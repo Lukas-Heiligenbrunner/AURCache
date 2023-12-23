@@ -1,0 +1,27 @@
+[package]
+name = "untitled"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aur-rs = "0.1.1"
+tokio = "1.35.1"
+anyhow = "1.0.76"
+
+reqwest = { version = "0.11.23", features = ["blocking", "gzip"] }
+flate2 = "1.0.28"
+tar = "0.4.40"
+
+rocket = "0.5.0-rc.3"
+rocket_okapi = { version = "0.8.0-rc.3", features = ["swagger"]  }
+sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
+sea-orm-migration = {version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
+serde = "1.0.193"
+
+
+
+[[bin]]
+name = "untitled"
+path = "src/main.rs"
