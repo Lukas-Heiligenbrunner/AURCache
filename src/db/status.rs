@@ -6,23 +6,14 @@ use rocket_okapi::JsonSchema;
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, JsonSchema)]
-#[sea_orm(table_name = "packages")]
+#[sea_orm(table_name = "status")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub name: String,
+    pub value: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::versions::Entity")]
-    Versions,
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
-
-impl Related<super::versions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Versions.def()
-    }
-}

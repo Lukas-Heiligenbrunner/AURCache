@@ -30,4 +30,5 @@ RUN pacman -Sc
 # EXPOSE 8080
 
 # Set the entry point or default command to run your application
+WORKDIR /app
 CMD ["untitled"]

@@ -47,7 +47,7 @@ pub fn build_pkgbuild(
     }
 
     // check if expected built dir exists
-    let built_name = build_repo_packagename(pkg_name.to_string(), pkg_vers.to_string());
+    let built_name = build_expected_repo_packagename(pkg_name.to_string(), pkg_vers.to_string());
     if fs::metadata(format!("{folder_path}/{built_name}")).is_ok() {
         println!("Built {built_name}");
         return Ok(built_name.to_string());
@@ -90,6 +90,8 @@ pub fn build_pkgbuild(
     Err(anyhow!("No package built"))
 }
 
-pub fn build_repo_packagename(pkg_name: String, pkg_vers: String) -> String {
+/// don't trust this pkg name from existing
+/// pkgbuild might build different version name
+pub fn build_expected_repo_packagename(pkg_name: String, pkg_vers: String) -> String {
     format!("{pkg_name}-{pkg_vers}-x86_64.pkg.tar.zst")
 }

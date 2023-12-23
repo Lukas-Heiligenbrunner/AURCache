@@ -1,6 +1,6 @@
 use crate::aur::aur::get_info_by_name;
 use crate::builder::types::Action;
-use crate::db::packages;
+use crate::db::{packages, versions};
 use crate::query_aur;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
@@ -8,12 +8,13 @@ use rocket::State;
 use rocket::{get, post, Route};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, openapi_get_routes, JsonSchema};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
-use sea_orm::{DeleteResult, EntityTrait, ModelTrait};
+use sea_orm::EntityTrait;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, FromQueryResult, JoinType, QuerySelect, Set};
+use sea_orm::{ColumnTrait, RelationTrait};
 use tokio::sync::broadcast::Sender;
 
 use crate::db::prelude::Packages;
-use crate::repo::repo::remove_pkg;
+use crate::repo::repo::{remove_pkg, remove_version};
 
 #[derive(Serialize, JsonSchema)]
 #[serde(crate = "rocket::serde")]
@@ -42,14 +43,30 @@ async fn search(query: &str) -> Result<Json<Vec<ApiPackage>>, String> {
     }
 }
 
+#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[serde(crate = "rocket::serde")]
+struct ListPackageModel {
+    name: String,
+    count: i32,
+}
+
 #[openapi(tag = "test")]
 #[get("/packages/list")]
 async fn package_list(
     db: &State<DatabaseConnection>,
-) -> Result<Json<Vec<packages::Model>>, String> {
+) -> Result<Json<Vec<ListPackageModel>>, String> {
     let db = db as &DatabaseConnection;
 
-    let all: Vec<packages::Model> = Packages::find().all(db).await.unwrap();
+    let all: Vec<ListPackageModel> = Packages::find()
+        .join_rev(JoinType::InnerJoin, versions::Relation::Packages.def())
+        .select_only()
+        .column_as(versions::Column::Id.count(), "count")
+        .column(packages::Column::Name)
+        .group_by(packages::Column::Name)
+        .into_model::<ListPackageModel>()
+        .all(db)
+        .await
+        .unwrap();
 
     Ok(Json(all))
 }
@@ -68,7 +85,6 @@ async fn package_add(
     tx: &State<Sender<Action>>,
 ) -> Result<(), String> {
     let db = db as &DatabaseConnection;
-
     let pkg_name = &input.name;
 
     let pkg = get_info_by_name(pkg_name)
@@ -77,17 +93,24 @@ async fn package_add(
 
     let new_package = packages::ActiveModel {
         name: Set(pkg_name.clone()),
-        version: Set(pkg.version.clone()),
         ..Default::default()
     };
 
-    let t = new_package.save(db).await.expect("TODO: panic message");
+    let pkt_model = new_package.save(db).await.expect("TODO: panic message");
+
+    let new_version = versions::ActiveModel {
+        version: Set(pkg.version.clone()),
+        package_id: Set(pkt_model.id.clone().unwrap()),
+        ..Default::default()
+    };
+
+    let version_model = new_version.save(db).await.expect("TODO: panic message");
 
     let _ = tx.send(Action::Build(
         pkg.name,
         pkg.version,
         pkg.url_path.unwrap(),
-        t.id.unwrap(),
+        version_model,
     ));
 
     Ok(())
@@ -103,22 +126,23 @@ struct DelBody {
 #[post("/packages/delete", data = "<input>")]
 async fn package_del(db: &State<DatabaseConnection>, input: Json<DelBody>) -> Result<(), String> {
     let db = db as &DatabaseConnection;
-    let pkg_id = &input.id;
+    let pkg_id = input.id.clone();
 
-    let pkg = Packages::find_by_id(*pkg_id)
-        .one(db)
-        .await
-        .unwrap()
-        .unwrap();
+    remove_pkg(db, pkg_id).await.map_err(|e| e.to_string())?;
 
-    // remove folders
-    remove_pkg(pkg.name.to_string(), pkg.version.to_string()).await;
+    Ok(())
+}
 
-    // remove package db entry
-    let res: DeleteResult = pkg.delete(db).await.unwrap();
+#[openapi(tag = "test")]
+#[post("/versions/delete/<id>")]
+async fn version_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), String> {
+    let db = db as &DatabaseConnection;
+
+    remove_version(db, id).await.map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
 pub fn build_api() -> Vec<Route> {
-    openapi_get_routes![search, package_list, package_add, package_del]
+    openapi_get_routes![search, package_list, package_add, package_del, version_del]
 }

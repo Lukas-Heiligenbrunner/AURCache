@@ -1,4 +1,6 @@
+use crate::db::versions;
+
 #[derive(Clone)]
 pub enum Action {
-    Build(String, String, String, i32),
+    Build(String, String, String, versions::ActiveModel),
 }

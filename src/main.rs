@@ -5,11 +5,12 @@ mod db;
 mod pkgbuild;
 mod repo;
 
-use crate::api::{backend, repository};
+use crate::api::backend;
 use crate::aur::aur::query_aur;
 use crate::builder::types::Action;
 use crate::db::migration::Migrator;
 use rocket::config::Config;
+use rocket::fs::FileServer;
 use rocket::futures::future::join_all;
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::{Database, DatabaseConnection};
@@ -23,17 +24,19 @@ fn main() {
     let (tx, _) = broadcast::channel::<Action>(32);
 
     t.block_on(async move {
-        //build_package("sea-orm-cli").await;
+        // create folder for db stuff
+        if !fs::metadata("./db").is_ok() {
+            fs::create_dir("./db").unwrap();
+        }
 
-        let db: DatabaseConnection = Database::connect("sqlite://db.sqlite?mode=rwc")
+        let db: DatabaseConnection = Database::connect("sqlite://db/db.sqlite?mode=rwc")
             .await
             .unwrap();
 
         Migrator::up(&db, None).await.unwrap();
 
-        // Check if the directory exists
+        // create repo folder
         if !fs::metadata("./repo").is_ok() {
-            // Create the directory if it does not exist
             fs::create_dir("./repo").unwrap();
         }
 
@@ -73,7 +76,7 @@ fn main() {
             config.port = 8080;
 
             let launch_result = rocket::custom(config)
-                .mount("/", repository::build_api())
+                .mount("/", FileServer::from("./repo"))
                 .launch()
                 .await;
             match launch_result {
