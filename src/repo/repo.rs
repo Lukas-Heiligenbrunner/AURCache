@@ -1,7 +1,7 @@
 use crate::aur::aur::download_pkgbuild;
 use crate::db::prelude::Packages;
 use crate::db::prelude::Versions;
-use crate::db::{versions};
+use crate::db::versions;
 use crate::pkgbuild::build::build_pkgbuild;
 use anyhow::anyhow;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter};
@@ -69,7 +69,10 @@ fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
 }
 
 pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
-    let pkg = Packages::find_by_id(pkg_id).one(db).await?.ok_or(anyhow!("id not found"))?;
+    let pkg = Packages::find_by_id(pkg_id)
+        .one(db)
+        .await?
+        .ok_or(anyhow!("id not found"))?;
 
     fs::remove_dir_all(format!("./builds/{}", pkg.name))?;
 

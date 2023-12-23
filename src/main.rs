@@ -6,7 +6,6 @@ mod pkgbuild;
 mod repo;
 
 use crate::api::backend;
-use crate::aur::aur::query_aur;
 use crate::builder::types::Action;
 use crate::db::migration::Migrator;
 use rocket::config::Config;

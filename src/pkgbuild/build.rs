@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader};
+use std::process::Command;
 use std::time::SystemTime;
 
 pub fn build_pkgbuild(
@@ -14,7 +15,7 @@ pub fn build_pkgbuild(
     let script_file = std::env::temp_dir().join("makepkg_custom.sh");
     fs::write(&script_file, makepkg).expect("Unable to write script to file");
 
-    let output = Command::new("bash")
+    let mut output = Command::new("bash")
         .args(&[
             script_file.as_os_str().to_str().unwrap(),
             "-f",
@@ -23,20 +24,29 @@ pub fn build_pkgbuild(
             "-c",
         ])
         .current_dir(folder_path.clone())
-        .stdout(Stdio::inherit())
         .spawn()
         .unwrap();
-    let output = output.wait_with_output();
 
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                println!("makepkg output: {}", stdout);
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("makepkg error: {}", stderr);
+    if let Some(stdout) = output.stdout.take() {
+        let reader = BufReader::new(stdout);
 
+        // Iterate through each line of output
+        for line in reader.lines() {
+            if let Ok(line_content) = line {
+                // Print the line to the terminal
+                println!("{}", line_content);
+
+                // todo store line to database for being fetchable from api
+            }
+        }
+    }
+
+    // Ensure the command completes
+    let result = output.wait();
+
+    match result {
+        Ok(result) => {
+            if !result.success() {
                 return Err(anyhow!("failed to build package"));
             }
         }
@@ -46,6 +56,14 @@ pub fn build_pkgbuild(
         }
     }
 
+    locate_built_package(pkg_name.to_string(), pkg_vers.to_string(), folder_path)
+}
+
+fn locate_built_package(
+    pkg_name: String,
+    pkg_vers: String,
+    folder_path: String,
+) -> anyhow::Result<String> {
     // check if expected built dir exists
     let built_name = build_expected_repo_packagename(pkg_name.to_string(), pkg_vers.to_string());
     if fs::metadata(format!("{folder_path}/{built_name}")).is_ok() {
@@ -65,7 +83,8 @@ pub fn build_pkgbuild(
                 if let Some(file_name) = path.file_name() {
                     let file_name = file_name.to_str().unwrap();
 
-                    if file_name.ends_with("-x86_64.pkg.tar.zst") && file_name.starts_with(pkg_name)
+                    if file_name.ends_with("-x86_64.pkg.tar.zst")
+                        && file_name.starts_with(pkg_name.as_str())
                     {
                         if let Ok(metadata) = path.metadata() {
                             if let Ok(modified_time) = metadata.modified() {
@@ -87,7 +106,7 @@ pub fn build_pkgbuild(
         }
     }
 
-    Err(anyhow!("No package built"))
+    Err(anyhow!("Built package not found"))
 }
 
 /// don't trust this pkg name from existing
