@@ -2,7 +2,7 @@ use crate::aur::aur::get_info_by_name;
 use crate::builder::types::Action;
 use crate::db::prelude::{Packages, Versions};
 use crate::db::{packages, versions};
-use rocket::response::status::NotFound;
+use rocket::response::status::BadRequest;
 use rocket::serde::json::Json;
 use rocket::serde::Deserialize;
 use rocket::{post, State};
@@ -25,14 +25,14 @@ pub async fn package_add(
     db: &State<DatabaseConnection>,
     input: Json<AddBody>,
     tx: &State<Sender<Action>>,
-) -> Result<(), NotFound<String>> {
+) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
     let pkt_model = match Packages::find()
         .filter(packages::Column::Name.eq(input.name.clone()))
         .one(db)
         .await
-        .map_err(|e| NotFound(e.to_string()))?
+        .map_err(|e| BadRequest(Some(e.to_string())))?
     {
         None => {
             let new_package = packages::ActiveModel {
@@ -47,13 +47,13 @@ pub async fn package_add(
 
     let pkg = get_info_by_name(input.name.clone().as_str())
         .await
-        .map_err(|_| NotFound("couldn't download package metadata".to_string()))?;
+        .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
 
     let version_model = match Versions::find()
         .filter(versions::Column::Version.eq(pkg.version.clone()))
         .one(db)
         .await
-        .map_err(|e| NotFound(e.to_string()))?
+        .map_err(|e| BadRequest(Some(e.to_string())))?
     {
         None => {
             let new_version = versions::ActiveModel {
@@ -70,7 +70,7 @@ pub async fn package_add(
             if input.force_build {
                 p.into()
             } else {
-                return Err(NotFound("Version already existing".to_string()));
+                return Err(BadRequest(Some("Version already existing".to_string())));
             }
         }
     };

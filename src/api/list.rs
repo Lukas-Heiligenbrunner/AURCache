@@ -69,10 +69,11 @@ pub async fn package_list(
 }
 
 #[openapi(tag = "test")]
-#[get("/builds/output?<buildid>")]
+#[get("/builds/output?<buildid>&<startline>")]
 pub async fn build_output(
     db: &State<DatabaseConnection>,
     buildid: i32,
+    startline: Option<i32>,
 ) -> Result<String, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -82,7 +83,32 @@ pub async fn build_output(
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("couldn't find id".to_string()))?;
 
-    build.ouput.ok_or(NotFound("No Output".to_string()))
+    return match build.ouput {
+        None => Err(NotFound("No Output".to_string())),
+        Some(v) => match startline {
+            None => Ok(v),
+            Some(startline) => {
+                let output: Vec<String> = v.split("\n").map(|x| x.to_string()).collect();
+                let len = output.len();
+                let len_missing = len as i32 - startline;
+
+                let output = output
+                    .iter()
+                    .rev()
+                    .take(if len_missing > 0 {
+                        len_missing as usize
+                    } else {
+                        0
+                    })
+                    .rev()
+                    .map(|x1| x1.clone())
+                    .collect::<Vec<_>>();
+
+                let output = output.join("\n");
+                Ok(output)
+            }
+        },
+    };
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
