@@ -7,14 +7,25 @@ use anyhow::anyhow;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter};
 use std::fs;
 use std::process::Command;
+use tokio::sync::broadcast::Sender;
 
 static REPO_NAME: &str = "repo";
 static BASEURL: &str = "https://aur.archlinux.org";
 
-pub async fn add_pkg(url: String, version: String, name: String) -> anyhow::Result<String> {
+pub async fn add_pkg(
+    url: String,
+    version: String,
+    name: String,
+    tx: Sender<String>,
+) -> anyhow::Result<String> {
     let fname = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds").await?;
-    let pkg_file_name =
-        build_pkgbuild(format!("./builds/{fname}"), version.as_str(), name.as_str())?;
+    let pkg_file_name = build_pkgbuild(
+        format!("./builds/{fname}"),
+        version.as_str(),
+        name.as_str(),
+        tx,
+    )
+    .await?;
 
     // todo force overwrite if file already exists
     fs::copy(

@@ -26,7 +26,8 @@ create table packages
 (
 	id integer not null
 		primary key autoincrement,
-	name text not null
+	name text not null,
+	status integer default 0 not null
 );
 
 create table status
@@ -44,8 +45,7 @@ create table versions
 			primary key autoincrement,
 	version TEXT not null,
 	package_id integer not null,
-	file_name TEXT,
-	status INTEGER
+	file_name TEXT
 );
             "#,
         )

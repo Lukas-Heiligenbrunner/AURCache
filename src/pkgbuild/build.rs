@@ -1,13 +1,15 @@
 use anyhow::anyhow;
 use std::fs;
-use std::io::{BufRead, BufReader};
-use std::process::Command;
+use std::process::Stdio;
 use std::time::SystemTime;
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
+use tokio::sync::broadcast::Sender;
 
-pub fn build_pkgbuild(
+pub async fn build_pkgbuild(
     folder_path: String,
     pkg_vers: &str,
     pkg_name: &str,
+    tx: Sender<String>,
 ) -> anyhow::Result<String> {
     let makepkg = include_str!("../../scripts/makepkg");
 
@@ -15,34 +17,39 @@ pub fn build_pkgbuild(
     let script_file = std::env::temp_dir().join("makepkg_custom.sh");
     fs::write(&script_file, makepkg).expect("Unable to write script to file");
 
-    let mut output = Command::new("bash")
+    let mut child = tokio::process::Command::new("bash")
         .args(&[
             script_file.as_os_str().to_str().unwrap(),
             "-f",
             "--noconfirm",
-            "-s",
-            "-c",
+            "--nocolor",
+            "-s",              // install required deps
+            "-c",              // cleanup leftover files and dirs
+            "--rmdeps",        // remove installed deps with -s
+            "--noprogressbar", // pacman shouldn't display a progressbar
         ])
         .current_dir(folder_path.clone())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
 
-    if let Some(stdout) = output.stdout.take() {
-        let reader = BufReader::new(stdout);
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(anyhow!("failed to take stderr"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(anyhow!("failed to take stdout"))?;
 
-        // Iterate through each line of output
-        for line in reader.lines() {
-            if let Ok(line_content) = line {
-                // Print the line to the terminal
-                println!("{}", line_content);
+    let stderr = BufReader::new(stderr).lines();
+    let stdout = BufReader::new(stdout).lines();
 
-                // todo store line to database for being fetchable from api
-            }
-        }
-    }
+    let tx1 = tx.clone();
+    spawn_broadcast_sender(stderr, tx1);
+    spawn_broadcast_sender(stdout, tx);
 
-    // Ensure the command completes
-    let result = output.wait();
+    let result = child.wait().await;
 
     match result {
         Ok(result) => {
@@ -57,6 +64,18 @@ pub fn build_pkgbuild(
     }
 
     locate_built_package(pkg_name.to_string(), pkg_vers.to_string(), folder_path)
+}
+
+fn spawn_broadcast_sender<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+    mut reader: Lines<BufReader<R>>,
+    tx: Sender<String>,
+) {
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = reader.next_line().await {
+            // println!("directerr: {line}");
+            let _ = tx.send(line);
+        }
+    });
 }
 
 fn locate_built_package(

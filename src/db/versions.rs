@@ -13,7 +13,6 @@ pub struct Model {
     pub version: String,
     pub package_id: i32,
     pub file_name: Option<String>,
-    pub status: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
