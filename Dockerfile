@@ -24,11 +24,6 @@ RUN pacman -Syyu --noconfirm
 RUN pacman -S --noconfirm base-devel git
 RUN pacman -Sc
 
-# Set any additional configurations or dependencies if required
-
-# Example: Expose a port if your application listens on a specific port
-# EXPOSE 8080
-
 # Set the entry point or default command to run your application
 WORKDIR /app
 CMD ["untitled"]

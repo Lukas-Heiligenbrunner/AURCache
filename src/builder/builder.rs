@@ -24,7 +24,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                         status: Set(Some(0)),
                         ..Default::default()
                     };
-                    let new_build = build.save(&db).await.unwrap();
+                    let mut new_build = build.save(&db).await.unwrap();
 
                     // spawn new thread for each pkg build
                     // todo add queue and build two packages in parallel
@@ -32,6 +32,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                         let (tx, mut rx) = broadcast::channel::<String>(3);
 
                         let db2 = db.clone();
+                        let new_build2 = new_build.clone();
                         tokio::spawn(async move {
                             loop {
                                 match rx.recv().await {
@@ -41,7 +42,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                                         let _ = append_db_log_output(
                                             &db2,
                                             output_line,
-                                            new_build.id.clone().unwrap(),
+                                            new_build2.id.clone().unwrap(),
                                         )
                                         .await;
                                     }
@@ -67,6 +68,10 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
 
                                 version_model.file_name = Set(Some(pkg_file_name));
                                 let _ = version_model.update(&db).await;
+
+                                new_build.status = Set(Some(1));
+                                let _ = new_build.update(&db).await;
+
                             }
                             Err(e) => {
                                 let _ = set_pkg_status(
@@ -76,6 +81,9 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                                 )
                                 .await;
                                 let _ = version_model.update(&db).await;
+
+                                new_build.status = Set(Some(1));
+                                let _ = new_build.update(&db).await;
 
                                 println!("Error: {e}")
                             }
@@ -93,15 +101,13 @@ async fn set_pkg_status(
     package_id: i32,
     status: i32,
 ) -> anyhow::Result<()> {
-    let mut pkg = Packages::find_by_id(package_id)
+    let mut pkg: packages::ActiveModel = Packages::find_by_id(package_id)
         .one(db)
         .await?
-        .ok_or(anyhow!("no package with id {package_id} found"))?;
+        .ok_or(anyhow!("no package with id {package_id} found"))?
+        .into();
 
-    pkg.status = status;
-
-    let pkg: packages::ActiveModel = pkg.into();
-
+    pkg.status = Set(status);
     pkg.update(db).await?;
     Ok(())
 }
