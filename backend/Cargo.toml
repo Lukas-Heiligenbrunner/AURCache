@@ -20,9 +20,12 @@ rocket_okapi = { version = "0.8.0-rc.3", features = ["swagger"]  }
 sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
 sea-orm-migration = {version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 serde = "1.0.193"
-
-
+rust-embed = "8.1.0"
 
 [[bin]]
 name = "untitled"
 path = "src/main.rs"
+
+[features]
+default = []
+static = []

@@ -16,6 +16,8 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::fs;
 use tokio::sync::broadcast;
+#[cfg(feature = "static")]
+use crate::api::embed::CustomHandler;
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
@@ -50,20 +52,25 @@ fn main() {
             config.address = "0.0.0.0".parse().unwrap();
             config.port = 8081;
 
-            let launch_result = rocket::custom(config)
+            let rock = rocket::custom(config)
                 .manage(db)
                 .manage(tx)
                 .mount("/", backend::build_api())
+
                 .mount(
                     "/docs/",
                     make_swagger_ui(&SwaggerUIConfig {
                         url: "../openapi.json".to_owned(),
                         ..Default::default()
                     }),
-                )
+                );
+            #[cfg(feature = "static")]
+            let rock = rock.mount("/", CustomHandler {});
+
+            let rock = rock
                 .launch()
                 .await;
-            match launch_result {
+            match rock {
                 Ok(_) => println!("Rocket shut down gracefully."),
                 Err(err) => println!("Rocket had an error: {}", err),
             };

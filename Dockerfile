@@ -1,4 +1,9 @@
-# Stage 1: Build the Rust binary
+FROM ghcr.io/cirruslabs/flutter:latest AS frontend_builder
+WORKDIR /app
+
+COPY frontend /app
+RUN flutter build web --release
+
 FROM rust AS builder
 
 # Install necessary tools and dependencies
@@ -6,19 +11,22 @@ FROM rust AS builder
 WORKDIR /app
 
 # Copy the Rust project files
-COPY ./src /app/src
-COPY ./scripts /app/scripts
-COPY Cargo.lock /app
-COPY Cargo.toml /app
+COPY backend/src /app/src
+COPY backend/scripts /app/scripts
+COPY backend/Cargo.lock /app
+COPY backend/Cargo.toml /app
+
+COPY --from=frontend_builder /app/build/web /app/web
 
 # Build the Rust binary
-RUN cargo build --release
+RUN cargo build --release --features static
 
 # Stage 2: Create the final image
 FROM archlinux
 
 # Copy the built binary from the previous stage
 COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
+
 
 RUN pacman -Syyu --noconfirm
 RUN pacman -S --noconfirm base-devel git
