@@ -2,14 +2,18 @@ use crate::aur::aur::query_aur;
 use crate::db::migration::JoinType;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages, versions};
+use crate::utils::dir_size::dir_size;
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
+use sea_orm::PaginatorTrait;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult, QuerySelect, RelationTrait};
+use std::path::PathBuf;
+use std::{fs, io};
 
 #[derive(Serialize, JsonSchema)]
 #[serde(crate = "rocket::serde")]
@@ -148,4 +152,66 @@ pub async fn list_builds(
     .map_err(|e| NotFound(e.to_string()))?;
 
     Ok(Json(build))
+}
+
+#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct ListStats {
+    total_builds: u32,
+    failed_builds: u32,
+    avg_queue_wait_time: u32,
+    avg_build_time: u32,
+    repo_storage_size: u32,
+    active_builds: u32,
+    total_packages: u32,
+}
+
+#[openapi(tag = "test")]
+#[get("/stats")]
+pub async fn stats(db: &State<DatabaseConnection>) -> Result<Json<ListStats>, NotFound<String>> {
+    let db = db as &DatabaseConnection;
+
+    return match get_stats(db).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(NotFound(e.to_string())),
+    };
+}
+
+async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
+    // Count total builds
+    let total_builds: u32 = Builds::find().count(db).await?.try_into()?;
+
+    // Count failed builds
+    let failed_builds: u32 = Builds::find()
+        .filter(builds::Column::Status.eq(2))
+        .count(db)
+        .await?
+        .try_into()?;
+
+    // todo implement this values somehow
+    let avg_queue_wait_time: u32 = 42;
+    let avg_build_time: u32 = 42;
+
+    // Calculate repo storage size
+    let repo_storage_size: u32 = dir_size("repo/").unwrap_or(0).try_into()?;
+
+    // Count active builds
+    let active_builds: u32 = Builds::find()
+        .filter(builds::Column::Status.eq(0))
+        .count(db)
+        .await?
+        .try_into()?;
+
+    // Count total packages
+    let total_packages: u32 = Packages::find().count(db).await?.try_into()?;
+
+    Ok(ListStats {
+        total_builds,
+        failed_builds,
+        avg_queue_wait_time,
+        avg_build_time,
+        repo_storage_size,
+        active_builds,
+        total_packages,
+    })
 }

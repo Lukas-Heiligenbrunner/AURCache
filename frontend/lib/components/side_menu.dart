@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
-import '../../../core/constants/color_constants.dart';
+import '../constants/color_constants.dart';
 
 class SideMenu extends StatelessWidget {
   const SideMenu({

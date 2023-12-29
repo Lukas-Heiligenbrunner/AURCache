@@ -4,6 +4,7 @@ mod builder;
 mod db;
 mod pkgbuild;
 mod repo;
+mod utils;
 
 use crate::api::backend;
 #[cfg(feature = "static")]

@@ -1,13 +1,18 @@
-import 'package:aurcache/screens/dashboard/components/chart_card.dart';
+import 'package:aurcache/components/dashboard/chart_card.dart';
 import 'package:flutter/material.dart';
 
-import '../../../core/constants/color_constants.dart';
-import 'charts.dart';
+import '../../constants/color_constants.dart';
+import 'builds_chart.dart';
 
-class UserDetailsWidget extends StatelessWidget {
-  const UserDetailsWidget({
+class SidePanel extends StatelessWidget {
+  const SidePanel({
     Key? key,
+    required this.nrbuilds,
+    required this.nrfailedbuilds,
   }) : super(key: key);
+
+  final int nrbuilds;
+  final int nrfailedbuilds;
 
   @override
   Widget build(BuildContext context) {
@@ -20,26 +25,28 @@ class UserDetailsWidget extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          const Text(
             "Package build success",
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.w500,
             ),
           ),
-          SizedBox(height: defaultPadding),
-          Chart(),
-          UserDetailsMiniCard(
+          const SizedBox(height: defaultPadding),
+          BuildsChart(nrbuilds: nrbuilds, nrfailedbuilds: nrfailedbuilds),
+          ChartCard(
             color: const Color(0xff0a7005),
             title: "Successful Builds",
-            amountOfFiles: "%16.7",
-            numberOfIncrease: 1328,
+            textRight:
+                "${((nrbuilds - nrfailedbuilds) * 100 / nrbuilds).toStringAsFixed(2)}%",
+            subtitle: (nrbuilds - nrfailedbuilds).toString(),
           ),
-          UserDetailsMiniCard(
+          ChartCard(
             color: const Color(0xff760707),
             title: "Failed Builds",
-            amountOfFiles: "%28.3",
-            numberOfIncrease: 1328,
+            textRight:
+                "${(nrfailedbuilds * 100 / nrbuilds).toStringAsFixed(2)}%",
+            subtitle: nrfailedbuilds.toString(),
           ),
         ],
       ),

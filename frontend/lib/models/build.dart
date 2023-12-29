@@ -5,8 +5,10 @@ class Build {
   final int status;
 
   Build(
-      {required this.id,required this.pkg_name, required this.version,
-        required this.status});
+      {required this.id,
+      required this.pkg_name,
+      required this.version,
+      required this.status});
 
   factory Build.fromJson(Map<String, dynamic> json) {
     return Build(

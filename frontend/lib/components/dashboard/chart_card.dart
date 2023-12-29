@@ -1,25 +1,24 @@
 import 'package:flutter/material.dart';
 
-import '../../../core/constants/color_constants.dart';
+import '../../constants/color_constants.dart';
 
-class UserDetailsMiniCard extends StatelessWidget {
-  const UserDetailsMiniCard({
+class ChartCard extends StatelessWidget {
+  const ChartCard({
     Key? key,
     required this.title,
     required this.color,
-    required this.amountOfFiles,
-    required this.numberOfIncrease,
+    required this.textRight,
+    required this.subtitle,
   }) : super(key: key);
 
   final Color color;
-  final String title, amountOfFiles;
-  final int numberOfIncrease;
+  final String title, textRight, subtitle;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: EdgeInsets.only(top: defaultPadding),
-      padding: EdgeInsets.all(defaultPadding),
+      margin: const EdgeInsets.only(top: defaultPadding),
+      padding: const EdgeInsets.all(defaultPadding),
       decoration: BoxDecoration(
         border: Border.all(width: 2, color: primaryColor.withOpacity(0.15)),
         borderRadius: const BorderRadius.all(
@@ -46,17 +45,17 @@ class UserDetailsMiniCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
-                    "$numberOfIncrease",
+                    subtitle,
                     style: Theme.of(context)
                         .textTheme
-                        .caption!
+                        .bodySmall!
                         .copyWith(color: Colors.white70),
                   ),
                 ],
               ),
             ),
           ),
-          Text(amountOfFiles)
+          Text(textRight)
         ],
       ),
     );

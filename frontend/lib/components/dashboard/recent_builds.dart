@@ -1,13 +1,12 @@
 import 'dart:async';
 
 import 'package:aurcache/api/builds.dart';
-import 'package:aurcache/core/models/build.dart';
-import 'package:aurcache/screens/dashboard/components/your_packages.dart';
+import 'package:aurcache/models/build.dart';
+import 'package:aurcache/components/dashboard/your_packages.dart';
 import 'package:flutter/material.dart';
 
-import '../../../api/API.dart';
-import '../../../core/constants/color_constants.dart';
-import '../../../core/models/package.dart';
+import '../../api/API.dart';
+import '../../constants/color_constants.dart';
 
 class RecentBuilds extends StatefulWidget {
   const RecentBuilds({
@@ -78,7 +77,9 @@ class _RecentBuildsState extends State<RecentBuilds> {
                           label: Text("Status"),
                         ),
                       ],
-                      rows: snapshot.data!.map((e) => recentUserDataRow(e)).toList(),
+                      rows: snapshot.data!
+                          .map((e) => recentUserDataRow(e))
+                          .toList(),
                     );
                   } else {
                     return Text("no data");

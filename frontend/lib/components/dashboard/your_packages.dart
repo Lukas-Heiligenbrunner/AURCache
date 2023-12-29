@@ -3,9 +3,9 @@ import 'dart:async';
 import 'package:aurcache/api/packages.dart';
 import 'package:flutter/material.dart';
 
-import '../../../api/API.dart';
-import '../../../core/constants/color_constants.dart';
-import '../../../core/models/package.dart';
+import '../../api/API.dart';
+import '../../constants/color_constants.dart';
+import '../../models/package.dart';
 
 class YourPackages extends StatefulWidget {
   const YourPackages({

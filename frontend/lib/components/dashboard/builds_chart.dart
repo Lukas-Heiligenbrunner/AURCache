@@ -1,16 +1,21 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
-class Chart extends StatefulWidget {
-  const Chart({
+class BuildsChart extends StatefulWidget {
+  const BuildsChart({
     Key? key,
+    required this.nrbuilds,
+    required this.nrfailedbuilds,
   }) : super(key: key);
 
+  final int nrbuilds;
+  final int nrfailedbuilds;
+
   @override
-  _ChartState createState() => _ChartState();
+  _BuildsChartState createState() => _BuildsChartState();
 }
 
-class _ChartState extends State<Chart> {
+class _BuildsChartState extends State<BuildsChart> {
   int touchedIndex = -1;
   @override
   Widget build(BuildContext context) {
@@ -31,9 +36,6 @@ class _ChartState extends State<Chart> {
                       pieTouchData: PieTouchData(
                           touchCallback: (pieTouchResponse, touchresponse) {
                         setState(() {
-                          // final desiredTouch = pieTouchResponse.touchInput
-                          //       is! PointerExitEvent &&
-                          // pieTouchResponse.touchInput is! PointerUpEvent;
                           if (touchresponse?.touchedSection != null) {
                             touchedIndex = touchresponse!
                                 .touchedSection!.touchedSectionIndex;
@@ -69,8 +71,9 @@ class _ChartState extends State<Chart> {
         case 0:
           return PieChartSectionData(
             color: const Color(0xff760707),
-            value: 40,
-            title: '28.3%',
+            value: widget.nrfailedbuilds.toDouble(),
+            title:
+                "${(widget.nrfailedbuilds * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,
@@ -80,8 +83,9 @@ class _ChartState extends State<Chart> {
         case 1:
           return PieChartSectionData(
             color: const Color(0xff0a7005),
-            value: 30,
-            title: '16.7%',
+            value: (widget.nrbuilds - widget.nrfailedbuilds).toDouble(),
+            title:
+                "${((widget.nrbuilds - widget.nrfailedbuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,

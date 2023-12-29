@@ -1,4 +1,4 @@
-import '../core/models/package.dart';
+import '../models/package.dart';
 import 'api_client.dart';
 
 extension PackagesAPI on ApiClient {
@@ -15,8 +15,8 @@ extension PackagesAPI on ApiClient {
   }
 
   Future<void> addPackage({bool force = false, required String name}) async {
-    final resp = await getRawClient().post("/packages/add", data: {'force_build': force, 'name': name});
+    final resp = await getRawClient()
+        .post("/packages/add", data: {'force_build': force, 'name': name});
     print(resp.data);
   }
-
 }
