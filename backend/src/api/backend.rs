@@ -20,6 +20,5 @@ pub fn build_api() -> Vec<Route> {
         version_del,
         build_output,
         list_builds,
-
     ]
 }

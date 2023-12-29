@@ -6,6 +6,8 @@ mod pkgbuild;
 mod repo;
 
 use crate::api::backend;
+#[cfg(feature = "static")]
+use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
 use crate::db::migration::Migrator;
 use rocket::config::Config;
@@ -16,8 +18,6 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::fs;
 use tokio::sync::broadcast;
-#[cfg(feature = "static")]
-use crate::api::embed::CustomHandler;
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
@@ -56,7 +56,6 @@ fn main() {
                 .manage(db)
                 .manage(tx)
                 .mount("/", backend::build_api())
-
                 .mount(
                     "/docs/",
                     make_swagger_ui(&SwaggerUIConfig {
@@ -67,9 +66,7 @@ fn main() {
             #[cfg(feature = "static")]
             let rock = rock.mount("/", CustomHandler {});
 
-            let rock = rock
-                .launch()
-                .await;
+            let rock = rock.launch().await;
             match rock {
                 Ok(_) => println!("Rocket shut down gracefully."),
                 Err(err) => println!("Rocket had an error: {}", err),

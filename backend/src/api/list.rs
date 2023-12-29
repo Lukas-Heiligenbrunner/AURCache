@@ -115,34 +115,37 @@ pub async fn build_output(
 #[serde(crate = "rocket::serde")]
 pub struct ListBuildsModel {
     id: i32,
-    pkg_id: i32,
-    version_id: i32,
-    status: Option<i32>,
+    pkg_name: String,
+    version: String,
+    status: i32,
 }
 
 #[openapi(tag = "test")]
 #[get("/builds?<pkgid>")]
 pub async fn list_builds(
     db: &State<DatabaseConnection>,
-    pkgid: i32,
+    pkgid: Option<i32>,
 ) -> Result<Json<Vec<ListBuildsModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let build = Builds::find()
-        .filter(builds::Column::PkgId.eq(pkgid))
-        .all(db)
-        .await
-        .map_err(|e| NotFound(e.to_string()))?;
+    let basequery = Builds::find()
+        .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
+        .join_rev(JoinType::InnerJoin, versions::Relation::Builds.def())
+        .select_only()
+        .column_as(builds::Column::Id, "id")
+        .column(builds::Column::Status)
+        .column_as(packages::Column::Name, "pkg_name")
+        .column(versions::Column::Version);
 
-    Ok(Json(
-        build
-            .iter()
-            .map(|x| ListBuildsModel {
-                id: x.id,
-                status: x.status,
-                pkg_id: x.pkg_id,
-                version_id: x.version_id,
-            })
-            .collect::<Vec<_>>(),
-    ))
+    let build = match pkgid {
+        None => basequery.into_model::<ListBuildsModel>().all(db),
+        Some(pkgid) => basequery
+            .filter(builds::Column::PkgId.eq(pkgid))
+            .into_model::<ListBuildsModel>()
+            .all(db),
+    }
+    .await
+    .map_err(|e| NotFound(e.to_string()))?;
+
+    Ok(Json(build))
 }

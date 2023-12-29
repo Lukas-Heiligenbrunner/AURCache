@@ -14,16 +14,24 @@ pub struct Model {
     pub status: i32,
 }
 
+impl ActiveModelBehavior for ActiveModel {}
+
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(has_many = "super::versions::Entity")]
     Versions,
+    #[sea_orm(has_many = "super::builds::Entity")]
+    Builds,
 }
-
-impl ActiveModelBehavior for ActiveModel {}
 
 impl Related<super::versions::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Versions.def()
+    }
+}
+
+impl Related<super::builds::Entity> for crate::db::versions::Entity {
+    fn to() -> RelationDef {
+        crate::db::versions::Relation::Builds.def()
     }
 }

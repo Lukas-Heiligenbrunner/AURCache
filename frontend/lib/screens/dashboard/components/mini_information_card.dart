@@ -30,8 +30,7 @@ class MiniInformation extends StatelessWidget {
                       defaultPadding / (Responsive.isMobile(context) ? 2 : 1),
                 ),
               ),
-              onPressed: () {
-              },
+              onPressed: () {},
               icon: Icon(Icons.add),
               label: Text(
                 "Add New",
@@ -68,7 +67,7 @@ class InformationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GridView.builder(
-      physics: NeverScrollableScrollPhysics(),
+      physics: const NeverScrollableScrollPhysics(),
       shrinkWrap: true,
       itemCount: dailyDatas.length,
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(

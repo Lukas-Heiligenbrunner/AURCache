@@ -1,4 +1,4 @@
-import 'package:aurcache/screens/dashboard/components/user_details_mini_card.dart';
+import 'package:aurcache/screens/dashboard/components/chart_card.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/constants/color_constants.dart';

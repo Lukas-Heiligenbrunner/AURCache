@@ -71,7 +71,6 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
 
                                 new_build.status = Set(Some(1));
                                 let _ = new_build.update(&db).await;
-
                             }
                             Err(e) => {
                                 let _ = set_pkg_status(
@@ -82,7 +81,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                                 .await;
                                 let _ = version_model.update(&db).await;
 
-                                new_build.status = Set(Some(1));
+                                new_build.status = Set(Some(2));
                                 let _ = new_build.update(&db).await;
 
                                 println!("Error: {e}")

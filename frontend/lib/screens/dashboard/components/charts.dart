@@ -28,14 +28,15 @@ class _ChartState extends State<Chart> {
                 aspectRatio: 1,
                 child: PieChart(
                   PieChartData(
-                      pieTouchData:
-                          PieTouchData(touchCallback: (pieTouchResponse, touchresponse) {
+                      pieTouchData: PieTouchData(
+                          touchCallback: (pieTouchResponse, touchresponse) {
                         setState(() {
-                         // final desiredTouch = pieTouchResponse.touchInput
-                           //       is! PointerExitEvent &&
-                             // pieTouchResponse.touchInput is! PointerUpEvent;
-                          if (                            touchresponse?.touchedSection != null) {
-                            touchedIndex = touchresponse!.touchedSection!.touchedSectionIndex;
+                          // final desiredTouch = pieTouchResponse.touchInput
+                          //       is! PointerExitEvent &&
+                          // pieTouchResponse.touchInput is! PointerUpEvent;
+                          if (touchresponse?.touchedSection != null) {
+                            touchedIndex = touchresponse!
+                                .touchedSection!.touchedSectionIndex;
                           } else {
                             touchedIndex = -1;
                           }

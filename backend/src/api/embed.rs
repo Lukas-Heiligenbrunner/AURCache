@@ -3,7 +3,7 @@ use rocket::http::uri::Segments;
 use rocket::http::{ContentType, Method, Status};
 use rocket::route::{Handler, Outcome};
 use rocket::{Data, Request, Response, Route};
-use rust_embed::{RustEmbed};
+use rust_embed::RustEmbed;
 use std::io::Cursor;
 
 #[derive(RustEmbed)]

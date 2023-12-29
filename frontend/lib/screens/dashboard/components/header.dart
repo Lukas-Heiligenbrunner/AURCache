@@ -1,6 +1,8 @@
+import 'package:aurcache/api/packages.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../../../api/API.dart';
 import '../../../core/constants/color_constants.dart';
 import '../../../responsive.dart';
 
@@ -31,7 +33,7 @@ class Header extends StatelessWidget {
                 height: 8,
               ),
               Text(
-                "Welcome to AURCentral",
+                "Welcome to your Build server",
                 style: Theme.of(context).textTheme.subtitle2,
               ),
             ],
@@ -82,29 +84,35 @@ class ProfileCard extends StatelessWidget {
 }
 
 class SearchField extends StatelessWidget {
-  const SearchField({
+  SearchField({
     Key? key,
   }) : super(key: key);
+
+  final controller = TextEditingController();
 
   @override
   Widget build(BuildContext context) {
     return TextField(
+      controller: controller,
       decoration: InputDecoration(
         hintText: "Search",
         fillColor: secondaryColor,
         filled: true,
-        border: OutlineInputBorder(
+        border: const OutlineInputBorder(
           borderSide: BorderSide.none,
-          borderRadius: const BorderRadius.all(Radius.circular(10)),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
         ),
         suffixIcon: InkWell(
-          onTap: () {},
+          onTap: () {
+            // todo this is only temporary -> add this to a proper page
+            API.addPackage(name: controller.text);
+          },
           child: Container(
             padding: EdgeInsets.all(defaultPadding * 0.75),
             margin: EdgeInsets.symmetric(horizontal: defaultPadding / 2),
-            decoration: BoxDecoration(
+            decoration: const BoxDecoration(
               color: greenColor,
-              borderRadius: const BorderRadius.all(Radius.circular(10)),
+              borderRadius: BorderRadius.all(Radius.circular(10)),
             ),
             child: SvgPicture.asset(
               "assets/icons/Search.svg",

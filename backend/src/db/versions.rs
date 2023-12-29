@@ -23,6 +23,8 @@ pub enum Relation {
         to = "super::packages::Column::Id"
     )]
     Packages,
+    #[sea_orm(has_many = "super::builds::Entity")]
+    Builds,
 }
 
 // `Related` trait has to be implemented by hand
@@ -31,5 +33,11 @@ impl Related<super::packages::Entity> for Entity {
         Relation::Packages.def()
     }
 }
+
+// impl Related<super::builds::Entity> for Entity {
+//     fn to() -> RelationDef {
+//         Relation::Builds.def()
+//     }
+// }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -15,7 +15,7 @@ class SideMenu extends StatelessWidget {
         // it enables scrolling
         child: Column(
           children: [
-            DrawerHeader(
+            const DrawerHeader(
                 child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -29,7 +29,7 @@ class SideMenu extends StatelessWidget {
                 SizedBox(
                   height: defaultPadding,
                 ),
-                Text("AUR Build Server")
+                Text("AURCache")
               ],
             )),
             DrawerListTile(

@@ -5,7 +5,7 @@ import '../../responsive.dart';
 import 'components/header.dart';
 import 'components/mini_information_card.dart';
 import 'components/recent_builds.dart';
-import 'components/recent_users.dart';
+import 'components/your_packages.dart';
 import 'components/user_details_widget.dart';
 
 class DashboardScreen extends StatelessWidget {
@@ -29,7 +29,7 @@ class DashboardScreen extends StatelessWidget {
                     flex: 5,
                     child: Column(
                       children: [
-                        RecentUsers(),
+                        YourPackages(),
                         SizedBox(height: defaultPadding),
                         RecentBuilds(),
                         if (Responsive.isMobile(context))
