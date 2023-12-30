@@ -1,11 +1,18 @@
 import 'dart:async';
 
 import 'package:aurcache/api/packages.dart';
+import 'package:aurcache/providers/APIBuilder.dart';
+import 'package:aurcache/providers/packages_provider.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 
 import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../../models/package.dart';
+import '../../providers/builds_provider.dart';
+import '../../providers/stats_provider.dart';
+import '../confirm_popup.dart';
 
 class YourPackages extends StatefulWidget {
   const YourPackages({
@@ -17,27 +24,6 @@ class YourPackages extends StatefulWidget {
 }
 
 class _YourPackagesState extends State<YourPackages> {
-  late Future<List<Package>> dataFuture;
-  Timer? timer;
-
-  @override
-  void initState() {
-    super.initState();
-    dataFuture = API.listPackages();
-
-    timer = Timer.periodic(
-        const Duration(seconds: 10),
-        (Timer t) => setState(() {
-              dataFuture = API.listPackages();
-            }));
-  }
-
-  @override
-  void dispose() {
-    super.dispose();
-    timer?.cancel();
-  }
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -57,10 +43,11 @@ class _YourPackagesState extends State<YourPackages> {
             //scrollDirection: Axis.horizontal,
             child: SizedBox(
               width: double.infinity,
-              child: FutureBuilder(
-                builder: (context, snapshot) {
-                  if (snapshot.hasData) {
-                    return DataTable(
+              child: APIBuilder<PackagesProvider, List<Package>, Object>(
+                key: GlobalKey(),
+                interval: const Duration(seconds: 10),
+                onData: (data) {
+                  return DataTable(
                       horizontalMargin: 0,
                       columnSpacing: defaultPadding,
                       columns: const [
@@ -80,15 +67,11 @@ class _YourPackagesState extends State<YourPackages> {
                           label: Text("Action"),
                         ),
                       ],
-                      rows: snapshot.data!
+                      rows: data
                           .map((e) => buildDataRow(e))
-                          .toList(growable: false),
-                    );
-                  } else {
-                    return const Text("No data");
-                  }
+                          .toList(growable: false));
                 },
-                future: dataFuture,
+                onLoad: () => const Text("No data"),
               ),
             ),
           ),
@@ -117,7 +100,9 @@ class _YourPackagesState extends State<YourPackages> {
             children: [
               TextButton(
                 child: const Text('View', style: TextStyle(color: greenColor)),
-                onPressed: () {},
+                onPressed: () {
+                  context.push("/package/${package.id}");
+                },
               ),
               const SizedBox(
                 width: 6,
@@ -125,7 +110,21 @@ class _YourPackagesState extends State<YourPackages> {
               TextButton(
                 child: const Text("Delete",
                     style: TextStyle(color: Colors.redAccent)),
-                onPressed: () {},
+                onPressed: () async {
+                  final confirmResult =
+                      await showDeleteConfirmationDialog(context);
+                  if (!confirmResult) return;
+
+                  final succ = await API.deletePackage(package.id);
+                  if (succ) {
+                    Provider.of<PackagesProvider>(context, listen: false)
+                        .refresh(context);
+                    Provider.of<BuildsProvider>(context, listen: false)
+                        .refresh(context);
+                    Provider.of<StatsProvider>(context, listen: false)
+                        .refresh(context);
+                  }
+                },
               ),
             ],
           ),

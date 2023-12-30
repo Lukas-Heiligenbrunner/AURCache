@@ -9,7 +9,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
-use sea_orm::{PaginatorTrait};
+use sea_orm::PaginatorTrait;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult, QuerySelect, RelationTrait};
 
@@ -66,6 +66,32 @@ pub async fn package_list(
         .all(db)
         .await
         .unwrap();
+
+    Ok(Json(all))
+}
+
+#[openapi(tag = "test")]
+#[get("/package/<id>")]
+pub async fn get_package(
+    db: &State<DatabaseConnection>,
+    id: u64,
+) -> Result<Json<ListPackageModel>, NotFound<String>> {
+    let db = db as &DatabaseConnection;
+
+    let all: ListPackageModel = Packages::find()
+        .join_rev(JoinType::InnerJoin, versions::Relation::Packages.def())
+        .filter(packages::Column::Id.eq(id))
+        .select_only()
+        .column_as(versions::Column::Id.count(), "count")
+        .column(packages::Column::Name)
+        .column(packages::Column::Id)
+        .column(packages::Column::Status)
+        .group_by(packages::Column::Name)
+        .into_model::<ListPackageModel>()
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("id not found".to_string()))?;
 
     Ok(Json(all))
 }
@@ -172,7 +198,10 @@ pub async fn get_build(
         .column_as(packages::Column::Name, "pkg_name")
         .column(versions::Column::Version)
         .into_model::<ListBuildsModel>()
-        .one(db).await.map_err(|e| NotFound(e.to_string()))?.ok_or(NotFound("no item with id found".to_string()))?;
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("no item with id found".to_string()))?;
 
     Ok(Json(result))
 }

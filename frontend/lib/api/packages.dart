@@ -11,9 +11,21 @@ extension PackagesAPI on ApiClient {
     return packages;
   }
 
+  Future<Package> getPackage(int id) async {
+    final resp = await getRawClient().get("/package/$id");
+
+    final package = Package.fromJson(resp.data);
+    return package;
+  }
+
   Future<void> addPackage({bool force = false, required String name}) async {
     final resp = await getRawClient()
         .post("/packages/add", data: {'force_build': force, 'name': name});
     print(resp.data);
+  }
+
+  Future<bool> deletePackage(int id) async {
+    final resp = await getRawClient().post("/package/delete/$id");
+    return resp.statusCode == 200;
   }
 }

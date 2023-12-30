@@ -1,6 +1,8 @@
 import 'package:aurcache/screens/build_screen.dart';
+import 'package:aurcache/screens/builds_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
 import 'package:aurcache/components/menu_shell.dart';
+import 'package:aurcache/screens/package_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -21,15 +23,24 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/',
           builder: (context, state) => DashboardScreen(),
-          routes: [
-            GoRoute(
-              path: 'build/:id',
-              builder: (context, state) {
-                final id = int.parse(state.pathParameters['id']!);
-                return BuildScreen(buildID: id);
-              },
-            ),
-          ]
+        ),
+        GoRoute(
+          path: '/build/:id',
+          builder: (context, state) {
+            final id = int.parse(state.pathParameters['id']!);
+            return BuildScreen(buildID: id);
+          },
+        ),
+        GoRoute(
+          path: '/builds',
+          builder: (context, state) => const BuildsScreen(),
+        ),
+        GoRoute(
+          path: '/package/:id',
+          builder: (context, state) {
+            final id = int.parse(state.pathParameters['id']!);
+            return PackageScreen(pkgID: id);
+          },
         ),
       ],
     ),

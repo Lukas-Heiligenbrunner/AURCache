@@ -1,9 +1,13 @@
 import 'package:aurcache/api/packages.dart';
+import 'package:aurcache/providers/builds_provider.dart';
+import 'package:aurcache/providers/stats_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
+import 'package:provider/provider.dart';
 
 import '../../api/API.dart';
 import '../../constants/color_constants.dart';
+import '../../providers/packages_provider.dart';
 
 class SearchField extends StatelessWidget {
   SearchField({
@@ -25,9 +29,14 @@ class SearchField extends StatelessWidget {
           borderRadius: BorderRadius.all(Radius.circular(10)),
         ),
         suffixIcon: InkWell(
-          onTap: () {
+          onTap: () async {
             // todo this is only temporary -> add this to a proper page
-            API.addPackage(name: controller.text);
+            await API.addPackage(name: controller.text, force: true);
+            Provider.of<PackagesProvider>(context, listen: false)
+                .refresh(context);
+            Provider.of<BuildsProvider>(context, listen: false)
+                .refresh(context);
+            Provider.of<StatsProvider>(context, listen: false).refresh(context);
           },
           child: Container(
             padding: EdgeInsets.all(defaultPadding * 0.75),
