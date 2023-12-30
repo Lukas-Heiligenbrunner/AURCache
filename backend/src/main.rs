@@ -56,11 +56,11 @@ fn main() {
             let rock = rocket::custom(config)
                 .manage(db)
                 .manage(tx)
-                .mount("/", backend::build_api())
+                .mount("/api/", backend::build_api())
                 .mount(
                     "/docs/",
                     make_swagger_ui(&SwaggerUIConfig {
-                        url: "../openapi.json".to_owned(),
+                        url: "../api/openapi.json".to_owned(),
                         ..Default::default()
                     }),
                 );

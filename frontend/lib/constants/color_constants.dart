@@ -13,7 +13,7 @@ const defaultPadding = 16.0;
 const double defaultBorderRadius = 15;
 
 class ColorConstants {
-  static Color blue = Color(0xFF0D46BB);
+  static Color blue = const Color(0xFF0D46BB);
 }
 
 class Palette {

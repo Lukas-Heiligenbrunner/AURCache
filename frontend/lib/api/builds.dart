@@ -10,4 +10,18 @@ extension BuildsAPI on ApiClient {
         responseObject.map((e) => Build.fromJson(e)).toList(growable: false);
     return packages;
   }
+
+  Future<Build> getBuild(int id) async {
+    final resp = await getRawClient().get("/builds/${id}");
+    return Build.fromJson(resp.data);
+  }
+
+  Future<String> getOutput({int? line, required int buildID}) async {
+    String uri = "/builds/output?buildid=$buildID";
+    if (line != null) {
+      uri += "&startline=$line";
+    }
+    final resp = await getRawClient().get(uri);
+    return resp.data.toString();
+  }
 }

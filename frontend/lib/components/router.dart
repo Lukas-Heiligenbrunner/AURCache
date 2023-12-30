@@ -1,0 +1,37 @@
+import 'package:aurcache/screens/build_screen.dart';
+import 'package:aurcache/screens/dashboard_screen.dart';
+import 'package:aurcache/components/menu_shell.dart';
+import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
+
+final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
+final GlobalKey<NavigatorState> _shellNavigatorKey =
+    GlobalKey<NavigatorState>();
+
+final appRouter = GoRouter(
+  navigatorKey: _rootNavigatorKey,
+  initialLocation: '/',
+  routes: [
+    ShellRoute(
+      navigatorKey: _shellNavigatorKey,
+      builder: (context, state, child) {
+        return MenuShell(child: child);
+      },
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) => DashboardScreen(),
+          routes: [
+            GoRoute(
+              path: 'build/:id',
+              builder: (context, state) {
+                final id = int.parse(state.pathParameters['id']!);
+                return BuildScreen(buildID: id);
+              },
+            ),
+          ]
+        ),
+      ],
+    ),
+  ],
+);

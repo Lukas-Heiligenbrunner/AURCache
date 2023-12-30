@@ -9,7 +9,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
-use sea_orm::PaginatorTrait;
+use sea_orm::{PaginatorTrait};
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult, QuerySelect, RelationTrait};
 
@@ -123,10 +123,11 @@ pub struct ListBuildsModel {
 }
 
 #[openapi(tag = "test")]
-#[get("/builds?<pkgid>")]
+#[get("/builds?<pkgid>&<limit>")]
 pub async fn list_builds(
     db: &State<DatabaseConnection>,
     pkgid: Option<i32>,
+    limit: Option<u64>,
 ) -> Result<Json<Vec<ListBuildsModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -137,7 +138,8 @@ pub async fn list_builds(
         .column_as(builds::Column::Id, "id")
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
-        .column(versions::Column::Version);
+        .column(versions::Column::Version)
+        .limit(limit);
 
     let build = match pkgid {
         None => basequery.into_model::<ListBuildsModel>().all(db),
@@ -150,6 +152,29 @@ pub async fn list_builds(
     .map_err(|e| NotFound(e.to_string()))?;
 
     Ok(Json(build))
+}
+
+#[openapi(tag = "test")]
+#[get("/builds/<buildid>")]
+pub async fn get_build(
+    db: &State<DatabaseConnection>,
+    buildid: i32,
+) -> Result<Json<ListBuildsModel>, NotFound<String>> {
+    let db = db as &DatabaseConnection;
+
+    let result = Builds::find()
+        .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
+        .join_rev(JoinType::InnerJoin, versions::Relation::Builds.def())
+        .filter(builds::Column::Id.eq(buildid))
+        .select_only()
+        .column_as(builds::Column::Id, "id")
+        .column(builds::Column::Status)
+        .column_as(packages::Column::Name, "pkg_name")
+        .column(versions::Column::Version)
+        .into_model::<ListBuildsModel>()
+        .one(db).await.map_err(|e| NotFound(e.to_string()))?.ok_or(NotFound("no item with id found".to_string()))?;
+
+    Ok(Json(result))
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]

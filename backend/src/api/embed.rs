@@ -32,6 +32,10 @@ impl Handler for CustomHandler {
             path = path.join("index.html")
         }
 
+        // if let None =  path.extension()  {
+        //     path = "index.html".into();
+        // }
+
         match <Asset as RustEmbed>::get(path.to_string_lossy().as_ref()) {
             None => Outcome::Failure(Status::NotFound),
             Some(file_content) => {

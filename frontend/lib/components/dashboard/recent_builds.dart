@@ -4,6 +4,7 @@ import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/dashboard/your_packages.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../api/API.dart';
 import '../../constants/color_constants.dart';
@@ -82,7 +83,7 @@ class _RecentBuildsState extends State<RecentBuilds> {
                           .toList(),
                     );
                   } else {
-                    return Text("no data");
+                    return const Text("no data");
                   }
                 }),
           ),
@@ -102,7 +103,9 @@ class _RecentBuildsState extends State<RecentBuilds> {
             switchSuccessIcon(build.status),
             color: switchSuccessColor(build.status),
           ),
-          onPressed: () {},
+          onPressed: () {
+            context.push("/build/${build.id}");
+          },
         )),
       ],
     );

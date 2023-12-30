@@ -4,9 +4,6 @@ import 'api_client.dart';
 extension PackagesAPI on ApiClient {
   Future<List<Package>> listPackages() async {
     final resp = await getRawClient().get("/packages/list");
-    print(resp.data);
-
-    // todo error handling
 
     final responseObject = resp.data as List;
     final List<Package> packages =

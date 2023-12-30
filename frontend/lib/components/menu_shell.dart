@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 
 import '../utils/responsive.dart';
-import 'dashboard_screen.dart';
-import '../components/side_menu.dart';
+import '../screens/dashboard_screen.dart';
+import 'side_menu.dart';
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class MenuShell extends StatelessWidget {
+  const MenuShell({super.key, required this.child});
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +26,7 @@ class HomeScreen extends StatelessWidget {
             Expanded(
               // It takes 5/6 part of the screen
               flex: 5,
-              child: DashboardScreen(),
+              child: child,
             ),
           ],
         ),
