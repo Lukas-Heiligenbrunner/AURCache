@@ -6,10 +6,12 @@ class BuildsChart extends StatefulWidget {
     Key? key,
     required this.nrbuilds,
     required this.nrfailedbuilds,
+    required this.nrActiveBuilds,
   }) : super(key: key);
 
   final int nrbuilds;
   final int nrfailedbuilds;
+  final int nrActiveBuilds;
 
   @override
   _BuildsChartState createState() => _BuildsChartState();
@@ -36,6 +38,7 @@ class _BuildsChartState extends State<BuildsChart> {
                       pieTouchData: PieTouchData(
                           touchCallback: (pieTouchResponse, touchresponse) {
                         setState(() {
+                          // todo hover gesture not working properly
                           if (touchresponse?.touchedSection != null) {
                             touchedIndex = touchresponse!
                                 .touchedSection!.touchedSectionIndex;
@@ -63,7 +66,7 @@ class _BuildsChartState extends State<BuildsChart> {
   }
 
   List<PieChartSectionData> showingSections() {
-    return List.generate(2, (i) {
+    return List.generate(3, (i) {
       final isTouched = i == touchedIndex;
       final fontSize = isTouched ? 25.0 : 16.0;
       final radius = isTouched ? 60.0 : 50.0;
@@ -83,9 +86,24 @@ class _BuildsChartState extends State<BuildsChart> {
         case 1:
           return PieChartSectionData(
             color: const Color(0xff0a7005),
-            value: (widget.nrbuilds - widget.nrfailedbuilds).toDouble(),
+            value: (widget.nrbuilds -
+                    widget.nrfailedbuilds -
+                    widget.nrActiveBuilds)
+                .toDouble(),
             title:
-                "${((widget.nrbuilds - widget.nrfailedbuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${((widget.nrbuilds - widget.nrfailedbuilds - widget.nrActiveBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+            radius: radius,
+            titleStyle: TextStyle(
+                fontSize: fontSize,
+                fontWeight: FontWeight.bold,
+                color: const Color(0xffffffff)),
+          );
+        case 2:
+          return PieChartSectionData(
+            color: const Color(0xff9d8d00),
+            value: (widget.nrActiveBuilds).toDouble(),
+            title:
+                "${((widget.nrActiveBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,

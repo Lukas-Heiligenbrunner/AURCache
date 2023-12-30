@@ -12,8 +12,6 @@ use rocket_okapi::{openapi, JsonSchema};
 use sea_orm::PaginatorTrait;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult, QuerySelect, RelationTrait};
-use std::path::PathBuf;
-use std::{fs, io};
 
 #[derive(Serialize, JsonSchema)]
 #[serde(crate = "rocket::serde")]

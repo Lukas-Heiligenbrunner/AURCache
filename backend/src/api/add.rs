@@ -28,7 +28,7 @@ pub async fn package_add(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    let pkt_model = match Packages::find()
+    let mut pkg_model = match Packages::find()
         .filter(packages::Column::Name.eq(input.name.clone()))
         .one(db)
         .await
@@ -37,6 +37,7 @@ pub async fn package_add(
         None => {
             let new_package = packages::ActiveModel {
                 name: Set(input.name.clone()),
+                status: Set(0),
                 ..Default::default()
             };
 
@@ -58,7 +59,7 @@ pub async fn package_add(
         None => {
             let new_version = versions::ActiveModel {
                 version: Set(pkg.version.clone()),
-                package_id: Set(pkt_model.id.clone().unwrap()),
+                package_id: Set(pkg_model.id.clone().unwrap()),
                 ..Default::default()
             };
 
@@ -74,6 +75,11 @@ pub async fn package_add(
             }
         }
     };
+
+    if pkg_model.status.unwrap() != 0 {
+        pkg_model.status = Set(0);
+        pkg_model.save(db).await.expect("todo error message");
+    }
 
     let _ = tx.send(Action::Build(
         pkg.name,

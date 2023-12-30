@@ -49,7 +49,8 @@ class DashboardScreen extends StatelessWidget {
                                 if (Responsive.isMobile(context))
                                   SidePanel(
                                       nrbuilds: stats.total_builds,
-                                      nrfailedbuilds: stats.failed_builds),
+                                      nrfailedbuilds: stats.failed_builds,
+                                      nrActiveBuilds: stats.active_builds),
                               ],
                             ),
                           ),
@@ -61,7 +62,8 @@ class DashboardScreen extends StatelessWidget {
                               flex: 2,
                               child: SidePanel(
                                   nrbuilds: stats.total_builds,
-                                  nrfailedbuilds: stats.failed_builds),
+                                  nrfailedbuilds: stats.failed_builds,
+                                  nrActiveBuilds: stats.active_builds),
                             ),
                         ],
                       )

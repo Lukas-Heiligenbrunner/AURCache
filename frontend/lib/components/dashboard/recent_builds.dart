@@ -42,10 +42,10 @@ class _RecentBuildsState extends State<RecentBuilds> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.all(defaultPadding),
-      decoration: BoxDecoration(
+      padding: const EdgeInsets.all(defaultPadding),
+      decoration: const BoxDecoration(
         color: secondaryColor,
-        borderRadius: const BorderRadius.all(Radius.circular(10)),
+        borderRadius: BorderRadius.all(Radius.circular(10)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -97,9 +97,12 @@ class _RecentBuildsState extends State<RecentBuilds> {
         DataCell(Text(build.id.toString())),
         DataCell(Text(build.pkg_name)),
         DataCell(Text(build.version)),
-        DataCell(Icon(
-          switchSuccessIcon(build.status),
-          color: switchSuccessColor(build.status),
+        DataCell(IconButton(
+          icon: Icon(
+            switchSuccessIcon(build.status),
+            color: switchSuccessColor(build.status),
+          ),
+          onPressed: () {},
         )),
       ],
     );

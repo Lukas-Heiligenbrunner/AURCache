@@ -9,10 +9,12 @@ class SidePanel extends StatelessWidget {
     Key? key,
     required this.nrbuilds,
     required this.nrfailedbuilds,
+    required this.nrActiveBuilds,
   }) : super(key: key);
 
   final int nrbuilds;
   final int nrfailedbuilds;
+  final int nrActiveBuilds;
 
   @override
   Widget build(BuildContext context) {
@@ -33,7 +35,10 @@ class SidePanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: defaultPadding),
-          BuildsChart(nrbuilds: nrbuilds, nrfailedbuilds: nrfailedbuilds),
+          BuildsChart(
+              nrbuilds: nrbuilds,
+              nrfailedbuilds: nrfailedbuilds,
+              nrActiveBuilds: nrActiveBuilds),
           ChartCard(
             color: const Color(0xff0a7005),
             title: "Successful Builds",
@@ -47,6 +52,13 @@ class SidePanel extends StatelessWidget {
             textRight:
                 "${(nrfailedbuilds * 100 / nrbuilds).toStringAsFixed(2)}%",
             subtitle: nrfailedbuilds.toString(),
+          ),
+          ChartCard(
+            color: const Color(0xff9d8d00),
+            title: "Active Builds",
+            textRight:
+                "${(nrActiveBuilds * 100 / nrbuilds).toStringAsFixed(2)}%",
+            subtitle: nrActiveBuilds.toString(),
           ),
         ],
       ),
