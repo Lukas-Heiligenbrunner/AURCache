@@ -1,7 +1,7 @@
 use crate::aur::aur::download_pkgbuild;
-use crate::db::prelude::Packages;
 use crate::db::prelude::Versions;
-use crate::db::versions;
+use crate::db::prelude::{Builds, Packages};
+use crate::db::{builds, versions};
 use crate::pkgbuild::build::build_pkgbuild;
 use anyhow::anyhow;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter};
@@ -37,6 +37,49 @@ pub async fn add_pkg(
     repo_add(pkg_file_name.clone())?;
 
     Ok(pkg_file_name)
+}
+
+pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
+    let pkg = Packages::find_by_id(pkg_id)
+        .one(db)
+        .await?
+        .ok_or(anyhow!("id not found"))?;
+
+    fs::remove_dir_all(format!("./builds/{}", pkg.name))?;
+
+    let versions = Versions::find()
+        .filter(versions::Column::PackageId.eq(pkg.id))
+        .all(db)
+        .await?;
+
+    for v in versions {
+        rem_ver(db, v).await?;
+    }
+
+    // remove corresponding builds
+    let builds = Builds::find()
+        .filter(builds::Column::PkgId.eq(pkg.id))
+        .all(db)
+        .await?;
+    for b in builds {
+        b.delete(db).await?;
+    }
+
+    // remove package db entry
+    pkg.delete(db).await?;
+
+    Ok(())
+}
+
+pub async fn remove_version(db: &DatabaseConnection, version_id: i32) -> anyhow::Result<()> {
+    let version = Versions::find()
+        .filter(versions::Column::PackageId.eq(version_id))
+        .one(db)
+        .await?;
+    if let Some(version) = version {
+        rem_ver(db, version).await?;
+    }
+    Ok(())
 }
 
 fn repo_add(pkg_file_name: String) -> anyhow::Result<()> {
@@ -76,40 +119,6 @@ fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
     }
 
     println!("{db_file} updated successfully");
-    Ok(())
-}
-
-pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
-    let pkg = Packages::find_by_id(pkg_id)
-        .one(db)
-        .await?
-        .ok_or(anyhow!("id not found"))?;
-
-    fs::remove_dir_all(format!("./builds/{}", pkg.name))?;
-
-    let versions = Versions::find()
-        .filter(versions::Column::PackageId.eq(pkg.id))
-        .all(db)
-        .await?;
-
-    for v in versions {
-        rem_ver(db, v).await?;
-    }
-
-    // remove package db entry
-    pkg.delete(db).await?;
-
-    Ok(())
-}
-
-pub async fn remove_version(db: &DatabaseConnection, version_id: i32) -> anyhow::Result<()> {
-    let version = Versions::find()
-        .filter(versions::Column::PackageId.eq(version_id))
-        .one(db)
-        .await?;
-    if let Some(version) = version {
-        rem_ver(db, version).await?;
-    }
     Ok(())
 }
 

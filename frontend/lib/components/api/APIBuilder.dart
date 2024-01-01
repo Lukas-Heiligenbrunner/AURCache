@@ -2,8 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
-import 'BaseProvider.dart';
+import '../../providers/BaseProvider.dart';
 
 class APIBuilder<T extends BaseProvider, K, DTO> extends StatefulWidget {
   const APIBuilder(
@@ -25,6 +26,7 @@ class APIBuilder<T extends BaseProvider, K, DTO> extends StatefulWidget {
 class _APIBuilderState<T extends BaseProvider, K, DTO>
     extends State<APIBuilder<T, K, DTO>> {
   Timer? timer;
+  bool visible = true;
 
   @override
   void initState() {
@@ -33,12 +35,10 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
 
     if (widget.interval != null) {
       timer = Timer.periodic(widget.interval!, (Timer t) {
-        final RenderObject? box = context.findRenderObject();
-        print(box);
-        print(context.mounted);
-
-        Provider.of<T>(context, listen: false)
-            .refresh(context, dto: widget.dto);
+        if (visible) {
+          Provider.of<T>(context, listen: false)
+              .refresh(context, dto: widget.dto);
+        }
       });
     }
   }
@@ -53,15 +53,30 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
   Widget build(BuildContext context) {
     final Future<K> fut = Provider.of<T>(context).data as Future<K>;
 
-    return FutureBuilder<K>(
-      future: fut,
-      builder: (context, snapshot) {
-        if (snapshot.hasData) {
-          return widget.onData(snapshot.data!);
-        } else {
-          return widget.onLoad();
+    return VisibilityDetector(
+      key: widget.key ?? const Key("APIBuilder"),
+      onVisibilityChanged: (visibilityInfo) {
+        var visiblePercentage = visibilityInfo.visibleFraction * 100;
+
+        if (mounted) {
+          setState(() {
+            visible = visiblePercentage != 0;
+          });
         }
+
+        debugPrint(
+            'Widget ${visibilityInfo.key} is ${visiblePercentage}% visible');
       },
+      child: FutureBuilder<K>(
+        future: fut,
+        builder: (context, snapshot) {
+          if (snapshot.hasData) {
+            return widget.onData(snapshot.data!);
+          } else {
+            return widget.onLoad();
+          }
+        },
+      ),
     );
   }
 }

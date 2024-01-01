@@ -1,4 +1,4 @@
-import 'package:aurcache/components/router.dart';
+import 'package:aurcache/components/routing/router.dart';
 import 'package:aurcache/providers/build_provider.dart';
 import 'package:aurcache/providers/builds_provider.dart';
 import 'package:aurcache/providers/package_provider.dart';

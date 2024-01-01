@@ -1,7 +1,7 @@
 import 'package:aurcache/screens/build_screen.dart';
 import 'package:aurcache/screens/builds_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
-import 'package:aurcache/components/menu_shell.dart';
+import 'package:aurcache/components/routing/menu_shell.dart';
 import 'package:aurcache/screens/package_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';

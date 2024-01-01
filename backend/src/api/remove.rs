@@ -1,9 +1,6 @@
 use crate::repo::repo::{remove_pkg, remove_version};
-use rocket::serde::json::Json;
-use rocket::serde::Deserialize;
 use rocket::{post, State};
-use rocket_okapi::okapi::schemars;
-use rocket_okapi::{openapi, JsonSchema};
+use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
 
 #[openapi(tag = "test")]

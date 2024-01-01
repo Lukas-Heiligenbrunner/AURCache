@@ -4,7 +4,7 @@ import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/builds_table.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/dashboard/your_packages.dart';
-import 'package:aurcache/providers/APIBuilder.dart';
+import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -41,6 +41,7 @@ class _RecentBuildsState extends State<RecentBuilds> {
           SizedBox(
             width: double.infinity,
             child: APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
+              key: const Key("Builds on dashboard"),
               dto: BuildsDTO(limit: 10),
               interval: const Duration(seconds: 10),
               onLoad: () => const Text("no data"),

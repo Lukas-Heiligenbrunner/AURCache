@@ -2,10 +2,11 @@ import 'dart:async';
 
 import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/providers/APIBuilder.dart';
+import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
 
 import '../api/API.dart';
 import '../components/builds_table.dart';
@@ -15,6 +16,7 @@ import '../models/build.dart';
 import '../models/package.dart';
 import '../providers/package_provider.dart';
 import '../providers/packages_provider.dart';
+import '../providers/stats_provider.dart';
 
 class PackageScreen extends StatefulWidget {
   const PackageScreen({super.key, required this.pkgID});
@@ -61,6 +63,15 @@ class _PackageScreenState extends State<PackageScreen> {
                             final succ = await API.deletePackage(pkg.id);
                             if (succ) {
                               context.pop();
+
+                              Provider.of<PackagesProvider>(context,
+                                      listen: false)
+                                  .refresh(context);
+                              Provider.of<BuildsProvider>(context,
+                                      listen: false)
+                                  .refresh(context);
+                              Provider.of<StatsProvider>(context, listen: false)
+                                  .refresh(context);
                             }
                           },
                           child: const Text(
@@ -92,7 +103,7 @@ class _PackageScreenState extends State<PackageScreen> {
                             width: double.infinity,
                             child: APIBuilder<BuildsProvider, List<Build>,
                                 BuildsDTO>(
-                              key: GlobalKey(),
+                              key: const Key("Builds on Package info"),
                               dto: BuildsDTO(pkgID: pkg.id),
                               interval: const Duration(seconds: 5),
                               onData: (data) {

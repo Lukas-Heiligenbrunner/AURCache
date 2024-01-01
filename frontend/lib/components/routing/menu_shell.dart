@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../utils/responsive.dart';
-import '../screens/dashboard_screen.dart';
+import '../../utils/responsive.dart';
+import '../../screens/dashboard_screen.dart';
 import 'side_menu.dart';
 
 class MenuShell extends StatelessWidget {

@@ -1,5 +1,5 @@
 import 'package:aurcache/api/statistics.dart';
-import 'package:aurcache/providers/APIBuilder.dart';
+import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/stats_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';

@@ -1,7 +1,7 @@
 import 'dart:async';
 
 import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/providers/APIBuilder.dart';
+import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -44,7 +44,7 @@ class _YourPackagesState extends State<YourPackages> {
             child: SizedBox(
               width: double.infinity,
               child: APIBuilder<PackagesProvider, List<Package>, Object>(
-                key: GlobalKey(),
+                key: Key("Packages on dashboard"),
                 interval: const Duration(seconds: 10),
                 onData: (data) {
                   return DataTable(
