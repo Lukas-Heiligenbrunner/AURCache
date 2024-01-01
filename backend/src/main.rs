@@ -4,6 +4,7 @@ mod builder;
 mod db;
 mod pkgbuild;
 mod repo;
+mod scheduler;
 mod utils;
 
 use crate::api::backend;
@@ -11,6 +12,7 @@ use crate::api::backend;
 use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
 use crate::db::migration::Migrator;
+use crate::scheduler::aur_version_update::start_aur_version_checking;
 use rocket::config::Config;
 use rocket::fs::FileServer;
 use rocket::futures::future::join_all;
@@ -47,6 +49,8 @@ fn main() {
         tokio::spawn(async move {
             builder::builder::init(db2, tx2).await;
         });
+
+        start_aur_version_checking(db.clone());
 
         let backend_handle = tokio::spawn(async {
             let mut config = Config::default();

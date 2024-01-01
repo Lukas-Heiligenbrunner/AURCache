@@ -5,6 +5,7 @@ use crate::repo::repo::add_pkg;
 use anyhow::anyhow;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::ops::Add;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Sender;
@@ -16,12 +17,17 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                 // add a package to parallel build
                 Action::Build(name, version, url, mut version_model) => {
                     let db = db.clone();
-
                     let build = builds::ActiveModel {
                         pkg_id: version_model.package_id.clone(),
                         version_id: version_model.id.clone(),
                         ouput: Set(None),
                         status: Set(Some(0)),
+                        start_time: Set(Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs() as u32,
+                        )),
                         ..Default::default()
                     };
                     let mut new_build = build.save(&db).await.unwrap();
@@ -62,6 +68,8 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                                 let _ = set_pkg_status(
                                     &db,
                                     version_model.package_id.clone().unwrap(),
+                                    version_model.id.clone().unwrap(),
+                                    Some(false),
                                     1,
                                 )
                                 .await;
@@ -70,18 +78,32 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                                 let _ = version_model.update(&db).await;
 
                                 new_build.status = Set(Some(1));
+                                new_build.end_time = Set(Some(
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs() as u32,
+                                ));
                                 let _ = new_build.update(&db).await;
                             }
                             Err(e) => {
                                 let _ = set_pkg_status(
                                     &db,
                                     version_model.package_id.clone().unwrap(),
+                                    version_model.id.clone().unwrap(),
+                                    None,
                                     2,
                                 )
                                 .await;
                                 let _ = version_model.update(&db).await;
 
                                 new_build.status = Set(Some(2));
+                                new_build.end_time = Set(Some(
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs() as u32,
+                                ));
                                 let _ = new_build.update(&db).await;
 
                                 println!("Error: {e}")
@@ -98,6 +120,8 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
 async fn set_pkg_status(
     db: &DatabaseConnection,
     package_id: i32,
+    version_id: i32,
+    outofdate: Option<bool>,
     status: i32,
 ) -> anyhow::Result<()> {
     let mut pkg: packages::ActiveModel = Packages::find_by_id(package_id)
@@ -107,6 +131,10 @@ async fn set_pkg_status(
         .into();
 
     pkg.status = Set(status);
+    pkg.latest_version_id = Set(Some(version_id));
+    if outofdate.is_some() {
+        pkg.out_of_date = Set(outofdate.unwrap() as i32)
+    }
     pkg.update(db).await?;
     Ok(())
 }

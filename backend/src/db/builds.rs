@@ -14,6 +14,8 @@ pub struct Model {
     pub version_id: i32,
     pub ouput: Option<String>,
     pub status: Option<i32>,
+    pub start_time: Option<u32>,
+    pub end_time: Option<u32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

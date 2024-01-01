@@ -23,6 +23,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return APIBuilder<StatsProvider, Stats, Object>(
+      interval: const Duration(seconds: 10),
       onData: (stats) {
         return SafeArea(
           child: SingleChildScrollView(

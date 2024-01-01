@@ -19,7 +19,9 @@ create table builds
 	pkg_id integer not null,
 	version_id integer not null,
 	ouput TEXT,
-	status integer
+	status integer,
+	start_time INTEGER,
+	end_time integer
 );
 
 create table packages
@@ -27,7 +29,12 @@ create table packages
 	id integer not null
 		primary key autoincrement,
 	name text not null,
-	status integer default 0 not null
+	status integer default 0 not null,
+	out_of_date INTEGER default 0 not null,
+	latest_version_id integer
+		constraint packages_versions_id_fk
+			references versions,
+	latest_aur_version TEXT
 );
 
 create table status

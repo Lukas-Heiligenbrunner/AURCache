@@ -1,14 +1,11 @@
-import 'dart:async';
-
-import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/build_provider.dart';
+import 'package:aurcache/utils/time_formatter.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
-import '../api/API.dart';
 import '../components/dashboard/your_packages.dart';
 
 class BuildScreen extends StatefulWidget {
@@ -29,6 +26,9 @@ class _BuildScreenState extends State<BuildScreen> {
           interval: const Duration(seconds: 10),
           onLoad: () => const Text("no data"),
           onData: (buildData) {
+            final start_time = DateTime.fromMillisecondsSinceEpoch(
+                (buildData.start_time ?? 0) * 1000);
+
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.start,
@@ -58,7 +58,7 @@ class _BuildScreenState extends State<BuildScreen> {
                     const SizedBox(
                       width: 10,
                     ),
-                    const Text("triggered 2 months ago")
+                    Text("triggered ${start_time.readableDuration()}")
                   ],
                 ),
                 const SizedBox(

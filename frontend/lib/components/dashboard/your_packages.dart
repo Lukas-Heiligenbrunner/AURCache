@@ -58,7 +58,10 @@ class _YourPackagesState extends State<YourPackages> {
                           label: Text("Package Name"),
                         ),
                         DataColumn(
-                          label: Text("Number of versions"),
+                          label: Text("Version"),
+                        ),
+                        DataColumn(
+                          label: Text("Up-To-Date"),
                         ),
                         DataColumn(
                           label: Text("Status"),
@@ -85,14 +88,25 @@ class _YourPackagesState extends State<YourPackages> {
       cells: [
         DataCell(Text(package.id.toString())),
         DataCell(Text(package.name)),
-        DataCell(Text(package.count.toString())),
+        DataCell(Text(package.latest_version.toString())),
+        DataCell(IconButton(
+          icon: Icon(
+            package.outofdate ? Icons.update : Icons.verified,
+            color: package.outofdate ? Color(0xFF6B43A4) : Color(0xFF0A6900),
+          ),
+          onPressed: package.outofdate
+              ? () {
+                  // todo open build info with logs
+                }
+              : null,
+        )),
         DataCell(IconButton(
           icon: Icon(
             switchSuccessIcon(package.status),
             color: switchSuccessColor(package.status),
           ),
           onPressed: () {
-            // todo open build info with logs
+            //context.push("/build/${package.latest_version_id}");
           },
         )),
         DataCell(

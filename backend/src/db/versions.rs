@@ -23,6 +23,12 @@ pub enum Relation {
         to = "super::packages::Column::Id"
     )]
     Packages,
+    #[sea_orm(
+        belongs_to = "super::packages::Entity",
+        from = "Column::Id",
+        to = "super::packages::Column::LatestVersionId"
+    )]
+    LatestPackage,
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
 }

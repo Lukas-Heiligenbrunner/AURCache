@@ -9,9 +9,9 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
-use sea_orm::PaginatorTrait;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult, QuerySelect, RelationTrait};
+use sea_orm::{Order, PaginatorTrait, QueryOrder};
 
 #[derive(Serialize, JsonSchema)]
 #[serde(crate = "rocket::serde")]
@@ -43,8 +43,11 @@ pub async fn search(query: &str) -> Result<Json<Vec<ApiPackage>>, String> {
 pub struct ListPackageModel {
     id: i32,
     name: String,
-    count: i32,
     status: i32,
+    outofdate: bool,
+    latest_version: String,
+    latest_version_id: i32,
+    latest_aur_version: String,
 }
 
 #[openapi(tag = "test")]
@@ -55,13 +58,15 @@ pub async fn package_list(
     let db = db as &DatabaseConnection;
 
     let all: Vec<ListPackageModel> = Packages::find()
-        .join_rev(JoinType::InnerJoin, versions::Relation::Packages.def())
+        .join_rev(JoinType::InnerJoin, versions::Relation::LatestPackage.def())
         .select_only()
-        .column_as(versions::Column::Id.count(), "count")
         .column(packages::Column::Name)
         .column(packages::Column::Id)
         .column(packages::Column::Status)
-        .group_by(packages::Column::Name)
+        .column_as(packages::Column::OutOfDate, "outofdate")
+        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
+        .column_as(versions::Column::Version, "latest_version")
+        .column_as(packages::Column::LatestVersionId, "latest_version_id")
         .into_model::<ListPackageModel>()
         .all(db)
         .await
@@ -146,6 +151,8 @@ pub struct ListBuildsModel {
     pkg_name: String,
     version: String,
     status: i32,
+    start_time: Option<u32>,
+    end_time: Option<u32>,
 }
 
 #[openapi(tag = "test")]
@@ -165,6 +172,9 @@ pub async fn list_builds(
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
         .column(versions::Column::Version)
+        .column(builds::Column::EndTime)
+        .column(builds::Column::StartTime)
+        .order_by(builds::Column::StartTime, Order::Desc)
         .limit(limit);
 
     let build = match pkgid {
@@ -197,6 +207,8 @@ pub async fn get_build(
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
         .column(versions::Column::Version)
+        .column(builds::Column::EndTime)
+        .column(builds::Column::StartTime)
         .into_model::<ListBuildsModel>()
         .one(db)
         .await

@@ -12,6 +12,9 @@ pub struct Model {
     pub id: i32,
     pub name: String,
     pub status: i32,
+    pub out_of_date: i32,
+    pub latest_version_id: Option<i32>,
+    pub latest_aur_version: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
@@ -22,6 +25,8 @@ pub enum Relation {
     Versions,
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
+    #[sea_orm(has_one = "super::versions::Entity")]
+    LatestVersion,
 }
 
 impl Related<super::versions::Entity> for Entity {
@@ -30,8 +35,14 @@ impl Related<super::versions::Entity> for Entity {
     }
 }
 
+// impl Related<super::versions::Entity> for Entity {
+//     fn to() -> RelationDef {
+//         Relation::LatestVersion.def()
+//     }
+// }
+
 impl Related<super::builds::Entity> for crate::db::versions::Entity {
     fn to() -> RelationDef {
-        crate::db::versions::Relation::Builds.def()
+        Relation::Builds.def()
     }
 }
