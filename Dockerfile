@@ -27,8 +27,12 @@ FROM archlinux
 # Copy the built binary from the previous stage
 COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
 
+RUN echo " \
+[extra]\
+Include = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
 
 RUN pacman -Syyu --noconfirm
+RUN pacman-key --init && pacman-key --populate
 RUN pacman -S --noconfirm base-devel git
 RUN pacman -Sc
 
