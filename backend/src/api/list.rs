@@ -45,8 +45,8 @@ pub struct ListPackageModel {
     name: String,
     status: i32,
     outofdate: bool,
-    latest_version: String,
-    latest_version_id: i32,
+    latest_version: Option<String>,
+    latest_version_id: Option<i32>,
     latest_aur_version: String,
 }
 
@@ -58,7 +58,7 @@ pub async fn package_list(
     let db = db as &DatabaseConnection;
 
     let all: Vec<ListPackageModel> = Packages::find()
-        .join_rev(JoinType::InnerJoin, versions::Relation::LatestPackage.def())
+        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
         .select_only()
         .column(packages::Column::Name)
         .column(packages::Column::Id)
