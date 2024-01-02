@@ -77,10 +77,9 @@ pub async fn package_add(
         }
     };
 
-    if pkg_model.status.unwrap() != 0 {
-        pkg_model.status = Set(0);
-        pkg_model.save(db).await.expect("todo error message");
-    }
+    pkg_model.status = Set(0);
+    pkg_model.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
+    pkg_model.save(db).await.expect("todo error message");
 
     let _ = tx.send(Action::Build(
         pkg.name,
