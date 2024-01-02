@@ -28,6 +28,10 @@ pub async fn package_add(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
+    let pkg = get_info_by_name(input.name.clone().as_str())
+        .await
+        .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
+
     let mut pkg_model = match Packages::find()
         .filter(packages::Column::Name.eq(input.name.clone()))
         .one(db)
@@ -38,6 +42,7 @@ pub async fn package_add(
             let new_package = packages::ActiveModel {
                 name: Set(input.name.clone()),
                 status: Set(0),
+                latest_aur_version: Set(pkg.version.clone()),
                 ..Default::default()
             };
 
@@ -45,10 +50,6 @@ pub async fn package_add(
         }
         Some(p) => p.into(),
     };
-
-    let pkg = get_info_by_name(input.name.clone().as_str())
-        .await
-        .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
 
     let version_model = match Versions::find()
         .filter(versions::Column::Version.eq(pkg.version.clone()))

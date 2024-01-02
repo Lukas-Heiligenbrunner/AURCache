@@ -54,7 +54,7 @@ pub struct ListPackageModel {
 #[get("/packages/list")]
 pub async fn package_list(
     db: &State<DatabaseConnection>,
-) -> Result<Json<Vec<ListPackageModel>>, String> {
+) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
     let all: Vec<ListPackageModel> = Packages::find()
@@ -70,7 +70,7 @@ pub async fn package_list(
         .into_model::<ListPackageModel>()
         .all(db)
         .await
-        .unwrap();
+        .map_err(|e| NotFound(e.to_string()))?;
 
     Ok(Json(all))
 }

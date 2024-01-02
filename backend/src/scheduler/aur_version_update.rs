@@ -46,7 +46,7 @@ async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
             Some(result) => {
                 let mut package: packages::ActiveModel = package.into();
 
-                package.latest_aur_version = Set(Some(result.version.clone()));
+                package.latest_aur_version = Set(result.version.clone());
                 let _ = package.update(&db).await;
             }
         }

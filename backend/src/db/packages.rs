@@ -14,7 +14,7 @@ pub struct Model {
     pub status: i32,
     pub out_of_date: i32,
     pub latest_version_id: Option<i32>,
-    pub latest_aur_version: Option<String>,
+    pub latest_aur_version: String,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
