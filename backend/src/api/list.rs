@@ -84,14 +84,16 @@ pub async fn get_package(
     let db = db as &DatabaseConnection;
 
     let all: ListPackageModel = Packages::find()
-        .join_rev(JoinType::InnerJoin, versions::Relation::Packages.def())
+        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
         .filter(packages::Column::Id.eq(id))
         .select_only()
-        .column_as(versions::Column::Id.count(), "count")
         .column(packages::Column::Name)
         .column(packages::Column::Id)
         .column(packages::Column::Status)
-        .group_by(packages::Column::Name)
+        .column_as(packages::Column::OutOfDate, "outofdate")
+        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
+        .column_as(versions::Column::Version, "latest_version")
+        .column_as(packages::Column::LatestVersionId, "latest_version_id")
         .into_model::<ListPackageModel>()
         .one(db)
         .await

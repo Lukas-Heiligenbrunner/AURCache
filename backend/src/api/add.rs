@@ -41,7 +41,7 @@ pub async fn package_add(
         None => {
             let new_package = packages::ActiveModel {
                 name: Set(input.name.clone()),
-                status: Set(0),
+                status: Set(3),
                 latest_aur_version: Set(pkg.version.clone()),
                 ..Default::default()
             };
@@ -77,7 +77,7 @@ pub async fn package_add(
         }
     };
 
-    pkg_model.status = Set(0);
+    pkg_model.status = Set(3);
     pkg_model.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
     pkg_model.save(db).await.expect("todo error message");
 

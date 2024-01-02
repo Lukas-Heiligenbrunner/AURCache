@@ -24,7 +24,7 @@ class _BuildScreenState extends State<BuildScreen> {
       body: APIBuilder<BuildProvider, Build, BuildDTO>(
           dto: BuildDTO(buildID: widget.buildID),
           interval: const Duration(seconds: 10),
-          onLoad: () => const Text("no data"),
+          onLoad: () => const Text("loading"),
           onData: (buildData) {
             final start_time = DateTime.fromMillisecondsSinceEpoch(
                 (buildData.start_time ?? 0) * 1000);
@@ -64,11 +64,23 @@ class _BuildScreenState extends State<BuildScreen> {
                 const SizedBox(
                   height: 15,
                 ),
-                BuildOutput(build: buildData)
+                _buildPage(buildData)
               ],
             );
           }),
       appBar: AppBar(),
     );
+  }
+
+  Widget _buildPage(Build build) {
+    switch (build.status) {
+      case 3:
+        return const Text("in Queue");
+      case 0:
+      case 1:
+      case 2:
+      default:
+        return BuildOutput(build: build);
+    }
   }
 }
