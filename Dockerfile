@@ -29,16 +29,17 @@ COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
 
 RUN echo $'\n\
 [multilib]\n\
-Include = /etc/pacman.d/mirrorlist\n\
-\n\n\
-[repo]\n\
-SigLevel = Optional TrustAll\n\
-Server = http://localhost:8080/' >> /etc/pacman.conf
+Include = /etc/pacman.d/mirrorlist'>> /etc/pacman.conf
 
 RUN pacman -Syyu --noconfirm
 RUN pacman-key --init && pacman-key --populate
 RUN pacman -S --noconfirm base-devel git
 RUN pacman -Sc
+
+RUN echo $'\n\
+[repo]\n\
+SigLevel = Optional TrustAll\n\
+Server = http://localhost:8080/' >> /etc/pacman.conf
 
 # Set the entry point or default command to run your application
 WORKDIR /app
