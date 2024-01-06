@@ -28,8 +28,12 @@ FROM archlinux
 COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
 
 RUN echo $'\n\
-[extra]\n\
-Include = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
+[multilib]\n\
+Include = /etc/pacman.d/mirrorlist\n\
+\n\n\
+[repo]\n\
+SigLevel = Optional TrustAll\n\
+Server = http://localhost:8080/' >> /etc/pacman.conf
 
 RUN pacman -Syyu --noconfirm
 RUN pacman-key --init && pacman-key --populate
