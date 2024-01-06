@@ -31,6 +31,7 @@ class BuildsScreen extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder<BuildsProvider, List<Build>, Object>(
+                      key: const Key("Builds on seperate screen"),
                       interval: const Duration(seconds: 10),
                       onLoad: () => const Text("no data"),
                       onData: (data) {

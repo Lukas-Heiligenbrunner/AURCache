@@ -22,6 +22,7 @@ class _BuildScreenState extends State<BuildScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: APIBuilder<BuildProvider, Build, BuildDTO>(
+          key: const Key("Build on seperate page"),
           dto: BuildDTO(buildID: widget.buildID),
           interval: const Duration(seconds: 10),
           onLoad: () => const Text("loading"),
