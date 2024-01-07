@@ -11,6 +11,15 @@ pub async fn build_pkgbuild(
     pkg_name: &str,
     tx: Sender<String>,
 ) -> anyhow::Result<String> {
+    let mut child = tokio::process::Command::new("pacman")
+        .args([
+            "-Sy",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child.wait().await?;
+
     let makepkg = include_str!("../../scripts/makepkg");
 
     // Create a temporary file to store the bash script content
