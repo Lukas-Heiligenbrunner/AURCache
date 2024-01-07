@@ -17,10 +17,16 @@ pub async fn add_pkg(
     version: String,
     name: String,
     tx: Sender<String>,
-) -> anyhow::Result<String> {
-    let fname = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds").await?;
-    let pkg_file_name = build_pkgbuild(
-        format!("./builds/{fname}"),
+) -> anyhow::Result<Vec<String>> {
+    // download pkgbuild archive from aur
+    let (basepath, pkgbuild) = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds").await?;
+
+    // todo extract pkgname attributes from pkgbuild
+    // one pkgbuild might contain several pkgs
+
+    let pkg_file_names = build_pkgbuild(
+        pkgbuild,
+        basepath.clone(),
         version.as_str(),
         name.as_str(),
         tx,
@@ -28,15 +34,18 @@ pub async fn add_pkg(
     .await?;
 
     // todo force overwrite if file already exists
-    fs::copy(
-        format!("./builds/{fname}/{pkg_file_name}"),
-        format!("./repo/{pkg_file_name}"),
-    )?;
-    fs::remove_file(format!("./builds/{fname}/{pkg_file_name}"))?;
+    for name in &pkg_file_names {
+        fs::copy(
+            format!("{basepath}/{name}"),
+            format!("./repo/{name}"),
+        )?;
+        fs::remove_file(format!("{basepath}/{name}"))?;
 
-    repo_add(pkg_file_name.clone())?;
+        repo_add(name.clone())?;
+    }
 
-    Ok(pkg_file_name)
+
+    Ok(pkg_file_names)
 }
 
 pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {

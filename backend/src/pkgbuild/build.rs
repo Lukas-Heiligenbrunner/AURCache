@@ -2,15 +2,18 @@ use anyhow::anyhow;
 use std::fs;
 use std::process::Stdio;
 use std::time::SystemTime;
+use rocket::form::validate::Contains;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::sync::broadcast::Sender;
+use crate::aur::pkgbuild::PkgBuild;
 
 pub async fn build_pkgbuild(
+    pkg_build: PkgBuild,
     folder_path: String,
     pkg_vers: &str,
     pkg_name: &str,
     tx: Sender<String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<String>> {
     let makepkg = include_str!("../../scripts/makepkg");
 
     // Create a temporary file to store the bash script content
@@ -18,7 +21,7 @@ pub async fn build_pkgbuild(
     fs::write(&script_file, makepkg).expect("Unable to write script to file");
 
     let mut child = tokio::process::Command::new("bash")
-        .args(&[
+        .args([
             script_file.as_os_str().to_str().unwrap(),
             "-f",
             "--noconfirm",
@@ -63,7 +66,10 @@ pub async fn build_pkgbuild(
         }
     }
 
-    locate_built_package(pkg_name.to_string(), pkg_vers.to_string(), folder_path)
+    let archives = pkg_build.pkgname.iter().map(|x| {
+        locate_built_package(x.to_string(), pkg_vers.to_string(), folder_path.clone())
+    }).into_iter().collect();
+    return archives
 }
 
 fn spawn_broadcast_sender<R: tokio::io::AsyncRead + Unpin + Send + 'static>(

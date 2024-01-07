@@ -123,7 +123,7 @@ pub async fn build_output(
         Some(v) => match startline {
             None => Ok(v),
             Some(startline) => {
-                let output: Vec<String> = v.split("\n").map(|x| x.to_string()).collect();
+                let output: Vec<String> = v.split('\n').map(|x| x.to_string()).collect();
                 let len = output.len();
                 let len_missing = len as i32 - startline;
 
@@ -136,7 +136,7 @@ pub async fn build_output(
                         0
                     })
                     .rev()
-                    .map(|x1| x1.clone())
+                    .cloned()
                     .collect::<Vec<_>>();
 
                 let output = output.join("\n");
@@ -237,10 +237,10 @@ pub struct ListStats {
 pub async fn stats(db: &State<DatabaseConnection>) -> Result<Json<ListStats>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    return match get_stats(db).await {
+    match get_stats(db).await {
         Ok(v) => Ok(Json(v)),
         Err(e) => Err(NotFound(e.to_string())),
-    };
+    }
 }
 
 async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {

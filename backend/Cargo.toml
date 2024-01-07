@@ -21,6 +21,7 @@ sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "runtime-tokio-rustls"
 sea-orm-migration = {version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 serde = "1.0.193"
 rust-embed = "8.1.0"
+nom = "7.1.3"
 
 [[bin]]
 name = "untitled"

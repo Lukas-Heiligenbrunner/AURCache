@@ -29,7 +29,7 @@ fn main() {
 
     t.block_on(async move {
         // create folder for db stuff
-        if !fs::metadata("./db").is_ok() {
+        if fs::metadata("./db").is_err() {
             fs::create_dir("./db").unwrap();
         }
 
@@ -40,7 +40,7 @@ fn main() {
         Migrator::up(&db, None).await.unwrap();
 
         // create repo folder
-        if !fs::metadata("./repo").is_ok() {
+        if fs::metadata("./repo").is_err() {
             fs::create_dir("./repo").unwrap();
         }
 
@@ -95,6 +95,4 @@ fn main() {
 
         join_all([repo_handle, backend_handle]).await;
     });
-
-    return;
 }

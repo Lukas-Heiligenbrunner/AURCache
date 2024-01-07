@@ -13,13 +13,14 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::{broadcast, Semaphore};
 
 pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
-    let semaphore = Arc::new(Semaphore::new(1));
+    let parallel_builds = 1usize;
+    let semaphore = Arc::new(Semaphore::new(parallel_builds));
 
     loop {
         if let Ok(_result) = tx.subscribe().recv().await {
             match _result {
                 // add a package to parallel build
-                Action::Build(name, version, url, mut version_model) => {
+                Action::Build(name, version, url, version_model) => {
                     let _ = queue_package(
                         name,
                         version,
@@ -39,7 +40,7 @@ async fn queue_package(
     name: String,
     version: String,
     url: String,
-    mut version_model: versions::ActiveModel,
+    version_model: versions::ActiveModel,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
@@ -98,7 +99,7 @@ async fn build_package(
     pkg = pkg.update(&db).await?.into();
 
     match add_pkg(url, version, name, tx).await {
-        Ok(pkg_file_name) => {
+        Ok(pkg_file_names) => {
             println!("successfully built package");
             // update package success status
             pkg.status = Set(1);
@@ -106,7 +107,7 @@ async fn build_package(
             pkg.out_of_date = Set(false as i32);
             pkg.update(&db).await?;
 
-            version_model.file_name = Set(Some(pkg_file_name));
+            version_model.file_name = Set(Some(pkg_file_names.first().unwrap().clone()));
             let _ = version_model.update(&db).await;
 
             new_build.status = Set(Some(1));
