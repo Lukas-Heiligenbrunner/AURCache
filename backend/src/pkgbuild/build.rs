@@ -13,9 +13,7 @@ pub async fn build_pkgbuild(
 ) -> anyhow::Result<String> {
     // update pacman cache
     let mut child = tokio::process::Command::new("pacman")
-        .args([
-            "-Sy",
-        ])
+        .args(["-Sy"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
