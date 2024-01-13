@@ -19,7 +19,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
         if let Ok(_result) = tx.subscribe().recv().await {
             match _result {
                 // add a package to parallel build
-                Action::Build(name, version, url, mut version_model) => {
+                Action::Build(name, version, url, version_model) => {
                     let _ = queue_package(
                         name,
                         version,
@@ -39,7 +39,7 @@ async fn queue_package(
     name: String,
     version: String,
     url: String,
-    mut version_model: versions::ActiveModel,
+    version_model: versions::ActiveModel,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
 ) -> anyhow::Result<()> {

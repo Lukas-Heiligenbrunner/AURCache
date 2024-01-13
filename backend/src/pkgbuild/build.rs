@@ -11,6 +11,7 @@ pub async fn build_pkgbuild(
     pkg_name: &str,
     tx: Sender<String>,
 ) -> anyhow::Result<String> {
+    // update pacman cache
     let mut child = tokio::process::Command::new("pacman")
         .args([
             "-Sy",
@@ -111,7 +112,7 @@ fn locate_built_package(
                 if let Some(file_name) = path.file_name() {
                     let file_name = file_name.to_str().unwrap();
 
-                    if file_name.ends_with("-x86_64.pkg.tar.zst")
+                    if file_name.ends_with(".pkg.tar.zst")
                         && file_name.starts_with(pkg_name.as_str())
                     {
                         if let Ok(metadata) = path.metadata() {
