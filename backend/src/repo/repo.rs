@@ -45,7 +45,8 @@ pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<
         .await?
         .ok_or(anyhow!("id not found"))?;
 
-    fs::remove_dir_all(format!("./builds/{}", pkg.name))?;
+    // remove build dir if available
+    let _ = fs::remove_dir_all(format!("./builds/{}", pkg.name));
 
     let versions = Versions::find()
         .filter(versions::Column::PackageId.eq(pkg.id))
