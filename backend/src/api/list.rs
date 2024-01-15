@@ -51,9 +51,10 @@ pub struct ListPackageModel {
 }
 
 #[openapi(tag = "test")]
-#[get("/packages/list")]
+#[get("/packages/list?<limit>")]
 pub async fn package_list(
     db: &State<DatabaseConnection>,
+    limit: Option<u64>,
 ) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -67,6 +68,8 @@ pub async fn package_list(
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
         .column_as(versions::Column::Version, "latest_version")
         .column_as(packages::Column::LatestVersionId, "latest_version_id")
+        .order_by(packages::Column::Id, Order::Desc)
+        .limit(limit)
         .into_model::<ListPackageModel>()
         .all(db)
         .await

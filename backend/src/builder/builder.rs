@@ -70,7 +70,7 @@ async fn queue_package(
         new_build.status = Set(Some(0));
         new_build = new_build.save(&db).await.unwrap();
 
-        build_package(new_build, db, version_model, version, name, url).await;
+        let _ = build_package(new_build, db, version_model, version, name, url).await;
     });
     Ok(())
 }
