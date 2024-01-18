@@ -19,7 +19,7 @@ pub async fn add_pkg(
     tx: Sender<String>,
 ) -> anyhow::Result<String> {
     let fname = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds").await?;
-    let pkg_file_name = build_pkgbuild(
+    let pkg_file_names = build_pkgbuild(
         format!("./builds/{fname}"),
         version.as_str(),
         name.as_str(),
@@ -27,16 +27,22 @@ pub async fn add_pkg(
     )
     .await?;
 
-    // todo force overwrite if file already exists
-    fs::copy(
-        format!("./builds/{fname}/{pkg_file_name}"),
-        format!("./repo/{pkg_file_name}"),
-    )?;
-    fs::remove_file(format!("./builds/{fname}/{pkg_file_name}"))?;
+    // todo for now we just return first one if there are multiple
+    // unwrap is valid because there must be at least one element -> check inside locate_built_packages
+    let firstpkgname: String = pkg_file_names.first().unwrap().to_string();
 
-    repo_add(pkg_file_name.clone())?;
+    for pkg_file_name in pkg_file_names {
+        // todo force overwrite if file already exists
+        fs::copy(
+            format!("./builds/{fname}/{pkg_file_name}"),
+            format!("./repo/{pkg_file_name}"),
+        )?;
+        fs::remove_file(format!("./builds/{fname}/{pkg_file_name}"))?;
 
-    Ok(pkg_file_name)
+        repo_add(pkg_file_name.clone())?;
+    }
+
+    Ok(firstpkgname)
 }
 
 pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {

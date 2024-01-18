@@ -1,16 +1,16 @@
 use anyhow::anyhow;
 use std::fs;
 use std::process::Stdio;
-use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::sync::broadcast::Sender;
 
+// todo consider removing pkg_vers from attribute list
 pub async fn build_pkgbuild(
     folder_path: String,
     pkg_vers: &str,
     pkg_name: &str,
     tx: Sender<String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Vec<String>> {
     // update pacman cache
     let mut child = tokio::process::Command::new("pacman")
         .args(["-Sy"])
@@ -71,7 +71,7 @@ pub async fn build_pkgbuild(
         }
     }
 
-    locate_built_package(pkg_name.to_string(), pkg_vers.to_string(), folder_path)
+    locate_built_packages(pkg_name.to_string(), folder_path)
 }
 
 fn spawn_broadcast_sender<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
@@ -86,58 +86,35 @@ fn spawn_broadcast_sender<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     });
 }
 
-fn locate_built_package(
-    pkg_name: String,
-    pkg_vers: String,
-    folder_path: String,
-) -> anyhow::Result<String> {
-    // check if expected built dir exists
-    let built_name = build_expected_repo_packagename(pkg_name.to_string(), pkg_vers.to_string());
-    if fs::metadata(format!("{folder_path}/{built_name}")).is_ok() {
-        println!("Built {built_name}");
-        return Ok(built_name.to_string());
-    }
+/// a pkgbuild might build multiple packages
+/// todo handle case later to pick only relevant one
+fn locate_built_packages(pkg_name: String, folder_path: String) -> anyhow::Result<Vec<String>> {
+    let mut pkg_names: Vec<String> = vec![];
 
-    // the naming might not always contain the build version
-    // eg. mesa-git  --> match pkgname and extension if multiple return latest
     if let Ok(paths) = fs::read_dir(folder_path) {
-        let mut candidate_filename: Option<String> = None;
-        let mut candidate_timestamp = SystemTime::UNIX_EPOCH;
-
         for path in paths {
             if let Ok(path) = path {
                 let path = path.path();
                 if let Some(file_name) = path.file_name() {
                     let file_name = file_name.to_str().unwrap();
 
-                    if file_name.ends_with(".pkg.tar.zst")
-                        && file_name.starts_with(pkg_name.as_str())
-                    {
-                        if let Ok(metadata) = path.metadata() {
-                            if let Ok(modified_time) = metadata.modified() {
-                                // Update the candidate filename and timestamp if the current file is newer
-                                if modified_time > candidate_timestamp {
-                                    candidate_filename = Some(file_name.to_string());
-                                    candidate_timestamp = modified_time;
-                                }
-                            }
-                        }
+                    if file_name.ends_with(".pkg.tar.zst") {
+                        pkg_names.push(file_name.to_string());
                     }
                 }
             }
         }
-
-        if candidate_filename.is_some() {
-            println!("Built {}", candidate_filename.clone().unwrap());
-            return Ok(candidate_filename.unwrap());
-        }
     }
 
-    Err(anyhow!("Built package not found"))
-}
-
-/// don't trust this pkg name from existing
-/// pkgbuild might build different version name
-pub fn build_expected_repo_packagename(pkg_name: String, pkg_vers: String) -> String {
-    format!("{pkg_name}-{pkg_vers}-x86_64.pkg.tar.zst")
+    return if pkg_names.is_empty() {
+        Err(anyhow!("Built package not found"))
+    } else {
+        // expect at least one of the packages to start with the package name
+        if !pkg_names.iter().any(|x| x.starts_with(&pkg_name)) {
+            return Err(anyhow!(
+                "None of the built packages starts with the expected name"
+            ));
+        }
+        Ok(pkg_names)
+    };
 }
