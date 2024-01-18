@@ -28,19 +28,22 @@ pub async fn package_add(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    let pkg = get_info_by_name(input.name.clone().as_str())
+    // remove leading and trailing whitespaces
+    let pkg_name = input.name.trim();
+
+    let pkg = get_info_by_name(pkg_name)
         .await
         .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
 
     let mut pkg_model = match Packages::find()
-        .filter(packages::Column::Name.eq(input.name.clone()))
+        .filter(packages::Column::Name.eq(pkg_name))
         .one(db)
         .await
         .map_err(|e| BadRequest(Some(e.to_string())))?
     {
         None => {
             let new_package = packages::ActiveModel {
-                name: Set(input.name.clone()),
+                name: Set(pkg_name.to_string()),
                 status: Set(3),
                 latest_aur_version: Set(pkg.version.clone()),
                 ..Default::default()
