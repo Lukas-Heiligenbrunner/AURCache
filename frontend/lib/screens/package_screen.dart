@@ -29,94 +29,103 @@ class _PackageScreenState extends State<PackageScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(),
-      body: APIBuilder<PackageProvider, Package, PackageDTO>(
-          dto: PackageDTO(pkgID: widget.pkgID),
-          onLoad: () => const Text("loading"),
-          onData: (pkg) {
-            return Padding(
-              padding: const EdgeInsets.all(defaultPadding),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Container(
-                        margin: const EdgeInsets.only(left: 15),
-                        child: Text(
-                          pkg.name,
-                          style: const TextStyle(fontSize: 32),
-                        ),
-                      ),
-                      Container(
-                        margin: const EdgeInsets.only(right: 15),
-                        child: ElevatedButton(
-                          onPressed: () async {
-                            final confirmResult =
-                                await showDeleteConfirmationDialog(context);
-                            if (!confirmResult) return;
-
-                            final succ = await API.deletePackage(pkg.id);
-                            if (succ) {
-                              context.pop();
-
-                              Provider.of<PackagesProvider>(context,
-                                      listen: false)
-                                  .refresh(context);
-                              Provider.of<BuildsProvider>(context,
-                                      listen: false)
-                                  .refresh(context);
-                              Provider.of<StatsProvider>(context, listen: false)
-                                  .refresh(context);
-                            }
-                          },
-                          child: const Text(
-                            "Delete",
-                            style: TextStyle(color: Colors.redAccent),
+      body: MultiProvider(
+        providers: [
+          ChangeNotifierProvider<BuildsProvider>(
+              create: (_) => BuildsProvider()),
+          ChangeNotifierProvider<PackageProvider>(
+              create: (_) => PackageProvider()),
+        ],
+        child: APIBuilder<PackageProvider, Package, PackageDTO>(
+            dto: PackageDTO(pkgID: widget.pkgID),
+            onLoad: () => const Text("loading"),
+            onData: (pkg) {
+              return Padding(
+                padding: const EdgeInsets.all(defaultPadding),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Container(
+                          margin: const EdgeInsets.only(left: 15),
+                          child: Text(
+                            pkg.name,
+                            style: const TextStyle(fontSize: 32),
                           ),
                         ),
-                      )
-                    ],
-                  ),
-                  const SizedBox(
-                    height: 25,
-                  ),
-                  Container(
-                    padding: const EdgeInsets.all(defaultPadding),
-                    decoration: const BoxDecoration(
-                      color: secondaryColor,
-                      borderRadius: BorderRadius.all(Radius.circular(10)),
-                    ),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            "Builds of ${pkg.name}",
-                            style: Theme.of(context).textTheme.subtitle1,
-                          ),
-                          SizedBox(
-                            width: double.infinity,
-                            child: APIBuilder<BuildsProvider, List<Build>,
-                                BuildsDTO>(
-                              key: const Key("Builds on Package info"),
-                              dto: BuildsDTO(pkgID: pkg.id),
-                              interval: const Duration(seconds: 5),
-                              onData: (data) {
-                                return BuildsTable(data: data);
-                              },
-                              onLoad: () => const Text("no data"),
+                        Container(
+                          margin: const EdgeInsets.only(right: 15),
+                          child: ElevatedButton(
+                            onPressed: () async {
+                              final confirmResult =
+                                  await showDeleteConfirmationDialog(context);
+                              if (!confirmResult) return;
+
+                              final succ = await API.deletePackage(pkg.id);
+                              if (succ) {
+                                context.pop();
+
+                                Provider.of<PackagesProvider>(context,
+                                        listen: false)
+                                    .refresh(context);
+                                Provider.of<BuildsProvider>(context,
+                                        listen: false)
+                                    .refresh(context);
+                                Provider.of<StatsProvider>(context,
+                                        listen: false)
+                                    .refresh(context);
+                              }
+                            },
+                            child: const Text(
+                              "Delete",
+                              style: TextStyle(color: Colors.redAccent),
                             ),
                           ),
-                        ],
-                      ),
+                        )
+                      ],
                     ),
-                  )
-                ],
-              ),
-            );
-          }),
+                    const SizedBox(
+                      height: 25,
+                    ),
+                    Container(
+                      padding: const EdgeInsets.all(defaultPadding),
+                      decoration: const BoxDecoration(
+                        color: secondaryColor,
+                        borderRadius: BorderRadius.all(Radius.circular(10)),
+                      ),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Builds of ${pkg.name}",
+                              style: Theme.of(context).textTheme.subtitle1,
+                            ),
+                            SizedBox(
+                              width: double.infinity,
+                              child: APIBuilder<BuildsProvider, List<Build>,
+                                  BuildsDTO>(
+                                key: const Key("Builds on Package info"),
+                                dto: BuildsDTO(pkgID: pkg.id),
+                                interval: const Duration(seconds: 5),
+                                onData: (data) {
+                                  return BuildsTable(data: data);
+                                },
+                                onLoad: () => const Text("no data"),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  ],
+                ),
+              );
+            }),
+      ),
     );
   }
 }

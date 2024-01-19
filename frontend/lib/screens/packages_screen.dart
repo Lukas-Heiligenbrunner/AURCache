@@ -1,13 +1,14 @@
-import 'package:aurcache/components/builds_table.dart';
-import 'package:aurcache/components/api/APIBuilder.dart';
-import 'package:aurcache/providers/builds_provider.dart';
+import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/providers/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../constants/color_constants.dart';
-import '../models/build.dart';
 
-class BuildsScreen extends StatelessWidget {
-  const BuildsScreen({super.key});
+import '../components/api/APIBuilder.dart';
+import '../constants/color_constants.dart';
+import '../models/package.dart';
+
+class PackagesScreen extends StatelessWidget {
+  const PackagesScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -15,8 +16,8 @@ class BuildsScreen extends StatelessWidget {
       appBar: AppBar(),
       body: MultiProvider(
         providers: [
-          ChangeNotifierProvider<BuildsProvider>(
-              create: (_) => BuildsProvider()),
+          ChangeNotifierProvider<PackagesProvider>(
+              create: (_) => PackagesProvider()),
         ],
         child: Padding(
           padding: const EdgeInsets.all(defaultPadding),
@@ -31,17 +32,17 @@ class BuildsScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    "All Builds",
+                    "All Packages",
                     style: Theme.of(context).textTheme.subtitle1,
                   ),
                   SizedBox(
                     width: double.infinity,
-                    child: APIBuilder<BuildsProvider, List<Build>, Object>(
+                    child: APIBuilder<PackagesProvider, List<Package>, Object>(
                         key: const Key("Builds on seperate screen"),
                         interval: const Duration(seconds: 10),
                         onLoad: () => const Text("no data"),
                         onData: (data) {
-                          return BuildsTable(data: data);
+                          return PackagesTable(data: data);
                         }),
                   )
                 ],

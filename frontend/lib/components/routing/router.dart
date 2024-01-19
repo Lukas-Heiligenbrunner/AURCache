@@ -3,6 +3,7 @@ import 'package:aurcache/screens/builds_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
 import 'package:aurcache/components/routing/menu_shell.dart';
 import 'package:aurcache/screens/package_screen.dart';
+import 'package:aurcache/screens/packages_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -34,6 +35,10 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/builds',
           builder: (context, state) => const BuildsScreen(),
+        ),
+        GoRoute(
+          path: '/packages',
+          builder: (context, state) => const PackagesScreen(),
         ),
         GoRoute(
           path: '/package/:id',

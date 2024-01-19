@@ -2,8 +2,9 @@ import '../models/package.dart';
 import 'api_client.dart';
 
 extension PackagesAPI on ApiClient {
-  Future<List<Package>> listPackages() async {
-    final resp = await getRawClient().get("/packages/list");
+  Future<List<Package>> listPackages({int? limit}) async {
+    final resp = await getRawClient()
+        .get("/packages/list", queryParameters: {'limit': limit});
 
     final responseObject = resp.data as List;
     final List<Package> packages =
