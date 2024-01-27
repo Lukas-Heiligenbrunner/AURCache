@@ -87,19 +87,18 @@ class PackagesTable extends StatelessWidget {
                 child: const Text("Delete",
                     style: TextStyle(color: Colors.redAccent)),
                 onPressed: () async {
-                  final confirmResult =
-                      await showDeleteConfirmationDialog(context);
-                  if (!confirmResult) return;
-
-                  final succ = await API.deletePackage(package.id);
-                  if (succ) {
-                    Provider.of<PackagesProvider>(context, listen: false)
-                        .refresh(context);
-                    Provider.of<BuildsProvider>(context, listen: false)
-                        .refresh(context);
-                    Provider.of<StatsProvider>(context, listen: false)
-                        .refresh(context);
-                  }
+                  await showConfirmationDialog(context, "Delete Package",
+                      "Are you sure to delete this Package?", () async {
+                    final succ = await API.deletePackage(package.id);
+                    if (succ) {
+                      Provider.of<PackagesProvider>(context, listen: false)
+                          .refresh(context);
+                      Provider.of<BuildsProvider>(context, listen: false)
+                          .refresh(context);
+                      Provider.of<StatsProvider>(context, listen: false)
+                          .refresh(context);
+                    }
+                  }, null);
                 },
               ),
             ],

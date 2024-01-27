@@ -61,23 +61,28 @@ class _PackageScreenState extends State<PackageScreen> {
                           child: ElevatedButton(
                             onPressed: () async {
                               final confirmResult =
-                                  await showDeleteConfirmationDialog(context);
-                              if (!confirmResult) return;
+                                  await showConfirmationDialog(
+                                context,
+                                "Delete Package",
+                                "Are you sure to delete this Package?",
+                                () async {
+                                  final succ = await API.deletePackage(pkg.id);
+                                  if (succ) {
+                                    context.pop();
 
-                              final succ = await API.deletePackage(pkg.id);
-                              if (succ) {
-                                context.pop();
-
-                                Provider.of<PackagesProvider>(context,
-                                        listen: false)
-                                    .refresh(context);
-                                Provider.of<BuildsProvider>(context,
-                                        listen: false)
-                                    .refresh(context);
-                                Provider.of<StatsProvider>(context,
-                                        listen: false)
-                                    .refresh(context);
-                              }
+                                    Provider.of<PackagesProvider>(context,
+                                            listen: false)
+                                        .refresh(context);
+                                    Provider.of<BuildsProvider>(context,
+                                            listen: false)
+                                        .refresh(context);
+                                    Provider.of<StatsProvider>(context,
+                                            listen: false)
+                                        .refresh(context);
+                                  }
+                                },
+                                () {},
+                              );
                             },
                             child: const Text(
                               "Delete",

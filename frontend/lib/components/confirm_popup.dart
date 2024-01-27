@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
 
-Future<bool> showDeleteConfirmationDialog(BuildContext context) async {
+Future<bool> showConfirmationDialog(
+  BuildContext context,
+  String title,
+  String content,
+  void Function() successCallback,
+  void Function()? errorCallback,
+) async {
   return (await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -17,20 +23,24 @@ Future<bool> showDeleteConfirmationDialog(BuildContext context) async {
           ),
           // Delete confirmation dialog
           AlertDialog(
-            title: Text('Confirm Delete'),
-            content: Text('Are you sure you want to delete this item?'),
+            title: Text(title),
+            content: Text(content),
             actions: <Widget>[
               TextButton(
                 onPressed: () {
                   Navigator.of(context).pop(true);
+                  successCallback();
                 },
-                child: Text('Yes, Delete'),
+                child: const Text('Yes'),
               ),
               TextButton(
                 onPressed: () {
                   Navigator.of(context).pop(false); // Dismiss dialog
+                  if (errorCallback != null) {
+                    errorCallback();
+                  }
                 },
-                child: Text('Cancel'),
+                child: const Text('Cancel'),
               ),
             ],
           ),

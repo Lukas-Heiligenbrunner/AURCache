@@ -1,3 +1,4 @@
+import 'package:aurcache/screens/aur_screen.dart';
 import 'package:aurcache/screens/build_screen.dart';
 import 'package:aurcache/screens/builds_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
@@ -39,6 +40,10 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/packages',
           builder: (context, state) => const PackagesScreen(),
+        ),
+        GoRoute(
+          path: '/aur',
+          builder: (context, state) => AurScreen(),
         ),
         GoRoute(
           path: '/package/:id',

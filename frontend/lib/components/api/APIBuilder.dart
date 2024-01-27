@@ -27,6 +27,15 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
   Timer? timer;
 
   @override
+  void didUpdateWidget(APIBuilder<T, K, DTO> oldWidget) {
+    if (oldWidget.dto != widget.dto) {
+      Provider.of<T>(context, listen: false)
+          .loadFuture(context, dto: widget.dto);
+    }
+    super.didUpdateWidget(oldWidget);
+  }
+
+  @override
   void initState() {
     super.initState();
     Provider.of<T>(context, listen: false).loadFuture(context, dto: widget.dto);
