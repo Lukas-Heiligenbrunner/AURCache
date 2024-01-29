@@ -43,7 +43,9 @@ final appRouter = GoRouter(
         ),
         GoRoute(
           path: '/aur',
-          builder: (context, state) => AurScreen(),
+          builder: (context, state) {
+            return AurScreen(initalQuery: state.uri.queryParameters["query"]);
+          },
         ),
         GoRoute(
           path: '/package/:id',

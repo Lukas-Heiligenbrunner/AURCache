@@ -1,13 +1,7 @@
-import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/providers/builds_provider.dart';
-import 'package:aurcache/providers/stats_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
-import 'package:provider/provider.dart';
-
-import '../../api/API.dart';
+import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
-import '../../providers/packages_provider.dart';
 
 class SearchField extends StatelessWidget {
   SearchField({
@@ -30,17 +24,11 @@ class SearchField extends StatelessWidget {
         ),
         suffixIcon: InkWell(
           onTap: () async {
-            // todo this is only temporary -> add this to a proper page
-            await API.addPackage(name: controller.text, force: true);
-            Provider.of<PackagesProvider>(context, listen: false)
-                .refresh(context);
-            Provider.of<BuildsProvider>(context, listen: false)
-                .refresh(context);
-            Provider.of<StatsProvider>(context, listen: false).refresh(context);
+            context.push("/aur?query=${controller.text}");
           },
           child: Container(
-            padding: EdgeInsets.all(defaultPadding * 0.75),
-            margin: EdgeInsets.symmetric(horizontal: defaultPadding / 2),
+            padding: const EdgeInsets.all(defaultPadding * 0.75),
+            margin: const EdgeInsets.symmetric(horizontal: defaultPadding / 2),
             decoration: const BoxDecoration(
               color: darkgreenColor,
               borderRadius: BorderRadius.all(Radius.circular(10)),

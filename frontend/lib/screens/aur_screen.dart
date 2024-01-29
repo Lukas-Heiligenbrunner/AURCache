@@ -11,7 +11,9 @@ import '../constants/color_constants.dart';
 import '../providers/packages_provider.dart';
 
 class AurScreen extends StatefulWidget {
-  const AurScreen({super.key});
+  const AurScreen({super.key, this.initalQuery});
+
+  final String? initalQuery;
 
   @override
   State<AurScreen> createState() => _AurScreenState();
@@ -21,6 +23,15 @@ class _AurScreenState extends State<AurScreen> {
   TextEditingController controller = TextEditingController();
   String query = "";
   Timer? timer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initalQuery != null) {
+      query = widget.initalQuery!;
+      controller.text = widget.initalQuery!;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

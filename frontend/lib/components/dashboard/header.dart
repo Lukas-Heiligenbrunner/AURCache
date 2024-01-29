@@ -1,5 +1,6 @@
 import 'package:aurcache/components/dashboard/search_field.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
 import '../../utils/responsive.dart';
 
@@ -46,7 +47,9 @@ class Header extends StatelessWidget {
               vertical: defaultPadding / (Responsive.isMobile(context) ? 2 : 1),
             ),
           ),
-          onPressed: () {},
+          onPressed: () {
+            context.push("/aur");
+          },
           icon: const Icon(Icons.add),
           label: const Text(
             "Add New",
