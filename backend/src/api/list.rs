@@ -230,7 +230,7 @@ pub struct ListStats {
     failed_builds: u32,
     avg_queue_wait_time: u32,
     avg_build_time: u32,
-    repo_storage_size: u32,
+    repo_storage_size: u64,
     active_builds: u32,
     total_packages: u32,
 }
@@ -262,7 +262,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
     let avg_build_time: u32 = 42;
 
     // Calculate repo storage size
-    let repo_storage_size: u32 = dir_size("repo/").unwrap_or(0).try_into()?;
+    let repo_storage_size: u64 = dir_size("repo/").unwrap_or(0);
 
     // Count active builds
     let active_builds: u32 = Builds::find()
