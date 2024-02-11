@@ -43,7 +43,7 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
     if (widget.interval != null) {
       timer = Timer.periodic(widget.interval!, (Timer t) {
         Provider.of<T>(context, listen: false)
-            .refresh(context, dto: widget.dto);
+            .refresh(context);
       });
     }
   }

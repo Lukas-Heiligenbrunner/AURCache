@@ -15,5 +15,6 @@ class PackageProvider extends BaseProvider<Package, PackageDTO> {
   loadFuture(context, {dto}) {
     // todo search solution to force an exising dto
     data = API.getPackage(dto!.pkgID);
+    this.dto = dto;
   }
 }

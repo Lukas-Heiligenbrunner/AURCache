@@ -15,5 +15,6 @@ class BuildProvider extends BaseProvider<Build, BuildDTO> {
   loadFuture(context, {dto}) {
     // todo search solution to force an exising dto
     data = API.getBuild(dto!.buildID);
+    this.dto = dto;
   }
 }

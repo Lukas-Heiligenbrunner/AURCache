@@ -16,6 +16,7 @@ class BuildsProvider extends BaseProvider<List<Build>, BuildsDTO> {
   loadFuture(context, {dto}) {
     if (dto != null) {
       data = API.listAllBuilds(pkgID: dto.pkgID, limit: dto.limit);
+      this.dto = dto;
     } else {
       data = API.listAllBuilds();
     }

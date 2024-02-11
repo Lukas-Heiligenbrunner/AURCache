@@ -7,5 +7,6 @@ class StatsProvider extends BaseProvider {
   @override
   loadFuture(context, {dto}) {
     data = API.listStats();
+    this.dto = dto;
   }
 }

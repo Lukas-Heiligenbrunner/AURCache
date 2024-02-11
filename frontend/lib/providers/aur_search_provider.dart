@@ -14,5 +14,6 @@ class AURSearchProvider extends BaseProvider<List<AurPackage>, AurSearchDTO> {
   @override
   loadFuture(context, {dto}) {
     data = API.getAurPackages(dto!.query);
+    this.dto = dto;
   }
 }

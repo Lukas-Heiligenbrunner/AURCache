@@ -35,11 +35,7 @@ pub async fn package_add(
     // remove leading and trailing whitespaces
     let pkg_name = input.name.trim();
 
-    let pkg = get_info_by_name(pkg_name)
-        .await
-        .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
-
-    if let None = Packages::find()
+    if let Some(..) = Packages::find()
         .filter(packages::Column::Name.eq(pkg_name))
         .one(db)
         .await
@@ -47,6 +43,10 @@ pub async fn package_add(
     {
         return Err(BadRequest(Some("Package already exists".to_string())));
     }
+
+    let pkg = get_info_by_name(pkg_name)
+        .await
+        .map_err(|_| BadRequest(Some("couldn't download package metadata".to_string())))?;
 
     let mut new_package = packages::ActiveModel {
         name: Set(pkg_name.to_string()),

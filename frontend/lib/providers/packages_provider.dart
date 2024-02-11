@@ -14,5 +14,6 @@ class PackagesProvider extends BaseProvider<List<Package>, PackagesDTO> {
   @override
   loadFuture(context, {dto}) {
     data = API.listPackages(limit: dto?.limit);
+    this.dto = dto;
   }
 }
