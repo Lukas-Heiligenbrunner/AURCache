@@ -56,18 +56,19 @@ class _PackageScreenState extends State<PackageScreen> {
                             style: const TextStyle(fontSize: 32),
                           ),
                         ),
-                        Container(
-                          margin: const EdgeInsets.only(right: 15),
-                          child: ElevatedButton(
-                            onPressed: () async {
-                              final confirmResult =
-                                  await showConfirmationDialog(
-                                context,
-                                "Delete Package",
-                                "Are you sure to delete this Package?",
-                                () async {
-                                  final succ = await API.deletePackage(pkg.id);
-                                  if (succ) {
+                        Row(
+                          children: [
+                            ElevatedButton(
+                              onPressed: () async {
+                                final confirmResult =
+                                    await showConfirmationDialog(
+                                  context,
+                                  "Force update Package",
+                                  "Are you sure to force an Package rebuild?",
+                                  () async {
+                                    await API.updatePackage(
+                                        force: true, id: pkg.id);
+
                                     context.pop();
 
                                     Provider.of<PackagesProvider>(context,
@@ -79,16 +80,51 @@ class _PackageScreenState extends State<PackageScreen> {
                                     Provider.of<StatsProvider>(context,
                                             listen: false)
                                         .refresh(context);
-                                  }
-                                },
-                                () {},
-                              );
-                            },
-                            child: const Text(
-                              "Delete",
-                              style: TextStyle(color: Colors.redAccent),
+                                  },
+                                  () {},
+                                );
+                              },
+                              child: const Text(
+                                "Force Update",
+                                style: TextStyle(color: Colors.yellowAccent),
+                              ),
                             ),
-                          ),
+                            ElevatedButton(
+                              onPressed: () async {
+                                final confirmResult =
+                                    await showConfirmationDialog(
+                                  context,
+                                  "Delete Package",
+                                  "Are you sure to delete this Package?",
+                                  () async {
+                                    final succ =
+                                        await API.deletePackage(pkg.id);
+                                    if (succ) {
+                                      context.pop();
+
+                                      Provider.of<PackagesProvider>(context,
+                                              listen: false)
+                                          .refresh(context);
+                                      Provider.of<BuildsProvider>(context,
+                                              listen: false)
+                                          .refresh(context);
+                                      Provider.of<StatsProvider>(context,
+                                              listen: false)
+                                          .refresh(context);
+                                    }
+                                  },
+                                  () {},
+                                );
+                              },
+                              child: const Text(
+                                "Delete",
+                                style: TextStyle(color: Colors.redAccent),
+                              ),
+                            ),
+                            SizedBox(
+                              width: 15,
+                            )
+                          ],
                         )
                       ],
                     ),

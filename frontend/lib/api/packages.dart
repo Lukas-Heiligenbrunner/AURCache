@@ -19,9 +19,15 @@ extension PackagesAPI on ApiClient {
     return package;
   }
 
-  Future<void> addPackage({bool force = false, required String name}) async {
+  Future<void> addPackage({required String name}) async {
+    final resp =
+        await getRawClient().post("/packages/add", data: {'name': name});
+    print(resp.data);
+  }
+
+  Future<void> updatePackage({bool force = false, required int id}) async {
     final resp = await getRawClient()
-        .post("/packages/add", data: {'force_build': force, 'name': name});
+        .post("/packages/$id/update", data: {'force': force});
     print(resp.data);
   }
 

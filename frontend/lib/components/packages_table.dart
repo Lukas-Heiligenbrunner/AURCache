@@ -54,11 +54,19 @@ class PackagesTable extends StatelessWidget {
         DataCell(IconButton(
           icon: Icon(
             package.outofdate ? Icons.update : Icons.verified,
-            color: package.outofdate ? Color(0xFF6B43A4) : Color(0xFF0A6900),
+            color: package.outofdate
+                ? const Color(0xFF6B43A4)
+                : const Color(0xFF0A6900),
           ),
           onPressed: package.outofdate
-              ? () {
-                  // todo open build info with logs
+              ? () async {
+                  await API.updatePackage(id: package.id);
+                  Provider.of<PackagesProvider>(context, listen: false)
+                      .refresh(context);
+                  Provider.of<BuildsProvider>(context, listen: false)
+                      .refresh(context);
+                  Provider.of<StatsProvider>(context, listen: false)
+                      .refresh(context);
                 }
               : null,
         )),

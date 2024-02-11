@@ -51,62 +51,6 @@ pub struct ListPackageModel {
 }
 
 #[openapi(tag = "test")]
-#[get("/packages/list?<limit>")]
-pub async fn package_list(
-    db: &State<DatabaseConnection>,
-    limit: Option<u64>,
-) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
-    let db = db as &DatabaseConnection;
-
-    let all: Vec<ListPackageModel> = Packages::find()
-        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
-        .select_only()
-        .column(packages::Column::Name)
-        .column(packages::Column::Id)
-        .column(packages::Column::Status)
-        .column_as(packages::Column::OutOfDate, "outofdate")
-        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(versions::Column::Version, "latest_version")
-        .column_as(packages::Column::LatestVersionId, "latest_version_id")
-        .order_by(packages::Column::Id, Order::Desc)
-        .limit(limit)
-        .into_model::<ListPackageModel>()
-        .all(db)
-        .await
-        .map_err(|e| NotFound(e.to_string()))?;
-
-    Ok(Json(all))
-}
-
-#[openapi(tag = "test")]
-#[get("/package/<id>")]
-pub async fn get_package(
-    db: &State<DatabaseConnection>,
-    id: u64,
-) -> Result<Json<ListPackageModel>, NotFound<String>> {
-    let db = db as &DatabaseConnection;
-
-    let all: ListPackageModel = Packages::find()
-        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
-        .filter(packages::Column::Id.eq(id))
-        .select_only()
-        .column(packages::Column::Name)
-        .column(packages::Column::Id)
-        .column(packages::Column::Status)
-        .column_as(packages::Column::OutOfDate, "outofdate")
-        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(versions::Column::Version, "latest_version")
-        .column_as(packages::Column::LatestVersionId, "latest_version_id")
-        .into_model::<ListPackageModel>()
-        .one(db)
-        .await
-        .map_err(|e| NotFound(e.to_string()))?
-        .ok_or(NotFound("id not found".to_string()))?;
-
-    Ok(Json(all))
-}
-
-#[openapi(tag = "test")]
 #[get("/builds/output?<buildid>&<startline>")]
 pub async fn build_output(
     db: &State<DatabaseConnection>,

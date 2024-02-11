@@ -1,16 +1,20 @@
-use crate::api::add::okapi_add_operation_for_package_add_;
-use crate::api::add::package_add;
+use crate::api::list::build_output;
 use crate::api::list::okapi_add_operation_for_get_build_;
-use crate::api::list::okapi_add_operation_for_get_package_;
 use crate::api::list::okapi_add_operation_for_stats_;
-use crate::api::list::{build_output, okapi_add_operation_for_package_list_};
-use crate::api::list::{get_build, get_package, okapi_add_operation_for_list_builds_};
+use crate::api::list::search;
+use crate::api::list::{get_build, okapi_add_operation_for_list_builds_};
 use crate::api::list::{list_builds, okapi_add_operation_for_search_};
 use crate::api::list::{okapi_add_operation_for_build_output_, stats};
-use crate::api::list::{package_list, search};
-use crate::api::remove::okapi_add_operation_for_package_del_;
+use crate::api::package::okapi_add_operation_for_get_package_;
+use crate::api::package::okapi_add_operation_for_package_del_;
+use crate::api::package::okapi_add_operation_for_package_list_;
+use crate::api::package::okapi_add_operation_for_package_update_;
+use crate::api::package::package_add;
+use crate::api::package::{
+    get_package, okapi_add_operation_for_package_add_, package_del, package_list, package_update,
+};
 use crate::api::remove::okapi_add_operation_for_version_del_;
-use crate::api::remove::{package_del, version_del};
+use crate::api::remove::version_del;
 use rocket::Route;
 use rocket_okapi::openapi_get_routes;
 
@@ -25,6 +29,7 @@ pub fn build_api() -> Vec<Route> {
         list_builds,
         stats,
         get_build,
-        get_package
+        get_package,
+        package_update
     ]
 }
