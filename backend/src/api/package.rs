@@ -12,7 +12,8 @@ use rocket::{get, post, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, TransactionTrait,
 };
 use sea_orm::{DatabaseConnection, Set};
 use tokio::sync::broadcast::Sender;
@@ -30,14 +31,17 @@ pub async fn package_add(
     input: Json<AddBody>,
     tx: &State<Sender<Action>>,
 ) -> Result<(), BadRequest<String>> {
-    let db = db as &DatabaseConnection;
+    let txn = db
+        .begin()
+        .await
+        .map_err(|e| BadRequest(Some(e.to_string())))?;
 
     // remove leading and trailing whitespaces
     let pkg_name = input.name.trim();
 
     if let Some(..) = Packages::find()
         .filter(packages::Column::Name.eq(pkg_name))
-        .one(db)
+        .one(&txn)
         .await
         .map_err(|e| BadRequest(Some(e.to_string())))?
     {
@@ -55,28 +59,28 @@ pub async fn package_add(
         ..Default::default()
     };
 
-    new_package
+    let mut new_package = new_package
         .clone()
-        .save(db)
+        .save(&txn)
         .await
         .map_err(|e| BadRequest(Some(e.to_string())))?;
 
     let new_version = versions::ActiveModel {
         version: Set(pkg.version.clone()),
-        package_id: Set(new_package.id.clone().unwrap()),
+        package_id: new_package.id.clone(),
         ..Default::default()
     };
 
-    new_version
+    let new_version = new_version
         .clone()
-        .save(db)
+        .save(&txn)
         .await
         .map_err(|e| BadRequest(Some(e.to_string())))?;
 
     new_package.status = Set(3);
     new_package.latest_version_id = Set(Some(new_version.id.clone().unwrap()));
     new_package
-        .save(db)
+        .save(&txn)
         .await
         .map_err(|e| BadRequest(Some(e.to_string())))?;
 
@@ -87,6 +91,9 @@ pub async fn package_add(
         new_version,
     ));
 
+    txn.commit()
+        .await
+        .map_err(|e| BadRequest(Some(e.to_string())))?;
     Ok(())
 }
 

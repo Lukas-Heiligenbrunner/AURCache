@@ -1,4 +1,4 @@
-use crate::repo::repo::{remove_version};
+use crate::repo::repo::remove_version;
 use rocket::{post, State};
 use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
