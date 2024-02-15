@@ -14,6 +14,8 @@ use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
 use crate::db::migration::Migrator;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
+use flate2::read::GzEncoder;
+use flate2::Compression;
 use rocket::config::Config;
 use rocket::fs::FileServer;
 use rocket::futures::future::join_all;
@@ -21,6 +23,9 @@ use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::fs;
+use std::fs::File;
+use tar::Archive;
+use tokio::fs::symlink;
 use tokio::sync::broadcast;
 
 fn main() {
@@ -43,6 +48,22 @@ fn main() {
         // create repo folder
         if !fs::metadata("./repo").is_ok() {
             fs::create_dir("./repo").unwrap();
+
+            let tar_gz = File::create("./repo/repo.db.tar.gz").unwrap();
+            let enc = GzEncoder::new(tar_gz, Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.finish().expect("failed to create repo archive");
+            symlink("./repo/repo.db.tar.gz", "./repo/repo.db")
+                .await
+                .expect("failed to create repo symlink");
+
+            let tar_gz = File::create("./repo/repo.files.tar.gz").unwrap();
+            let enc = GzEncoder::new(tar_gz, Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.finish().expect("failed to create repo archive");
+            symlink("./repo/repo.files.tar.gz", "./repo/repo.files")
+                .await
+                .expect("failed to create repo symlink");
         }
 
         let db2 = db.clone();
