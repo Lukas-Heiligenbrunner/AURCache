@@ -1,7 +1,7 @@
 use crate::aur::aur::download_pkgbuild;
+use crate::db::prelude::Packages;
 use crate::db::prelude::Versions;
-use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds, versions};
+use crate::db::versions;
 use crate::pkgbuild::build::build_pkgbuild;
 use anyhow::anyhow;
 use sea_orm::{
@@ -46,43 +46,6 @@ pub async fn add_pkg(
     }
 
     Ok(firstpkgname)
-}
-
-pub async fn remove_pkg(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
-    let txn = db.begin().await?;
-
-    let pkg = Packages::find_by_id(pkg_id)
-        .one(&txn)
-        .await?
-        .ok_or(anyhow!("id not found"))?;
-
-    // remove build dir if available
-    let _ = fs::remove_dir_all(format!("./builds/{}", pkg.name));
-
-    // remove package db entry
-    pkg.clone().delete(&txn).await?;
-
-    let versions = Versions::find()
-        .filter(versions::Column::PackageId.eq(pkg.id))
-        .all(&txn)
-        .await?;
-
-    for v in versions {
-        rem_ver(&txn, v).await?;
-    }
-
-    // remove corresponding builds
-    let builds = Builds::find()
-        .filter(builds::Column::PkgId.eq(pkg.id))
-        .all(&txn)
-        .await?;
-    for b in builds {
-        b.delete(&txn).await?;
-    }
-
-    txn.commit().await?;
-
-    Ok(())
 }
 
 pub async fn remove_version(db: &DatabaseConnection, version_id: i32) -> anyhow::Result<()> {
@@ -141,7 +104,10 @@ fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn rem_ver(db: &DatabaseTransaction, version: versions::Model) -> anyhow::Result<()> {
+pub(crate) async fn rem_ver(
+    db: &DatabaseTransaction,
+    version: versions::Model,
+) -> anyhow::Result<()> {
     if let Some(filename) = version.file_name.clone() {
         // so repo-remove only supports passing a package name and removing the whole package
         // it seems that repo-add removes an older version when called

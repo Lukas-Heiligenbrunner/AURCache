@@ -2,6 +2,7 @@ mod api;
 mod aur;
 mod builder;
 mod db;
+mod package;
 mod pkgbuild;
 mod repo;
 mod scheduler;
