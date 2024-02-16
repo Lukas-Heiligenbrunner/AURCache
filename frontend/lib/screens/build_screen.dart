@@ -7,7 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../components/confirm_popup.dart';
+import '../components/dashboard/chart_card.dart';
 import '../components/dashboard/your_packages.dart';
+import '../constants/color_constants.dart';
 
 class BuildScreen extends StatefulWidget {
   const BuildScreen({super.key, required this.buildID});
@@ -32,50 +35,201 @@ class _BuildScreenState extends State<BuildScreen> {
             interval: const Duration(seconds: 10),
             onLoad: () => const Text("loading"),
             onData: (buildData) {
-              final start_time = DateTime.fromMillisecondsSinceEpoch(
-                  (buildData.start_time ?? 0) * 1000);
-
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.start,
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.start,
-                    children: [
-                      const SizedBox(
-                        width: 10,
-                      ),
-                      IconButton(
-                        icon: Icon(
-                          switchSuccessIcon(buildData.status),
-                          color: switchSuccessColor(buildData.status),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      children: [
+                        _buildTopBar(buildData),
+                        const SizedBox(
+                          height: 15,
                         ),
-                        onPressed: () {
-                          context.replace("/build/${buildData.id}");
-                        },
-                      ),
-                      const SizedBox(
-                        width: 10,
-                      ),
-                      Text(
-                        buildData.pkg_name,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(
-                        width: 10,
-                      ),
-                      Text("triggered ${start_time.readableDuration()}")
-                    ],
+                        _buildPage(buildData)
+                      ],
+                    ),
                   ),
-                  const SizedBox(
-                    height: 15,
-                  ),
-                  _buildPage(buildData)
+                  _buildSideBar(),
                 ],
               );
             }),
       ),
-      appBar: AppBar(),
+    );
+  }
+
+  Widget _buildTopBar(Build buildData) {
+    final start_time =
+        DateTime.fromMillisecondsSinceEpoch((buildData.start_time ?? 0) * 1000);
+
+    return Container(
+      color: secondaryColor,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 10),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: [
+                const SizedBox(
+                  width: 10,
+                ),
+                IconButton(
+                  icon: const Icon(
+                    Icons.arrow_back,
+                    size: 28,
+                  ),
+                  onPressed: () {
+                    context.pop();
+                  },
+                ),
+                const SizedBox(
+                  width: 10,
+                ),
+                IconButton(
+                  icon: Icon(
+                    switchSuccessIcon(buildData.status),
+                    color: switchSuccessColor(buildData.status),
+                  ),
+                  onPressed: () {
+                    context.replace("/build/${buildData.id}");
+                  },
+                ),
+                const SizedBox(
+                  width: 10,
+                ),
+                Text(
+                  buildData.pkg_name,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(
+                  width: 10,
+                ),
+                Text("triggered ${start_time.readableDuration()}")
+              ],
+            ),
+            Row(
+              children: [
+                IconButton(
+                  onPressed: () {},
+                  icon: const Icon(Icons.read_more),
+                  tooltip: "Follow log",
+                ),
+                IconButton(
+                  onPressed: () {},
+                  icon: const Icon(Icons.vertical_align_top_rounded),
+                  tooltip: "Go to Top",
+                ),
+                IconButton(
+                  onPressed: () {},
+                  icon: Icon(Icons.vertical_align_bottom_rounded),
+                  tooltip: "Go to Bottom",
+                ),
+                const SizedBox(
+                  width: 15,
+                ),
+              ],
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSideBar() {
+    return SizedBox(
+      width: 300,
+      child: Container(
+        color: secondaryColor,
+        padding: const EdgeInsets.all(defaultPadding),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(
+              height: 45,
+            ),
+            Divider(),
+            const Text(
+              "Actions:",
+              style: TextStyle(fontSize: 18),
+              textAlign: TextAlign.start,
+            ),
+            const SizedBox(
+              height: 15,
+            ),
+            Row(
+              children: [
+                ElevatedButton(
+                  onPressed: () async {
+                    final confirmResult = await showConfirmationDialog(
+                      context,
+                      "Delete Build",
+                      "Are you sure to delete this Package?",
+                      () async {},
+                      () {},
+                    );
+                  },
+                  child: const Text(
+                    "Delete",
+                    style: TextStyle(color: Colors.redAccent),
+                  ),
+                ),
+                const SizedBox(
+                  width: 10,
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final confirmResult = await showConfirmationDialog(
+                      context,
+                      "Delete Build",
+                      "Are you sure to delete this Package?",
+                      () async {},
+                      () {},
+                    );
+                  },
+                  child: const Text(
+                    "Retry",
+                    style: TextStyle(color: Colors.orangeAccent),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(
+              height: 15,
+            ),
+            Divider(),
+            const SizedBox(
+              height: 15,
+            ),
+            Text(
+              "Build Information:",
+              style: TextStyle(fontSize: 18),
+              textAlign: TextAlign.start,
+            ),
+            SizedBox(
+              height: 20,
+            ),
+            SideCard(
+              title: "Build Number",
+              textRight: "7",
+            ),
+            SideCard(
+              title: "Finished",
+              textRight: "7",
+            ),
+            SideCard(
+              title: "Queued",
+              textRight: "7",
+            ),
+            SideCard(
+              title: "Duration",
+              textRight: "7",
+            ),
+          ],
+        ),
+      ),
     );
   }
 

@@ -2,17 +2,18 @@ import 'package:flutter/material.dart';
 
 import '../../constants/color_constants.dart';
 
-class ChartCard extends StatelessWidget {
-  const ChartCard({
-    Key? key,
+class SideCard extends StatelessWidget {
+  const SideCard({
+    super.key,
     required this.title,
-    required this.color,
+    this.color,
     required this.textRight,
-    required this.subtitle,
-  }) : super(key: key);
+    this.subtitle,
+  });
 
-  final Color color;
-  final String title, textRight, subtitle;
+  final Color? color;
+  final String title, textRight;
+  final String? subtitle;
 
   @override
   Widget build(BuildContext context) {
@@ -27,12 +28,13 @@ class ChartCard extends StatelessWidget {
       ),
       child: Row(
         children: [
-          SizedBox(
-              height: 20,
-              width: 20,
-              child: Container(
-                color: color,
-              )),
+          if (color != null)
+            SizedBox(
+                height: 20,
+                width: 20,
+                child: Container(
+                  color: color,
+                )),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: defaultPadding),
@@ -44,13 +46,14 @@ class ChartCard extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  Text(
-                    subtitle,
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall!
-                        .copyWith(color: Colors.white70),
-                  ),
+                  if (subtitle != null)
+                    Text(
+                      subtitle!,
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall!
+                          .copyWith(color: Colors.white70),
+                    ),
                 ],
               ),
             ),
