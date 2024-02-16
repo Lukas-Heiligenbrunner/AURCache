@@ -1,6 +1,6 @@
 import 'package:aurcache/api/statistics.dart';
 
-import '../api/API.dart';
+import '../../api/API.dart';
 import 'BaseProvider.dart';
 
 class StatsProvider extends BaseProvider {

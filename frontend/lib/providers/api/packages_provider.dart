@@ -1,8 +1,8 @@
 import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/providers/BaseProvider.dart';
+import 'package:aurcache/providers/api/BaseProvider.dart';
 
-import '../api/API.dart';
-import '../models/package.dart';
+import '../../api/API.dart';
+import '../../models/package.dart';
 
 class PackagesDTO {
   final int limit;

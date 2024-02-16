@@ -1,7 +1,7 @@
 import 'package:aurcache/api/builds.dart';
 
-import '../api/API.dart';
-import '../models/build.dart';
+import '../../api/API.dart';
+import '../../models/build.dart';
 import 'BaseProvider.dart';
 
 class BuildDTO {
