@@ -24,9 +24,6 @@ RUN cargo build --release --features static
 # Stage 2: Create the final image
 FROM archlinux
 
-# Copy the built binary from the previous stage
-COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
-
 RUN echo $'\n\
 [multilib]\n\
 Include = /etc/pacman.d/mirrorlist'>> /etc/pacman.conf
@@ -40,6 +37,9 @@ RUN echo $'\n\
 [repo]\n\
 SigLevel = Optional TrustAll\n\
 Server = http://localhost:8080/' >> /etc/pacman.conf
+
+# Copy the built binary from the previous stage
+COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
 
 # Set the entry point or default command to run your application
 WORKDIR /app

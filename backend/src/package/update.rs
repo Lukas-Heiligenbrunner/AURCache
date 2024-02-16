@@ -3,7 +3,6 @@ use crate::builder::types::Action;
 use crate::db::prelude::{Packages, Versions};
 use crate::db::{packages, versions};
 use anyhow::anyhow;
-use rocket::State;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
@@ -13,7 +12,7 @@ pub async fn package_update(
     db: &DatabaseConnection,
     pkg_id: i32,
     force: bool,
-    tx: &State<Sender<Action>>,
+    tx: &Sender<Action>,
 ) -> anyhow::Result<()> {
     let txn = db.begin().await?;
 

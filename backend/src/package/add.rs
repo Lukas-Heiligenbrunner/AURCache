@@ -3,7 +3,6 @@ use crate::builder::types::Action;
 use crate::db::prelude::Packages;
 use crate::db::{packages, versions};
 use anyhow::anyhow;
-use rocket::State;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
@@ -12,7 +11,7 @@ use tokio::sync::broadcast::Sender;
 pub async fn package_add(
     db: &DatabaseConnection,
     pkg_name: String,
-    tx: &State<Sender<Action>>,
+    tx: &Sender<Action>,
 ) -> anyhow::Result<()> {
     let txn = db.begin().await?;
 

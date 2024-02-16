@@ -24,7 +24,6 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::fs;
 use std::fs::File;
-use tar::Archive;
 use tokio::fs::symlink;
 use tokio::sync::broadcast;
 
@@ -53,7 +52,7 @@ fn main() {
             let enc = GzEncoder::new(tar_gz, Compression::default());
             let mut tar = tar::Builder::new(enc);
             tar.finish().expect("failed to create repo archive");
-            symlink("./repo/repo.db.tar.gz", "./repo/repo.db")
+            symlink("repo.db.tar.gz", "./repo/repo.db")
                 .await
                 .expect("failed to create repo symlink");
 
@@ -61,7 +60,7 @@ fn main() {
             let enc = GzEncoder::new(tar_gz, Compression::default());
             let mut tar = tar::Builder::new(enc);
             tar.finish().expect("failed to create repo archive");
-            symlink("./repo/repo.files.tar.gz", "./repo/repo.files")
+            symlink("repo.files.tar.gz", "./repo/repo.files")
                 .await
                 .expect("failed to create repo symlink");
         }
