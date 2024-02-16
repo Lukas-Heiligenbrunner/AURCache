@@ -171,14 +171,17 @@ class _BuildScreenState extends State<BuildScreen> {
             const SizedBox(
               height: 45,
             ),
-            Divider(),
+            const Divider(),
+            const SizedBox(
+              height: 5,
+            ),
             const Text(
               "Actions:",
               style: TextStyle(fontSize: 18),
               textAlign: TextAlign.start,
             ),
             const SizedBox(
-              height: 15,
+              height: 20,
             ),
             Row(
               children: [
@@ -213,9 +216,9 @@ class _BuildScreenState extends State<BuildScreen> {
             const SizedBox(
               height: 15,
             ),
-            Divider(),
+            const Divider(),
             const SizedBox(
-              height: 15,
+              height: 5,
             ),
             Text(
               "Build Information:",
