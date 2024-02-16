@@ -6,9 +6,9 @@ import 'package:provider/provider.dart';
 import '../api/API.dart';
 import '../constants/color_constants.dart';
 import '../models/package.dart';
-import '../providers/builds_provider.dart';
-import '../providers/packages_provider.dart';
-import '../providers/stats_provider.dart';
+import '../providers/api/builds_provider.dart';
+import '../providers/api/packages_provider.dart';
+import '../providers/api/stats_provider.dart';
 import 'confirm_popup.dart';
 import 'dashboard/your_packages.dart';
 

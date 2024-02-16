@@ -1,6 +1,6 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
-import 'package:aurcache/providers/builds_provider.dart';
+import 'package:aurcache/providers/api/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -11,9 +11,9 @@ import '../components/confirm_popup.dart';
 import '../constants/color_constants.dart';
 import '../models/build.dart';
 import '../models/package.dart';
-import '../providers/package_provider.dart';
-import '../providers/packages_provider.dart';
-import '../providers/stats_provider.dart';
+import '../providers/api/package_provider.dart';
+import '../providers/api/packages_provider.dart';
+import '../providers/api/stats_provider.dart';
 
 class PackageScreen extends StatefulWidget {
   const PackageScreen({super.key, required this.pkgID});

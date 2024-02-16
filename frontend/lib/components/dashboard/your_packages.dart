@@ -1,6 +1,6 @@
 import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/components/packages_table.dart';
-import 'package:aurcache/providers/packages_provider.dart';
+import 'package:aurcache/providers/api/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';

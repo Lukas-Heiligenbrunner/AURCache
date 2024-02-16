@@ -1,5 +1,5 @@
 import 'package:aurcache/components/packages_table.dart';
-import 'package:aurcache/providers/packages_provider.dart';
+import 'package:aurcache/providers/api/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

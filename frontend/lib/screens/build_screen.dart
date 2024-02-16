@@ -1,7 +1,7 @@
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
-import 'package:aurcache/providers/build_provider.dart';
+import 'package:aurcache/providers/build_log_provider.dart';
 import 'package:aurcache/utils/time_formatter.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -11,6 +11,7 @@ import '../components/confirm_popup.dart';
 import '../components/dashboard/chart_card.dart';
 import '../components/dashboard/your_packages.dart';
 import '../constants/color_constants.dart';
+import '../providers/api/build_provider.dart';
 
 class BuildScreen extends StatefulWidget {
   const BuildScreen({super.key, required this.buildID});
@@ -22,44 +23,50 @@ class BuildScreen extends StatefulWidget {
 }
 
 class _BuildScreenState extends State<BuildScreen> {
+  bool scrollFollowActive = true;
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: MultiProvider(
         providers: [
           ChangeNotifierProvider<BuildProvider>(create: (_) => BuildProvider()),
+          ChangeNotifierProvider<BuildLogProvider>(
+              create: (_) => BuildLogProvider()),
         ],
-        child: APIBuilder<BuildProvider, Build, BuildDTO>(
-            key: const Key("Build on seperate page"),
-            dto: BuildDTO(buildID: widget.buildID),
-            interval: const Duration(seconds: 10),
-            onLoad: () => const Text("loading"),
-            onData: (buildData) {
-              return Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        _buildTopBar(buildData),
-                        const SizedBox(
-                          height: 15,
-                        ),
-                        _buildPage(buildData)
-                      ],
+        builder: (context, child) {
+          return APIBuilder<BuildProvider, Build, BuildDTO>(
+              key: const Key("Build on seperate page"),
+              dto: BuildDTO(buildID: widget.buildID),
+              interval: const Duration(seconds: 10),
+              onLoad: () => const Text("loading"),
+              onData: (buildData) {
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.start,
+                        children: [
+                          _buildTopBar(buildData, context),
+                          const SizedBox(
+                            height: 15,
+                          ),
+                          _buildPage(buildData)
+                        ],
+                      ),
                     ),
-                  ),
-                  _buildSideBar(),
-                ],
-              );
-            }),
+                    _buildSideBar(),
+                  ],
+                );
+              });
+        },
       ),
     );
   }
 
-  Widget _buildTopBar(Build buildData) {
+  Widget _buildTopBar(Build buildData, BuildContext context) {
     final start_time =
         DateTime.fromMillisecondsSinceEpoch((buildData.start_time ?? 0) * 1000);
 
@@ -113,18 +120,32 @@ class _BuildScreenState extends State<BuildScreen> {
             Row(
               children: [
                 IconButton(
-                  onPressed: () {},
+                  onPressed: () {
+                    setState(() {
+                      scrollFollowActive = !scrollFollowActive;
+                      Provider.of<BuildLogProvider>(context, listen: false)
+                          .followLog = scrollFollowActive;
+                    });
+                  },
+                  isSelected: scrollFollowActive,
                   icon: const Icon(Icons.read_more),
+                  selectedIcon: const Icon(Icons.read_more),
                   tooltip: "Follow log",
                 ),
                 IconButton(
-                  onPressed: () {},
+                  onPressed: () {
+                    Provider.of<BuildLogProvider>(context, listen: false)
+                        .go_to_top();
+                  },
                   icon: const Icon(Icons.vertical_align_top_rounded),
                   tooltip: "Go to Top",
                 ),
                 IconButton(
-                  onPressed: () {},
-                  icon: Icon(Icons.vertical_align_bottom_rounded),
+                  onPressed: () {
+                    Provider.of<BuildLogProvider>(context, listen: false)
+                        .go_to_bottom();
+                  },
+                  icon: const Icon(Icons.vertical_align_bottom_rounded),
                   tooltip: "Go to Bottom",
                 ),
                 const SizedBox(
@@ -164,12 +185,11 @@ class _BuildScreenState extends State<BuildScreen> {
                 ElevatedButton(
                   onPressed: () async {
                     final confirmResult = await showConfirmationDialog(
-                      context,
-                      "Delete Build",
-                      "Are you sure to delete this Package?",
-                      () async {},
-                      () {},
-                    );
+                        context,
+                        "Delete Build",
+                        "Are you sure to delete this Package?", () async {
+                      // todo delete build
+                    }, null);
                   },
                   child: const Text(
                     "Delete",
@@ -181,13 +201,7 @@ class _BuildScreenState extends State<BuildScreen> {
                 ),
                 ElevatedButton(
                   onPressed: () async {
-                    final confirmResult = await showConfirmationDialog(
-                      context,
-                      "Delete Build",
-                      "Are you sure to delete this Package?",
-                      () async {},
-                      () {},
-                    );
+                    // todo api call and page redirect
                   },
                   child: const Text(
                     "Retry",

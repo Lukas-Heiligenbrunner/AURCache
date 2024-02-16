@@ -1,12 +1,12 @@
 import 'package:aurcache/components/api/APIBuilder.dart';
-import 'package:aurcache/providers/stats_provider.dart';
+import 'package:aurcache/providers/api/stats_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../components/dashboard/header.dart';
 import '../constants/color_constants.dart';
-import '../providers/builds_provider.dart';
-import '../providers/packages_provider.dart';
+import '../providers/api/builds_provider.dart';
+import '../providers/api/packages_provider.dart';
 import '../utils/responsive.dart';
 import '../models/stats.dart';
 import '../components/dashboard/quick_info_banner.dart';

@@ -1,7 +1,7 @@
 import 'package:aurcache/api/aur.dart';
 import 'package:aurcache/models/aur_package.dart';
 
-import '../api/API.dart';
+import '../../api/API.dart';
 import 'BaseProvider.dart';
 
 class AurSearchDTO {

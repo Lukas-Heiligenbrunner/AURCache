@@ -2,13 +2,13 @@ import 'dart:async';
 
 import 'package:aurcache/components/aur_search_table.dart';
 import 'package:aurcache/models/aur_package.dart';
-import 'package:aurcache/providers/aur_search_provider.dart';
+import 'package:aurcache/providers/api/aur_search_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../components/api/APIBuilder.dart';
 import '../constants/color_constants.dart';
-import '../providers/packages_provider.dart';
+import '../providers/api/packages_provider.dart';
 
 class AurScreen extends StatefulWidget {
   const AurScreen({super.key, this.initalQuery});

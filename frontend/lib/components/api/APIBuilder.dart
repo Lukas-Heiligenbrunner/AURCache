@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../providers/BaseProvider.dart';
+import '../../providers/api/BaseProvider.dart';
 
 class APIBuilder<T extends BaseProvider, K, DTO> extends StatefulWidget {
   const APIBuilder(
