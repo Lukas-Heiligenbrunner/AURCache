@@ -39,21 +39,21 @@ class SidePanel extends StatelessWidget {
               nrbuilds: nrbuilds,
               nrfailedbuilds: nrfailedbuilds,
               nrActiveBuilds: nrActiveBuilds),
-          ChartCard(
+          SideCard(
             color: const Color(0xff0a7005),
             title: "Successful Builds",
             textRight:
                 "${((nrbuilds - nrfailedbuilds) * 100 / nrbuilds).toStringAsFixed(2)}%",
             subtitle: (nrbuilds - nrfailedbuilds).toString(),
           ),
-          ChartCard(
+          SideCard(
             color: const Color(0xff760707),
             title: "Failed Builds",
             textRight:
                 "${(nrfailedbuilds * 100 / nrbuilds).toStringAsFixed(2)}%",
             subtitle: nrfailedbuilds.toString(),
           ),
-          ChartCard(
+          SideCard(
             color: const Color(0xff9d8d00),
             title: "Active Builds",
             textRight:

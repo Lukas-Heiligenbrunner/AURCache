@@ -31,11 +31,13 @@ class _BuildOutputState extends State<BuildOutput> {
         scrollDirection: Axis.vertical, //.horizontal
         child: Padding(
           padding: const EdgeInsets.only(left: 30, right: 15),
-          child: Text(
-            output,
-            style: const TextStyle(
-              fontSize: 16.0,
-              color: Colors.white,
+          child: SelectionArea(
+            child: Text(
+              output,
+              style: const TextStyle(
+                fontSize: 16.0,
+                color: Colors.white,
+              ),
             ),
           ),
         ),
