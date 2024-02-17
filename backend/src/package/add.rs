@@ -1,11 +1,12 @@
 use crate::aur::aur::get_info_by_name;
 use crate::builder::types::Action;
 use crate::db::prelude::Packages;
-use crate::db::{packages, versions};
+use crate::db::{builds, packages, versions};
 use anyhow::anyhow;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
 pub async fn package_add(
@@ -49,11 +50,28 @@ pub async fn package_add(
     new_package.latest_version_id = Set(Some(new_version.id.clone().unwrap()));
     new_package.save(&txn).await?;
 
+    // set build status to pending
+    let build = builds::ActiveModel {
+        pkg_id: new_version.package_id.clone(),
+        version_id: new_version.id.clone(),
+        ouput: Set(None),
+        status: Set(Some(3)),
+        start_time: Set(Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as u32,
+        )),
+        ..Default::default()
+    };
+    let new_build = build.save(&txn).await?;
+
     let _ = tx.send(Action::Build(
         pkg.name,
         pkg.version,
         pkg.url_path.unwrap(),
         new_version,
+        new_build,
     ));
 
     txn.commit().await?;

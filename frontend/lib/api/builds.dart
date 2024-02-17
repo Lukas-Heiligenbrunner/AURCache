@@ -21,14 +21,19 @@ extension BuildsAPI on ApiClient {
   }
 
   Future<Build> getBuild(int id) async {
-    final resp = await getRawClient().get("/builds/${id}");
+    final resp = await getRawClient().get("/build/${id}");
     return Build.fromJson(resp.data);
   }
 
+  Future<bool> deleteBuild(int id) async {
+    final resp = await getRawClient().delete("/build/${id}");
+    return resp.statusCode == 400;
+  }
+
   Future<String> getOutput({int? line, required int buildID}) async {
-    String uri = "/builds/output?buildid=$buildID";
+    String uri = "/build/$buildID/output";
     if (line != null) {
-      uri += "&startline=$line";
+      uri += "?startline=$line";
     }
     final resp = await getRawClient().get(uri);
     return resp.data.toString();

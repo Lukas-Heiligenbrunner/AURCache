@@ -1,4 +1,4 @@
-use crate::api::list::ListPackageModel;
+use crate::api::build::ListPackageModel;
 use crate::builder::types::Action;
 use crate::db::migration::{JoinType, Order};
 use crate::db::prelude::Packages;
@@ -9,7 +9,7 @@ use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 use rocket::serde::Deserialize;
-use rocket::{get, post, State};
+use rocket::{delete, get, post, State};
 use rocket_okapi::okapi::schemars;
 use rocket_okapi::{openapi, JsonSchema};
 use sea_orm::DatabaseConnection;
@@ -23,7 +23,7 @@ pub struct AddBody {
 }
 
 #[openapi(tag = "Packages")]
-#[post("/packages/add", data = "<input>")]
+#[post("/package", data = "<input>")]
 pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
     input: Json<AddBody>,
@@ -41,20 +41,21 @@ pub struct UpdateBody {
 }
 
 #[openapi(tag = "Packages")]
-#[post("/packages/<id>/update", data = "<input>")]
+#[post("/package/<id>/update", data = "<input>")]
 pub async fn package_update_endpoint(
     db: &State<DatabaseConnection>,
     id: i32,
     input: Json<UpdateBody>,
     tx: &State<Sender<Action>>,
-) -> Result<(), BadRequest<String>> {
+) -> Result<Json<i32>, BadRequest<String>> {
     package_update(db, id, input.force, tx)
         .await
+        .map(|e| Json(e))
         .map_err(|e| BadRequest(Some(e.to_string())))
 }
 
 #[openapi(tag = "Packages")]
-#[post("/package/delete/<id>")]
+#[delete("/package/<id>")]
 pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), String> {
     let db = db as &DatabaseConnection;
 

@@ -1,3 +1,5 @@
+import 'package:aurcache/api/builds.dart';
+import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
@@ -7,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../api/API.dart';
 import '../components/confirm_popup.dart';
 import '../components/dashboard/chart_card.dart';
 import '../components/dashboard/your_packages.dart';
@@ -57,7 +60,7 @@ class _BuildScreenState extends State<BuildScreen> {
                         ],
                       ),
                     ),
-                    _buildSideBar(),
+                    _buildSideBar(buildData),
                   ],
                 );
               });
@@ -159,7 +162,7 @@ class _BuildScreenState extends State<BuildScreen> {
     );
   }
 
-  Widget _buildSideBar() {
+  Widget _buildSideBar(Build buildData) {
     return SizedBox(
       width: 300,
       child: Container(
@@ -190,8 +193,9 @@ class _BuildScreenState extends State<BuildScreen> {
                     final confirmResult = await showConfirmationDialog(
                         context,
                         "Delete Build",
-                        "Are you sure to delete this Package?", () async {
-                      // todo delete build
+                        "Are you sure to delete this Package?", () {
+                      API.deleteBuild(widget.buildID);
+                      context.pop();
                     }, null);
                   },
                   child: const Text(
@@ -204,7 +208,9 @@ class _BuildScreenState extends State<BuildScreen> {
                 ),
                 ElevatedButton(
                   onPressed: () async {
-                    // todo api call and page redirect
+                    final buildid =
+                        await API.updatePackage(id: buildData.pkg_id);
+                    context.pushReplacement("/build/$buildid");
                   },
                   child: const Text(
                     "Retry",
@@ -220,21 +226,21 @@ class _BuildScreenState extends State<BuildScreen> {
             const SizedBox(
               height: 5,
             ),
-            Text(
+            const Text(
               "Build Information:",
               style: TextStyle(fontSize: 18),
               textAlign: TextAlign.start,
             ),
-            SizedBox(
+            const SizedBox(
               height: 20,
             ),
             SideCard(
               title: "Build Number",
-              textRight: "7",
+              textRight: buildData.id.toString(),
             ),
             SideCard(
               title: "Finished",
-              textRight: "7",
+              textRight: buildData.end_time.toString(),
             ),
             SideCard(
               title: "Queued",
@@ -242,7 +248,13 @@ class _BuildScreenState extends State<BuildScreen> {
             ),
             SideCard(
               title: "Duration",
-              textRight: "7",
+              textRight: (buildData.end_time != null
+                      ? DateTime.fromMillisecondsSinceEpoch(
+                          buildData.end_time! * 1000)
+                      : DateTime.now())
+                  .difference(DateTime.fromMillisecondsSinceEpoch(
+                      buildData.start_time! * 1000))
+                  .readableDuration(),
             ),
           ],
         ),

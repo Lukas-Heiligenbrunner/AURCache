@@ -18,3 +18,21 @@ extension TimeFormatter on DateTime {
     }
   }
 }
+
+extension DurationFormatter on Duration {
+  String readableDuration() {
+    if (inSeconds < 60) {
+      return '$inSeconds second${inSeconds != 1 ? 's' : ''}';
+    } else if (inMinutes < 60) {
+      return '$inMinutes minute${inMinutes != 1 ? 's' : ''}';
+    } else if (inHours < 24) {
+      return '$inHours hour${inHours != 1 ? 's' : ''}';
+    } else if (inDays < 30) {
+      return '$inDays day${inDays != 1 ? 's' : ''}';
+    } else if ((inDays / 30) < 12) {
+      return '${inDays ~/ 30} month${(inDays ~/ 30) != 1 ? 's' : ''}';
+    } else {
+      return '${inDays ~/ 365} year${(inDays ~/ 365) != 1 ? 's' : ''}';
+    }
+  }
+}
