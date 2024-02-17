@@ -20,19 +20,20 @@ extension PackagesAPI on ApiClient {
   }
 
   Future<void> addPackage({required String name}) async {
-    final resp =
-        await getRawClient().post("/packages/add", data: {'name': name});
+    final resp = await getRawClient().post("/package", data: {'name': name});
     print(resp.data);
   }
 
-  Future<void> updatePackage({bool force = false, required int id}) async {
+  Future<int> updatePackage({bool force = false, required int id}) async {
     final resp = await getRawClient()
-        .post("/packages/$id/update", data: {'force': force});
+        .post("/package/$id/update", data: {'force': force});
     print(resp.data);
+
+    return resp.data as int;
   }
 
   Future<bool> deletePackage(int id) async {
-    final resp = await getRawClient().post("/package/delete/$id");
+    final resp = await getRawClient().delete("/package/$id");
     return resp.statusCode == 200;
   }
 }

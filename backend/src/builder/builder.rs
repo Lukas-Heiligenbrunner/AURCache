@@ -19,12 +19,13 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
         if let Ok(_result) = tx.subscribe().recv().await {
             match _result {
                 // add a package to parallel build
-                Action::Build(name, version, url, version_model) => {
+                Action::Build(name, version, url, version_model, build_model) => {
                     let _ = queue_package(
                         name,
                         version,
                         url,
                         version_model,
+                        build_model,
                         db.clone(),
                         semaphore.clone(),
                     )
@@ -40,25 +41,10 @@ async fn queue_package(
     version: String,
     url: String,
     version_model: versions::ActiveModel,
+    mut build_model: builds::ActiveModel,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
-    // set build status to pending
-    let build = builds::ActiveModel {
-        pkg_id: version_model.package_id.clone(),
-        version_id: version_model.id.clone(),
-        ouput: Set(None),
-        status: Set(Some(3)),
-        start_time: Set(Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as u32,
-        )),
-        ..Default::default()
-    };
-    let mut new_build = build.save(&db).await.unwrap();
-
     let permits = Arc::clone(&semaphore);
 
     // spawn new thread for each pkg build
@@ -67,10 +53,10 @@ async fn queue_package(
         let _permit = permits.acquire().await.unwrap();
 
         // set build status to building
-        new_build.status = Set(Some(0));
-        new_build = new_build.save(&db).await.unwrap();
+        build_model.status = Set(Some(0));
+        build_model = build_model.save(&db).await.unwrap();
 
-        let _ = build_package(new_build, db, version_model, version, name, url).await;
+        let _ = build_package(build_model, db, version_model, version, name, url).await;
     });
     Ok(())
 }
