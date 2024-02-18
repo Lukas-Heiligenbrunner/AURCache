@@ -239,12 +239,16 @@ class _BuildScreenState extends State<BuildScreen> {
               textRight: buildData.id.toString(),
             ),
             SideCard(
-              title: "Finished",
-              textRight: buildData.end_time.toString(),
+              title: "Version",
+              textRight: buildData.version,
             ),
             SideCard(
-              title: "Queued",
-              textRight: "7",
+              title: "Finished",
+              textRight: buildData.end_time == null
+                  ? "Not yet"
+                  : DateTime.fromMillisecondsSinceEpoch(
+                          buildData.end_time! * 1000)
+                      .readableDuration(),
             ),
             SideCard(
               title: "Duration",
