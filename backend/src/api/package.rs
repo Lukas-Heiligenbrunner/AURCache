@@ -1,4 +1,3 @@
-use crate::api::build::ListPackageModel;
 use crate::builder::types::Action;
 use crate::db::migration::{JoinType, Order};
 use crate::db::prelude::Packages;
@@ -8,19 +7,15 @@ use crate::package::delete::package_delete;
 use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
-use rocket::serde::Deserialize;
+
 use rocket::{delete, get, post, State};
-use rocket_okapi::okapi::schemars;
-use rocket_okapi::{openapi, JsonSchema};
+
+use crate::api::types::input::ListPackageModel;
+use crate::api::types::output::{AddBody, UpdateBody};
+use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use tokio::sync::broadcast::Sender;
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(crate = "rocket::serde")]
-pub struct AddBody {
-    name: String,
-}
 
 #[openapi(tag = "Packages")]
 #[post("/package", data = "<input>")]
@@ -34,12 +29,6 @@ pub async fn package_add_endpoint(
         .map_err(|e| BadRequest(Some(e.to_string())))
 }
 
-#[derive(Deserialize, JsonSchema)]
-#[serde(crate = "rocket::serde")]
-pub struct UpdateBody {
-    force: bool,
-}
-
 #[openapi(tag = "Packages")]
 #[post("/package/<id>/update", data = "<input>")]
 pub async fn package_update_endpoint(
@@ -50,7 +39,7 @@ pub async fn package_update_endpoint(
 ) -> Result<Json<i32>, BadRequest<String>> {
     package_update(db, id, input.force, tx)
         .await
-        .map(|e| Json(e))
+        .map(Json)
         .map_err(|e| BadRequest(Some(e.to_string())))
 }
 

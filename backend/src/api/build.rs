@@ -3,28 +3,15 @@ use crate::db::prelude::Builds;
 use crate::db::{builds, packages, versions};
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
-use rocket::serde::{Deserialize, Serialize};
 use rocket::{delete, get, State};
-use rocket_okapi::okapi::schemars;
-use rocket_okapi::{openapi, JsonSchema};
+
+use crate::api::types::input::ListBuildsModel;
+use rocket_okapi::openapi;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{
-    DatabaseConnection, EntityTrait, FromQueryResult, ModelTrait, QueryOrder, QuerySelect,
-    RelationTrait,
+    DatabaseConnection, EntityTrait, ModelTrait, QueryOrder, QuerySelect, RelationTrait,
 };
-
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
-pub struct ListPackageModel {
-    id: i32,
-    name: String,
-    status: i32,
-    outofdate: bool,
-    latest_version: Option<String>,
-    latest_version_id: Option<i32>,
-    latest_aur_version: String,
-}
 
 #[openapi(tag = "build")]
 #[get("/build/<buildid>/output?<startline>")]
@@ -46,7 +33,7 @@ pub async fn build_output(
         Some(v) => match startline {
             None => Ok(v),
             Some(startline) => {
-                let output: Vec<String> = v.split("\n").map(|x| x.to_string()).collect();
+                let output: Vec<String> = v.split('\n').map(|x| x.to_string()).collect();
                 let len = output.len();
                 let len_missing = len as i32 - startline;
 
@@ -59,7 +46,7 @@ pub async fn build_output(
                         0
                     })
                     .rev()
-                    .map(|x1| x1.clone())
+                    .cloned()
                     .collect::<Vec<_>>();
 
                 let output = output.join("\n");
@@ -67,18 +54,6 @@ pub async fn build_output(
             }
         },
     };
-}
-
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
-pub struct ListBuildsModel {
-    id: i32,
-    pkg_id: i32,
-    pkg_name: String,
-    version: String,
-    status: i32,
-    start_time: Option<u32>,
-    end_time: Option<u32>,
 }
 
 #[openapi(tag = "build")]

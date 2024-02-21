@@ -29,7 +29,7 @@ pub async fn package_update(
 
     let version_model = match Versions::find()
         .filter(versions::Column::Version.eq(pkg.version.clone()))
-        .filter(versions::Column::PackageId.eq(pkg.id.clone()))
+        .filter(versions::Column::PackageId.eq(pkg.id))
         .one(&txn)
         .await?
     {

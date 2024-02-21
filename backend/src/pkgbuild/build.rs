@@ -7,7 +7,7 @@ use tokio::sync::broadcast::Sender;
 // todo consider removing pkg_vers from attribute list
 pub async fn build_pkgbuild(
     folder_path: String,
-    pkg_vers: &str,
+    _pkg_vers: &str,
     pkg_name: &str,
     tx: Sender<String>,
 ) -> anyhow::Result<Vec<String>> {
@@ -26,7 +26,7 @@ pub async fn build_pkgbuild(
     fs::write(&script_file, makepkg).expect("Unable to write script to file");
 
     let mut child = tokio::process::Command::new("bash")
-        .args(&[
+        .args([
             script_file.as_os_str().to_str().unwrap(),
             "-f",
             "--noconfirm",
@@ -106,7 +106,7 @@ fn locate_built_packages(pkg_name: String, folder_path: String) -> anyhow::Resul
         }
     }
 
-    return if pkg_names.is_empty() {
+    if pkg_names.is_empty() {
         Err(anyhow!("Built package not found"))
     } else {
         // expect at least one of the packages to start with the package name
@@ -116,5 +116,5 @@ fn locate_built_packages(pkg_name: String, folder_path: String) -> anyhow::Resul
             ));
         }
         Ok(pkg_names)
-    };
+    }
 }

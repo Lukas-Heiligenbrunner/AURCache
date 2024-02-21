@@ -34,7 +34,7 @@ fn main() {
 
     t.block_on(async move {
         // create folder for db stuff
-        if !fs::metadata("./db").is_ok() {
+        if fs::metadata("./db").is_err() {
             fs::create_dir("./db").unwrap();
         }
 
@@ -45,7 +45,7 @@ fn main() {
         Migrator::up(&db, None).await.unwrap();
 
         // create repo folder
-        if !fs::metadata("./repo").is_ok() {
+        if fs::metadata("./repo").is_err() {
             fs::create_dir("./repo").unwrap();
 
             let tar_gz = File::create("./repo/repo.db.tar.gz").unwrap();
@@ -74,9 +74,11 @@ fn main() {
         start_aur_version_checking(db.clone());
 
         let backend_handle = tokio::spawn(async {
-            let mut config = Config::default();
-            config.address = "0.0.0.0".parse().unwrap();
-            config.port = 8081;
+            let config = Config {
+                address: "0.0.0.0".parse().unwrap(),
+                port: 8081,
+                ..Default::default()
+            };
 
             let rock = rocket::custom(config)
                 .manage(db)
@@ -100,9 +102,11 @@ fn main() {
         });
 
         let repo_handle = tokio::spawn(async {
-            let mut config = Config::default();
-            config.address = "0.0.0.0".parse().unwrap();
-            config.port = 8080;
+            let config = Config {
+                address: "0.0.0.0".parse().unwrap(),
+                port: 8080,
+                ..Default::default()
+            };
 
             let launch_result = rocket::custom(config)
                 .mount("/", FileServer::from("./repo"))
@@ -116,6 +120,4 @@ fn main() {
 
         join_all([repo_handle, backend_handle]).await;
     });
-
-    return;
 }

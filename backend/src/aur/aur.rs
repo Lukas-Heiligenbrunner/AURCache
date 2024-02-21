@@ -52,7 +52,7 @@ pub async fn download_pkgbuild(url: &str, dest_dir: &str) -> anyhow::Result<Stri
     };
 
     // Check if the directory exists
-    if !fs::metadata(dest_dir).is_ok() {
+    if fs::metadata(dest_dir).is_err() {
         // Create the directory if it does not exist
         fs::create_dir(dest_dir)?;
     }
@@ -71,7 +71,7 @@ async fn download_file(url: &str) -> anyhow::Result<(Vec<u8>, String)> {
         .path_segments()
         .and_then(|segments| segments.last())
         .ok_or(anyhow!("no segments"))?
-        .split(".")
+        .split('.')
         .collect::<Vec<&str>>()
         .first()
         .ok_or(anyhow!(""))?

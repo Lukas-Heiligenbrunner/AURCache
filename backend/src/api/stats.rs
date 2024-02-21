@@ -1,53 +1,17 @@
-use crate::aur::aur::query_aur;
+use crate::db::builds;
 use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds};
 use crate::utils::dir_size::dir_size;
+
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
-use rocket::serde::{Deserialize, Serialize};
+
 use rocket::{get, State};
-use rocket_okapi::okapi::schemars;
-use rocket_okapi::{openapi, JsonSchema};
+
+use crate::api::types::input::ListStats;
+use rocket_okapi::openapi;
+use sea_orm::PaginatorTrait;
 use sea_orm::{ColumnTrait, QueryFilter};
-use sea_orm::{DatabaseConnection, EntityTrait, FromQueryResult};
-use sea_orm::{PaginatorTrait};
-
-#[derive(Serialize, JsonSchema)]
-#[serde(crate = "rocket::serde")]
-pub struct ApiPackage {
-    name: String,
-    version: String,
-}
-
-#[openapi(tag = "aur")]
-#[get("/search?<query>")]
-pub async fn search(query: &str) -> Result<Json<Vec<ApiPackage>>, String> {
-    return match query_aur(query).await {
-        Ok(v) => {
-            let mapped = v
-                .iter()
-                .map(|x| ApiPackage {
-                    name: x.name.clone(),
-                    version: x.version.clone(),
-                })
-                .collect();
-            Ok(Json(mapped))
-        }
-        Err(e) => Err(format!("{}", e)),
-    };
-}
-
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
-pub struct ListStats {
-    total_builds: u32,
-    failed_builds: u32,
-    avg_queue_wait_time: u32,
-    avg_build_time: u32,
-    repo_storage_size: u64,
-    active_builds: u32,
-    total_packages: u32,
-}
+use sea_orm::{DatabaseConnection, EntityTrait};
 
 #[openapi(tag = "stats")]
 #[get("/stats")]

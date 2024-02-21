@@ -19,10 +19,11 @@ pub async fn package_add(
     // remove leading and trailing whitespaces
     let pkg_name = pkg_name.trim();
 
-    if let Some(..) = Packages::find()
+    if Packages::find()
         .filter(packages::Column::Name.eq(pkg_name))
         .one(&txn)
         .await?
+        .is_some()
     {
         return Err(anyhow!("Package already exists"));
     }
