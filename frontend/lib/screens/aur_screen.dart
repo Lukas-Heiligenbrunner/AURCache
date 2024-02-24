@@ -36,7 +36,9 @@ class _AurScreenState extends State<AurScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(),
+      appBar: AppBar(
+        title: const Text("AUR"),
+      ),
       body: MultiProvider(
         providers: [
           ChangeNotifierProvider(create: (_) => PackagesProvider()),

@@ -6,8 +6,8 @@ import '../../constants/color_constants.dart';
 
 class SideMenu extends StatelessWidget {
   const SideMenu({
-    Key? key,
-  }) : super(key: key);
+    super.key,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -20,13 +20,10 @@ class SideMenu extends StatelessWidget {
                 child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // SizedBox(
-                //   height: defaultPadding * 3,
-                // ),
-                // Image.asset(
-                //   "assets/logo/logo_icon.png",
-                //   scale: 5,
-                // ),
+                SizedBox(
+                  height: defaultPadding,
+                ),
+                Icon(Icons.storage_sharp, size: 60, color: Colors.white54),
                 SizedBox(
                   height: defaultPadding,
                 ),
@@ -68,12 +65,11 @@ class SideMenu extends StatelessWidget {
 
 class DrawerListTile extends StatelessWidget {
   const DrawerListTile({
-    Key? key,
-    // For selecting those three line once press "Command+D"
+    super.key,
     required this.title,
     required this.svgSrc,
     required this.press,
-  }) : super(key: key);
+  });
 
   final String title, svgSrc;
   final VoidCallback press;
