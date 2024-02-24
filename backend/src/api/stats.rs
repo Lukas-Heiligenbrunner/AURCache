@@ -40,14 +40,13 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     // todo implement this values somehow
     let avg_queue_wait_time: u32 = 42;
-    let avg_build_time: u32 = 42;
 
     // Calculate repo storage size
     let repo_storage_size: u64 = dir_size("repo/").unwrap_or(0);
 
     // Count active builds
-    let active_builds: u32 = Builds::find()
-        .filter(builds::Column::Status.eq(0))
+    let enqueued_builds: u32 = Builds::find()
+        .filter(builds::Column::Status.eq(3))
         .count(db)
         .await?
         .try_into()?;
@@ -57,13 +56,14 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         avg_build_time: f64,
     }
 
-    let unique: BuildTimeStruct = BuildTimeStruct::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Sqlite,
-        r#"SELECT AVG((builds.end_time - builds.start_time)) AS avg_build_time
+    let unique: BuildTimeStruct =
+        BuildTimeStruct::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT AVG((builds.end_time - builds.start_time)) AS avg_build_time
         FROM builds
         WHERE builds.end_time IS NOT NULL AND builds.status = 1;"#,
-        [],
-    ))
+            [],
+        ))
         .one(db)
         .await?
         .ok_or(anyhow::anyhow!("No Average build time"))?;
@@ -79,7 +79,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         avg_queue_wait_time,
         avg_build_time,
         repo_storage_size,
-        active_builds,
+        enqueued_builds,
         total_packages,
     })
 }

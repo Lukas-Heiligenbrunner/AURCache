@@ -42,6 +42,6 @@ pub struct ListStats {
     pub avg_queue_wait_time: u32,
     pub avg_build_time: u32,
     pub repo_storage_size: u64,
-    pub active_builds: u32,
+    pub enqueued_builds: u32,
     pub total_packages: u32,
 }

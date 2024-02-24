@@ -3,7 +3,7 @@ class Stats {
       failed_builds,
       avg_queue_wait_time,
       repo_storage_size,
-      active_builds,
+      enqueued_builds,
       total_packages;
   final Duration avg_build_time;
 
@@ -14,7 +14,7 @@ class Stats {
       avg_queue_wait_time: json["avg_queue_wait_time"] as int,
       avg_build_time: Duration(seconds: json["avg_build_time"]),
       repo_storage_size: json["repo_storage_size"] as int,
-      active_builds: json["active_builds"] as int,
+      enqueued_builds: json["enqueued_builds"] as int,
       total_packages: json["total_packages"] as int,
     );
   }
@@ -25,6 +25,6 @@ class Stats {
       required this.avg_queue_wait_time,
       required this.avg_build_time,
       required this.repo_storage_size,
-      required this.active_builds,
+      required this.enqueued_builds,
       required this.total_packages});
 }

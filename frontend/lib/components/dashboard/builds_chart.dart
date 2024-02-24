@@ -100,7 +100,7 @@ class _BuildsChartState extends State<BuildsChart> {
           );
         case 2:
           return PieChartSectionData(
-            color: const Color(0xff9d8d00),
+            color: const Color(0xFF0044AA),
             value: (widget.nrActiveBuilds).toDouble(),
             title:
                 "${((widget.nrActiveBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",

@@ -60,7 +60,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 SidePanel(
                                     nrbuilds: stats.total_builds,
                                     nrfailedbuilds: stats.failed_builds,
-                                    nrActiveBuilds: stats.active_builds),
+                                    nrEnqueuedBuilds: stats.enqueued_builds),
                             ],
                           ),
                         ),
@@ -73,7 +73,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             child: SidePanel(
                                 nrbuilds: stats.total_builds,
                                 nrfailedbuilds: stats.failed_builds,
-                                nrActiveBuilds: stats.active_builds),
+                                nrEnqueuedBuilds: stats.enqueued_builds),
                           ),
                       ],
                     )

@@ -46,8 +46,8 @@ class QuickInfoBanner extends StatelessWidget {
       QuickInfoData(
           color: const Color(0xFFFFA113),
           icon: Icons.hourglass_top,
-          title: "Active Builds",
-          subtitle: stats.active_builds.toString()),
+          title: "Enqueued Builds",
+          subtitle: stats.enqueued_builds.toString()),
       QuickInfoData(
           color: const Color(0xFFA4CDFF),
           icon: Icons.build,
