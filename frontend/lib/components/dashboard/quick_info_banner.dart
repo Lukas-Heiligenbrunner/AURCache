@@ -1,5 +1,6 @@
 import 'package:aurcache/components/dashboard/quick_info_tile.dart';
 import 'package:aurcache/utils/file_formatter.dart';
+import 'package:aurcache/utils/time_formatter.dart';
 import 'package:flutter/material.dart';
 
 import '../../constants/color_constants.dart';
@@ -61,7 +62,7 @@ class QuickInfoBanner extends StatelessWidget {
           color: const Color(0xFF00F260),
           icon: Icons.timelapse,
           title: "Average Build Time",
-          subtitle: stats.avg_build_time.toString()),
+          subtitle: stats.avg_build_time.readableDuration()),
     ];
   }
 

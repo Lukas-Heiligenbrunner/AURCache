@@ -70,9 +70,6 @@ class _BuildScreenState extends State<BuildScreen> {
   }
 
   Widget _buildTopBar(Build buildData, BuildContext context) {
-    final start_time =
-        DateTime.fromMillisecondsSinceEpoch((buildData.start_time ?? 0) * 1000);
-
     return Container(
       color: secondaryColor,
       child: Padding(
@@ -117,7 +114,7 @@ class _BuildScreenState extends State<BuildScreen> {
                 const SizedBox(
                   width: 10,
                 ),
-                Text("triggered ${start_time.readableDuration()}")
+                Text("triggered ${buildData.start_time.readableDuration()}")
               ],
             ),
             Row(
@@ -246,18 +243,12 @@ class _BuildScreenState extends State<BuildScreen> {
               title: "Finished",
               textRight: buildData.end_time == null
                   ? "Not yet"
-                  : DateTime.fromMillisecondsSinceEpoch(
-                          buildData.end_time! * 1000)
-                      .readableDuration(),
+                  : buildData.end_time!.readableDuration(),
             ),
             SideCard(
               title: "Duration",
-              textRight: (buildData.end_time != null
-                      ? DateTime.fromMillisecondsSinceEpoch(
-                          buildData.end_time! * 1000)
-                      : DateTime.now())
-                  .difference(DateTime.fromMillisecondsSinceEpoch(
-                      buildData.start_time! * 1000))
+              textRight: (buildData.end_time ?? DateTime.now())
+                  .difference(buildData.start_time)
                   .readableDuration(),
             ),
           ],

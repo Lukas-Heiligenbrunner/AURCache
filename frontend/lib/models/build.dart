@@ -4,7 +4,8 @@ class Build {
   final int pkg_id;
   final String version;
   final int status;
-  final int? start_time, end_time;
+  final DateTime? end_time;
+  final DateTime start_time;
 
   Build(
       {required this.id,
@@ -16,12 +17,18 @@ class Build {
       required this.status});
 
   factory Build.fromJson(Map<String, dynamic> json) {
+    final startTime =
+        DateTime.fromMillisecondsSinceEpoch(json["start_time"] * 1000);
+    final endTime = json["end_time"] != null
+        ? DateTime.fromMillisecondsSinceEpoch((json["end_time"] as int) * 1000)
+        : null;
+
     return Build(
       id: json["id"] as int,
       pkg_id: json["pkg_id"] as int,
       status: json["status"] as int,
-      start_time: json["start_time"] as int?,
-      end_time: json["end_time"] as int?,
+      start_time: startTime,
+      end_time: endTime,
       pkg_name: json["pkg_name"] as String,
       version: json["version"] as String,
     );

@@ -9,9 +9,12 @@ use rocket::{get, State};
 
 use crate::api::types::input::ListStats;
 use rocket_okapi::openapi;
-use sea_orm::PaginatorTrait;
+use sea_orm::prelude::Expr;
+use sea_orm::sea_query::Function::Avg;
+use sea_orm::sea_query::{Func, QueryStatement};
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, QuerySelect, Statement, TryGetableMany};
 
 #[openapi(tag = "stats")]
 #[get("/stats")]
@@ -48,6 +51,24 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .count(db)
         .await?
         .try_into()?;
+
+    #[derive(Debug, FromQueryResult)]
+    struct BuildTimeStruct {
+        avg_build_time: f64,
+    }
+
+    let unique: BuildTimeStruct = BuildTimeStruct::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"SELECT AVG((builds.end_time - builds.start_time)) AS avg_build_time
+        FROM builds
+        WHERE builds.end_time IS NOT NULL AND builds.status = 1;"#,
+        [],
+    ))
+        .one(db)
+        .await?
+        .ok_or(anyhow::anyhow!("No Average build time"))?;
+
+    let avg_build_time: u32 = unique.avg_build_time as u32;
 
     // Count total packages
     let total_packages: u32 = Packages::find().count(db).await?.try_into()?;
