@@ -1,5 +1,6 @@
 import 'package:aurcache/components/builds_table.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
+import 'package:aurcache/components/table_info.dart';
 import 'package:aurcache/providers/api/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -43,7 +44,12 @@ class BuildsScreen extends StatelessWidget {
                         interval: const Duration(seconds: 10),
                         onLoad: () => const Text("no data"),
                         onData: (data) {
-                          return BuildsTable(data: data);
+                          if (data.isEmpty) {
+                            return const TableInfo(
+                                title: "You have no builds yet");
+                          } else {
+                            return BuildsTable(data: data);
+                          }
                         }),
                   )
                 ],

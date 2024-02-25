@@ -3,15 +3,15 @@ import 'package:flutter/material.dart';
 
 class BuildsChart extends StatefulWidget {
   const BuildsChart({
-    Key? key,
+    super.key,
     required this.nrbuilds,
     required this.nrfailedbuilds,
-    required this.nrActiveBuilds,
-  }) : super(key: key);
+    required this.nrEnqueuedBuilds,
+  });
 
   final int nrbuilds;
   final int nrfailedbuilds;
-  final int nrActiveBuilds;
+  final int nrEnqueuedBuilds;
 
   @override
   _BuildsChartState createState() => _BuildsChartState();
@@ -88,10 +88,10 @@ class _BuildsChartState extends State<BuildsChart> {
             color: const Color(0xff0a7005),
             value: (widget.nrbuilds -
                     widget.nrfailedbuilds -
-                    widget.nrActiveBuilds)
+                    widget.nrEnqueuedBuilds)
                 .toDouble(),
             title:
-                "${((widget.nrbuilds - widget.nrfailedbuilds - widget.nrActiveBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${((widget.nrbuilds - widget.nrfailedbuilds - widget.nrEnqueuedBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,
@@ -101,9 +101,9 @@ class _BuildsChartState extends State<BuildsChart> {
         case 2:
           return PieChartSectionData(
             color: const Color(0xFF0044AA),
-            value: (widget.nrActiveBuilds).toDouble(),
+            value: (widget.nrEnqueuedBuilds).toDouble(),
             title:
-                "${((widget.nrActiveBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${((widget.nrEnqueuedBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,

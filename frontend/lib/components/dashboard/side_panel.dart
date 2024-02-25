@@ -35,10 +35,34 @@ class SidePanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: defaultPadding),
-          BuildsChart(
-              nrbuilds: nrbuilds,
-              nrfailedbuilds: nrfailedbuilds,
-              nrActiveBuilds: nrEnqueuedBuilds),
+          nrbuilds > 0
+              ? BuildsChart(
+                  nrbuilds: nrbuilds,
+                  nrfailedbuilds: nrfailedbuilds,
+                  nrEnqueuedBuilds: nrEnqueuedBuilds)
+              : const SizedBox(
+                  width: double.infinity,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SizedBox(
+                        height: 15,
+                      ),
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 42,
+                      ),
+                      SizedBox(
+                        height: 15,
+                      ),
+                      Text("Add Packages to view Graph"),
+                      SizedBox(
+                        height: 30,
+                      )
+                    ],
+                  ),
+                ),
           SideCard(
             color: const Color(0xff0a7005),
             title: "Successful Builds",

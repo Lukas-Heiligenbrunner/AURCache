@@ -5,17 +5,11 @@ import 'package:aurcache/providers/api/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
+import '../table_info.dart';
 
-class RecentBuilds extends StatefulWidget {
-  const RecentBuilds({
-    Key? key,
-  }) : super(key: key);
+class RecentBuilds extends StatelessWidget {
+  const RecentBuilds({super.key});
 
-  @override
-  State<RecentBuilds> createState() => _RecentBuildsState();
-}
-
-class _RecentBuildsState extends State<RecentBuilds> {
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -31,27 +25,34 @@ class _RecentBuildsState extends State<RecentBuilds> {
             "Recent Builds",
             style: Theme.of(context).textTheme.subtitle1,
           ),
-          SizedBox(
-            width: double.infinity,
-            child: APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
-              key: const Key("Builds on dashboard"),
-              dto: BuildsDTO(limit: 10),
-              interval: const Duration(seconds: 10),
-              onLoad: () => const Text("no data"),
-              onData: (t) {
-                return BuildsTable(data: t);
-              },
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              context.push("/builds");
+          APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
+            key: const Key("Builds on dashboard"),
+            dto: BuildsDTO(limit: 10),
+            interval: const Duration(seconds: 10),
+            onLoad: () => const Text("no data"),
+            onData: (t) {
+              if (t.isEmpty) {
+                return const TableInfo(title: "You have no builds yet");
+              } else {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                        width: double.infinity, child: BuildsTable(data: t)),
+                    ElevatedButton(
+                      onPressed: () {
+                        context.push("/builds");
+                      },
+                      child: Text(
+                        "List all Builds",
+                        style: TextStyle(color: Colors.white.withOpacity(0.8)),
+                      ),
+                    ),
+                  ],
+                );
+              }
             },
-            child: Text(
-              "List all Builds",
-              style: TextStyle(color: Colors.white.withOpacity(0.8)),
-            ),
-          )
+          ),
         ],
       ),
     );

@@ -1,21 +1,19 @@
+import 'dart:ffi';
+
 import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/components/packages_table.dart';
 import 'package:aurcache/providers/api/packages_provider.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
 import '../../models/package.dart';
+import '../table_info.dart';
 
-class YourPackages extends StatefulWidget {
-  const YourPackages({
-    Key? key,
-  }) : super(key: key);
+class YourPackages extends StatelessWidget {
+  const YourPackages({super.key});
 
-  @override
-  State<YourPackages> createState() => _YourPackagesState();
-}
-
-class _YourPackagesState extends State<YourPackages> {
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -31,29 +29,35 @@ class _YourPackagesState extends State<YourPackages> {
             "Your Packages",
             style: Theme.of(context).textTheme.subtitle1,
           ),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            SizedBox(
-              width: double.infinity,
-              child: APIBuilder<PackagesProvider, List<Package>, PackagesDTO>(
-                key: const Key("Packages on dashboard"),
-                interval: const Duration(seconds: 10),
-                dto: PackagesDTO(limit: 10),
-                onData: (data) {
-                  return PackagesTable(data: data);
-                },
-                onLoad: () => const Text("No data"),
-              ),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                context.push("/packages");
-              },
-              child: Text(
-                "List all Packages",
-                style: TextStyle(color: Colors.white.withOpacity(0.8)),
-              ),
-            )
-          ]),
+          APIBuilder<PackagesProvider, List<Package>, PackagesDTO>(
+            key: const Key("Packages on dashboard"),
+            interval: const Duration(seconds: 10),
+            dto: PackagesDTO(limit: 10),
+            onData: (data) {
+              if (data.isEmpty) {
+                return const TableInfo(title: "You have no packages yet");
+              } else {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                        width: double.infinity,
+                        child: PackagesTable(data: data)),
+                    ElevatedButton(
+                      onPressed: () {
+                        context.push("/packages");
+                      },
+                      child: Text(
+                        "List all Packages",
+                        style: TextStyle(color: Colors.white.withOpacity(0.8)),
+                      ),
+                    )
+                  ],
+                );
+              }
+            },
+            onLoad: () => const CircularProgressIndicator(),
+          ),
         ],
       ),
     );
