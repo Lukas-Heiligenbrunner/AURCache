@@ -53,7 +53,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     #[derive(Debug, FromQueryResult)]
     struct BuildTimeStruct {
-        avg_build_time: f64,
+        avg_build_time: Option<f64>,
     }
 
     let unique: BuildTimeStruct =
@@ -68,7 +68,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .await?
         .ok_or(anyhow::anyhow!("No Average build time"))?;
 
-    let avg_build_time: u32 = unique.avg_build_time as u32;
+    let avg_build_time: u32 = unique.avg_build_time.unwrap_or(0.0) as u32;
 
     // Count total packages
     let total_packages: u32 = Packages::find().count(db).await?.try_into()?;
