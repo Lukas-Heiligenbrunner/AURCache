@@ -1,11 +1,7 @@
-import 'dart:ffi';
-
 import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/components/packages_table.dart';
 import 'package:aurcache/providers/api/packages_provider.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
 import '../../models/package.dart';
