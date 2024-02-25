@@ -233,7 +233,7 @@ class _BuildScreenState extends State<BuildScreen> {
             ),
             SideCard(
               title: "Build Number",
-              textRight: buildData.id.toString(),
+              textRight: "#${buildData.id}",
             ),
             SideCard(
               title: "Version",

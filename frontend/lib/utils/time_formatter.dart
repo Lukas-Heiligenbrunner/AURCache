@@ -8,7 +8,7 @@ extension TimeFormatter on DateTime {
     if (duration.inSeconds < 60) {
       return '${duration.inSeconds} Second${_s(duration.inSeconds)} ago';
     } else if (duration.inMinutes < 60) {
-      return '${duration.inMinutes} Minute${_s(duration.inMinutes)})} ago';
+      return '${duration.inMinutes} Minute${_s(duration.inMinutes)} ago';
     } else if (duration.inHours < 24) {
       return '${duration.inHours} Hour${_s(duration.inHours)} ago';
     } else if (duration.inDays < 30) {
