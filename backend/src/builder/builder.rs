@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::iter::Map;
 use crate::builder::types::Action;
 use crate::db::builds::ActiveModel;
 use crate::db::prelude::{Builds, Packages};
@@ -5,15 +7,17 @@ use crate::db::{builds, packages, versions};
 use crate::repo::repo::add_pkg;
 use anyhow::anyhow;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use std::ops::Add;
+use std::ops::{Add, Deref};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::task::JoinHandle;
 
 pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
     let semaphore = Arc::new(Semaphore::new(1));
+    let job_handles: Arc<Mutex<HashMap<i32, JoinHandle<_>>>> = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         if let Ok(_result) = tx.subscribe().recv().await {
@@ -28,8 +32,33 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                         build_model,
                         db.clone(),
                         semaphore.clone(),
+                        job_handles.clone()
                     )
                     .await;
+                }
+                Action::Cancel(build_id) => {
+                    let build = Builds::find_by_id(build_id)
+                        .one(&db)
+                        .await
+                        .expect("TODO: panic message")
+                        .expect("TODO: panic message");
+
+                    let mut build: builds::ActiveModel = build.into();
+                    build.status = Set(Some(4));
+                    build.end_time = Set(Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as u32,
+                    ));
+                    let _ = build.clone().update(&db).await;
+
+                    job_handles
+                        .lock()
+                        .await
+                        .remove(&build.id.clone().unwrap())
+                        .expect("TODO: panic message")
+                        .abort();
                 }
             }
         }
@@ -44,12 +73,15 @@ async fn queue_package(
     mut build_model: builds::ActiveModel,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
+    job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
 ) -> anyhow::Result<()> {
     let permits = Arc::clone(&semaphore);
+    let mut job_handles = Arc::clone(&job_handles);
+    let build_id = build_model.id.clone().unwrap();
 
     // spawn new thread for each pkg build
     // todo add queue and build two packages in parallel
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _permit = permits.acquire().await.unwrap();
 
         // set build status to building
@@ -58,6 +90,7 @@ async fn queue_package(
 
         let _ = build_package(build_model, db, version_model, version, name, url).await;
     });
+    job_handles.lock().await.insert(build_id, handle);
     Ok(())
 }
 
