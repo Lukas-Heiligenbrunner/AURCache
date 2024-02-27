@@ -147,7 +147,7 @@ pub async fn delete_build(
 
 #[openapi(tag = "build")]
 #[post("/build/<buildid>/cancel")]
-pub async fn cancle_build(
+pub async fn cancel_build(
     db: &State<DatabaseConnection>,
     tx: &State<Sender<Action>>,
     buildid: i32,
