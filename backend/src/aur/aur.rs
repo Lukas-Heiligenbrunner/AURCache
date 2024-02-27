@@ -43,13 +43,17 @@ pub async fn get_info_by_name(pkg_name: &str) -> anyhow::Result<Package> {
     Ok(response)
 }
 
-pub async fn download_pkgbuild(url: &str, dest_dir: &str) -> anyhow::Result<String> {
+pub async fn download_pkgbuild(url: &str, dest_dir: &str, clear_build_dir: bool) -> anyhow::Result<String> {
     let (file_data, file_name) = match download_file(url).await {
         Ok(data) => data,
         Err(e) => {
             return Err(anyhow!("Error downloading file: {}", e));
         }
     };
+
+    if clear_build_dir {
+        fs::remove_dir_all(dest_dir)?;
+    }
 
     // Check if the directory exists
     if fs::metadata(dest_dir).is_err() {

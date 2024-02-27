@@ -20,8 +20,9 @@ pub async fn add_pkg(
     version: String,
     name: String,
     tx: Sender<String>,
+    clear_build_dir: bool,
 ) -> anyhow::Result<String> {
-    let fname = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds").await?;
+    let fname = download_pkgbuild(format!("{}{}", BASEURL, url).as_str(), "./builds", clear_build_dir).await?;
     let pkg_file_names = build_pkgbuild(
         format!("./builds/{fname}"),
         version.as_str(),

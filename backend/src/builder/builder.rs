@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::iter::Map;
+use std::ops::Add;
 use crate::builder::types::Action;
 use crate::db::builds::ActiveModel;
 use crate::db::prelude::{Builds, Packages};
@@ -7,7 +7,6 @@ use crate::db::{builds, packages, versions};
 use crate::repo::repo::add_pkg;
 use anyhow::anyhow;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
-use std::ops::{Add, Deref};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::error::RecvError;
@@ -37,32 +36,36 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                     .await;
                 }
                 Action::Cancel(build_id) => {
-                    let build = Builds::find_by_id(build_id)
-                        .one(&db)
-                        .await
-                        .expect("TODO: panic message")
-                        .expect("TODO: panic message");
-
-                    let mut build: builds::ActiveModel = build.into();
-                    build.status = Set(Some(4));
-                    build.end_time = Set(Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs() as u32,
-                    ));
-                    let _ = build.clone().update(&db).await;
-
-                    job_handles
-                        .lock()
-                        .await
-                        .remove(&build.id.clone().unwrap())
-                        .expect("TODO: panic message")
-                        .abort();
+                    let _ = cancel_build(build_id, job_handles.clone(), db.clone()).await;
                 }
             }
         }
     }
+}
+
+async fn cancel_build(build_id: i32, job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>, db: DatabaseConnection) -> anyhow::Result<()> {
+    let build = Builds::find_by_id(build_id)
+        .one(&db)
+        .await?
+        .ok_or(anyhow!("No build found"))?;
+
+    let mut build: builds::ActiveModel = build.into();
+    build.status = Set(Some(4));
+    build.end_time = Set(Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32,
+    ));
+    let _ = build.clone().update(&db).await;
+
+    job_handles
+        .lock()
+        .await
+        .remove(&build.id.clone().unwrap())
+        .ok_or(anyhow!("No build found"))?
+        .abort();
+    Ok(())
 }
 
 async fn queue_package(
@@ -76,7 +79,6 @@ async fn queue_package(
     job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
 ) -> anyhow::Result<()> {
     let permits = Arc::clone(&semaphore);
-    let mut job_handles = Arc::clone(&job_handles);
     let build_id = build_model.id.clone().unwrap();
 
     // spawn new thread for each pkg build
@@ -116,7 +118,7 @@ async fn build_package(
     pkg.status = Set(0);
     pkg = pkg.update(&db).await?.into();
 
-    match add_pkg(url, version, name, tx).await {
+    match add_pkg(url, version, name, tx, false).await {
         Ok(pkg_file_name) => {
             println!("successfully built package");
             // update package success status
