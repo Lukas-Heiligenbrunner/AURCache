@@ -3,7 +3,7 @@ use crate::db::prelude::Builds;
 use crate::db::{builds, packages, versions};
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
-use rocket::{delete, get, State};
+use rocket::{delete, get, post, State};
 
 use crate::api::types::input::ListBuildsModel;
 use rocket_okapi::openapi;
@@ -12,6 +12,8 @@ use sea_orm::QueryFilter;
 use sea_orm::{
     DatabaseConnection, EntityTrait, ModelTrait, QueryOrder, QuerySelect, RelationTrait,
 };
+use tokio::sync::broadcast::Sender;
+use crate::builder::types::Action;
 
 #[openapi(tag = "build")]
 #[get("/build/<buildid>/output?<startline>")]
@@ -139,6 +141,20 @@ pub async fn delete_build(
         .delete(db)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
+
+    Ok(())
+}
+
+#[openapi(tag = "build")]
+#[post("/build/<buildid>/cancel")]
+pub async fn cancle_build(
+    db: &State<DatabaseConnection>,
+    tx: &State<Sender<Action>>,
+    buildid: i32,
+) -> Result<(), NotFound<String>> {
+    let db = db as &DatabaseConnection;
+
+    let _ = tx.send(Action::Cancel(buildid)).map_err(|e| NotFound(e.to_string()))?;
 
     Ok(())
 }

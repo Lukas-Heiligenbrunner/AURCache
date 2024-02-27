@@ -9,4 +9,5 @@ pub enum Action {
         versions::ActiveModel,
         builds::ActiveModel,
     ),
+    Cancel(i32),
 }
