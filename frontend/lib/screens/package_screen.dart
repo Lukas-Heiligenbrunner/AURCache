@@ -60,8 +60,7 @@ class _PackageScreenState extends State<PackageScreen> {
                           children: [
                             ElevatedButton(
                               onPressed: () async {
-                                final confirmResult =
-                                    await showConfirmationDialog(
+                                await showConfirmationDialog(
                                   context,
                                   "Force update Package",
                                   "Are you sure to force an Package rebuild?",
@@ -91,8 +90,7 @@ class _PackageScreenState extends State<PackageScreen> {
                             ),
                             ElevatedButton(
                               onPressed: () async {
-                                final confirmResult =
-                                    await showConfirmationDialog(
+                                await showConfirmationDialog(
                                   context,
                                   "Delete Package",
                                   "Are you sure to delete this Package?",
@@ -121,7 +119,7 @@ class _PackageScreenState extends State<PackageScreen> {
                                 style: TextStyle(color: Colors.redAccent),
                               ),
                             ),
-                            SizedBox(
+                            const SizedBox(
                               width: 15,
                             )
                           ],

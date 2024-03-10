@@ -21,12 +21,17 @@ extension BuildsAPI on ApiClient {
   }
 
   Future<Build> getBuild(int id) async {
-    final resp = await getRawClient().get("/build/${id}");
+    final resp = await getRawClient().get("/build/$id");
     return Build.fromJson(resp.data);
   }
 
   Future<bool> deleteBuild(int id) async {
-    final resp = await getRawClient().delete("/build/${id}");
+    final resp = await getRawClient().delete("/build/$id");
+    return resp.statusCode == 400;
+  }
+
+  Future<bool> cancelBuild(int id) async {
+    final resp = await getRawClient().post("/build/$id/cancel");
     return resp.statusCode == 400;
   }
 
