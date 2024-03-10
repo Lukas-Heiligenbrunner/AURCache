@@ -9,8 +9,8 @@ import '../models/package.dart';
 import '../providers/api/builds_provider.dart';
 import '../providers/api/packages_provider.dart';
 import '../providers/api/stats_provider.dart';
+import '../utils/package_color.dart';
 import 'confirm_popup.dart';
-import 'dashboard/your_packages.dart';
 
 class PackagesTable extends StatelessWidget {
   const PackagesTable({super.key, required this.data});

@@ -12,9 +12,9 @@ import 'package:provider/provider.dart';
 import '../api/API.dart';
 import '../components/confirm_popup.dart';
 import '../components/dashboard/chart_card.dart';
-import '../components/dashboard/your_packages.dart';
 import '../constants/color_constants.dart';
 import '../providers/api/build_provider.dart';
+import '../utils/package_color.dart';
 
 class BuildScreen extends StatefulWidget {
   const BuildScreen({super.key, required this.buildID});
@@ -184,37 +184,7 @@ class _BuildScreenState extends State<BuildScreen> {
               height: 20,
             ),
             Row(
-              children: [
-                ElevatedButton(
-                  onPressed: () async {
-                    final confirmResult = await showConfirmationDialog(
-                        context,
-                        "Delete Build",
-                        "Are you sure to delete this Package?", () {
-                      API.deleteBuild(widget.buildID);
-                      context.pop();
-                    }, null);
-                  },
-                  child: const Text(
-                    "Delete",
-                    style: TextStyle(color: Colors.redAccent),
-                  ),
-                ),
-                const SizedBox(
-                  width: 10,
-                ),
-                ElevatedButton(
-                  onPressed: () async {
-                    final buildid =
-                        await API.updatePackage(id: buildData.pkg_id);
-                    context.pushReplacement("/build/$buildid");
-                  },
-                  child: const Text(
-                    "Retry",
-                    style: TextStyle(color: Colors.orangeAccent),
-                  ),
-                ),
-              ],
+              children: buildActions(buildData),
             ),
             const SizedBox(
               height: 15,
@@ -255,6 +225,58 @@ class _BuildScreenState extends State<BuildScreen> {
         ),
       ),
     );
+  }
+
+  List<Widget> buildActions(Build build) {
+    if (build.status == 0) {
+      return [
+        ElevatedButton(
+          onPressed: () async {
+            await showConfirmationDialog(
+                context, "Cancel Build", "Are you sure to cancel this Build?",
+                () {
+              API.cancelBuild(widget.buildID);
+              Provider.of<BuildProvider>(context, listen: false)
+                  .refresh(context);
+            }, null);
+          },
+          child: const Text(
+            "Cancel",
+            style: TextStyle(color: Colors.redAccent),
+          ),
+        ),
+      ];
+    } else {
+      return [
+        ElevatedButton(
+          onPressed: () async {
+            await showConfirmationDialog(
+                context, "Delete Build", "Are you sure to delete this Build?",
+                () {
+              API.deleteBuild(widget.buildID);
+              context.pop();
+            }, null);
+          },
+          child: const Text(
+            "Delete",
+            style: TextStyle(color: Colors.redAccent),
+          ),
+        ),
+        const SizedBox(
+          width: 10,
+        ),
+        ElevatedButton(
+          onPressed: () async {
+            final buildid = await API.updatePackage(id: build.pkg_id);
+            context.pushReplacement("/build/$buildid");
+          },
+          child: const Text(
+            "Retry",
+            style: TextStyle(color: Colors.orangeAccent),
+          ),
+        ),
+      ];
+    }
   }
 
   Widget _buildPage(Build build) {

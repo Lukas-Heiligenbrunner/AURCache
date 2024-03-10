@@ -3,7 +3,7 @@ import 'package:go_router/go_router.dart';
 
 import '../constants/color_constants.dart';
 import '../models/build.dart';
-import 'dashboard/your_packages.dart';
+import '../utils/package_color.dart';
 
 class BuildsTable extends StatelessWidget {
   const BuildsTable({super.key, required this.data});
