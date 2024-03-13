@@ -6,6 +6,7 @@ use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
 
 use crate::api::types::input::ListBuildsModel;
+use crate::builder::types::Action;
 use rocket_okapi::openapi;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
@@ -13,7 +14,6 @@ use sea_orm::{
     DatabaseConnection, EntityTrait, ModelTrait, QueryOrder, QuerySelect, RelationTrait,
 };
 use tokio::sync::broadcast::Sender;
-use crate::builder::types::Action;
 
 #[openapi(tag = "build")]
 #[get("/build/<buildid>/output?<startline>")]
@@ -154,7 +154,9 @@ pub async fn cancel_build(
 ) -> Result<(), NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let _ = tx.send(Action::Cancel(buildid)).map_err(|e| NotFound(e.to_string()))?;
+    let _ = tx
+        .send(Action::Cancel(buildid))
+        .map_err(|e| NotFound(e.to_string()))?;
 
     Ok(())
 }

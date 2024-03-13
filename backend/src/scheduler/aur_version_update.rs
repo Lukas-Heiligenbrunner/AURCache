@@ -1,12 +1,12 @@
-use std::env;
 use crate::db::packages;
 use crate::db::prelude::{Packages, Versions};
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
+use std::env;
 use std::time::Duration;
-use tokio::time::{sleep};
+use tokio::time::sleep;
 
 pub fn start_aur_version_checking(db: DatabaseConnection) {
     let default_version_check_interval = 10;

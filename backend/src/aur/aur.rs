@@ -43,7 +43,11 @@ pub async fn get_info_by_name(pkg_name: &str) -> anyhow::Result<Package> {
     Ok(response)
 }
 
-pub async fn download_pkgbuild(url: &str, dest_dir: &str, clear_build_dir: bool) -> anyhow::Result<String> {
+pub async fn download_pkgbuild(
+    url: &str,
+    dest_dir: &str,
+    clear_build_dir: bool,
+) -> anyhow::Result<String> {
     let (file_data, file_name) = match download_file(url).await {
         Ok(data) => data,
         Err(e) => {

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::ops::Add;
 use crate::builder::types::Action;
 use crate::db::builds::ActiveModel;
 use crate::db::prelude::{Builds, Packages};
@@ -7,6 +5,8 @@ use crate::db::{builds, packages, versions};
 use crate::repo::repo::add_pkg;
 use anyhow::anyhow;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use std::collections::HashMap;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::error::RecvError;
@@ -31,7 +31,7 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                         build_model,
                         db.clone(),
                         semaphore.clone(),
-                        job_handles.clone()
+                        job_handles.clone(),
                     )
                     .await;
                 }
@@ -43,7 +43,11 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
     }
 }
 
-async fn cancel_build(build_id: i32, job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>, db: DatabaseConnection) -> anyhow::Result<()> {
+async fn cancel_build(
+    build_id: i32,
+    job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
+    db: DatabaseConnection,
+) -> anyhow::Result<()> {
     let build = Builds::find_by_id(build_id)
         .one(&db)
         .await?

@@ -7,3 +7,4 @@ pub mod migration;
 pub mod packages;
 pub mod status;
 pub mod versions;
+pub mod helpers;

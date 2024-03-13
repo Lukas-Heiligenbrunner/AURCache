@@ -22,10 +22,11 @@ use rocket::futures::future::join_all;
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use std::fs;
 use std::fs::File;
+use std::{env, fs};
 use tokio::fs::symlink;
 use tokio::sync::broadcast;
+use crate::db::helpers::dbtype::{database_type, DbType};
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
@@ -33,14 +34,32 @@ fn main() {
     let (tx, _) = broadcast::channel::<Action>(32);
 
     t.block_on(async move {
-        // create folder for db stuff
-        if fs::metadata("./db").is_err() {
-            fs::create_dir("./db").unwrap();
-        }
+        let db: DatabaseConnection = match database_type() {
+            DbType::SQLITE => {
+                // create folder for db stuff
+                if fs::metadata("./db").is_err() {
+                    fs::create_dir("./db").unwrap();
+                }
 
-        let db: DatabaseConnection = Database::connect("sqlite://db/db.sqlite?mode=rwc")
-            .await
-            .unwrap();
+                Database::connect("sqlite://db/db.sqlite?mode=rwc")
+                    .await
+                    .expect("Failed to connect to SQLITE DB")
+            }
+            DbType::POSTGRES => {
+                let db_user =
+                    env::var("DB_USER").expect("No DB_USER envvar for POSTGRES Username specified");
+                let db_pwd =
+                    env::var("DB_PWD").expect("No DB_PWD envvar for POSTGRES Password specified");
+                let db_host =
+                    env::var("DB_HOST").expect("No DB_HOST envvar for POSTGRES HOST specified");
+
+                Database::connect(format!(
+                    "postgres://{db_user}:{db_pwd}@{db_host}/database?currentSchema=aurcache"
+                ))
+                .await
+                .expect("Failed to connect to POSTGRES DB")
+            }
+        };
 
         Migrator::up(&db, None).await.unwrap();
 

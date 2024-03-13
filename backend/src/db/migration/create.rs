@@ -1,4 +1,5 @@
 use sea_orm_migration::prelude::*;
+use crate::db::helpers::dbtype::{database_type, DbType};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -8,9 +9,10 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        // Use `execute_unprepared` if the SQL statement doesn't have value bindings
-        db.execute_unprepared(
-            r#"
+        match database_type() {
+            DbType::SQLITE => {
+                db.execute_unprepared(
+                    r#"
 create table builds
 (
 	id integer not null
@@ -54,13 +56,18 @@ create table versions
 	package_id integer not null,
 	file_name TEXT
 );
-            "#,
-        )
-        .await?;
+"#).await?;
+            }
+            DbType::POSTGRES => {
+                // todo create postgresql schema!
+            }
+        }
+
         Ok(())
     }
 
     async fn down(&self, _: &SchemaManager) -> Result<(), DbErr> {
+        // this is the initial db schema state, so no down script here!
         Ok(())
     }
 }
