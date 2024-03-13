@@ -63,9 +63,9 @@ create table versions
             DbType::POSTGRES => {
                 db.execute_unprepared(
                     r#"
-CREATE SCHEMA IF NOT EXISTS aurcache;
+CREATE SCHEMA IF NOT EXISTS public;
 
-CREATE TABLE aurcache.builds (
+CREATE TABLE public.builds (
     id SERIAL PRIMARY KEY,
     pkg_id INTEGER NOT NULL,
     version_id INTEGER NOT NULL,
@@ -75,25 +75,25 @@ CREATE TABLE aurcache.builds (
     end_time INTEGER
 );
 
-CREATE TABLE aurcache.packages (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    status INTEGER DEFAULT 0 NOT NULL,
-    out_of_date INTEGER DEFAULT 0 NOT NULL,
-    latest_version_id INTEGER REFERENCES aurcache.versions(id),
-    latest_aur_version TEXT
-);
-
-CREATE TABLE aurcache.status (
-    id SERIAL PRIMARY KEY,
-    value TEXT
-);
-
-CREATE TABLE aurcache.versions (
+CREATE TABLE public.versions (
     id SERIAL PRIMARY KEY,
     version TEXT NOT NULL,
     package_id INTEGER NOT NULL,
     file_name TEXT
+);
+
+CREATE TABLE public.packages (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    status INTEGER DEFAULT 0 NOT NULL,
+    out_of_date INTEGER DEFAULT 0 NOT NULL,
+    latest_version_id INTEGER REFERENCES public.versions(id),
+    latest_aur_version TEXT
+);
+
+CREATE TABLE public.status (
+    id SERIAL PRIMARY KEY,
+    value TEXT
 );
 "#,
                 )

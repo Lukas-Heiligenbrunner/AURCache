@@ -54,7 +54,7 @@ fn main() {
                     env::var("DB_HOST").expect("No DB_HOST envvar for POSTGRES HOST specified");
 
                 Database::connect(format!(
-                    "postgres://{db_user}:{db_pwd}@{db_host}/database?currentSchema=aurcache"
+                    "postgres://{db_user}:{db_pwd}@{db_host}/postgres?currentSchema=public"
                 ))
                 .await
                 .expect("Failed to connect to POSTGRES DB")
