@@ -1,3 +1,4 @@
+use std::env;
 use crate::db::packages;
 use crate::db::prelude::{Packages, Versions};
 use anyhow::anyhow;
@@ -5,11 +6,16 @@ use aur_rs::{Package, Request};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep};
 
 pub fn start_aur_version_checking(db: DatabaseConnection) {
+    let default_version_check_interval = 10;
+    let check_interval = env::var("VERSION_CHECK_INTERVAL")
+        .map(|x| x.parse::<u64>().unwrap_or(default_version_check_interval))
+        .unwrap_or(default_version_check_interval);
+
     tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(check_interval)).await;
         loop {
             println!("performing aur version checks");
             match aur_check_versions(db.clone()).await {
