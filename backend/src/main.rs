@@ -12,6 +12,7 @@ use crate::api::backend;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
+use crate::db::helpers::dbtype::{database_type, DbType};
 use crate::db::migration::Migrator;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use flate2::read::GzEncoder;
@@ -26,7 +27,6 @@ use std::fs::File;
 use std::{env, fs};
 use tokio::fs::symlink;
 use tokio::sync::broadcast;
-use crate::db::helpers::dbtype::{database_type, DbType};
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();

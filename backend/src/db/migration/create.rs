@@ -1,5 +1,5 @@
-use sea_orm_migration::prelude::*;
 use crate::db::helpers::dbtype::{database_type, DbType};
+use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -56,10 +56,48 @@ create table versions
 	package_id integer not null,
 	file_name TEXT
 );
-"#).await?;
+"#,
+                )
+                .await?;
             }
             DbType::POSTGRES => {
-                // todo create postgresql schema!
+                db.execute_unprepared(
+                    r#"
+CREATE SCHEMA IF NOT EXISTS aurcache;
+
+CREATE TABLE aurcache.builds (
+    id SERIAL PRIMARY KEY,
+    pkg_id INTEGER NOT NULL,
+    version_id INTEGER NOT NULL,
+    output TEXT,
+    status INTEGER,
+    start_time INTEGER,
+    end_time INTEGER
+);
+
+CREATE TABLE aurcache.packages (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    status INTEGER DEFAULT 0 NOT NULL,
+    out_of_date INTEGER DEFAULT 0 NOT NULL,
+    latest_version_id INTEGER REFERENCES aurcache.versions(id),
+    latest_aur_version TEXT
+);
+
+CREATE TABLE aurcache.status (
+    id SERIAL PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE aurcache.versions (
+    id SERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    package_id INTEGER NOT NULL,
+    file_name TEXT
+);
+"#,
+                )
+                .await?;
             }
         }
 
