@@ -20,7 +20,7 @@ create table builds
 			primary key autoincrement,
 	pkg_id integer not null,
 	version_id integer not null,
-	ouput TEXT,
+	output TEXT,
 	status integer,
 	start_time INTEGER,
 	end_time integer

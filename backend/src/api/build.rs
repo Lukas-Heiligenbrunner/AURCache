@@ -30,7 +30,7 @@ pub async fn build_output(
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("couldn't find id".to_string()))?;
 
-    return match build.ouput {
+    return match build.output {
         None => Err(NotFound("No Output".to_string())),
         Some(v) => match startline {
             None => Ok(v),

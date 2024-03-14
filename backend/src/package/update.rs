@@ -61,7 +61,7 @@ pub async fn package_update(
     let build = builds::ActiveModel {
         pkg_id: version_model.package_id.clone(),
         version_id: version_model.id.clone(),
-        ouput: Set(None),
+        output: Set(None),
         status: Set(Some(3)),
         start_time: Set(Some(
             SystemTime::now()

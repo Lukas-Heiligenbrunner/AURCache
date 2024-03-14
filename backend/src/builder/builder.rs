@@ -198,12 +198,12 @@ async fn append_db_log_output(
 
     let mut build: builds::ActiveModel = build.into();
 
-    match build.ouput.unwrap() {
+    match build.output.unwrap() {
         None => {
-            build.ouput = Set(Some(text.add("\n")));
+            build.output = Set(Some(text.add("\n")));
         }
         Some(s) => {
-            build.ouput = Set(Some(s.add(text.as_str()).add("\n")));
+            build.output = Set(Some(s.add(text.as_str()).add("\n")));
         }
     }
 
