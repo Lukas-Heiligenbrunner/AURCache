@@ -9,13 +9,13 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 pub fn start_aur_version_checking(db: DatabaseConnection) {
-    let default_version_check_interval = 10;
+    let default_version_check_interval = 3600;
     let check_interval = env::var("VERSION_CHECK_INTERVAL")
         .map(|x| x.parse::<u64>().unwrap_or(default_version_check_interval))
         .unwrap_or(default_version_check_interval);
 
     tokio::spawn(async move {
-        sleep(Duration::from_secs(check_interval)).await;
+        sleep(Duration::from_secs(10)).await;
         loop {
             println!("performing aur version checks");
             match aur_check_versions(db.clone()).await {
@@ -24,7 +24,7 @@ pub fn start_aur_version_checking(db: DatabaseConnection) {
                     println!("Failed to perform aur version check: {e}")
                 }
             }
-            sleep(Duration::from_secs(3600)).await;
+            sleep(Duration::from_secs(check_interval)).await;
         }
     });
 }

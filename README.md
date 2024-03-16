@@ -51,6 +51,17 @@ SigLevel = Optional TrustAll
 Server = http://localhost:8080/
 ```
 
+## Configuration
+Environment Variables
+
+| Variable   | Type                  | Description                                       | Default |
+|------------|-----------------------|---------------------------------------------------|---------|
+| DB_TYPE    | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)             | SQLITE  |
+| DB_USER | String                | POSTGRES Username  (ignored if sqlite)            | null    |
+| DB_PWD | String                | POSTGRES Password  (ignored if sqlite)            | null    |
+| DB_HOST | String                | POSTGRES Host   (ignored if sqlite)               | null    |
+| VERSION_CHECK_INTERVAL | Integer | Interval in seconds for checking package versions | 3600    |
+
 ## Build Info
 
 The AURCache project comprises two main components: a Flutter frontend and a Rust backend.
