@@ -21,6 +21,7 @@ sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "sqlx-postgres", "runt
 sea-orm-migration = {version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 serde = "1.0.193"
 rust-embed = "8.1.0"
+rocket_seek_stream = "0.2.6"
 
 [[bin]]
 name = "untitled"
