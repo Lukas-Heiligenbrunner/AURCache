@@ -7,6 +7,7 @@ mod pkgbuild;
 mod repo;
 mod scheduler;
 mod utils;
+mod cusom_file_server;
 
 use crate::api::backend;
 #[cfg(feature = "static")]
@@ -26,6 +27,7 @@ use std::fs;
 use std::fs::File;
 use tokio::fs::symlink;
 use tokio::sync::broadcast;
+use crate::cusom_file_server::CustomFileServer;
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
@@ -109,7 +111,7 @@ fn main() {
             };
 
             let launch_result = rocket::custom(config)
-                .mount("/", FileServer::from("./repo"))
+                .mount("/", CustomFileServer::from("./repo"))
                 .launch()
                 .await;
             match launch_result {
