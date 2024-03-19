@@ -9,13 +9,11 @@ use rocket::{get, State};
 
 use crate::api::types::input::ListStats;
 use rocket_okapi::openapi;
-use sea_orm::prelude::Expr;
-use sea_orm::sea_query::Function::Avg;
-use sea_orm::sea_query::{Func, QueryStatement};
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
-use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, QuerySelect, Statement, TryGetableMany};
+use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
 
+/// get general build-server stats
 #[openapi(tag = "stats")]
 #[get("/stats")]
 pub async fn stats(db: &State<DatabaseConnection>) -> Result<Json<ListStats>, NotFound<String>> {

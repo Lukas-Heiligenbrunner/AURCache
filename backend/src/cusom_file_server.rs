@@ -1,10 +1,9 @@
-use std::path::{PathBuf, Path};
-use rocket::{async_trait, Data, figment, Request, Route};
-use rocket::futures::StreamExt;
-use rocket::http::Method;
 use rocket::http::uri::Segments;
+use rocket::http::Method;
 use rocket::route::{Handler, Outcome};
+use rocket::{async_trait, figment, Data, Request, Route};
 use rocket_seek_stream::SeekStream;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct CustomFileServer {
@@ -24,7 +23,10 @@ impl CustomFileServer {
     #[track_caller]
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         let path = path.as_ref();
-        CustomFileServer { root: path.into(), rank: Self::DEFAULT_RANK }
+        CustomFileServer {
+            root: path.into(),
+            rank: Self::DEFAULT_RANK,
+        }
     }
 
     pub fn rank(mut self, rank: isize) -> Self {
@@ -47,7 +49,9 @@ impl Handler for CustomFileServer {
     async fn handle<'r>(&self, req: &'r Request<'_>, data: Data<'r>) -> Outcome<'r> {
         use rocket::http::uri::fmt::Path;
 
-        let path = req.segments::<Segments<'_, Path>>(0..).ok()
+        let path = req
+            .segments::<Segments<'_, Path>>(0..)
+            .ok()
             .and_then(|segments| segments.to_path_buf(true).ok())
             .map(|path| self.root.join(path));
 

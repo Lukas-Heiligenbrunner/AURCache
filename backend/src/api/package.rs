@@ -17,6 +17,7 @@ use sea_orm::DatabaseConnection;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use tokio::sync::broadcast::Sender;
 
+/// Add new Package to build queue
 #[openapi(tag = "Packages")]
 #[post("/package", data = "<input>")]
 pub async fn package_add_endpoint(
@@ -29,6 +30,7 @@ pub async fn package_add_endpoint(
         .map_err(|e| BadRequest(Some(e.to_string())))
 }
 
+/// Update a package with id
 #[openapi(tag = "Packages")]
 #[post("/package/<id>/update", data = "<input>")]
 pub async fn package_update_endpoint(
@@ -43,6 +45,7 @@ pub async fn package_update_endpoint(
         .map_err(|e| BadRequest(Some(e.to_string())))
 }
 
+/// Delete package with id
 #[openapi(tag = "Packages")]
 #[delete("/package/<id>")]
 pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), String> {
@@ -53,6 +56,7 @@ pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), 
     Ok(())
 }
 
+/// Get all packages currently in Repo
 #[openapi(tag = "Packages")]
 #[get("/packages/list?<limit>")]
 pub async fn package_list(
@@ -81,6 +85,7 @@ pub async fn package_list(
     Ok(Json(all))
 }
 
+/// get specific package by id
 #[openapi(tag = "Packages")]
 #[get("/package/<id>")]
 pub async fn get_package(

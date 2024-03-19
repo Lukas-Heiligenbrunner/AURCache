@@ -8,13 +8,14 @@ use rocket::{delete, get, post, State};
 use crate::api::types::input::ListBuildsModel;
 use crate::builder::types::Action;
 use rocket_okapi::openapi;
-use sea_orm::ColumnTrait;
-use sea_orm::QueryFilter;
 use sea_orm::{
-    DatabaseConnection, EntityTrait, ModelTrait, QueryOrder, QuerySelect, RelationTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
 };
 use tokio::sync::broadcast::Sender;
 
+/// Get build output of specified build
+/// use startline to specify a start-line (to fetch only new content)
 #[openapi(tag = "build")]
 #[get("/build/<buildid>/output?<startline>")]
 pub async fn build_output(
@@ -58,6 +59,7 @@ pub async fn build_output(
     };
 }
 
+/// get list of all builds
 #[openapi(tag = "build")]
 #[get("/builds?<pkgid>&<limit>")]
 pub async fn list_builds(
@@ -148,12 +150,9 @@ pub async fn delete_build(
 #[openapi(tag = "build")]
 #[post("/build/<buildid>/cancel")]
 pub async fn cancel_build(
-    db: &State<DatabaseConnection>,
     tx: &State<Sender<Action>>,
     buildid: i32,
 ) -> Result<(), NotFound<String>> {
-    let db = db as &DatabaseConnection;
-
     let _ = tx
         .send(Action::Cancel(buildid))
         .map_err(|e| NotFound(e.to_string()))?;

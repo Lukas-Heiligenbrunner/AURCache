@@ -1,25 +1,25 @@
 mod api;
 mod aur;
 mod builder;
+mod cusom_file_server;
 mod db;
 mod package;
 mod pkgbuild;
 mod repo;
 mod scheduler;
 mod utils;
-mod cusom_file_server;
 
 use crate::api::backend;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
+use crate::cusom_file_server::CustomFileServer;
 use crate::db::helpers::dbtype::{database_type, DbType};
 use crate::db::migration::Migrator;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use flate2::read::GzEncoder;
 use flate2::Compression;
 use rocket::config::Config;
-use rocket::fs::FileServer;
 use rocket::futures::future::join_all;
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::{Database, DatabaseConnection};
@@ -28,7 +28,6 @@ use std::fs::File;
 use std::{env, fs};
 use tokio::fs::symlink;
 use tokio::sync::broadcast;
-use crate::cusom_file_server::CustomFileServer;
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
