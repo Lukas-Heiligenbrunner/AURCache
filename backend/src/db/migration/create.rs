@@ -71,8 +71,8 @@ CREATE TABLE public.builds (
     version_id INTEGER NOT NULL,
     output TEXT,
     status INTEGER,
-    start_time INTEGER,
-    end_time INTEGER
+    start_time OID,
+    end_time OID
 );
 
 CREATE TABLE public.versions (

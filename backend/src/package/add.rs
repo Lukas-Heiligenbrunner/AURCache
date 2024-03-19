@@ -66,6 +66,7 @@ pub async fn package_add(
         ..Default::default()
     };
     let new_build = build.save(&txn).await?;
+    txn.commit().await?;
 
     let _ = tx.send(Action::Build(
         pkg.name,
@@ -74,8 +75,6 @@ pub async fn package_add(
         new_version,
         new_build,
     ));
-
-    txn.commit().await?;
 
     Ok(())
 }
