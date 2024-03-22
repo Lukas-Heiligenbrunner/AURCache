@@ -72,8 +72,8 @@ pub async fn package_add(
         pkg.name,
         pkg.version,
         pkg.url_path.unwrap(),
-        new_version,
-        new_build,
+        Box::from(new_version),
+        Box::from(new_build),
     ));
 
     Ok(())

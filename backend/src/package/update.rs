@@ -78,8 +78,8 @@ pub async fn package_update(
         pkg.name,
         pkg.version,
         pkg.url_path.unwrap(),
-        version_model,
-        new_build,
+        Box::from(version_model),
+        Box::from(new_build),
     ));
 
     txn.commit().await?;

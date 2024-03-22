@@ -6,8 +6,8 @@ pub enum Action {
         String,
         String,
         String,
-        versions::ActiveModel,
-        builds::ActiveModel,
+        Box<versions::ActiveModel>,
+        Box<builds::ActiveModel>,
     ),
     Cancel(i32),
 }

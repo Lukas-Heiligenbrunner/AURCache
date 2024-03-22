@@ -76,8 +76,8 @@ async fn queue_package(
     name: String,
     version: String,
     url: String,
-    version_model: versions::ActiveModel,
-    mut build_model: builds::ActiveModel,
+    version_model: Box<versions::ActiveModel>,
+    mut build_model: Box<ActiveModel>,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
     job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
@@ -92,9 +92,9 @@ async fn queue_package(
 
         // set build status to building
         build_model.status = Set(Some(0));
-        build_model = build_model.save(&db).await.unwrap();
+        let build_model = build_model.save(&db).await.unwrap();
 
-        let _ = build_package(build_model, db, version_model, version, name, url).await;
+        let _ = build_package(build_model, db, *version_model, version, name, url).await;
     });
     job_handles.lock().await.insert(build_id, handle);
     Ok(())

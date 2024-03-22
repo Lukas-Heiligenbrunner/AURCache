@@ -58,10 +58,11 @@ pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), 
 
 /// Get all packages currently in Repo
 #[openapi(tag = "Packages")]
-#[get("/packages/list?<limit>")]
+#[get("/packages/list?<limit>&<page>")]
 pub async fn package_list(
     db: &State<DatabaseConnection>,
     limit: Option<u64>,
+    page: Option<u64>,
 ) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -77,6 +78,10 @@ pub async fn package_list(
         .column_as(packages::Column::LatestVersionId, "latest_version_id")
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
+        .offset(
+            page.unwrap_or(0)
+                * limit.ok_or(NotFound("Limit has to be set when using page".to_string()))?,
+        )
         .into_model::<ListPackageModel>()
         .all(db)
         .await

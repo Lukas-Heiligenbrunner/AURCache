@@ -61,11 +61,12 @@ pub async fn build_output(
 
 /// get list of all builds
 #[openapi(tag = "build")]
-#[get("/builds?<pkgid>&<limit>")]
+#[get("/builds?<pkgid>&<limit>&<page>")]
 pub async fn list_builds(
     db: &State<DatabaseConnection>,
     pkgid: Option<i32>,
     limit: Option<u64>,
+    page: Option<u64>,
 ) -> Result<Json<Vec<ListBuildsModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -81,7 +82,11 @@ pub async fn list_builds(
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
         .order_by(builds::Column::StartTime, Order::Desc)
-        .limit(limit);
+        .limit(limit)
+        .offset(
+            page.unwrap_or(0)
+                * limit.ok_or(NotFound("Limit has to be set when using page".to_string()))?,
+        );
 
     let build = match pkgid {
         None => basequery.into_model::<ListBuildsModel>().all(db),
