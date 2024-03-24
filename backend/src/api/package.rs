@@ -78,10 +78,10 @@ pub async fn package_list(
         .column_as(packages::Column::LatestVersionId, "latest_version_id")
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
-        .offset(
-            page.unwrap_or(0)
-                * limit.ok_or(NotFound("Limit has to be set when using page".to_string()))?,
-        )
+        .offset(match page.zip(limit) {
+            None => None,
+            Some((page, limit)) => Some(page * limit),
+        })
         .into_model::<ListPackageModel>()
         .all(db)
         .await

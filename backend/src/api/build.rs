@@ -83,10 +83,10 @@ pub async fn list_builds(
         .column(builds::Column::StartTime)
         .order_by(builds::Column::StartTime, Order::Desc)
         .limit(limit)
-        .offset(
-            page.unwrap_or(0)
-                * limit.ok_or(NotFound("Limit has to be set when using page".to_string()))?,
-        );
+        .offset(match page.zip(limit) {
+            None => None,
+            Some((page, limit)) => Some(page * limit),
+        });
 
     let build = match pkgid {
         None => basequery.into_model::<ListBuildsModel>().all(db),
