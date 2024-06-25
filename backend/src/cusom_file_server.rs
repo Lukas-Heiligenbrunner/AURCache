@@ -1,7 +1,9 @@
+use rocket::fs::NamedFile;
 use rocket::http::uri::Segments;
-use rocket::http::Method;
+use rocket::http::{Method, Status};
+use rocket::response::Responder;
 use rocket::route::{Handler, Outcome};
-use rocket::{async_trait, figment, Data, Request, Route};
+use rocket::{async_trait, figment, Data, Request, Response, Route};
 use rocket_seek_stream::SeekStream;
 use std::path::{Path, PathBuf};
 
@@ -55,9 +57,17 @@ impl Handler for CustomFileServer {
             .and_then(|segments| segments.to_path_buf(true).ok())
             .map(|path| self.root.join(path));
 
-        match path {
-            Some(p) => Outcome::from_or_forward(req, data, SeekStream::from_path(p).ok()),
-            None => Outcome::forward(data),
+        let response = match path {
+            None => {None},
+            Some(p) => NamedFile::open(p)
+                .await
+                .ok()
+                .and_then(|file| file.respond_to(req).ok()),
+        };
+
+        match response {
+            None => Outcome::forward(data, Status::NotFound),
+            Some(file) => Outcome::Success(file),
         }
     }
 }

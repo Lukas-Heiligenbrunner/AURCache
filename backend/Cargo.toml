@@ -8,19 +8,19 @@ edition = "2021"
 
 [dependencies]
 aur-rs = "0.1.1"
-tokio = "1.35.1"
+tokio = "1.38.0"
 anyhow = "1.0.76"
 
-reqwest = { version = "0.11.23", features = ["blocking", "gzip"] }
-flate2 = "1.0.28"
-tar = "0.4.40"
+reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
+flate2 = "1.0.30"
+tar = "0.4.41"
 
-rocket = "0.5.0-rc.3"
-rocket_okapi = { version = "0.8.0-rc.3", features = ["swagger"]  }
-sea-orm = { version = "0.12", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
-sea-orm-migration = {version = "0.12", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
-serde = "1.0.193"
-rust-embed = "8.1.0"
+rocket = "0.5.0"
+rocket_okapi = { version = "0.8.0", features = ["swagger"]  }
+sea-orm = { version = "1.0.0-rc.7", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
+sea-orm-migration = {version = "1.0.0-rc.7", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
+serde = "1.0.203"
+rust-embed = "8.4.0"
 rocket_seek_stream = "0.2.6"
 
 [[bin]]

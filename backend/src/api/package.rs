@@ -27,7 +27,7 @@ pub async fn package_add_endpoint(
 ) -> Result<(), BadRequest<String>> {
     package_add(db, input.name.clone(), tx)
         .await
-        .map_err(|e| BadRequest(Some(e.to_string())))
+        .map_err(|e| BadRequest(e.to_string()))
 }
 
 /// Update a package with id
@@ -42,7 +42,7 @@ pub async fn package_update_endpoint(
     package_update(db, id, input.force, tx)
         .await
         .map(Json)
-        .map_err(|e| BadRequest(Some(e.to_string())))
+        .map_err(|e| BadRequest(e.to_string()))
 }
 
 /// Delete package with id
