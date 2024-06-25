@@ -23,7 +23,7 @@ class RecentBuilds extends StatelessWidget {
         children: [
           Text(
             "Recent Builds",
-            style: Theme.of(context).textTheme.subtitle1,
+            style: Theme.of(context).textTheme.titleMedium,
           ),
           APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
             key: const Key("Builds on dashboard"),

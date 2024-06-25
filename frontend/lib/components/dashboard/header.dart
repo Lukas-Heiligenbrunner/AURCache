@@ -25,14 +25,14 @@ class Header extends StatelessWidget {
             children: [
               Text(
                 "Hello, Arch User 👋",
-                style: Theme.of(context).textTheme.headline6,
+                style: Theme.of(context).textTheme.titleLarge,
               ),
               const SizedBox(
                 height: 8,
               ),
               Text(
                 "Welcome to your Build server",
-                style: Theme.of(context).textTheme.subtitle2,
+                style: Theme.of(context).textTheme.titleSmall,
               ),
             ],
           ),
