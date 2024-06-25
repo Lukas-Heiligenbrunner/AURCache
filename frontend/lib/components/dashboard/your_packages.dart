@@ -23,7 +23,7 @@ class YourPackages extends StatelessWidget {
         children: [
           Text(
             "Your Packages",
-            style: Theme.of(context).textTheme.subtitle1,
+            style: Theme.of(context).textTheme.titleMedium,
           ),
           APIBuilder<PackagesProvider, List<Package>, PackagesDTO>(
             key: const Key("Packages on dashboard"),

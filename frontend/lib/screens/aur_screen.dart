@@ -58,7 +58,7 @@ class _AurScreenState extends State<AurScreen> {
                 children: [
                   Text(
                     "AUR Packages",
-                    style: Theme.of(context).textTheme.subtitle1,
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const Text("Search:"),
                   TextField(

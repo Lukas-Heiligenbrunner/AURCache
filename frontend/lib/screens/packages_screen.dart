@@ -33,7 +33,7 @@ class PackagesScreen extends StatelessWidget {
                 children: [
                   Text(
                     "All Packages",
-                    style: Theme.of(context).textTheme.subtitle1,
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                   SizedBox(
                     width: double.infinity,

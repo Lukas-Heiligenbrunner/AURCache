@@ -37,7 +37,7 @@ impl Handler for CustomHandler {
         // }
 
         match <Asset as RustEmbed>::get(path.to_string_lossy().as_ref()) {
-            None => Outcome::Failure(Status::NotFound),
+            None => Outcome::Error(Status::NotFound),
             Some(file_content) => {
                 let content_type: ContentType = path
                     .extension()
