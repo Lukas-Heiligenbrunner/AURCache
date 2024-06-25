@@ -3,8 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - '**'
-      - '!master'
+      - master
 
 jobs:
   build-and-push:
@@ -23,3 +22,4 @@ jobs:
       - name: Build and push Docker image
         run: |
           docker build -t luki42/aurcache:latest .
+          docker push luki42/aurcache:latest
