@@ -26,7 +26,6 @@ pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
                     let _ = queue_package(
                         name,
                         version,
-                        url,
                         version_model,
                         build_model,
                         db.clone(),
@@ -75,7 +74,6 @@ async fn cancel_build(
 async fn queue_package(
     name: String,
     version: String,
-    url: String,
     version_model: Box<versions::ActiveModel>,
     mut build_model: Box<ActiveModel>,
     db: DatabaseConnection,
@@ -94,7 +92,7 @@ async fn queue_package(
         build_model.status = Set(Some(0));
         let build_model = build_model.save(&db).await.unwrap();
 
-        let _ = build_package(build_model, db, *version_model, version, name, url).await;
+        let _ = build_package(build_model, db, *version_model, version, name).await;
     });
     job_handles.lock().await.insert(build_id, handle);
     Ok(())
@@ -106,7 +104,6 @@ async fn build_package(
     mut version_model: versions::ActiveModel,
     version: String,
     name: String,
-    url: String,
 ) -> anyhow::Result<()> {
     let (tx, rx) = broadcast::channel::<String>(3);
     spawn_log_appender(db.clone(), new_build.clone(), rx);
@@ -122,7 +119,9 @@ async fn build_package(
     pkg.status = Set(0);
     pkg = pkg.update(&db).await?.into();
 
-    match add_pkg(url, version, name, tx, false).await {
+    let build_id = new_build.id.clone().unwrap();
+
+    match add_pkg(version, name, tx, build_id).await {
         Ok(pkg_file_name) => {
             println!("successfully built package");
             // update package success status
@@ -170,7 +169,7 @@ fn spawn_log_appender(db2: DatabaseConnection, new_build2: ActiveModel, mut rx: 
         loop {
             match rx.recv().await {
                 Ok(output_line) => {
-                    println!("{output_line}");
+                    print!("{}", output_line);
 
                     let _ = append_db_log_output(&db2, output_line, new_build2.id.clone().unwrap())
                         .await;

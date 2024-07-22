@@ -26,11 +26,40 @@ services:
         volumes:
           - ./aurcache/db:/app/db
           - ./aurcache/repo:/app/repo
+        privileged: true 
 ```
 
 Make sure to define the db path and repo path as volumes.
 
 The default Port 8081 serves the Frontend and Port 8080 serves the Repository.
+It needs to be a priviledged container to be able to use dind for spawining build containers.
+
+If you are uncomfortable with the priviledged container you can pass through the docker socket and create a volume mounted to
+`/app/builds` on aurcache container and set the `BUILD_CONTAINER_DIR` environment variable to the volume.
+
+For example:
+```yaml
+version: '3'
+services:
+    aurcache:
+        image: luki42/aurcache:latest
+        ports:
+        - "8080:8080"
+        - "8081:8081"
+        volumes:
+          - ./aurcache/db:/app/db
+          - ./aurcache/repo:/app/repo
+          - /var/run/docker.sock:/var/run/docker.sock
+          - artifact_cache:/app/builds
+        environment:
+          - BUILD_CONTAINER_DIR=artifact_cache # also absolute path is possible
+volumes:
+  artifact_cache:
+        driver: local
+```
+
+But keep in mind with this method containers are spawned on the host system and not in the aurcache container.
+(And destroyed afterwards)
 
 To start AURCache with Docker-compose, run:
 
@@ -54,13 +83,14 @@ Server = http://localhost:8080/
 ## Configuration
 Environment Variables
 
-| Variable   | Type                  | Description                                       | Default |
-|------------|-----------------------|---------------------------------------------------|---------|
-| DB_TYPE    | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)             | SQLITE  |
-| DB_USER | String                | POSTGRES Username  (ignored if sqlite)            | null    |
-| DB_PWD | String                | POSTGRES Password  (ignored if sqlite)            | null    |
-| DB_HOST | String                | POSTGRES Host   (ignored if sqlite)               | null    |
-| VERSION_CHECK_INTERVAL | Integer | Interval in seconds for checking package versions | 3600    |
+| Variable               | Type                  | Description                                                         | Default |
+|------------------------|-----------------------|---------------------------------------------------------------------|---------|
+| DB_TYPE                | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)                               | SQLITE  |
+| DB_USER                | String                | POSTGRES Username  (ignored if sqlite)                              | null    |
+| DB_PWD                 | String                | POSTGRES Password  (ignored if sqlite)                              | null    |
+| DB_HOST                | String                | POSTGRES Host   (ignored if sqlite)                                 | null    |
+| VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600    |
+| BUILD_CONTAINER_DIR    | String                | pkg share directory between aurcache container and build containers | null    |
 
 ## Build Info
 
