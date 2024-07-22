@@ -1,6 +1,5 @@
 [package]
-# todo rename to AURCentral
-name = "untitled"
+name = "aurcache"
 version = "0.1.0"
 edition = "2021"
 
@@ -25,7 +24,7 @@ rocket_seek_stream = "0.2.6"
 shiplift = "0.7.0"
 
 [[bin]]
-name = "untitled"
+name = "aurcache"
 path = "src/main.rs"
 
 [features]

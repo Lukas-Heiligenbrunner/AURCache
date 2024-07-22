@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Start main process
-/usr/local/bin/untitled &
+/usr/local/bin/aurcache &
 
 DOCKER_SOCKET="/var/run/docker.sock"
 # Check if the Docker socket is available

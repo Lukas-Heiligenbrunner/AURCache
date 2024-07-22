@@ -121,9 +121,10 @@ async fn build_package(
 
     let build_id = new_build.id.clone().unwrap();
 
-    match add_pkg(version, name, tx, build_id).await {
+    match add_pkg(version, name, tx.clone(), build_id).await {
         Ok(pkg_file_name) => {
-            println!("successfully built package");
+            _ = tx.send("successfully built package".to_string());
+
             // update package success status
             pkg.status = Set(1);
             pkg.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
@@ -158,7 +159,7 @@ async fn build_package(
             ));
             let _ = new_build.update(&db).await;
 
-            println!("Error: {e}")
+            _ = tx.send(e.to_string());
         }
     };
     Ok(())

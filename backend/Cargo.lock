@@ -237,6 +237,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aur-rs",
+ "flate2",
+ "reqwest 0.12.5",
+ "rocket",
+ "rocket_okapi",
+ "rocket_seek_stream",
+ "rust-embed",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "shiplift",
+ "tar",
+ "tokio",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3935,26 +3955,6 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
-
-[[package]]
-name = "untitled"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aur-rs",
- "flate2",
- "reqwest 0.12.5",
- "rocket",
- "rocket_okapi",
- "rocket_seek_stream",
- "rust-embed",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "shiplift",
- "tar",
- "tokio",
-]
 
 [[package]]
 name = "untrusted"

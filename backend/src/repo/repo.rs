@@ -25,6 +25,11 @@ pub async fn add_pkg(
 ) -> anyhow::Result<String> {
     let docker = Docker::new();
 
+    match docker.ping().await {
+        Ok(_) => {},
+        Err(e) => return Err(anyhow!("Connection to Docker Socket failed: {}", e)),
+    }
+
     // repull image to make sure it's up to date
     let mut stream = docker.images().pull(
         &PullOptions::builder()
@@ -34,14 +39,8 @@ pub async fn add_pkg(
 
     while let Some(pull_result) = stream.next().await {
         match pull_result {
-            Ok(output) => {
-                println!("{:?}", output);
-                _ = tx.send(format!("{:?}", output));
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                _ = tx.send(format!("{}", e));
-            }
+            Ok(output) => _ = tx.send(format!("{:?}", output)),
+            Err(e) => _ = tx.send(format!("{}", e))
         }
     }
 
@@ -50,7 +49,7 @@ pub async fn add_pkg(
     fs::create_dir_all(work_dir.clone())?;
     fs::set_permissions(work_dir.clone(), Permissions::from_mode(0o777))?;
 
-    let host_build_path = env::var("BUILD_CONTAINER_DIR").unwrap_or(work_dir.display().to_string());
+    let host_build_path = env::var("BUILD_ARTIFACT_DIR").unwrap_or(work_dir.display().to_string());
 
     // create new docker container for current build
     let mountpoint = format!("{}:/var/cache/makepkg/pkg", host_build_path);
@@ -103,17 +102,16 @@ pub async fn add_pkg(
         return Err(anyhow!("No files found in build directory"));
     }
 
+    _ = tx.send(format!("Copy {} files from build dir to repo", archive_paths.len()));
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
-        // todo force overwrite if file already exists
         fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
         fs::remove_file(archive.path())?;
 
-        repo_add(archive_name)?;
+        repo_add(archive_name.clone())?;
+        _ = tx.send(format!("Successfully added '{}' to the repo archive", archive_name));
     }
-
-    fs::remove_dir(work_dir)?;
 
     Ok(name)
 }
