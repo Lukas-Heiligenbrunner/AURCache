@@ -51,7 +51,7 @@ async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
             }
             Some(result) => {
                 let mut package: packages::ActiveModel = package.into();
-                // tdo remove unwraps and handle errors
+                // todo remove unwraps and handle errors
                 let latest_version =
                     Versions::find_by_id(package.latest_version_id.clone().unwrap().unwrap())
                         .one(&db)

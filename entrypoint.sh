@@ -3,14 +3,11 @@
 # Start main process
 /usr/local/bin/aurcache &
 
-DOCKER_SOCKET="/var/run/docker.sock"
-# Check if the Docker socket is available
-if [ -S "$DOCKER_SOCKET" ]; then
-    echo "Docker socket is available."
+if [[ -z "${BUILD_ARTIFACT_DIR}" ]]; then
+  echo "Starting Podman service."
+  podman system service --time=0 unix:///var/run/docker.sock &
 else
-    echo "Docker socket is not available. Starting Podman service..."
-
-    podman system service --time=0 unix://$DOCKER_SOCKET &
+  echo "Docker socket should be available."
 fi
 
 # Wait for any process to exit
