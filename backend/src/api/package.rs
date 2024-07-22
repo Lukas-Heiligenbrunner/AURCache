@@ -78,10 +78,7 @@ pub async fn package_list(
         .column_as(packages::Column::LatestVersionId, "latest_version_id")
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
-        .offset(match page.zip(limit) {
-            None => None,
-            Some((page, limit)) => Some(page * limit),
-        })
+        .offset(page.zip(limit).map(|(page, limit)| page * limit))
         .into_model::<ListPackageModel>()
         .all(db)
         .await
