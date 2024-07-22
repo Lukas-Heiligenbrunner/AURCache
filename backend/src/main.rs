@@ -4,7 +4,6 @@ mod builder;
 mod cusom_file_server;
 mod db;
 mod package;
-mod pkgbuild;
 mod repo;
 mod scheduler;
 mod utils;

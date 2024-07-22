@@ -1,9 +1,5 @@
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
-use flate2::bufread::GzDecoder;
-use std::fs;
-use std::path::Path;
-use tar::Archive;
 
 pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
     let request = Request::default();
@@ -41,67 +37,4 @@ pub async fn get_info_by_name(pkg_name: &str) -> anyhow::Result<Package> {
     };
 
     Ok(response)
-}
-
-pub async fn download_pkgbuild(
-    url: &str,
-    dest_dir: &str,
-    clear_build_dir: bool,
-) -> anyhow::Result<String> {
-    let (file_data, file_name) = match download_file(url).await {
-        Ok(data) => data,
-        Err(e) => {
-            return Err(anyhow!("Error downloading file: {}", e));
-        }
-    };
-
-    if clear_build_dir {
-        fs::remove_dir_all(dest_dir)?;
-    }
-
-    // Check if the directory exists
-    if fs::metadata(dest_dir).is_err() {
-        // Create the directory if it does not exist
-        fs::create_dir(dest_dir)?;
-    }
-
-    unpack_tar_gz(&file_data, dest_dir)?;
-    Ok(file_name)
-}
-
-async fn download_file(url: &str) -> anyhow::Result<(Vec<u8>, String)> {
-    let response = reqwest::get(url).await?;
-
-    // extract name of file without extension
-    // todo might be also possible here to use package name
-    let t = response
-        .url()
-        .path_segments()
-        .and_then(|segments| segments.last())
-        .ok_or(anyhow!("no segments"))?
-        .split('.')
-        .collect::<Vec<&str>>()
-        .first()
-        .ok_or(anyhow!(""))?
-        .to_string();
-
-    println!("{}", t);
-
-    let r = response.bytes().await?;
-    Ok((r.to_vec(), t))
-}
-
-fn unpack_tar_gz(data: &[u8], target_dir: &str) -> anyhow::Result<()> {
-    let tar = GzDecoder::new(data);
-    let mut archive = Archive::new(tar);
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?;
-        let entry_path = Path::new(target_dir).join(path);
-
-        entry.unpack(entry_path)?;
-    }
-
-    Ok(())
 }

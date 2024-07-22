@@ -3,8 +3,7 @@ use rocket::http::uri::Segments;
 use rocket::http::{Method, Status};
 use rocket::response::Responder;
 use rocket::route::{Handler, Outcome};
-use rocket::{async_trait, figment, Data, Request, Response, Route};
-use rocket_seek_stream::SeekStream;
+use rocket::{async_trait, figment, Data, Request, Route};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -58,7 +57,7 @@ impl Handler for CustomFileServer {
             .map(|path| self.root.join(path));
 
         let response = match path {
-            None => {None},
+            None => None,
             Some(p) => NamedFile::open(p)
                 .await
                 .ok()

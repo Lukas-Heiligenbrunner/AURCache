@@ -12,7 +12,6 @@ WORKDIR /app
 
 # Copy the Rust project files
 COPY backend/src /app/src
-COPY backend/scripts /app/scripts
 COPY backend/Cargo.lock /app
 COPY backend/Cargo.toml /app
 
@@ -22,25 +21,16 @@ COPY --from=frontend_builder /app/build/web /app/web
 RUN cargo build --release --features static
 
 # Stage 2: Create the final image
-FROM archlinux
-
-RUN echo $'\n\
-[multilib]\n\
-Include = /etc/pacman.d/mirrorlist'>> /etc/pacman.conf
-
-RUN pacman -Syyu --noconfirm
-RUN pacman-key --init && pacman-key --populate
-RUN pacman -S --noconfirm base-devel git
-RUN pacman -Sc
-
-RUN echo $'\n\
-[repo]\n\
-SigLevel = Optional TrustAll\n\
-Server = http://localhost:8080/' >> /etc/pacman.conf
+FROM quay.io/podman/stable
 
 # Copy the built binary from the previous stage
-COPY --from=builder /app/target/release/untitled /usr/local/bin/untitled
+COPY --from=builder /app/target/release/aurcache /usr/local/bin/aurcache
+
+RUN dnf -y install pacman  && dnf clean all
+COPY entrypoint.sh /entrypoint.sh
+
+RUN chmod +x /entrypoint.sh /usr/local/bin/aurcache
 
 # Set the entry point or default command to run your application
 WORKDIR /app
-CMD ["untitled"]
+CMD /entrypoint.sh
