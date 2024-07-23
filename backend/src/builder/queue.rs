@@ -1,11 +1,11 @@
 use crate::builder::builder::prepare_build;
 use crate::db::builds::ActiveModel;
+use crate::db::packages;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
-use crate::db::packages;
 
 pub(crate) async fn queue_package(
     name: String,

@@ -1,7 +1,7 @@
 use crate::builder::types::Action;
 use crate::db::migration::{JoinType, Order};
+use crate::db::packages;
 use crate::db::prelude::Packages;
-use crate::db::{packages};
 use crate::package::add::package_add;
 use crate::package::delete::package_delete;
 use crate::package::update::package_update;

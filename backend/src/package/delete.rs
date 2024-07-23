@@ -1,5 +1,5 @@
+use crate::db::builds;
 use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds};
 use anyhow::anyhow;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;

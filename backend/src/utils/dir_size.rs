@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 
 pub fn dir_size(path: impl Into<PathBuf>) -> anyhow::Result<u64> {
     fn dir_size(mut dir: fs::ReadDir) -> anyhow::Result<u64> {

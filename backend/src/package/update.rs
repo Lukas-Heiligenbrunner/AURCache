@@ -1,6 +1,6 @@
 use crate::aur::aur::get_info_by_name;
 use crate::builder::types::Action;
-use crate::db::prelude::{Packages};
+use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::anyhow;
 use sea_orm::ColumnTrait;

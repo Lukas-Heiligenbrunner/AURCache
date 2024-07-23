@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use sea_orm::DatabaseConnection;
-use tokio::sync::broadcast::Sender;
-use tokio::sync::{Mutex, Semaphore};
-use tokio::task::JoinHandle;
 use crate::builder::builder::cancel_build;
 use crate::builder::queue::queue_package;
 use crate::builder::types::Action;
+use sea_orm::DatabaseConnection;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::broadcast::Sender;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinHandle;
 
 pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -28,7 +28,7 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
                             semaphore.clone(),
                             job_handles.clone(),
                         )
-                            .await;
+                        .await;
                     }
                     Action::Cancel(build_id) => {
                         let _ = cancel_build(build_id, job_handles.clone(), db.clone()).await;

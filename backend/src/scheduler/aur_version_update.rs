@@ -1,5 +1,5 @@
 use crate::db::packages;
-use crate::db::prelude::{Packages};
+use crate::db::prelude::Packages;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
 use sea_orm::ActiveValue::Set;
@@ -55,7 +55,11 @@ async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                 let latest_version = package.version.clone().unwrap();
 
                 package.latest_aur_version = Set(Option::from(result.version.clone()));
-                package.out_of_date = Set(if latest_version == result.version { 0 } else { 1 });
+                package.out_of_date = Set(if latest_version == result.version {
+                    0
+                } else {
+                    1
+                });
                 let _ = package.update(&db).await;
             }
         }

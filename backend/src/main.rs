@@ -8,13 +8,13 @@ mod scheduler;
 mod utils;
 
 use crate::api::init::{init_api, init_repo};
+use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
 use crate::db::init::init_db;
 use crate::repo::init::init_repo_files;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use rocket::futures::future::try_join_all;
 use tokio::sync::broadcast;
-use crate::builder::init::init_build_queue;
 
 fn main() {
     let t = tokio::runtime::Runtime::new().unwrap();
