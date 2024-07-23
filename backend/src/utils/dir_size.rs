@@ -1,8 +1,8 @@
 use std::path::PathBuf;
-use std::{fs, io};
+use std::fs;
 
-pub fn dir_size(path: impl Into<PathBuf>) -> io::Result<u64> {
-    fn dir_size(mut dir: fs::ReadDir) -> io::Result<u64> {
+pub fn dir_size(path: impl Into<PathBuf>) -> anyhow::Result<u64> {
+    fn dir_size(mut dir: fs::ReadDir) -> anyhow::Result<u64> {
         dir.try_fold(0, |acc, file| {
             let file = file?;
             let size = match file.metadata()? {

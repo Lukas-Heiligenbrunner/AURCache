@@ -6,9 +6,10 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
 use std::env;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-pub fn start_aur_version_checking(db: DatabaseConnection) {
+pub fn start_aur_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     let default_version_check_interval = 3600;
     let check_interval = env::var("VERSION_CHECK_INTERVAL")
         .map(|x| x.parse::<u64>().unwrap_or(default_version_check_interval))
@@ -26,7 +27,7 @@ pub fn start_aur_version_checking(db: DatabaseConnection) {
             }
             sleep(Duration::from_secs(check_interval)).await;
         }
-    });
+    })
 }
 
 async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {

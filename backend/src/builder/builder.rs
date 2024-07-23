@@ -1,48 +1,23 @@
-use crate::builder::types::Action;
-use crate::db::builds::ActiveModel;
+use crate::builder::logger::spawn_log_appender;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages, versions};
-use crate::repo::repo::add_pkg;
+use crate::repo::repo::repo_add;
 use anyhow::anyhow;
+use rocket::futures::StreamExt;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use shiplift::tty::TtyChunk;
+use shiplift::{ContainerOptions, Docker, LogsOptions, PullOptions};
 use std::collections::HashMap;
-use std::ops::Add;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use std::{env, fs};
+use tokio::sync::broadcast::Sender;
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 
-pub async fn init(db: DatabaseConnection, tx: Sender<Action>) {
-    let semaphore = Arc::new(Semaphore::new(1));
-    let job_handles: Arc<Mutex<HashMap<i32, JoinHandle<_>>>> = Arc::new(Mutex::new(HashMap::new()));
-
-    loop {
-        if let Ok(_result) = tx.subscribe().recv().await {
-            match _result {
-                // add a package to parallel build
-                Action::Build(name, version, url, version_model, build_model) => {
-                    let _ = queue_package(
-                        name,
-                        version,
-                        version_model,
-                        build_model,
-                        db.clone(),
-                        semaphore.clone(),
-                        job_handles.clone(),
-                    )
-                    .await;
-                }
-                Action::Cancel(build_id) => {
-                    let _ = cancel_build(build_id, job_handles.clone(), db.clone()).await;
-                }
-            }
-        }
-    }
-}
-
-async fn cancel_build(
+pub(crate) async fn cancel_build(
     build_id: i32,
     job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
     db: DatabaseConnection,
@@ -71,34 +46,7 @@ async fn cancel_build(
     Ok(())
 }
 
-async fn queue_package(
-    name: String,
-    version: String,
-    version_model: Box<versions::ActiveModel>,
-    mut build_model: Box<ActiveModel>,
-    db: DatabaseConnection,
-    semaphore: Arc<Semaphore>,
-    job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
-) -> anyhow::Result<()> {
-    let permits = Arc::clone(&semaphore);
-    let build_id = build_model.id.clone().unwrap();
-
-    // spawn new thread for each pkg build
-    // todo add queue and build two packages in parallel
-    let handle = tokio::spawn(async move {
-        let _permit = permits.acquire().await.unwrap();
-
-        // set build status to building
-        build_model.status = Set(Some(0));
-        let build_model = build_model.save(&db).await.unwrap();
-
-        let _ = build_package(build_model, db, *version_model, version, name).await;
-    });
-    job_handles.lock().await.insert(build_id, handle);
-    Ok(())
-}
-
-async fn build_package(
+pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
     mut version_model: versions::ActiveModel,
@@ -121,7 +69,7 @@ async fn build_package(
 
     let build_id = new_build.id.clone().unwrap();
 
-    match add_pkg(version, name, tx.clone(), build_id).await {
+    match build(version, name, tx.clone(), build_id).await {
         Ok(pkg_file_name) => {
             _ = tx.send("successfully built package".to_string());
 
@@ -165,48 +113,107 @@ async fn build_package(
     Ok(())
 }
 
-fn spawn_log_appender(db2: DatabaseConnection, new_build2: ActiveModel, mut rx: Receiver<String>) {
-    tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(output_line) => {
-                    print!("{}", output_line);
-
-                    let _ = append_db_log_output(&db2, output_line, new_build2.id.clone().unwrap())
-                        .await;
-                }
-                Err(e) => match e {
-                    RecvError::Closed => {
-                        break;
-                    }
-                    RecvError::Lagged(_) => {}
-                },
-            }
-        }
-    });
-}
-
-async fn append_db_log_output(
-    db: &DatabaseConnection,
-    text: String,
+pub async fn build(
+    version: String,
+    name: String,
+    tx: Sender<String>,
     build_id: i32,
-) -> anyhow::Result<()> {
-    let build = Builds::find_by_id(build_id)
-        .one(db)
-        .await?
-        .ok_or(anyhow!("build not found"))?;
+) -> anyhow::Result<String> {
+    let docker = Docker::new();
 
-    let mut build: builds::ActiveModel = build.into();
+    match docker.ping().await {
+        Ok(_) => {}
+        Err(e) => return Err(anyhow!("Connection to Docker Socket failed: {}", e)),
+    }
 
-    match build.output.unwrap() {
-        None => {
-            build.output = Set(Some(text.add("\n")));
-        }
-        Some(s) => {
-            build.output = Set(Some(s.add(text.as_str()).add("\n")));
+    // repull image to make sure it's up to date
+    let mut stream = docker.images().pull(
+        &PullOptions::builder()
+            .image("docker.io/greyltc/archlinux-aur:paru")
+            .build(),
+    );
+
+    while let Some(pull_result) = stream.next().await {
+        match pull_result {
+            Ok(output) => _ = tx.send(format!("{:?}", output)),
+            Err(e) => _ = tx.send(format!("{}", e)),
         }
     }
 
-    build.update(db).await?;
-    Ok(())
+    let mut work_dir = env::current_dir()?;
+    work_dir.push("builds");
+    fs::create_dir_all(work_dir.clone())?;
+    fs::set_permissions(work_dir.clone(), Permissions::from_mode(0o777))?;
+
+    let host_build_path = env::var("BUILD_ARTIFACT_DIR").unwrap_or(work_dir.display().to_string());
+
+    // create new docker container for current build
+    let mountpoint = format!("{}:/var/cache/makepkg/pkg", host_build_path);
+    let create_info = docker
+        .containers()
+        .create(
+            &ContainerOptions::builder("docker.io/greyltc/archlinux-aur:paru")
+                .volumes(vec![mountpoint.as_str()])
+                .attach_stdout(true)
+                .attach_stderr(true)
+                .auto_remove(true)
+                .user("ab")
+                .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
+                .cmd(vec![
+                    "paru",
+                    "-Syu",
+                    "--noconfirm",
+                    "--noprogressbar",
+                    "--color",
+                    "never",
+                    name.as_str(),
+                ])
+                .build(),
+        )
+        .await?;
+    let id = create_info.id;
+    docker.containers().get(&id).start().await?;
+
+    let mut logs_stream = docker.containers().get(id.clone()).logs(
+        &LogsOptions::builder()
+            .follow(true)
+            .stdout(true)
+            .stderr(true)
+            .build(),
+    );
+
+    while let Some(log_result) = logs_stream.next().await {
+        match log_result {
+            Ok(chunk) => match chunk {
+                TtyChunk::StdIn(_) => unreachable!(),
+                TtyChunk::StdOut(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
+                TtyChunk::StdErr(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
+            },
+            Err(e) => _ = tx.send(e.to_string()),
+        }
+    }
+
+    let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
+    if archive_paths.is_empty() {
+        return Err(anyhow!("No files found in build directory"));
+    }
+
+    _ = tx.send(format!(
+        "Copy {} files from build dir to repo",
+        archive_paths.len()
+    ));
+    for archive in archive_paths {
+        let archive = archive?;
+        let archive_name = archive.file_name().to_str().unwrap().to_string();
+        fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
+        fs::remove_file(archive.path())?;
+
+        repo_add(archive_name.clone())?;
+        _ = tx.send(format!(
+            "Successfully added '{}' to the repo archive",
+            archive_name
+        ));
+    }
+
+    Ok(name)
 }
