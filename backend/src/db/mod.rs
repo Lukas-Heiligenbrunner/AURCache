@@ -4,6 +4,7 @@ pub mod prelude;
 
 pub mod builds;
 pub mod helpers;
+pub mod init;
 pub mod migration;
 pub mod packages;
 pub mod status;
