@@ -1,6 +1,6 @@
 use crate::db::migration::{JoinType, Order};
 use crate::db::prelude::Builds;
-use crate::db::{builds, packages, versions};
+use crate::db::{builds, packages};
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
@@ -72,13 +72,12 @@ pub async fn list_builds(
 
     let basequery = Builds::find()
         .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
-        .join_rev(JoinType::InnerJoin, versions::Relation::Builds.def())
         .select_only()
         .column_as(builds::Column::Id, "id")
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
         .column_as(packages::Column::Id, "pkg_id")
-        .column(versions::Column::Version)
+        .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
         .order_by(builds::Column::StartTime, Order::Desc)
@@ -108,14 +107,13 @@ pub async fn get_build(
 
     let result = Builds::find()
         .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
-        .join_rev(JoinType::InnerJoin, versions::Relation::Builds.def())
         .filter(builds::Column::Id.eq(buildid))
         .select_only()
         .column_as(builds::Column::Id, "id")
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
         .column_as(packages::Column::Id, "pkg_id")
-        .column(versions::Column::Version)
+        .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
         .into_model::<ListBuildsModel>()

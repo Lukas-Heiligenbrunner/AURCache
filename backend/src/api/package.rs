@@ -1,7 +1,7 @@
 use crate::builder::types::Action;
 use crate::db::migration::{JoinType, Order};
 use crate::db::prelude::Packages;
-use crate::db::{packages, versions};
+use crate::db::{packages};
 use crate::package::add::package_add;
 use crate::package::delete::package_delete;
 use crate::package::update::package_update;
@@ -67,15 +67,13 @@ pub async fn package_list(
     let db = db as &DatabaseConnection;
 
     let all: Vec<ListPackageModel> = Packages::find()
-        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
         .select_only()
         .column(packages::Column::Name)
         .column(packages::Column::Id)
         .column(packages::Column::Status)
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(versions::Column::Version, "latest_version")
-        .column_as(packages::Column::LatestVersionId, "latest_version_id")
+        .column_as(packages::Column::Version, "latest_version")
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit))
@@ -97,7 +95,6 @@ pub async fn get_package(
     let db = db as &DatabaseConnection;
 
     let all: ListPackageModel = Packages::find()
-        .join_rev(JoinType::LeftJoin, versions::Relation::LatestPackage.def())
         .filter(packages::Column::Id.eq(id))
         .select_only()
         .column(packages::Column::Name)
@@ -105,8 +102,7 @@ pub async fn get_package(
         .column(packages::Column::Status)
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(versions::Column::Version, "latest_version")
-        .column_as(packages::Column::LatestVersionId, "latest_version_id")
+        .column_as(packages::Column::Version, "latest_version")
         .into_model::<ListPackageModel>()
         .one(db)
         .await

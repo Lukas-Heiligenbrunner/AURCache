@@ -1,4 +1,4 @@
-use crate::db::{builds, versions};
+use crate::db::{builds, packages};
 
 #[derive(Clone)]
 pub enum Action {
@@ -6,7 +6,7 @@ pub enum Action {
         String,
         String,
         String,
-        Box<versions::ActiveModel>,
+        Box<packages::ActiveModel>,
         Box<builds::ActiveModel>,
     ),
     Cancel(i32),

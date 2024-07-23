@@ -1,5 +1,5 @@
 class Package {
-  final int id, latest_version_id;
+  final int id;
   final String name;
   final bool outofdate;
   final int status;
@@ -7,7 +7,6 @@ class Package {
 
   Package(
       {required this.id,
-      required this.latest_version_id,
       required this.name,
       required this.status,
       required this.latest_version,
@@ -21,7 +20,6 @@ class Package {
       status: json["status"] as int,
       name: json["name"] as String,
       latest_version: json["latest_version"] as String,
-      latest_version_id: json["latest_version_id"] as int,
       latest_aur_version: json["latest_aur_version"] as String,
     );
   }

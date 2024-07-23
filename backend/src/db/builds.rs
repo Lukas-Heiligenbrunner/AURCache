@@ -11,7 +11,6 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub pkg_id: i32,
-    pub version_id: i32,
     pub output: Option<String>,
     pub status: Option<i32>,
     pub start_time: Option<u32>,
@@ -20,24 +19,14 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::versions::Entity",
-        from = "Column::VersionId",
-        to = "super::versions::Column::Id"
-    )]
-    Versions,
+    #[sea_orm(has_one = "super::packages::Entity")]
+    Package,
     #[sea_orm(
         belongs_to = "super::packages::Entity",
         from = "Column::PkgId",
         to = "super::packages::Column::Id"
     )]
     Packages,
-}
-
-impl Related<super::versions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Versions.def()
-    }
 }
 
 impl Related<super::packages::Entity> for Entity {

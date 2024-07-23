@@ -1,6 +1,6 @@
 use crate::builder::logger::spawn_log_appender;
 use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds, packages, versions};
+use crate::db::{builds, packages};
 use crate::repo::repo::repo_add;
 use anyhow::anyhow;
 use rocket::futures::StreamExt;
@@ -49,14 +49,14 @@ pub(crate) async fn cancel_build(
 pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
-    mut version_model: versions::ActiveModel,
+    mut package_model: packages::ActiveModel,
     version: String,
     name: String,
 ) -> anyhow::Result<()> {
     let (tx, rx) = broadcast::channel::<String>(3);
     spawn_log_appender(db.clone(), new_build.clone(), rx);
 
-    let package_id = version_model.package_id.clone().unwrap();
+    let package_id = package_model.id.clone().unwrap();
     let mut pkg: packages::ActiveModel = Packages::find_by_id(package_id)
         .one(&db)
         .await?
@@ -75,12 +75,8 @@ pub(crate) async fn prepare_build(
 
             // update package success status
             pkg.status = Set(1);
-            pkg.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
             pkg.out_of_date = Set(false as i32);
             pkg.update(&db).await?;
-
-            version_model.file_name = Set(Some(pkg_file_name));
-            let _ = version_model.update(&db).await;
 
             new_build.status = Set(Some(1));
             new_build.end_time = Set(Some(
@@ -93,10 +89,7 @@ pub(crate) async fn prepare_build(
         }
         Err(e) => {
             pkg.status = Set(2);
-            pkg.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
             pkg.update(&db).await?;
-
-            let _ = version_model.update(&db).await;
 
             new_build.status = Set(Some(2));
             new_build.end_time = Set(Some(

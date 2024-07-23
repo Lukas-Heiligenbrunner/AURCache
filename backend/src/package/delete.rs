@@ -1,6 +1,5 @@
-use crate::db::prelude::{Builds, Packages, Versions};
-use crate::db::{builds, versions};
-use crate::repo::repo::rem_ver;
+use crate::db::prelude::{Builds, Packages};
+use crate::db::{builds};
 use anyhow::anyhow;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
@@ -20,15 +19,6 @@ pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
 
     // remove package db entry
     pkg.clone().delete(&txn).await?;
-
-    let versions = Versions::find()
-        .filter(versions::Column::PackageId.eq(pkg.id))
-        .all(&txn)
-        .await?;
-
-    for v in versions {
-        rem_ver(&txn, v).await?;
-    }
 
     // remove corresponding builds
     let builds = Builds::find()
