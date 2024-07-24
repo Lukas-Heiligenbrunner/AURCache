@@ -1,4 +1,4 @@
-use crate::builder::logger::spawn_log_appender;
+use crate::builder::logger::BuildLogger;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
 use crate::db::prelude::{Builds, Files, PackagesFiles};
@@ -19,8 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
-use tokio::sync::broadcast::Sender;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 pub(crate) async fn cancel_build(
@@ -57,21 +56,26 @@ pub(crate) async fn prepare_build(
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = broadcast::channel::<String>(3);
-    spawn_log_appender(db.clone(), new_build.clone(), rx);
+    let build_id = new_build.id.clone().unwrap();
+    let build_logger = BuildLogger::new(build_id, db.clone());
 
     // update status to building
     package_model.status = Set(0);
     package_model = package_model.update(&db).await?.into();
 
-    let build_id = new_build.id.clone().unwrap();
     let package_name = package_model.name.clone().unwrap();
     let package_id = package_model.id.clone().unwrap();
 
-    match build(package_name, tx.clone(), build_id, package_id, db.clone()).await {
+    match build(
+        package_name,
+        build_id,
+        package_id,
+        db.clone(),
+        build_logger.clone(),
+    )
+    .await
+    {
         Ok(_) => {
-            _ = tx.send("successfully built package".to_string());
-
             // update package success status
             package_model.status = Set(1);
             package_model.out_of_date = Set(false as i32);
@@ -84,7 +88,10 @@ pub(crate) async fn prepare_build(
                     .unwrap()
                     .as_secs() as u32,
             ));
-            let _ = new_build.update(&db).await;
+            _ = new_build.update(&db).await;
+            build_logger
+                .append("finished package build".to_string())
+                .await?;
         }
         Err(e) => {
             package_model.status = Set(2);
@@ -99,7 +106,7 @@ pub(crate) async fn prepare_build(
             ));
             let _ = new_build.update(&db).await;
 
-            _ = tx.send(e.to_string());
+            build_logger.append(e.to_string()).await?;
         }
     };
     Ok(())
@@ -107,10 +114,10 @@ pub(crate) async fn prepare_build(
 
 pub async fn build(
     name: String,
-    tx: Sender<String>,
     build_id: i32,
     pkg_id: i32,
     db: DatabaseConnection,
+    build_logger: BuildLogger,
 ) -> anyhow::Result<()> {
     let docker = Docker::new();
 
@@ -128,8 +135,8 @@ pub async fn build(
 
     while let Some(pull_result) = stream.next().await {
         match pull_result {
-            Ok(output) => _ = tx.send(format!("{:?}", output)),
-            Err(e) => _ = tx.send(format!("{}", e)),
+            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
+            Err(e) => build_logger.append(format!("{}", e)).await?,
         }
     }
 
@@ -179,20 +186,28 @@ pub async fn build(
         match log_result {
             Ok(chunk) => match chunk {
                 TtyChunk::StdIn(_) => unreachable!(),
-                TtyChunk::StdOut(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
-                TtyChunk::StdErr(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
+                TtyChunk::StdOut(bytes) => {
+                    build_logger
+                        .append(String::from_utf8(bytes).unwrap())
+                        .await?
+                }
+                TtyChunk::StdErr(bytes) => {
+                    build_logger
+                        .append(String::from_utf8(bytes).unwrap())
+                        .await?
+                }
             },
-            Err(e) => _ = tx.send(e.to_string()),
+            Err(e) => build_logger.append(e.to_string()).await?,
         }
     }
 
-    move_and_add_pkgs(tx, work_dir, pkg_id, db).await?;
+    move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
     Ok(())
 }
 
 /// move built files from build container to host and add them to the repo
 async fn move_and_add_pkgs(
-    tx: Sender<String>,
+    build_logger: BuildLogger,
     work_dir: PathBuf,
     pkg_id: i32,
     db: DatabaseConnection,
@@ -213,17 +228,19 @@ async fn move_and_add_pkgs(
 
     let txn = db.begin().await?;
     for (pkg_file, file) in old_files {
-        pkg_file.delete(&db).await?;
+        pkg_file.delete(&txn).await?;
 
         if let Some(file) = file {
             try_remove_archive_file(file, &txn).await?;
         }
     }
 
-    _ = tx.send(format!(
-        "Copy {} files from build dir to repo",
-        archive_paths.len()
-    ));
+    build_logger
+        .append(format!(
+            "Copy {} files from build dir to repo",
+            archive_paths.len()
+        ))
+        .await?;
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
@@ -253,10 +270,12 @@ async fn move_and_add_pkgs(
         package_file.save(&txn).await?;
 
         repo_add(archive_name.clone())?;
-        _ = tx.send(format!(
-            "Successfully added '{}' to the repo archive",
-            archive_name
-        ));
+        build_logger
+            .append(format!(
+                "Successfully added '{}' to the repo archive",
+                archive_name
+            ))
+            .await?;
     }
     txn.commit().await?;
     Ok(())
