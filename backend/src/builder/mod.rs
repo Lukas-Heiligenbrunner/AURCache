@@ -1,4 +1,4 @@
-mod builder;
+mod build;
 pub mod init;
 mod logger;
 mod queue;

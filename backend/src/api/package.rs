@@ -1,5 +1,5 @@
 use crate::builder::types::Action;
-use crate::db::migration::{JoinType, Order};
+use crate::db::migration::Order;
 use crate::db::packages;
 use crate::db::prelude::Packages;
 use crate::package::add::package_add;
@@ -14,7 +14,7 @@ use crate::api::types::input::ListPackageModel;
 use crate::api::types::output::{AddBody, UpdateBody};
 use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
 
 /// Add new Package to build queue

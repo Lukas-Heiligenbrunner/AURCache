@@ -1,15 +1,21 @@
 use crate::builder::logger::spawn_log_appender;
-use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds, packages};
-use crate::repo::repo::repo_add;
+use crate::db::files::ActiveModel;
+use crate::db::migration::JoinType;
+use crate::db::prelude::{Builds, Files, PackagesFiles};
+use crate::db::{builds, files, packages, packages_files};
+use crate::repo::utils::{repo_add, try_remove_archive_file};
 use anyhow::anyhow;
 use rocket::futures::StreamExt;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
+    QuerySelect, RelationTrait, Set, TransactionTrait,
+};
 use shiplift::tty::TtyChunk;
 use shiplift::{ContainerOptions, Docker, LogsOptions, PullOptions};
 use std::collections::HashMap;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
@@ -50,33 +56,26 @@ pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
-    version: String,
-    name: String,
 ) -> anyhow::Result<()> {
     let (tx, rx) = broadcast::channel::<String>(3);
     spawn_log_appender(db.clone(), new_build.clone(), rx);
 
-    let package_id = package_model.id.clone().unwrap();
-    let mut pkg: packages::ActiveModel = Packages::find_by_id(package_id)
-        .one(&db)
-        .await?
-        .ok_or(anyhow!("no package with id {package_id} found"))?
-        .into();
-
     // update status to building
-    pkg.status = Set(0);
-    pkg = pkg.update(&db).await?.into();
+    package_model.status = Set(0);
+    package_model = package_model.update(&db).await?.into();
 
     let build_id = new_build.id.clone().unwrap();
+    let package_name = package_model.name.clone().unwrap();
+    let package_id = package_model.id.clone().unwrap();
 
-    match build(version, name, tx.clone(), build_id).await {
-        Ok(pkg_file_name) => {
+    match build(package_name, tx.clone(), build_id, package_id, db.clone()).await {
+        Ok(_) => {
             _ = tx.send("successfully built package".to_string());
 
             // update package success status
-            pkg.status = Set(1);
-            pkg.out_of_date = Set(false as i32);
-            pkg.update(&db).await?;
+            package_model.status = Set(1);
+            package_model.out_of_date = Set(false as i32);
+            package_model.update(&db).await?;
 
             new_build.status = Set(Some(1));
             new_build.end_time = Set(Some(
@@ -88,8 +87,8 @@ pub(crate) async fn prepare_build(
             let _ = new_build.update(&db).await;
         }
         Err(e) => {
-            pkg.status = Set(2);
-            pkg.update(&db).await?;
+            package_model.status = Set(2);
+            package_model.update(&db).await?;
 
             new_build.status = Set(Some(2));
             new_build.end_time = Set(Some(
@@ -107,11 +106,12 @@ pub(crate) async fn prepare_build(
 }
 
 pub async fn build(
-    version: String,
     name: String,
     tx: Sender<String>,
     build_id: i32,
-) -> anyhow::Result<String> {
+    pkg_id: i32,
+    db: DatabaseConnection,
+) -> anyhow::Result<()> {
     let docker = Docker::new();
 
     match docker.ping().await {
@@ -186,9 +186,38 @@ pub async fn build(
         }
     }
 
+    move_and_add_pkgs(tx, work_dir, pkg_id, db).await?;
+    Ok(())
+}
+
+/// move built files from build container to host and add them to the repo
+async fn move_and_add_pkgs(
+    tx: Sender<String>,
+    work_dir: PathBuf,
+    pkg_id: i32,
+    db: DatabaseConnection,
+) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
         return Err(anyhow!("No files found in build directory"));
+    }
+
+    // remove old files from repo and from direcotry
+    // remove files assosicated with package
+    let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
+        .filter(packages_files::Column::PackageId.eq(pkg_id))
+        .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
+        .select_also(files::Entity)
+        .all(&db)
+        .await?;
+
+    let txn = db.begin().await?;
+    for (pkg_file, file) in old_files {
+        pkg_file.delete(&db).await?;
+
+        if let Some(file) = file {
+            try_remove_archive_file(file, &txn).await?;
+        }
     }
 
     _ = tx.send(format!(
@@ -201,12 +230,34 @@ pub async fn build(
         fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
         fs::remove_file(archive.path())?;
 
+        let file = match Files::find()
+            .filter(files::Column::Filename.eq(archive_name.clone()))
+            .one(&txn)
+            .await?
+        {
+            None => {
+                let file = files::ActiveModel {
+                    filename: Set(archive_name.clone()),
+                    ..Default::default()
+                };
+                file.save(&txn).await?
+            }
+            Some(file) => ActiveModel::from(file),
+        };
+
+        let package_file = packages_files::ActiveModel {
+            file_id: Set(file.id.unwrap()),
+            package_id: Set(pkg_id),
+            ..Default::default()
+        };
+        package_file.save(&txn).await?;
+
         repo_add(archive_name.clone())?;
         _ = tx.send(format!(
             "Successfully added '{}' to the repo archive",
             archive_name
         ));
     }
-
-    Ok(name)
+    txn.commit().await?;
+    Ok(())
 }

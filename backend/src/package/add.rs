@@ -1,4 +1,4 @@
-use crate::aur::aur::get_info_by_name;
+use crate::aur::api::get_info_by_name;
 use crate::builder::types::Action;
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
@@ -37,11 +37,7 @@ pub async fn package_add(
         latest_aur_version: Set(Option::from(pkg.version.clone())),
         ..Default::default()
     };
-
-    let mut new_package = new_package.clone().save(&txn).await?;
-
-    new_package.status = Set(3);
-    let new_package = new_package.save(&txn).await?;
+    let mut new_package = new_package.save(&txn).await?;
 
     // set build status to pending
     let build = builds::ActiveModel {
@@ -57,15 +53,12 @@ pub async fn package_add(
         ..Default::default()
     };
     let new_build = build.save(&txn).await?;
+    new_package.latest_build = Set(Some(new_build.id.clone().unwrap()));
+    let new_package = new_package.save(&txn).await?;
+
     txn.commit().await?;
 
-    let _ = tx.send(Action::Build(
-        pkg.name,
-        pkg.version,
-        pkg.url_path.unwrap(),
-        Box::from(new_package),
-        Box::from(new_build),
-    ));
+    let _ = tx.send(Action::Build(Box::from(new_package), Box::from(new_build)));
 
     Ok(())
 }

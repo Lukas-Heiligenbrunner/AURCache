@@ -1,4 +1,4 @@
-use crate::builder::builder::cancel_build;
+use crate::builder::build::cancel_build;
 use crate::builder::queue::queue_package;
 use crate::builder::types::Action;
 use sea_orm::DatabaseConnection;
@@ -18,11 +18,9 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
             if let Ok(_result) = tx.subscribe().recv().await {
                 match _result {
                     // add a package to parallel build
-                    Action::Build(name, version, url, version_model, build_model) => {
+                    Action::Build(package_model, build_model) => {
                         let _ = queue_package(
-                            name,
-                            version,
-                            version_model,
+                            package_model,
                             build_model,
                             db.clone(),
                             semaphore.clone(),

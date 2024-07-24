@@ -2,7 +2,6 @@ use crate::api::aur::*;
 use crate::api::build::*;
 use crate::api::package::*;
 use crate::api::stats::*;
-use crate::api::version::*;
 use rocket::Route;
 use rocket_okapi::openapi_get_routes;
 

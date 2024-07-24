@@ -37,3 +37,13 @@ impl Related<super::builds::Entity> for Entity {
         Relation::Builds.def()
     }
 }
+
+impl Related<super::files::Entity> for Entity {
+    fn to() -> RelationDef {
+        super::packages_files::Relation::Files.def()
+    }
+
+    fn via() -> Option<RelationDef> {
+        Some(super::packages_files::Relation::Packages.def())
+    }
+}

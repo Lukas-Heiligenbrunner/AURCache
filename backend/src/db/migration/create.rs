@@ -10,7 +10,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         match database_type() {
-            DbType::SQLITE => {
+            DbType::Sqlite => {
                 db.execute_unprepared(
                     r#"
 create table builds
@@ -27,7 +27,9 @@ create table builds
 
 create table files
 (
-	filename TEXT not null,
+	filename TEXT not null
+		constraint files_pk_2
+			unique,
 	id integer not null
 		constraint files_pk
 			primary key autoincrement
@@ -44,28 +46,21 @@ create table packages
 	version TEXT not null,
 	latest_aur_version TEXT,
 	latest_build integer
-		constraint packages_builds_id_fk
-			references builds
 );
 
 create table packages_files
 (
-	file_id integer not null
-		constraint packages_files_files_id_fk
-			references files,
-	package_id integer not null
-		constraint packages_files_packages_id_fk
-			references packages
+	file_id integer not null,
+	package_id integer not null,
 	id integer not null
 		constraint packages_files_pk
 			primary key autoincrement
 );
-
 "#,
                 )
                 .await?;
             }
-            DbType::POSTGRES => {
+            DbType::Postgres => {
                 db.execute_unprepared(
                     r#"
 CREATE SCHEMA IF NOT EXISTS public;

@@ -14,3 +14,13 @@ pub struct Model {
 pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Related<super::packages::Entity> for Entity {
+    fn to() -> RelationDef {
+        super::packages_files::Relation::Packages.def()
+    }
+
+    fn via() -> Option<RelationDef> {
+        Some(super::packages_files::Relation::Files.def().rev())
+    }
+}

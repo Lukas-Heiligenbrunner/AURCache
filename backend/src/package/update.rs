@@ -1,10 +1,8 @@
-use crate::aur::aur::get_info_by_name;
+use crate::aur::api::get_info_by_name;
 use crate::builder::types::Action;
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::anyhow;
-use sea_orm::ColumnTrait;
-use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
@@ -27,7 +25,12 @@ pub async fn package_update(
         .await
         .map_err(|_| anyhow!("couldn't download package metadata".to_string()))?;
 
+    if !force && pkg_model.version.clone().unwrap() == pkg.version {
+        return Err(anyhow!("Package is already up to date"));
+    }
+
     pkg_model.status = Set(3);
+    pkg_model.version = Set(pkg.version.clone());
     let pkg_model = pkg_model.save(&txn).await?;
 
     // set build status to pending
@@ -46,13 +49,7 @@ pub async fn package_update(
     let new_build = build.save(&txn).await?;
     let build_id = new_build.id.clone().unwrap();
 
-    let _ = tx.send(Action::Build(
-        pkg.name,
-        pkg.version,
-        pkg.url_path.unwrap(),
-        Box::from(pkg_model),
-        Box::from(new_build),
-    ));
+    let _ = tx.send(Action::Build(Box::from(pkg_model), Box::from(new_build)));
 
     txn.commit().await?;
 

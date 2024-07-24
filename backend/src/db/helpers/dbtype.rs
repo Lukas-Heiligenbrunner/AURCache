@@ -1,16 +1,16 @@
 use std::env;
 
 pub enum DbType {
-    SQLITE,
-    POSTGRES,
+    Sqlite,
+    Postgres,
 }
 
 pub fn database_type() -> DbType {
-    env::var("DB_TYPE").map_or(DbType::SQLITE, |t| {
+    env::var("DB_TYPE").map_or(DbType::Sqlite, |t| {
         if t == "POSTGRESQL" {
-            DbType::POSTGRES
+            DbType::Postgres
         } else {
-            DbType::SQLITE
+            DbType::Sqlite
         }
     })
 }

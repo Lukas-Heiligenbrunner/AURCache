@@ -8,4 +8,3 @@ pub mod init;
 mod package;
 mod stats;
 mod types;
-mod version;

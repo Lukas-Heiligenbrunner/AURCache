@@ -1,4 +1,4 @@
-use crate::builder::builder::prepare_build;
+use crate::builder::build::prepare_build;
 use crate::db::builds::ActiveModel;
 use crate::db::packages;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
@@ -8,8 +8,6 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 pub(crate) async fn queue_package(
-    name: String,
-    version: String,
     package_model: Box<packages::ActiveModel>,
     mut build_model: Box<ActiveModel>,
     db: DatabaseConnection,
@@ -28,7 +26,7 @@ pub(crate) async fn queue_package(
         build_model.status = Set(Some(0));
         let build_model = build_model.save(&db).await.unwrap();
 
-        let _ = prepare_build(build_model, db, *package_model, version, name).await;
+        let _ = prepare_build(build_model, db, *package_model).await;
     });
     job_handles.lock().await.insert(build_id, handle);
     Ok(())
