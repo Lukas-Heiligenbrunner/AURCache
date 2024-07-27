@@ -7,7 +7,7 @@ use std::{env, fs};
 
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
     let db: DatabaseConnection = match database_type() {
-        DbType::SQLITE => {
+        DbType::Sqlite => {
             // create folder for db stuff
             if fs::metadata("./db").is_err() {
                 fs::create_dir("./db")?;
@@ -15,7 +15,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
 
             Database::connect("sqlite://db/db.sqlite?mode=rwc").await?
         }
-        DbType::POSTGRES => {
+        DbType::Postgres => {
             let db_user = env::var("DB_USER")
                 .map_err(|_| anyhow!("No DB_USER envvar for POSTGRES Username specified"))?;
             let db_pwd = env::var("DB_PWD")

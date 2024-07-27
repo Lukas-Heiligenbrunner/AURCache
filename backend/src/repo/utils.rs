@@ -1,31 +1,13 @@
-use crate::db::prelude::Packages;
-use crate::db::prelude::Versions;
-use crate::db::versions;
+use crate::db::prelude::PackagesFiles;
+use crate::db::{files, packages_files};
 use anyhow::anyhow;
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, ModelTrait, QueryFilter,
-    TransactionTrait,
-};
+use sea_orm::ColumnTrait;
+use sea_orm::QueryFilter;
+use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
 use std::fs;
 use std::process::Command;
 
 static REPO_NAME: &str = "repo";
-
-pub async fn remove_version(db: &DatabaseConnection, version_id: i32) -> anyhow::Result<()> {
-    let txn = db.begin().await?;
-
-    let version = Versions::find()
-        .filter(versions::Column::PackageId.eq(version_id))
-        .one(&txn)
-        .await?;
-    if let Some(version) = version {
-        rem_ver(&txn, version).await?;
-    }
-
-    txn.commit().await?;
-
-    Ok(())
-}
 
 pub fn repo_add(pkg_file_name: String) -> anyhow::Result<()> {
     let db_file = format!("{REPO_NAME}.db.tar.gz");
@@ -47,7 +29,7 @@ pub fn repo_add(pkg_file_name: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
+pub fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
     let db_file = format!("{REPO_NAME}.db.tar.gz");
 
     let output = Command::new("repo-remove")
@@ -67,23 +49,22 @@ fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) async fn rem_ver(
+pub async fn try_remove_archive_file(
+    file: files::Model,
     db: &DatabaseTransaction,
-    version: versions::Model,
 ) -> anyhow::Result<()> {
-    if let Some(filename) = version.file_name.clone() {
-        // so repo-remove only supports passing a package name and removing the whole package
-        // it seems that repo-add removes an older version when called
-        // todo fix in future by implementing in rust
-        if let Some(pkg) = Packages::find_by_id(version.package_id).one(db).await? {
-            // remove from repo db
-            repo_remove(pkg.name)?;
+    let package_files = PackagesFiles::find()
+        .filter(packages_files::Column::FileId.eq(file.id))
+        .all(db)
+        .await?;
+    if package_files.is_empty() {
+        let filename = file.filename.clone();
+        file.delete(db).await?;
+        let _ = repo_remove(filename.clone());
+        fs::remove_file(format!("./repo/{}", filename))?;
 
-            // remove from fs
-            fs::remove_file(format!("./repo/{filename}"))?;
-        }
+        println!("Removed old file: {}", filename);
     }
 
-    version.delete(db).await?;
     Ok(())
 }

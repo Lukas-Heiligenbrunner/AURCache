@@ -1,1 +1,1 @@
-pub mod aur;
+pub mod api;

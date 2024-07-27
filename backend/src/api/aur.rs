@@ -1,4 +1,4 @@
-use crate::aur::aur::query_aur;
+use crate::aur::api::query_aur;
 use rocket::serde::json::Json;
 
 use rocket::get;

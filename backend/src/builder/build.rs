@@ -1,20 +1,25 @@
-use crate::builder::logger::spawn_log_appender;
-use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds, packages, versions};
-use crate::repo::repo::repo_add;
+use crate::builder::logger::BuildLogger;
+use crate::db::files::ActiveModel;
+use crate::db::migration::JoinType;
+use crate::db::prelude::{Builds, Files, PackagesFiles};
+use crate::db::{builds, files, packages, packages_files};
+use crate::repo::utils::{repo_add, try_remove_archive_file};
 use anyhow::anyhow;
 use rocket::futures::StreamExt;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
+    QuerySelect, RelationTrait, Set, TransactionTrait,
+};
 use shiplift::tty::TtyChunk;
 use shiplift::{ContainerOptions, Docker, LogsOptions, PullOptions};
 use std::collections::HashMap;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
-use tokio::sync::broadcast::Sender;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 pub(crate) async fn cancel_build(
@@ -49,38 +54,32 @@ pub(crate) async fn cancel_build(
 pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
-    mut version_model: versions::ActiveModel,
-    version: String,
-    name: String,
+    mut package_model: packages::ActiveModel,
 ) -> anyhow::Result<()> {
-    let (tx, rx) = broadcast::channel::<String>(3);
-    spawn_log_appender(db.clone(), new_build.clone(), rx);
-
-    let package_id = version_model.package_id.clone().unwrap();
-    let mut pkg: packages::ActiveModel = Packages::find_by_id(package_id)
-        .one(&db)
-        .await?
-        .ok_or(anyhow!("no package with id {package_id} found"))?
-        .into();
+    let build_id = new_build.id.clone().unwrap();
+    let build_logger = BuildLogger::new(build_id, db.clone());
 
     // update status to building
-    pkg.status = Set(0);
-    pkg = pkg.update(&db).await?.into();
+    package_model.status = Set(0);
+    package_model = package_model.update(&db).await?.into();
 
-    let build_id = new_build.id.clone().unwrap();
+    let package_name = package_model.name.clone().unwrap();
+    let package_id = package_model.id.clone().unwrap();
 
-    match build(version, name, tx.clone(), build_id).await {
-        Ok(pkg_file_name) => {
-            _ = tx.send("successfully built package".to_string());
-
+    match build(
+        package_name,
+        build_id,
+        package_id,
+        db.clone(),
+        build_logger.clone(),
+    )
+    .await
+    {
+        Ok(_) => {
             // update package success status
-            pkg.status = Set(1);
-            pkg.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
-            pkg.out_of_date = Set(false as i32);
-            pkg.update(&db).await?;
-
-            version_model.file_name = Set(Some(pkg_file_name));
-            let _ = version_model.update(&db).await;
+            package_model.status = Set(1);
+            package_model.out_of_date = Set(false as i32);
+            package_model.update(&db).await?;
 
             new_build.status = Set(Some(1));
             new_build.end_time = Set(Some(
@@ -89,14 +88,14 @@ pub(crate) async fn prepare_build(
                     .unwrap()
                     .as_secs() as u32,
             ));
-            let _ = new_build.update(&db).await;
+            _ = new_build.update(&db).await;
+            build_logger
+                .append("finished package build".to_string())
+                .await?;
         }
         Err(e) => {
-            pkg.status = Set(2);
-            pkg.latest_version_id = Set(Some(version_model.id.clone().unwrap()));
-            pkg.update(&db).await?;
-
-            let _ = version_model.update(&db).await;
+            package_model.status = Set(2);
+            package_model.update(&db).await?;
 
             new_build.status = Set(Some(2));
             new_build.end_time = Set(Some(
@@ -107,18 +106,19 @@ pub(crate) async fn prepare_build(
             ));
             let _ = new_build.update(&db).await;
 
-            _ = tx.send(e.to_string());
+            build_logger.append(e.to_string()).await?;
         }
     };
     Ok(())
 }
 
 pub async fn build(
-    version: String,
     name: String,
-    tx: Sender<String>,
     build_id: i32,
-) -> anyhow::Result<String> {
+    pkg_id: i32,
+    db: DatabaseConnection,
+    build_logger: BuildLogger,
+) -> anyhow::Result<()> {
     let docker = Docker::new();
 
     match docker.ping().await {
@@ -135,8 +135,8 @@ pub async fn build(
 
     while let Some(pull_result) = stream.next().await {
         match pull_result {
-            Ok(output) => _ = tx.send(format!("{:?}", output)),
-            Err(e) => _ = tx.send(format!("{}", e)),
+            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
+            Err(e) => build_logger.append(format!("{}", e)).await?,
         }
     }
 
@@ -186,34 +186,97 @@ pub async fn build(
         match log_result {
             Ok(chunk) => match chunk {
                 TtyChunk::StdIn(_) => unreachable!(),
-                TtyChunk::StdOut(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
-                TtyChunk::StdErr(bytes) => _ = tx.send(String::from_utf8(bytes).unwrap()),
+                TtyChunk::StdOut(bytes) => {
+                    build_logger
+                        .append(String::from_utf8(bytes).unwrap())
+                        .await?
+                }
+                TtyChunk::StdErr(bytes) => {
+                    build_logger
+                        .append(String::from_utf8(bytes).unwrap())
+                        .await?
+                }
             },
-            Err(e) => _ = tx.send(e.to_string()),
+            Err(e) => build_logger.append(e.to_string()).await?,
         }
     }
 
+    move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
+    Ok(())
+}
+
+/// move built files from build container to host and add them to the repo
+async fn move_and_add_pkgs(
+    build_logger: BuildLogger,
+    work_dir: PathBuf,
+    pkg_id: i32,
+    db: DatabaseConnection,
+) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
         return Err(anyhow!("No files found in build directory"));
     }
 
-    _ = tx.send(format!(
-        "Copy {} files from build dir to repo",
-        archive_paths.len()
-    ));
+    // remove old files from repo and from direcotry
+    // remove files assosicated with package
+    let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
+        .filter(packages_files::Column::PackageId.eq(pkg_id))
+        .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
+        .select_also(files::Entity)
+        .all(&db)
+        .await?;
+
+    let txn = db.begin().await?;
+    for (pkg_file, file) in old_files {
+        pkg_file.delete(&txn).await?;
+
+        if let Some(file) = file {
+            try_remove_archive_file(file, &txn).await?;
+        }
+    }
+
+    build_logger
+        .append(format!(
+            "Copy {} files from build dir to repo",
+            archive_paths.len()
+        ))
+        .await?;
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
         fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
         fs::remove_file(archive.path())?;
 
-        repo_add(archive_name.clone())?;
-        _ = tx.send(format!(
-            "Successfully added '{}' to the repo archive",
-            archive_name
-        ));
-    }
+        let file = match Files::find()
+            .filter(files::Column::Filename.eq(archive_name.clone()))
+            .one(&txn)
+            .await?
+        {
+            None => {
+                let file = files::ActiveModel {
+                    filename: Set(archive_name.clone()),
+                    ..Default::default()
+                };
+                file.save(&txn).await?
+            }
+            Some(file) => ActiveModel::from(file),
+        };
 
-    Ok(name)
+        let package_file = packages_files::ActiveModel {
+            file_id: Set(file.id.unwrap()),
+            package_id: Set(pkg_id),
+            ..Default::default()
+        };
+        package_file.save(&txn).await?;
+
+        repo_add(archive_name.clone())?;
+        build_logger
+            .append(format!(
+                "Successfully added '{}' to the repo archive",
+                archive_name
+            ))
+            .await?;
+    }
+    txn.commit().await?;
+    Ok(())
 }

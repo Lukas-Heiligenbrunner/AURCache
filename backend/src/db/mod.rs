@@ -3,9 +3,9 @@
 pub mod prelude;
 
 pub mod builds;
+pub mod files;
 pub mod helpers;
 pub mod init;
 pub mod migration;
 pub mod packages;
-pub mod status;
-pub mod versions;
+pub mod packages_files;

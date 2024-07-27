@@ -10,7 +10,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         match database_type() {
-            DbType::SQLITE => {
+            DbType::Sqlite => {
                 db.execute_unprepared(
                     r#"
 create table builds
@@ -19,48 +19,48 @@ create table builds
 		constraint builds_pk
 			primary key autoincrement,
 	pkg_id integer not null,
-	version_id integer not null,
 	output TEXT,
 	status integer,
 	start_time INTEGER,
 	end_time integer
 );
 
+create table files
+(
+	filename TEXT not null
+		constraint files_pk_2
+			unique,
+	id integer not null
+		constraint files_pk
+			primary key autoincrement
+);
+
 create table packages
 (
 	id integer not null
-		primary key autoincrement,
+		constraint packages_pk
+			primary key autoincrement,
 	name text not null,
 	status integer default 0 not null,
 	out_of_date INTEGER default 0 not null,
-	latest_version_id integer
-		constraint packages_versions_id_fk
-			references versions,
-	latest_aur_version TEXT
-);
-
-create table status
-(
-	id integer not null
-		constraint status_pk
-			primary key autoincrement,
-	value TEXT
-);
-
-create table versions
-(
-	id integer not null
-		constraint versions_pk
-			primary key autoincrement,
 	version TEXT not null,
+	latest_aur_version TEXT,
+	latest_build integer
+);
+
+create table packages_files
+(
+	file_id integer not null,
 	package_id integer not null,
-	file_name TEXT
+	id integer not null
+		constraint packages_files_pk
+			primary key autoincrement
 );
 "#,
                 )
                 .await?;
             }
-            DbType::POSTGRES => {
+            DbType::Postgres => {
                 db.execute_unprepared(
                     r#"
 CREATE SCHEMA IF NOT EXISTS public;
@@ -89,11 +89,6 @@ CREATE TABLE public.packages (
     out_of_date INTEGER DEFAULT 0 NOT NULL,
     latest_version_id INTEGER REFERENCES public.versions(id),
     latest_aur_version TEXT
-);
-
-CREATE TABLE public.status (
-    id SERIAL PRIMARY KEY,
-    value TEXT
 );
 "#,
                 )

@@ -13,36 +13,37 @@ pub struct Model {
     pub name: String,
     pub status: i32,
     pub out_of_date: i32,
-    pub latest_version_id: Option<i32>,
-    pub latest_aur_version: String,
+    pub version: String,
+    pub latest_aur_version: Option<String>,
+    pub latest_build: Option<i32>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::versions::Entity")]
-    Versions,
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
-    #[sea_orm(has_one = "super::versions::Entity")]
-    LatestVersion,
+    #[sea_orm(
+        belongs_to = "super::builds::Entity",
+        from = "Column::LatestBuild",
+        to = "super::builds::Column::Id"
+    )]
+    LatestBuild,
 }
 
-impl Related<super::versions::Entity> for Entity {
+impl Related<super::builds::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Versions.def()
+        Relation::Builds.def()
     }
 }
 
-// impl Related<super::versions::Entity> for Entity {
-//     fn to() -> RelationDef {
-//         Relation::LatestVersion.def()
-//     }
-// }
-
-impl Related<super::builds::Entity> for crate::db::versions::Entity {
+impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Builds.def()
+        super::packages_files::Relation::Files.def()
+    }
+
+    fn via() -> Option<RelationDef> {
+        Some(super::packages_files::Relation::Packages.def())
     }
 }

@@ -18,7 +18,6 @@ pub struct ListPackageModel {
     pub status: i32,
     pub outofdate: bool,
     pub latest_version: Option<String>,
-    pub latest_version_id: Option<i32>,
     pub latest_aur_version: String,
 }
 
