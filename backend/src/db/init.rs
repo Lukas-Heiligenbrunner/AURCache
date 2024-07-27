@@ -20,8 +20,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
                 .max_connections(100)
                 .connect_timeout(Duration::from_secs(10))
                 .acquire_timeout(Duration::from_secs(10))
-                .idle_timeout(Duration::from_secs(10))
-                .max_lifetime(Duration::from_secs(30));
+                .max_lifetime(Duration::from_secs(10));
             Database::connect(conn_opts).await?
         }
         DbType::Postgres => {
