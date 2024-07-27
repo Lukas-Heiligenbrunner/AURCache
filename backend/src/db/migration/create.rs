@@ -68,18 +68,15 @@ CREATE SCHEMA IF NOT EXISTS public;
 CREATE TABLE public.builds (
     id SERIAL PRIMARY KEY,
     pkg_id INTEGER NOT NULL,
-    version_id INTEGER NOT NULL,
     output TEXT,
     status INTEGER,
     start_time OID,
     end_time OID
 );
 
-CREATE TABLE public.versions (
-    id SERIAL PRIMARY KEY,
-    version TEXT NOT NULL,
-    package_id INTEGER NOT NULL,
-    file_name TEXT
+CREATE TABLE public.files (
+    filename TEXT NOT NULL UNIQUE,
+    id SERIAL PRIMARY KEY
 );
 
 CREATE TABLE public.packages (
@@ -87,8 +84,16 @@ CREATE TABLE public.packages (
     name TEXT NOT NULL,
     status INTEGER DEFAULT 0 NOT NULL,
     out_of_date INTEGER DEFAULT 0 NOT NULL,
-    latest_version_id INTEGER REFERENCES public.versions(id),
-    latest_aur_version TEXT
+    latest_build INTEGER,
+    latest_aur_version TEXT,
+    version TEXT NOT NULL
+);
+
+CREATE TABLE public.packages_files
+(
+    file_id INTEGER NOT NULL,
+    package_id INTEGER NOT NULL,
+    id SERIAL PRIMARY KEY
 );
 "#,
                 )
