@@ -31,16 +31,21 @@ jobs:
         id: extract_tag
         run: echo "::set-output name=tag::${GITHUB_REF#refs/tags/}"
 
+      - id: repo_name_lc
+        uses: ASzc/change-string-case-action@v1
+        with:
+         string: ${{ github.repository }}
+
       - name: Build and push Docker image for main branch
         if: github.ref == 'refs/heads/master'
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:git .
-          docker push ghcr.io/${{ github.repository }}:git
+          docker build -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git
 
       - name: Build and push Docker image for tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build -t ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }} .
-          docker tag ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ github.repository }}:latest
-          docker push ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }}
-          docker push ghcr.io/${{ github.repository }}:latest
+          docker build -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
+          docker tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
