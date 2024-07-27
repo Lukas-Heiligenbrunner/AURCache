@@ -20,11 +20,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 pub(crate) async fn cancel_build(
     build_id: i32,
-    job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
     db: DatabaseConnection,
 ) -> anyhow::Result<()> {
     let build = Builds::find_by_id(build_id)
@@ -42,19 +41,32 @@ pub(crate) async fn cancel_build(
     ));
     let _ = build.clone().update(&db).await;
 
-    job_handles
+    let container_id = job_containers
         .lock()
         .await
-        .remove(&build.id.clone().unwrap())
-        .ok_or(anyhow!("No build found"))?
-        .abort();
+        .get(&build_id)
+        .ok_or(anyhow!("Build container not found"))?.clone();
+
+    let docker = Docker::new();
+    docker.containers().get(container_id).stop(None).await?;
+
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!("Failed to remove build container from active build map"))?;
     Ok(())
+}
+
+fn concat_container_name(name: String, build_id: i32) -> String {
+    format!("aurcache_build_{}_{}", name, build_id)
 }
 
 pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
     let build_id = new_build.id.clone().unwrap();
     let build_logger = BuildLogger::new(build_id, db.clone());
@@ -72,6 +84,7 @@ pub(crate) async fn prepare_build(
         package_id,
         db.clone(),
         build_logger.clone(),
+        job_containers
     )
     .await
     {
@@ -118,6 +131,7 @@ pub async fn build(
     pkg_id: i32,
     db: DatabaseConnection,
     build_logger: BuildLogger,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
     let docker = Docker::new();
 
@@ -158,7 +172,7 @@ pub async fn build(
                 .attach_stderr(true)
                 .auto_remove(true)
                 .user("ab")
-                .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
+                .name(concat_container_name(name.clone(), build_id).as_str())
                 .cmd(vec![
                     "paru",
                     "-Syu",
@@ -173,6 +187,9 @@ pub async fn build(
         .await?;
     let id = create_info.id;
     docker.containers().get(&id).start().await?;
+
+    // insert container id to container map
+    job_containers.lock().await.insert(build_id, id.clone());
 
     let mut logs_stream = docker.containers().get(id.clone()).logs(
         &LogsOptions::builder()
@@ -200,6 +217,12 @@ pub async fn build(
             Err(e) => build_logger.append(e.to_string()).await?,
         }
     }
+
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!("Failed to remove build container from active builds map"))?;
 
     move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
     Ok(())
