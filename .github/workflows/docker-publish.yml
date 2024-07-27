@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - master
+    tags:
+      - '*'
 
 jobs:
   build-and-push:
@@ -13,13 +15,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v1
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          username: luki42
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
         run: |
-          docker build -t luki42/aurcache:latest .
-          docker push luki42/aurcache:latest
+          docker build -t ghcr.io/${{ github.repository }}:git .
+          docker push ghcr.io/${{ github.repository }}:git
+
+      - name: Extract version tag
+        id: extract_tag
+        run: echo "::set-output name=tag::${GITHUB_REF#refs/tags/}"
+
+      - name: Build and push Docker image for main branch
+        if: github.ref == 'refs/heads/master'
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:git .
+          docker push ghcr.io/${{ github.repository }}:git
+
+      - name: Build and push Docker image for tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }} .
+          docker tag ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:${{ steps.extract_tag.outputs.tag }}
+          docker push ghcr.io/${{ github.repository }}:latest
