@@ -19,7 +19,7 @@ To deploy AURCache using Docker and Docker-compose, you can use the following ex
 version: '3'
 services:
     aurcache:
-        image: luki42/aurcache:latest
+        image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
         ports:
         - "8080:8080"
         - "8081:8081"
@@ -42,7 +42,7 @@ For example:
 version: '3'
 services:
     aurcache:
-        image: luki42/aurcache:latest
+        image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
         ports:
         - "8080:8080"
         - "8081:8081"
@@ -80,6 +80,12 @@ SigLevel = Optional TrustAll
 Server = http://localhost:8080/
 ```
 
+### Docker Tags
+`:git` - current master branch build
+
+`:latest` - latest version 
+
+`:<version>` - <version> git tag (latest version = latest tag)
 ## Configuration
 Environment Variables
 
