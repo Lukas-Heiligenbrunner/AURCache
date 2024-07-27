@@ -45,7 +45,8 @@ pub(crate) async fn cancel_build(
         .lock()
         .await
         .get(&build_id)
-        .ok_or(anyhow!("Build container not found"))?.clone();
+        .ok_or(anyhow!("Build container not found"))?
+        .clone();
 
     let docker = Docker::new();
     docker.containers().get(container_id).stop(None).await?;
@@ -54,7 +55,9 @@ pub(crate) async fn cancel_build(
         .lock()
         .await
         .remove(&build_id)
-        .ok_or(anyhow!("Failed to remove build container from active build map"))?;
+        .ok_or(anyhow!(
+            "Failed to remove build container from active build map"
+        ))?;
     Ok(())
 }
 
@@ -84,7 +87,7 @@ pub(crate) async fn prepare_build(
         package_id,
         db.clone(),
         build_logger.clone(),
-        job_containers
+        job_containers,
     )
     .await
     {
@@ -222,7 +225,9 @@ pub async fn build(
         .lock()
         .await
         .remove(&build_id)
-        .ok_or(anyhow!("Failed to remove build container from active builds map"))?;
+        .ok_or(anyhow!(
+            "Failed to remove build container from active builds map"
+        ))?;
 
     move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
     Ok(())
