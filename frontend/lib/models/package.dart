@@ -16,7 +16,7 @@ class Package {
   factory Package.fromJson(Map<String, dynamic> json) {
     return Package(
       id: json["id"] as int,
-      outofdate: json["outofdate"] as bool,
+      outofdate: json["outofdate"] as num != 0,
       status: json["status"] as int,
       name: json["name"] as String,
       latest_version: json["latest_version"] as String,

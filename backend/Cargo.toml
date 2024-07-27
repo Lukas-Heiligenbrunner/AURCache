@@ -1,6 +1,6 @@
 [package]
 name = "aurcache"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -16,12 +16,13 @@ tar = "0.4.41"
 
 rocket = "0.5.1"
 rocket_okapi = { features = ["swagger"],  git = "https://github.com/beyera/okapi.git", branch = "beyera/update-rocket-0.5.1" }
-sea-orm = { version = "1.0.0-rc.7", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros" ] }
+sea-orm = { version = "1.0.0-rc.7", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
 sea-orm-migration = {version = "1.0.0-rc.7", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 serde = "1.0.203"
 rust-embed = "8.4.0"
 rocket_seek_stream = "0.2.6"
 shiplift = "0.7.0"
+bigdecimal = "0.4.5"
 
 [[bin]]
 name = "aurcache"

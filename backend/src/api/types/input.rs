@@ -16,7 +16,7 @@ pub struct ListPackageModel {
     pub id: i32,
     pub name: String,
     pub status: i32,
-    pub outofdate: bool,
+    pub outofdate: i32,
     pub latest_version: Option<String>,
     pub latest_aur_version: String,
 }
@@ -29,8 +29,8 @@ pub struct ListBuildsModel {
     pkg_name: String,
     version: String,
     status: i32,
-    start_time: Option<u32>,
-    end_time: Option<u32>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]

@@ -42,7 +42,7 @@ pub async fn package_update(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as u32,
+                .as_secs() as i64,
         )),
         ..Default::default()
     };

@@ -1,6 +1,7 @@
 use crate::db::builds;
 use crate::db::prelude::{Builds, Packages};
 use crate::utils::dir_size::dir_size;
+use bigdecimal::ToPrimitive;
 
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
@@ -9,6 +10,7 @@ use rocket::{get, State};
 
 use crate::api::types::input::ListStats;
 use rocket_okapi::openapi;
+use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
@@ -51,7 +53,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     #[derive(Debug, FromQueryResult)]
     struct BuildTimeStruct {
-        avg_build_time: Option<f64>,
+        avg_build_time: Option<BigDecimal>,
     }
 
     let unique: BuildTimeStruct =
@@ -66,7 +68,11 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .await?
         .ok_or(anyhow::anyhow!("No Average build time"))?;
 
-    let avg_build_time: u32 = unique.avg_build_time.unwrap_or(0.0) as u32;
+    let avg_build_time = unique
+        .avg_build_time
+        .unwrap_or(BigDecimal::try_from(0.0)?)
+        .to_u32()
+        .unwrap();
 
     // Count total packages
     let total_packages: u32 = Packages::find().count(db).await?.try_into()?;

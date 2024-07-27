@@ -38,7 +38,7 @@ pub(crate) async fn cancel_build(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() as u32,
+            .as_secs() as i64,
     ));
     let _ = build.clone().update(&db).await;
 
@@ -86,7 +86,7 @@ pub(crate) async fn prepare_build(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as u32,
+                    .as_secs() as i64,
             ));
             _ = new_build.update(&db).await;
             build_logger
@@ -102,7 +102,7 @@ pub(crate) async fn prepare_build(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() as u32,
+                    .as_secs() as i64,
             ));
             let _ = new_build.update(&db).await;
 
@@ -272,12 +272,7 @@ async fn move_and_add_pkgs(
         package_file.save(&txn).await?;
 
         repo_add(archive_name.clone())?;
-        build_logger
-            .append(format!(
-                "Successfully added '{}' to the repo archive",
-                archive_name
-            ))
-            .await?;
+        println!("Successfully added '{}' to the repo archive", archive_name);
     }
     txn.commit().await?;
     Ok(())
