@@ -61,10 +61,6 @@ pub(crate) async fn cancel_build(
     Ok(())
 }
 
-fn concat_container_name(name: String, build_id: i32) -> String {
-    format!("aurcache_build_{}_{}", name, build_id)
-}
-
 pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
@@ -175,7 +171,7 @@ pub async fn build(
                 .attach_stderr(true)
                 .auto_remove(true)
                 .user("ab")
-                .name(concat_container_name(name.clone(), build_id).as_str())
+                .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
                 .cmd(vec![
                     "paru",
                     "-Syu",
