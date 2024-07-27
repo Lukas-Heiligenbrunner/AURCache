@@ -48,10 +48,9 @@ pub async fn package_update(
     };
     let new_build = build.save(&txn).await?;
     let build_id = new_build.id.clone().unwrap();
+    txn.commit().await?;
 
     let _ = tx.send(Action::Build(Box::from(pkg_model), Box::from(new_build)));
-
-    txn.commit().await?;
 
     Ok(build_id)
 }
