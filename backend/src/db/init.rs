@@ -1,8 +1,9 @@
 use crate::db::helpers::dbtype::{database_type, DbType};
 use crate::db::migration::Migrator;
 use anyhow::anyhow;
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
+use std::time::Duration;
 use std::{env, fs};
 
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
@@ -13,7 +14,15 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
                 fs::create_dir("./db")?;
             }
 
-            Database::connect("sqlite://db/db.sqlite?mode=rwc").await?
+            let mut conn_opts = ConnectOptions::new("sqlite://db/db.sqlite?mode=rwc");
+            conn_opts
+                .min_connections(5)
+                .max_connections(100)
+                .connect_timeout(Duration::from_secs(10))
+                .acquire_timeout(Duration::from_secs(10))
+                .idle_timeout(Duration::from_secs(10))
+                .max_lifetime(Duration::from_secs(30));
+            Database::connect(conn_opts).await?
         }
         DbType::Postgres => {
             let db_user = env::var("DB_USER")

@@ -226,6 +226,14 @@ async fn move_and_add_pkgs(
         .all(&db)
         .await?;
 
+    build_logger
+        .append(format!(
+            "Copy {} files from build dir to repo\nDeleting {} old files",
+            archive_paths.len(),
+            old_files.len()
+        ))
+        .await?;
+
     let txn = db.begin().await?;
     for (pkg_file, file) in old_files {
         pkg_file.delete(&txn).await?;
@@ -235,12 +243,6 @@ async fn move_and_add_pkgs(
         }
     }
 
-    build_logger
-        .append(format!(
-            "Copy {} files from build dir to repo",
-            archive_paths.len()
-        ))
-        .await?;
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
