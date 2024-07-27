@@ -70,8 +70,8 @@ CREATE TABLE public.builds (
     pkg_id INTEGER NOT NULL,
     output TEXT,
     status INTEGER,
-    start_time OID,
-    end_time OID
+    start_time BIGINT,
+    end_time BIGINT
 );
 
 CREATE TABLE public.files (
