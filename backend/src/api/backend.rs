@@ -1,5 +1,6 @@
 use crate::api::aur::*;
 use crate::api::build::*;
+use crate::api::health::*;
 use crate::api::package::*;
 use crate::api::stats::*;
 use crate::api::version::*;
@@ -20,6 +21,7 @@ pub fn build_api() -> Vec<Route> {
         get_build,
         get_package,
         package_update_endpoint,
-        cancel_build
+        cancel_build,
+        health
     ]
 }
