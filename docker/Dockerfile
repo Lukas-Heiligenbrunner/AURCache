@@ -27,9 +27,7 @@ FROM quay.io/podman/stable
 COPY --from=builder /app/target/release/aurcache /usr/local/bin/aurcache
 
 RUN dnf -y install pacman  && dnf clean all
-COPY entrypoint.sh /entrypoint.sh
-
-RUN chmod +x /entrypoint.sh /usr/local/bin/aurcache
+COPY docker/entrypoint.sh /entrypoint.sh
 
 # Set the entry point or default command to run your application
 WORKDIR /app
