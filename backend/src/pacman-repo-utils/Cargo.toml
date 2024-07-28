@@ -1,0 +1,17 @@
+[package]
+name = "pacman-repo-utils"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+base64 = "0.22.1"
+md5 = "0.7.0"
+sha2 = "0.10.6"
+flate2 = "1.0.30"
+
+
+zstd = "0.13.2"
+tar = "0.4"
+anyhow = "1.0.86"

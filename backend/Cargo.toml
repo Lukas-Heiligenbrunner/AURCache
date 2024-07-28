@@ -1,3 +1,4 @@
+workspace = { members = ["src/pacman-repo-utils"] }
 [package]
 name = "aurcache"
 version = "0.1.1"
@@ -23,6 +24,7 @@ rust-embed = "8.4.0"
 rocket_seek_stream = "0.2.6"
 shiplift = "0.7.0"
 bigdecimal = "0.4.5"
+pacman-repo-utils = {path = "./src/pacman-repo-utils"}
 
 [[bin]]
 name = "aurcache"
