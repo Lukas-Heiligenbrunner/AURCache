@@ -49,10 +49,7 @@ pub async fn package_update_endpoint(
 #[openapi(tag = "Packages")]
 #[delete("/package/<id>")]
 pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), String> {
-    let db = db as &DatabaseConnection;
-
     package_delete(db, id).await.map_err(|e| e.to_string())?;
-
     Ok(())
 }
 

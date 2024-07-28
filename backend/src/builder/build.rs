@@ -272,7 +272,7 @@ async fn move_and_add_pkgs(
         package_file.save(&txn).await?;
 
         pacman_repo_utils::repo_add(
-            archive_name.as_str(),
+            format!("./repo/{}",archive_name).as_str(),
             "./repo/repo.db.tar.gz".to_string(),
             "./repo/repo.files.tar.gz".to_string(),
         )?;
