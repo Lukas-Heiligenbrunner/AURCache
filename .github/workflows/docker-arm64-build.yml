@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:    
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     env:
       DOCKER_TARGET_PLATFORM: linux/arm64/v8
 
@@ -19,6 +19,10 @@ jobs:
       uses: crazy-max/ghaction-docker-buildx@v1      
       with:        
         version: latest
+    - name: Prepare
+      id: prepare
+      run: |        
+        echo ::set-output name=docker_platform::${DOCKER_TARGET_PLATFORM}
     - name: Login to GitHub Container Registry
       uses: docker/login-action@v3
       with:
@@ -28,6 +32,6 @@ jobs:
     - name: Run Buildx (push image)
       run: |
         docker buildx build \
-        --platform ${{ DOCKER_TARGET_PLATFORM }} \
+        --platform ${{ steps.prepare.outputs.docker_platform }} \
         --file ./Dockerfile \
         --output type=image,push=false .
