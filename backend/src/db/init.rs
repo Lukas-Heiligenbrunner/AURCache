@@ -18,14 +18,14 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
             conn_opts
                 .max_connections(100)
                 .sqlx_logging_level(LevelFilter::Info);
-            let dbb = Database::connect(conn_opts).await?;
-            dbb.execute_unprepared("
+            let db = Database::connect(conn_opts).await?;
+            db.execute_unprepared("
                 PRAGMA journal_mode = WAL;          -- better write-concurrency
                 PRAGMA synchronous = NORMAL;        -- fsync only in critical moments
                 PRAGMA wal_autocheckpoint = 1000;   -- write WAL changes back every 1000 pages, for an in average 1MB WAL file. May affect readers if number is increased
                 PRAGMA wal_checkpoint(TRUNCATE);    -- free some space by truncating possibly massive WAL files from the last run.
             ").await?;
-            dbb
+            db
         }
         DbType::Postgres => {
             let db_user = env::var("DB_USER")
