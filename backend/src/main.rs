@@ -13,10 +13,13 @@ use crate::builder::types::Action;
 use crate::db::init::init_db;
 use crate::repo::init::init_repo_files;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
+use crate::utils::logger::init_logger;
+use log::warn;
 use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
+    init_logger();
     let (tx, _) = broadcast::channel::<Action>(32);
     let db = init_db()
         .await
@@ -32,16 +35,16 @@ async fn main() {
 
     tokio::select! {
         _ = version_check_handle => {
-            println!("Version check handle exited");
+            warn!("Version check handle exited");
         }
         _ = build_queue_handle => {
-            println!("Build queue handle exited");
+            warn!("Build queue handle exited");
         }
         _ = repo_handle => {
-            println!("Repo web server handle exited");
+            warn!("Repo web server handle exited");
         }
         _ = api_handle => {
-            println!("API web server handle exited");
+            warn!("API web server handle exited");
         }
     }
 }
