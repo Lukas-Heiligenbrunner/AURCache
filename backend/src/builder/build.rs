@@ -160,22 +160,32 @@ pub async fn build(
     fs::set_permissions(host_build_path_base.clone(), Permissions::from_mode(0o777))?;
 
     // use either docker volume or base dir as docker host mount path
-    let host_build_path_docker = env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
+    let host_build_path_docker =
+        env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
 
     // create current build dir
     let mut host_active_build_path = host_build_path_base.clone();
     host_active_build_path.push(name.clone());
     fs::create_dir_all(host_active_build_path.clone())?;
-    fs::set_permissions(host_active_build_path.clone(), Permissions::from_mode(0o777))?;
+    fs::set_permissions(
+        host_active_build_path.clone(),
+        Permissions::from_mode(0o777),
+    )?;
 
     // create new docker container for current build
     let build_dir_base = "/var/cache/makepkg/pkg";
     let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
-    let makepkg_config = format!("
+    let makepkg_config = format!(
+        "\
 MAKEFLAGS=-j$(nproc)
-PKGDEST={}/{}", build_dir_base, name);
+PKGDEST={}/{}",
+        build_dir_base, name
+    );
     let makepkg_config_path = "/var/ab/.config/pacman/makepkg.conf";
-    let cmd = format!("cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}", makepkg_config_path, makepkg_config, name);
+    let cmd = format!(
+        "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
+        makepkg_config_path, makepkg_config, name
+    );
     let create_info = docker
         .containers()
         .create(
