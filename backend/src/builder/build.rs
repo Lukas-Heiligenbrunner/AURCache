@@ -153,15 +153,29 @@ pub async fn build(
         }
     }
 
-    let mut work_dir = env::current_dir()?;
-    work_dir.push("builds");
-    fs::create_dir_all(work_dir.clone())?;
-    fs::set_permissions(work_dir.clone(), Permissions::from_mode(0o777))?;
+    // create builds dir
+    let mut host_build_path_base = env::current_dir()?;
+    host_build_path_base.push("builds");
+    fs::create_dir_all(host_build_path_base.clone())?;
+    fs::set_permissions(host_build_path_base.clone(), Permissions::from_mode(0o777))?;
 
-    let host_build_path = env::var("BUILD_ARTIFACT_DIR").unwrap_or(work_dir.display().to_string());
+    // use either docker volume or base dir as docker host mount path
+    let host_build_path_docker = env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
+
+    // create current build dir
+    let mut host_active_build_path = host_build_path_base.clone();
+    host_active_build_path.push(name.clone());
+    fs::create_dir_all(host_active_build_path.clone())?;
+    fs::set_permissions(host_active_build_path.clone(), Permissions::from_mode(0o777))?;
 
     // create new docker container for current build
-    let mountpoint = format!("{}:/var/cache/makepkg/pkg", host_build_path);
+    let build_dir_base = "/var/cache/makepkg/pkg";
+    let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
+    let makepkg_config = format!("
+MAKEFLAGS=-j$(nproc)
+PKGDEST={}/{}", build_dir_base, name);
+    let makepkg_config_path = "/var/ab/.config/pacman/makepkg.conf";
+    let cmd = format!("cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}", makepkg_config_path, makepkg_config, name);
     let create_info = docker
         .containers()
         .create(
@@ -172,15 +186,7 @@ pub async fn build(
                 .auto_remove(true)
                 .user("ab")
                 .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
-                .cmd(vec![
-                    "paru",
-                    "-Syu",
-                    "--noconfirm",
-                    "--noprogressbar",
-                    "--color",
-                    "never",
-                    name.as_str(),
-                ])
+                .cmd(vec!["sh", "-c", cmd.as_str()])
                 .build(),
         )
         .await?;
@@ -225,7 +231,10 @@ pub async fn build(
             "Failed to remove build container from active builds map"
         ))?;
 
-    move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
+    // move built tar.gz archives to host and repo-add
+    move_and_add_pkgs(build_logger, host_active_build_path.clone(), pkg_id, db).await?;
+    // remove active build dir
+    fs::remove_dir(host_active_build_path)?;
     Ok(())
 }
 
@@ -271,6 +280,7 @@ async fn move_and_add_pkgs(
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
         fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
+        // remove old file from shared path
         fs::remove_file(archive.path())?;
 
         let file = match Files::find()
