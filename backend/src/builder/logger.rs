@@ -1,7 +1,7 @@
 use crate::db::builds;
 use crate::db::prelude::Builds;
 use anyhow::anyhow;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::ops::Add;
 
 #[derive(Debug, Clone)]
@@ -16,8 +16,9 @@ impl BuildLogger {
     }
 
     pub async fn append(&self, mut text: String) -> anyhow::Result<()> {
+        let txn = self.db.begin().await?;
         let mut build: builds::ActiveModel = Builds::find_by_id(self.build_id)
-            .one(&self.db)
+            .one(&txn)
             .await?
             .ok_or(anyhow!("build not found"))?
             .into();
@@ -38,7 +39,8 @@ impl BuildLogger {
             }
         }
 
-        build.update(&self.db).await?;
+        build.update(&txn).await?;
+        txn.commit().await?;
         Ok(())
     }
 }

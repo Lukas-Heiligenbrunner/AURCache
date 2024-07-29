@@ -81,7 +81,7 @@ pub(crate) async fn prepare_build(
         package_name,
         build_id,
         package_id,
-        db.clone(),
+        &db,
         build_logger.clone(),
         job_containers,
     )
@@ -128,7 +128,7 @@ pub async fn build(
     name: String,
     build_id: i32,
     pkg_id: i32,
-    db: DatabaseConnection,
+    db: &DatabaseConnection,
     build_logger: BuildLogger,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
@@ -234,7 +234,7 @@ async fn move_and_add_pkgs(
     build_logger: BuildLogger,
     work_dir: PathBuf,
     pkg_id: i32,
-    db: DatabaseConnection,
+    db: &DatabaseConnection,
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
@@ -247,7 +247,7 @@ async fn move_and_add_pkgs(
         .filter(packages_files::Column::PackageId.eq(pkg_id))
         .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
         .select_also(files::Entity)
-        .all(&db)
+        .all(db)
         .await?;
 
     build_logger
