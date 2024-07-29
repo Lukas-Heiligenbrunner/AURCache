@@ -14,12 +14,23 @@ use crate::db::init::init_db;
 use crate::repo::init::init_repo_files;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
-use log::warn;
+use log::{info, warn};
 use tokio::sync::broadcast;
+
+static START_BANNER: &str = r"
+          _    _ _____   _____           _
+     /\  | |  | |  __ \ / ____|         | |
+    /  \ | |  | | |__) | |     __ _  ___| |__   ___
+   / /\ \| |  | |  _  /| |    / _` |/ __| '_ \ / _ \
+  / ____ \ |__| | | \ \| |___| (_| | (__| | | |  __/
+ /_/    \_\____/|_|  \_\\_____\__,_|\___|_| |_|\___|
+";
 
 #[tokio::main]
 async fn main() {
     init_logger();
+    info!("{}", START_BANNER);
+
     let (tx, _) = broadcast::channel::<Action>(32);
     let db = init_db()
         .await
