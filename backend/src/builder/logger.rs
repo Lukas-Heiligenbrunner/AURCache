@@ -1,6 +1,7 @@
 use crate::db::builds;
 use crate::db::prelude::Builds;
 use anyhow::anyhow;
+use log::debug;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::ops::Add;
 
@@ -27,8 +28,7 @@ impl BuildLogger {
             text = text.add("\n");
         }
 
-        // todo replace this with debug log
-        print!("{}", text);
+        debug!("{}", text);
 
         match build.output.unwrap() {
             None => {

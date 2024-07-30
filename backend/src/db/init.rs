@@ -1,10 +1,10 @@
 use crate::db::helpers::dbtype::{database_type, DbType};
 use crate::db::migration::Migrator;
 use anyhow::anyhow;
-use sea_orm::{ConnectionTrait, ConnectOptions, Database, DatabaseConnection};
+use rocket::log::private::LevelFilter;
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 use std::{env, fs};
-use rocket::log::private::LevelFilter;
 
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
     let db: DatabaseConnection = match database_type() {
@@ -17,7 +17,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
             let mut conn_opts = ConnectOptions::new("sqlite://db/db.sqlite?mode=rwc");
             conn_opts
                 .max_connections(100)
-                .sqlx_logging_level(LevelFilter::Info);
+                .sqlx_logging_level(LevelFilter::Trace);
             let db = Database::connect(conn_opts).await?;
             db.execute_unprepared("
                 PRAGMA journal_mode = WAL;          -- better write-concurrency

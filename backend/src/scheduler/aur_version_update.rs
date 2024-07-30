@@ -2,6 +2,7 @@ use crate::db::packages;
 use crate::db::prelude::Packages;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
+use log::{error, info, warn};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
 use std::env;
@@ -18,11 +19,11 @@ pub fn start_aur_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     tokio::spawn(async move {
         sleep(Duration::from_secs(10)).await;
         loop {
-            println!("performing aur version checks");
+            info!("performing aur version checks");
             match aur_check_versions(db.clone()).await {
                 Ok(_) => {}
                 Err(e) => {
-                    println!("Failed to perform aur version check: {e}")
+                    error!("Failed to perform aur version check: {e}")
                 }
             }
             sleep(Duration::from_secs(check_interval)).await;
@@ -42,13 +43,13 @@ async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
         .results;
 
     if results.len() != packages.len() {
-        println!("Package nr in repo and aur api response has different size");
+        warn!("Package nr in repo and aur api response has different size");
     }
 
     for package in packages {
         match results.iter().find(|x1| x1.name == package.name) {
             None => {
-                println!("Couldn't find {} in AUR response", package.name)
+                warn!("Couldn't find {} in AUR response", package.name)
             }
             Some(result) => {
                 let mut package: packages::ActiveModel = package.into();
