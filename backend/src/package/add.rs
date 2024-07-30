@@ -44,6 +44,7 @@ pub async fn package_add(
         pkg_id: new_package.id.clone(),
         output: Set(None),
         status: Set(Some(3)),
+        // todo add new column for enqueued_time
         start_time: Set(Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
