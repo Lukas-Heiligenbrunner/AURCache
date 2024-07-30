@@ -1,6 +1,7 @@
 use crate::db::prelude::PackagesFiles;
 use crate::db::{files, packages_files};
 use anyhow::anyhow;
+use log::info;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
@@ -25,7 +26,7 @@ pub fn repo_add(pkg_file_name: String) -> anyhow::Result<()> {
         ));
     }
 
-    println!("{db_file} updated successfully");
+    info!("{db_file} updated successfully");
     Ok(())
 }
 
@@ -45,7 +46,7 @@ pub fn repo_remove(pkg_file_name: String) -> anyhow::Result<()> {
         ));
     }
 
-    println!("{db_file} updated successfully");
+    info!("{db_file} updated successfully");
     Ok(())
 }
 
@@ -63,7 +64,7 @@ pub async fn try_remove_archive_file(
         let _ = repo_remove(filename.clone());
         fs::remove_file(format!("./repo/{}", filename))?;
 
-        println!("Removed old file: {}", filename);
+        info!("Removed old file: {}", filename);
     }
 
     Ok(())

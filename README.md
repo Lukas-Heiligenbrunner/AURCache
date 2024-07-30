@@ -97,6 +97,7 @@ Environment Variables
 | DB_HOST                | String                | POSTGRES Host   (ignored if sqlite)                                 | null    |
 | VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600    |
 | BUILD_ARTIFACT_DIR     | String                | pkg share directory between aurcache container and build containers | null    |
+| LOG_LEVEL              | String                | Log level                                                           | INFO    |
 
 ## Build Info
 
@@ -123,7 +124,6 @@ cargo build --release
 ## Things still missing
 
 * proper error return from api
-* proper logging
 * auto update packages
 * implement repo-add in rust
 * keep older pkg versions in repo (repo-add limitation)
