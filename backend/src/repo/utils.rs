@@ -1,6 +1,5 @@
 use crate::db::prelude::PackagesFiles;
 use crate::db::{files, packages_files};
-use anyhow::anyhow;
 use log::info;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
