@@ -1937,6 +1937,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "flate2",
+ "log",
  "md5",
  "sha2",
  "tar",

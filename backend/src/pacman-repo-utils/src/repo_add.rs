@@ -1,5 +1,9 @@
 use anyhow::anyhow;
 
+use crate::pkginfo::parser::Pkginfo;
+use crate::repo_database::db::add_to_db_file;
+use crate::repo_database::desc::Desc;
+use log::{debug, error};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
@@ -7,23 +11,17 @@ use std::path::Path;
 use tar::Archive;
 use zstd::Decoder;
 
-use crate::pkginfo::parser::Pkginfo;
-use crate::repo_database::db::add_to_db_file;
-use crate::repo_database::desc::Desc;
-
 pub fn repo_add_impl(
     pkgfile: &str,
     db_archive: String,
     files_archive: String,
 ) -> anyhow::Result<()> {
     let mut files = vec![];
+    let mut pkginfo = Pkginfo::new();
 
     // Path to the .tar.zst file
     let file = File::open(Path::new(pkgfile))?;
-    let decoder = Decoder::new(file)?;
-    let mut archive = Archive::new(decoder);
-
-    let mut pkginfo = Pkginfo::new();
+    let mut archive = Archive::new(Decoder::new(file)?);
 
     // Iterate over the entries in the tar archive
     for entry in archive.entries()? {
@@ -34,22 +32,24 @@ pub fn repo_add_impl(
         }
 
         if entry.path()? == Path::new(".PKGINFO") {
+            debug!("Found .PKGINFO file in '{}'.", pkgfile);
             pkginfo.parse(entry)?;
         }
     }
 
-    // Ensure $pkgname and $pkgver variables were found
-    if pkginfo.pkgname.is_empty() || pkginfo.pkgver.is_empty() {
-        eprintln!("Invalid package file '{}'.", pkgfile);
+    if !pkginfo.valid() {
+        error!("Invalid package file '{}'.", pkgfile);
         return Err(anyhow!("Invalid package file"));
     }
 
     // Compute base64'd PGP signature
+    debug!("Setting signature for '{}'.", pkgfile);
     pkginfo.set_signature(pkgfile)?;
 
+    debug!("Calculating compressed size for '{}'.", pkgfile);
     let csize = fs::metadata(pkgfile)?.len() as usize;
 
-    // Compute checksums
+    debug!("Calculating checksums for '{}'.", pkgfile);
     let (md5sum, sha256sum) = calc_checksums(pkgfile)?;
 
     let filename = Path::new(pkgfile)
@@ -61,6 +61,7 @@ pub fn repo_add_impl(
 
     let dir_name = format!("{}-{}", pkginfo.pkgname, pkginfo.pkgver);
 
+    debug!("Creating DESC file for db entry");
     let mut desc = Desc::from(pkginfo);
     desc.filename = filename.clone();
     desc.md5sum = md5sum.clone();
@@ -68,6 +69,7 @@ pub fn repo_add_impl(
     desc.sha256sum = sha256sum.clone();
     let desc_str = desc.to_string();
 
+    debug!("Adding DESC and FILES entries to db archive");
     add_to_db_file(
         desc_str.clone(),
         dir_name.clone(),

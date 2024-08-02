@@ -110,4 +110,76 @@ impl Pkginfo {
         }
         Ok(())
     }
+
+    pub fn valid(&self) -> bool {
+        // Ensure $pkgname and $pkgver variables were found
+        !self.pkgname.is_empty() && !self.pkgver.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_missing() {
+        let mut pkginfo = Pkginfo::new();
+        assert_eq!(pkginfo.valid(), false);
+        pkginfo.pkgname = "test".to_string();
+        assert_eq!(pkginfo.valid(), false);
+        pkginfo.pkgver = "1.0".to_string();
+        assert_eq!(pkginfo.valid(), true);
+    }
+
+    #[test]
+    fn parse() {
+        let mut pkginfo = Pkginfo::new();
+        let data = r#"
+            pkgname = test
+            pkgver = 1.0
+            pkgdesc = test package
+            size = 1024
+            url = https://example.com
+            arch = x86_64
+            builddate = 2021-01-01
+            packager = test
+            "#;
+        pkginfo.parse(data.as_bytes()).unwrap();
+        assert_eq!(pkginfo.pkgname, "test");
+        assert_eq!(pkginfo.pkgver, "1.0");
+        assert_eq!(pkginfo.pkgdesc, "test package");
+        assert_eq!(pkginfo.size, 1024);
+        assert_eq!(pkginfo.url, "https://example.com");
+        assert_eq!(pkginfo.arch, "x86_64");
+        assert_eq!(pkginfo.builddate, "2021-01-01");
+        assert_eq!(pkginfo.packager, "test");
+    }
+
+    #[test]
+    fn parse_array() {
+        let mut pkginfo = Pkginfo::new();
+        let data = r#"
+            group = test
+            group = secgroup
+            license = MIT
+            replaces = test
+            depend = test
+            conflict = test
+            provides = test
+            optdepend = myoptdep
+            optdepend = secopdep
+            makedepend = test
+            checkdepend = test
+            "#;
+        pkginfo.parse(data.as_bytes()).unwrap();
+        assert_eq!(pkginfo.groups, vec!["test", "secgroup"]);
+        assert_eq!(pkginfo.licenses, vec!["MIT"]);
+        assert_eq!(pkginfo.replaces, vec!["test"]);
+        assert_eq!(pkginfo.depends, vec!["test"]);
+        assert_eq!(pkginfo.conflicts, vec!["test"]);
+        assert_eq!(pkginfo.provides, vec!["test"]);
+        assert_eq!(pkginfo.optdepends, vec!["myoptdep", "secopdep"]);
+        assert_eq!(pkginfo.makedepends, vec!["test"]);
+        assert_eq!(pkginfo.checkdepends, vec!["test"]);
+    }
 }

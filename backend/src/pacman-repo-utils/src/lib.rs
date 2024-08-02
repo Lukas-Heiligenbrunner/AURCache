@@ -16,28 +16,3 @@ pub fn repo_remove(
 ) -> anyhow::Result<()> {
     repo_remove_impl(filename, db_archive, files_archive)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repoadd() {
-        repo_add(
-            "/home/lukas/RustroverProjects/untitled/backend/repo/yay-12.3.5-1-x86_64.pkg.tar.zst",
-            "test.db.tar.gz".to_string(),
-            "test.files.tar.gz".to_string(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn repodel() {
-        repo_remove(
-            "yay-12.3.5-1".to_string(),
-            "test.db.tar.gz".to_string(),
-            "test.files.tar.gz".to_string(),
-        )
-        .unwrap()
-    }
-}
