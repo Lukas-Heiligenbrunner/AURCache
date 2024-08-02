@@ -3,7 +3,7 @@ use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
 use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
-use crate::repo::utils::{repo_add, try_remove_archive_file};
+use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
 use log::info;
 use rocket::futures::StreamExt;
@@ -296,7 +296,11 @@ async fn move_and_add_pkgs(
         };
         package_file.save(&txn).await?;
 
-        repo_add(archive_name.clone())?;
+        pacman_repo_utils::repo_add(
+            format!("./repo/{}", archive_name).as_str(),
+            "./repo/repo.db.tar.gz".to_string(),
+            "./repo/repo.files.tar.gz".to_string(),
+        )?;
         info!("Successfully added '{}' to the repo archive", archive_name);
     }
     txn.commit().await?;
