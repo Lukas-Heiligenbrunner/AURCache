@@ -1,5 +1,7 @@
 use crate::db::prelude::PackagesFiles;
 use crate::db::{files, packages_files};
+use anyhow::anyhow;
+use log::info;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
@@ -24,7 +26,7 @@ pub async fn try_remove_archive_file(
         )?;
         fs::remove_file(format!("./repo/{}", filename))?;
 
-        println!("Removed old file: {}", filename);
+        info!("Removed old file: {}", filename);
     }
 
     Ok(())

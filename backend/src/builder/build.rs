@@ -5,6 +5,7 @@ use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
+use log::info;
 use rocket::futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
@@ -20,11 +21,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 pub(crate) async fn cancel_build(
     build_id: i32,
-    job_handles: Arc<Mutex<HashMap<i32, JoinHandle<()>>>>,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
     db: DatabaseConnection,
 ) -> anyhow::Result<()> {
     let build = Builds::find_by_id(build_id)
@@ -42,12 +42,23 @@ pub(crate) async fn cancel_build(
     ));
     let _ = build.clone().update(&db).await;
 
-    job_handles
+    let container_id = job_containers
         .lock()
         .await
-        .remove(&build.id.clone().unwrap())
-        .ok_or(anyhow!("No build found"))?
-        .abort();
+        .get(&build_id)
+        .ok_or(anyhow!("Build container not found"))?
+        .clone();
+
+    let docker = Docker::new();
+    docker.containers().get(container_id).stop(None).await?;
+
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!(
+            "Failed to remove build container from active build map"
+        ))?;
     Ok(())
 }
 
@@ -55,6 +66,7 @@ pub(crate) async fn prepare_build(
     mut new_build: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
     let build_id = new_build.id.clone().unwrap();
     let build_logger = BuildLogger::new(build_id, db.clone());
@@ -70,8 +82,9 @@ pub(crate) async fn prepare_build(
         package_name,
         build_id,
         package_id,
-        db.clone(),
+        &db,
         build_logger.clone(),
+        job_containers,
     )
     .await
     {
@@ -116,8 +129,9 @@ pub async fn build(
     name: String,
     build_id: i32,
     pkg_id: i32,
-    db: DatabaseConnection,
+    db: &DatabaseConnection,
     build_logger: BuildLogger,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
     let docker = Docker::new();
 
@@ -174,6 +188,9 @@ pub async fn build(
     let id = create_info.id;
     docker.containers().get(&id).start().await?;
 
+    // insert container id to container map
+    job_containers.lock().await.insert(build_id, id.clone());
+
     let mut logs_stream = docker.containers().get(id.clone()).logs(
         &LogsOptions::builder()
             .follow(true)
@@ -201,6 +218,14 @@ pub async fn build(
         }
     }
 
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!(
+            "Failed to remove build container from active builds map"
+        ))?;
+
     move_and_add_pkgs(build_logger, work_dir, pkg_id, db).await?;
     Ok(())
 }
@@ -210,7 +235,7 @@ async fn move_and_add_pkgs(
     build_logger: BuildLogger,
     work_dir: PathBuf,
     pkg_id: i32,
-    db: DatabaseConnection,
+    db: &DatabaseConnection,
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
@@ -223,7 +248,7 @@ async fn move_and_add_pkgs(
         .filter(packages_files::Column::PackageId.eq(pkg_id))
         .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
         .select_also(files::Entity)
-        .all(&db)
+        .all(db)
         .await?;
 
     build_logger
@@ -276,7 +301,7 @@ async fn move_and_add_pkgs(
             "./repo/repo.db.tar.gz".to_string(),
             "./repo/repo.files.tar.gz".to_string(),
         )?;
-        println!("Successfully added '{}' to the repo archive", archive_name);
+        info!("Successfully added '{}' to the repo archive", archive_name);
     }
     txn.commit().await?;
     Ok(())

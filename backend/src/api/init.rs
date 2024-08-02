@@ -3,6 +3,7 @@ use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
 use crate::builder::types::Action;
+use log::{error, info};
 use rocket::Config;
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::DatabaseConnection;
@@ -14,6 +15,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8081,
+            //log_level: LogLevel::Off,
             ..Default::default()
         };
 
@@ -33,8 +35,8 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
 
         let rock = rock.launch().await;
         match rock {
-            Ok(_) => println!("Rocket shut down gracefully."),
-            Err(err) => println!("Rocket had an error: {}", err),
+            Ok(_) => info!("Rocket shut down gracefully."),
+            Err(err) => error!("Rocket had an error: {}", err),
         };
     })
 }
@@ -44,6 +46,7 @@ pub fn init_repo() -> JoinHandle<()> {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8080,
+            //log_level: LogLevel::Off,
             ..Default::default()
         };
 
@@ -52,8 +55,8 @@ pub fn init_repo() -> JoinHandle<()> {
             .launch()
             .await;
         match launch_result {
-            Ok(_) => println!("Rocket shut down gracefully."),
-            Err(err) => println!("Rocket had an error: {}", err),
+            Ok(_) => info!("Rocket shut down gracefully."),
+            Err(err) => error!("Rocket had an error: {}", err),
         };
     })
 }
