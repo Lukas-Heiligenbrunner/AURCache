@@ -24,8 +24,8 @@ RUN cargo build --release --features static
 FROM quay.io/podman/stable
 
 # Copy the built binary from the previous stage
-COPY --from=builder /app/target/release/aurcache /usr/local/bin/aurcache
-COPY entrypoint.sh /entrypoint.sh
+COPY --from=builder --chmod=0755 /app/target/release/aurcache /usr/local/bin/aurcache
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 
 WORKDIR /app
 CMD /entrypoint.sh
