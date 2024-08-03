@@ -98,6 +98,7 @@ Environment Variables
 | VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600    |
 | BUILD_ARTIFACT_DIR     | String                | pkg share directory between aurcache container and build containers | null    |
 | LOG_LEVEL              | String                | Log level                                                           | INFO    |
+| MAX_CONCURRENT_BUILDS  | Integer               | Max concurrent builds                                               | 1       |
 
 ## Build Info
 

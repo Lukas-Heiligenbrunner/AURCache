@@ -3,6 +3,7 @@ use crate::builder::queue::queue_package;
 use crate::builder::types::Action;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{Mutex, Semaphore};
@@ -10,7 +11,11 @@ use tokio::task::JoinHandle;
 
 pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(1));
+        let max_concurrent_builds = env::var("MAX_CONCURRENT_BUILDS")
+            .ok()
+            .and_then(|x| x.parse::<usize>().ok())
+            .unwrap_or(1);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent_builds));
         let job_containers: Arc<Mutex<HashMap<i32, String>>> = Arc::new(Mutex::new(HashMap::new()));
 
         loop {
