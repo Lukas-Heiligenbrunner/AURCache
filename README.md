@@ -2,13 +2,13 @@
 
 AURCache is a build server and repository for Archlinux packages sourced from the AUR (Arch User Repository). It features a Flutter frontend and Rust backend, enabling users to add packages for building and subsequently serves them as a pacman repository. Notably, AURCache automatically detects when a package is out of date and displays it within the frontend.
 
-<p><img src="res/imgs/screenshot1.png" alt=""/> 
+<p><img src="docs/static/img/screenshot1.png" alt=""/> 
 
 <details>
 <summary>More Images:</summary>
 <br>
-<img src="res/imgs/screenshot2.png" alt=""/> 
-<img src="res/imgs/screenshot3.png" alt=""/></p>
+<img src="docs/static/img/screenshot2.png" alt=""/> 
+<img src="docs/static/img/screenshot3.png" alt=""/></p>
 </details>
 
 ## Deployment with Docker and Docker-compose
