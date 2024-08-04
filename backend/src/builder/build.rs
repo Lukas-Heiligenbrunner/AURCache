@@ -11,6 +11,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
     QuerySelect, RelationTrait, Set, TransactionTrait,
 };
+use shiplift::rep::ContainerCreateInfo;
 use shiplift::tty::TtyChunk;
 use shiplift::{ContainerOptions, Docker, LogsOptions, PullOptions};
 use std::collections::HashMap;
@@ -135,97 +136,48 @@ pub async fn build(
 ) -> anyhow::Result<()> {
     let docker = Docker::new();
 
-    match docker.ping().await {
-        Ok(_) => {}
-        Err(e) => return Err(anyhow!("Connection to Docker Socket failed: {}", e)),
-    }
+    docker
+        .ping()
+        .await
+        .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
-    // repull image to make sure it's up to date
-    let mut stream = docker.images().pull(
-        &PullOptions::builder()
-            .image("docker.io/greyltc/archlinux-aur:paru")
-            .build(),
-    );
+    repull_image(&docker, &build_logger).await?;
 
-    while let Some(pull_result) = stream.next().await {
-        match pull_result {
-            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
-            Err(e) => build_logger.append(format!("{}", e)).await?,
-        }
-    }
-
-    // create builds dir
-    let mut host_build_path_base = env::current_dir()?;
-    host_build_path_base.push("builds");
-    fs::create_dir_all(host_build_path_base.clone())?;
-    fs::set_permissions(host_build_path_base.clone(), Permissions::from_mode(0o777))?;
-
-    // use either docker volume or base dir as docker host mount path
-    let host_build_path_docker =
-        env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
-
-    // create current build dir
-    let mut host_active_build_path = host_build_path_base.clone();
-    host_active_build_path.push(name.clone());
-    fs::create_dir_all(host_active_build_path.clone())?;
-    fs::set_permissions(
-        host_active_build_path.clone(),
-        Permissions::from_mode(0o777),
-    )?;
-
-    // create new docker container for current build
-    let build_dir_base = "/var/cache/makepkg/pkg";
-    let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
-    let makepkg_config = format!(
-        "\
-MAKEFLAGS=-j$(nproc)
-PKGDEST={}/{}",
-        build_dir_base, name
-    );
-    let makepkg_config_path = "/var/ab/.config/pacman/makepkg.conf";
-    let cmd = format!(
-        "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
-        makepkg_config_path, makepkg_config, name
-    );
-
-    // cpu_limit in milli cpus
-    let cpu_limit = env::var("CPU_LIMIT")
-        .ok()
-        .and_then(|x| x.parse::<u64>().ok())
-        .map(|x| x * 1_000_000)
-        .unwrap_or(0);
-    debug!("cpu_limit: {} mCPUs", cpu_limit);
-    // memory_limit in megabytes
-    let memory_limit = env::var("MEMORY_LIMIT")
-        .ok()
-        .and_then(|x| x.parse::<i64>().ok())
-        .map(|x| x * 1024 * 1024)
-        .unwrap_or(-1);
-    debug!("memory_limit: {}MB", memory_limit);
-
-    let create_info = docker
-        .containers()
-        .create(
-            &ContainerOptions::builder("docker.io/greyltc/archlinux-aur:paru")
-                .volumes(vec![mountpoint.as_str()])
-                .attach_stdout(true)
-                .attach_stderr(true)
-                .auto_remove(true)
-                .nano_cpus(cpu_limit)
-                .memory_swap(memory_limit)
-                .user("ab")
-                .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
-                .cmd(vec!["sh", "-c", cmd.as_str()])
-                .build(),
-        )
-        .await?;
+    let (create_info, host_active_build_path) =
+        create_build_container(&docker, build_id, name).await?;
     let id = create_info.id;
+
+    // start build container
     docker.containers().get(&id).start().await?;
 
     // insert container id to container map
     job_containers.lock().await.insert(build_id, id.clone());
 
-    let mut logs_stream = docker.containers().get(id.clone()).logs(
+    // monitor build output
+    monitor_build_output(&build_logger, &docker, id).await?;
+
+    // remove build from container map
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!(
+            "Failed to remove build container from active builds map"
+        ))?;
+
+    // move built tar.gz archives to host and repo-add
+    move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg_id, db).await?;
+    // remove active build dir
+    fs::remove_dir(host_active_build_path)?;
+    Ok(())
+}
+
+async fn monitor_build_output(
+    build_logger: &BuildLogger,
+    docker: &Docker,
+    id: String,
+) -> anyhow::Result<()> {
+    let mut logs_stream = docker.containers().get(id).logs(
         &LogsOptions::builder()
             .follow(true)
             .stdout(true)
@@ -251,25 +203,120 @@ PKGDEST={}/{}",
             Err(e) => build_logger.append(e.to_string()).await?,
         }
     }
+    Ok(())
+}
 
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active builds map"
-        ))?;
+async fn create_build_container(
+    docker: &Docker,
+    build_id: i32,
+    name: String,
+) -> anyhow::Result<(ContainerCreateInfo, PathBuf)> {
+    let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
-    // move built tar.gz archives to host and repo-add
-    move_and_add_pkgs(build_logger, host_active_build_path.clone(), pkg_id, db).await?;
-    // remove active build dir
-    fs::remove_dir(host_active_build_path)?;
+    // create new docker container for current build
+    let build_dir_base = "/var/cache/makepkg/pkg";
+    let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
+
+    let (makepkg_config, makepkg_config_path) =
+        create_makepkg_config(name.clone(), build_dir_base)?;
+    let cmd = format!(
+        "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
+        makepkg_config_path, makepkg_config, name
+    );
+
+    let (cpu_limit, memory_limit) = limits_from_env();
+
+    let container_name = format!("aurcache_build_{}_{}", name, build_id);
+    let create_info = docker
+        .containers()
+        .create(
+            &ContainerOptions::builder("docker.io/greyltc/archlinux-aur:paru")
+                .volumes(vec![mountpoint.as_str()])
+                .attach_stdout(true)
+                .attach_stderr(true)
+                .auto_remove(true)
+                .nano_cpus(cpu_limit)
+                .memory_swap(memory_limit)
+                .user("ab")
+                .name(container_name.as_str())
+                .cmd(vec!["sh", "-c", cmd.as_str()])
+                .build(),
+        )
+        .await?;
+    Ok((create_info, host_active_build_path))
+}
+
+fn create_makepkg_config(name: String, build_dir_base: &str) -> anyhow::Result<(String, String)> {
+    let makepkg_config = format!(
+        "\
+MAKEFLAGS=-j$(nproc)
+PKGDEST={}/{}",
+        build_dir_base, name
+    );
+    let makepkg_config_path = "/var/ab/.config/pacman/makepkg.conf";
+    Ok((makepkg_config, makepkg_config_path.to_string()))
+}
+
+fn create_build_paths(name: String) -> anyhow::Result<(String, PathBuf)> {
+    // create builds dir
+    let mut host_build_path_base = env::current_dir()?;
+    host_build_path_base.push("builds");
+    fs::create_dir_all(host_build_path_base.clone())?;
+    fs::set_permissions(host_build_path_base.clone(), Permissions::from_mode(0o777))?;
+
+    // create current build dir
+    let mut host_active_build_path = host_build_path_base.clone();
+    host_active_build_path.push(name);
+    fs::create_dir_all(host_active_build_path.clone())?;
+    fs::set_permissions(
+        host_active_build_path.clone(),
+        Permissions::from_mode(0o777),
+    )?;
+
+    // use either docker volume or base dir as docker host mount path
+    let host_build_path_docker =
+        env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
+    Ok((host_build_path_docker, host_active_build_path))
+}
+
+fn limits_from_env() -> (u64, i64) {
+    // cpu_limit in milli cpus
+    let cpu_limit = env::var("CPU_LIMIT")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .map(|x| x * 1_000_000)
+        .unwrap_or(0);
+    debug!("cpu_limit: {} mCPUs", cpu_limit);
+    // memory_limit in megabytes
+    let memory_limit = env::var("MEMORY_LIMIT")
+        .ok()
+        .and_then(|x| x.parse::<i64>().ok())
+        .map(|x| x * 1024 * 1024)
+        .unwrap_or(-1);
+    debug!("memory_limit: {}MB", memory_limit);
+    (cpu_limit, memory_limit)
+}
+
+async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Result<()> {
+    // repull image to make sure it's up to date
+    let mut stream = docker.images().pull(
+        &PullOptions::builder()
+            .image("docker.io/greyltc/archlinux-aur:paru")
+            .build(),
+    );
+
+    while let Some(pull_result) = stream.next().await {
+        match pull_result {
+            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
+            Err(e) => build_logger.append(format!("{}", e)).await?,
+        }
+    }
     Ok(())
 }
 
 /// move built files from build container to host and add them to the repo
 async fn move_and_add_pkgs(
-    build_logger: BuildLogger,
+    build_logger: &BuildLogger,
     work_dir: PathBuf,
     pkg_id: i32,
     db: &DatabaseConnection,
