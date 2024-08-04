@@ -127,6 +127,7 @@ cargo build --release
 ## Things still missing
 
 * proper error return from api
+* proper logging
 * auto update packages
 * implement repo-add in rust
 * keep older pkg versions in repo (repo-add limitation)
