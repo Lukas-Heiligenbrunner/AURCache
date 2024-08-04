@@ -5,7 +5,7 @@ use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
-use log::info;
+use log::{debug, info};
 use rocket::futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
@@ -187,6 +187,22 @@ PKGDEST={}/{}",
         "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
         makepkg_config_path, makepkg_config, name
     );
+
+    // cpu_limit in milli cpus
+    let cpu_limit = env::var("CPU_LIMIT")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .and_then(|x| Some(x * 1_000_000))
+        .unwrap_or(0);
+    debug!("cpu_limit: {} mCPUs", cpu_limit);
+    // memory_limit in megabytes
+    let memory_limit = env::var("MEMORY_LIMIT")
+        .ok()
+        .and_then(|x| x.parse::<i64>().ok())
+        .and_then(|x| Some(x * 1024 * 1024))
+        .unwrap_or(-1);
+    debug!("memory_limit: {}MB", memory_limit);
+
     let create_info = docker
         .containers()
         .create(
@@ -195,6 +211,8 @@ PKGDEST={}/{}",
                 .attach_stdout(true)
                 .attach_stderr(true)
                 .auto_remove(true)
+                .nano_cpus(cpu_limit)
+                .memory_swap(memory_limit)
                 .user("ab")
                 .name(format!("aurcache_build_{}_{}", name, build_id).as_str())
                 .cmd(vec!["sh", "-c", cmd.as_str()])
