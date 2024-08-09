@@ -31,28 +31,28 @@ impl Display for Desc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let desc_lines = vec![
             self.add_desc_entry("filename", self.filename.clone()),
-            self.add_desc_entry("NAME", self.name.clone()),
-            self.add_desc_entry("BASE", self.base.clone()),
-            self.add_desc_entry("VERSION", self.version.clone()),
-            self.add_desc_entry("DESC", self.desc.clone()),
-            self.add_desc_entries("GROUPS", &self.groups),
-            self.add_desc_entry("CSIZE", self.csize.clone()),
-            self.add_desc_entry("ISIZE", self.isize.clone()),
-            self.add_desc_entry("MD5SUM", self.md5sum.clone()),
-            self.add_desc_entry("SHA256SUM", self.sha256sum.clone()),
-            self.add_desc_entry("PGPSIG", self.pgpsig.clone()),
-            self.add_desc_entry("URL", self.url.clone()),
-            self.add_desc_entries("LICENSE", &self.licenses),
-            self.add_desc_entry("ARCH", self.arch.clone()),
-            self.add_desc_entry("BUILDDATE", self.builddate.clone()),
-            self.add_desc_entry("PACKAGER", self.packager.clone()),
-            self.add_desc_entries("REPLACES", &self.replace),
-            self.add_desc_entries("CONFLICTS", &self.conflicts),
-            self.add_desc_entries("PROVIDES", &self.provides),
-            self.add_desc_entries("DEPENDS", &self.depends),
-            self.add_desc_entries("OPTDEPENDS", &self.optdepends),
-            self.add_desc_entries("MAKEDEPENDS", &self.makedepends),
-            self.add_desc_entries("CHECKDEPENDS", &self.checkdepends),
+            self.add_desc_entry("name", self.name.clone()),
+            self.add_desc_entry("base", self.base.clone()),
+            self.add_desc_entry("version", self.version.clone()),
+            self.add_desc_entry("desc", self.desc.clone()),
+            self.add_desc_entries("groups", &self.groups),
+            self.add_desc_entry("csize", self.csize.clone()),
+            self.add_desc_entry("isize", self.isize.clone()),
+            self.add_desc_entry("md5sum", self.md5sum.clone()),
+            self.add_desc_entry("sha256sum", self.sha256sum.clone()),
+            self.add_desc_entry("pgpsig", self.pgpsig.clone()),
+            self.add_desc_entry("url", self.url.clone()),
+            self.add_desc_entries("license", &self.licenses),
+            self.add_desc_entry("arch", self.arch.clone()),
+            self.add_desc_entry("builddate", self.builddate.clone()),
+            self.add_desc_entry("packager", self.packager.clone()),
+            self.add_desc_entries("replaces", &self.replace),
+            self.add_desc_entries("conflicts", &self.conflicts),
+            self.add_desc_entries("provides", &self.provides),
+            self.add_desc_entries("depends", &self.depends),
+            self.add_desc_entries("optdepends", &self.optdepends),
+            self.add_desc_entries("makedepends", &self.makedepends),
+            self.add_desc_entries("checkdepends", &self.checkdepends),
         ];
         write!(f, "{}", desc_lines.join(""))
     }
@@ -62,7 +62,7 @@ impl Desc {
         if value.is_empty() {
             return String::new();
         }
-        format!("%{}%\n{}\n\n", header, value)
+        format!("%{}%\n{}\n\n", header.to_uppercase(), value)
     }
 
     fn add_desc_entries(&self, header: &str, values: &[String]) -> String {
