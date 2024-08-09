@@ -264,6 +264,3 @@ test
         assert_eq!(desc.optdepends, vec!["test".to_string()]);
     }
 }
-
-//"%FILENAME%\nmyfilename\n\n%NAME%\nmyname\n\n%BASE%\nmybase\n\n%VERSION%\nvers\n\n%DESC%\ntest\n\n%groups%\nfirstgroup\nsecgroup\n\n%CSIZE%\ntest\n\n%ISIZE%\ntest\n\n%MD5SUM%\ntest\n\n%SHA256SUM%\ntest\n\n%PGPSIG%\ntest\n\n%URL%\ntest\n\n%license%\ntest\n\n%ARCH%\ntest\n\n%BUILDDATE%\ntest\n\n%PACKAGER%\ntest\n\n%replaces%\ntest\n\n%conflicts%\ntest\n\n%provides%\ntest\n\n%depends%\ntest\n\n%optdepends%\ntest\n\n%makedepends%\ntest\n\n%checkdepends%\ntest\n\n"
-//"%FILENAME%\nmyfilename\n\n%NAME%\nmyname\n\n%BASE%\nmybase\n\n%VERSION%\nvers\n\n%DESC%\ntest\n\n%GROUPS%\nfirstgroup\nsecgroup\n\n%CSIZE%\ntest\n\n%ISIZE%\ntest\n\n%MD5SUM%\ntest\n\n%SHA256SUM%\ntest\n\n%PGPSIG%\ntest\n\n%URL%\ntest\n\n%LICENSE%\ntest\n\n%ARCH%\ntest\n\n%BUILDDATE%\ntest\n\n%PACKAGER%\ntest\n\n%REPLACES%\ntest\n\n%CONFLICTS%\ntest\n\n%PROVIDES%\ntest\n\n%DEPENDS%\ntest\n\n%OPTDEPENDS%\ntest\n\n%MAKEDEPENDS%\ntest\n\n%CHECKDEPENDS%\ntest\n\n"
