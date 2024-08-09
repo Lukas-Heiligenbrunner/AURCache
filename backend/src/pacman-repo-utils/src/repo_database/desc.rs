@@ -59,20 +59,19 @@ impl Display for Desc {
 }
 impl Desc {
     fn add_desc_entry(&self, header: &str, value: String) -> String {
-        if value.is_empty() {
-            return String::new();
+        if !value.is_empty() {
+            format!("%{}%\n{}\n\n", header.to_uppercase(), value)
+        } else {
+            String::new()
         }
-        format!("%{}%\n{}\n\n", header.to_uppercase(), value)
     }
 
     fn add_desc_entries(&self, header: &str, values: &[String]) -> String {
-        if values.is_empty() {
-            return String::new();
+        if values.is_empty() || (values.len() == 1 && values.first().unwrap().eq("")) {
+            String::new()
+        } else {
+            self.add_desc_entry(header, values.join("\n"))
         }
-        if values.len() == 1 && values.first().unwrap().eq("") {
-            return String::new();
-        }
-        format!("%{}%\n{}\n\n", header, values.join("\n"))
     }
 }
 
@@ -139,7 +138,7 @@ mod tests {
         };
 
         let expected = "\
-%filename%
+%FILENAME%
 myfilename
 
 %NAME%
@@ -265,3 +264,6 @@ test
         assert_eq!(desc.optdepends, vec!["test".to_string()]);
     }
 }
+
+//"%FILENAME%\nmyfilename\n\n%NAME%\nmyname\n\n%BASE%\nmybase\n\n%VERSION%\nvers\n\n%DESC%\ntest\n\n%groups%\nfirstgroup\nsecgroup\n\n%CSIZE%\ntest\n\n%ISIZE%\ntest\n\n%MD5SUM%\ntest\n\n%SHA256SUM%\ntest\n\n%PGPSIG%\ntest\n\n%URL%\ntest\n\n%license%\ntest\n\n%ARCH%\ntest\n\n%BUILDDATE%\ntest\n\n%PACKAGER%\ntest\n\n%replaces%\ntest\n\n%conflicts%\ntest\n\n%provides%\ntest\n\n%depends%\ntest\n\n%optdepends%\ntest\n\n%makedepends%\ntest\n\n%checkdepends%\ntest\n\n"
+//"%FILENAME%\nmyfilename\n\n%NAME%\nmyname\n\n%BASE%\nmybase\n\n%VERSION%\nvers\n\n%DESC%\ntest\n\n%GROUPS%\nfirstgroup\nsecgroup\n\n%CSIZE%\ntest\n\n%ISIZE%\ntest\n\n%MD5SUM%\ntest\n\n%SHA256SUM%\ntest\n\n%PGPSIG%\ntest\n\n%URL%\ntest\n\n%LICENSE%\ntest\n\n%ARCH%\ntest\n\n%BUILDDATE%\ntest\n\n%PACKAGER%\ntest\n\n%REPLACES%\ntest\n\n%CONFLICTS%\ntest\n\n%PROVIDES%\ntest\n\n%DEPENDS%\ntest\n\n%OPTDEPENDS%\ntest\n\n%MAKEDEPENDS%\ntest\n\n%CHECKDEPENDS%\ntest\n\n"
