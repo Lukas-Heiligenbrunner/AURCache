@@ -3,7 +3,7 @@ sidebar_position: 1
 ---
 
 # Environment Variables
-
+AURCache can be configured using the following environment variables:
 
 | Variable               | Type                  | Description                                                         | Default |
 |------------------------|-----------------------|---------------------------------------------------------------------|---------|

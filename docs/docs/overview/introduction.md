@@ -4,9 +4,12 @@ sidebar_position: 1
 
 # Introduction
 
-Let's discover **Docusaurus in less than 5 minutes**.
+URCache is a build server and repository for Archlinux packages sourced from the AUR (Arch User Repository). It features a Flutter frontend and Rust backend, enabling users to add packages for building and subsequently serves them as a pacman repository. Notably, AURCache automatically detects when a package is out of date and displays it within the frontend.
 
-## Getting Started
+
+## Usecases
+
+- **Avoid repeated builds**: AURCache can be used as a build server for Archlinux packages sourced from the AUR.
 
 Get started by **creating a new site**.
 
