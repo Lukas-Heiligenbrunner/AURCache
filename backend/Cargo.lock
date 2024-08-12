@@ -235,7 +235,6 @@ dependencies = [
  "aur-rs",
  "bigdecimal 0.4.5",
  "env_logger",
- "flate2",
  "log",
  "pacman-repo-utils",
  "reqwest 0.12.5",
@@ -247,7 +246,6 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "shiplift",
- "tar",
  "tokio",
 ]
 
