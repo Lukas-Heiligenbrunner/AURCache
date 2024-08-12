@@ -7,6 +7,7 @@ mod repo;
 mod scheduler;
 mod utils;
 
+use std::path::PathBuf;
 use crate::api::init::{init_api, init_repo};
 use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
@@ -36,7 +37,7 @@ async fn main() {
         .map_err(|e| format!("Failed to initialize database: {}", e))
         .unwrap();
 
-    pacman_repo_utils::init_repo().unwrap();
+    pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo").unwrap();
 
     let build_queue_handle = init_build_queue(db.clone(), tx.clone());
     let version_check_handle = start_aur_version_checking(db.clone());
