@@ -7,7 +7,6 @@ mod repo;
 mod scheduler;
 mod utils;
 
-use std::path::PathBuf;
 use crate::api::init::{init_api, init_repo};
 use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
@@ -15,6 +14,7 @@ use crate::db::init::init_db;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
 use log::{info, warn};
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 
 static START_BANNER: &str = r"
