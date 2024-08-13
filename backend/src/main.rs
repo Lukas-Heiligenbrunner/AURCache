@@ -11,10 +11,10 @@ use crate::api::init::{init_api, init_repo};
 use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
 use crate::db::init::init_db;
-use crate::repo::init::init_repo_files;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
 use log::{info, warn};
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 
 static START_BANNER: &str = r"
@@ -37,7 +37,7 @@ async fn main() {
         .map_err(|e| format!("Failed to initialize database: {}", e))
         .unwrap();
 
-    init_repo_files().await.unwrap();
+    pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo").unwrap();
 
     let build_queue_handle = init_build_queue(db.clone(), tx.clone());
     let version_check_handle = start_aur_version_checking(db.clone());

@@ -11,8 +11,6 @@ tokio = "1.38.0"
 anyhow = "1.0.76"
 
 reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
-flate2 = "1.0.30"
-tar = "0.4.41"
 
 rocket = "0.5.1"
 rocket_okapi = { features = ["swagger"],  git = "https://github.com/beyera/okapi.git", branch = "beyera/update-rocket-0.5.1" }

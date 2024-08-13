@@ -1,5 +1,6 @@
 [package]
 name = "pacman-repo-utils"
+description = "Plug in replacement for repo-add pacman tools"
 version = "0.1.0"
 edition = "2021"
 
