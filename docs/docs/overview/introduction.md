@@ -4,47 +4,19 @@ sidebar_position: 1
 
 # Introduction
 
-URCache is a build server and repository for Archlinux packages sourced from the AUR (Arch User Repository). It features a Flutter frontend and Rust backend, enabling users to add packages for building and subsequently serves them as a pacman repository. Notably, AURCache automatically detects when a package is out of date and displays it within the frontend.
+AURCache is a build server and repository for Archlinux packages sourced from the AUR (Arch User Repository). It features a Flutter frontend and Rust backend, enabling users to add packages for building and subsequently serves them as a pacman repository. Notably, AURCache automatically detects when a package is out of date and displays it within the frontend.
 
 
-## Usecases
+## Advantages
 
-- **Avoid repeated builds**: AURCache can be used as a build server for Archlinux packages sourced from the AUR.
+- **Avoid repeated builds**: Build your packages only once on your server and not on every client.
+- **Reduce CPU and memory usage**: Clients only need to download packages.
+- **Reduce build time**: Build packages in parallel.
+- **Reduce network traffic**: Serve packages from your local network.
+- **Automatically update packages**: AURCache automatically checks for updates. 
+- **Customize your repository**: Add custom packages to your repository.
 
-Get started by **creating a new site**.
+## Getting Started
+Get started with [Quick Start](/docs/overview/quick-start) to try it out.
 
-Or **try Docusaurus immediately** with **[docusaurus.new](https://docusaurus.new)**.
-
-### What you'll need
-
-- [Node.js](https://nodejs.org/en/download/) version 18.0 or above:
-  - When installing Node.js, you are recommended to check all checkboxes related to dependencies.
-
-## Generate a new site
-
-Generate a new Docusaurus site using the **classic template**.
-
-The classic template will automatically be added to your project after you run the command:
-
-```bash
-npm init docusaurus@latest my-website classic
-```
-
-You can type this command into Command Prompt, Powershell, Terminal, or any other integrated terminal of your code editor.
-
-The command also installs all necessary dependencies you need to run Docusaurus.
-
-## Start your site
-
-Run the development server:
-
-```bash
-cd my-website
-npm run start
-```
-
-The `cd` command changes the directory you're working with. In order to work with your newly created Docusaurus site, you'll need to navigate the terminal there.
-
-The `npm run start` command builds your website locally and serves it through a development server, ready for you to view at http://localhost:3000/.
-
-Open `docs/intro.md` (this page) and edit some lines: the site **reloads automatically** and displays your changes.
+For advanced setup, see the [Configuration](/docs/configuration) page.

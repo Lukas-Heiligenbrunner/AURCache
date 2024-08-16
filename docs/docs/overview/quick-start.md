@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Quick Start
 
-USe the following example docker-compose.yml file to deploy AURCache using Docker and Docker-compose:
+Use the following example docker-compose.yml file to deploy AURCache using Docker and Docker-compose:
 
 ```yaml
 version: '3'
@@ -22,4 +22,5 @@ services:
 
 This setup will create a sqlite database in `./aurcache/db` and a repository in `./aurcache/repo`.
 I recommend using this only for testing purposes. 
-For production use, you should use a proper database and repository. See the [Configuration](/docs/configuration) page for more information.
+
+For production use, you should use a proper database and resource configuration. See the [Configuration](/docs/configuration) page for more information.
