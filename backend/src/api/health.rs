@@ -1,4 +1,4 @@
-use bollard::{Docker};
+use bollard::Docker;
 use rocket::{get, State};
 use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
