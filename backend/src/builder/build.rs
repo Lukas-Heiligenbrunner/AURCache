@@ -191,7 +191,7 @@ pub async fn build(
 
 async fn monitor_build_output(
     build_logger: &BuildLogger,
-    container: &Container<'_>
+    container: &Container<'_>,
 ) -> anyhow::Result<()> {
     let mut logs_stream = container.logs(
         &LogsOptions::builder()
