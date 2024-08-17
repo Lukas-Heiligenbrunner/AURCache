@@ -1,4 +1,4 @@
-use bollard::Docker;
+use bollard::{Docker};
 use rocket::{get, State};
 use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
@@ -15,7 +15,7 @@ async fn check_health(db: &DatabaseConnection) -> anyhow::Result<()> {
     db.ping().await?;
 
     // check docker socket connection
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = Docker::connect_with_unix_defaults()?;
     docker.ping().await?;
 
     Ok(())

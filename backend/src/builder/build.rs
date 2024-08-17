@@ -53,7 +53,7 @@ pub(crate) async fn cancel_build(
         .ok_or(anyhow!("Build container not found"))?
         .clone();
 
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = Docker::connect_with_unix_defaults()?;
     docker
         .remove_container(
             &container_id,
@@ -139,7 +139,7 @@ pub async fn build(
     build_logger: BuildLogger,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
-    let docker = Docker::connect_with_socket_defaults()?;
+    let docker = Docker::connect_with_unix_defaults()?;
 
     docker
         .ping()
