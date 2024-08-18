@@ -19,7 +19,7 @@ sea-orm-migration = {version = "1.1.0-rc.1", features = ["sqlx-sqlite", "runtime
 serde = "1.0.208"
 rust-embed = "8.5.0"
 rocket_seek_stream = "0.2.6"
-shiplift = "0.7.0"
+bollard = "*"
 bigdecimal = "0.4.5"
 env_logger = "0.11.5"
 log = "0.4.22"
