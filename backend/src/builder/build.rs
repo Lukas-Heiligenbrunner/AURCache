@@ -5,9 +5,7 @@ use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
-use bollard::container::{
-    AttachContainerOptions, Config, CreateContainerOptions, LogOutput, RemoveContainerOptions,
-};
+use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput, RemoveContainerOptions};
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, HostConfig};
 use bollard::Docker;
@@ -150,7 +148,7 @@ pub async fn build(
     repull_image(&docker, &build_logger).await?;
 
     let (create_info, host_active_build_path) =
-        create_build_container(&docker, build_id, name).await?;
+        create_build_container(&docker, build_id, name.clone()).await?;
     let id = create_info.id;
 
     // start build container
@@ -162,7 +160,7 @@ pub async fn build(
     // monitor build output
     match timeout(
         job_timeout_from_env(),
-        monitor_build_output(&build_logger, &container),
+        monitor_build_output(&build_logger, &docker, id.clone()),
     )
     .await
     {
@@ -172,7 +170,7 @@ pub async fn build(
                 .append(format!("Build #{build_id} timed out for package '{name}'"))
                 .await?;
             // kill build container
-            container.kill(Some("SIGKILL")).await?;
+            docker.kill_container(&id, Some(KillContainerOptions{signal: "SIGKILL"})).await?;
         }
     }
 
