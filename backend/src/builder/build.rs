@@ -5,7 +5,10 @@ use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
-use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput, RemoveContainerOptions};
+use bollard::container::{
+    AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
+    RemoveContainerOptions,
+};
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, HostConfig};
 use bollard::Docker;
@@ -24,6 +27,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+
+static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -170,7 +175,9 @@ pub async fn build(
                 .append(format!("Build #{build_id} timed out for package '{name}'"))
                 .await?;
             // kill build container
-            docker.kill_container(&id, Some(KillContainerOptions{signal: "SIGKILL"})).await?;
+            docker
+                .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
+                .await?;
         }
     }
 
@@ -215,12 +222,12 @@ async fn monitor_build_output(
                 LogOutput::Console { .. } => unreachable!(),
                 LogOutput::StdOut { message } => {
                     build_logger
-                        .append(String::from_utf8(Vec::from(message)).unwrap())
+                        .append(String::from_utf8_lossy(&message).into_owned())
                         .await?
                 }
                 LogOutput::StdErr { message } => {
                     build_logger
-                        .append(String::from_utf8(Vec::from(message)).unwrap())
+                        .append(String::from_utf8_lossy(&message).into_owned())
                         .await?
                 }
             },
@@ -252,7 +259,7 @@ async fn create_build_container(
 
     let container_name = format!("aurcache_build_{}_{}", name, build_id);
     let conf = Config {
-        image: Some("docker.io/greyltc/archlinux-aur:paru"),
+        image: Some(BUILDER_IMAGE),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
         open_stdin: Some(false),
@@ -344,7 +351,7 @@ async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Re
     // repull image to make sure it's up to date
     let mut stream = docker.create_image(
         Some(CreateImageOptions {
-            from_image: "docker.io/greyltc/archlinux-aur:paru",
+            from_image: BUILDER_IMAGE,
             ..Default::default()
         }),
         None,
