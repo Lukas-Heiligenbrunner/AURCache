@@ -101,6 +101,7 @@ Environment Variables
 | MAX_CONCURRENT_BUILDS  | Integer               | Max concurrent builds                                               | 1       |
 | CPU_LIMIT              | Integer               | CPU limit of build container in milli CPUs                          | 0       |
 | MEMORY_LIMIT           | Integer               | Memory limit of build container in MB                               | -1      |
+| JOB_TIMEOUT            | Integer               | Job timeout for build in Seconds                                    | 3600    |
 
 ## Build Info
 

@@ -22,9 +22,10 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -159,7 +160,21 @@ pub async fn build(
     job_containers.lock().await.insert(build_id, id.clone());
 
     // monitor build output
-    monitor_build_output(&build_logger, &docker, id).await?;
+    match timeout(
+        job_timeout_from_env(),
+        monitor_build_output(&build_logger, &container),
+    )
+    .await
+    {
+        Ok(v) => v?,
+        Err(_) => {
+            build_logger
+                .append(format!("Build #{build_id} timed out for package '{name}'"))
+                .await?;
+            // kill build container
+            container.kill(Some("SIGKILL")).await?;
+        }
+    }
 
     // remove build from container map
     job_containers
@@ -297,6 +312,16 @@ fn create_build_paths(name: String) -> anyhow::Result<(String, PathBuf)> {
     let host_build_path_docker =
         env::var("BUILD_ARTIFACT_DIR").unwrap_or(host_build_path_base.display().to_string());
     Ok((host_build_path_docker, host_active_build_path))
+}
+
+fn job_timeout_from_env() -> Duration {
+    let job_timeout = env::var("JOB_TIMEOUT")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(60 * 60));
+    debug!("job_timeout: {} sec", job_timeout.as_secs());
+    job_timeout
 }
 
 fn limits_from_env() -> (u64, i64) {
