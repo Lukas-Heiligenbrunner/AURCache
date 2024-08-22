@@ -1,5 +1,8 @@
 {
-  "extends": ["config:recommended"],
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
   "automerge": false,
   "prCreation": "immediate",
   "rebaseWhen": "conflicted",
