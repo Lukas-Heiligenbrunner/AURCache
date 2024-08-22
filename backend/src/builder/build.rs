@@ -246,7 +246,7 @@ async fn create_build_container(
 
     // create new docker container for current build
     let build_dir_base = "/var/cache/makepkg/pkg";
-    let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
+    let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
 
     let (makepkg_config, makepkg_config_path) =
         create_makepkg_config(name.clone(), build_dir_base)?;
@@ -265,11 +265,11 @@ async fn create_build_container(
         open_stdin: Some(false),
         user: Some("ab"),
         cmd: Some(vec!["sh", "-c", cmd.as_str()]),
-        volumes: Some(HashMap::from([(mountpoint.as_str(), HashMap::new())])),
         host_config: Some(HostConfig {
             auto_remove: Some(true),
             nano_cpus: Some(cpu_limit as i64),
             memory_swap: Some(memory_limit),
+            binds: Some(mountpoints),
             ..Default::default()
         }),
         ..Default::default()
@@ -370,11 +370,11 @@ async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Re
 /// move built files from build container to host and add them to the repo
 async fn move_and_add_pkgs(
     build_logger: &BuildLogger,
-    work_dir: PathBuf,
+    host_build_path: PathBuf,
     pkg_id: i32,
     db: &DatabaseConnection,
 ) -> anyhow::Result<()> {
-    let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
+    let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
         return Err(anyhow!("No files found in build directory"));
     }
