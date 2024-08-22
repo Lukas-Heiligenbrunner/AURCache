@@ -10,9 +10,9 @@ use bollard::container::{
     RemoveContainerOptions,
 };
 use bollard::image::CreateImageOptions;
-use bollard::models::{ContainerCreateResponse, HostConfig};
+use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
 use bollard::Docker;
-use log::{debug, info};
+use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
@@ -360,8 +360,22 @@ async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Re
 
     while let Some(pull_result) = stream.next().await {
         match pull_result {
-            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
             Err(e) => build_logger.append(format!("{}", e)).await?,
+            Ok(info @ CreateImageInfo { status: None, .. }) => debug!("{:?}", info),
+            Ok(
+                ref info @ CreateImageInfo {
+                    status: Some(ref status),
+                    ..
+                },
+            ) => match status.as_str() {
+                "Pulling fs layer" | "Waiting" | "Downloading" | "Verifying Checksum"
+                | "Extracting" => {
+                    trace!("{:?}", info);
+                }
+                _ => {
+                    build_logger.append(status.clone()).await?;
+                }
+            },
         }
     }
     Ok(())
