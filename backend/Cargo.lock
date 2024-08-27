@@ -232,6 +232,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "aur-rs",
+ "backon",
  "bigdecimal",
  "bollard",
  "env_logger",
@@ -253,6 +254,15 @@ name = "autocfg"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4b4d0bd25bd0b74681c0ad21497610ce1b7c91b1022cd21c80c6fbdd9476b0"
+
+[[package]]
+name = "backon"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2caf634d05fe0642d0fb1ab43497fa627088ecd93f84b2d0f2a5d7b91f7730db"
+dependencies = [
+ "fastrand",
+]
 
 [[package]]
 name = "backtrace"
