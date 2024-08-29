@@ -5,6 +5,7 @@ use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
 
+use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListBuildsModel;
 use crate::builder::types::Action;
 use rocket_okapi::openapi;
@@ -22,6 +23,7 @@ pub async fn build_output(
     db: &State<DatabaseConnection>,
     buildid: i32,
     startline: Option<i32>,
+    _a: Authenticated,
 ) -> Result<String, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -67,6 +69,7 @@ pub async fn list_builds(
     pkgid: Option<i32>,
     limit: Option<u64>,
     page: Option<u64>,
+    _a: Authenticated,
 ) -> Result<Json<Vec<ListBuildsModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -102,6 +105,7 @@ pub async fn list_builds(
 pub async fn get_build(
     db: &State<DatabaseConnection>,
     buildid: i32,
+    _a: Authenticated,
 ) -> Result<Json<ListBuildsModel>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -130,6 +134,7 @@ pub async fn get_build(
 pub async fn delete_build(
     db: &State<DatabaseConnection>,
     buildid: i32,
+    _a: Authenticated,
 ) -> Result<(), NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -152,6 +157,7 @@ pub async fn delete_build(
 pub async fn cancel_build(
     tx: &State<Sender<Action>>,
     buildid: i32,
+    _a: Authenticated,
 ) -> Result<(), NotFound<String>> {
     let _ = tx
         .send(Action::Cancel(buildid))

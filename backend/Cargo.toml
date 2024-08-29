@@ -14,6 +14,7 @@ reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
 
 rocket = "0.5.1"
 rocket_okapi = { features = ["swagger"],  git = "https://github.com/beyera/okapi.git", branch = "beyera/update-rocket-0.5.1" }
+rocket_oauth2 = "0.5.0"
 sea-orm = { version = "1.1.0-rc.1", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
 sea-orm-migration = {version = "1.1.0-rc.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 serde = "1.0.208"

@@ -10,6 +10,7 @@ use rocket::serde::json::Json;
 
 use rocket::{delete, get, post, State};
 
+use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListPackageModel;
 use crate::api::types::output::{AddBody, UpdateBody};
 use rocket_okapi::openapi;
@@ -24,6 +25,7 @@ pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
     input: Json<AddBody>,
     tx: &State<Sender<Action>>,
+    _a: Authenticated,
 ) -> Result<(), BadRequest<String>> {
     package_add(db, input.name.clone(), tx)
         .await
@@ -38,6 +40,7 @@ pub async fn package_update_endpoint(
     id: i32,
     input: Json<UpdateBody>,
     tx: &State<Sender<Action>>,
+    _a: Authenticated,
 ) -> Result<Json<i32>, BadRequest<String>> {
     package_update(db, id, input.force, tx)
         .await
@@ -48,7 +51,11 @@ pub async fn package_update_endpoint(
 /// Delete package with id
 #[openapi(tag = "Packages")]
 #[delete("/package/<id>")]
-pub async fn package_del(db: &State<DatabaseConnection>, id: i32) -> Result<(), String> {
+pub async fn package_del(
+    db: &State<DatabaseConnection>,
+    id: i32,
+    _a: Authenticated,
+) -> Result<(), String> {
     package_delete(db, id).await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -60,6 +67,7 @@ pub async fn package_list(
     db: &State<DatabaseConnection>,
     limit: Option<u64>,
     page: Option<u64>,
+    _a: Authenticated,
 ) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
@@ -88,6 +96,7 @@ pub async fn package_list(
 pub async fn get_package(
     db: &State<DatabaseConnection>,
     id: u64,
+    _a: Authenticated,
 ) -> Result<Json<ListPackageModel>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
