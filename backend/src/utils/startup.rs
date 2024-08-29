@@ -2,7 +2,8 @@ use log::info;
 use std::path::PathBuf;
 use tokio::fs;
 
-static START_BANNER: &str = r"
+const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
+const START_BANNER: &str = r"
           _    _ _____   _____           _
      /\  | |  | |  __ \ / ____|         | |
     /  \ | |  | | |__) | |     __ _  ___| |__   ___
@@ -14,11 +15,10 @@ static START_BANNER: &str = r"
 pub async fn startup_tasks() -> anyhow::Result<()> {
     info!("{}", START_BANNER);
 
-    if fs::remove_dir_all("/run/containers/storage").await.is_ok() {
-        info!("Removed old container storage `/run/containers/storage`");
-    }
-    if fs::remove_dir_all("/run/libpod").await.is_ok() {
-        info!("Removed old container storage `/run/libpod`");
+    for cs in CONTAINER_STORAGE_DIRS {
+        if fs::remove_dir_all(cs).await.is_ok() {
+            info!("Removed old container storage `{}`", cs);
+        }
     }
 
     pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo")
