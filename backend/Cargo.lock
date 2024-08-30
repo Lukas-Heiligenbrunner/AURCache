@@ -269,6 +269,7 @@ dependencies = [
  "aur-rs",
  "bigdecimal",
  "bollard",
+ "dotenvy",
  "env_logger",
  "log",
  "pacman-repo-utils",

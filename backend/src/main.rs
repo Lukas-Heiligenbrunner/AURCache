@@ -7,6 +7,7 @@ mod repo;
 mod scheduler;
 mod utils;
 
+use dotenvy::dotenv;
 use crate::api::init::{init_api, init_repo};
 use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
@@ -19,6 +20,7 @@ use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
+    _ = dotenv();
     init_logger();
     startup_tasks().await.unwrap();
 
