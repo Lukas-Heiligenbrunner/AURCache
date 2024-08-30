@@ -20,7 +20,7 @@ use tokio::sync::broadcast;
 #[tokio::main]
 async fn main() {
     init_logger();
-    startup_tasks().await.unwrap();
+    startup_tasks().await;
 
     let (tx, _) = broadcast::channel::<Action>(32);
     let db = init_db().await.unwrap();
