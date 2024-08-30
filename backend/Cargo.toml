@@ -32,3 +32,9 @@ path = "src/main.rs"
 [features]
 default = []
 static = []
+
+[profile.release]
+strip = true  # Automatically strip symbols from the binary.
+opt-level = "z"  # Optimize for size.
+lto = true  # Enable link-time optimization.
+codegen-units = 1
