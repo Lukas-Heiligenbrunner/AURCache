@@ -34,19 +34,19 @@ jobs:
       - name: Build and push Docker image for main branch
         if: github.ref == 'refs/heads/master'
         run: |
-          docker build -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
+          docker build --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git
 
       - name: Build and push ARM64 Docker image for main branch
         if: github.ref == 'refs/heads/master'
         run: |
-          docker build -f ./docker/Dockerfile.arm64 -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
+          docker build --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile.arm64 -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git
 
       - name: Build and push Docker image for tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
+          docker build --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
           docker tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
@@ -54,7 +54,7 @@ jobs:
       - name: Build and push ARM64 Docker image for tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build -f ./docker/Dockerfile.arm64 -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
+          docker build --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile.arm64 -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
           docker tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}
           docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest

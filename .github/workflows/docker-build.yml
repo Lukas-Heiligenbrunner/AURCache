@@ -23,8 +23,8 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -f ./docker/Dockerfile .
+          docker build --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile .
 
       - name: Build ARM64 Docker image
         run: |
-          docker build -f ./docker/Dockerfile.arm64 .
+          docker build --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile .

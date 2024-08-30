@@ -28,7 +28,8 @@ use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
+static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/archlinux-aur:paru-20240729.0.2@sha256:6d34c3982a9f99e1f5f1055992e8a32269ae337fc2df4fcb4f2434bc43588d4c";
+static QEMU_IMAGE: &str = "docker.io/multiarch/qemu-user-static:latest";
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -145,12 +146,35 @@ pub async fn build(
 ) -> anyhow::Result<()> {
     let docker = Docker::connect_with_unix_defaults()?;
 
+    let target_arch = "arm64";
+    let host_arch = "x86_64";
+
     docker
         .ping()
         .await
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
-    repull_image(&docker, &build_logger).await?;
+    if host_arch != target_arch {
+        if host_arch != "x86_64" {
+            return Err(anyhow!("Unsupported host architecture {} for cross-compile", host_arch));
+        }
+        repull_image(&docker, &build_logger, QEMU_IMAGE).await?;
+    }
+    repull_image(&docker, &build_logger, BUILDER_IMAGE).await?;
+
+    // prepare cross-build
+    if host_arch != target_arch {
+        println!("creating qemu container");
+        let create_info = create_qemu_container(&docker).await?;
+        println!("starting qemu container");
+        docker.start_container::<String>(&create_info.id, None).await?;
+        // wait until the container exited
+        println!("waiting for qemu container to exit");
+        while docker.inspect_container(&create_info.id, None).await.ok().is_some() {
+            println!("waiting for qemu container to exit");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
 
     let (create_info, host_active_build_path) =
         create_build_container(&docker, build_id, name.clone()).await?;
@@ -237,6 +261,35 @@ async fn monitor_build_output(
     Ok(())
 }
 
+async fn create_qemu_container(
+    docker: &Docker
+) -> anyhow::Result<ContainerCreateResponse> {
+    let conf = Config {
+        image: Some(QEMU_IMAGE),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        open_stdin: Some(false),
+        cmd: Some(vec!["--reset", "-p", "yes"]),
+        host_config: Some(HostConfig {
+            auto_remove: Some(true),
+            privileged: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let create_info = docker
+        .create_container::<&str, &str>(
+            Some(CreateContainerOptions {
+                name: "qemu",
+                platform: None,
+            }),
+            conf,
+        )
+        .await?;
+    Ok(create_info)
+}
+
 async fn create_build_container(
     docker: &Docker,
     build_id: i32,
@@ -266,7 +319,7 @@ async fn create_build_container(
         user: Some("ab"),
         cmd: Some(vec!["sh", "-c", cmd.as_str()]),
         host_config: Some(HostConfig {
-            auto_remove: Some(true),
+            //auto_remove: Some(true),
             nano_cpus: Some(cpu_limit as i64),
             memory_swap: Some(memory_limit),
             binds: Some(mountpoints),
@@ -278,7 +331,7 @@ async fn create_build_container(
         .create_container::<&str, &str>(
             Some(CreateContainerOptions {
                 name: container_name.as_str(),
-                platform: None,
+                platform: Some("linux/arm64"),
             }),
             conf,
         )
@@ -347,11 +400,12 @@ fn limits_from_env() -> (u64, i64) {
     (cpu_limit, memory_limit)
 }
 
-async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Result<()> {
+async fn repull_image(docker: &Docker, build_logger: &BuildLogger, image: &str) -> anyhow::Result<()> {
+    build_logger.append(format!("Pulling image: {}", image)).await?;
     // repull image to make sure it's up to date
     let mut stream = docker.create_image(
         Some(CreateImageOptions {
-            from_image: BUILDER_IMAGE,
+            from_image: image,
             ..Default::default()
         }),
         None,

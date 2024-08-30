@@ -1,10 +1,12 @@
+ARG TARGET_ARCH
+
 FROM ghcr.io/cirruslabs/flutter:3.22.2 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
 RUN flutter build web --release
 
-FROM rust AS builder
+FROM rust:1.80.1 AS builder
 
 # Install necessary tools and dependencies
 
@@ -17,15 +19,14 @@ COPY backend/Cargo.toml /app
 
 COPY --from=frontend_builder /app/build/web /app/web
 
-# Build the Rust binary
-RUN cargo build --release --features static
+ARG TARGET_ARCH
+ADD docker/build-rust.sh /root
+RUN bash /root/build-rust.sh $TARGET_ARCH
 
-# Stage 2: Create the final image
-FROM quay.io/podman/stable
-
+FROM --platform=$TARGET_ARCH quay.io/podman/stable
 # Copy the built binary from the previous stage
-COPY --from=builder --chmod=0755 /app/target/release/aurcache /usr/local/bin/aurcache
-COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
+COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 
 WORKDIR /app
 CMD /entrypoint.sh

@@ -1,0 +1,13 @@
+version: '3'
+services:
+  aurcache:
+    build:
+        context: .
+        dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ./aurcache/db:/app/db
+      - ./aurcache/repo:/app/repo
+    privileged: true
