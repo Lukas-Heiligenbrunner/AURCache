@@ -23,4 +23,8 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build .
+          docker build -f ./docker/Dockerfile .
+
+      - name: Build ARM64 Docker image
+        run: |
+          docker build -f ./docker/Dockerfile.arm64 .
