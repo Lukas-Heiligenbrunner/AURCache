@@ -107,6 +107,7 @@ Environment Variables
 | OAUTH_REDIRECT_URI     | String                | Oauth redirect uri back to AURCache                                 | null    |
 | OAUTH_CLIENT_ID        | String                | Oauth client ID                                                     | null    |
 | OAUTH_CLIENT_SECRET    | String                | Oauth client Secret                                                 | null    |
+| SECRET_KEY             | String                | \>32Byte Random String for singing cookies                          | Random  |
 
 To disable Oauth support (default) leave all OAUTH_* variables undefined.
 ## Build Info

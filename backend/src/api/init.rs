@@ -6,21 +6,34 @@ use crate::api::embed::CustomHandler;
 use crate::api::types::authenticated::OauthEnabled;
 use crate::builder::types::Action;
 use crate::utils::oauth_config::oauth_config_from_env;
-use log::{error, info};
+use log::{error, info, warn};
+use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
+use rocket::http::private::cookie::Key;
 use rocket::{routes, Config};
 use rocket_oauth2::{HyperRustlsAdapter, OAuth2};
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::DatabaseConnection;
+use std::env;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+
+fn get_secret_key() -> SecretKey {
+    match env::var("SECRET_KEY") {
+        Ok(secret_key) => SecretKey::from(secret_key.as_bytes()),
+        Err(_) => {
+            warn!("`SECRET_KEY` env not set, generating random key.");
+            SecretKey::from(Key::try_generate().unwrap().master())
+        }
+    }
+}
 
 pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8081,
-            //log_level: LogLevel::Off,
+            secret_key: get_secret_key(),
             ..Default::default()
         };
 
@@ -65,7 +78,7 @@ pub fn init_repo() -> JoinHandle<()> {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8080,
-            //log_level: LogLevel::Off,
+            secret_key: get_secret_key(),
             ..Default::default()
         };
 

@@ -7,7 +7,6 @@ mod repo;
 mod scheduler;
 mod utils;
 
-use dotenvy::dotenv;
 use crate::api::init::{init_api, init_repo};
 use crate::builder::init::init_build_queue;
 use crate::builder::types::Action;
@@ -15,6 +14,7 @@ use crate::db::init::init_db;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
 use crate::utils::startup::startup_tasks;
+use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
 
