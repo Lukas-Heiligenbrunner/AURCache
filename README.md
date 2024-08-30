@@ -102,7 +102,13 @@ Environment Variables
 | CPU_LIMIT              | Integer               | CPU limit of build container in milli CPUs                          | 0       |
 | MEMORY_LIMIT           | Integer               | Memory limit of build container in MB                               | -1      |
 | JOB_TIMEOUT            | Integer               | Job timeout for build in Seconds                                    | 3600    |
+| OAUTH_AUTH_URI         | String                | Oauth authorize endpoint                                            | null    |
+| OAUTH_TOKEN_URI        | String                | Oauth token endpoint                                                | null    |
+| OAUTH_REDIRECT_URI     | String                | Oauth redirect uri back to AURCache                                 | null    |
+| OAUTH_CLIENT_ID        | String                | Oauth client ID                                                     | null    |
+| OAUTH_CLIENT_SECRET    | String                | Oauth client Secret                                                 | null    |
 
+To disable Oauth support (default) leave all OAUTH_* variables undefined.
 ## Build Info
 
 The AURCache project comprises two main components: a Flutter frontend and a Rust backend.
