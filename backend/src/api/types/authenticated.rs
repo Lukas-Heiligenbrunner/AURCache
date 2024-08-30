@@ -3,6 +3,7 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
 use rocket_okapi::OpenApiFromRequest;
 
+#[derive(Debug, Clone)]
 pub struct OauthEnabled(pub bool);
 
 #[derive(OpenApiFromRequest)]
