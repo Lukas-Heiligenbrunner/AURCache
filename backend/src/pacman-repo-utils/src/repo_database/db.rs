@@ -27,14 +27,13 @@ pub fn remove_from_db_file(db_archive: String, dir_name: String) -> anyhow::Resu
 
         // Copy existing entries to the new archive
         for entry in archive.entries()? {
-            let mut entry = entry?;
-
-            // skip file and folder we want to delete
-            if entry.header().path()?.starts_with(dir_name.clone()) {
-                continue;
+            if let Ok(mut entry) = entry {
+                // skip file and folder we want to delete
+                if entry.header().path()?.starts_with(dir_name.clone()) {
+                    continue;
+                }
+                tar_builder.append(&entry.header().clone(), &mut entry)?;
             }
-
-            tar_builder.append(&entry.header().clone(), &mut entry)?;
         }
 
         tar_builder.finish()?;
@@ -69,8 +68,9 @@ pub fn add_to_db_file(
 
             // Copy existing entries to the new archive
             for entry in archive.entries()? {
-                let mut entry = entry?;
-                tar_builder.append(&entry.header().clone(), &mut entry)?;
+                if let Ok(mut entry) = entry {
+                    tar_builder.append(&entry.header().clone(), &mut entry)?;
+                }
             }
             tar_builder
         } else {
