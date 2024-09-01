@@ -10,8 +10,10 @@ use bollard::container::{
     RemoveContainerOptions,
 };
 use bollard::image::CreateImageOptions;
-use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
-use bollard::Docker;
+use bollard::models::{
+    ContainerCreateResponse, ContainerStateStatusEnum, CreateImageInfo, HostConfig,
+};
+use bollard::{ClientVersion, Docker, API_DEFAULT_VERSION};
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use sea_orm::{
@@ -28,8 +30,8 @@ use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/archlinux-aur:paru-20240729.0.2@sha256:6d34c3982a9f99e1f5f1055992e8a32269ae337fc2df4fcb4f2434bc43588d4c";
-static QEMU_IMAGE: &str = "docker.io/multiarch/qemu-user-static:latest";
+static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
+static QEMU_IMAGE: &str = "multiarch/qemu-user-static:latest";
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -146,8 +148,8 @@ pub async fn build(
 ) -> anyhow::Result<()> {
     let docker = Docker::connect_with_unix_defaults()?;
 
-    let target_arch = "arm64";
-    let host_arch = "x86_64";
+    let target_arch = "linux/arm64/v8";
+    let host_arch = "linux/x86_64";
 
     docker
         .ping()
@@ -155,19 +157,24 @@ pub async fn build(
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
     if host_arch != target_arch {
-        if host_arch != "x86_64" {
-            return Err(anyhow!("Unsupported host architecture {} for cross-compile", host_arch));
+        if host_arch != "linux/x86_64" {
+            return Err(anyhow!(
+                "Unsupported host architecture {} for cross-compile",
+                host_arch
+            ));
         }
-        repull_image(&docker, &build_logger, QEMU_IMAGE).await?;
+        repull_image(&docker, &build_logger, QEMU_IMAGE, "").await?;
     }
-    repull_image(&docker, &build_logger, BUILDER_IMAGE).await?;
+    repull_image(&docker, &build_logger, BUILDER_IMAGE, target_arch).await?;
 
     // prepare cross-build
     if host_arch != target_arch {
         println!("creating qemu container");
         let create_info = create_qemu_container(&docker).await?;
         println!("starting qemu container");
-        docker.start_container::<String>(&create_info.id, None).await?;
+        docker
+            .start_container::<String>(&create_info.id, None)
+            .await?;
         // wait until the container exited
         println!("waiting for qemu container to exit");
         while docker.inspect_container(&create_info.id, None).await.ok().is_some() {
@@ -261,9 +268,7 @@ async fn monitor_build_output(
     Ok(())
 }
 
-async fn create_qemu_container(
-    docker: &Docker
-) -> anyhow::Result<ContainerCreateResponse> {
+async fn create_qemu_container(docker: &Docker) -> anyhow::Result<ContainerCreateResponse> {
     let conf = Config {
         image: Some(QEMU_IMAGE),
         attach_stdout: Some(true),
@@ -331,7 +336,7 @@ async fn create_build_container(
         .create_container::<&str, &str>(
             Some(CreateContainerOptions {
                 name: container_name.as_str(),
-                platform: Some("linux/arm64"),
+                platform: Some("linux/arm64/v8"),
             }),
             conf,
         )
@@ -400,12 +405,20 @@ fn limits_from_env() -> (u64, i64) {
     (cpu_limit, memory_limit)
 }
 
-async fn repull_image(docker: &Docker, build_logger: &BuildLogger, image: &str) -> anyhow::Result<()> {
-    build_logger.append(format!("Pulling image: {}", image)).await?;
+async fn repull_image(
+    docker: &Docker,
+    build_logger: &BuildLogger,
+    image: &str,
+    arch: &str,
+) -> anyhow::Result<()> {
+    build_logger
+        .append(format!("Pulling image: {}", image))
+        .await?;
     // repull image to make sure it's up to date
     let mut stream = docker.create_image(
         Some(CreateImageOptions {
             from_image: image,
+            platform: arch,
             ..Default::default()
         }),
         None,
