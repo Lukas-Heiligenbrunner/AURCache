@@ -27,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use crate::builder::types::BuildStates;
 
 static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
 
@@ -88,7 +89,7 @@ pub(crate) async fn prepare_build(
     let build_logger = BuildLogger::new(build_id, db.clone());
 
     // update status to building
-    package_model.status = Set(0);
+    package_model.status = Set(BuildStates::ACTIVE_BUILD);
     package_model = package_model.update(&db).await?.into();
 
     let package_name = package_model.name.clone().unwrap();
@@ -106,11 +107,11 @@ pub(crate) async fn prepare_build(
     {
         Ok(_) => {
             // update package success status
-            package_model.status = Set(1);
+            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
             package_model.out_of_date = Set(false as i32);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(1));
+            new_build.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
             new_build.end_time = Set(Some(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));
@@ -120,10 +121,10 @@ pub(crate) async fn prepare_build(
                 .await?;
         }
         Err(e) => {
-            package_model.status = Set(2);
+            package_model.status = Set(BuildStates::FAILED_BUILD);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(2));
+            new_build.status = Set(Some(BuildStates::FAILED_BUILD));
             new_build.end_time = Set(Some(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));

@@ -37,6 +37,7 @@ pub struct ListBuildsModel {
 #[serde(crate = "rocket::serde")]
 pub struct ListStats {
     pub total_builds: u32,
+    pub successful_builds: u32,
     pub failed_builds: u32,
     pub avg_queue_wait_time: u32,
     pub avg_build_time: u32,

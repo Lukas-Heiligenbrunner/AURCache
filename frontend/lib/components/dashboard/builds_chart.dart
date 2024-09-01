@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 class BuildsChart extends StatefulWidget {
   const BuildsChart({
     super.key,
-    required this.nrbuilds,
+    required this.nrBuilds,
+    required this.nrSuccessfulBuilds,
     required this.nrfailedbuilds,
     required this.nrEnqueuedBuilds,
   });
 
-  final int nrbuilds;
+  final int nrBuilds;
+  final int nrSuccessfulBuilds;
   final int nrfailedbuilds;
   final int nrEnqueuedBuilds;
 
@@ -76,7 +78,7 @@ class _BuildsChartState extends State<BuildsChart> {
             color: const Color(0xff760707),
             value: widget.nrfailedbuilds.toDouble(),
             title:
-                "${(widget.nrfailedbuilds * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${(widget.nrfailedbuilds * 100 / widget.nrBuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,
@@ -86,12 +88,9 @@ class _BuildsChartState extends State<BuildsChart> {
         case 1:
           return PieChartSectionData(
             color: const Color(0xff0a7005),
-            value: (widget.nrbuilds -
-                    widget.nrfailedbuilds -
-                    widget.nrEnqueuedBuilds)
-                .toDouble(),
+            value: (widget.nrSuccessfulBuilds).toDouble(),
             title:
-                "${((widget.nrbuilds - widget.nrfailedbuilds - widget.nrEnqueuedBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${((widget.nrSuccessfulBuilds) * 100 / widget.nrBuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,
@@ -103,7 +102,7 @@ class _BuildsChartState extends State<BuildsChart> {
             color: const Color(0xFF0044AA),
             value: (widget.nrEnqueuedBuilds).toDouble(),
             title:
-                "${((widget.nrEnqueuedBuilds) * 100 / widget.nrbuilds).toStringAsFixed(2)}%",
+                "${((widget.nrEnqueuedBuilds) * 100 / widget.nrBuilds).toStringAsFixed(2)}%",
             radius: radius,
             titleStyle: TextStyle(
                 fontSize: fontSize,
