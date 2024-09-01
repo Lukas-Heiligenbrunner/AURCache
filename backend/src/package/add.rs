@@ -1,5 +1,5 @@
 use crate::aur::api::get_info_by_name;
-use crate::builder::types::Action;
+use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::anyhow;
@@ -32,7 +32,7 @@ pub async fn package_add(
 
     let new_package = packages::ActiveModel {
         name: Set(pkg_name.to_string()),
-        status: Set(3),
+        status: Set(BuildStates::ENQUEUED_BUILD),
         version: Set(pkg.version.clone()),
         latest_aur_version: Set(Option::from(pkg.version.clone())),
         ..Default::default()
@@ -43,7 +43,7 @@ pub async fn package_add(
     let build = builds::ActiveModel {
         pkg_id: new_package.id.clone(),
         output: Set(None),
-        status: Set(Some(3)),
+        status: Set(Some(BuildStates::ENQUEUED_BUILD)),
         // todo add new column for enqueued_time
         start_time: Set(Some(
             SystemTime::now()
