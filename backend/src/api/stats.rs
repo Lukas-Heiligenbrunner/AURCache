@@ -9,12 +9,12 @@ use rocket::serde::json::Json;
 use rocket::{get, State};
 
 use crate::api::types::input::ListStats;
+use crate::builder::types::BuildStates;
 use rocket_okapi::openapi;
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
-use crate::builder::types::BuildStates;
 
 /// get general build-server stats
 #[openapi(tag = "stats")]
@@ -51,7 +51,6 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .count(db)
         .await?
         .try_into()?;
-
 
     // todo implement this values somehow
     let avg_queue_wait_time: u32 = 42;

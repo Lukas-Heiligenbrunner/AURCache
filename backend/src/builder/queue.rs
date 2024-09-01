@@ -1,4 +1,5 @@
 use crate::builder::build::prepare_build;
+use crate::builder::types::BuildStates;
 use crate::db::builds::ActiveModel;
 use crate::db::packages;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
@@ -6,7 +7,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
-use crate::builder::types::BuildStates;
 
 pub(crate) async fn queue_package(
     package_model: Box<packages::ActiveModel>,

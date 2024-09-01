@@ -1,4 +1,5 @@
 use crate::builder::logger::BuildLogger;
+use crate::builder::types::BuildStates;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
 use crate::db::prelude::{Builds, Files, PackagesFiles};
@@ -27,7 +28,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use crate::builder::types::BuildStates;
 
 static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
 
