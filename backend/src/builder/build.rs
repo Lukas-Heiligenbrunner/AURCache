@@ -163,24 +163,24 @@ pub async fn build(
                 host_arch
             ));
         }
-        repull_image(&docker, &build_logger, QEMU_IMAGE, "").await?;
+        //repull_image(&docker, &build_logger, QEMU_IMAGE, "").await?;
     }
     repull_image(&docker, &build_logger, BUILDER_IMAGE, target_arch).await?;
 
     // prepare cross-build
     if host_arch != target_arch {
         println!("creating qemu container");
-        let create_info = create_qemu_container(&docker).await?;
-        println!("starting qemu container");
-        docker
-            .start_container::<String>(&create_info.id, None)
-            .await?;
+        //let create_info = create_qemu_container(&docker).await?;
+        //println!("starting qemu container");
+        //docker
+        //    .start_container::<String>(&create_info.id, None)
+        //    .await?;
         // wait until the container exited
-        println!("waiting for qemu container to exit");
-        while docker.inspect_container(&create_info.id, None).await.ok().is_some() {
-            println!("waiting for qemu container to exit");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        //println!("waiting for qemu container to exit");
+        //while docker.inspect_container(&create_info.id, None).await.ok().is_some() {
+        //    println!("waiting for qemu container to exit");
+        //    tokio::time::sleep(Duration::from_secs(1)).await;
+        //}
     }
 
     let (create_info, host_active_build_path) =

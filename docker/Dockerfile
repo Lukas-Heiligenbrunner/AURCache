@@ -1,4 +1,4 @@
-ARG TARGET_ARCH
+ARG TARGET_ARCH=linux/amd64
 
 FROM ghcr.io/cirruslabs/flutter:3.22.2 AS frontend_builder
 WORKDIR /app
