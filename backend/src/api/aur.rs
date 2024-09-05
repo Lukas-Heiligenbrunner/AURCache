@@ -3,12 +3,13 @@ use rocket::serde::json::Json;
 
 use rocket::get;
 
+use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ApiPackage;
 use rocket_okapi::openapi;
 
 #[openapi(tag = "aur")]
 #[get("/search?<query>")]
-pub async fn search(query: &str) -> Result<Json<Vec<ApiPackage>>, String> {
+pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackage>>, String> {
     return match query_aur(query).await {
         Ok(v) => {
             let mapped = v
