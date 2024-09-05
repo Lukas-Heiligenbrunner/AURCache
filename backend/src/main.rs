@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 async fn main() {
     _ = dotenv();
     init_logger();
-    startup_tasks().await.unwrap();
+    startup_tasks().await;
 
     let (tx, _) = broadcast::channel::<Action>(32);
     let db = init_db().await.unwrap();
