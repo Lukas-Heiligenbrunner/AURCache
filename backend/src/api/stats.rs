@@ -8,7 +8,9 @@ use rocket::serde::json::Json;
 
 use rocket::{get, State};
 
+use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListStats;
+use crate::builder::types::BuildStates;
 use rocket_okapi::openapi;
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
@@ -18,7 +20,10 @@ use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
 /// get general build-server stats
 #[openapi(tag = "stats")]
 #[get("/stats")]
-pub async fn stats(db: &State<DatabaseConnection>) -> Result<Json<ListStats>, NotFound<String>> {
+pub async fn stats(
+    db: &State<DatabaseConnection>,
+    _a: Authenticated,
+) -> Result<Json<ListStats>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
     get_stats(db)
@@ -33,7 +38,20 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     // Count failed builds
     let failed_builds: u32 = Builds::find()
-        .filter(builds::Column::Status.eq(2))
+        .filter(builds::Column::Status.eq(BuildStates::FAILED_BUILD))
+        .count(db)
+        .await?
+        .try_into()?;
+
+    // Count active builds
+    let successful_builds: u32 = Builds::find()
+        .filter(builds::Column::Status.eq(BuildStates::SUCCESSFUL_BUILD))
+        .count(db)
+        .await?
+        .try_into()?;
+
+    let enqueued_builds: u32 = Builds::find()
+        .filter(builds::Column::Status.eq(BuildStates::ENQUEUED_BUILD))
         .count(db)
         .await?
         .try_into()?;
@@ -43,13 +61,6 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     // Calculate repo storage size
     let repo_storage_size: u64 = dir_size("repo/").unwrap_or(0);
-
-    // Count active builds
-    let enqueued_builds: u32 = Builds::find()
-        .filter(builds::Column::Status.eq(3))
-        .count(db)
-        .await?
-        .try_into()?;
 
     #[derive(Debug, FromQueryResult)]
     struct BuildTimeStruct {
@@ -79,6 +90,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     Ok(ListStats {
         total_builds,
+        successful_builds,
         failed_builds,
         avg_queue_wait_time,
         avg_build_time,

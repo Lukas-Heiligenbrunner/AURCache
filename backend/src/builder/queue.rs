@@ -1,4 +1,5 @@
 use crate::builder::build::prepare_build;
+use crate::builder::types::BuildStates;
 use crate::db::builds::ActiveModel;
 use crate::db::packages;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
@@ -22,7 +23,7 @@ pub(crate) async fn queue_package(
         let _permit = permits.acquire().await.unwrap();
 
         // set build status to building
-        build_model.status = Set(Some(0));
+        build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
         build_model.start_time = Set(Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

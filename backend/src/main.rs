@@ -14,11 +14,13 @@ use crate::db::init::init_db;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
 use crate::utils::startup::startup_tasks;
+use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() {
+    _ = dotenv();
     init_logger();
     startup_tasks().await;
 
