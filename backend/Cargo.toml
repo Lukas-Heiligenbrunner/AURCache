@@ -25,7 +25,7 @@ bollard = "*"
 bigdecimal = "0.4.5"
 env_logger = "0.11.5"
 log = "0.4.22"
-backon = "1.0.2"
+backon = "1.2.0"
 pacman-repo-utils = {path = "./src/pacman-repo-utils"}
 
 [[bin]]
