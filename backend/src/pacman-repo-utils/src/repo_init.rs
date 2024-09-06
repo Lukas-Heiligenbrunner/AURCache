@@ -18,7 +18,7 @@ pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
     }
 
     info!("Initializing empty pacman Repo archive");
-    fs::create_dir(path)?;
+    _ = fs::create_dir(path);
 
     let tar_gz = File::create(&db_file)?;
     let enc = GzEncoder::new(tar_gz, Compression::default());

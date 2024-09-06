@@ -58,7 +58,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 const SizedBox(height: defaultPadding),
                               if (Responsive.isMobile(context))
                                 SidePanel(
-                                    nrbuilds: stats.total_builds,
+                                    nrSuccessfulBuilds: stats.successful_builds,
                                     nrfailedbuilds: stats.failed_builds,
                                     nrEnqueuedBuilds: stats.enqueued_builds),
                             ],
@@ -71,7 +71,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Expanded(
                             flex: 2,
                             child: SidePanel(
-                                nrbuilds: stats.total_builds,
+                                nrSuccessfulBuilds: stats.successful_builds,
                                 nrfailedbuilds: stats.failed_builds,
                                 nrEnqueuedBuilds: stats.enqueued_builds),
                           ),

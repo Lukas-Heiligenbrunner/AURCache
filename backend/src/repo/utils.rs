@@ -1,6 +1,6 @@
 use crate::db::prelude::PackagesFiles;
 use crate::db::{files, packages_files};
-use log::info;
+use log::{info, warn};
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
@@ -23,9 +23,10 @@ pub async fn try_remove_archive_file(
             "./repo/repo.db.tar.gz".to_string(),
             "./repo/repo.files.tar.gz".to_string(),
         )?;
-        fs::remove_file(format!("./repo/{}", filename))?;
-
-        info!("Removed old file: {}", filename);
+        match fs::remove_file(format!("./repo/{}", filename)) {
+            Ok(_) => info!("Removed old file: {}", filename),
+            Err(_) => warn!("Failed to remove package file: {}", filename),
+        }
     }
 
     Ok(())
