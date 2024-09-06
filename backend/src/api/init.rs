@@ -1,27 +1,47 @@
+use crate::api::auth::{oauth_callback, oauth_login};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
+use crate::api::types::authenticated::OauthEnabled;
 use crate::builder::types::Action;
-use log::{error, info};
-use rocket::Config;
+use crate::utils::oauth_config::oauth_config_from_env;
+use log::{error, info, warn};
+use rocket::config::SecretKey;
+use rocket::fairing::AdHoc;
+use rocket::http::private::cookie::Key;
+use rocket::{routes, Config};
+use rocket_oauth2::{HyperRustlsAdapter, OAuth2};
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
 use sea_orm::DatabaseConnection;
+use std::env;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+
+fn get_secret_key() -> SecretKey {
+    match env::var("SECRET_KEY") {
+        Ok(secret_key) => SecretKey::from(secret_key.as_bytes()),
+        Err(_) => {
+            warn!("`SECRET_KEY` env not set, generating random key.");
+            SecretKey::from(Key::try_generate().unwrap().master())
+        }
+    }
+}
 
 pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8081,
-            //log_level: LogLevel::Off,
+            secret_key: get_secret_key(),
             ..Default::default()
         };
 
-        let rock = rocket::custom(config)
+        let oauth_config = oauth_config_from_env();
+        let mut rock = rocket::custom(config)
             .manage(db)
             .manage(tx)
+            .manage(OauthEnabled(oauth_config.is_ok()))
             .mount("/api/", build_api())
             .mount(
                 "/docs/",
@@ -30,6 +50,18 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                     ..Default::default()
                 }),
             );
+
+        if let Ok(oauth_config) = oauth_config {
+            rock = rock
+                .mount("/api/", routes![oauth_login, oauth_callback])
+                .attach(AdHoc::on_ignite("OAuth Config", |rocket| async {
+                    rocket.attach(OAuth2::<()>::custom(
+                        HyperRustlsAdapter::default(),
+                        oauth_config,
+                    ))
+                }));
+        }
+
         #[cfg(feature = "static")]
         let rock = rock.mount("/", CustomHandler {});
 
@@ -46,7 +78,7 @@ pub fn init_repo() -> JoinHandle<()> {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
             port: 8080,
-            //log_level: LogLevel::Off,
+            secret_key: get_secret_key(),
             ..Default::default()
         };
 

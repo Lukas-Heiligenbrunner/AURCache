@@ -1,4 +1,4 @@
-use log::info;
+use log::{error, info};
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -12,7 +12,7 @@ const START_BANNER: &str = r"
  /_/    \_\____/|_|  \_\\_____\__,_|\___|_| |_|\___|
 ";
 
-pub async fn startup_tasks() -> anyhow::Result<()> {
+pub async fn startup_tasks() {
     info!("{}", START_BANNER);
 
     for cs in CONTAINER_STORAGE_DIRS {
@@ -21,5 +21,7 @@ pub async fn startup_tasks() -> anyhow::Result<()> {
         }
     }
 
-    pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo")
+    if let Err(e) = pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo") {
+        error!("Failed to initialize pacman repo: {:?}", e);
+    }
 }
