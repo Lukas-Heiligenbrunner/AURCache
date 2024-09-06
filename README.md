@@ -55,6 +55,7 @@ services:
           - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
 volumes:
   artifact_cache:
+        name: artifact_cache # this name should match env name above
         driver: local
 ```
 
