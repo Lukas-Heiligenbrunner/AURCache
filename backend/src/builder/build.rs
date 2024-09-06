@@ -10,10 +10,8 @@ use bollard::container::{
     RemoveContainerOptions,
 };
 use bollard::image::CreateImageOptions;
-use bollard::models::{
-    ContainerCreateResponse, ContainerStateStatusEnum, CreateImageInfo, HostConfig,
-};
-use bollard::{ClientVersion, Docker, API_DEFAULT_VERSION};
+use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::Docker;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use sea_orm::{
@@ -31,7 +29,6 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
-static QEMU_IMAGE: &str = "multiarch/qemu-user-static:latest";
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -148,40 +145,21 @@ pub async fn build(
 ) -> anyhow::Result<()> {
     let docker = Docker::connect_with_unix_defaults()?;
 
+    // todo get target arch from build job or sth
     let target_arch = "linux/arm64/v8";
-    let host_arch = "linux/x86_64";
 
     docker
         .ping()
         .await
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
-    if host_arch != target_arch {
-        if host_arch != "linux/x86_64" {
-            return Err(anyhow!(
-                "Unsupported host architecture {} for cross-compile",
-                host_arch
-            ));
-        }
-        //repull_image(&docker, &build_logger, QEMU_IMAGE, "").await?;
+    #[cfg(target_arch = "aarch64")]
+    if target_arch != "linux/arm64/v8" {
+        return Err(anyhow!(
+            "Unsupported host architecture aarch64 for cross-compile"
+        ));
     }
     repull_image(&docker, &build_logger, BUILDER_IMAGE, target_arch).await?;
-
-    // prepare cross-build
-    if host_arch != target_arch {
-        println!("creating qemu container");
-        //let create_info = create_qemu_container(&docker).await?;
-        //println!("starting qemu container");
-        //docker
-        //    .start_container::<String>(&create_info.id, None)
-        //    .await?;
-        // wait until the container exited
-        //println!("waiting for qemu container to exit");
-        //while docker.inspect_container(&create_info.id, None).await.ok().is_some() {
-        //    println!("waiting for qemu container to exit");
-        //    tokio::time::sleep(Duration::from_secs(1)).await;
-        //}
-    }
 
     let (create_info, host_active_build_path) =
         create_build_container(&docker, build_id, name.clone()).await?;
@@ -266,33 +244,6 @@ async fn monitor_build_output(
         }
     }
     Ok(())
-}
-
-async fn create_qemu_container(docker: &Docker) -> anyhow::Result<ContainerCreateResponse> {
-    let conf = Config {
-        image: Some(QEMU_IMAGE),
-        attach_stdout: Some(true),
-        attach_stderr: Some(true),
-        open_stdin: Some(false),
-        cmd: Some(vec!["--reset", "-p", "yes"]),
-        host_config: Some(HostConfig {
-            auto_remove: Some(true),
-            privileged: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let create_info = docker
-        .create_container::<&str, &str>(
-            Some(CreateContainerOptions {
-                name: "qemu",
-                platform: None,
-            }),
-            conf,
-        )
-        .await?;
-    Ok(create_info)
 }
 
 async fn create_build_container(
