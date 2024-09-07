@@ -36,7 +36,7 @@ pub struct ExtendedPackageModel {
     pub maintainer: Option<String>,
     pub aur_flagged_outdated: bool,
     pub selected_platforms: Vec<String>,
-    pub selected_build_flags: Vec<String>,
+    pub selected_build_flags: Option<Vec<String>>,
     pub aur_url: String,
     pub project_url: Option<String>,
     pub description: Option<String>,

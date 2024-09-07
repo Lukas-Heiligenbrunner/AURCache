@@ -92,16 +92,13 @@ pub(crate) async fn prepare_build(
     package_model.status = Set(BuildStates::ACTIVE_BUILD);
     package_model = package_model.update(&db).await?.into();
 
-    let package_name = package_model.name.clone().unwrap();
-    let package_id = package_model.id.clone().unwrap();
-
     match build(
-        package_name,
+        package_model.clone().try_into()?,
         build_id,
-        package_id,
         &db,
         build_logger.clone(),
         job_containers,
+        new_build.platform.clone().unwrap(),
     )
     .await
     {
@@ -137,17 +134,15 @@ pub(crate) async fn prepare_build(
 }
 
 pub async fn build(
-    name: String,
+    pkg: packages::Model,
     build_id: i32,
-    pkg_id: i32,
     db: &DatabaseConnection,
     build_logger: BuildLogger,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
+    target_platform: String,
 ) -> anyhow::Result<()> {
     let docker = Docker::connect_with_unix_defaults()?;
-
-    // todo get target arch from build job or sth
-    let target_arch = "linux/arm64/v8";
+    let target_platform = format!("linux/{}", target_platform);
 
     docker
         .ping()
@@ -155,15 +150,27 @@ pub async fn build(
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
     #[cfg(target_arch = "aarch64")]
-    if target_arch != "linux/arm64/v8" {
+    if target_platform != "linux/arm64/v8" {
         return Err(anyhow!(
             "Unsupported host architecture aarch64 for cross-compile"
         ));
     }
-    repull_image(&docker, &build_logger, BUILDER_IMAGE, target_arch).await?;
+    repull_image(
+        &docker,
+        &build_logger,
+        BUILDER_IMAGE,
+        target_platform.clone(),
+    )
+    .await?;
 
-    let (create_info, host_active_build_path) =
-        create_build_container(&docker, build_id, name.clone(), target_arch).await?;
+    let (create_info, host_active_build_path) = create_build_container(
+        &docker,
+        build_id,
+        pkg.name.clone(),
+        target_platform,
+        pkg.build_flags.split(";").collect(),
+    )
+    .await?;
     let id = create_info.id;
 
     // start build container
@@ -182,7 +189,10 @@ pub async fn build(
         Ok(v) => v?,
         Err(_) => {
             build_logger
-                .append(format!("Build #{build_id} timed out for package '{name}'"))
+                .append(format!(
+                    "Build #{build_id} timed out for package '{}'",
+                    pkg.name
+                ))
                 .await?;
             // kill build container
             docker
@@ -201,7 +211,7 @@ pub async fn build(
         ))?;
 
     // move built tar.gz archives to host and repo-add
-    move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg_id, db).await?;
+    move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg.id, db).await?;
     // remove active build dir
     fs::remove_dir(host_active_build_path)?;
     Ok(())
@@ -251,10 +261,12 @@ async fn create_build_container(
     docker: &Docker,
     build_id: i32,
     name: String,
-    arch: &str,
+    arch: String,
+    build_flags: Vec<&str>,
 ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
     let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
+    let build_flags = build_flags.join(" ");
     // create new docker container for current build
     let build_dir_base = "/var/cache/makepkg/pkg";
     let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
@@ -262,8 +274,8 @@ async fn create_build_container(
     let (makepkg_config, makepkg_config_path) =
         create_makepkg_config(name.clone(), build_dir_base)?;
     let cmd = format!(
-        "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
-        makepkg_config_path, makepkg_config, name
+        "cat <<EOF > {}\n{}\nEOF\nparu {} {}",
+        makepkg_config_path, makepkg_config, build_flags, name
     );
 
     let (cpu_limit, memory_limit) = limits_from_env();
@@ -289,7 +301,7 @@ async fn create_build_container(
         .create_container::<&str, &str>(
             Some(CreateContainerOptions {
                 name: container_name.as_str(),
-                platform: Some(arch),
+                platform: Some(arch.as_str()),
             }),
             conf,
         )
@@ -362,7 +374,7 @@ async fn repull_image(
     docker: &Docker,
     build_logger: &BuildLogger,
     image: &str,
-    arch: &str,
+    arch: String,
 ) -> anyhow::Result<()> {
     build_logger
         .append(format!("Pulling image: {}", image))
@@ -371,7 +383,7 @@ async fn repull_image(
     let mut stream = docker.create_image(
         Some(CreateImageOptions {
             from_image: image,
-            platform: arch,
+            platform: arch.as_str(),
             ..Default::default()
         }),
         None,

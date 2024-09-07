@@ -6,6 +6,7 @@ use rocket_okapi::JsonSchema;
 #[serde(crate = "rocket::serde")]
 pub struct AddBody {
     pub(crate) name: String,
+    pub(crate) platforms: Vec<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]

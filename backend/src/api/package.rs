@@ -28,7 +28,7 @@ pub async fn package_add_endpoint(
     tx: &State<Sender<Action>>,
     _a: Authenticated,
 ) -> Result<(), BadRequest<String>> {
-    package_add(db, input.name.clone(), tx)
+    package_add(db, input.name.clone(), tx, input.platforms.clone())
         .await
         .map_err(|e| BadRequest(e.to_string()))
 }
@@ -124,8 +124,8 @@ pub async fn get_package(
         licenses: aur_info.license.map(|l| l.join(", ")),
         maintainer: aur_info.maintainer,
         aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
-        selected_platforms: vec![], // todo add those two to db
-        selected_build_flags: vec![],
+        selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
+        selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
         aur_url: format!(
             "https://aur.archlinux.org/packages/{}",
             aur_info.package_base
