@@ -1,9 +1,11 @@
-use log::{debug, error, info};
+use log::{error, info};
 use std::path::PathBuf;
 use tokio::fs;
 
+#[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]
 use {
+    log::debug,
     std::fs::File,
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
@@ -32,6 +34,7 @@ pub async fn startup_tasks() {
         error!("Failed to initialize pacman repo: {:?}", e);
     }
 
+    #[cfg(not(debug_assertions))]
     #[cfg(target_arch = "x86_64")]
     init_qemu_binfmt().await.unwrap();
 }
@@ -39,6 +42,7 @@ pub async fn startup_tasks() {
 /// This is required to initialize the binfmt configuration for QEMU on x86_64 correctly
 /// arm64 is not supported by qemu binfmt
 /// see https://stackoverflow.com/questions/75954301/using-sudo-in-podman-with-qemu-architecture-emulation-leads-to-sudo-effective-u
+#[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]
 async fn init_qemu_binfmt() -> anyhow::Result<()> {
     let source_dir = Path::new("/usr/lib/binfmt.d");

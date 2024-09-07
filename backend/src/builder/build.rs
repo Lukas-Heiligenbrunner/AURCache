@@ -163,7 +163,7 @@ pub async fn build(
     repull_image(&docker, &build_logger, BUILDER_IMAGE, target_arch).await?;
 
     let (create_info, host_active_build_path) =
-        create_build_container(&docker, build_id, name.clone()).await?;
+        create_build_container(&docker, build_id, name.clone(), target_arch).await?;
     let id = create_info.id;
 
     // start build container
@@ -251,6 +251,7 @@ async fn create_build_container(
     docker: &Docker,
     build_id: i32,
     name: String,
+    arch: &str,
 ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
     let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
@@ -276,7 +277,7 @@ async fn create_build_container(
         user: Some("ab"),
         cmd: Some(vec!["sh", "-c", cmd.as_str()]),
         host_config: Some(HostConfig {
-            //auto_remove: Some(true),
+            auto_remove: Some(true),
             nano_cpus: Some(cpu_limit as i64),
             memory_swap: Some(memory_limit),
             binds: Some(mountpoints),
@@ -288,7 +289,7 @@ async fn create_build_container(
         .create_container::<&str, &str>(
             Some(CreateContainerOptions {
                 name: container_name.as_str(),
-                platform: Some("linux/arm64/v8"),
+                platform: Some(arch),
             }),
             conf,
         )

@@ -7,7 +7,7 @@ on:
       - '!master'
 
 jobs:
-  build-and-push:
+  build-amd64:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,6 +24,19 @@ jobs:
       - name: Build Docker image
         run: |
           docker build --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile .
+
+  build-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build ARM64 Docker image
         run: |

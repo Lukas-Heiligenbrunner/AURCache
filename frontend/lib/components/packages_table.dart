@@ -5,7 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../api/API.dart';
 import '../constants/color_constants.dart';
-import '../models/package.dart';
+import '../models/simple_packge.dart';
 import '../providers/api/builds_provider.dart';
 import '../providers/api/packages_provider.dart';
 import '../providers/api/stats_provider.dart';
@@ -14,7 +14,7 @@ import 'confirm_popup.dart';
 
 class PackagesTable extends StatelessWidget {
   const PackagesTable({super.key, required this.data});
-  final List<Package> data;
+  final List<SimplePackage> data;
 
   @override
   Widget build(BuildContext context) {
@@ -45,7 +45,7 @@ class PackagesTable extends StatelessWidget {
             data.map((e) => buildDataRow(e, context)).toList(growable: false));
   }
 
-  DataRow buildDataRow(Package package, BuildContext context) {
+  DataRow buildDataRow(SimplePackage package, BuildContext context) {
     return DataRow(
       cells: [
         DataCell(Text(package.id.toString())),

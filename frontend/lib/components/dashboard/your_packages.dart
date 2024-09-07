@@ -4,7 +4,7 @@ import 'package:aurcache/providers/api/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../../constants/color_constants.dart';
-import '../../models/package.dart';
+import '../../models/simple_packge.dart';
 import '../table_info.dart';
 
 class YourPackages extends StatelessWidget {
@@ -25,7 +25,7 @@ class YourPackages extends StatelessWidget {
             "Your Packages",
             style: Theme.of(context).textTheme.titleMedium,
           ),
-          APIBuilder<PackagesProvider, List<Package>, PackagesDTO>(
+          APIBuilder<PackagesProvider, List<SimplePackage>, PackagesDTO>(
             key: const Key("Packages on dashboard"),
             interval: const Duration(seconds: 10),
             dto: PackagesDTO(limit: 10),

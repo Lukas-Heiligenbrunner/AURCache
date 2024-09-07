@@ -60,6 +60,9 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
     return FutureBuilder<K>(
       future: fut,
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          print(snapshot.error);
+        }
         if (snapshot.hasData) {
           return widget.onData(snapshot.data!);
         } else {

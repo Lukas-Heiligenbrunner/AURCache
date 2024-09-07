@@ -1,21 +1,24 @@
-import '../models/package.dart';
+import 'package:aurcache/models/extended_package.dart';
+
+import '../models/simple_packge.dart';
 import 'api_client.dart';
 
 extension PackagesAPI on ApiClient {
-  Future<List<Package>> listPackages({int? limit}) async {
+  Future<List<SimplePackage>> listPackages({int? limit}) async {
     final resp = await getRawClient()
         .get("/packages/list", queryParameters: {'limit': limit});
 
     final responseObject = resp.data as List;
-    final List<Package> packages =
-        responseObject.map((e) => Package.fromJson(e)).toList(growable: false);
+    final List<SimplePackage> packages = responseObject
+        .map((e) => SimplePackage.fromJson(e))
+        .toList(growable: false);
     return packages;
   }
 
-  Future<Package> getPackage(int id) async {
+  Future<ExtendedPackage> getPackage(int id) async {
     final resp = await getRawClient().get("/package/$id");
 
-    final package = Package.fromJson(resp.data);
+    final package = ExtendedPackage.fromJson(resp.data);
     return package;
   }
 

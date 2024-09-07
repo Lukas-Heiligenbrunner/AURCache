@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../api/API.dart';
 import '../constants/color_constants.dart';
+import 'add_package_popup.dart';
 import 'confirm_popup.dart';
 
 class AurSearchTable extends StatelessWidget {
@@ -39,10 +40,8 @@ class AurSearchTable extends StatelessWidget {
           TextButton(
             child: const Text("Install", style: TextStyle(color: greenColor)),
             onPressed: () async {
-              final confirmResult = await showConfirmationDialog(
-                  context,
-                  "Install Package?",
-                  "Are you sure to install Package: ${package.name}", () async {
+              final confirmResult =
+                  await showPackageAddPopup(context, package.name, () async {
                 await API.addPackage(name: package.name);
                 context.go("/");
               }, null);

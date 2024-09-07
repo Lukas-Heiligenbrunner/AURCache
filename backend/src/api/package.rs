@@ -11,8 +11,9 @@ use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
 
 use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::ListPackageModel;
+use crate::api::types::input::{ExtendedPackageModel, SimplePackageModel};
 use crate::api::types::output::{AddBody, UpdateBody};
+use crate::aur::api::get_info_by_name;
 use rocket_okapi::openapi;
 use sea_orm::DatabaseConnection;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -68,10 +69,10 @@ pub async fn package_list(
     limit: Option<u64>,
     page: Option<u64>,
     _a: Authenticated,
-) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
+) -> Result<Json<Vec<SimplePackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let all: Vec<ListPackageModel> = Packages::find()
+    let all: Vec<SimplePackageModel> = Packages::find()
         .select_only()
         .column(packages::Column::Name)
         .column(packages::Column::Id)
@@ -82,7 +83,7 @@ pub async fn package_list(
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit))
-        .into_model::<ListPackageModel>()
+        .into_model::<SimplePackageModel>()
         .all(db)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
@@ -97,23 +98,39 @@ pub async fn get_package(
     db: &State<DatabaseConnection>,
     id: u64,
     _a: Authenticated,
-) -> Result<Json<ListPackageModel>, NotFound<String>> {
+) -> Result<Json<ExtendedPackageModel>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let all: ListPackageModel = Packages::find()
+    let pkg = Packages::find()
         .filter(packages::Column::Id.eq(id))
-        .select_only()
-        .column(packages::Column::Name)
-        .column(packages::Column::Id)
-        .column(packages::Column::Status)
-        .column_as(packages::Column::OutOfDate, "outofdate")
-        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(packages::Column::Version, "latest_version")
-        .into_model::<ListPackageModel>()
         .one(db)
         .await
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("id not found".to_string()))?;
 
-    Ok(Json(all))
+    let aur_info = get_info_by_name(&pkg.name)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    let ext_pkg = ExtendedPackageModel {
+        id: pkg.id,
+        name: pkg.name,
+        status: pkg.status,
+        outofdate: pkg.out_of_date,
+        latest_version: Some(pkg.version), // todo might be null in databse right?
+        latest_aur_version: aur_info.version,
+        last_updated: aur_info.last_modified,
+        first_submitted: aur_info.first_submitted,
+        licenses: aur_info.license.map(|l| l.join(", ")),
+        maintainer: aur_info.maintainer,
+        aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+        selected_platforms: vec![], // todo add those two to db
+        selected_build_flags: vec![],
+        aur_url: format!(
+            "https://aur.archlinux.org/packages/{}",
+            aur_info.package_base
+        ),
+        project_url: aur_info.url,
+    };
+    Ok(Json(ext_pkg))
 }
