@@ -159,7 +159,7 @@ class _PackageScreenState extends State<PackageScreen> {
         ),
         ElevatedButton(
           onPressed: () {
-            // todo redirect to pkg settings page
+            context.push("/package/${pkg.id}/settings");
           },
           child: const Text(
             "Settings",
@@ -224,7 +224,7 @@ class _PackageScreenState extends State<PackageScreen> {
               height: 5,
             ),
             const Text(
-              "Selected build Platforms:",
+              "Selected build platforms:",
               style: TextStyle(fontSize: 18),
               textAlign: TextAlign.start,
             ),

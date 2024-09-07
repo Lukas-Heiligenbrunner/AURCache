@@ -24,10 +24,10 @@ ADD COLUMN platform TEXT;
 
 UPDATE packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
-    platforms = 'x86_64';
+    platforms = 'amd64';
 
 UPDATE builds
-    SET platform = 'x86_64';
+    SET platform = 'amd64';
 "#,
                 )
                 .await?;
@@ -46,10 +46,10 @@ ADD COLUMN platform TEXT;
 
 UPDATE public.packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
-    platforms = 'x86_64';
+    platforms = 'amd64';
 
 UPDATE public.builds
-    SET platform = 'x86_64';
+    SET platform = 'amd64';
 "#,
                 )
                 .await?;

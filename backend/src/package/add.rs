@@ -62,7 +62,7 @@ pub async fn package_add(
         let new_build = build.save(&txn).await?;
 
         // todo -- setting latest build to latest x86_64 build for now
-        if platform == "x86_64" {
+        if platform == "amd64" {
             new_package.latest_build = Set(Some(new_build.id.clone().unwrap()));
             new_package = new_package.save(&txn).await?;
         }

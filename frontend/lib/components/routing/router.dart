@@ -1,3 +1,4 @@
+import 'package:aurcache/screens/PackageSettingsScreen.dart';
 import 'package:aurcache/screens/aur_screen.dart';
 import 'package:aurcache/screens/build_screen.dart';
 import 'package:aurcache/screens/builds_screen.dart';
@@ -52,6 +53,13 @@ final appRouter = GoRouter(
           builder: (context, state) {
             final id = int.parse(state.pathParameters['id']!);
             return PackageScreen(pkgID: id);
+          },
+        ),
+        GoRoute(
+          path: '/package/:id/settings',
+          builder: (context, state) {
+            final id = int.parse(state.pathParameters['id']!);
+            return Packagesettingsscreen(pkgID: id);
           },
         ),
       ],

@@ -150,7 +150,7 @@ pub async fn build(
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
 
     #[cfg(target_arch = "aarch64")]
-    if target_platform != "linux/arm64/v8" {
+    if target_platform != "linux/arm64" {
         return Err(anyhow!(
             "Unsupported host architecture aarch64 for cross-compile"
         ));

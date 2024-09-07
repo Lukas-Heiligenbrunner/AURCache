@@ -1,3 +1,4 @@
+import 'package:aurcache/constants/platforms.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 
@@ -71,47 +72,13 @@ class ArchTags extends StatelessWidget {
 
   final List<String> selectedArchs;
 
-  final archs = [
-    "x86_64",
-    "aarch64",
-    "riscv64",
-    "riscv32",
-    "arm",
-    "alpha",
-    "armeb",
-    "sparc",
-    "sparc32plus",
-    "sparc64",
-    "ppc",
-    "ppc64",
-    "ppc64le",
-    "m68k",
-    "mips",
-    "mipsel",
-    "mipsn32",
-    "mipsn32el",
-    "mips64",
-    "mips64el",
-    "sh4",
-    "sh4eb",
-    "s390x",
-    "aarch64_be",
-    "hppa",
-    "xtensa",
-    "xtensaeb",
-    "microblaze",
-    "microblazeel",
-    "or1k",
-    "hexagon"
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Tags(
       itemBuilder: (idx) => ItemTags(
         index: idx,
-        title: archs[idx],
-        active: selectedArchs.contains(archs[idx]),
+        title: Platforms[idx],
+        active: selectedArchs.contains(Platforms[idx]),
         activeColor: Colors.green,
         onPressed: (i) {
           if (i.active!) {
@@ -121,7 +88,7 @@ class ArchTags extends StatelessWidget {
           }
         },
       ),
-      itemCount: archs.length,
+      itemCount: Platforms.length,
     );
   }
 }
