@@ -34,6 +34,7 @@ pub async fn startup_tasks() {
         error!("Failed to initialize pacman repo: {:?}", e);
     }
 
+    // disable on debug builds since annoying bc. of root permissions
     #[cfg(not(debug_assertions))]
     #[cfg(target_arch = "x86_64")]
     init_qemu_binfmt().await.unwrap();

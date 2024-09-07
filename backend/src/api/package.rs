@@ -131,6 +131,7 @@ pub async fn get_package(
             aur_info.package_base
         ),
         project_url: aur_info.url,
+        description: aur_info.description,
     };
     Ok(Json(ext_pkg))
 }

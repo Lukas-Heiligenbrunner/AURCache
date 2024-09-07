@@ -39,6 +39,7 @@ pub struct ExtendedPackageModel {
     pub selected_build_flags: Vec<String>,
     pub aur_url: String,
     pub project_url: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]

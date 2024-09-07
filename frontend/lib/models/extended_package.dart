@@ -4,7 +4,7 @@ class ExtendedPackage {
   final bool outofdate;
   final int status, last_updated, first_submitted;
   final String latest_version, latest_aur_version, aur_url;
-  final String? licenses, maintainer, project_url;
+  final String? licenses, maintainer, project_url, description;
   final bool aur_flagged_outdated;
   final List<String> selected_platforms;
   final List<String> selected_build_flags;
@@ -25,6 +25,7 @@ class ExtendedPackage {
     required this.selected_build_flags,
     required this.aur_url,
     required this.project_url,
+    required this.description,
   });
 
   factory ExtendedPackage.fromJson(Map<String, dynamic> json) {
@@ -48,6 +49,7 @@ class ExtendedPackage {
           .toList(growable: false),
       aur_url: json['aur_url'] as String,
       project_url: json['project_url'] as String?,
+      description: json['description'] as String?,
     );
   }
 }

@@ -290,17 +290,18 @@ class _PackageScreenState extends State<PackageScreen> {
 
   Widget _buildMainBody(ExtendedPackage pkg) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const SizedBox(
-        height: 25,
-      ),
-      Padding(
-        padding: const EdgeInsets.all(5.0),
-        child: Text(
-            "Yet another yogurt. Pacman wrapper and AUR helper written in go."),
-      ),
-      const SizedBox(
-        height: 25,
-      ),
+      if (pkg.description != null) ...[
+        const SizedBox(
+          height: 25,
+        ),
+        Padding(
+          padding: const EdgeInsets.all(5.0),
+          child: Text(pkg.description!),
+        ),
+        const SizedBox(
+          height: 25,
+        )
+      ],
       Container(
         padding: const EdgeInsets.all(defaultPadding),
         decoration: const BoxDecoration(
