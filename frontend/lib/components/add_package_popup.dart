@@ -11,7 +11,7 @@ Future<bool> showPackageAddPopup(
     context: context,
     barrierDismissible: false,
     builder: (BuildContext context) {
-      List<String> selectedArchs = ["x86_64"];
+      List<String> selectedArchs = ["amd64"];
 
       return Stack(
         children: <Widget>[
@@ -27,8 +27,8 @@ Future<bool> showPackageAddPopup(
           AlertDialog(
             title: Text("Install package $packageName?"),
             content: SizedBox(
-              height: 200,
-              width: 800,
+              height: 150,
+              width: 450,
               child: Column(
                 children: [
                   const Text(

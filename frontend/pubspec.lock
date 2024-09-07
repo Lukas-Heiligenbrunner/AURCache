@@ -126,14 +126,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.0.0"
-  flutter_stepindicator:
-    dependency: "direct main"
-    description:
-      name: flutter_stepindicator
-      sha256: f167786cae32b38a093eb3b7757ef359e8ba165e0fa3570015a45394d873daf9
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.1.7"
   flutter_svg:
     dependency: "direct main"
     description:
