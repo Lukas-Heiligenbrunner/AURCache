@@ -1,6 +1,6 @@
 class Build {
   final int id;
-  final String pkg_name;
+  final String pkg_name, platform;
   final int pkg_id;
   final String version;
   final int status;
@@ -11,6 +11,7 @@ class Build {
       {required this.id,
       required this.pkg_id,
       required this.pkg_name,
+      required this.platform,
       required this.version,
       required this.start_time,
       required this.end_time,
@@ -31,6 +32,7 @@ class Build {
       end_time: endTime,
       pkg_name: json["pkg_name"] as String,
       version: json["version"] as String,
+      platform: json["platform"] as String,
     );
   }
 }

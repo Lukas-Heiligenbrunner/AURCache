@@ -83,6 +83,7 @@ pub async fn list_builds(
         .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
+        .column(builds::Column::Platform)
         .order_by(builds::Column::StartTime, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit));
@@ -120,6 +121,7 @@ pub async fn get_build(
         .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
+        .column(builds::Column::Platform)
         .into_model::<ListBuildsModel>()
         .one(db)
         .await

@@ -52,6 +52,7 @@ pub struct ListBuildsModel {
     status: i32,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    platform: String,
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]

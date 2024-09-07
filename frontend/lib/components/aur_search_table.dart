@@ -40,11 +40,11 @@ class AurSearchTable extends StatelessWidget {
           TextButton(
             child: const Text("Install", style: TextStyle(color: greenColor)),
             onPressed: () async {
-              final confirmResult =
-                  await showPackageAddPopup(context, package.name, () async {
-                await API.addPackage(name: package.name);
+              final confirmResult = await showPackageAddPopup(
+                  context, package.name, (archs) async {
+                await API.addPackage(name: package.name, selectedArchs: archs);
                 context.go("/");
-              }, null);
+              });
               if (!confirmResult) return;
             },
           ),

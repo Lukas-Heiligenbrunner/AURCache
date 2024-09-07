@@ -1,50 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 
-final archs = [
-  "x86_64",
-  "aarch64",
-  "riscv64",
-  "riscv32",
-  "arm",
-  "alpha",
-  "armeb",
-  "sparc",
-  "sparc32plus",
-  "sparc64",
-  "ppc",
-  "ppc64",
-  "ppc64le",
-  "m68k",
-  "mips",
-  "mipsel",
-  "mipsn32",
-  "mipsn32el",
-  "mips64",
-  "mips64el",
-  "sh4",
-  "sh4eb",
-  "s390x",
-  "aarch64_be",
-  "hppa",
-  "xtensa",
-  "xtensaeb",
-  "microblaze",
-  "microblazeel",
-  "or1k",
-  "hexagon"
-];
-
 Future<bool> showPackageAddPopup(
   BuildContext context,
   String packageName,
-  void Function() successCallback,
-  void Function()? errorCallback,
+  void Function(List<String>) successCallback,
 ) async {
   return (await showDialog<bool>(
     context: context,
     barrierDismissible: false,
     builder: (BuildContext context) {
+      List<String> selectedArchs = ["x86_64"];
+
       return Stack(
         children: <Widget>[
           GestureDetector(
@@ -68,20 +35,12 @@ Future<bool> showPackageAddPopup(
                   const SizedBox(
                     height: 10,
                   ),
-                  Tags(
-                    itemBuilder: (index) => ItemTags(
-                      index: index,
-                      title: archs[index],
-                      active: index == 0,
-                      activeColor: Colors.green,
-                    ),
-                    itemCount: archs.length,
-                  ),
+                  ArchTags(selectedArchs: selectedArchs),
                   const SizedBox(
                     height: 15,
                   ),
                   const Text(
-                      "Remember: Supported platforms depend strongly on the AUR package and ints PKGBUILD."),
+                      "Remember: Supported platforms depend strongly on the AUR package and its PKGBUILD."),
                 ],
               ),
             ),
@@ -89,16 +48,13 @@ Future<bool> showPackageAddPopup(
               TextButton(
                 onPressed: () {
                   Navigator.of(context).pop(true);
-                  successCallback();
+                  successCallback(selectedArchs);
                 },
                 child: const Text('Install'),
               ),
               TextButton(
                 onPressed: () {
                   Navigator.of(context).pop(false); // Dismiss dialog
-                  if (errorCallback != null) {
-                    errorCallback();
-                  }
                 },
                 child: const Text('Cancel'),
               ),
@@ -108,4 +64,64 @@ Future<bool> showPackageAddPopup(
       );
     },
   ))!;
+}
+
+class ArchTags extends StatelessWidget {
+  ArchTags({super.key, required this.selectedArchs});
+
+  final List<String> selectedArchs;
+
+  final archs = [
+    "x86_64",
+    "aarch64",
+    "riscv64",
+    "riscv32",
+    "arm",
+    "alpha",
+    "armeb",
+    "sparc",
+    "sparc32plus",
+    "sparc64",
+    "ppc",
+    "ppc64",
+    "ppc64le",
+    "m68k",
+    "mips",
+    "mipsel",
+    "mipsn32",
+    "mipsn32el",
+    "mips64",
+    "mips64el",
+    "sh4",
+    "sh4eb",
+    "s390x",
+    "aarch64_be",
+    "hppa",
+    "xtensa",
+    "xtensaeb",
+    "microblaze",
+    "microblazeel",
+    "or1k",
+    "hexagon"
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Tags(
+      itemBuilder: (idx) => ItemTags(
+        index: idx,
+        title: archs[idx],
+        active: selectedArchs.contains(archs[idx]),
+        activeColor: Colors.green,
+        onPressed: (i) {
+          if (i.active!) {
+            selectedArchs.add(i.title!);
+          } else {
+            selectedArchs.remove(i.title!);
+          }
+        },
+      ),
+      itemCount: archs.length,
+    );
+  }
 }

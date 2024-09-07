@@ -22,8 +22,10 @@ extension PackagesAPI on ApiClient {
     return package;
   }
 
-  Future<void> addPackage({required String name}) async {
-    final resp = await getRawClient().post("/package", data: {'name': name});
+  Future<void> addPackage(
+      {required String name, required List<String> selectedArchs}) async {
+    final resp = await getRawClient()
+        .post("/package", data: {'name': name, 'platforms': selectedArchs});
     print(resp.data);
   }
 

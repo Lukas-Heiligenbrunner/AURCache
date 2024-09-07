@@ -232,14 +232,14 @@ class _PackageScreenState extends State<PackageScreen> {
               height: 20,
             ),
             Tags(
-              itemBuilder: (index) => ItemTags(
-                index: index,
-                title: "x86_64",
+              itemBuilder: (idx) => ItemTags(
+                index: idx,
+                title: pkg.selected_platforms[idx],
                 active: true,
                 activeColor: Colors.green,
                 pressEnabled: false,
               ),
-              itemCount: 2,
+              itemCount: pkg.selected_platforms.length,
             ),
             const SizedBox(
               height: 15,
@@ -257,14 +257,14 @@ class _PackageScreenState extends State<PackageScreen> {
               height: 20,
             ),
             Tags(
-              itemBuilder: (index) => ItemTags(
-                index: index,
-                title: "--noconfirm",
+              itemBuilder: (idx) => ItemTags(
+                index: idx,
+                title: pkg.selected_build_flags[idx],
                 active: true,
                 activeColor: Colors.white38,
                 pressEnabled: false,
               ),
-              itemCount: 2,
+              itemCount: pkg.selected_build_flags.length,
             ),
           ],
         ),
