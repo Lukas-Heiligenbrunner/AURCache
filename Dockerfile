@@ -1,4 +1,4 @@
-FROM ghcr.io/cirruslabs/flutter:3.24.2 AS frontend_builder
+FROM ghcr.io/cirruslabs/flutter:3.24.3 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
