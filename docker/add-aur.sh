@@ -8,18 +8,6 @@ set -o xtrace
 
 AUR_USER="${1:-ab}"
 
-# update mirrorlist
-#curl --silent --location https://raw.githubusercontent.com/greyltc/docker-archlinux/master/get-new-mirrors.sh > /tmp/get-new-mirrors
-#chmod +x /tmp/get-new-mirrors
-#mv /tmp/get-new-mirrors /bin/.
-#get-new-mirrors
-
-#RUN pacman -Sy --noconfirm
-#RUN pacman -Syu --noconfirm
-#RUN pacman -S cmake --noconfirm
-#RUN pacman -S git --noconfirm
-#RUN pacman -S base-devel --noconfirm
-
 # we're gonna need sudo to use the helper properly
 pacman -Sy --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"

@@ -80,12 +80,13 @@ pub(crate) async fn cancel_build(
 }
 
 pub(crate) async fn prepare_build(
-    mut new_build: builds::ActiveModel,
+    mut new_build_am: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
-    let build_id = new_build.id.clone().unwrap();
+    let new_build: builds::Model = new_build_am.clone().try_into()?;
+    let build_id = new_build.id;
     let build_logger = BuildLogger::new(build_id, db.clone());
 
     // update status to building
@@ -98,7 +99,7 @@ pub(crate) async fn prepare_build(
         &db,
         build_logger.clone(),
         job_containers,
-        new_build.platform.clone().unwrap(),
+        new_build.platform,
     )
     .await
     {
@@ -108,11 +109,11 @@ pub(crate) async fn prepare_build(
             package_model.out_of_date = Set(false as i32);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
-            new_build.end_time = Set(Some(
+            new_build_am.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
+            new_build_am.end_time = Set(Some(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));
-            _ = new_build.update(&db).await;
+            _ = new_build_am.update(&db).await;
             build_logger
                 .append("finished package build".to_string())
                 .await?;
@@ -121,11 +122,11 @@ pub(crate) async fn prepare_build(
             package_model.status = Set(BuildStates::FAILED_BUILD);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(BuildStates::FAILED_BUILD));
-            new_build.end_time = Set(Some(
+            new_build_am.status = Set(Some(BuildStates::FAILED_BUILD));
+            new_build_am.end_time = Set(Some(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));
-            let _ = new_build.update(&db).await;
+            let _ = new_build_am.update(&db).await;
 
             build_logger.append(e.to_string()).await?;
         }
@@ -144,17 +145,18 @@ pub async fn build(
     let docker = Docker::connect_with_unix_defaults()?;
     let target_platform = format!("linux/{}", target_platform);
 
-    docker
-        .ping()
-        .await
-        .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
-
     #[cfg(target_arch = "aarch64")]
     if target_platform != "linux/arm64" {
         return Err(anyhow!(
             "Unsupported host architecture aarch64 for cross-compile"
         ));
     }
+
+    docker
+        .ping()
+        .await
+        .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
+
     repull_image(
         &docker,
         &build_logger,

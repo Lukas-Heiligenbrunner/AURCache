@@ -13,25 +13,8 @@ jobs:
       contents: write
       packages: write
     steps:
-      - name: Get current date
-        id: date
-        run: echo "TODAY=$(date +'%Y%m%d')" >> $GITHUB_ENV
-      - name: Generate version string
-        id: versionstring
-        run: echo "THIS_TAG=${{ env.TODAY }}.0.${{ github.run_number }}" >> $GITHUB_ENV
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Create tag
-        uses: actions/github-script@v3
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            github.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/tags/${process.env.THIS_TAG}`,
-              sha: context.sha
-            })
       - id: repo_name_lc
         uses: ASzc/change-string-case-action@v6
         with:

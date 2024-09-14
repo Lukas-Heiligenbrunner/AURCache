@@ -112,12 +112,17 @@ pub async fn get_package(
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
+    let aur_url = format!(
+        "https://aur.archlinux.org/packages/{}",
+        aur_info.package_base
+    );
+
     let ext_pkg = ExtendedPackageModel {
         id: pkg.id,
         name: pkg.name,
         status: pkg.status,
         outofdate: pkg.out_of_date,
-        latest_version: Some(pkg.version), // todo might be null in databse right?
+        latest_version: pkg.version, // todo might be null in databse right?
         latest_aur_version: aur_info.version,
         last_updated: aur_info.last_modified,
         first_submitted: aur_info.first_submitted,
@@ -126,10 +131,7 @@ pub async fn get_package(
         aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
         selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
         selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
-        aur_url: format!(
-            "https://aur.archlinux.org/packages/{}",
-            aur_info.package_base
-        ),
+        aur_url,
         project_url: aur_info.url,
         description: aur_info.description,
     };

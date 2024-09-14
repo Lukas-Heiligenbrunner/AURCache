@@ -32,7 +32,7 @@ pub async fn package_add(
     let new_package = packages::ActiveModel {
         name: Set(pkg_name.to_string()),
         status: Set(BuildStates::ENQUEUED_BUILD),
-        version: Set(pkg.version.clone()),
+        version: Set(Some(pkg.version.clone())),
         latest_aur_version: Set(Option::from(pkg.version.clone())),
         platforms: Set(platforms.join(";")),
         build_flags: Set("-Syu;--noconfirm;--noprogressbar;--color never".to_string()),
