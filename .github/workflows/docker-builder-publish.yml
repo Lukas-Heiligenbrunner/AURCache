@@ -42,4 +42,3 @@ jobs:
           file: ./docker/builder.Dockerfile
           tags: |
             ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest
-            ghcr.io/lukas-heiligenbrunner/aurcache-builder:${{ env.THIS_TAG }}
