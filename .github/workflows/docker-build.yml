@@ -20,7 +20,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build Docker image
         run: |
-          docker build .
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} .
