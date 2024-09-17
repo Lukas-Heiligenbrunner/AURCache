@@ -20,12 +20,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: docker info
-        run: |
-          docker --version
-          docker buildx build --help
-          BUILDX_EXPERIMENTAL=1 docker buildx build --help
-          docker build --help
       - name: Build Docker image
         run: |
-          docker build --env LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} .
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} .
