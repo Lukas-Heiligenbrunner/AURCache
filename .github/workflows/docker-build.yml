@@ -23,7 +23,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile .
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile .
 
   build-aarch64:
     runs-on: ubuntu-latest
@@ -40,4 +40,4 @@ jobs:
 
       - name: Build ARM64 Docker image
         run: |
-          docker build --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile .
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile .

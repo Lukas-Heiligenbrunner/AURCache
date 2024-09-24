@@ -90,25 +90,26 @@ Server = http://localhost:8080/
 ## Configuration
 Environment Variables
 
-| Variable               | Type                  | Description                                                         | Default |
-|------------------------|-----------------------|---------------------------------------------------------------------|---------|
-| DB_TYPE                | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)                               | SQLITE  |
-| DB_USER                | String                | POSTGRES Username  (ignored if sqlite)                              | null    |
-| DB_PWD                 | String                | POSTGRES Password  (ignored if sqlite)                              | null    |
-| DB_HOST                | String                | POSTGRES Host   (ignored if sqlite)                                 | null    |
-| VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600    |
-| BUILD_ARTIFACT_DIR     | String                | pkg share directory between aurcache container and build containers | null    |
-| LOG_LEVEL              | String                | Log level                                                           | INFO    |
-| MAX_CONCURRENT_BUILDS  | Integer               | Max concurrent builds                                               | 1       |
-| CPU_LIMIT              | Integer               | CPU limit of build container in milli CPUs                          | 0       |
-| MEMORY_LIMIT           | Integer               | Memory limit of build container in MB                               | -1      |
-| JOB_TIMEOUT            | Integer               | Job timeout for build in Seconds                                    | 3600    |
-| OAUTH_AUTH_URI         | String                | Oauth authorize endpoint                                            | null    |
-| OAUTH_TOKEN_URI        | String                | Oauth token endpoint                                                | null    |
-| OAUTH_REDIRECT_URI     | String                | Oauth redirect uri back to AURCache                                 | null    |
-| OAUTH_CLIENT_ID        | String                | Oauth client ID                                                     | null    |
-| OAUTH_CLIENT_SECRET    | String                | Oauth client Secret                                                 | null    |
-| SECRET_KEY             | String                | \>32Byte Random String for singing cookies                          | Random  |
+| Variable               | Type                  | Description                                                         | Default                   |
+|------------------------|-----------------------|---------------------------------------------------------------------|---------------------------|
+| DB_TYPE                | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)                               | SQLITE                    |
+| DB_USER                | String                | POSTGRES Username  (ignored if sqlite)                              | null                      |
+| DB_PWD                 | String                | POSTGRES Password  (ignored if sqlite)                              | null                      |
+| DB_HOST                | String                | POSTGRES Host   (ignored if sqlite)                                 | null                      |
+| DB_NAME                | String                | Database name                                                       | 'db.sqlite' or 'postgres' |
+| VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600                      |
+| BUILD_ARTIFACT_DIR     | String                | pkg share directory between aurcache container and build containers | null                      |
+| LOG_LEVEL              | String                | Log level                                                           | INFO                      |
+| MAX_CONCURRENT_BUILDS  | Integer               | Max concurrent builds                                               | 1                         |
+| CPU_LIMIT              | Integer               | CPU limit of build container in milli CPUs                          | 0                         |
+| MEMORY_LIMIT           | Integer               | Memory limit of build container in MB                               | -1                        |
+| JOB_TIMEOUT            | Integer               | Job timeout for build in Seconds                                    | 3600                      |
+| OAUTH_AUTH_URI         | String                | Oauth authorize endpoint                                            | null                      |
+| OAUTH_TOKEN_URI        | String                | Oauth token endpoint                                                | null                      |
+| OAUTH_REDIRECT_URI     | String                | Oauth redirect uri back to AURCache                                 | null                      |
+| OAUTH_CLIENT_ID        | String                | Oauth client ID                                                     | null                      |
+| OAUTH_CLIENT_SECRET    | String                | Oauth client Secret                                                 | null                      |
+| SECRET_KEY             | String                | \>32Byte Random String for singing cookies                          | Random                    |
 
 To disable Oauth support (default) leave all OAUTH_* variables undefined.
 ## Build Info
