@@ -18,6 +18,7 @@ pub fn build_api() -> Vec<Route> {
         stats,
         get_build,
         get_package,
+        rery_build,
         package_update_endpoint,
         cancel_build,
         health

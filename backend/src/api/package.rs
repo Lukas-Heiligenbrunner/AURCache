@@ -42,7 +42,7 @@ pub async fn package_update_endpoint(
     input: Json<UpdateBody>,
     tx: &State<Sender<Action>>,
     _a: Authenticated,
-) -> Result<Json<i32>, BadRequest<String>> {
+) -> Result<Json<Vec<i32>>, BadRequest<String>> {
     package_update(db, id, input.force, tx)
         .await
         .map(Json)

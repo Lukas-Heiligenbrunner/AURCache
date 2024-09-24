@@ -29,12 +29,12 @@ extension PackagesAPI on ApiClient {
     print(resp.data);
   }
 
-  Future<int> updatePackage({bool force = false, required int id}) async {
+  Future<List<int>> updatePackage({bool force = false, required int id}) async {
     final resp = await getRawClient()
         .post("/package/$id/update", data: {'force': force});
     print(resp.data);
 
-    return resp.data as int;
+    return resp.data as List<int>;
   }
 
   Future<bool> deletePackage(int id) async {

@@ -167,3 +167,19 @@ pub async fn cancel_build(
 
     Ok(())
 }
+
+#[openapi(tag = "build")]
+#[post("/build/<buildid>/retry")]
+pub async fn rery_build(
+    tx: &State<Sender<Action>>,
+    buildid: i32,
+    _a: Authenticated,
+) -> Result<Json<i32>, NotFound<String>> {
+    todo!();
+    // todo use update_platform() to retry build
+    // update package latestbuild correctly or maybe delete this
+    // and build status might need changes too
+    // get platform to retry from buildid
+
+    Ok(Json(42))
+}

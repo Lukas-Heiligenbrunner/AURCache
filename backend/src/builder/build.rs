@@ -8,10 +8,13 @@ use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
 use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
-    RemoveContainerOptions,
+    RemoveContainerOptions, WaitContainerOptions,
 };
+use bollard::errors::Error;
 use bollard::image::CreateImageOptions;
-use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::models::{
+    ContainerCreateResponse, ContainerWaitResponse, CreateImageInfo, HostConfig,
+};
 use bollard::Docker;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
@@ -27,6 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
+use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
@@ -98,7 +102,7 @@ pub(crate) async fn prepare_build(
         build_id,
         &db,
         build_logger.clone(),
-        job_containers,
+        job_containers.clone(),
         new_build.platform,
     )
     .await
@@ -131,6 +135,15 @@ pub(crate) async fn prepare_build(
             build_logger.append(e.to_string()).await?;
         }
     };
+
+    // remove build from container map
+    job_containers
+        .lock()
+        .await
+        .remove(&build_id)
+        .ok_or(anyhow!(
+            "Failed to remove build container from active builds map"
+        ))?;
     Ok(())
 }
 
@@ -175,42 +188,62 @@ pub async fn build(
     .await?;
     let id = create_info.id;
 
+    let docker2 = docker.clone();
+    let id2 = id.clone();
+    let build_logger2 = build_logger.clone();
+    // start listening to container before starting it
+    tokio::spawn(async move {
+        let todooo = monitor_build_output(&build_logger2, &docker2, id2.clone()).await;
+    });
+
     // start build container
-    docker.start_container::<String>(&id, None).await?;
+    &docker.start_container::<String>(&id, None).await?;
 
     // insert container id to container map
     job_containers.lock().await.insert(build_id, id.clone());
 
     // monitor build output
-    match timeout(
+    let build_result = timeout(
         job_timeout_from_env(),
-        monitor_build_output(&build_logger, &docker, id.clone()),
+        docker
+            .wait_container(
+                &id,
+                Some(WaitContainerOptions {
+                    condition: "removed",
+                }),
+            )
+            .next(),
     )
-    .await
-    {
-        Ok(v) => v?,
+    .await;
+
+    match build_result {
+        Ok(v) => {
+            let t = v.ok_or(anyhow!("Failed to get build result"))??;
+            let exit_code = t.status_code;
+            if exit_code != 0 {
+                &build_logger
+                    .append(format!(
+                        "Build #{build_id} failed for package '{}', exit code: {}",
+                        pkg.name, exit_code
+                    ))
+                    .await?;
+                return Err(anyhow!("Build failed with exit code: {}", exit_code));
+            }
+        }
+        // timeout branch
         Err(_) => {
-            build_logger
+            &build_logger
                 .append(format!(
                     "Build #{build_id} timed out for package '{}'",
                     pkg.name
                 ))
                 .await?;
             // kill build container
-            docker
+            &docker
                 .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
                 .await?;
         }
     }
-
-    // remove build from container map
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active builds map"
-        ))?;
 
     // move built tar.gz archives to host and repo-add
     move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg.id, db).await?;
@@ -291,7 +324,7 @@ async fn create_build_container(
         user: Some("ab"),
         cmd: Some(vec!["sh", "-c", cmd.as_str()]),
         host_config: Some(HostConfig {
-            auto_remove: Some(true),
+            auto_remove: Some(false),
             nano_cpus: Some(cpu_limit as i64),
             memory_swap: Some(memory_limit),
             binds: Some(mountpoints),
