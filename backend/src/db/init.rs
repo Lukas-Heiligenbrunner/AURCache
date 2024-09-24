@@ -37,8 +37,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
                 .map_err(|_| anyhow!("No DB_HOST envvar for POSTGRES HOST specified"))?;
             let db_name = env::var("DB_NAME").unwrap_or("postgres".to_string());
 
-            let conn_str =
-                format!("postgres://{db_user}:{db_pwd}@{db_host}/{db_name}?currentSchema=public");
+            let conn_str = format!("postgres://{db_user}:{db_pwd}@{db_host}/{db_name}");
             let mut conn_opts = ConnectOptions::new(conn_str);
             conn_opts.sqlx_logging_level(LevelFilter::Trace);
             Database::connect(conn_opts).await?
