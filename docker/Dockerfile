@@ -1,4 +1,5 @@
 ARG TARGET_ARCH=linux/amd64
+ARG LATEST_COMMIT_SHA=dev
 
 FROM ghcr.io/cirruslabs/flutter:3.22.2 AS frontend_builder
 WORKDIR /app
@@ -7,7 +8,8 @@ COPY frontend /app
 RUN flutter build web --release
 
 FROM rust:1.80.1 AS builder
-
+ARG LATEST_COMMIT_SHA
+ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
 
 WORKDIR /app
