@@ -1,5 +1,5 @@
 use crate::aur::api::get_info_by_name;
-use crate::builder::types::Action;
+use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::anyhow;
@@ -30,7 +30,7 @@ pub async fn package_update(
         return Err(anyhow!("Package is already up to date"));
     }
 
-    pkg_model_active.status = Set(3);
+    pkg_model_active.status = Set(BuildStates::ENQUEUED_BUILD);
     pkg_model_active.version = Set(Some(pkg.version.clone()));
     let pkg_aktive_model = pkg_model_active.save(&txn).await?;
     txn.commit().await?;
@@ -58,9 +58,9 @@ pub async fn update_platform(
     let build = builds::ActiveModel {
         pkg_id: Set(pkg.id),
         output: Set(None),
-        status: Set(Some(3)),
+        status: Set(Some(BuildStates::ENQUEUED_BUILD)),
         start_time: Set(Some(start_time)),
-        platform: Set(platform.clone().to_string()),
+        platform: Set(platform.to_string()),
         ..Default::default()
     };
     let new_build = build.save(&txn).await?;

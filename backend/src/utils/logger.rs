@@ -1,6 +1,5 @@
 use env_logger::Env;
 use log::LevelFilter;
-use std::env;
 use std::str::FromStr;
 
 pub fn init_logger() {

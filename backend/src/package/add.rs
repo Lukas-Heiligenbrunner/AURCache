@@ -9,12 +9,16 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, Transactio
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
+static PATFORMS: &'static [&str] = &["amd64", "arm64", "arm/v7"];
+
 pub async fn package_add(
     db: &DatabaseConnection,
     pkg_name: String,
     tx: &Sender<Action>,
     platforms: Vec<String>,
 ) -> anyhow::Result<()> {
+    check_platforms(&platforms)?;
+
     // remove leading and trailing whitespaces
     let pkg_name = pkg_name.trim();
 
@@ -74,5 +78,14 @@ pub async fn package_add(
         ));
     }
 
+    Ok(())
+}
+
+fn check_platforms(platforms: &Vec<String>) -> anyhow::Result<()> {
+    for platform in platforms {
+        if !PATFORMS.contains(&platform.as_str()) {
+            return Err(anyhow!("Invalid platform: {}", platform));
+        }
+    }
     Ok(())
 }

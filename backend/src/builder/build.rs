@@ -10,11 +10,8 @@ use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
     RemoveContainerOptions, WaitContainerOptions,
 };
-use bollard::errors::Error;
 use bollard::image::CreateImageOptions;
-use bollard::models::{
-    ContainerCreateResponse, ContainerWaitResponse, CreateImageInfo, HostConfig,
-};
+use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
 use bollard::Docker;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
@@ -30,7 +27,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
-use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
@@ -84,79 +80,22 @@ pub(crate) async fn cancel_build(
 }
 
 pub(crate) async fn prepare_build(
-    mut new_build_am: builds::ActiveModel,
+    mut build_model: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-) -> anyhow::Result<()> {
-    let new_build: builds::Model = new_build_am.clone().try_into()?;
-    let build_id = new_build.id;
-    let build_logger = BuildLogger::new(build_id, db.clone());
+) -> anyhow::Result<(packages::ActiveModel, builds::ActiveModel, String)> {
+    // set build status to building
+    build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
+    build_model.start_time = Set(Some(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+    ));
+    let build_model = build_model.save(&db).await?;
 
     // update status to building
     package_model.status = Set(BuildStates::ACTIVE_BUILD);
     package_model = package_model.update(&db).await?.into();
 
-    match build(
-        package_model.clone().try_into()?,
-        build_id,
-        &db,
-        build_logger.clone(),
-        job_containers.clone(),
-        new_build.platform,
-    )
-    .await
-    {
-        Ok(_) => {
-            // update package success status
-            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
-            package_model.out_of_date = Set(false as i32);
-            package_model.update(&db).await?;
-
-            new_build_am.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
-            new_build_am.end_time = Set(Some(
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-            ));
-            _ = new_build_am.update(&db).await;
-            build_logger
-                .append("finished package build".to_string())
-                .await?;
-        }
-        Err(e) => {
-            package_model.status = Set(BuildStates::FAILED_BUILD);
-            package_model.update(&db).await?;
-
-            new_build_am.status = Set(Some(BuildStates::FAILED_BUILD));
-            new_build_am.end_time = Set(Some(
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-            ));
-            let _ = new_build_am.update(&db).await;
-
-            build_logger.append(e.to_string()).await?;
-        }
-    };
-
-    // remove build from container map
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active builds map"
-        ))?;
-    Ok(())
-}
-
-pub async fn build(
-    pkg: packages::Model,
-    build_id: i32,
-    db: &DatabaseConnection,
-    build_logger: BuildLogger,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-    target_platform: String,
-) -> anyhow::Result<()> {
-    let docker = Docker::connect_with_unix_defaults()?;
-    let target_platform = format!("linux/{}", target_platform);
+    let target_platform = format!("linux/{}", build_model.platform.clone().unwrap());
 
     #[cfg(target_arch = "aarch64")]
     if target_platform != "linux/arm64" {
@@ -165,10 +104,30 @@ pub async fn build(
         ));
     }
 
+    Ok((package_model, build_model, target_platform))
+}
+
+async fn establish_docker_connection() -> anyhow::Result<Docker> {
+    let docker = Docker::connect_with_unix_defaults()?;
     docker
         .ping()
         .await
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
+    Ok(docker)
+}
+
+pub async fn build(
+    build_model: builds::ActiveModel,
+    db: &DatabaseConnection,
+    package_model: packages::ActiveModel,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
+    build_logger: BuildLogger,
+) -> anyhow::Result<()> {
+    let (package_model_am, build_model_am, target_platform) =
+        prepare_build(build_model, db.clone(), package_model).await?;
+    let package_model: packages::Model = package_model_am.try_into()?;
+    let build_model: builds::Model = build_model_am.try_into()?;
+    let docker = establish_docker_connection().await?;
 
     repull_image(
         &docker,
@@ -180,10 +139,10 @@ pub async fn build(
 
     let (create_info, host_active_build_path) = create_build_container(
         &docker,
-        build_id,
-        pkg.name.clone(),
+        build_model.id,
+        package_model.name.clone(),
         target_platform,
-        pkg.build_flags.split(";").collect(),
+        package_model.build_flags.split(";").collect(),
     )
     .await?;
     let id = create_info.id;
@@ -193,14 +152,17 @@ pub async fn build(
     let build_logger2 = build_logger.clone();
     // start listening to container before starting it
     tokio::spawn(async move {
-        let todooo = monitor_build_output(&build_logger2, &docker2, id2.clone()).await;
+        _ = monitor_build_output(&build_logger2, &docker2, id2.clone()).await;
     });
 
     // start build container
-    &docker.start_container::<String>(&id, None).await?;
+    docker.start_container::<String>(&id, None).await?;
 
     // insert container id to container map
-    job_containers.lock().await.insert(build_id, id.clone());
+    job_containers
+        .lock()
+        .await
+        .insert(build_model.id, id.clone());
 
     // monitor build output
     let build_result = timeout(
@@ -209,22 +171,24 @@ pub async fn build(
             .wait_container(
                 &id,
                 Some(WaitContainerOptions {
-                    condition: "removed",
+                    condition: "not-running",
                 }),
             )
             .next(),
     )
     .await;
 
+    debug!("Build container was removed");
+
     match build_result {
         Ok(v) => {
             let t = v.ok_or(anyhow!("Failed to get build result"))??;
             let exit_code = t.status_code;
             if exit_code != 0 {
-                &build_logger
+                build_logger
                     .append(format!(
-                        "Build #{build_id} failed for package '{}', exit code: {}",
-                        pkg.name, exit_code
+                        "Build #{} failed for package '{}', exit code: {}",
+                        build_model.id, package_model.name, exit_code
                     ))
                     .await?;
                 return Err(anyhow!("Build failed with exit code: {}", exit_code));
@@ -232,21 +196,27 @@ pub async fn build(
         }
         // timeout branch
         Err(_) => {
-            &build_logger
+            build_logger
                 .append(format!(
-                    "Build #{build_id} timed out for package '{}'",
-                    pkg.name
+                    "Build #{} timed out for package '{}'",
+                    build_model.id, package_model.name
                 ))
                 .await?;
             // kill build container
-            &docker
+            docker
                 .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
                 .await?;
         }
     }
 
     // move built tar.gz archives to host and repo-add
-    move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg.id, db).await?;
+    move_and_add_pkgs(
+        &build_logger,
+        host_active_build_path.clone(),
+        package_model.id,
+        &db,
+    )
+    .await?;
     // remove active build dir
     fs::remove_dir(host_active_build_path)?;
     Ok(())
@@ -324,7 +294,7 @@ async fn create_build_container(
         user: Some("ab"),
         cmd: Some(vec!["sh", "-c", cmd.as_str()]),
         host_config: Some(HostConfig {
-            auto_remove: Some(false),
+            auto_remove: Some(true),
             nano_cpus: Some(cpu_limit as i64),
             memory_swap: Some(memory_limit),
             binds: Some(mountpoints),

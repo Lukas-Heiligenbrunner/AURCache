@@ -7,11 +7,12 @@ use rocket::{delete, get, post, State};
 
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListBuildsModel;
-use crate::builder::types::Action;
+use crate::builder::types::{Action, BuildStates};
+use crate::package::update::update_platform;
 use rocket_okapi::openapi;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use tokio::sync::broadcast::Sender;
 
@@ -171,15 +172,41 @@ pub async fn cancel_build(
 #[openapi(tag = "build")]
 #[post("/build/<buildid>/retry")]
 pub async fn rery_build(
+    db: &State<DatabaseConnection>,
     tx: &State<Sender<Action>>,
     buildid: i32,
     _a: Authenticated,
 ) -> Result<Json<i32>, NotFound<String>> {
-    todo!();
-    // todo use update_platform() to retry build
-    // update package latestbuild correctly or maybe delete this
-    // and build status might need changes too
-    // get platform to retry from buildid
+    let db = db as &DatabaseConnection;
 
-    Ok(Json(42))
+    // Fetch the build details
+    let old_build = Builds::find_by_id(buildid)
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("Build not found".to_string()))?;
+
+    // Extract the platform and package ID
+    let platform = old_build.platform.clone();
+    let pkg_id = old_build.pkg_id.clone();
+
+    // Fetch the package details
+    let package = packages::Entity::find_by_id(pkg_id)
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("Package not found".to_string()))?;
+
+    let mut pacage_am: packages::ActiveModel = package.clone().into();
+    pacage_am.status = Set(BuildStates::ENQUEUED_BUILD);
+    pacage_am
+        .save(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    let new_buildid = update_platform(&platform, package, &db, tx)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    Ok(Json(new_buildid))
 }
