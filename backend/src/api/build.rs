@@ -187,8 +187,8 @@ pub async fn rery_build(
         .ok_or(NotFound("Build not found".to_string()))?;
 
     // Extract the platform and package ID
-    let platform = old_build.platform.clone();
-    let pkg_id = old_build.pkg_id.clone();
+    let platform = old_build.platform;
+    let pkg_id = old_build.pkg_id;
 
     // Fetch the package details
     let package = packages::Entity::find_by_id(pkg_id)
@@ -204,7 +204,7 @@ pub async fn rery_build(
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
-    let new_buildid = update_platform(&platform, package, &db, tx)
+    let new_buildid = update_platform(&platform, package, db, tx)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 

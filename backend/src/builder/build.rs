@@ -214,7 +214,7 @@ pub async fn build(
         &build_logger,
         host_active_build_path.clone(),
         package_model.id,
-        &db,
+        db,
     )
     .await?;
     // remove active build dir

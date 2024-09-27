@@ -29,27 +29,25 @@ pub(crate) async fn queue_package(
 }
 
 async fn start_build(
-    build_model: builds::ActiveModel,
+    mut build_model: builds::ActiveModel,
     db: &DatabaseConnection,
-    package_model: packages::ActiveModel,
+    mut package_model: packages::ActiveModel,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) {
-    let mut packge_model_am: packages::ActiveModel = package_model.clone().into();
-    let mut build_model_am: builds::ActiveModel = build_model.clone().into();
-    let build_id = build_model_am.id.clone().unwrap();
+    let build_id = build_model.id.clone().unwrap();
     let build_logger = BuildLogger::new(build_id, db.clone());
 
     let build_result = build(
-        build_model,
+        build_model.clone(),
         db,
-        package_model,
+        package_model.clone(),
         job_containers.clone(),
         build_logger.clone(),
     )
     .await;
 
     let txn = db.begin().await.unwrap();
-    build_model_am.end_time = Set(Some(
+    build_model.end_time = Set(Some(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -59,23 +57,23 @@ async fn start_build(
     match build_result {
         Ok(_) => {
             // update package success status
-            packge_model_am.status = Set(BuildStates::SUCCESSFUL_BUILD);
-            packge_model_am.out_of_date = Set(false as i32);
-            _ = packge_model_am.update(&txn).await;
+            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
+            package_model.out_of_date = Set(false as i32);
+            _ = package_model.update(&txn).await;
 
-            build_model_am.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
+            build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
 
-            let _ = build_model_am.update(&txn).await;
+            let _ = build_model.update(&txn).await;
             _ = build_logger
                 .append("finished package build".to_string())
                 .await;
         }
         Err(e) => {
-            packge_model_am.status = Set(BuildStates::FAILED_BUILD);
-            _ = packge_model_am.update(&txn).await;
+            package_model.status = Set(BuildStates::FAILED_BUILD);
+            _ = package_model.update(&txn).await;
 
-            build_model_am.status = Set(Some(BuildStates::FAILED_BUILD));
-            let _ = build_model_am.update(&txn).await;
+            build_model.status = Set(Some(BuildStates::FAILED_BUILD));
+            let _ = build_model.update(&txn).await;
 
             _ = build_logger.append(e.to_string()).await;
         }

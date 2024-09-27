@@ -9,7 +9,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, Transactio
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
-static PATFORMS: &'static [&str] = &["amd64", "arm64", "arm/v7"];
+static PATFORMS: &[&str] = &["amd64", "arm64", "arm/v7"];
 
 pub async fn package_add(
     db: &DatabaseConnection,
