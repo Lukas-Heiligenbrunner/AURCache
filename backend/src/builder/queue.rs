@@ -20,7 +20,6 @@ pub(crate) async fn queue_package(
     let permits = Arc::clone(&semaphore);
 
     // spawn new thread for each pkg build
-    // todo add queue and build two packages in parallel
     tokio::spawn(async move {
         let _permit = permits.acquire().await.unwrap();
         start_build(*build_model, &db, *package_model, job_containers).await;

@@ -8,15 +8,16 @@ use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 
-use rocket::{delete, get, post, State};
+use rocket::{delete, get, patch, post, State};
 
 use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{ExtendedPackageModel, SimplePackageModel};
+use crate::api::types::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
 use crate::api::types::output::{AddBody, UpdateBody};
 use crate::aur::api::get_info_by_name;
 use rocket_okapi::openapi;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::ActiveValue::Set;
 use tokio::sync::broadcast::Sender;
 
 /// Add new Package to build queue
@@ -28,9 +29,41 @@ pub async fn package_add_endpoint(
     tx: &State<Sender<Action>>,
     _a: Authenticated,
 ) -> Result<(), BadRequest<String>> {
-    package_add(db, input.name.clone(), tx, input.platforms.clone())
+    package_add(db, input.name.clone(), tx, input.platforms.clone(), input.build_flags.clone())
         .await
         .map_err(|e| BadRequest(e.to_string()))
+}
+
+/// Add new Package to build queue
+#[openapi(tag = "Packages")]
+#[patch("/package/<id>", data = "<input>")]
+pub async fn package_update_entity_endpoint(
+    db: &State<DatabaseConnection>,
+    input: Json<PackagePatchModel>,
+    id: i32,
+    _a: Authenticated,
+) -> Result<(), BadRequest<String>> {
+    let db = db as &DatabaseConnection;
+
+    // Start building the update operation
+    let update_pkg = packages::ActiveModel {
+        id: Set(id),
+        name: input.name.clone().map(Set).unwrap_or(NotSet),
+        status: input.status.clone().map(Set).unwrap_or(NotSet),
+        out_of_date: input.out_of_date.clone().map(Set).unwrap_or(NotSet),
+        version: input.version.clone().map(Set).unwrap_or(NotSet),
+        latest_aur_version: input.latest_aur_version.clone().map(Set).unwrap_or(NotSet),
+        latest_build: input.latest_build.clone().map(Set).unwrap_or(NotSet),
+        build_flags: input.build_flags.clone().map(|v| {Set(v.join(";"))}).unwrap_or(NotSet),
+        platforms: input.platforms.clone().map(|v| Set(v.join(";"))).unwrap_or(NotSet),
+    };
+
+    // Execute the update query
+    update_pkg.update(db)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    Ok(())
 }
 
 /// Update a package with id
@@ -92,6 +125,8 @@ pub async fn package_list(
 }
 
 /// get specific package by id
+/// This requires 1 API call to the AUR (rate limited 4000 per day)
+/// https://wiki.archlinux.org/title/Aurweb_RPC_interface
 #[openapi(tag = "Packages")]
 #[get("/package/<id>")]
 pub async fn get_package(
@@ -122,7 +157,7 @@ pub async fn get_package(
         name: pkg.name,
         status: pkg.status,
         outofdate: pkg.out_of_date,
-        latest_version: pkg.version, // todo might be null in databse right?
+        latest_version: pkg.version,
         latest_aur_version: aur_info.version,
         last_updated: aur_info.last_modified,
         first_submitted: aur_info.first_submitted,

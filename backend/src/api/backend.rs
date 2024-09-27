@@ -12,6 +12,7 @@ pub fn build_api() -> Vec<Route> {
         package_list,
         package_add_endpoint,
         package_del,
+        package_update_entity_endpoint,
         build_output,
         delete_build,
         list_builds,

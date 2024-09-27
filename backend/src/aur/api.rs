@@ -3,6 +3,9 @@ use aur_rs::{Package, Request};
 use backon::{ConstantBuilder, FibonacciBuilder, Retryable};
 use std::time::Duration;
 
+// https://wiki.archlinux.org/title/Aurweb_RPC_interface
+// API rate limit 4000 requests per day
+
 pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
     let request = Request::default();
     let response = (|| async { request.search_package_by_name(query).await })

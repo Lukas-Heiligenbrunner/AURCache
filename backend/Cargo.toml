@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 aur-rs = "0.1.1"
 tokio = "1.39.2"
-anyhow = "1.0.86"
+anyhow = "1.0.89"
 
 reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
 

@@ -22,6 +22,29 @@ extension PackagesAPI on ApiClient {
     return package;
   }
 
+  Future<bool> patchPackage(
+      {required int id,
+      String? name,
+      bool? outofdate,
+      int? status,
+      String? version,
+      latest_aur_version,
+      latest_build,
+      List<String>? platforms,
+      List<String>? build_flags}) async {
+    final resp = await getRawClient().patch("/package/$id", data: {
+      "name": name,
+      "status": status,
+      "out_of_date": outofdate,
+      "version": version,
+      "latest_aur_version": latest_aur_version,
+      "latest_build": latest_build,
+      "build_flags": build_flags,
+      "platforms": platforms
+    });
+    return resp.statusCode == 200;
+  }
+
   Future<void> addPackage(
       {required String name, required List<String> selectedArchs}) async {
     final resp = await getRawClient()

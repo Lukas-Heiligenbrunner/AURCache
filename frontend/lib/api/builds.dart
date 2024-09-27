@@ -45,8 +45,7 @@ extension BuildsAPI on ApiClient {
   }
 
   Future<int> retryBuild({required int id}) async {
-    final resp = await getRawClient()
-        .post("/build/$id/retry");
+    final resp = await getRawClient().post("/build/$id/retry");
     return resp.data as int;
   }
 }

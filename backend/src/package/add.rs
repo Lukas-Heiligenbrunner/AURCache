@@ -15,9 +15,24 @@ pub async fn package_add(
     db: &DatabaseConnection,
     pkg_name: String,
     tx: &Sender<Action>,
-    platforms: Vec<String>,
+    platforms: Option<Vec<String>>,
+    build_flags: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    check_platforms(&platforms)?;
+    let platforms = match platforms {
+        None => vec!["amd64".to_string()],
+        Some(platforms) => {
+            check_platforms(&platforms)?;
+            platforms
+        }
+    };
+    let build_flags = build_flags.unwrap_or_else(|| {
+        vec![
+            "-Syu".to_string(),
+            "--noconfirm".to_string(),
+            "--noprogressbar".to_string(),
+            "--color never".to_string(),
+        ]
+    });
 
     // remove leading and trailing whitespaces
     let pkg_name = pkg_name.trim();
@@ -39,7 +54,7 @@ pub async fn package_add(
         version: Set(Some(pkg.version.clone())),
         latest_aur_version: Set(Option::from(pkg.version.clone())),
         platforms: Set(platforms.join(";")),
-        build_flags: Set("-Syu;--noconfirm;--noprogressbar;--color never".to_string()),
+        build_flags: Set(build_flags.join(";")),
         ..Default::default()
     };
     let mut new_package = new_package.save(db).await?;
