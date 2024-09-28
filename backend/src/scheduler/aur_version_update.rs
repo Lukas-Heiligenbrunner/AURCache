@@ -3,12 +3,10 @@ use crate::db::prelude::Packages;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
 use log::{error, info, warn};
-use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 use std::env;
 use std::time::Duration;
-use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::{task::JoinHandle, time};
 
 pub fn start_aur_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     let default_version_check_interval = 3600;
@@ -17,8 +15,10 @@ pub fn start_aur_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
         .unwrap_or(default_version_check_interval);
 
     tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+        let mut interval = time::interval(Duration::from_secs(check_interval));
+
         loop {
+            interval.tick().await;
             info!("performing aur version checks");
             match aur_check_versions(db.clone()).await {
                 Ok(_) => {}
@@ -26,7 +26,6 @@ pub fn start_aur_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
                     error!("Failed to perform aur version check: {e}")
                 }
             }
-            sleep(Duration::from_secs(check_interval)).await;
         }
     })
 }

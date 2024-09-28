@@ -1,6 +1,10 @@
+use crate::api::types::authenticated::Authenticated;
+use log::error;
 use rocket::http::uri::fmt::Path;
 use rocket::http::uri::Segments;
 use rocket::http::{ContentType, Method, Status};
+use rocket::request::FromRequest;
+use rocket::response::{Redirect, Responder};
 use rocket::route::{Handler, Outcome};
 use rocket::{Data, Request, Response, Route};
 use rust_embed::RustEmbed;
@@ -22,6 +26,16 @@ impl Into<Vec<Route>> for CustomHandler {
 #[rocket::async_trait]
 impl Handler for CustomHandler {
     async fn handle<'r>(&self, request: &'r Request<'_>, _: Data<'r>) -> Outcome<'r> {
+        if Authenticated::from_request(request).await.is_error() {
+            return match Redirect::to("/api/login").respond_to(request) {
+                Ok(r) => Outcome::Success(r),
+                Err(e) => {
+                    error!("Failed to redirect: {:?}", e);
+                    Outcome::Error(Status::InternalServerError)
+                }
+            };
+        }
+
         let mut path = request
             .segments::<Segments<'_, Path>>(0..)
             .ok()

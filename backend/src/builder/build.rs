@@ -1,27 +1,35 @@
 use crate::builder::logger::BuildLogger;
+use crate::builder::types::BuildStates;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
 use crate::db::prelude::{Builds, Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
-use log::{debug, info};
+use bollard::container::{
+    AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
+    RemoveContainerOptions,
+};
+use bollard::image::CreateImageOptions;
+use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::Docker;
+use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
     QuerySelect, RelationTrait, Set, TransactionTrait,
 };
-use shiplift::rep::ContainerCreateInfo;
-use shiplift::tty::TtyChunk;
-use shiplift::{ContainerOptions, Docker, LogsOptions, PullOptions};
 use std::collections::HashMap;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
+
+static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
 
 pub(crate) async fn cancel_build(
     build_id: i32,
@@ -50,8 +58,16 @@ pub(crate) async fn cancel_build(
         .ok_or(anyhow!("Build container not found"))?
         .clone();
 
-    let docker = Docker::new();
-    docker.containers().get(container_id).stop(None).await?;
+    let docker = Docker::connect_with_unix_defaults()?;
+    docker
+        .remove_container(
+            &container_id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await?;
 
     job_containers
         .lock()
@@ -73,7 +89,7 @@ pub(crate) async fn prepare_build(
     let build_logger = BuildLogger::new(build_id, db.clone());
 
     // update status to building
-    package_model.status = Set(0);
+    package_model.status = Set(BuildStates::ACTIVE_BUILD);
     package_model = package_model.update(&db).await?.into();
 
     let package_name = package_model.name.clone().unwrap();
@@ -91,16 +107,13 @@ pub(crate) async fn prepare_build(
     {
         Ok(_) => {
             // update package success status
-            package_model.status = Set(1);
+            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
             package_model.out_of_date = Set(false as i32);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(1));
+            new_build.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
             new_build.end_time = Set(Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));
             _ = new_build.update(&db).await;
             build_logger
@@ -108,15 +121,12 @@ pub(crate) async fn prepare_build(
                 .await?;
         }
         Err(e) => {
-            package_model.status = Set(2);
+            package_model.status = Set(BuildStates::FAILED_BUILD);
             package_model.update(&db).await?;
 
-            new_build.status = Set(Some(2));
+            new_build.status = Set(Some(BuildStates::FAILED_BUILD));
             new_build.end_time = Set(Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
             ));
             let _ = new_build.update(&db).await;
 
@@ -134,7 +144,7 @@ pub async fn build(
     build_logger: BuildLogger,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) -> anyhow::Result<()> {
-    let docker = Docker::new();
+    let docker = Docker::connect_with_unix_defaults()?;
 
     docker
         .ping()
@@ -144,17 +154,33 @@ pub async fn build(
     repull_image(&docker, &build_logger).await?;
 
     let (create_info, host_active_build_path) =
-        create_build_container(&docker, build_id, name).await?;
+        create_build_container(&docker, build_id, name.clone()).await?;
     let id = create_info.id;
 
     // start build container
-    docker.containers().get(&id).start().await?;
+    docker.start_container::<String>(&id, None).await?;
 
     // insert container id to container map
     job_containers.lock().await.insert(build_id, id.clone());
 
     // monitor build output
-    monitor_build_output(&build_logger, &docker, id).await?;
+    match timeout(
+        job_timeout_from_env(),
+        monitor_build_output(&build_logger, &docker, id.clone()),
+    )
+    .await
+    {
+        Ok(v) => v?,
+        Err(_) => {
+            build_logger
+                .append(format!("Build #{build_id} timed out for package '{name}'"))
+                .await?;
+            // kill build container
+            docker
+                .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
+                .await?;
+        }
+    }
 
     // remove build from container map
     job_containers
@@ -177,26 +203,32 @@ async fn monitor_build_output(
     docker: &Docker,
     id: String,
 ) -> anyhow::Result<()> {
-    let mut logs_stream = docker.containers().get(id).logs(
-        &LogsOptions::builder()
-            .follow(true)
-            .stdout(true)
-            .stderr(true)
-            .build(),
-    );
+    let mut attach_results = docker
+        .attach_container(
+            &id,
+            Some(AttachContainerOptions::<String> {
+                stdout: Some(true),
+                stderr: Some(true),
+                stdin: Some(false),
+                stream: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await?;
 
-    while let Some(log_result) = logs_stream.next().await {
+    while let Some(log_result) = attach_results.output.next().await {
         match log_result {
             Ok(chunk) => match chunk {
-                TtyChunk::StdIn(_) => unreachable!(),
-                TtyChunk::StdOut(bytes) => {
+                LogOutput::StdIn { .. } => unreachable!(),
+                LogOutput::Console { .. } => unreachable!(),
+                LogOutput::StdOut { message } => {
                     build_logger
-                        .append(String::from_utf8(bytes).unwrap())
+                        .append(String::from_utf8_lossy(&message).into_owned())
                         .await?
                 }
-                TtyChunk::StdErr(bytes) => {
+                LogOutput::StdErr { message } => {
                     build_logger
-                        .append(String::from_utf8(bytes).unwrap())
+                        .append(String::from_utf8_lossy(&message).into_owned())
                         .await?
                 }
             },
@@ -210,12 +242,12 @@ async fn create_build_container(
     docker: &Docker,
     build_id: i32,
     name: String,
-) -> anyhow::Result<(ContainerCreateInfo, PathBuf)> {
+) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
     let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
     // create new docker container for current build
     let build_dir_base = "/var/cache/makepkg/pkg";
-    let mountpoint = format!("{}:{}", host_build_path_docker, build_dir_base);
+    let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
 
     let (makepkg_config, makepkg_config_path) =
         create_makepkg_config(name.clone(), build_dir_base)?;
@@ -227,20 +259,29 @@ async fn create_build_container(
     let (cpu_limit, memory_limit) = limits_from_env();
 
     let container_name = format!("aurcache_build_{}_{}", name, build_id);
+    let conf = Config {
+        image: Some(BUILDER_IMAGE),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        open_stdin: Some(false),
+        user: Some("ab"),
+        cmd: Some(vec!["sh", "-c", cmd.as_str()]),
+        host_config: Some(HostConfig {
+            auto_remove: Some(true),
+            nano_cpus: Some(cpu_limit as i64),
+            memory_swap: Some(memory_limit),
+            binds: Some(mountpoints),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let create_info = docker
-        .containers()
-        .create(
-            &ContainerOptions::builder("docker.io/greyltc/archlinux-aur:paru")
-                .volumes(vec![mountpoint.as_str()])
-                .attach_stdout(true)
-                .attach_stderr(true)
-                .auto_remove(true)
-                .nano_cpus(cpu_limit)
-                .memory_swap(memory_limit)
-                .user("ab")
-                .name(container_name.as_str())
-                .cmd(vec!["sh", "-c", cmd.as_str()])
-                .build(),
+        .create_container::<&str, &str>(
+            Some(CreateContainerOptions {
+                name: container_name.as_str(),
+                platform: None,
+            }),
+            conf,
         )
         .await?;
     Ok((create_info, host_active_build_path))
@@ -279,6 +320,16 @@ fn create_build_paths(name: String) -> anyhow::Result<(String, PathBuf)> {
     Ok((host_build_path_docker, host_active_build_path))
 }
 
+fn job_timeout_from_env() -> Duration {
+    let job_timeout = env::var("JOB_TIMEOUT")
+        .ok()
+        .and_then(|x| x.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(60 * 60));
+    debug!("job_timeout: {} sec", job_timeout.as_secs());
+    job_timeout
+}
+
 fn limits_from_env() -> (u64, i64) {
     // cpu_limit in milli cpus
     let cpu_limit = env::var("CPU_LIMIT")
@@ -299,16 +350,33 @@ fn limits_from_env() -> (u64, i64) {
 
 async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Result<()> {
     // repull image to make sure it's up to date
-    let mut stream = docker.images().pull(
-        &PullOptions::builder()
-            .image("docker.io/greyltc/archlinux-aur:paru")
-            .build(),
+    let mut stream = docker.create_image(
+        Some(CreateImageOptions {
+            from_image: BUILDER_IMAGE,
+            ..Default::default()
+        }),
+        None,
+        None,
     );
 
     while let Some(pull_result) = stream.next().await {
         match pull_result {
-            Ok(output) => build_logger.append(format!("{:?}", output)).await?,
             Err(e) => build_logger.append(format!("{}", e)).await?,
+            Ok(info @ CreateImageInfo { status: None, .. }) => debug!("{:?}", info),
+            Ok(
+                ref info @ CreateImageInfo {
+                    status: Some(ref status),
+                    ..
+                },
+            ) => match status.as_str() {
+                "Pulling fs layer" | "Waiting" | "Downloading" | "Verifying Checksum"
+                | "Extracting" => {
+                    trace!("{:?}", info);
+                }
+                _ => {
+                    build_logger.append(status.clone()).await?;
+                }
+            },
         }
     }
     Ok(())
@@ -317,11 +385,11 @@ async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Re
 /// move built files from build container to host and add them to the repo
 async fn move_and_add_pkgs(
     build_logger: &BuildLogger,
-    work_dir: PathBuf,
+    host_build_path: PathBuf,
     pkg_id: i32,
     db: &DatabaseConnection,
 ) -> anyhow::Result<()> {
-    let archive_paths = fs::read_dir(work_dir.clone())?.collect::<Vec<_>>();
+    let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
         return Err(anyhow!("No files found in build directory"));
     }

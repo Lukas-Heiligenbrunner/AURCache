@@ -9,12 +9,13 @@ use std::{env, fs};
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
     let db: DatabaseConnection = match database_type() {
         DbType::Sqlite => {
-            // create folder for db stuff
             if fs::metadata("./db").is_err() {
                 fs::create_dir("./db")?;
             }
 
-            let mut conn_opts = ConnectOptions::new("sqlite://db/db.sqlite?mode=rwc");
+            let db_name = env::var("DB_NAME").unwrap_or("db.sqlite".to_string());
+
+            let mut conn_opts = ConnectOptions::new(format!("sqlite://db/{}?mode=rwc", db_name));
             conn_opts
                 .max_connections(100)
                 .sqlx_logging_level(LevelFilter::Trace);
@@ -34,9 +35,9 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
                 .map_err(|_| anyhow!("No DB_PWD envvar for POSTGRES Password specified"))?;
             let db_host = env::var("DB_HOST")
                 .map_err(|_| anyhow!("No DB_HOST envvar for POSTGRES HOST specified"))?;
+            let db_name = env::var("DB_NAME").unwrap_or("postgres".to_string());
 
-            let conn_str =
-                format!("postgres://{db_user}:{db_pwd}@{db_host}/postgres?currentSchema=public");
+            let conn_str = format!("postgres://{db_user}:{db_pwd}@{db_host}/{db_name}");
             let mut conn_opts = ConnectOptions::new(conn_str);
             conn_opts.sqlx_logging_level(LevelFilter::Trace);
             Database::connect(conn_opts).await?

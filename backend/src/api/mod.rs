@@ -1,4 +1,5 @@
 mod aur;
+mod auth;
 pub mod backend;
 mod build;
 pub mod cusom_file_server;
