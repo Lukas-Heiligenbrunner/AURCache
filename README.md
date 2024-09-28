@@ -1,19 +1,20 @@
 <p align="center">
-    <a href="https://git-cliff.org">
+    <a href="https://lukas-heiligenbrunner.github.io/AURCache/">
         <img src="frontend/assets/icons/icon.svg" width="200"></a><!-- </a> being on the same line as the <img> tag is intentional! -->
+    <br>
     <br>
     <a href="https://github.com/lukas-heiligenbrunner/aurcache/releases">
         <img src="https://img.shields.io/github/v/release/lukas-heiligenbrunner/aurcache?style=flat&labelColor=1C2C2E&color=C96329&logo=GitHub&logoColor=white"></a>
-    <a href="https://crates.io/crates/git-cliff/">
-        <img src="https://img.shields.io/crates/v/git-cliff?style=flat&labelColor=1C2C2E&color=C96329&logo=Rust&logoColor=white"></a>
-    <a href="https://codecov.io/gh/orhun/git-cliff">
-        <img src="https://img.shields.io/codecov/c/gh/orhun/git-cliff?style=flat&labelColor=1C2C2E&color=C96329&logo=Codecov&logoColor=white"></a>
+    <a href="https://github.com/Lukas-Heiligenbrunner/AURCache/pkgs/container/aurcache">
+        <img src="https://ghcr-badge.egpl.dev/lukas-heiligenbrunner/aurcache/tags?color=%23c26632&ignore=latest&n=3&label=Tags&trim="></a>
+    <a href="https://github.com/Lukas-Heiligenbrunner/AURCache/pkgs/container/aurcache">
+        <img src="https://ghcr-badge.egpl.dev/lukas-heiligenbrunner/aurcache/size?color=%23c26632&tag=latest&label=Size&trim="></a>
     <br>
 </p>
 
 <h4 align="center">
-  <a href="https://git-cliff.org/docs">Documentation</a> |
-  <a href="https://git-cliff.org">Website</a>
+  <a href="https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction">Documentation</a> |
+  <a href="https://lukas-heiligenbrunner.github.io/AURCache/">Website</a>
 </h4>
 
 # AURCache
