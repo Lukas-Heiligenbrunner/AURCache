@@ -1,3 +1,21 @@
+<p align="center">
+    <a href="https://git-cliff.org">
+        <img src="frontend/assets/icons/icon.svg" width="200"></a><!-- </a> being on the same line as the <img> tag is intentional! -->
+    <br>
+    <a href="https://github.com/lukas-heiligenbrunner/aurcache/releases">
+        <img src="https://img.shields.io/github/v/release/lukas-heiligenbrunner/aurcache?style=flat&labelColor=1C2C2E&color=C96329&logo=GitHub&logoColor=white"></a>
+    <a href="https://crates.io/crates/git-cliff/">
+        <img src="https://img.shields.io/crates/v/git-cliff?style=flat&labelColor=1C2C2E&color=C96329&logo=Rust&logoColor=white"></a>
+    <a href="https://codecov.io/gh/orhun/git-cliff">
+        <img src="https://img.shields.io/codecov/c/gh/orhun/git-cliff?style=flat&labelColor=1C2C2E&color=C96329&logo=Codecov&logoColor=white"></a>
+    <br>
+</p>
+
+<h4 align="center">
+  <a href="https://git-cliff.org/docs">Documentation</a> |
+  <a href="https://git-cliff.org">Website</a>
+</h4>
+
 # AURCache
 
 AURCache is a build server and repository for Archlinux packages sourced from the AUR (Arch User Repository). It features a Flutter frontend and Rust backend, enabling users to add packages for building and subsequently serves them as a pacman repository. Notably, AURCache automatically detects when a package is out of date and displays it within the frontend.
