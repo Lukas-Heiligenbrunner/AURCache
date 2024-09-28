@@ -10,7 +10,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 const config = {
   title: 'AURCache',
   tagline: 'The Archlinux AUR build server',
-  favicon: 'img/favicon.ico',
+  favicon: '../frontend/assets/icons/icon.png',
 
   // Set the production url of your site here
   url: 'https://lukas-heiligenbrunner.github.io',
@@ -68,10 +68,10 @@ const config = {
       image: 'img/docusaurus-social-card.jpg',
       navbar: {
         title: 'AURCache',
-        //logo: {
-        //  alt: 'My Site Logo',
-        //  src: 'img/logo.svg',
-        //},
+        logo: {
+          alt: 'My Site Logo',
+          src: 'img/favicon.png',
+        },
         items: [
           {
             type: 'docSidebar',
@@ -79,9 +79,8 @@ const config = {
             position: 'left',
             label: 'Docs',
           },
-          {to: '/blog', label: 'Blog', position: 'left'},
           {
-            href: 'https://github.com/facebook/docusaurus',
+            href: 'https://github.com/lukas-heiligenbrunner/aurcache',
             label: 'GitHub',
             position: 'right',
           },
@@ -89,34 +88,7 @@ const config = {
       },
       footer: {
         style: 'dark',
-        links: [
-          {
-            title: 'Docs',
-            items: [
-              {
-                label: 'Tutorial',
-                to: '/docs/introduction',
-              },
-            ],
-          },
-          {
-            title: 'Community',
-            items: [
-              {
-                label: 'Stack Overflow',
-                href: 'https://stackoverflow.com/questions/tagged/docusaurus',
-              },
-              {
-                label: 'Discord',
-                href: 'https://discordapp.com/invite/docusaurus',
-              },
-              {
-                label: 'Twitter',
-                href: 'https://twitter.com/docusaurus',
-              },
-            ],
-          },
-        ],
+        links: [],
         copyright: `AURCache is available as open source under the terms of the MIT License. Built with Docusaurus.`,
       },
       prism: {

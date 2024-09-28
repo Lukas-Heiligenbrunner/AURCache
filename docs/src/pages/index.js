@@ -7,11 +7,14 @@ import HomepageFeatures from '@site/src/components/HomepageFeatures';
 import Heading from '@theme/Heading';
 import styles from './index.module.css';
 
+const Svg = require('../../../frontend/assets/icons/icon.svg').default;
+
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
   return (
     <header className={clsx('hero hero--primary', styles.heroBanner)}>
       <div className="container">
+          <Svg className={styles.svgLogo} alt="AURCache Logo" />
         <Heading as="h1" className="hero__title">
           {siteConfig.title}
         </Heading>

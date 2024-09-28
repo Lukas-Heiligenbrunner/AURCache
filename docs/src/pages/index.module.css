@@ -21,3 +21,8 @@
   align-items: center;
   justify-content: center;
 }
+
+.svgLogo {
+  height: 200px;
+  width: 200px;
+}
