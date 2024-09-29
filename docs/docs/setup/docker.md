@@ -8,7 +8,7 @@ In both ways for each package built a seperate container is spawned and destroye
 
 `:latest` - latest version
 
-`:<version>` - <version> git tag (latest version = latest tag)
+`:<version>` - version git tag (latest version = latest tag)
 
 ## DinD (Docker in Docker) build mode
 The build container will spawn a new container for each package inside the main container.
