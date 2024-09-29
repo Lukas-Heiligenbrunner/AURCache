@@ -24,8 +24,6 @@ services:
       - DB_USER=aurcache
       - DB_PWD=YOUR_SECURE_PWD
       - DB_HOST=dbhost
-      - MAX_CONCURRENT_BUILDS=1
-      - CPU_LIMIT=100
     networks:
       aurcache_network:
     restart: unless-stopped

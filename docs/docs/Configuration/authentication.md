@@ -12,3 +12,5 @@ Setup the following Environment Variables to enable OAuth2 authentication:
 | OAUTH_REDIRECT_URI     | String                | Oauth redirect uri back to AURCache                                 | null                      |
 | OAUTH_CLIENT_ID        | String                | Oauth client ID                                                     | null                      |
 | OAUTH_CLIENT_SECRET    | String                | Oauth client Secret                                                 | null                      |
+
+To disable Authentiation leave all `OAUTH_*` variables undefined. 

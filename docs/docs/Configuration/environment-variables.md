@@ -5,6 +5,7 @@ sidebar_position: 1
 # Environment Variables
 AURCache can be configured using the following environment variables:
 
+## Database Configuration
 | Variable               | Type                  | Description                                                         | Default                   |
 |------------------------|-----------------------|---------------------------------------------------------------------|---------------------------|
 | DB_TYPE                | (POSTGRESQL\| SQLITE) | Type of Database (SQLite, PostgreSQL)                               | SQLITE                    |
@@ -12,6 +13,11 @@ AURCache can be configured using the following environment variables:
 | DB_PWD                 | String                | POSTGRES Password  (ignored if sqlite)                              | null                      |
 | DB_HOST                | String                | POSTGRES Host   (ignored if sqlite)                                 | null                      |
 | DB_NAME                | String                | Database name                                                       | 'db.sqlite' or 'postgres' |
+
+## General Settings
+
+| Variable               | Type                  | Description                                                         | Default                   |
+|------------------------|-----------------------|---------------------------------------------------------------------|---------------------------|
 | VERSION_CHECK_INTERVAL | Integer               | Interval in seconds for checking package versions                   | 3600                      |
 | BUILD_ARTIFACT_DIR     | String                | pkg share directory between aurcache container and build containers | null                      |
 | LOG_LEVEL              | String                | Log level                                                           | INFO                      |
