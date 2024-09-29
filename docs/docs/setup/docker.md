@@ -3,6 +3,13 @@
 There are two ways the packages can be built:
 In both ways for each package built a seperate container is spawned and destroyed afterwards.
 
+## Docker Tags
+`:git` - current master branch build
+
+`:latest` - latest version
+
+`:<version>` - <version> git tag (latest version = latest tag)
+
 ## DinD (Docker in Docker) build mode
 The build container will spawn a new container for each package inside the main container.
 For this to work the container needs to be priviledged!
@@ -129,3 +136,11 @@ Use SQLite database only for development, I don't recommend using it in producti
 
 For this method to work you need to mount a exchange volume to pass the built packages to the aurcache container.
 In this example the `artifact_cache` volume is mounted to the aurcache container and the `BUILD_ARTIFACT_DIR` environment variable is set to the volume.
+
+## Accessing WebUI
+
+Access AURCache through your web browser at http://localhost:8081.
+
+You can now start adding packages for building and utilizing the AURCache repository.
+
+See [Pacman-Repo](/docs/setup/pacman-repo) how to setup your Archlinux client to use the repo.
