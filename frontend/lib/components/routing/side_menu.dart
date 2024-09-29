@@ -16,20 +16,19 @@ class SideMenu extends StatelessWidget {
         // it enables scrolling
         child: Column(
           children: [
-            const DrawerHeader(
-                child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                SizedBox(
-                  height: defaultPadding,
-                ),
-                Icon(Icons.storage_sharp, size: 60, color: Colors.white54),
-                SizedBox(
-                  height: defaultPadding,
-                ),
-                Text("AURCache")
-              ],
-            )),
+            SizedBox(
+              height: 210,
+              child: DrawerHeader(
+                  child: Column(
+                mainAxisAlignment: MainAxisAlignment.start,
+                children: [
+                  SizedBox(height: 30,),
+                  SvgPicture.asset('assets/icons/icon.svg',height: 90, width: 00,),
+                  SizedBox(height: 15,),
+                  const Text("AURCache")
+                ],
+              )),
+            ),
             DrawerListTile(
               title: "Dashboard",
               svgSrc: "assets/icons/menu_dashbord.svg",
