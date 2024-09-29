@@ -10,7 +10,6 @@ For this to work the container needs to be priviledged!
 
 Example with PostgreSQL database (recommended):
 ```yaml
-version: '3'
 services:
   aurcache:
     image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
@@ -50,7 +49,6 @@ networks:
 
 Example with SQLite database:
 ```yaml
-version: '3'
 services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
@@ -62,13 +60,14 @@ services:
           - ./aurcache/repo:/app/repo
         privileged: true 
 ```
+
+Use SQLite database only for development, I don't recommend using it in production.
 ## Host build mode
 For every package built a new container is spawned on the host system and destroyed afterwards.
 For this method the docker socket needs to be mounted to the aurcache container.
 
 Example with PostgreSQL database (recommended):
 ```yaml
-version: '3'
 services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
@@ -104,12 +103,12 @@ networks:
 
 volumes:
   artifact_cache:
+        name: artifact_cache
         driver: local
 ```
 
 Example with SQLite database:
 ```yaml
-version: '3'
 services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
@@ -125,7 +124,10 @@ services:
           - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
 volumes:
   artifact_cache:
+        name: artifact_cache
         driver: local
 ```
+Use SQLite database only for development, I don't recommend using it in production.
+
 For this method to work you need to mount a exchange volume to pass the built packages to the aurcache container.
 In this example the `artifact_cache` volume is mounted to the aurcache container and the `BUILD_ARTIFACT_DIR` environment variable is set to the volume.
