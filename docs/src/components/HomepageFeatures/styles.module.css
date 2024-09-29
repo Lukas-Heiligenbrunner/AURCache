@@ -1,0 +1,54 @@
+.features {
+  display: flex;
+  align-items: center;
+  padding: 2rem 0;
+  width: 100%;
+}
+
+.featureSvg {
+  height: 200px;
+  width: 200px;
+}
+
+
+
+
+
+
+
+
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  margin: 20px 0;
+}
+
+.rowEven {
+  flex-direction: row;
+}
+
+.rowOdd {
+  flex-direction: row-reverse;
+}
+
+.image {
+  flex: 3 ;
+  text-align: center;
+}
+
+.image img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 15px;
+}
+
+.text {
+  flex: 2;
+  padding: 0 20px;
+}
