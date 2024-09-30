@@ -15,18 +15,21 @@ pub async fn try_remove_archive_file(
         .all(db)
         .await?;
     if package_files.is_empty() {
-        let filename = file.filename.clone();
-        file.delete(db).await?;
+        let platform = file.platform.clone();
 
         pacman_repo_utils::repo_remove(
-            filename.clone(),
-            "./repo/repo.db.tar.gz".to_string(),
-            "./repo/repo.files.tar.gz".to_string(),
+            file.filename.clone(),
+            format!("./repo/{platform}/repo.db.tar.gz"),
+            format!("./repo/{platform}/repo.files.tar.gz"),
         )?;
-        match fs::remove_file(format!("./repo/{}", filename)) {
-            Ok(_) => info!("Removed old file: {}", filename),
-            Err(_) => warn!("Failed to remove package file: {}", filename),
+
+        let file_path = format!("./repo/{}/{}", platform, file.filename);
+        match fs::remove_file(file_path.clone()) {
+            Ok(_) => info!("Removed old file: {}", file_path),
+            Err(_) => warn!("Failed to remove package file: {}", file_path),
         }
+
+        file.delete(db).await?;
     }
 
     Ok(())

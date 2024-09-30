@@ -5,6 +5,7 @@ use tokio::fs;
 #[cfg(debug_assertions)]
 use log::warn;
 
+use crate::repo::platforms::PLATFORMS;
 #[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]
 use {
@@ -42,8 +43,12 @@ pub async fn startup_tasks() {
         }
     }
 
-    if let Err(e) = pacman_repo_utils::init_repo(&PathBuf::from("./repo"), "repo") {
-        error!("Failed to initialize pacman repo: {:?}", e);
+    for platform in PLATFORMS {
+        if let Err(e) =
+            pacman_repo_utils::init_repo(&PathBuf::from(format!("./repo/{platform}")), "repo")
+        {
+            error!("Failed to initialize pacman repo: {:?}", e);
+        }
     }
 
     // disable on debug builds since annoying bc. of root permissions
@@ -53,7 +58,7 @@ pub async fn startup_tasks() {
 }
 
 /// This is required to initialize the binfmt configuration for QEMU on x86_64 correctly
-/// arm64 is not supported by qemu binfmt
+/// aarch64 is not supported by qemu binfmt
 /// see https://stackoverflow.com/questions/75954301/using-sudo-in-podman-with-qemu-architecture-emulation-leads-to-sudo-effective-u
 #[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]

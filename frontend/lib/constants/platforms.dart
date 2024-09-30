@@ -1,1 +1,1 @@
-final Platforms = ["amd64", "arm64", "arm/v7"];
+final Platforms = ["x86_64", "aarch64", "armv7h"];

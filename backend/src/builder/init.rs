@@ -1,4 +1,4 @@
-use crate::builder::build::cancel_build;
+use crate::builder::cancel::cancel_build;
 use crate::builder::queue::queue_package;
 use crate::builder::types::Action;
 use sea_orm::DatabaseConnection;

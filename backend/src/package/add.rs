@@ -2,14 +2,13 @@ use crate::aur::api::get_info_by_name;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
+use crate::repo::platforms::PLATFORMS;
 use anyhow::anyhow;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
-
-static PATFORMS: &[&str] = &["amd64", "arm64", "arm/v7"];
 
 pub async fn package_add(
     db: &DatabaseConnection,
@@ -19,7 +18,7 @@ pub async fn package_add(
     build_flags: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let platforms = match platforms {
-        None => vec!["amd64".to_string()],
+        None => vec!["x86_64".to_string()],
         Some(platforms) => {
             check_platforms(&platforms)?;
             platforms
@@ -81,7 +80,7 @@ pub async fn package_add(
         let new_build = build.save(&txn).await?;
 
         // todo -- setting latest build to latest x86_64 build for now
-        if platform == "amd64" {
+        if platform == "x86_64" {
             new_package.latest_build = Set(Some(new_build.id.clone().unwrap()));
             new_package = new_package.save(&txn).await?;
         }
@@ -98,7 +97,7 @@ pub async fn package_add(
 
 fn check_platforms(platforms: &Vec<String>) -> anyhow::Result<()> {
     for platform in platforms {
-        if !PATFORMS.contains(&platform.as_str()) {
+        if !PLATFORMS.contains(&platform.as_str()) {
             return Err(anyhow!("Invalid platform: {}", platform));
         }
     }

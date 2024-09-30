@@ -10,7 +10,7 @@ class AddPackagePopup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    List<String> selectedArchs = ["amd64"];
+    List<String> selectedArchs = ["x86_64"];
 
     return Stack(
       children: <Widget>[

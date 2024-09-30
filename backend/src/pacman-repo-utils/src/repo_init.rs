@@ -15,7 +15,7 @@ pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
 
     // create repo folder
     info!("Initializing empty pacman Repo archive");
-    _ = fs::create_dir(path);
+    _ = fs::create_dir_all(path);
 
     create_empty_archive(&path, &name, "db")?;
     create_empty_archive(&path, &name, "files")?;

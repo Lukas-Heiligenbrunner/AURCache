@@ -3,13 +3,14 @@ use anyhow::anyhow;
 use crate::pkginfo::parser::Pkginfo;
 use crate::repo_database::db::add_to_db_file;
 use crate::repo_database::desc::Desc;
-use log::{debug, error};
+use log::{debug, error, warn};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use tar::Archive;
-use zstd::Decoder;
+use xz2::read::XzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 pub fn repo_add_impl(
     pkgfile: &str,
@@ -21,19 +22,40 @@ pub fn repo_add_impl(
 
     // Path to the .tar.zst file
     let file = File::open(Path::new(pkgfile))?;
-    let mut archive = Archive::new(Decoder::new(file)?);
+    let ext = Path::new(pkgfile).extension().and_then(|e| e.to_str());
+
+    // Select the appropriate decompression method
+    let decompressor: Box<dyn Read> = match ext {
+        Some("zst") => {
+            let decoder = ZstdDecoder::new(BufReader::new(file))?;
+            Box::new(decoder)
+        }
+        Some("xz") => {
+            let decoder = XzDecoder::new(BufReader::new(file));
+            Box::new(decoder)
+        }
+        _ => {
+            return Err(anyhow!("Unsupported file type"));
+        }
+    };
+    let mut archive = Archive::new(decompressor);
 
     // Iterate over the entries in the tar archive
     for entry in archive.entries()? {
-        let entry = entry?;
+        match entry {
+            Ok(entry) => {
+                if let Ok(path) = entry.path() {
+                    if !path.display().to_string().starts_with('.') {
+                        files.push(format!("{}", path.display()));
+                    }
 
-        if !entry.path()?.display().to_string().starts_with('.') {
-            files.push(format!("{}", entry.path()?.display()));
-        }
-
-        if entry.path()? == Path::new(".PKGINFO") {
-            debug!("Found .PKGINFO file in '{}'.", pkgfile);
-            pkginfo.parse(entry)?;
+                    if path == Path::new(".PKGINFO") {
+                        debug!("Found .PKGINFO file in '{}'.", pkgfile);
+                        pkginfo.parse(entry)?;
+                    }
+                }
+            }
+            Err(e) => warn!("Error reading entry: {:?}", e),
         }
     }
 

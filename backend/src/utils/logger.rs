@@ -15,5 +15,6 @@ pub fn init_logger() {
             "rocket",
             LevelFilter::from_str("warn".to_string().as_str()).unwrap_or(LevelFilter::Warn),
         )
+        .filter_module("hyper::proto", LevelFilter::Warn)
         .init();
 }

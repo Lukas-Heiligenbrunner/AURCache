@@ -1,5 +1,7 @@
 use crate::db::helpers::dbtype::{database_type, DbType};
 use sea_orm_migration::prelude::*;
+use std::fs;
+use std::path::Path;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -27,13 +29,13 @@ ADD COLUMN platform TEXT;
 
 UPDATE packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
-    platforms = 'amd64';
+    platforms = 'x86_64';
 
 UPDATE builds
-    SET platform = 'amd64';
+    SET platform = 'x86_64';
 
 UPDATE files
-    SET platform = 'amd64';
+    SET platform = 'x86_64';
 "#,
                 )
                 .await?;
@@ -55,16 +57,37 @@ ADD COLUMN platform TEXT;
 
 UPDATE public.packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
-    platforms = 'amd64';
+    platforms = 'x86_64';
 
 UPDATE public.builds
-    SET platform = 'amd64';
+    SET platform = 'x86_64';
 
 UPDATE public.files
-    SET platform = 'amd64';
+    SET platform = 'x86_64';
 "#,
                 )
                 .await?;
+            }
+        }
+
+        // try to copy pkg files to new location
+        let src_path = Path::new("./repo");
+        let dest_path = Path::new("./repo/x86_64");
+
+        // Iterate over the files in the source directory
+        if let Ok(entries) = fs::read_dir(src_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                // Only copy files (not directories)
+                if path.is_file() {
+                    let file_name = entry.file_name();
+                    let dest_file = dest_path.join(file_name);
+
+                    // Copy the file to the destination directory
+                    _ = fs::copy(path.clone(), dest_file);
+                    _ = fs::remove_file(path);
+                }
             }
         }
 

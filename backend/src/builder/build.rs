@@ -2,13 +2,13 @@ use crate::builder::logger::BuildLogger;
 use crate::builder::types::BuildStates;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
-use crate::db::prelude::{Builds, Files, PackagesFiles};
+use crate::db::prelude::{Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
 use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
-    RemoveContainerOptions, WaitContainerOptions,
+    WaitContainerOptions,
 };
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
@@ -30,54 +30,6 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
-
-pub(crate) async fn cancel_build(
-    build_id: i32,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-    db: DatabaseConnection,
-) -> anyhow::Result<()> {
-    let build = Builds::find_by_id(build_id)
-        .one(&db)
-        .await?
-        .ok_or(anyhow!("No build found"))?;
-
-    let mut build: builds::ActiveModel = build.into();
-    build.status = Set(Some(4));
-    build.end_time = Set(Some(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    ));
-    let _ = build.clone().update(&db).await;
-
-    let container_id = job_containers
-        .lock()
-        .await
-        .get(&build_id)
-        .ok_or(anyhow!("Build container not found"))?
-        .clone();
-
-    let docker = Docker::connect_with_unix_defaults()?;
-    docker
-        .remove_container(
-            &container_id,
-            Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            }),
-        )
-        .await?;
-
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active build map"
-        ))?;
-    Ok(())
-}
 
 pub(crate) async fn prepare_build(
     mut build_model: builds::ActiveModel,
@@ -462,7 +414,8 @@ async fn move_and_add_pkgs(
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
-        fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
+        let pkg_path = format!("./repo/{platform}/{archive_name}");
+        fs::copy(archive.path(), pkg_path.clone())?;
         // remove old file from shared path
         fs::remove_file(archive.path())?;
 
@@ -490,9 +443,9 @@ async fn move_and_add_pkgs(
         package_file.save(&txn).await?;
 
         pacman_repo_utils::repo_add(
-            format!("./repo/{}", archive_name).as_str(),
-            "./repo/repo.db.tar.gz".to_string(),
-            "./repo/repo.files.tar.gz".to_string(),
+            pkg_path.as_str(),
+            format!("./repo/{platform}/repo.db.tar.gz"),
+            format!("./repo/{platform}/repo.files.tar.gz"),
         )?;
         info!("Successfully added '{}' to the repo archive", archive_name);
     }
