@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 aur-rs = "0.1.1"
 tokio = "1.39.2"
-anyhow = "1.0.86"
+anyhow = "1.0.89"
 
 reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
 
@@ -27,6 +27,9 @@ env_logger = "0.11.5"
 log = "0.4.22"
 backon = "1.2.0"
 pacman-repo-utils = {path = "./src/pacman-repo-utils"}
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+openssl = { version = "*", features = ["vendored"] }
 
 [[bin]]
 name = "aurcache"

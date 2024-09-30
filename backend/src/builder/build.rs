@@ -2,13 +2,13 @@ use crate::builder::logger::BuildLogger;
 use crate::builder::types::BuildStates;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
-use crate::db::prelude::{Builds, Files, PackagesFiles};
+use crate::db::prelude::{Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::anyhow;
 use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
-    RemoveContainerOptions,
+    WaitContainerOptions,
 };
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
@@ -29,151 +29,130 @@ use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-static BUILDER_IMAGE: &str = "docker.io/greyltc/archlinux-aur:paru";
-
-pub(crate) async fn cancel_build(
-    build_id: i32,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-    db: DatabaseConnection,
-) -> anyhow::Result<()> {
-    let build = Builds::find_by_id(build_id)
-        .one(&db)
-        .await?
-        .ok_or(anyhow!("No build found"))?;
-
-    let mut build: builds::ActiveModel = build.into();
-    build.status = Set(Some(4));
-    build.end_time = Set(Some(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    ));
-    let _ = build.clone().update(&db).await;
-
-    let container_id = job_containers
-        .lock()
-        .await
-        .get(&build_id)
-        .ok_or(anyhow!("Build container not found"))?
-        .clone();
-
-    let docker = Docker::connect_with_unix_defaults()?;
-    docker
-        .remove_container(
-            &container_id,
-            Some(RemoveContainerOptions {
-                force: true,
-                ..Default::default()
-            }),
-        )
-        .await?;
-
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active build map"
-        ))?;
-    Ok(())
-}
+static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 pub(crate) async fn prepare_build(
-    mut new_build: builds::ActiveModel,
+    mut build_model: builds::ActiveModel,
     db: DatabaseConnection,
     mut package_model: packages::ActiveModel,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-) -> anyhow::Result<()> {
-    let build_id = new_build.id.clone().unwrap();
-    let build_logger = BuildLogger::new(build_id, db.clone());
+) -> anyhow::Result<(packages::ActiveModel, builds::ActiveModel, String)> {
+    // set build status to building
+    build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
+    build_model.start_time = Set(Some(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+    ));
+    let build_model = build_model.save(&db).await?;
 
     // update status to building
     package_model.status = Set(BuildStates::ACTIVE_BUILD);
     package_model = package_model.update(&db).await?.into();
 
-    let package_name = package_model.name.clone().unwrap();
-    let package_id = package_model.id.clone().unwrap();
+    let target_platform = format!("linux/{}", build_model.platform.clone().unwrap());
 
-    match build(
-        package_name,
-        build_id,
-        package_id,
-        &db,
-        build_logger.clone(),
-        job_containers,
-    )
-    .await
-    {
-        Ok(_) => {
-            // update package success status
-            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
-            package_model.out_of_date = Set(false as i32);
-            package_model.update(&db).await?;
+    #[cfg(target_arch = "aarch64")]
+    if target_platform != "linux/arm64" {
+        return Err(anyhow!(
+            "Unsupported host architecture aarch64 for cross-compile"
+        ));
+    }
 
-            new_build.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
-            new_build.end_time = Set(Some(
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-            ));
-            _ = new_build.update(&db).await;
-            build_logger
-                .append("finished package build".to_string())
-                .await?;
-        }
-        Err(e) => {
-            package_model.status = Set(BuildStates::FAILED_BUILD);
-            package_model.update(&db).await?;
-
-            new_build.status = Set(Some(BuildStates::FAILED_BUILD));
-            new_build.end_time = Set(Some(
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-            ));
-            let _ = new_build.update(&db).await;
-
-            build_logger.append(e.to_string()).await?;
-        }
-    };
-    Ok(())
+    Ok((package_model, build_model, target_platform))
 }
 
-pub async fn build(
-    name: String,
-    build_id: i32,
-    pkg_id: i32,
-    db: &DatabaseConnection,
-    build_logger: BuildLogger,
-    job_containers: Arc<Mutex<HashMap<i32, String>>>,
-) -> anyhow::Result<()> {
+async fn establish_docker_connection() -> anyhow::Result<Docker> {
     let docker = Docker::connect_with_unix_defaults()?;
-
     docker
         .ping()
         .await
         .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
+    Ok(docker)
+}
 
-    repull_image(&docker, &build_logger).await?;
+pub async fn build(
+    build_model: builds::ActiveModel,
+    db: &DatabaseConnection,
+    package_model: packages::ActiveModel,
+    job_containers: Arc<Mutex<HashMap<i32, String>>>,
+    build_logger: BuildLogger,
+) -> anyhow::Result<()> {
+    let (package_model_am, build_model_am, target_platform) =
+        prepare_build(build_model, db.clone(), package_model).await?;
+    let package_model: packages::Model = package_model_am.try_into()?;
+    let build_model: builds::Model = build_model_am.try_into()?;
+    let docker = establish_docker_connection().await?;
 
-    let (create_info, host_active_build_path) =
-        create_build_container(&docker, build_id, name.clone()).await?;
+    repull_image(
+        &docker,
+        &build_logger,
+        BUILDER_IMAGE,
+        target_platform.clone(),
+    )
+    .await?;
+
+    let (create_info, host_active_build_path) = create_build_container(
+        &docker,
+        build_model.id,
+        package_model.name.clone(),
+        target_platform,
+        package_model.build_flags.split(";").collect(),
+    )
+    .await?;
     let id = create_info.id;
+
+    let docker2 = docker.clone();
+    let id2 = id.clone();
+    let build_logger2 = build_logger.clone();
+    // start listening to container before starting it
+    tokio::spawn(async move {
+        _ = monitor_build_output(&build_logger2, &docker2, id2.clone()).await;
+    });
 
     // start build container
     docker.start_container::<String>(&id, None).await?;
 
     // insert container id to container map
-    job_containers.lock().await.insert(build_id, id.clone());
+    job_containers
+        .lock()
+        .await
+        .insert(build_model.id, id.clone());
 
     // monitor build output
-    match timeout(
+    let build_result = timeout(
         job_timeout_from_env(),
-        monitor_build_output(&build_logger, &docker, id.clone()),
+        docker
+            .wait_container(
+                &id,
+                Some(WaitContainerOptions {
+                    condition: "not-running",
+                }),
+            )
+            .next(),
     )
-    .await
-    {
-        Ok(v) => v?,
+    .await;
+
+    debug!("Build container was removed");
+
+    match build_result {
+        Ok(v) => {
+            let t = v.ok_or(anyhow!("Failed to get build result"))??;
+            let exit_code = t.status_code;
+            if exit_code != 0 {
+                build_logger
+                    .append(format!(
+                        "Build #{} failed for package '{}', exit code: {}",
+                        build_model.id, package_model.name, exit_code
+                    ))
+                    .await?;
+                return Err(anyhow!("Build failed with exit code: {}", exit_code));
+            }
+        }
+        // timeout branch
         Err(_) => {
             build_logger
-                .append(format!("Build #{build_id} timed out for package '{name}'"))
+                .append(format!(
+                    "Build #{} timed out for package '{}'",
+                    build_model.id, package_model.name
+                ))
                 .await?;
             // kill build container
             docker
@@ -182,17 +161,15 @@ pub async fn build(
         }
     }
 
-    // remove build from container map
-    job_containers
-        .lock()
-        .await
-        .remove(&build_id)
-        .ok_or(anyhow!(
-            "Failed to remove build container from active builds map"
-        ))?;
-
     // move built tar.gz archives to host and repo-add
-    move_and_add_pkgs(&build_logger, host_active_build_path.clone(), pkg_id, db).await?;
+    move_and_add_pkgs(
+        &build_logger,
+        host_active_build_path.clone(),
+        package_model.id,
+        db,
+        build_model.platform,
+    )
+    .await?;
     // remove active build dir
     fs::remove_dir(host_active_build_path)?;
     Ok(())
@@ -242,9 +219,12 @@ async fn create_build_container(
     docker: &Docker,
     build_id: i32,
     name: String,
+    arch: String,
+    build_flags: Vec<&str>,
 ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
     let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
+    let build_flags = build_flags.join(" ");
     // create new docker container for current build
     let build_dir_base = "/var/cache/makepkg/pkg";
     let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
@@ -252,8 +232,8 @@ async fn create_build_container(
     let (makepkg_config, makepkg_config_path) =
         create_makepkg_config(name.clone(), build_dir_base)?;
     let cmd = format!(
-        "cat <<EOF > {}\n{}\nEOF\nparu -Syu --noconfirm --noprogressbar --color never {}",
-        makepkg_config_path, makepkg_config, name
+        "cat <<EOF > {}\n{}\nEOF\nparu {} {}",
+        makepkg_config_path, makepkg_config, build_flags, name
     );
 
     let (cpu_limit, memory_limit) = limits_from_env();
@@ -279,7 +259,7 @@ async fn create_build_container(
         .create_container::<&str, &str>(
             Some(CreateContainerOptions {
                 name: container_name.as_str(),
-                platform: None,
+                platform: Some(arch.as_str()),
             }),
             conf,
         )
@@ -348,11 +328,20 @@ fn limits_from_env() -> (u64, i64) {
     (cpu_limit, memory_limit)
 }
 
-async fn repull_image(docker: &Docker, build_logger: &BuildLogger) -> anyhow::Result<()> {
+async fn repull_image(
+    docker: &Docker,
+    build_logger: &BuildLogger,
+    image: &str,
+    arch: String,
+) -> anyhow::Result<()> {
+    build_logger
+        .append(format!("Pulling image: {}", image))
+        .await?;
     // repull image to make sure it's up to date
     let mut stream = docker.create_image(
         Some(CreateImageOptions {
-            from_image: BUILDER_IMAGE,
+            from_image: image,
+            platform: arch.as_str(),
             ..Default::default()
         }),
         None,
@@ -388,6 +377,7 @@ async fn move_and_add_pkgs(
     host_build_path: PathBuf,
     pkg_id: i32,
     db: &DatabaseConnection,
+    platform: String,
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
@@ -398,6 +388,7 @@ async fn move_and_add_pkgs(
     // remove files assosicated with package
     let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
         .filter(packages_files::Column::PackageId.eq(pkg_id))
+        .filter(files::Column::Platform.eq(platform.clone()))
         .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
         .select_also(files::Entity)
         .all(db)
@@ -423,7 +414,8 @@ async fn move_and_add_pkgs(
     for archive in archive_paths {
         let archive = archive?;
         let archive_name = archive.file_name().to_str().unwrap().to_string();
-        fs::copy(archive.path(), format!("./repo/{archive_name}"))?;
+        let pkg_path = format!("./repo/{platform}/{archive_name}");
+        fs::copy(archive.path(), pkg_path.clone())?;
         // remove old file from shared path
         fs::remove_file(archive.path())?;
 
@@ -435,6 +427,7 @@ async fn move_and_add_pkgs(
             None => {
                 let file = files::ActiveModel {
                     filename: Set(archive_name.clone()),
+                    platform: Set(platform.clone()),
                     ..Default::default()
                 };
                 file.save(&txn).await?
@@ -450,9 +443,9 @@ async fn move_and_add_pkgs(
         package_file.save(&txn).await?;
 
         pacman_repo_utils::repo_add(
-            format!("./repo/{}", archive_name).as_str(),
-            "./repo/repo.db.tar.gz".to_string(),
-            "./repo/repo.files.tar.gz".to_string(),
+            pkg_path.as_str(),
+            format!("./repo/{platform}/repo.db.tar.gz"),
+            format!("./repo/{platform}/repo.files.tar.gz"),
         )?;
         info!("Successfully added '{}' to the repo archive", archive_name);
     }

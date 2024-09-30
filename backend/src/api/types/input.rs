@@ -12,13 +12,46 @@ pub struct ApiPackage {
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
 #[serde(crate = "rocket::serde")]
-pub struct ListPackageModel {
+pub struct SimplePackageModel {
     pub id: i32,
     pub name: String,
     pub status: i32,
     pub outofdate: i32,
     pub latest_version: Option<String>,
     pub latest_aur_version: String,
+}
+
+#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize, Default)]
+#[serde(crate = "rocket::serde")]
+pub struct ExtendedPackageModel {
+    pub id: i32,
+    pub name: String,
+    pub status: i32,
+    pub outofdate: i32,
+    pub latest_version: Option<String>,
+    pub latest_aur_version: String,
+    pub last_updated: u32,
+    pub first_submitted: u32,
+    pub licenses: Option<String>,
+    pub maintainer: Option<String>,
+    pub aur_flagged_outdated: bool,
+    pub selected_platforms: Vec<String>,
+    pub selected_build_flags: Option<Vec<String>>,
+    pub aur_url: String,
+    pub project_url: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize, Default)]
+pub struct PackagePatchModel {
+    pub name: Option<String>,
+    pub status: Option<i32>,
+    pub out_of_date: Option<i32>,
+    pub version: Option<Option<String>>,
+    pub latest_aur_version: Option<Option<String>>,
+    pub latest_build: Option<Option<i32>>,
+    pub build_flags: Option<Vec<String>>,
+    pub platforms: Option<Vec<String>>,
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
@@ -31,6 +64,7 @@ pub struct ListBuildsModel {
     status: i32,
     start_time: Option<i64>,
     end_time: Option<i64>,
+    platform: String,
 }
 
 #[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]

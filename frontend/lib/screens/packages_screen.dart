@@ -5,7 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../components/api/APIBuilder.dart';
 import '../constants/color_constants.dart';
-import '../models/package.dart';
+import '../models/simple_packge.dart';
 
 class PackagesScreen extends StatelessWidget {
   const PackagesScreen({super.key});
@@ -37,7 +37,8 @@ class PackagesScreen extends StatelessWidget {
                   ),
                   SizedBox(
                     width: double.infinity,
-                    child: APIBuilder<PackagesProvider, List<Package>, Object>(
+                    child: APIBuilder<PackagesProvider, List<SimplePackage>,
+                            Object>(
                         key: const Key("Builds on seperate screen"),
                         interval: const Duration(seconds: 10),
                         onLoad: () => const Text("no data"),

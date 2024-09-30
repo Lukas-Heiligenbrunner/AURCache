@@ -1,35 +1,63 @@
-import '../models/package.dart';
+import 'package:aurcache/models/extended_package.dart';
+
+import '../models/simple_packge.dart';
 import 'api_client.dart';
 
 extension PackagesAPI on ApiClient {
-  Future<List<Package>> listPackages({int? limit}) async {
+  Future<List<SimplePackage>> listPackages({int? limit}) async {
     final resp = await getRawClient()
         .get("/packages/list", queryParameters: {'limit': limit});
 
     final responseObject = resp.data as List;
-    final List<Package> packages =
-        responseObject.map((e) => Package.fromJson(e)).toList(growable: false);
+    final List<SimplePackage> packages = responseObject
+        .map((e) => SimplePackage.fromJson(e))
+        .toList(growable: false);
     return packages;
   }
 
-  Future<Package> getPackage(int id) async {
+  Future<ExtendedPackage> getPackage(int id) async {
     final resp = await getRawClient().get("/package/$id");
 
-    final package = Package.fromJson(resp.data);
+    final package = ExtendedPackage.fromJson(resp.data);
     return package;
   }
 
-  Future<void> addPackage({required String name}) async {
-    final resp = await getRawClient().post("/package", data: {'name': name});
+  Future<bool> patchPackage(
+      {required int id,
+      String? name,
+      bool? outofdate,
+      int? status,
+      String? version,
+      latest_aur_version,
+      latest_build,
+      List<String>? platforms,
+      List<String>? build_flags}) async {
+    final resp = await getRawClient().patch("/package/$id", data: {
+      "name": name,
+      "status": status,
+      "out_of_date": outofdate,
+      "version": version,
+      "latest_aur_version": latest_aur_version,
+      "latest_build": latest_build,
+      "build_flags": build_flags,
+      "platforms": platforms
+    });
+    return resp.statusCode == 200;
+  }
+
+  Future<void> addPackage(
+      {required String name, required List<String> selectedArchs}) async {
+    final resp = await getRawClient()
+        .post("/package", data: {'name': name, 'platforms': selectedArchs});
     print(resp.data);
   }
 
-  Future<int> updatePackage({bool force = false, required int id}) async {
+  Future<List<int>> updatePackage({bool force = false, required int id}) async {
     final resp = await getRawClient()
         .post("/package/$id/update", data: {'force': force});
     print(resp.data);
 
-    return resp.data as int;
+    return resp.data as List<int>;
   }
 
   Future<bool> deletePackage(int id) async {

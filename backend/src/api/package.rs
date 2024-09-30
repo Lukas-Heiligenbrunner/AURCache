@@ -8,13 +8,15 @@ use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 
-use rocket::{delete, get, post, State};
+use rocket::{delete, get, patch, post, State};
 
 use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::ListPackageModel;
+use crate::api::types::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
 use crate::api::types::output::{AddBody, UpdateBody};
+use crate::aur::api::get_info_by_name;
 use rocket_okapi::openapi;
-use sea_orm::DatabaseConnection;
+use sea_orm::ActiveValue::Set;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
 
@@ -27,9 +29,56 @@ pub async fn package_add_endpoint(
     tx: &State<Sender<Action>>,
     _a: Authenticated,
 ) -> Result<(), BadRequest<String>> {
-    package_add(db, input.name.clone(), tx)
+    package_add(
+        db,
+        input.name.clone(),
+        tx,
+        input.platforms.clone(),
+        input.build_flags.clone(),
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))
+}
+
+/// Add new Package to build queue
+#[openapi(tag = "Packages")]
+#[patch("/package/<id>", data = "<input>")]
+pub async fn package_update_entity_endpoint(
+    db: &State<DatabaseConnection>,
+    input: Json<PackagePatchModel>,
+    id: i32,
+    _a: Authenticated,
+) -> Result<(), BadRequest<String>> {
+    let db = db as &DatabaseConnection;
+
+    // Start building the update operation
+    let update_pkg = packages::ActiveModel {
+        id: Set(id),
+        name: input.name.clone().map(Set).unwrap_or(NotSet),
+        status: input.status.map(Set).unwrap_or(NotSet),
+        out_of_date: input.out_of_date.map(Set).unwrap_or(NotSet),
+        version: input.version.clone().map(Set).unwrap_or(NotSet),
+        latest_aur_version: input.latest_aur_version.clone().map(Set).unwrap_or(NotSet),
+        latest_build: input.latest_build.map(Set).unwrap_or(NotSet),
+        build_flags: input
+            .build_flags
+            .clone()
+            .map(|v| Set(v.join(";")))
+            .unwrap_or(NotSet),
+        platforms: input
+            .platforms
+            .clone()
+            .map(|v| Set(v.join(";")))
+            .unwrap_or(NotSet),
+    };
+
+    // Execute the update query
+    update_pkg
+        .update(db)
         .await
-        .map_err(|e| BadRequest(e.to_string()))
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    Ok(())
 }
 
 /// Update a package with id
@@ -41,7 +90,7 @@ pub async fn package_update_endpoint(
     input: Json<UpdateBody>,
     tx: &State<Sender<Action>>,
     _a: Authenticated,
-) -> Result<Json<i32>, BadRequest<String>> {
+) -> Result<Json<Vec<i32>>, BadRequest<String>> {
     package_update(db, id, input.force, tx)
         .await
         .map(Json)
@@ -68,10 +117,10 @@ pub async fn package_list(
     limit: Option<u64>,
     page: Option<u64>,
     _a: Authenticated,
-) -> Result<Json<Vec<ListPackageModel>>, NotFound<String>> {
+) -> Result<Json<Vec<SimplePackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let all: Vec<ListPackageModel> = Packages::find()
+    let all: Vec<SimplePackageModel> = Packages::find()
         .select_only()
         .column(packages::Column::Name)
         .column(packages::Column::Id)
@@ -82,7 +131,7 @@ pub async fn package_list(
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit))
-        .into_model::<ListPackageModel>()
+        .into_model::<SimplePackageModel>()
         .all(db)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
@@ -91,29 +140,50 @@ pub async fn package_list(
 }
 
 /// get specific package by id
+/// This requires 1 API call to the AUR (rate limited 4000 per day)
+/// https://wiki.archlinux.org/title/Aurweb_RPC_interface
 #[openapi(tag = "Packages")]
 #[get("/package/<id>")]
 pub async fn get_package(
     db: &State<DatabaseConnection>,
     id: u64,
     _a: Authenticated,
-) -> Result<Json<ListPackageModel>, NotFound<String>> {
+) -> Result<Json<ExtendedPackageModel>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    let all: ListPackageModel = Packages::find()
+    let pkg = Packages::find()
         .filter(packages::Column::Id.eq(id))
-        .select_only()
-        .column(packages::Column::Name)
-        .column(packages::Column::Id)
-        .column(packages::Column::Status)
-        .column_as(packages::Column::OutOfDate, "outofdate")
-        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(packages::Column::Version, "latest_version")
-        .into_model::<ListPackageModel>()
         .one(db)
         .await
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("id not found".to_string()))?;
 
-    Ok(Json(all))
+    let aur_info = get_info_by_name(&pkg.name)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    let aur_url = format!(
+        "https://aur.archlinux.org/packages/{}",
+        aur_info.package_base
+    );
+
+    let ext_pkg = ExtendedPackageModel {
+        id: pkg.id,
+        name: pkg.name,
+        status: pkg.status,
+        outofdate: pkg.out_of_date,
+        latest_version: pkg.version,
+        latest_aur_version: aur_info.version,
+        last_updated: aur_info.last_modified,
+        first_submitted: aur_info.first_submitted,
+        licenses: aur_info.license.map(|l| l.join(", ")),
+        maintainer: aur_info.maintainer,
+        aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+        selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
+        selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
+        aur_url,
+        project_url: aur_info.url,
+        description: aur_info.description,
+    };
+    Ok(Json(ext_pkg))
 }

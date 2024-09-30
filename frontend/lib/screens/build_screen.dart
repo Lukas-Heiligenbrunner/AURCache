@@ -267,7 +267,7 @@ class _BuildScreenState extends State<BuildScreen> {
         ),
         ElevatedButton(
           onPressed: () async {
-            final buildid = await API.updatePackage(id: build.pkg_id);
+            final buildid = await API.retryBuild(id: build.id);
             context.pushReplacement("/build/$buildid");
           },
           child: const Text(

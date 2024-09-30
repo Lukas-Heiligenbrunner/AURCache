@@ -1,7 +1,8 @@
 import 'package:aurcache/api/packages.dart';
+import 'package:aurcache/models/extended_package.dart';
 
 import '../../api/API.dart';
-import '../../models/package.dart';
+import '../../models/simple_packge.dart';
 import 'BaseProvider.dart';
 
 class PackageDTO {
@@ -10,7 +11,7 @@ class PackageDTO {
   PackageDTO({required this.pkgID});
 }
 
-class PackageProvider extends BaseProvider<Package, PackageDTO> {
+class PackageProvider extends BaseProvider<ExtendedPackage, PackageDTO> {
   @override
   loadFuture(context, {dto}) {
     // todo search solution to force an exising dto

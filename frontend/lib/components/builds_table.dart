@@ -25,6 +25,9 @@ class BuildsTable extends StatelessWidget {
           label: Text("Version"),
         ),
         DataColumn(
+          label: Text("Platform"),
+        ),
+        DataColumn(
           label: Text("Status"),
         ),
       ],
@@ -38,6 +41,7 @@ class BuildsTable extends StatelessWidget {
         DataCell(Text(build.id.toString())),
         DataCell(Text(build.pkg_name)),
         DataCell(Text(build.version)),
+        DataCell(Text(build.platform)),
         DataCell(IconButton(
           icon: Icon(
             switchSuccessIcon(build.status),

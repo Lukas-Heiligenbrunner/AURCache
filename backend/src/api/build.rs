@@ -7,11 +7,12 @@ use rocket::{delete, get, post, State};
 
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListBuildsModel;
-use crate::builder::types::Action;
+use crate::builder::types::{Action, BuildStates};
+use crate::package::update::update_platform;
 use rocket_okapi::openapi;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use tokio::sync::broadcast::Sender;
 
@@ -33,7 +34,7 @@ pub async fn build_output(
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("couldn't find id".to_string()))?;
 
-    return match build.output {
+    match build.output {
         None => Err(NotFound("No Output".to_string())),
         Some(v) => match startline {
             None => Ok(v),
@@ -58,7 +59,7 @@ pub async fn build_output(
                 Ok(output)
             }
         },
-    };
+    }
 }
 
 /// get list of all builds
@@ -83,6 +84,7 @@ pub async fn list_builds(
         .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
+        .column(builds::Column::Platform)
         .order_by(builds::Column::StartTime, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit));
@@ -120,6 +122,7 @@ pub async fn get_build(
         .column(packages::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
+        .column(builds::Column::Platform)
         .into_model::<ListBuildsModel>()
         .one(db)
         .await
@@ -164,4 +167,46 @@ pub async fn cancel_build(
         .map_err(|e| NotFound(e.to_string()))?;
 
     Ok(())
+}
+
+#[openapi(tag = "build")]
+#[post("/build/<buildid>/retry")]
+pub async fn rery_build(
+    db: &State<DatabaseConnection>,
+    tx: &State<Sender<Action>>,
+    buildid: i32,
+    _a: Authenticated,
+) -> Result<Json<i32>, NotFound<String>> {
+    let db = db as &DatabaseConnection;
+
+    // Fetch the build details
+    let old_build = Builds::find_by_id(buildid)
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("Build not found".to_string()))?;
+
+    // Extract the platform and package ID
+    let platform = old_build.platform;
+    let pkg_id = old_build.pkg_id;
+
+    // Fetch the package details
+    let package = packages::Entity::find_by_id(pkg_id)
+        .one(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("Package not found".to_string()))?;
+
+    let mut pacage_am: packages::ActiveModel = package.clone().into();
+    pacage_am.status = Set(BuildStates::ENQUEUED_BUILD);
+    pacage_am
+        .save(db)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    let new_buildid = update_platform(&platform, package, db, tx)
+        .await
+        .map_err(|e| NotFound(e.to_string()))?;
+
+    Ok(Json(new_buildid))
 }

@@ -42,6 +42,8 @@ dependencies:
   go_router: ^14.2.0
   provider: ^6.1.1
   visibility_detector: ^0.4.0+2
+  flutter_tags_x: any
+  url_launcher: any
 
 dev_dependencies:
   flutter_test:

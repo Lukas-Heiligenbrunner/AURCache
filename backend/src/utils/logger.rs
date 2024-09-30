@@ -1,6 +1,5 @@
 use env_logger::Env;
 use log::LevelFilter;
-use std::env;
 use std::str::FromStr;
 
 pub fn init_logger() {
@@ -14,8 +13,8 @@ pub fn init_logger() {
         // increase default rocket logging to warn
         .filter_module(
             "rocket",
-            LevelFilter::from_str(env::var(env_name).unwrap_or("warn".to_string()).as_str())
-                .unwrap_or(LevelFilter::Warn),
+            LevelFilter::from_str("warn".to_string().as_str()).unwrap_or(LevelFilter::Warn),
         )
+        .filter_module("hyper::proto", LevelFilter::Warn)
         .init();
 }
