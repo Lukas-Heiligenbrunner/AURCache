@@ -215,6 +215,7 @@ pub async fn build(
         host_active_build_path.clone(),
         package_model.id,
         db,
+        build_model.platform,
     )
     .await?;
     // remove active build dir
@@ -424,6 +425,7 @@ async fn move_and_add_pkgs(
     host_build_path: PathBuf,
     pkg_id: i32,
     db: &DatabaseConnection,
+    platform: String,
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
@@ -434,6 +436,7 @@ async fn move_and_add_pkgs(
     // remove files assosicated with package
     let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
         .filter(packages_files::Column::PackageId.eq(pkg_id))
+        .filter(files::Column::Platform.eq(platform.clone()))
         .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
         .select_also(files::Entity)
         .all(db)
@@ -471,6 +474,7 @@ async fn move_and_add_pkgs(
             None => {
                 let file = files::ActiveModel {
                     filename: Set(archive_name.clone()),
+                    platform: Set(platform.clone()),
                     ..Default::default()
                 };
                 file.save(&txn).await?

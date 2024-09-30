@@ -22,11 +22,17 @@ ADD COLUMN platforms TEXT;
 ALTER TABLE builds
 ADD COLUMN platform TEXT;
 
+ALTER TABLE files
+ADD COLUMN platform TEXT;
+
 UPDATE packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
     platforms = 'amd64';
 
 UPDATE builds
+    SET platform = 'amd64';
+
+UPDATE files
     SET platform = 'amd64';
 "#,
                 )
@@ -44,11 +50,17 @@ ADD COLUMN platforms TEXT;
 ALTER TABLE public.builds
 ADD COLUMN platform TEXT;
 
+ALTER TABLE public.files
+ADD COLUMN platform TEXT;
+
 UPDATE public.packages
 SET build_flags = '-Syu;--noconfirm;--noprogressbar;--color never',
     platforms = 'amd64';
 
 UPDATE public.builds
+    SET platform = 'amd64';
+
+UPDATE public.files
     SET platform = 'amd64';
 "#,
                 )
@@ -74,6 +86,9 @@ DROP COLUMN platforms;
 
 ALTER TABLE builds
 DROP COLUMN platform;
+
+ALTER TABLE files
+DROP COLUMN platform;
 "#,
                 )
                 .await?;
@@ -88,6 +103,9 @@ ALTER TABLE public.packages
 DROP COLUMN platforms;
 
 ALTER TABLE builds
+DROP COLUMN platform;
+
+ALTER TABLE files
 DROP COLUMN platform;
 "#,
                 )
