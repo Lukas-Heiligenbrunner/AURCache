@@ -63,6 +63,9 @@ async fn start_build(
             build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
 
             let _ = build_model.update(&txn).await;
+            // commit transaction before build logger requires db connection again
+            txn.commit().await.unwrap();
+
             _ = build_logger
                 .append("finished package build".to_string())
                 .await;
@@ -73,11 +76,11 @@ async fn start_build(
 
             build_model.status = Set(Some(BuildStates::FAILED_BUILD));
             let _ = build_model.update(&txn).await;
+            txn.commit().await.unwrap();
 
             _ = build_logger.append(e.to_string()).await;
         }
     };
-    txn.commit().await.unwrap();
 
     // remove build from container map
     _ = job_containers.lock().await.remove(&build_id);

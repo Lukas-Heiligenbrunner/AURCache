@@ -81,7 +81,7 @@ pub async fn build(
     let build_model: builds::Model = build_model_am.try_into()?;
     let docker = establish_docker_connection().await?;
 
-    repull_image(
+    let image_id = repull_image(
         &docker,
         &build_logger,
         BUILDER_IMAGE,
@@ -94,6 +94,7 @@ pub async fn build(
         build_model.id,
         package_model.name.clone(),
         target_platform,
+        image_id,
         package_model.build_flags.split(";").collect(),
     )
     .await?;
@@ -220,6 +221,7 @@ async fn create_build_container(
     build_id: i32,
     name: String,
     arch: String,
+    image_id: String,
     build_flags: Vec<&str>,
 ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
     let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
@@ -240,7 +242,7 @@ async fn create_build_container(
 
     let container_name = format!("aurcache_build_{}_{}", name, build_id);
     let conf = Config {
-        image: Some(BUILDER_IMAGE),
+        image: Some(image_id.as_str()),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
         open_stdin: Some(false),
@@ -328,12 +330,14 @@ fn limits_from_env() -> (u64, i64) {
     (cpu_limit, memory_limit)
 }
 
+/// repull docker image with specified arch
+/// returns image id hash
 async fn repull_image(
     docker: &Docker,
     build_logger: &BuildLogger,
     image: &str,
     arch: String,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     build_logger
         .append(format!("Pulling image: {}", image))
         .await?;
@@ -348,10 +352,13 @@ async fn repull_image(
         None,
     );
 
+    let mut image_id = None;
+
     while let Some(pull_result) = stream.next().await {
         match pull_result {
             Err(e) => build_logger.append(format!("{}", e)).await?,
             Ok(info @ CreateImageInfo { status: None, .. }) => debug!("{:?}", info),
+            Ok(CreateImageInfo { id: Some(id), .. }) => image_id = Some(id),
             Ok(
                 ref info @ CreateImageInfo {
                     status: Some(ref status),
@@ -368,7 +375,8 @@ async fn repull_image(
             },
         }
     }
-    Ok(())
+
+    image_id.ok_or(anyhow!("No Image Id found"))
 }
 
 /// move built files from build container to host and add them to the repo
