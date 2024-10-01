@@ -71,13 +71,13 @@ jobs:
       - name: Build and push ARM64 Docker image for main branch
         if: github.ref == 'refs/heads/master'
         run: |
-          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git .
-          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git-aarch64 .
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:git-aarch64
 
       - name: Build and push ARM64 Docker image for tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} .
-          docker tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
-          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}
-          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest
+          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}-aarch64 .
+          docker tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }} ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest-aarch64
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.extract_tag.outputs.tag }}-aarch64
+          docker push ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest-aarch64
