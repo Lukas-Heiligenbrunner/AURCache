@@ -8,6 +8,10 @@ set -o xtrace
 
 AUR_USER="${1:-ab}"
 
+# Enable the multilib repository
+sed -i '/#\[multilib\]/s/^#//' /etc/pacman.conf
+sed -i '/#Include = \/etc\/pacman.d\/mirrorlist/s/^#//' /etc/pacman.conf
+
 # we're gonna need sudo to use the helper properly
 pacman -Sy --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
