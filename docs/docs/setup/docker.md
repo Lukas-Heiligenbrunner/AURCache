@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # Docker Compose setup
 
 There are two ways the packages can be built:
