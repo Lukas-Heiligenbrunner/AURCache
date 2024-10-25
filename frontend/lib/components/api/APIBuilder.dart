@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:toastification/toastification.dart';
 
 import '../../providers/api/BaseProvider.dart';
 
@@ -62,6 +63,12 @@ class _APIBuilderState<T extends BaseProvider, K, DTO>
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           print(snapshot.error);
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => toastification.show(
+                    title: Text('API Request failed! ${snapshot.error}'),
+                    autoCloseDuration: const Duration(seconds: 5),
+                    type: ToastificationType.error,
+                  ));
         }
         if (snapshot.hasData) {
           return widget.onData(snapshot.data!);

@@ -44,6 +44,7 @@ dependencies:
   visibility_detector: ^0.4.0+2
   flutter_tags_x: any
   url_launcher: any
+  toastification: ^2.3.0
 
 dev_dependencies:
   flutter_test:

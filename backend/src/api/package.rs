@@ -146,7 +146,7 @@ pub async fn package_list(
 #[get("/package/<id>")]
 pub async fn get_package(
     db: &State<DatabaseConnection>,
-    id: u64,
+    id: i32,
     _a: Authenticated,
 ) -> Result<Json<ExtendedPackageModel>, NotFound<String>> {
     let db = db as &DatabaseConnection;
