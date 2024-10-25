@@ -25,8 +25,8 @@ services:
   aurcache:
     image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
     ports:
-      - "8080:8080" # Repository
-      - "8081:8081" # Frontend
+      - "8080:8080" # Frontend
+      - "8081:8081" # Repository
     volumes:
       - ./aurcache/repo:/app/repo
     privileged: true
@@ -62,8 +62,8 @@ services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
         ports:
-        - "8080:8080" # Repository
-        - "8081:8081" # Frontend
+        - "8080:8080" # Frontend
+        - "8081:8081" # Repository
         volumes:
           - ./aurcache/db:/app/db
           - ./aurcache/repo:/app/repo
@@ -81,8 +81,8 @@ services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
         ports:
-        - "8080:8080" # Repository
-        - "8081:8081" # Frontend
+        - "8080:8080" # Frontend
+        - "8081:8081" # Repository
         volumes:
           - ./aurcache/repo:/app/repo
           - /var/run/docker.sock:/var/run/docker.sock
@@ -122,8 +122,8 @@ services:
     aurcache:
         image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
         ports:
-        - "8080:8080" # Repository
-        - "8081:8081" # Frontend
+        - "8080:8080" # Frontend
+        - "8081:8081" # Repository
         volumes:
           - ./aurcache/db:/app/db
           - ./aurcache/repo:/app/repo
