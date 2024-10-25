@@ -2,8 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../constants/color_constants.dart';
-
 class SideMenu extends StatelessWidget {
   const SideMenu({
     super.key,
@@ -22,9 +20,17 @@ class SideMenu extends StatelessWidget {
                   child: Column(
                 mainAxisAlignment: MainAxisAlignment.start,
                 children: [
-                  SizedBox(height: 30,),
-                  SvgPicture.asset('assets/icons/icon.svg',height: 90, width: 00,),
-                  SizedBox(height: 15,),
+                  SizedBox(
+                    height: 30,
+                  ),
+                  SvgPicture.asset(
+                    'assets/icons/icon.svg',
+                    height: 90,
+                    width: 00,
+                  ),
+                  SizedBox(
+                    height: 15,
+                  ),
                   const Text("AURCache")
                 ],
               )),
@@ -49,12 +55,7 @@ class SideMenu extends StatelessWidget {
               press: () {
                 context.go("/aur");
               },
-            ),
-            DrawerListTile(
-              title: "Settings",
-              svgSrc: "assets/icons/menu_setting.svg",
-              press: () {},
-            ),
+            )
           ],
         ),
       ),

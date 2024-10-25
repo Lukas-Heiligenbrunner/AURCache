@@ -1,13 +1,14 @@
 import 'package:aurcache/api/builds.dart';
-import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
 import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/build_log_provider.dart';
 import 'package:aurcache/utils/time_formatter.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../components/confirm_popup.dart';
@@ -267,8 +268,17 @@ class _BuildScreenState extends State<BuildScreen> {
         ),
         ElevatedButton(
           onPressed: () async {
-            final buildid = await API.retryBuild(id: build.id);
-            context.pushReplacement("/build/$buildid");
+            try {
+              final buildid = await API.retryBuild(id: build.id);
+              context.pushReplacement("/build/$buildid");
+            } on DioException catch (e) {
+              print(e);
+              toastification.show(
+                title: Text('Failed to retry build!'),
+                autoCloseDuration: const Duration(seconds: 5),
+                type: ToastificationType.error,
+              );
+            }
           },
           child: const Text(
             "Retry",

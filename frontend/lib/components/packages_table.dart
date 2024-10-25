@@ -1,7 +1,9 @@
 import 'package:aurcache/api/packages.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../constants/color_constants.dart';
@@ -60,7 +62,16 @@ class PackagesTable extends StatelessWidget {
           ),
           onPressed: package.outofdate
               ? () async {
-                  await API.updatePackage(id: package.id);
+                  try {
+                    await API.updatePackage(id: package.id);
+                  } on DioException catch (e) {
+                    toastification.show(
+                      title: Text('Failed to update package!'),
+                      autoCloseDuration: const Duration(seconds: 5),
+                      type: ToastificationType.error,
+                    );
+                  }
+
                   Provider.of<PackagesProvider>(context, listen: false)
                       .refresh(context);
                   Provider.of<BuildsProvider>(context, listen: false)
@@ -105,6 +116,12 @@ class PackagesTable extends StatelessWidget {
                           .refresh(context);
                       Provider.of<StatsProvider>(context, listen: false)
                           .refresh(context);
+                    } else {
+                      toastification.show(
+                        title: Text('Failed to delete Package!'),
+                        autoCloseDuration: const Duration(seconds: 5),
+                        type: ToastificationType.error,
+                      );
                     }
                   }, null);
                 },

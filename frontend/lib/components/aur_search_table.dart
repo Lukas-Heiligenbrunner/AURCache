@@ -1,7 +1,9 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/models/aur_package.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:toastification/toastification.dart';
 import '../api/API.dart';
 import '../constants/color_constants.dart';
 import 'add_package_popup.dart';
@@ -42,7 +44,17 @@ class AurSearchTable extends StatelessWidget {
             onPressed: () async {
               final confirmResult = await showPackageAddPopup(
                   context, package.name, (archs) async {
-                await API.addPackage(name: package.name, selectedArchs: archs);
+                try {
+                  await API.addPackage(
+                      name: package.name, selectedArchs: archs);
+                } on DioException catch (e) {
+                  print(e);
+                  toastification.show(
+                    title: Text('Failed to add package!'),
+                    autoCloseDuration: const Duration(seconds: 5),
+                    type: ToastificationType.error,
+                  );
+                }
                 context.go("/");
               });
               if (!confirmResult) return;
