@@ -1,13 +1,13 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/build_flag_settings.dart';
 import 'package:aurcache/components/platform_settings.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:provider/provider.dart';
+import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../components/api/APIBuilder.dart';
-import '../constants/platforms.dart';
 import '../models/extended_package.dart';
 import '../providers/api/package_provider.dart';
 
@@ -34,11 +34,20 @@ class _PackagesettingsscreenState extends State<Packagesettingsscreen> {
             padding: const EdgeInsets.only(right: 10),
             child: TextButton(
                 onPressed: () async {
-                  await API.patchPackage(
-                      id: widget.pkgID,
-                      build_flags: buildFlags,
-                      platforms: buildPlatforms);
-                  Navigator.pop(context);
+                  try {
+                    await API.patchPackage(
+                        id: widget.pkgID,
+                        build_flags: buildFlags,
+                        platforms: buildPlatforms);
+                    Navigator.pop(context);
+                  } on DioException catch (e) {
+                    print(e);
+                    toastification.show(
+                      title: Text('Failed to save package settings!'),
+                      autoCloseDuration: const Duration(seconds: 5),
+                      type: ToastificationType.error,
+                    );
+                  }
                 },
                 child: const Text("Save")),
           )
