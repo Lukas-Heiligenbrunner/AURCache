@@ -10,5 +10,5 @@ Add the following to your `/etc/pacman.conf` on your target machine to use the r
 # nano /etc/pacman.conf
 [repo]
 SigLevel = Optional TrustAll
-Server = http://<server_ip>:8080/$arch
+Server = http://<server_ip>:8081/$arch
 ```

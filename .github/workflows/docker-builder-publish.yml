@@ -1,9 +1,8 @@
 name: Make helper containers
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "**"
+  schedule:
+    - cron: "0 1 * * 1"   # <=== Change this value
 
 jobs:
   build:
