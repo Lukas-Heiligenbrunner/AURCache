@@ -21,6 +21,6 @@ pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackag
                 .collect();
             Ok(Json(mapped))
         }
-        Err(e) => Err(format!("{}", e)),
+        Err(e) => Err(e.to_string()),
     }
 }

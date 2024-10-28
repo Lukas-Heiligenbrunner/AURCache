@@ -30,22 +30,22 @@ pub struct Desc {
 impl Display for Desc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let desc_lines = vec![
-            self.add_desc_entry("filename", self.filename.clone()),
-            self.add_desc_entry("name", self.name.clone()),
-            self.add_desc_entry("base", self.base.clone()),
-            self.add_desc_entry("version", self.version.clone()),
-            self.add_desc_entry("desc", self.desc.clone()),
+            self.add_desc_entry("filename", &self.filename),
+            self.add_desc_entry("name", &self.name),
+            self.add_desc_entry("base", &self.base),
+            self.add_desc_entry("version", &self.version),
+            self.add_desc_entry("desc", &self.desc),
             self.add_desc_entries("groups", &self.groups),
-            self.add_desc_entry("csize", self.csize.clone()),
-            self.add_desc_entry("isize", self.isize.clone()),
-            self.add_desc_entry("md5sum", self.md5sum.clone()),
-            self.add_desc_entry("sha256sum", self.sha256sum.clone()),
-            self.add_desc_entry("pgpsig", self.pgpsig.clone()),
-            self.add_desc_entry("url", self.url.clone()),
+            self.add_desc_entry("csize", &self.csize),
+            self.add_desc_entry("isize", &self.isize),
+            self.add_desc_entry("md5sum", &self.md5sum),
+            self.add_desc_entry("sha256sum", &self.sha256sum),
+            self.add_desc_entry("pgpsig", &self.pgpsig),
+            self.add_desc_entry("url", &self.url),
             self.add_desc_entries("license", &self.licenses),
-            self.add_desc_entry("arch", self.arch.clone()),
-            self.add_desc_entry("builddate", self.builddate.clone()),
-            self.add_desc_entry("packager", self.packager.clone()),
+            self.add_desc_entry("arch", &self.arch),
+            self.add_desc_entry("builddate", &self.builddate),
+            self.add_desc_entry("packager", &self.packager),
             self.add_desc_entries("replaces", &self.replace),
             self.add_desc_entries("conflicts", &self.conflicts),
             self.add_desc_entries("provides", &self.provides),
@@ -57,8 +57,9 @@ impl Display for Desc {
         write!(f, "{}", desc_lines.join(""))
     }
 }
+
 impl Desc {
-    fn add_desc_entry(&self, header: &str, value: String) -> String {
+    fn add_desc_entry(&self, header: &str, value: &String) -> String {
         if !value.is_empty() {
             format!("%{}%\n{}\n\n", header.to_uppercase(), value)
         } else {
@@ -70,7 +71,7 @@ impl Desc {
         if values.is_empty() || (values.len() == 1 && values.first().unwrap().eq("")) {
             String::new()
         } else {
-            self.add_desc_entry(header, values.join("\n"))
+            self.add_desc_entry(header, &values.join("\n"))
         }
     }
 }
