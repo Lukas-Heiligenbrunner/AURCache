@@ -10,6 +10,10 @@ use rocket_okapi::openapi;
 #[openapi(tag = "aur")]
 #[get("/search?<query>")]
 pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackage>>, String> {
+    if query.len() < 2 {
+        return Err("Query too short".to_string());
+    }
+
     match query_aur(query).await {
         Ok(v) => {
             let mapped = v
