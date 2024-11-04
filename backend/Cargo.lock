@@ -168,9 +168,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.91"
+version = "1.0.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
+checksum = "74f37166d7d48a0284b99dd824694c26119c700b53bf0d1540cdb147dbdaaf13"
 
 [[package]]
 name = "arrayvec"
@@ -727,8 +727,18 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a01d95850c592940db9b8194bc39f4bc0e89dee5c4265e4b1807c34a9aba453c"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.13.4",
+ "darling_macro 0.13.4",
+]
+
+[[package]]
+name = "darling"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f63b86c8a8826a49b8c21f08a2d07338eec8d900540f8630dc76284be802989"
+dependencies = [
+ "darling_core 0.20.10",
+ "darling_macro 0.20.10",
 ]
 
 [[package]]
@@ -746,14 +756,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95133861a8032aaea082871032f5815eb9e98cef03fa916ab4500513994df9e5"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.82",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c972679f83bdf9c42bd905396b6c3588a843a17f0f16dfcfa3e2c5d57441835"
 dependencies = [
- "darling_core",
+ "darling_core 0.13.4",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d336a2a514f6ccccaa3e09b02d41d35330c07ddf03a62165fcec10bb561c7806"
+dependencies = [
+ "darling_core 0.20.10",
+ "quote",
+ "syn 2.0.82",
 ]
 
 [[package]]
@@ -835,18 +869,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d6ef0072f8a535281e4876be788938b528e9a1d43900b82c2569af7da799125"
 
 [[package]]
-name = "educe"
-version = "0.5.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4bd92664bf78c4d3dba9b7cdafce6fa15b13ed3ed16175218196942e99168a8"
-dependencies = [
- "enum-ordinalize",
- "proc-macro2",
- "quote",
- "syn 2.0.82",
-]
-
-[[package]]
 name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,26 +884,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b45de904aa0b010bce2ab45264d0631681847fa7b6f2eaa7dab7619943bc4f59"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "enum-ordinalize"
-version = "4.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fea0dcfa4e54eeb516fe454635a95753ddd39acda650ce703031c6973e315dd5"
-dependencies = [
- "enum-ordinalize-derive",
-]
-
-[[package]]
-name = "enum-ordinalize-derive"
-version = "4.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d28318a75d4aead5c4db25382e8ef717932d0346600cacae6357eb5941bc5ff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.82",
 ]
 
 [[package]]
@@ -2823,7 +2825,7 @@ name = "rocket_okapi_codegen"
 version = "0.8.0"
 source = "git+https://github.com/beyera/okapi.git?branch=beyera/update-rocket-0.5.1#de78ba0c62f555dd17263848c5b13454a8a49ca0"
 dependencies = [
- "darling",
+ "darling 0.13.4",
  "proc-macro2",
  "quote",
  "rocket_http",
@@ -3108,9 +3110,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c4872675cc5d5d399a2a202c60f3a393ec8d3f3307c36adb166517f348e4db5"
+checksum = "d5680a8b686985116607ef5f5af2b1f9e1cc2c228330e93101816a0baa279afa"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3136,9 +3138,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-cli"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aefbd960c9ed7b2dfbab97b11890f5d8c314ad6e2f68c7b36c73ea0967fcc25"
+checksum = "70a157f42d291ccbd6e913b9d9b12dbe2ccbcf0472efc60c8715dd1254083aec"
 dependencies = [
  "chrono",
  "clap",
@@ -3153,9 +3155,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-macros"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85f714906b72e7265c0b2077d0ad8f235dabebda513c92f1326d5d40cef0dd01"
+checksum = "3a239e3bb1b566ad4ec2654d0d193d6ceddfd733487edc9c21a64d214c773910"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
@@ -3167,9 +3169,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-migration"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa7bbfbe3bec60b5925193acc9c98b9f8ae9853f52c8004df0c1ea5193c01ea0"
+checksum = "63ba07e9f2479cc671758fcb1edee42ff2e32c34b3e67ab41d0af1e41f73c74e"
 dependencies = [
  "async-trait",
  "clap",
@@ -3184,13 +3186,12 @@ dependencies = [
 
 [[package]]
 name = "sea-query"
-version = "0.32.0-rc.1"
+version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6fba498acd58ce434669f273505cd07737065472eb541c3f813c7f4ce33993f5"
+checksum = "ff504d13b5e4b52fffcf2fb203d0352a5722fa5151696db768933e41e1e591bb"
 dependencies = [
  "bigdecimal",
  "chrono",
- "educe",
  "inherent",
  "ordered-float",
  "rust_decimal",
@@ -3202,9 +3203,9 @@ dependencies = [
 
 [[package]]
 name = "sea-query-binder"
-version = "0.7.0-rc.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "643c2e6fbba4440ff0075c405d37079a7da1a46892623b1cc8f06e05233eee1b"
+checksum = "b0019f47430f7995af63deda77e238c17323359af241233ec768aba1faea7608"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -3218,10 +3219,11 @@ dependencies = [
 
 [[package]]
 name = "sea-query-derive"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25a82fcb49253abcb45cdcb2adf92956060ec0928635eb21b4f7a6d8f25ab0bc"
+checksum = "9834af2c4bd8c5162f00c89f1701fb6886119a88062cf76fe842ea9e232b9839"
 dependencies = [
+ "darling 0.20.10",
  "heck 0.4.1",
  "proc-macro2",
  "quote",
@@ -3231,9 +3233,9 @@ dependencies = [
 
 [[package]]
 name = "sea-schema"
-version = "0.16.0-rc.1"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2a4ff9e87c4340affbec4f7790d724dcd87e71fcd0ffe2247481843380485aa"
+checksum = "aab1592d17860a9a8584d9b549aebcd06f7bdc3ff615f71752486ba0b05b1e6e"
 dependencies = [
  "futures",
  "sea-query",
@@ -4481,7 +4483,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
