@@ -387,7 +387,7 @@ async fn move_and_add_pkgs(
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
-       bail!("No files found in build directory");
+        bail!("No files found in build directory");
     }
 
     // remove old files from repo and from direcotry

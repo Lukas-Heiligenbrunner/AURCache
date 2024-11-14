@@ -36,8 +36,7 @@ impl BuildLogger {
             loop {
                 interval.tick().await;
                 notifier_clone.notified().await; // Wait for a notification or timer
-                if let Err(e) = Self::flush_buffer(&db_clone, build_id, &buffer_clone)
-                    .await {
+                if let Err(e) = Self::flush_buffer(&db_clone, build_id, &buffer_clone).await {
                     error!("Failed to flush log buffer for build #{}: {}", build_id, e);
                 }
             }
@@ -100,8 +99,6 @@ impl Drop for BuildLogger {
         let buffer = Arc::clone(&self.buffer);
         let build_id = self.build_id;
 
-        tokio::spawn(async move {
-            Self::flush_buffer(&db, build_id, &buffer).await
-        });
+        tokio::spawn(async move { Self::flush_buffer(&db, build_id, &buffer).await });
     }
 }
