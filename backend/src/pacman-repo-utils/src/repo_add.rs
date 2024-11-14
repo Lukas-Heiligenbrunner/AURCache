@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 
 use crate::pkginfo::parser::Pkginfo;
 use crate::repo_database::db::add_to_db_file;
@@ -35,7 +35,7 @@ pub fn repo_add_impl(
             Box::new(decoder)
         }
         _ => {
-            return Err(anyhow!("Unsupported file type"));
+            bail!("Unsupported file type");
         }
     };
     let mut archive = Archive::new(decompressor);
@@ -61,7 +61,7 @@ pub fn repo_add_impl(
 
     if !pkginfo.valid() {
         error!("Invalid package file '{}'.", pkgfile);
-        return Err(anyhow!("Invalid package file"));
+        bail!("Invalid package file");
     }
 
     // Compute base64'd PGP signature

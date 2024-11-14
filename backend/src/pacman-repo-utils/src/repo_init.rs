@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use flate2::read::GzEncoder;
 use flate2::Compression;
 use log::info;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
     if repo_exists(path, name).is_ok() {
-        info!("Pacman repo archive already exists");
+        info!("Pacman repo '{}' archive already exists at path '{}'", name, path.display());
         return Ok(());
     }
 
@@ -28,7 +28,7 @@ fn repo_exists(path: &PathBuf, name: &str) -> anyhow::Result<()> {
         let files = get_archive_names(name, suffix);
         for file in [files.0, files.1] {
             if fs::metadata(&path.join(&file)).is_err() {
-                return Err(anyhow!("{} doesn't exist", file));
+                bail!("{} doesn't exist", file);
             }
         }
     }
