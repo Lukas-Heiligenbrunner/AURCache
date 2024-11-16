@@ -31,7 +31,7 @@ impl BuildLogger {
         let build_id = logger.build_id;
 
         tokio::spawn(async move {
-            let mut interval = time::interval(Duration::from_secs(2));
+            let mut interval = time::interval(Duration::from_millis(1500));
             loop {
                 notifier_clone.notified().await;
                 interval.tick().await;
