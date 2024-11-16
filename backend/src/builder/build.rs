@@ -402,7 +402,7 @@ async fn move_and_add_pkgs(
 
     build_logger
         .append(format!(
-            "Copy {} files from build dir to repo\nDeleting {} old files",
+            "Copy {} files from build dir to repo\nDeleting {} old files\n",
             archive_paths.len(),
             old_files.len()
         ))

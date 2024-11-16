@@ -66,16 +66,19 @@ class _BuildOutputState extends State<BuildOutput> {
     // poll new output only if not finished
     if (widget.build.status == 0) {
       outputTimer = Timer.periodic(const Duration(seconds: 3), (Timer t) async {
+        print("refreshing output");
+        final value = await API.getOutput(
+            buildID: widget.build.id, line: output.split("\n").length);
+        if (value.isNotEmpty) {
+          setState(() {
+            output += "\n$value";
+          });
+        }
+
         final follow =
             Provider.of<BuildLogProvider>(context, listen: false).followLog;
-        if (follow) {
-          print("refreshing output");
-          final value = await API.getOutput(
-              buildID: widget.build.id, line: output.split("\n").length);
-          setState(() {
-            output += value;
-          });
 
+        if (follow) {
           Provider.of<BuildLogProvider>(context, listen: false).go_to_bottom();
         }
       });

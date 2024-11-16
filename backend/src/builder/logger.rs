@@ -25,7 +25,6 @@ impl BuildLogger {
             notifier: Arc::new(Notify::new()),
         };
 
-        // Start a background task for flushing
         let buffer_clone = Arc::clone(&logger.buffer);
         let notifier_clone = Arc::clone(&logger.notifier);
         let db_clone = logger.db.clone();
@@ -34,8 +33,8 @@ impl BuildLogger {
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(2));
             loop {
+                notifier_clone.notified().await;
                 interval.tick().await;
-                notifier_clone.notified().await; // Wait for a notification or timer
                 if let Err(e) = Self::flush_buffer(&db_clone, build_id, &buffer_clone).await {
                     error!("Failed to flush log buffer for build #{}: {}", build_id, e);
                 }
@@ -66,7 +65,6 @@ impl BuildLogger {
         }
 
         let combined_text = buffer.join("");
-        buffer.clear(); // Clear the buffer
 
         let txn = db.begin().await?;
         let mut build: builds::ActiveModel = Builds::find_by_id(build_id)
@@ -86,6 +84,10 @@ impl BuildLogger {
 
         build.update(&txn).await?;
         txn.commit().await?;
+
+        // clear buffer in end in case of db error
+        // buffer is locked until end of scope
+        buffer.clear();
         debug!("Log buffer flushed!");
         Ok(())
     }

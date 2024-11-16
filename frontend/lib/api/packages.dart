@@ -56,8 +56,9 @@ extension PackagesAPI on ApiClient {
     final resp = await getRawClient()
         .post("/package/$id/update", data: {'force': force});
     print(resp.data);
-
-    return resp.data as List<int>;
+    final List<int> ids =
+        (resp.data as List).map((e) => e as int).toList(growable: false);
+    return ids;
   }
 
   Future<bool> deletePackage(int id) async {
