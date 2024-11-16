@@ -1,6 +1,7 @@
 use crate::db::migration::{JoinType, Order};
 use crate::db::prelude::Builds;
 use crate::db::{builds, packages};
+use itertools::Itertools;
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
@@ -39,23 +40,7 @@ pub async fn build_output(
         Some(v) => match startline {
             None => Ok(v),
             Some(startline) => {
-                let output: Vec<String> = v.split('\n').map(|x| x.to_string()).collect();
-                let len = output.len();
-                let len_missing = len as i32 - startline;
-
-                let output = output
-                    .iter()
-                    .rev()
-                    .take(if len_missing > 0 {
-                        len_missing as usize
-                    } else {
-                        0
-                    })
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<_>>();
-
-                let output = output.join("\n");
+                let output = v.lines().skip(startline as usize).join("\n");
                 Ok(output)
             }
         },

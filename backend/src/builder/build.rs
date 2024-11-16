@@ -5,7 +5,7 @@ use crate::db::migration::JoinType;
 use crate::db::prelude::{Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use bollard::container::{
     AttachContainerOptions, Config, CreateContainerOptions, KillContainerOptions, LogOutput,
     WaitContainerOptions,
@@ -51,9 +51,7 @@ pub(crate) async fn prepare_build(
 
     #[cfg(target_arch = "aarch64")]
     if target_platform != "linux/arm64" {
-        return Err(anyhow!(
-            "Unsupported host architecture aarch64 for cross-compile"
-        ));
+        bail!("Unsupported host architecture aarch64 for cross-compile");
     }
 
     Ok((package_model, build_model, target_platform))
@@ -144,7 +142,7 @@ pub async fn build(
                         build_model.id, package_model.name, exit_code
                     ))
                     .await?;
-                return Err(anyhow!("Build failed with exit code: {}", exit_code));
+                bail!("Build failed with exit code: {}", exit_code);
             }
         }
         // timeout branch
@@ -389,7 +387,7 @@ async fn move_and_add_pkgs(
 ) -> anyhow::Result<()> {
     let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
     if archive_paths.is_empty() {
-        return Err(anyhow!("No files found in build directory"));
+        bail!("No files found in build directory");
     }
 
     // remove old files from repo and from direcotry
@@ -404,7 +402,7 @@ async fn move_and_add_pkgs(
 
     build_logger
         .append(format!(
-            "Copy {} files from build dir to repo\nDeleting {} old files",
+            "Copy {} files from build dir to repo\nDeleting {} old files\n",
             archive_paths.len(),
             old_files.len()
         ))

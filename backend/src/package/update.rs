@@ -2,7 +2,7 @@ use crate::aur::api::get_info_by_name;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
@@ -27,7 +27,7 @@ pub async fn package_update(
         .map_err(|_| anyhow!("couldn't download package metadata".to_string()))?;
 
     if !force && pkg_model.version == Some(pkg.version.clone()) {
-        return Err(anyhow!("Package is already up to date"));
+        bail!("Package is already up to date");
     }
 
     pkg_model_active.status = Set(BuildStates::ENQUEUED_BUILD);

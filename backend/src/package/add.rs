@@ -3,7 +3,7 @@ use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use crate::repo::platforms::PLATFORMS;
-use anyhow::anyhow;
+use anyhow::bail;
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
@@ -42,7 +42,7 @@ pub async fn package_add(
         .await?
         .is_some()
     {
-        return Err(anyhow!("Package already exists"));
+        bail!("Package already exists");
     }
 
     let pkg = get_info_by_name(pkg_name).await?;
@@ -98,7 +98,7 @@ pub async fn package_add(
 fn check_platforms(platforms: &Vec<String>) -> anyhow::Result<()> {
     for platform in platforms {
         if !PLATFORMS.contains(&platform.as_str()) {
-            return Err(anyhow!("Invalid platform: {}", platform));
+            bail!("Invalid platform: {}", platform);
         }
     }
     Ok(())

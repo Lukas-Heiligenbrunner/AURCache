@@ -106,15 +106,10 @@ class _PackageScreenState extends State<PackageScreen> {
               "Are you sure to force an Package rebuild?",
               () async {
                 await API.updatePackage(force: true, id: pkg.id);
-
-                context.pop();
-
-                Provider.of<PackagesProvider>(context, listen: false)
-                    .refresh(context);
-                Provider.of<BuildsProvider>(context, listen: false)
-                    .refresh(context);
-                Provider.of<StatsProvider>(context, listen: false)
-                    .refresh(context);
+                if (mounted) {
+                  Provider.of<BuildsProvider>(context, listen: false)
+                      .refresh(context);
+                }
               },
               () {},
             );

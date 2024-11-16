@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::bail;
 use base64::engine::general_purpose;
 use base64::Engine;
 use std::io::{BufRead, Read};
@@ -98,12 +98,12 @@ impl Pkginfo {
             let sigdata = fs::read(&sigfile)?;
             if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
                 eprintln!("Cannot use armored signatures for packages: {}", sigfile);
-                return Err(anyhow!("Invalid package signature file"));
+                bail!("Invalid package signature file");
             }
             let pgpsigsize = sigdata.len();
             if pgpsigsize > 16384 {
                 eprintln!("Invalid package signature file '{}'.", sigfile);
-                return Err(anyhow!("Invalid package signature file"));
+                bail!("Invalid package signature file");
             }
 
             self.pgpsig = general_purpose::STANDARD.encode(&sigdata);
