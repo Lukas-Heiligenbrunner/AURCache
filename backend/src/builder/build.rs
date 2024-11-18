@@ -10,10 +10,7 @@ use crate::db::prelude::{Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use anyhow::{anyhow, bail};
-use bollard::container::{
-    KillContainerOptions,
-    WaitContainerOptions,
-};
+use bollard::container::{KillContainerOptions, WaitContainerOptions};
 use log::{debug, info};
 use rocket::futures::StreamExt;
 use sea_orm::{
@@ -21,10 +18,10 @@ use sea_orm::{
     QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
