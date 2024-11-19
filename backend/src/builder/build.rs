@@ -164,12 +164,8 @@ impl Builder {
 
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         let txn = self.db.begin().await?;
-        self.build_model.end_time = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-        );
+        self.build_model.end_time =
+            Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64);
 
         match result {
             Ok(_) => {
@@ -231,10 +227,11 @@ impl Builder {
 
     pub async fn prepare_build(&mut self) -> anyhow::Result<String> {
         // set build status to building
-        let build = &mut self.build_model;
-        build.status = Some(BuildStates::ACTIVE_BUILD);
-        build.start_time = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64);
-        self.build_model = build
+        self.build_model.status = Some(BuildStates::ACTIVE_BUILD);
+        self.build_model.start_time =
+            Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64);
+        self.build_model = self
+            .build_model
             .clone()
             .into_active_model()
             .save(&self.db)
@@ -242,9 +239,13 @@ impl Builder {
             .try_into_model()?;
 
         // update status to building
-        let package = &mut self.package_model;
-        package.status = BuildStates::ACTIVE_BUILD;
-        self.package_model = package.clone().into_active_model().update(&self.db).await?;
+        self.package_model.status = BuildStates::ACTIVE_BUILD;
+        self.package_model = self
+            .package_model
+            .clone()
+            .into_active_model()
+            .update(&self.db)
+            .await?;
 
         let target_platform = format!("linux/{}", self.build_model.platform);
 
@@ -290,11 +291,14 @@ impl Builder {
             }
         }
 
-        let platform = self.build_model.platform.clone();
         for archive in archive_paths {
             let archive = archive?;
-            let archive_name = archive.file_name().to_str().unwrap().to_string();
-            let pkg_path = format!("./repo/{platform}/{archive_name}");
+            let archive_name = archive
+                .file_name()
+                .to_str()
+                .ok_or(anyhow!("Failed to get string from filename"))?
+                .to_string();
+            let pkg_path = format!("./repo/{}/{}", self.build_model.platform, archive_name);
             fs::copy(archive.path(), pkg_path.clone())?;
             // remove old file from shared path
             fs::remove_file(archive.path())?;
@@ -316,7 +320,7 @@ impl Builder {
             };
 
             let package_file = packages_files::ActiveModel {
-                file_id: Set(file.id.unwrap()),
+                file_id: file.id,
                 package_id: Set(self.package_model.id),
                 ..Default::default()
             };
@@ -324,8 +328,8 @@ impl Builder {
 
             pacman_repo_utils::repo_add(
                 pkg_path.as_str(),
-                format!("./repo/{platform}/repo.db.tar.gz"),
-                format!("./repo/{platform}/repo.files.tar.gz"),
+                format!("./repo/{}/repo.db.tar.gz", self.build_model.platform),
+                format!("./repo/{}/repo.files.tar.gz", self.build_model.platform),
             )?;
             info!("Successfully added '{}' to the repo archive", archive_name);
         }

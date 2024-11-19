@@ -1,9 +1,9 @@
 use crate::builder::build::Builder;
 use crate::db::{builds, packages};
+use log::error;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-
 use tokio::sync::{Mutex, Semaphore};
 
 /// Queue a package for building
@@ -30,9 +30,19 @@ async fn start_build(
     package_model: packages::Model,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) {
-    let mut builder = Builder::new(db.clone(), job_containers, package_model, build_model)
-        .await
-        .unwrap();
+    let mut builder =
+        match Builder::new(db.clone(), job_containers, package_model, build_model).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Error while creating builder: {}", e);
+                return;
+            }
+        };
     let result = builder.build().await;
-    builder.post_build(result).await.unwrap();
+    if let Err(e) = builder.post_build(result).await {
+        error!(
+            "Error in post-build of build #{}: {}",
+            builder.build_model.id, e
+        );
+    }
 }
