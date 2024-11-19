@@ -4,9 +4,9 @@ use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use crate::repo::platforms::PLATFORMS;
 use anyhow::bail;
-use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ColumnTrait, TryIntoModel};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
@@ -87,8 +87,8 @@ pub async fn package_add(
 
         txn.commit().await?;
         let _ = tx.send(Action::Build(
-            Box::from(new_package.clone()),
-            Box::from(new_build),
+            Box::from(new_package.clone().try_into_model()?),
+            Box::from(new_build.try_into_model()?),
         ));
     }
 

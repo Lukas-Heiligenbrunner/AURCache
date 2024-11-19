@@ -3,7 +3,9 @@ use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait, TryIntoModel,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
@@ -67,7 +69,9 @@ pub async fn update_platform(
     let build_id = new_build.id.clone().unwrap();
     txn.commit().await?;
 
-    let pkg_am: packages::ActiveModel = pkg.into();
-    let _ = tx.send(Action::Build(Box::from(pkg_am), Box::from(new_build)));
+    let _ = tx.send(Action::Build(
+        Box::from(pkg),
+        Box::from(new_build.try_into_model()?),
+    ));
     Ok(build_id)
 }

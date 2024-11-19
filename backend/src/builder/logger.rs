@@ -44,14 +44,13 @@ impl BuildLogger {
         logger
     }
 
-    pub async fn append(&self, text: String) -> anyhow::Result<()> {
+    pub async fn append(&self, text: String) {
         debug!("{}", text);
 
         // Add the text to the buffer
         let mut buffer = self.buffer.lock().await;
         buffer.push(text);
         self.notifier.notify_one(); // Notify the background task
-        Ok(())
     }
 
     async fn flush_buffer(
