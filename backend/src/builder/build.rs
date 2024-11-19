@@ -90,7 +90,7 @@ impl Builder {
         let build_logger2 = self.logger.clone();
         // start listening to container before starting it
         tokio::spawn(async move {
-            _ = Self::monitor_build_output(&build_logger2, &docker2, id2.clone()).await;
+            _ = Self::monitor_build_output(&build_logger2, &docker2, id2).await;
         });
 
         // start build container
@@ -108,11 +108,25 @@ impl Builder {
             "Build #{}: awaiting build container to exit",
             self.build_model.id
         );
+        self.wait_container_exit(&id).await?;
+        debug!("Build #{}: docker container exited successfully", id);
+
+        // move built tar.gz archives to host and repo-add
+        debug!("Build {}: Move built packages to repo", self.build_model.id);
+        self.move_and_add_pkgs(host_active_build_path.clone())
+            .await?;
+        // remove active build dir
+        debug!("Build {}: Remove shared build folder", self.build_model.id);
+        fs::remove_dir(host_active_build_path)?;
+        Ok(())
+    }
+
+    async fn wait_container_exit(&self, container_id: &str) -> anyhow::Result<()> {
         let build_result = timeout(
             job_timeout_from_env(),
             self.docker
                 .wait_container(
-                    &id,
+                    container_id,
                     Some(WaitContainerOptions {
                         condition: "not-running",
                     }),
@@ -136,6 +150,7 @@ impl Builder {
                         .await;
                     bail!("Build failed with exit code: {}", exit_code);
                 }
+                Ok(())
             }
             // timeout branch
             Err(_) => {
@@ -147,19 +162,14 @@ impl Builder {
                     .await;
                 // kill build container
                 self.docker
-                    .kill_container(&id, Some(KillContainerOptions { signal: "SIGKILL" }))
+                    .kill_container(
+                        container_id,
+                        Some(KillContainerOptions { signal: "SIGKILL" }),
+                    )
                     .await?;
+                Ok(())
             }
         }
-
-        // move built tar.gz archives to host and repo-add
-        debug!("Build {}: Move built packages to repo", self.build_model.id);
-        self.move_and_add_pkgs(host_active_build_path.clone())
-            .await?;
-        // remove active build dir
-        debug!("Build {}: Remove shared build folder", self.build_model.id);
-        fs::remove_dir(host_active_build_path)?;
-        Ok(())
     }
 
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
