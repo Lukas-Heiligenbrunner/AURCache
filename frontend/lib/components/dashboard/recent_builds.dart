@@ -1,10 +1,12 @@
+import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/builds_table.dart';
-import 'package:aurcache/models/build.dart';
-import 'package:aurcache/components/api/APIBuilder.dart';
-import 'package:aurcache/providers/api/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import '../../api/API.dart';
 import '../../constants/color_constants.dart';
+import '../../models/build.dart';
+import '../api/ApiBuilder.dart';
 import '../table_info.dart';
 
 class RecentBuilds extends StatelessWidget {
@@ -12,6 +14,9 @@ class RecentBuilds extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final apiController =
+        Provider.of<APIController<List<Build>>>(context, listen: false);
+
     return Container(
       padding: const EdgeInsets.all(defaultPadding),
       decoration: const BoxDecoration(
@@ -25,11 +30,9 @@ class RecentBuilds extends StatelessWidget {
             "Recent Builds",
             style: Theme.of(context).textTheme.titleMedium,
           ),
-          APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
-            key: const Key("Builds on dashboard"),
-            dto: BuildsDTO(limit: 10),
-            interval: const Duration(seconds: 10),
+          APIBuilder(
             onLoad: () => const Text("no data"),
+            controller: apiController,
             onData: (t) {
               if (t.isEmpty) {
                 return const TableInfo(title: "You have no builds yet");
@@ -52,6 +55,7 @@ class RecentBuilds extends StatelessWidget {
                 );
               }
             },
+            api: () => API.listAllBuilds(limit: 10),
           ),
         ],
       ),

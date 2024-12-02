@@ -40,7 +40,7 @@ final appRouter = GoRouter(
         ),
         GoRoute(
           path: '/packages',
-          builder: (context, state) => const PackagesScreen(),
+          builder: (context, state) => PackagesScreen(),
         ),
         GoRoute(
           path: '/aur',

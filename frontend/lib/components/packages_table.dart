@@ -1,4 +1,5 @@
 import 'package:aurcache/api/packages.dart';
+import 'package:aurcache/components/api/ApiBuilder.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -7,12 +8,9 @@ import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../constants/color_constants.dart';
+import '../models/build.dart';
 import '../models/simple_packge.dart';
-import '../providers/api/builds_provider.dart';
-import '../providers/api/packages_provider.dart';
-import '../providers/api/stats_provider.dart';
 import '../utils/package_color.dart';
-import 'confirm_popup.dart';
 
 class PackagesTable extends StatelessWidget {
   const PackagesTable({super.key, required this.data});
@@ -71,13 +69,22 @@ class PackagesTable extends StatelessWidget {
                       type: ToastificationType.error,
                     );
                   }
+                  final apiController =
+                      Provider.of<APIController<List<SimplePackage>>>(context,
+                          listen: false);
+                  apiController.refresh();
 
-                  Provider.of<PackagesProvider>(context, listen: false)
-                      .refresh(context);
-                  Provider.of<BuildsProvider>(context, listen: false)
-                      .refresh(context);
-                  Provider.of<StatsProvider>(context, listen: false)
-                      .refresh(context);
+                  final buildsController =
+                      Provider.of<APIController<List<Build>>>(context,
+                          listen: false);
+                  buildsController.refresh();
+
+                  //Provider.of<PackagesProvider>(context, listen: false)
+                  //    .refresh(context);
+                  //Provider.of<BuildsProvider>(context, listen: false)
+                  //    .refresh(context);
+                  //Provider.of<StatsProvider>(context, listen: false)
+                  //    .refresh(context);
                 }
               : null,
         )),
@@ -91,42 +98,11 @@ class PackagesTable extends StatelessWidget {
           },
         )),
         DataCell(
-          Row(
-            children: [
-              TextButton(
-                child: const Text('View', style: TextStyle(color: greenColor)),
-                onPressed: () {
-                  context.push("/package/${package.id}");
-                },
-              ),
-              const SizedBox(
-                width: 6,
-              ),
-              TextButton(
-                child: const Text("Delete",
-                    style: TextStyle(color: Colors.redAccent)),
-                onPressed: () async {
-                  await showConfirmationDialog(context, "Delete Package",
-                      "Are you sure to delete this Package?", () async {
-                    final succ = await API.deletePackage(package.id);
-                    if (succ) {
-                      Provider.of<PackagesProvider>(context, listen: false)
-                          .refresh(context);
-                      Provider.of<BuildsProvider>(context, listen: false)
-                          .refresh(context);
-                      Provider.of<StatsProvider>(context, listen: false)
-                          .refresh(context);
-                    } else {
-                      toastification.show(
-                        title: Text('Failed to delete Package!'),
-                        autoCloseDuration: const Duration(seconds: 5),
-                        type: ToastificationType.error,
-                      );
-                    }
-                  }, null);
-                },
-              ),
-            ],
+          TextButton(
+            child: const Text('View', style: TextStyle(color: greenColor)),
+            onPressed: () {
+              context.push("/package/${package.id}");
+            },
           ),
         ),
       ],
