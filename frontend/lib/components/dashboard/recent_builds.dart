@@ -33,6 +33,7 @@ class RecentBuilds extends StatelessWidget {
           APIBuilder(
             onLoad: () => const Text("no data"),
             controller: apiController,
+            refreshOnComeback: true,
             onData: (t) {
               if (t.isEmpty) {
                 return const TableInfo(title: "You have no builds yet");

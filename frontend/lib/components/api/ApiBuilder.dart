@@ -26,9 +26,12 @@ class APIBuilder<T> extends StatefulWidget {
       required this.onLoad,
       required this.onData,
       required this.api,
-      this.controller});
+      this.controller,
+      this.refreshOnComeback = false});
 
   final Duration? interval;
+  final bool refreshOnComeback;
+
   final Widget Function() onLoad;
   final Widget Function(T data) onData;
   final Future<T> Function() api;
@@ -59,32 +62,37 @@ class _APIBuilderState<T> extends State<APIBuilder<T>> {
 
   @override
   Widget build(BuildContext context) {
-    return VisibilityDetector(
-      key: widget.key ?? Key(hashCode.toString()),
-      onVisibilityChanged: (VisibilityInfo info) {
-        if (info.visibleFraction > 0) {
-          _refreshData();
+    final builder = FutureBuilder<T>(
+      future: _futureData,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          print(snapshot.error);
+          WidgetsBinding.instance
+              .addPostFrameCallback((_) => toastification.show(
+                    title: Text('API Request failed! ${snapshot.error}'),
+                    autoCloseDuration: const Duration(seconds: 5),
+                    type: ToastificationType.error,
+                  ));
+        }
+        if (snapshot.hasData) {
+          return widget.onData(snapshot.data!);
+        } else {
+          return widget.onLoad();
         }
       },
-      child: FutureBuilder<T>(
-        future: _futureData,
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            print(snapshot.error);
-            WidgetsBinding.instance
-                .addPostFrameCallback((_) => toastification.show(
-                      title: Text('API Request failed! ${snapshot.error}'),
-                      autoCloseDuration: const Duration(seconds: 5),
-                      type: ToastificationType.error,
-                    ));
-          }
-          if (snapshot.hasData) {
-            return widget.onData(snapshot.data!);
-          } else {
-            return widget.onLoad();
-          }
-        },
-      ),
     );
+
+    if (widget.refreshOnComeback) {
+      return VisibilityDetector(
+          key: widget.key ?? Key(hashCode.toString()),
+          onVisibilityChanged: (VisibilityInfo info) {
+            if (info.visibleFraction > 0) {
+              _refreshData();
+            }
+          },
+          child: builder);
+    } else {
+      return builder;
+    }
   }
 }

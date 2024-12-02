@@ -10,7 +10,7 @@ import '../api/ApiBuilder.dart';
 import '../table_info.dart';
 
 class YourPackages extends StatelessWidget {
-  YourPackages({super.key});
+  const YourPackages({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -32,6 +32,7 @@ class YourPackages extends StatelessWidget {
           ),
           APIBuilder(
             controller: apiController,
+            refreshOnComeback: true,
             onData: (data) {
               if (data.isEmpty) {
                 return const TableInfo(title: "You have no packages yet");
