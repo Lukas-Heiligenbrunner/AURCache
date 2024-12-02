@@ -1,3 +1,5 @@
+import 'package:aurcache/components/dashboard/header.dart';
+import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -166,7 +168,12 @@ class DrawerListTile extends StatelessWidget {
     return Material(
       color: active ? Color(0xff0059FF) : Colors.transparent,
       child: InkWell(
-        onTap: press,
+        onTap: () {
+          if (context.mobile) {
+            context.pop();
+          }
+          press();
+        },
         child: Padding(
           padding:
               const EdgeInsets.only(left: 20, right: 15, bottom: 10, top: 10),

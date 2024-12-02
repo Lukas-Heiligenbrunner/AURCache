@@ -16,7 +16,9 @@ class Header extends StatelessWidget {
         if (!context.desktop)
           IconButton(
             icon: const Icon(Icons.menu),
-            onPressed: () {},
+            onPressed: () {
+              Scaffold.of(context).openDrawer();
+            },
           ),
         if (!context.mobile)
           Column(
