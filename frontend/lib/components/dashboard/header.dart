@@ -13,38 +13,37 @@ class Header extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        if (!Responsive.isDesktop(context))
+        if (!context.desktop)
           IconButton(
             icon: const Icon(Icons.menu),
             onPressed: () {},
           ),
-        if (!Responsive.isMobile(context))
+        if (!context.mobile)
           Column(
             mainAxisAlignment: MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                "Hello, Arch User 👋",
+                "Hi, Arch User :)",
                 style: Theme.of(context).textTheme.titleLarge,
               ),
               const SizedBox(
                 height: 8,
               ),
               Text(
-                "Welcome to your Build server",
+                "Welcome to your personal build server",
                 style: Theme.of(context).textTheme.titleSmall,
               ),
             ],
           ),
-        if (!Responsive.isMobile(context))
-          Spacer(flex: Responsive.isDesktop(context) ? 2 : 1),
+        if (!context.mobile) Spacer(flex: context.desktop ? 2 : 1),
         Expanded(child: SearchField()),
         ElevatedButton.icon(
           style: TextButton.styleFrom(
             backgroundColor: darkgreenColor,
             padding: EdgeInsets.symmetric(
               horizontal: defaultPadding * 1.5,
-              vertical: defaultPadding / (Responsive.isMobile(context) ? 2 : 1),
+              vertical: defaultPadding / (context.mobile ? 2 : 1),
             ),
           ),
           onPressed: () {

@@ -54,9 +54,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               const YourPackages(),
                               const SizedBox(height: defaultPadding),
                               const RecentBuilds(),
-                              if (Responsive.isMobile(context))
+                              if (context.mobile)
                                 const SizedBox(height: defaultPadding),
-                              if (Responsive.isMobile(context))
+                              if (context.mobile)
                                 SidePanel(
                                     nrSuccessfulBuilds: stats.successful_builds,
                                     nrfailedbuilds: stats.failed_builds,
@@ -64,10 +64,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             ],
                           ),
                         ),
-                        if (!Responsive.isMobile(context))
+                        if (!context.mobile)
                           const SizedBox(width: defaultPadding),
                         // On Mobile means if the screen is less than 850 we dont want to show it
-                        if (!Responsive.isMobile(context))
+                        if (!context.mobile)
                           Expanded(
                             flex: 2,
                             child: SidePanel(

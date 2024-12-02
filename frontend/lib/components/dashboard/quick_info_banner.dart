@@ -23,15 +23,13 @@ class QuickInfoBanner extends StatelessWidget {
       children: [
         const SizedBox(height: defaultPadding),
         Responsive(
-          mobile: _buildBanner(
-            crossAxisCount: _size.width < 650 ? 2 : 4,
-            childAspectRatio: _size.width < 650 ? 1.2 : 1,
-          ),
-          tablet: _buildBanner(),
-          desktop: _buildBanner(
-            childAspectRatio: _size.width < 1400 ? 2.75 : 2.75,
-          ),
-        ),
+            mobileChild: _buildBanner(
+              crossAxisCount: _size.width < 650 ? 2 : 4,
+              childAspectRatio: _size.width < 650 ? 1.2 : 1,
+            ),
+            desktopChild: _buildBanner(
+              childAspectRatio: _size.width < 1400 ? 2.75 : 2.75,
+            ))
       ],
     );
   }
