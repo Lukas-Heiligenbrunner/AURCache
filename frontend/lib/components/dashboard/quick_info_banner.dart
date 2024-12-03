@@ -10,9 +10,9 @@ import '../../models/stats.dart';
 
 class QuickInfoBanner extends StatelessWidget {
   const QuickInfoBanner({
-    Key? key,
+    super.key,
     required this.stats,
-  }) : super(key: key);
+  });
 
   final Stats stats;
 
