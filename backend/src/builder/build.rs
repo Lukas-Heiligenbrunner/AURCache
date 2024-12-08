@@ -160,6 +160,7 @@ impl Builder {
             Ok(v) => {
                 let t = v.ok_or(anyhow!("Failed to get build result"))??;
                 let exit_code = t.status_code;
+                debug!("Build container exited with code: {}", exit_code);
                 if exit_code > 0 {
                     self.logger
                         .append(format!(
