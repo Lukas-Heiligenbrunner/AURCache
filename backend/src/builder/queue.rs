@@ -5,6 +5,7 @@ use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
+use crate::utils::db::ActiveValueExt;
 
 /// Queue a package for building
 pub(crate) async fn queue_package(
@@ -42,7 +43,7 @@ async fn start_build(
     if let Err(e) = builder.post_build(result).await {
         error!(
             "Error in post-build of build #{}: {}",
-            builder.build_model.id, e
+            builder.build_model.id.get().unwrap(), e
         );
     }
 }

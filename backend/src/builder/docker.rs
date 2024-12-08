@@ -8,10 +8,11 @@ use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions,
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
 use bollard::Docker;
-use itertools::Itertools;
 use log::{debug, trace};
 use rocket::futures::StreamExt;
 use std::path::PathBuf;
+use itertools::Itertools;
+use crate::utils::db::ActiveValueExt;
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -72,24 +73,26 @@ impl Builder {
         arch: String,
         image_id: String,
     ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
-        let name = self.package_model.name.clone();
+        let name = self.package_model.name.get()?;
         let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
-        let build_flags = self.package_model.build_flags.clone().split(";").join(" ");
+        let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
         let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
 
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
+        let build_cmd = format!("paru {} {}", build_flags, name);
+        debug!("Build command: {}", build_cmd);
         let cmd = format!(
-            "cat <<EOF > {}\n{}\nEOF\nparu {} {}",
-            makepkg_config_path, makepkg_config, build_flags, name
+            "cat <<EOF > {}\n{}\nEOF\n{}",
+            makepkg_config_path, makepkg_config, build_cmd
         );
 
         let (cpu_limit, memory_limit) = limits_from_env();
 
-        let build_id = self.build_model.id;
+        let build_id = self.build_model.id.get()?;
         let container_name = format!("aurcache_build_{}_{}", name, build_id);
         let conf = Config {
             image: Some(image_id.as_str()),
