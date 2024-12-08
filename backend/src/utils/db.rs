@@ -7,7 +7,8 @@ pub trait ActiveValueExt<T> {
 
 impl<T> ActiveValueExt<T> for ActiveValue<T>
 where
-    T: Clone, sea_orm::Value: From<T>
+    T: Clone,
+    sea_orm::Value: From<T>,
 {
     fn get(&self) -> anyhow::Result<&T> {
         match self {

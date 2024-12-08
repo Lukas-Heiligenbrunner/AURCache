@@ -6,12 +6,16 @@ use crate::db::migration::JoinType;
 use crate::db::prelude::{Files, PackagesFiles};
 use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
+use crate::utils::db::ActiveValueExt;
 use anyhow::{anyhow, bail};
 use bollard::container::{KillContainerOptions, WaitContainerOptions};
 use bollard::Docker;
 use log::{debug, info};
 use rocket::futures::StreamExt;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, ModelTrait,
+    QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -19,7 +23,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use crate::utils::db::ActiveValueExt;
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
@@ -65,23 +68,31 @@ impl Builder {
         debug!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
-        debug!("Build #{}: Repull builder image", self.build_model.id.get()?);
+        debug!(
+            "Build #{}: Repull builder image",
+            self.build_model.id.get()?
+        );
         let image_id = self
             .repull_image(BUILDER_IMAGE, target_platform.clone())
             .await?;
         debug!(
             "Build #{}: Image pulled with id: {}",
-            self.build_model.id.get()?, image_id
+            self.build_model.id.get()?,
+            image_id
         );
 
-        debug!("Build #{}: Creating build container", self.build_model.id.get()?);
+        debug!(
+            "Build #{}: Creating build container",
+            self.build_model.id.get()?
+        );
         let (create_info, host_active_build_path) = self
             .create_build_container(target_platform, image_id)
             .await?;
         let id = create_info.id;
         debug!(
             "Build #{}: build container created with id: {}",
-            self.build_model.id.get()?, id
+            self.build_model.id.get()?,
+            id
         );
 
         let docker2 = self.docker.clone();
@@ -93,14 +104,17 @@ impl Builder {
         });
 
         // start build container
-        debug!("Build #{}: starting build container", self.build_model.id.get()?);
+        debug!(
+            "Build #{}: starting build container",
+            self.build_model.id.get()?
+        );
         self.docker.start_container::<String>(&id, None).await?;
 
         // insert container id to container map
         self.job_containers
             .lock()
             .await
-            .insert(self.build_model.id.get()?.clone(), id.clone());
+            .insert(*self.build_model.id.get()?, id.clone());
 
         // monitor build output
         debug!(
@@ -111,11 +125,17 @@ impl Builder {
         debug!("Build #{}: docker container exited successfully", id);
 
         // move built tar.gz archives to host and repo-add
-        debug!("Build {}: Move built packages to repo", self.build_model.id.get()?);
+        debug!(
+            "Build {}: Move built packages to repo",
+            self.build_model.id.get()?
+        );
         self.move_and_add_pkgs(host_active_build_path.clone())
             .await?;
         // remove active build dir
-        debug!("Build {}: Remove shared build folder", self.build_model.id.get()?);
+        debug!(
+            "Build {}: Remove shared build folder",
+            self.build_model.id.get()?
+        );
         fs::remove_dir(host_active_build_path)?;
         Ok(())
     }
@@ -144,7 +164,9 @@ impl Builder {
                     self.logger
                         .append(format!(
                             "Build #{} failed for package '{:?}', exit code: {}",
-                            self.build_model.id.get()?, self.package_model.name, exit_code
+                            self.build_model.id.get()?,
+                            self.package_model.name,
+                            exit_code
                         ))
                         .await;
                     bail!("Build failed with exit code: {}", exit_code);
@@ -156,7 +178,8 @@ impl Builder {
                 self.logger
                     .append(format!(
                         "Build #{} timed out for package '{:?}'",
-                        self.build_model.id.get()?, self.package_model.name
+                        self.build_model.id.get()?,
+                        self.package_model.name
                     ))
                     .await;
                 // kill build container
@@ -173,26 +196,20 @@ impl Builder {
 
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         let txn = self.db.begin().await?;
-        self.build_model.end_time =
-            Set(Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64));
+        self.build_model.end_time = Set(Some(
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+        ));
 
         match result {
             Ok(_) => {
                 // update package success status
                 self.package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
                 self.package_model.out_of_date = Set(false as i32);
-                self
-                    .package_model.clone()
-                    .update(&txn)
-                    .await?;
+                self.package_model = self.package_model.clone().save(&txn).await?;
 
                 self.build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
 
-                self
-                    .build_model
-                    .clone()
-                    .update(&txn)
-                    .await?;
+                self.build_model = self.build_model.clone().save(&txn).await?;
                 // commit transaction before build logger requires db connection again
                 txn.commit().await?;
 
@@ -202,19 +219,10 @@ impl Builder {
             }
             Err(e) => {
                 self.package_model.status = Set(BuildStates::FAILED_BUILD);
-                self.package_model = self
-                    .package_model
-                    .clone()
-                    .save(&txn)
-                    .await?;
+                self.package_model = self.package_model.clone().save(&txn).await?;
 
                 self.build_model.status = Set(Some(BuildStates::FAILED_BUILD));
-                // todo also use save and update struct field
-                self
-                    .build_model
-                    .clone()
-                    .update(&txn)
-                    .await?;
+                self.build_model = self.build_model.clone().save(&txn).await?;
                 txn.commit().await?;
 
                 self.logger
@@ -237,20 +245,14 @@ impl Builder {
         println!("build_model: {:?}", self.build_model);
         // set build status to building
         self.build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
-        self.build_model.start_time = Set(Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64));
-        self.build_model = self
-            .build_model
-            .clone()
-            .save(&self.db)
-            .await?;
+        self.build_model.start_time = Set(Some(
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+        ));
+        self.build_model = self.build_model.clone().save(&self.db).await?;
 
         // update status to building
         self.package_model.status = Set(BuildStates::ACTIVE_BUILD);
-        self.package_model = self
-            .package_model
-            .clone()
-            .save(&self.db)
-            .await?;
+        self.package_model = self.package_model.clone().save(&self.db).await?;
 
         let target_platform = format!("linux/{}", self.build_model.platform.get()?);
 
@@ -303,7 +305,11 @@ impl Builder {
                 .to_str()
                 .ok_or(anyhow!("Failed to get string from filename"))?
                 .to_string();
-            let pkg_path = format!("./repo/{}/{}", self.build_model.platform.get()?, archive_name);
+            let pkg_path = format!(
+                "./repo/{}/{}",
+                self.build_model.platform.get()?,
+                archive_name
+            );
             fs::copy(archive.path(), pkg_path.clone())?;
             // remove old file from shared path
             fs::remove_file(archive.path())?;
@@ -326,7 +332,7 @@ impl Builder {
 
             let package_file = packages_files::ActiveModel {
                 file_id: file.id,
-                package_id: Set(self.package_model.id.get()?.clone()),
+                package_id: Set(*self.package_model.id.get()?),
                 ..Default::default()
             };
             package_file.save(&txn).await?;
@@ -334,7 +340,10 @@ impl Builder {
             pacman_repo_utils::repo_add(
                 pkg_path.as_str(),
                 format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
-                format!("./repo/{}/repo.files.tar.gz", self.build_model.platform.get()?),
+                format!(
+                    "./repo/{}/repo.files.tar.gz",
+                    self.build_model.platform.get()?
+                ),
             )?;
             info!("Successfully added '{}' to the repo archive", archive_name);
         }

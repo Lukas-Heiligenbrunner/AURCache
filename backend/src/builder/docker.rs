@@ -3,16 +3,16 @@ use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
 use crate::builder::path_utils::create_build_paths;
+use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions, LogOutput};
 use bollard::image::CreateImageOptions;
 use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
 use bollard::Docker;
+use itertools::Itertools;
 use log::{debug, trace};
 use rocket::futures::StreamExt;
 use std::path::PathBuf;
-use itertools::Itertools;
-use crate::utils::db::ActiveValueExt;
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
