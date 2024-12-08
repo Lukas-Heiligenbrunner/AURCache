@@ -1,7 +1,6 @@
+import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/models/extended_package.dart';
-import 'package:aurcache/providers/api/builds_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
@@ -9,13 +8,10 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/API.dart';
+import '../components/api/ApiBuilder.dart';
 import '../components/builds_table.dart';
 import '../components/confirm_popup.dart';
 import '../constants/color_constants.dart';
-import '../models/build.dart';
-import '../providers/api/package_provider.dart';
-import '../providers/api/packages_provider.dart';
-import '../providers/api/stats_provider.dart';
 
 class PackageScreen extends StatefulWidget {
   const PackageScreen({super.key, required this.pkgID});
@@ -31,66 +27,59 @@ class _PackageScreenState extends State<PackageScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(),
-      body: MultiProvider(
-        providers: [
-          ChangeNotifierProvider<BuildsProvider>(
-              create: (_) => BuildsProvider()),
-          ChangeNotifierProvider<PackageProvider>(
-              create: (_) => PackageProvider()),
-        ],
-        child: APIBuilder<PackageProvider, ExtendedPackage, PackageDTO>(
-            dto: PackageDTO(pkgID: widget.pkgID),
-            onLoad: () => const Text("loading"),
-            onData: (pkg) {
-              return Padding(
-                padding: const EdgeInsets.all(defaultPadding),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      body: APIBuilder(
+        onLoad: () => const Text("loading"),
+        onData: (pkg) {
+          return Padding(
+            padding: const EdgeInsets.all(defaultPadding),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Row(
-                          children: [
-                            Container(
-                              margin: const EdgeInsets.only(left: 15),
-                              child: Text(
-                                pkg.name,
-                                style: const TextStyle(fontSize: 32),
-                              ),
-                            ),
-                            IconButton(
-                                onPressed: () async {
-                                  await launchUrl(
-                                    Uri.parse(pkg.aur_url!),
-                                    webOnlyWindowName: '_blank',
-                                  );
-                                },
-                                icon: const Icon(Icons.link))
-                          ],
-                        ),
-                        _buildTopActionButtons(pkg)
-                      ],
-                    ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisAlignment: MainAxisAlignment.start,
-                            children: [_buildMainBody(pkg)],
+                        Container(
+                          margin: const EdgeInsets.only(left: 15),
+                          child: Text(
+                            pkg.name,
+                            style: const TextStyle(fontSize: 32),
                           ),
                         ),
-                        _buildSideBar(pkg),
+                        IconButton(
+                            onPressed: () async {
+                              await launchUrl(
+                                Uri.parse(pkg.aur_url!),
+                                webOnlyWindowName: '_blank',
+                              );
+                            },
+                            icon: const Icon(Icons.link))
                       ],
                     ),
+                    _buildTopActionButtons(pkg)
                   ],
                 ),
-              );
-            }),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.start,
+                        children: [_buildMainBody(pkg)],
+                      ),
+                    ),
+                    _buildSideBar(pkg),
+                  ],
+                ),
+              ],
+            ),
+          );
+        },
+        api: () => API.getPackage(widget.pkgID),
       ),
     );
   }
@@ -107,8 +96,8 @@ class _PackageScreenState extends State<PackageScreen> {
               () async {
                 await API.updatePackage(force: true, id: pkg.id);
                 if (mounted) {
-                  Provider.of<BuildsProvider>(context, listen: false)
-                      .refresh(context);
+                  // Provider.of<BuildsProvider>(context, listen: false)
+                  //   .refresh(context);
                 }
               },
               () {},
@@ -133,12 +122,12 @@ class _PackageScreenState extends State<PackageScreen> {
                 if (succ) {
                   context.pop();
 
-                  Provider.of<PackagesProvider>(context, listen: false)
+                  /*Provider.of<PackagesProvider>(context, listen: false)
                       .refresh(context);
                   Provider.of<BuildsProvider>(context, listen: false)
                       .refresh(context);
                   Provider.of<StatsProvider>(context, listen: false)
-                      .refresh(context);
+                      .refresh(context);*/
                 }
               },
               () {},
@@ -313,14 +302,13 @@ class _PackageScreenState extends State<PackageScreen> {
               ),
               SizedBox(
                 width: double.infinity,
-                child: APIBuilder<BuildsProvider, List<Build>, BuildsDTO>(
-                  key: const Key("Builds on Package info"),
-                  dto: BuildsDTO(pkgID: pkg.id),
+                child: APIBuilder(
                   interval: const Duration(seconds: 5),
                   onData: (data) {
                     return BuildsTable(data: data);
                   },
                   onLoad: () => const Text("no data"),
+                  api: () => API.listAllBuilds(pkgID: pkg.id),
                 ),
               ),
             ],
