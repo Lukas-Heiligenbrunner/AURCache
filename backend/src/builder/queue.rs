@@ -1,18 +1,16 @@
-use crate::builder::build::build;
-use crate::builder::logger::BuildLogger;
-use crate::builder::types::BuildStates;
-use crate::db::builds::ActiveModel;
+use crate::builder::build::Builder;
 use crate::db::{builds, packages};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, Set, TransactionTrait};
+use crate::utils::db::ActiveValueExt;
+use log::error;
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 
 /// Queue a package for building
 pub(crate) async fn queue_package(
-    package_model: Box<packages::ActiveModel>,
-    build_model: Box<ActiveModel>,
+    package_model: Box<packages::Model>,
+    build_model: Box<builds::Model>,
     db: DatabaseConnection,
     semaphore: Arc<Semaphore>,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
@@ -28,60 +26,25 @@ pub(crate) async fn queue_package(
 }
 
 async fn start_build(
-    mut build_model: builds::ActiveModel,
+    build_model: builds::Model,
     db: &DatabaseConnection,
-    mut package_model: packages::ActiveModel,
+    package_model: packages::Model,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
 ) {
-    let build_id = build_model.id.clone().unwrap();
-    let build_logger = BuildLogger::new(build_id, db.clone());
-
-    let build_result = build(
-        build_model.clone(),
-        db,
-        package_model.clone(),
-        job_containers.clone(),
-        build_logger.clone(),
-    )
-    .await;
-
-    let txn = db.begin().await.unwrap();
-    build_model.end_time = Set(Some(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    ));
-
-    match build_result {
-        Ok(_) => {
-            // update package success status
-            package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
-            package_model.out_of_date = Set(false as i32);
-            _ = package_model.update(&txn).await;
-
-            build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
-
-            let _ = build_model.update(&txn).await;
-            // commit transaction before build logger requires db connection again
-            txn.commit().await.unwrap();
-
-            _ = build_logger
-                .append("finished package build".to_string())
-                .await;
-        }
-        Err(e) => {
-            package_model.status = Set(BuildStates::FAILED_BUILD);
-            _ = package_model.update(&txn).await;
-
-            build_model.status = Set(Some(BuildStates::FAILED_BUILD));
-            let _ = build_model.update(&txn).await;
-            txn.commit().await.unwrap();
-
-            _ = build_logger.append(e.to_string()).await;
-        }
-    };
-
-    // remove build from container map
-    _ = job_containers.lock().await.remove(&build_id);
+    let mut builder =
+        match Builder::new(db.clone(), job_containers, package_model, build_model).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Error while creating builder: {}", e);
+                return;
+            }
+        };
+    let result = builder.build().await;
+    if let Err(e) = builder.post_build(result).await {
+        error!(
+            "Error in post-build of build #{}: {}",
+            builder.build_model.id.get().unwrap(),
+            e
+        );
+    }
 }
