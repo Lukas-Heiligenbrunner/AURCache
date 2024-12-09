@@ -13,7 +13,7 @@ use crate::builder::types::Action;
 use crate::db::init::init_db;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::utils::logger::init_logger;
-use crate::utils::startup::startup_tasks;
+use crate::utils::startup::{post_startup_tasks, pre_startup_tasks};
 use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
@@ -22,10 +22,12 @@ use tokio::sync::broadcast;
 async fn main() {
     _ = dotenv();
     init_logger();
-    startup_tasks().await;
+    pre_startup_tasks().await;
 
     let (tx, _) = broadcast::channel::<Action>(32);
     let db = init_db().await.unwrap();
+
+    let _ = post_startup_tasks(&db).await;
 
     let build_queue_handle = init_build_queue(db.clone(), tx.clone());
     let version_check_handle = start_aur_version_checking(db.clone());
