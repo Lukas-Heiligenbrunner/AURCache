@@ -2,10 +2,15 @@ use log::{error, info};
 use std::path::PathBuf;
 use tokio::fs;
 
+use crate::builder::types::BuildStates;
+use crate::db::prelude::{Builds, Packages};
+use crate::db::{builds, packages};
+use crate::repo::platforms::PLATFORMS;
 #[cfg(debug_assertions)]
 use log::warn;
-
-use crate::repo::platforms::PLATFORMS;
+use sea_orm::prelude::Expr;
+use sea_orm::QueryFilter;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
 #[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]
 use {
@@ -25,7 +30,7 @@ const START_BANNER: &str = r"
  /_/    \_\____/|_|  \_\\_____\__,_|\___|_| |_|\___|
 ";
 
-pub async fn startup_tasks() {
+pub async fn pre_startup_tasks() {
     info!("{}", START_BANNER);
     let latest_commit_sha = option_env!("LATEST_COMMIT_SHA").unwrap_or("dev");
     info!(
@@ -55,6 +60,35 @@ pub async fn startup_tasks() {
     #[cfg(not(debug_assertions))]
     #[cfg(target_arch = "x86_64")]
     init_qemu_binfmt().await.unwrap();
+}
+
+pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
+    // set all pending package status to failed
+    Packages::update_many()
+        .col_expr(
+            packages::Column::Status,
+            Expr::value(BuildStates::FAILED_BUILD),
+        )
+        .filter(
+            packages::Column::Status
+                .is_in(vec![BuildStates::ACTIVE_BUILD, BuildStates::ENQUEUED_BUILD]),
+        )
+        .exec(db)
+        .await?;
+
+    // set all pending or failed package status to failed
+    Builds::update_many()
+        .col_expr(
+            builds::Column::Status,
+            Expr::value(BuildStates::FAILED_BUILD),
+        )
+        .filter(
+            builds::Column::Status
+                .is_in(vec![BuildStates::ACTIVE_BUILD, BuildStates::ENQUEUED_BUILD]),
+        )
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// This is required to initialize the binfmt configuration for QEMU on x86_64 correctly
