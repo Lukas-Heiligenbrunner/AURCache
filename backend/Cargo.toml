@@ -7,25 +7,25 @@ edition = "2021"
 
 [dependencies]
 aur-rs = "0.1.1"
-tokio = "1.39.2"
-anyhow = "1.0.89"
+tokio = "1.42.0"
+anyhow = "1.0.94"
 
-reqwest = { version = "0.12.5", features = ["blocking", "gzip"] }
+reqwest = { version = "0.12.9", features = ["blocking", "gzip"] }
 
 rocket = "0.5.1"
 rocket_okapi = { version = "0.9.0", features = ["swagger"] }
 rocket_oauth2 = "0.5.0"
 dotenvy = "0.15.7"
-sea-orm = { version = "1.1.0-rc.1", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
-sea-orm-migration = {version = "1.1.0-rc.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
-serde = "1.0.208"
+sea-orm = { version = "1.1.2", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
+sea-orm-migration = {version = "1.1.2", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
+serde = "1.0.215"
 rust-embed = "8.5.0"
 rocket_seek_stream = "0.2.6"
-bollard = "*"
-bigdecimal = "0.4.5"
+bollard = "0.18.1"
+bigdecimal = "0.4.7"
 env_logger = "0.11.5"
 log = "0.4.22"
-backon = "1.2.0"
+backon = "1.3.0"
 itertools = "0.13.0"
 pacman-repo-utils = {path = "./src/pacman-repo-utils"}
 
