@@ -7,7 +7,7 @@ WORKDIR /app
 COPY frontend /app
 RUN flutter build web --release
 
-FROM rust:1.82.0 AS builder
+FROM rust:1.83.0 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
