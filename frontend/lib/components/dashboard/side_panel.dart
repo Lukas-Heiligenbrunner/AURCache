@@ -31,7 +31,7 @@ class SidePanel extends StatelessWidget {
           const Text(
             "Recent Activity",
             style: TextStyle(
-              fontSize: 18,
+              fontSize: 16,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -56,11 +56,10 @@ class SidePanel extends StatelessWidget {
               const Text(
                 "Builds Per Month",
                 style: TextStyle(
-                  fontSize: 18,
+                  fontSize: 16,
                   fontWeight: FontWeight.w500,
                 ),
               ),
-              const SizedBox(height: defaultPadding),
               BuildLineChart()
             ],
           ),

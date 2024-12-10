@@ -31,31 +31,34 @@ class _BuildScreenState extends State<BuildScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: APIBuilder(
-          interval: const Duration(seconds: 10),
-          onLoad: () => const Text("loading"),
-          onData: (buildData) {
-            return Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.start,
-                    children: [
-                      _buildTopBar(buildData, context),
-                      const SizedBox(
-                        height: 15,
-                      ),
-                      _buildPage(buildData)
-                    ],
+      body: ChangeNotifierProvider(
+        create: (BuildContext context) => BuildLogProvider(),
+        child: APIBuilder(
+            interval: const Duration(seconds: 10),
+            onLoad: () => const Text("loading"),
+            onData: (buildData) {
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      children: [
+                        _buildTopBar(buildData, context),
+                        const SizedBox(
+                          height: 15,
+                        ),
+                        _buildPage(buildData)
+                      ],
+                    ),
                   ),
-                ),
-                _buildSideBar(buildData),
-              ],
-            );
-          },
-          api: () => API.getBuild(widget.buildID)),
+                  _buildSideBar(buildData),
+                ],
+              );
+            },
+            api: () => API.getBuild(widget.buildID)),
+      ),
     );
   }
 

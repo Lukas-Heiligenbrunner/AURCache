@@ -1,4 +1,3 @@
-import 'package:aurcache/components/dashboard/header.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
@@ -50,7 +49,7 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
                       child: Text(
                         widget.value,
                         style: TextStyle(
-                            fontSize: context.desktop ? 36 : 24,
+                            fontSize: context.desktop ? 30 : 24,
                             fontWeight: FontWeight.bold,
                             color: Colors.white),
                       ),

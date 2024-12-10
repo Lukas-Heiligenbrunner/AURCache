@@ -1,5 +1,6 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/api/api_builder.dart';
+import 'package:aurcache/utils/responsive.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -19,11 +20,16 @@ class PackagesTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DataTable(
-        horizontalMargin: 0,
+        horizontalMargin: 12,
         columnSpacing: defaultPadding,
+        headingRowColor:
+            WidgetStateProperty.resolveWith<Color?>((Set<WidgetState> states) {
+          return Color(0xff131418);
+        }),
+        headingRowHeight: 50,
         columns: const [
           DataColumn(
-            label: Text("Package ID"),
+            label: Text("ID"),
           ),
           DataColumn(
             label: Text("Package Name"),
@@ -98,11 +104,24 @@ class PackagesTable extends StatelessWidget {
           },
         )),
         DataCell(
-          TextButton(
-            child: const Text('View', style: TextStyle(color: greenColor)),
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              backgroundColor: secondaryColor,
+              side: BorderSide(color: primaryColor, width: 0),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8)),
+              padding: EdgeInsets.symmetric(
+                horizontal: defaultPadding,
+                vertical: defaultPadding / 2,
+              ),
+            ),
             onPressed: () {
               context.push("/package/${package.id}");
             },
+            child: const Text(
+              "View",
+              style: TextStyle(color: Colors.white54),
+            ),
           ),
         ),
       ],

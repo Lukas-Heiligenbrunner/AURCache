@@ -10,8 +10,7 @@ import '../constants/color_constants.dart';
 import '../models/build.dart';
 import '../utils/responsive.dart';
 import '../components/dashboard/quick_info_banner.dart';
-import '../components/dashboard/recent_builds.dart';
-import '../components/dashboard/your_packages.dart';
+import '../components/dashboard/dashboard_tables.dart';
 import '../components/dashboard/side_panel.dart';
 
 class DashboardScreen extends StatefulWidget {
@@ -43,10 +42,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     flex: 3,
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        YourPackages(),
-                        const SizedBox(height: defaultPadding),
-                        const RecentBuilds(),
+                        Expanded(child: DashboardTables()),
                         if (context.mobile)
                           const SizedBox(height: defaultPadding),
                         if (context.mobile)

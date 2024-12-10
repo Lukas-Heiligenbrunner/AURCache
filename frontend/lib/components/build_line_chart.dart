@@ -1,4 +1,3 @@
-import 'package:aurcache/constants/color_constants.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 
@@ -28,7 +27,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
   Widget bottomTitleWidgets(double value, TitleMeta meta) {
     const style = TextStyle(
       fontWeight: FontWeight.bold,
-      fontSize: 16,
+      fontSize: 12,
     );
     Widget text;
     switch (value) {
@@ -61,7 +60,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
   Widget leftTitleWidgets(double value, TitleMeta meta) {
     const style = TextStyle(
       fontWeight: FontWeight.bold,
-      fontSize: 15,
+      fontSize: 12,
     );
     String text;
     switch (value.toInt()) {
@@ -114,7 +113,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
             showTitles: true,
             interval: 1,
             getTitlesWidget: leftTitleWidgets,
-            reservedSize: 42,
+            reservedSize: 30,
           ),
         ),
       ),

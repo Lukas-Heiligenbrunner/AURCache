@@ -12,8 +12,13 @@ class BuildsTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DataTable(
-      horizontalMargin: 0,
+      horizontalMargin: 12,
       columnSpacing: defaultPadding,
+      headingRowColor:
+          WidgetStateProperty.resolveWith<Color?>((Set<WidgetState> states) {
+        return Color(0xff131418);
+      }),
+      headingRowHeight: 50,
       columns: const [
         DataColumn(
           label: Text("Build ID"),

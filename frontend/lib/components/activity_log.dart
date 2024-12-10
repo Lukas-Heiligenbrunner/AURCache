@@ -68,7 +68,7 @@ class ActivityLogItem extends StatelessWidget {
                 children: [
                   Text(
                     user ?? "Unknown User",
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 19),
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                   ),
                   if (context.desktop)
                     SizedBox(
@@ -77,14 +77,14 @@ class ActivityLogItem extends StatelessWidget {
                   if (context.desktop)
                     Text(
                       text,
-                      style: TextStyle(fontSize: 16),
+                      style: TextStyle(fontSize: 14),
                     )
                 ],
               ),
               context.desktop
                   ? Text(
                       timestamp.toString(),
-                      style: TextStyle(fontSize: 15),
+                      style: TextStyle(fontSize: 14),
                     )
                   : Text(
                       text,
