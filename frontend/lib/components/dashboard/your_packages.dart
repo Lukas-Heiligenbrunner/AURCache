@@ -1,10 +1,12 @@
-import 'package:aurcache/components/api/APIBuilder.dart';
+import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/packages_table.dart';
-import 'package:aurcache/providers/api/packages_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:provider/provider.dart';
+import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../../models/simple_packge.dart';
+import '../api/api_builder.dart';
 import '../table_info.dart';
 
 class YourPackages extends StatelessWidget {
@@ -12,6 +14,9 @@ class YourPackages extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final apiController =
+        Provider.of<APIController<List<SimplePackage>>>(context, listen: false);
+
     return Container(
       padding: const EdgeInsets.all(defaultPadding),
       decoration: const BoxDecoration(
@@ -25,10 +30,9 @@ class YourPackages extends StatelessWidget {
             "Your Packages",
             style: Theme.of(context).textTheme.titleMedium,
           ),
-          APIBuilder<PackagesProvider, List<SimplePackage>, PackagesDTO>(
-            key: const Key("Packages on dashboard"),
-            interval: const Duration(seconds: 10),
-            dto: PackagesDTO(limit: 10),
+          APIBuilder(
+            controller: apiController,
+            refreshOnComeback: true,
             onData: (data) {
               if (data.isEmpty) {
                 return const TableInfo(title: "You have no packages yet");
@@ -53,6 +57,7 @@ class YourPackages extends StatelessWidget {
               }
             },
             onLoad: () => const CircularProgressIndicator(),
+            api: () => API.listPackages(limit: 10),
           ),
         ],
       ),
