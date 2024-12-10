@@ -31,7 +31,10 @@ class _BuildLineChartState extends State<BuildLineChart> {
       fontSize: 16,
     );
     Widget text;
-    switch (value.toInt()) {
+    switch (value) {
+      case 0:
+        text = const Text('Jul', style: style);
+        break;
       case 2:
         text = const Text('Aug', style: style);
         break;
@@ -43,9 +46,6 @@ class _BuildLineChartState extends State<BuildLineChart> {
         break;
       case 8:
         text = const Text('Nov', style: style);
-        break;
-      case 10:
-        text = const Text('Dec', style: style);
         break;
       default:
         text = const Text('', style: style);
@@ -121,8 +121,8 @@ class _BuildLineChartState extends State<BuildLineChart> {
       borderData: FlBorderData(
         show: false,
       ),
-      minX: 0,
-      maxX: 10,
+      minX: -0.25,
+      maxX: 10.25,
       minY: 0,
       maxY: 6,
       lineBarsData: [
@@ -156,7 +156,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
               )!;
 
               return FlDotCirclePainter(
-                radius: 6,
+                radius: 4.5,
                 color: Colors.white,
                 strokeWidth: 3,
                 strokeColor: dotColor,
