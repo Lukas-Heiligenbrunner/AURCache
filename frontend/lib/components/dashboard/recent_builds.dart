@@ -6,7 +6,7 @@ import 'package:provider/provider.dart';
 import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../../models/build.dart';
-import '../api/ApiBuilder.dart';
+import '../api/api_builder.dart';
 import '../table_info.dart';
 
 class RecentBuilds extends StatelessWidget {

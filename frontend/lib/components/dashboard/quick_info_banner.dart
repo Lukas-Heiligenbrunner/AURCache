@@ -2,9 +2,9 @@ import 'package:aurcache/components/dashboard/quick_info_tile.dart';
 import 'package:aurcache/utils/file_formatter.dart';
 import 'package:aurcache/utils/time_formatter.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../constants/color_constants.dart';
-import '../../models/quick_info_data.dart';
 import '../../utils/responsive.dart';
 import '../../models/stats.dart';
 
@@ -18,65 +18,119 @@ class QuickInfoBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Size _size = MediaQuery.of(context).size;
-    return Column(
-      children: [
-        const SizedBox(height: defaultPadding),
-        Responsive(
-            mobileChild: _buildBanner(
-              crossAxisCount: _size.width < 650 ? 2 : 4,
-              childAspectRatio: _size.width < 650 ? 1.2 : 1,
-            ),
-            desktopChild: _buildBanner(
-              childAspectRatio: _size.width < 1400 ? 2.75 : 2.75,
-            ))
-      ],
-    );
-  }
+    final double iconSize = context.desktop ? 64 : 42;
 
-  List<QuickInfoData> buildQuickInfoData() {
-    return [
-      QuickInfoData(
-          color: primaryColor,
-          icon: Icons.widgets,
-          title: "Total Packages",
-          subtitle: stats.total_packages.toString()),
-      QuickInfoData(
-          color: const Color(0xFFFFA113),
-          icon: Icons.hourglass_top,
-          title: "Enqueued Builds",
-          subtitle: stats.enqueued_builds.toString()),
-      QuickInfoData(
-          color: const Color(0xFFA4CDFF),
-          icon: Icons.build,
-          title: "Total Builds",
-          subtitle: stats.total_builds.toString()),
-      QuickInfoData(
-          color: const Color(0xFFd50000),
-          icon: Icons.storage,
-          title: "Repo Size",
-          subtitle: stats.repo_storage_size.readableFileSize()),
-      QuickInfoData(
-          color: const Color(0xFF00F260),
-          icon: Icons.timelapse,
-          title: "Average Build Time",
-          subtitle: stats.avg_build_time.readableDuration()),
-    ];
-  }
-
-  Widget _buildBanner({int crossAxisCount = 5, double childAspectRatio = 1}) {
-    final quickInfo = buildQuickInfoData();
-    return GridView.builder(
-      physics: const NeverScrollableScrollPhysics(),
-      shrinkWrap: true,
-      itemCount: quickInfo.length,
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: crossAxisCount,
-        crossAxisSpacing: defaultPadding,
-        mainAxisSpacing: defaultPadding,
-        childAspectRatio: childAspectRatio,
+    final items = [
+      QuickInfoTile(
+        icon: SvgPicture.asset("assets/icons/tile/Frame.svg",
+            colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+            width: iconSize),
+        title: "Total Packages",
+        value: stats.total_packages.toString(),
+        positive: false,
+        trend: '10%',
       ),
-      itemBuilder: (context, idx) => QuickInfoTile(data: quickInfo[idx]),
+      QuickInfoTile(
+        icon: SvgPicture.asset("assets/icons/tile/graph.svg",
+            colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+            width: iconSize),
+        title: "Total Builds",
+        value: stats.total_builds.toString(),
+        positive: true,
+        trend: '10%',
+      ),
+      QuickInfoTile(
+        icon: SvgPicture.asset("assets/icons/tile/clock.svg",
+            colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+            width: iconSize),
+        title: "Repo Size",
+        value: stats.repo_storage_size.readableFileSize(),
+        positive: true,
+        trend: '10%',
+      ),
+      QuickInfoTile(
+        icon: SvgPicture.asset("assets/icons/tile/folder.svg",
+            colorFilter: const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+            width: iconSize),
+        title: "Average Build Time",
+        value: stats.avg_build_time.readableDuration(),
+        positive: true,
+        trend: '10%',
+      ),
+      QuickInfoTile(
+        icon: AspectRatio(
+            aspectRatio: 1,
+            child: RotatedBox(
+                quarterTurns: 1,
+                child: CircularProgressIndicator(
+                  value: 0.85,
+                  strokeWidth: 8,
+                  color: Colors.green,
+                  backgroundColor: Color(0xff292e35),
+                ))),
+        title: "Build Success",
+        value:
+            "${(stats.total_builds != 0 ? (stats.successful_builds * 100 / stats.total_builds) : 0).toInt()}%",
+        positive: false,
+        trend: '10%',
+      ),
+    ];
+
+    return ResponsiveBuilder(
+      mobile: () {
+        return Column(
+          children: [
+            items[0],
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            items[1],
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            items[2],
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            items[3],
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            items[4],
+          ],
+        );
+      },
+      desktop: () {
+        return Row(
+          children: [
+            Expanded(child: items[0]),
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            Expanded(child: items[1]),
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            Expanded(child: items[2]),
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            Expanded(child: items[3]),
+            SizedBox(
+              width: defaultPadding,
+              height: defaultPadding,
+            ),
+            Expanded(child: items[4]),
+          ],
+        );
+      },
     );
   }
 }

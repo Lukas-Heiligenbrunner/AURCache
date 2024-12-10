@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../api/API.dart';
-import '../components/api/ApiBuilder.dart';
+import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
 
 class AurScreen extends StatefulWidget {

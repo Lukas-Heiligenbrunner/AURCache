@@ -7,7 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
-import '../components/api/ApiBuilder.dart';
+import '../components/api/api_builder.dart';
 import '../models/extended_package.dart';
 
 class Packagesettingsscreen extends StatefulWidget {
