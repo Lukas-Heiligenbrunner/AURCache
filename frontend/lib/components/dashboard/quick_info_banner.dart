@@ -65,7 +65,7 @@ class QuickInfoBanner extends StatelessWidget {
                 child: CircularProgressIndicator(
                   value: 0.85,
                   strokeWidth: 8,
-                  color: Colors.green,
+                  color: Color(0xffA9FF0F),
                   backgroundColor: Color(0xff292e35),
                 ))),
         title: "Build Success",
@@ -79,57 +79,16 @@ class QuickInfoBanner extends StatelessWidget {
     return ResponsiveBuilder(
       mobile: () {
         return Column(
-          children: [
-            items[0],
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            items[1],
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            items[2],
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            items[3],
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            items[4],
-          ],
+          children: items,
         );
       },
       desktop: () {
         return Row(
-          children: [
-            Expanded(child: items[0]),
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            Expanded(child: items[1]),
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            Expanded(child: items[2]),
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            Expanded(child: items[3]),
-            SizedBox(
-              width: defaultPadding,
-              height: defaultPadding,
-            ),
-            Expanded(child: items[4]),
-          ],
-        );
+            children: items
+                .map(
+                  (e) => Expanded(child: e),
+                )
+                .toList(growable: false));
       },
     );
   }

@@ -1,3 +1,4 @@
+import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -19,19 +20,21 @@ class BuildsTable extends StatelessWidget {
         return Color(0xff131418);
       }),
       headingRowHeight: 50,
-      columns: const [
-        DataColumn(
-          label: Text("Build ID"),
-        ),
+      columns: [
+        if (context.desktop)
+          DataColumn(
+            label: Text("Build ID"),
+          ),
         DataColumn(
           label: Text("Package Name"),
         ),
         DataColumn(
           label: Text("Version"),
         ),
-        DataColumn(
-          label: Text("Platform"),
-        ),
+        if (context.desktop)
+          DataColumn(
+            label: Text("Platform"),
+          ),
         DataColumn(
           label: Text("Status"),
         ),
@@ -43,10 +46,13 @@ class BuildsTable extends StatelessWidget {
   DataRow buildDataRow(BuildContext context, Build build) {
     return DataRow(
       cells: [
-        DataCell(Text(build.id.toString())),
-        DataCell(Text(build.pkg_name)),
+        if (context.desktop) DataCell(Text(build.id.toString())),
+        DataCell(Text(build.pkg_name),
+            onTap: context.mobile
+                ? () => context.push("/build/${build.id}")
+                : null),
         DataCell(Text(build.version)),
-        DataCell(Text(build.platform)),
+        if (context.desktop) DataCell(Text(build.platform)),
         DataCell(IconButton(
           icon: Icon(
             switchSuccessIcon(build.status),

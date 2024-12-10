@@ -1,3 +1,4 @@
+import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
@@ -24,51 +25,50 @@ class QuickInfoTile extends StatefulWidget {
 class _QuickInfoTileState extends State<QuickInfoTile> {
   @override
   Widget build(BuildContext context) {
-    return Container(
-        padding: const EdgeInsets.all(defaultPadding),
-        decoration: const BoxDecoration(
-          color: secondaryColor,
-          borderRadius: BorderRadius.all(Radius.circular(10)),
-        ),
+    return Tilecontainer(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          widget.title,
+          style: TextStyle(fontSize: 16, color: Colors.white.withOpacity(0.8)),
+        ),
+        if (context.desktop)
+          SizedBox(
+            height: 8,
+          ),
+        Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(
-              widget.title,
-              style: TextStyle(fontSize: 18),
-            ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(left: 0),
-                      child: Text(
-                        widget.value,
-                        style: TextStyle(
-                            fontSize: context.desktop ? 30 : 24,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white),
-                      ),
-                    ),
-                    if (context.desktop)
-                      SizedBox(
-                        height: 10,
-                      ),
-                    _buildTrend(),
-                  ],
+                Padding(
+                  padding: const EdgeInsets.only(left: 0),
+                  child: Text(
+                    widget.value,
+                    style: TextStyle(
+                        fontSize: context.desktop ? 30 : 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white),
+                  ),
                 ),
-                SizedBox(
-                  height: context.desktop ? 64 : 42,
-                  child: widget.icon,
-                )
+                if (context.desktop)
+                  SizedBox(
+                    height: 8,
+                  ),
+                _buildTrend(),
               ],
+            ),
+            SizedBox(
+              height: context.desktop ? 64 : 42,
+              child: widget.icon,
             )
           ],
-        ));
+        )
+      ],
+    ));
   }
 
   Widget _buildTrend() {
@@ -77,11 +77,13 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
         children: [
           Icon(
             Icons.keyboard_double_arrow_up_outlined,
-            color: Colors.lightGreen,
+            color: Color(0xffA9FF0F),
           ),
           Text(
             widget.trend,
-            style: TextStyle(color: Colors.lightGreen),
+            style: TextStyle(
+              color: Color(0xffA9FF0F),
+            ),
           )
         ],
       );
@@ -90,11 +92,11 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
         children: [
           Icon(
             Icons.keyboard_double_arrow_down_outlined,
-            color: Colors.red,
+            color: Color(0xffFF4752),
           ),
           Text(
             widget.trend,
-            style: TextStyle(color: Colors.red),
+            style: TextStyle(color: Color(0xffFF4752)),
           )
         ],
       );

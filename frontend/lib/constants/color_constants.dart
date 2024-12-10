@@ -9,7 +9,7 @@ const bgColor = Color(0xff15171b);
 const darkgreenColor = Color(0xff0a7005);
 const greenColor = Color(0xFF6bab58);
 
-const defaultPadding = 16.0;
+const defaultPadding = 12.0;
 const double defaultBorderRadius = 15;
 
 class ColorConstants {

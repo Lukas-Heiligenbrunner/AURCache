@@ -8,6 +8,7 @@ import '../api/API.dart';
 import '../components/dashboard/header.dart';
 import '../constants/color_constants.dart';
 import '../models/build.dart';
+import '../models/stats.dart';
 import '../utils/responsive.dart';
 import '../components/dashboard/quick_info_banner.dart';
 import '../components/dashboard/dashboard_tables.dart';
@@ -70,18 +71,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
             );
 
             final allScreen = Container(
-              padding: const EdgeInsets.all(defaultPadding),
+              padding: const EdgeInsets.only(
+                  top: defaultPadding,
+                  left: defaultPadding / 2,
+                  right: defaultPadding / 2,
+                  bottom: defaultPadding / 2),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.start,
                 children: [
-                  const Header(),
+                  Padding(
+                    padding: const EdgeInsets.only(left: defaultPadding),
+                    child: const Header(),
+                  ),
                   const SizedBox(height: defaultPadding),
                   QuickInfoBanner(
                     stats: stats,
                   ),
-                  const SizedBox(height: defaultPadding),
-                  Responsive(
-                      mobileChild: body, desktopChild: Expanded(child: body))
+                  MultiProvider(
+                      providers: [
+                        ChangeNotifierProvider(
+                          create: (context) =>
+                              APIController<List<SimplePackage>>(),
+                        ),
+                        ChangeNotifierProvider(
+                          create: (context) => APIController<List<Build>>(),
+                        ),
+                      ],
+                      child: Responsive(
+                          mobileChild: _buildMobileBody(stats),
+                          desktopChild: _buildDesktopBody(stats)))
                 ],
               ),
             );
@@ -100,6 +118,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
         return Text("loading");
       },
       api: API.listStats,
+    );
+  }
+
+  Widget _buildDesktopBody(Stats stats) {
+    return Expanded(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 3,
+            child: DashboardTables(),
+          ),
+          Expanded(
+            flex: 2,
+            child: SidePanel(
+                nrSuccessfulBuilds: stats.successful_builds,
+                nrfailedbuilds: stats.failed_builds,
+                nrEnqueuedBuilds: stats.enqueued_builds),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMobileBody(Stats stats) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DashboardTables(),
+        SidePanel(
+            nrSuccessfulBuilds: stats.successful_builds,
+            nrfailedbuilds: stats.failed_builds,
+            nrEnqueuedBuilds: stats.enqueued_builds),
+      ],
     );
   }
 }

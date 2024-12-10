@@ -52,11 +52,15 @@ class ActivityLogItem extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.all(8.0),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            Icons.circle_outlined,
-            size: 16,
-            color: Color(0xff393C42),
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Icon(
+              Icons.circle_outlined,
+              size: 16,
+              color: Color(0xff393C42),
+            ),
           ),
           SizedBox(
             width: 10,
@@ -68,7 +72,7 @@ class ActivityLogItem extends StatelessWidget {
                 children: [
                   Text(
                     user ?? "Unknown User",
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                   ),
                   if (context.desktop)
                     SizedBox(
@@ -77,18 +81,18 @@ class ActivityLogItem extends StatelessWidget {
                   if (context.desktop)
                     Text(
                       text,
-                      style: TextStyle(fontSize: 14),
+                      style: TextStyle(fontSize: 18),
                     )
                 ],
               ),
               context.desktop
                   ? Text(
                       timestamp.toString(),
-                      style: TextStyle(fontSize: 14),
+                      style: TextStyle(fontSize: 16, color: Colors.white70),
                     )
                   : Text(
                       text,
-                      style: TextStyle(fontSize: 16),
+                      style: TextStyle(fontSize: 14),
                     )
             ],
           ),

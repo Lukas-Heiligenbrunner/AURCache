@@ -27,25 +27,28 @@ class PackagesTable extends StatelessWidget {
           return Color(0xff131418);
         }),
         headingRowHeight: 50,
-        columns: const [
-          DataColumn(
-            label: Text("ID"),
-          ),
+        columns: [
+          if (context.desktop)
+            DataColumn(
+              label: Text("ID"),
+            ),
           DataColumn(
             label: Text("Package Name"),
           ),
           DataColumn(
             label: Text("Version"),
           ),
-          DataColumn(
-            label: Text("Up-To-Date"),
-          ),
+          if (context.desktop)
+            DataColumn(
+              label: Text("Up-To-Date"),
+            ),
           DataColumn(
             label: Text("Status"),
           ),
-          DataColumn(
-            label: Text("Action"),
-          ),
+          if (context.desktop)
+            DataColumn(
+              label: Text("Action"),
+            ),
         ],
         rows:
             data.map((e) => buildDataRow(e, context)).toList(growable: false));
@@ -54,46 +57,54 @@ class PackagesTable extends StatelessWidget {
   DataRow buildDataRow(SimplePackage package, BuildContext context) {
     return DataRow(
       cells: [
-        DataCell(Text(package.id.toString())),
-        DataCell(Text(package.name)),
-        DataCell(Text(package.latest_version.toString())),
-        DataCell(IconButton(
-          icon: Icon(
-            package.outofdate ? Icons.update : Icons.verified,
-            color: package.outofdate
-                ? const Color(0xFF6B43A4)
-                : const Color(0xFF0A6900),
-          ),
-          onPressed: package.outofdate
-              ? () async {
-                  try {
-                    await API.updatePackage(id: package.id);
-                  } on DioException catch (e) {
-                    toastification.show(
-                      title: Text('Failed to update package!'),
-                      autoCloseDuration: const Duration(seconds: 5),
-                      type: ToastificationType.error,
-                    );
-                  }
-                  final apiController =
-                      Provider.of<APIController<List<SimplePackage>>>(context,
-                          listen: false);
-                  apiController.refresh();
-
-                  final buildsController =
-                      Provider.of<APIController<List<Build>>>(context,
-                          listen: false);
-                  buildsController.refresh();
-
-                  //Provider.of<PackagesProvider>(context, listen: false)
-                  //    .refresh(context);
-                  //Provider.of<BuildsProvider>(context, listen: false)
-                  //    .refresh(context);
-                  //Provider.of<StatsProvider>(context, listen: false)
-                  //    .refresh(context);
+        if (context.desktop) DataCell(Text(package.id.toString())),
+        DataCell(
+          Text(package.name),
+          onTap: context.mobile
+              ? () {
+                  context.push("/package/${package.id}");
                 }
               : null,
-        )),
+        ),
+        DataCell(Text(package.latest_version.toString())),
+        if (context.desktop)
+          DataCell(IconButton(
+            icon: Icon(
+              package.outofdate ? Icons.update : Icons.verified,
+              color: package.outofdate
+                  ? const Color(0xFF6B43A4)
+                  : const Color(0xFF0A6900),
+            ),
+            onPressed: package.outofdate
+                ? () async {
+                    try {
+                      await API.updatePackage(id: package.id);
+                    } on DioException catch (e) {
+                      toastification.show(
+                        title: Text('Failed to update package!'),
+                        autoCloseDuration: const Duration(seconds: 5),
+                        type: ToastificationType.error,
+                      );
+                    }
+                    final apiController =
+                        Provider.of<APIController<List<SimplePackage>>>(context,
+                            listen: false);
+                    apiController.refresh();
+
+                    final buildsController =
+                        Provider.of<APIController<List<Build>>>(context,
+                            listen: false);
+                    buildsController.refresh();
+
+                    //Provider.of<PackagesProvider>(context, listen: false)
+                    //    .refresh(context);
+                    //Provider.of<BuildsProvider>(context, listen: false)
+                    //    .refresh(context);
+                    //Provider.of<StatsProvider>(context, listen: false)
+                    //    .refresh(context);
+                  }
+                : null,
+          )),
         DataCell(IconButton(
           icon: Icon(
             switchSuccessIcon(package.status),
@@ -103,27 +114,28 @@ class PackagesTable extends StatelessWidget {
             //context.push("/build/${package.latest_version_id}");
           },
         )),
-        DataCell(
-          OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              backgroundColor: secondaryColor,
-              side: BorderSide(color: primaryColor, width: 0),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-              padding: EdgeInsets.symmetric(
-                horizontal: defaultPadding,
-                vertical: defaultPadding / 2,
+        if (context.desktop)
+          DataCell(
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                backgroundColor: secondaryColor,
+                side: BorderSide(color: primaryColor, width: 0),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+                padding: EdgeInsets.symmetric(
+                  horizontal: defaultPadding,
+                  vertical: defaultPadding / 2,
+                ),
+              ),
+              onPressed: () {
+                context.push("/package/${package.id}");
+              },
+              child: const Text(
+                "View",
+                style: TextStyle(color: Colors.white54),
               ),
             ),
-            onPressed: () {
-              context.push("/package/${package.id}");
-            },
-            child: const Text(
-              "View",
-              style: TextStyle(color: Colors.white54),
-            ),
           ),
-        ),
       ],
     );
   }

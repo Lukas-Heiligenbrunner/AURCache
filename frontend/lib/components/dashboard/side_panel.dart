@@ -1,5 +1,6 @@
 import 'package:aurcache/components/build_line_chart.dart';
 import 'package:aurcache/components/activity_log.dart';
+import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
@@ -19,20 +20,18 @@ class SidePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final activityWidget = Container(
-      padding: const EdgeInsets.all(defaultPadding),
-      decoration: const BoxDecoration(
-        color: secondaryColor,
-        borderRadius: BorderRadius.all(Radius.circular(10)),
-      ),
+    final activityWidget = Tilecontainer(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            "Recent Activity",
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
+          Padding(
+            padding: const EdgeInsets.only(left: 12),
+            child: const Text(
+              "Recent Activity",
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
           const SizedBox(height: defaultPadding),
@@ -44,28 +43,26 @@ class SidePanel extends StatelessWidget {
     return Column(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Container(
-          padding: const EdgeInsets.all(defaultPadding),
-          decoration: const BoxDecoration(
-            color: secondaryColor,
-            borderRadius: BorderRadius.all(Radius.circular(10)),
-          ),
+        Tilecontainer(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                "Builds Per Month",
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
+              Padding(
+                padding: const EdgeInsets.only(left: 12),
+                child: const Text(
+                  "Builds Per Month",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
-              BuildLineChart()
+              Padding(
+                padding: const EdgeInsets.only(left: 12, right: 12),
+                child: BuildLineChart(),
+              )
             ],
           ),
-        ),
-        SizedBox(
-          height: defaultPadding,
         ),
         Responsive(
             mobileChild: activityWidget,

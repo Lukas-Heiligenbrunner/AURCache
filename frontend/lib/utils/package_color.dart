@@ -25,7 +25,7 @@ Color switchSuccessColor(int status) {
       return const Color(0xFF0A6900);
     case 4:
     case 2:
-      return const Color(0xff760707);
+      return const Color(0xffFF4752).withOpacity(0.8);
     case 3:
       return const Color(0xFF0044AA);
     default:

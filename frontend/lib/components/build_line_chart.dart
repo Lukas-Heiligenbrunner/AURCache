@@ -46,6 +46,9 @@ class _BuildLineChartState extends State<BuildLineChart> {
       case 8:
         text = const Text('Nov', style: style);
         break;
+      case 10:
+        text = const Text('Dec', style: style);
+        break;
       default:
         text = const Text('', style: style);
         break;
@@ -88,8 +91,10 @@ class _BuildLineChartState extends State<BuildLineChart> {
         horizontalInterval: 1,
         verticalInterval: 1,
         getDrawingHorizontalLine: (value) {
-          return const FlLine(
-              color: Colors.grey, strokeWidth: 1, dashArray: [5, 5]);
+          return FlLine(
+              color: Colors.grey.withOpacity(0.8),
+              strokeWidth: 1,
+              dashArray: [5, 5]);
         },
       ),
       titlesData: FlTitlesData(
@@ -143,7 +148,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
           gradient: LinearGradient(
             colors: gradientColors,
           ),
-          barWidth: 5,
+          barWidth: 3,
           isStrokeCapRound: true,
           dotData: FlDotData(
             show: true,
@@ -155,7 +160,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
               )!;
 
               return FlDotCirclePainter(
-                radius: 4.5,
+                radius: 3.5,
                 color: Colors.white,
                 strokeWidth: 3,
                 strokeColor: dotColor,
