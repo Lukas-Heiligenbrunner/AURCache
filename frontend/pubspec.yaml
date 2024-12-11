@@ -72,6 +72,7 @@ flutter:
   assets:
     - assets/icons/
     - assets/icons/tile/
+    - assets/icons/menu/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

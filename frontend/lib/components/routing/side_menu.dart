@@ -58,7 +58,7 @@ class SideMenu extends StatelessWidget {
             DrawerSection(title: "General", children: [
               DrawerListTile(
                 title: "Dashboard",
-                svgSrc: "assets/icons/menu_dashbord.svg",
+                svgSrc: "assets/icons/menu/dashboard.svg",
                 active: active_uri == "/",
                 press: () {
                   context.go("/");
@@ -66,7 +66,7 @@ class SideMenu extends StatelessWidget {
               ),
               DrawerListTile(
                 title: "Builds",
-                svgSrc: "assets/icons/menu_tran.svg",
+                svgSrc: "assets/icons/menu/builds.svg",
                 active: active_uri.startsWith("/builds"),
                 press: () {
                   context.go("/builds");
@@ -74,7 +74,7 @@ class SideMenu extends StatelessWidget {
               ),
               DrawerListTile(
                 title: "AUR",
-                svgSrc: "assets/icons/menu_task.svg",
+                svgSrc: "assets/icons/menu/aur.svg",
                 active: active_uri.startsWith("/aur"),
                 press: () {
                   context.go("/aur");
@@ -87,7 +87,7 @@ class SideMenu extends StatelessWidget {
             DrawerSection(title: "Settings", children: [
               DrawerListTile(
                 title: "Settings",
-                svgSrc: "assets/icons/menu_dashbord.svg",
+                svgSrc: "assets/icons/menu/settings.svg",
                 active: active_uri.startsWith("/settings"),
                 press: () {
                   context.go("/settings");
@@ -95,7 +95,7 @@ class SideMenu extends StatelessWidget {
               ),
               DrawerListTile(
                 title: "Help",
-                svgSrc: "assets/icons/menu_dashbord.svg",
+                svgSrc: "assets/icons/menu/help.svg",
                 active: active_uri.startsWith("/help"),
                 press: () {
                   context.go("/help");
@@ -182,7 +182,7 @@ class DrawerListTile extends StatelessWidget {
               SvgPicture.asset(
                 svgSrc,
                 color: Colors.white,
-                height: 16,
+                height: 18,
               ),
               SizedBox(
                 width: 20,
