@@ -16,7 +16,7 @@ class MenuShell extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // We want this side menu only for large screen
-            if (Responsive.isDesktop(context))
+            if (context.desktop)
               const Expanded(
                 // default flex = 1
                 // and it takes 1/6 part of the screen
@@ -24,7 +24,7 @@ class MenuShell extends StatelessWidget {
               ),
             Expanded(
               // It takes 5/6 part of the screen
-              flex: 5,
+              flex: 7,
               child: child,
             ),
           ],
