@@ -7,16 +7,7 @@ import 'package:flutter/material.dart';
 import '../../constants/color_constants.dart';
 
 class SidePanel extends StatelessWidget {
-  const SidePanel({
-    Key? key,
-    required this.nrSuccessfulBuilds,
-    required this.nrfailedbuilds,
-    required this.nrEnqueuedBuilds,
-  }) : super(key: key);
-
-  final int nrSuccessfulBuilds;
-  final int nrfailedbuilds;
-  final int nrEnqueuedBuilds;
+  const SidePanel({super.key});
 
   @override
   Widget build(BuildContext context) {

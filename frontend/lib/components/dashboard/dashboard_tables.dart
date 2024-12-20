@@ -24,20 +24,23 @@ class _DashboardTablesState extends State<DashboardTables> {
 
   @override
   Widget build(BuildContext context) {
-    final toggle = ToggleSwitch(
-      initialLabelIndex: activePage,
-      totalSwitches: 2,
-      labels: ['Recent Packages', 'Recent Builds'],
-      onToggle: (index) {
-        setState(() {
-          activePage = index!;
-        });
-      },
-      radiusStyle: true,
-      activeBgColor: [Color(0xff292E35)],
-      inactiveBgColor: Color(0x292E354F),
-      cornerRadius: 8,
-      customWidths: [135, 115],
+    final toggle = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: ToggleSwitch(
+        initialLabelIndex: activePage,
+        totalSwitches: 2,
+        labels: ['Recent Packages', 'Recent Builds'],
+        onToggle: (index) {
+          setState(() {
+            activePage = index!;
+          });
+        },
+        radiusStyle: true,
+        activeBgColor: [Color(0xff292E35)],
+        inactiveBgColor: Color(0x292E354F),
+        cornerRadius: 8,
+        customWidths: [135, 115],
+      ),
     );
 
     return Tilecontainer(

@@ -48,11 +48,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Expanded(child: DashboardTables()),
                         if (context.mobile)
                           const SizedBox(height: defaultPadding),
-                        if (context.mobile)
-                          SidePanel(
-                              nrSuccessfulBuilds: stats.successful_builds,
-                              nrfailedbuilds: stats.failed_builds,
-                              nrEnqueuedBuilds: stats.enqueued_builds),
+                        if (context.mobile) SidePanel(),
                       ],
                     ),
                   ),
@@ -61,10 +57,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   if (!context.mobile)
                     Expanded(
                       flex: 2,
-                      child: SidePanel(
-                          nrSuccessfulBuilds: stats.successful_builds,
-                          nrfailedbuilds: stats.failed_builds,
-                          nrEnqueuedBuilds: stats.enqueued_builds),
+                      child: SidePanel(),
                     ),
                 ],
               ),
@@ -132,10 +125,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           Expanded(
             flex: 2,
-            child: SidePanel(
-                nrSuccessfulBuilds: stats.successful_builds,
-                nrfailedbuilds: stats.failed_builds,
-                nrEnqueuedBuilds: stats.enqueued_builds),
+            child: SidePanel(),
           ),
         ],
       ),
@@ -148,10 +138,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         DashboardTables(),
-        SidePanel(
-            nrSuccessfulBuilds: stats.successful_builds,
-            nrfailedbuilds: stats.failed_builds,
-            nrEnqueuedBuilds: stats.enqueued_builds),
+        SidePanel(),
       ],
     );
   }
