@@ -47,6 +47,7 @@ dependencies:
   toastification: ^2.3.0
   device_preview: ^1.2.0
   toggle_switch: ^2.3.0
+  skeletonizer: ^1.4.2
 
 dev_dependencies:
   flutter_test:

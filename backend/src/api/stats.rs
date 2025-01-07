@@ -50,17 +50,8 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .await?
         .try_into()?;
 
-    let enqueued_builds: u32 = Builds::find()
-        .filter(builds::Column::Status.eq(BuildStates::ENQUEUED_BUILD))
-        .count(db)
-        .await?
-        .try_into()?;
-
-    // todo implement this values somehow
-    let avg_queue_wait_time: u32 = 42;
-
     // Calculate repo storage size
-    let repo_storage_size: u64 = dir_size("repo/").unwrap_or(0);
+    let repo_size: u64 = dir_size("repo/").unwrap_or(0);
 
     #[derive(Debug, FromQueryResult)]
     struct BuildTimeStruct {
@@ -92,10 +83,13 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         total_builds,
         successful_builds,
         failed_builds,
-        avg_queue_wait_time,
         avg_build_time,
-        repo_storage_size,
-        enqueued_builds,
+        repo_size,
         total_packages,
+        total_build_trend: 0.0,
+        total_packages_trend: 0.0,
+        repo_size_trend: -0.0,
+        avg_build_time_trend: 0.0,
+        build_success_trend: 0.0,
     })
 }

@@ -22,99 +22,51 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
-    return APIBuilder(
-      interval: const Duration(seconds: 10),
-      onData: (stats) {
-        return SafeArea(
-          child: Builder(builder: (context) {
-            final body = MultiProvider(
-              providers: [
-                ChangeNotifierProvider(
-                  create: (context) => APIController<List<SimplePackage>>(),
-                ),
-                ChangeNotifierProvider(
-                  create: (context) => APIController<List<Build>>(),
-                ),
-              ],
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(child: DashboardTables()),
-                        if (context.mobile)
-                          const SizedBox(height: defaultPadding),
-                        if (context.mobile) SidePanel(),
-                      ],
-                    ),
-                  ),
-                  if (!context.mobile) const SizedBox(width: defaultPadding),
-                  // On Mobile means if the screen is less than 850 we dont want to show it
-                  if (!context.mobile)
-                    Expanded(
-                      flex: 2,
-                      child: SidePanel(),
-                    ),
-                ],
+    return SafeArea(
+      child: Builder(builder: (context) {
+        final allScreen = Container(
+          padding: const EdgeInsets.only(
+              top: defaultPadding,
+              left: defaultPadding / 2,
+              right: defaultPadding / 2,
+              bottom: defaultPadding / 2),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(left: defaultPadding),
+                child: const Header(),
               ),
-            );
-
-            final allScreen = Container(
-              padding: const EdgeInsets.only(
-                  top: defaultPadding,
-                  left: defaultPadding / 2,
-                  right: defaultPadding / 2,
-                  bottom: defaultPadding / 2),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.start,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(left: defaultPadding),
-                    child: const Header(),
-                  ),
-                  const SizedBox(height: defaultPadding),
-                  QuickInfoBanner(
-                    stats: stats,
-                  ),
-                  MultiProvider(
-                      providers: [
-                        ChangeNotifierProvider(
-                          create: (context) =>
-                              APIController<List<SimplePackage>>(),
-                        ),
-                        ChangeNotifierProvider(
-                          create: (context) => APIController<List<Build>>(),
-                        ),
-                      ],
-                      child: Responsive(
-                          mobileChild: _buildMobileBody(stats),
-                          desktopChild: _buildDesktopBody(stats)))
-                ],
-              ),
-            );
-
-            if (context.mobile) {
-              return SingleChildScrollView(
-                child: allScreen,
-              );
-            } else {
-              return allScreen;
-            }
-          }),
+              const SizedBox(height: defaultPadding),
+              QuickInfoBanner(),
+              MultiProvider(
+                  providers: [
+                    ChangeNotifierProvider(
+                      create: (context) => APIController<List<SimplePackage>>(),
+                    ),
+                    ChangeNotifierProvider(
+                      create: (context) => APIController<List<Build>>(),
+                    ),
+                  ],
+                  child: Responsive(
+                      mobileChild: _buildMobileBody(),
+                      desktopChild: _buildDesktopBody()))
+            ],
+          ),
         );
-      },
-      onLoad: () {
-        return Text("loading");
-      },
-      api: API.listStats,
+
+        if (context.mobile) {
+          return SingleChildScrollView(
+            child: allScreen,
+          );
+        } else {
+          return allScreen;
+        }
+      }),
     );
   }
 
-  Widget _buildDesktopBody(Stats stats) {
+  Widget _buildDesktopBody() {
     return Expanded(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -132,7 +84,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildMobileBody(Stats stats) {
+  Widget _buildMobileBody() {
     return Column(
       mainAxisAlignment: MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.stretch,

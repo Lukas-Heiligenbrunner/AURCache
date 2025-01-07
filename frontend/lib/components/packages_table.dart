@@ -110,9 +110,7 @@ class PackagesTable extends StatelessWidget {
             switchSuccessIcon(package.status),
             color: switchSuccessColor(package.status),
           ),
-          onPressed: () {
-            //context.push("/build/${package.latest_version_id}");
-          },
+          onPressed: null,
         )),
         if (context.desktop)
           DataCell(
