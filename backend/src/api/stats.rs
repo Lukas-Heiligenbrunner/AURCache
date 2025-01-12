@@ -9,12 +9,12 @@ use rocket::serde::json::Json;
 use rocket::{get, State};
 
 use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{GraphDataPoint, ListStats, SimplePackageModel};
+use crate::api::types::input::{GraphDataPoint, ListStats};
 use crate::builder::types::BuildStates;
 use crate::db::helpers::dbtype::{database_type, DbType};
 use rocket_okapi::openapi;
 use sea_orm::prelude::BigDecimal;
-use sea_orm::{ColumnTrait, QueryFilter, TryGetableMany};
+use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
 
@@ -49,9 +49,9 @@ pub async fn dashboard_graph_data(
 }
 
 async fn get_graph_datapoints(db: &DatabaseConnection) -> anyhow::Result<Vec<GraphDataPoint>> {
-    match database_type() {
+    let query = match database_type() {
         DbType::Sqlite => {
-            let query = "SELECT
+            "SELECT
     CAST(strftime('%Y', datetime(start_time, 'unixepoch')) AS INTEGER) AS year,
     CAST(strftime('%m', datetime(start_time, 'unixepoch')) AS INTEGER) AS month,
     COUNT(*) AS count
@@ -62,22 +62,33 @@ WHERE
 GROUP BY
     year, month
 ORDER BY
-    year DESC, month DESC;";
-
-            let result = GraphDataPoint::find_by_statement(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                query,
-                vec![],
-            ))
-            .all(db)
-            .await?;
-
-            return Ok(result);
+    year DESC, month DESC;"
         }
-        DbType::Postgres => {}
-    }
+        DbType::Postgres => {
+            "SELECT
+    EXTRACT(YEAR FROM to_timestamp(timestamp_column))::INTEGER AS year,
+    EXTRACT(MONTH FROM to_timestamp(timestamp_column))::INTEGER AS month,
+    COUNT(*) AS count
+FROM
+    your_table
+WHERE
+    timestamp_column >= extract(epoch FROM now() - interval '12 months')
+GROUP BY
+    year, month
+ORDER BY
+    year DESC, month DESC;"
+        }
+    };
 
-    Ok(vec![])
+    let result = GraphDataPoint::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        query,
+        vec![],
+    ))
+    .all(db)
+    .await?;
+
+    Ok(result)
 }
 
 async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
