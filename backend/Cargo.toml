@@ -15,9 +15,7 @@ reqwest = { version = "0.12.9", features = ["blocking", "gzip"] }
 rocket = "0.5.1"
 rocket_oauth2 = "0.5.0"
 utoipa = { version = "5.3.1", features = ["rocket_extras"] }
-utoipa-swagger-ui = { version = "8.1.1", features = ["rocket"] }
 utoipa-redoc = { version = "5.0.1", features = ["rocket"] }
-utoipa-rapidoc = { version = "5.0.1", features = ["rocket"] }
 utoipa-scalar = { version = "0.2.1", features = ["rocket"] }
 
 dotenvy = "0.15.7"

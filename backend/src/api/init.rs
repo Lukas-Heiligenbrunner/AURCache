@@ -19,9 +19,8 @@ use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
 use utoipa::openapi::security::{AuthorizationCode, Flow, OAuth2, Scopes};
 use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
-use utoipa_redoc::{Redoc, Servable};
-use utoipa_scalar::{Scalar, Servable as ScalarServable};
-use utoipa_swagger_ui::SwaggerUi;
+use utoipa_redoc::{Redoc, Servable as _};
+use utoipa_scalar::{Scalar, Servable as _};
 
 fn get_secret_key() -> SecretKey {
     match env::var("SECRET_KEY") {
@@ -92,11 +91,6 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
             .manage(OauthEnabled(oauth_config.is_ok()))
             .mount("/api/", build_api())
             .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
-            .mount(
-                "/",
-                SwaggerUi::new("/swagger-ui/<_..>")
-                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
-            )
             .mount("/", Redoc::with_url("/redoc", ApiDoc::openapi()));
 
         if let Ok(oauth_config) = oauth_config {
