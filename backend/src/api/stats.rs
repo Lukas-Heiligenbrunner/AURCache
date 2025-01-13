@@ -11,14 +11,22 @@ use rocket::{get, State};
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListStats;
 use crate::builder::types::BuildStates;
-use rocket_okapi::openapi;
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
+use utoipa::OpenApi;
+
+#[derive(OpenApi)]
+#[openapi(paths(stats))]
+pub struct StatsApi;
 
 /// get general build-server stats
-#[openapi(tag = "stats")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get general build-server stats", body = [ListStats]),
+    )
+)]
 #[get("/stats")]
 pub async fn stats(
     db: &State<DatabaseConnection>,

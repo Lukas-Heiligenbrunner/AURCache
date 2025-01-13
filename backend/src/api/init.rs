@@ -1,3 +1,4 @@
+use crate::api::aur::AURApi;
 use crate::api::auth::{oauth_callback, oauth_login};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
@@ -11,12 +12,16 @@ use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
 use rocket::http::private::cookie::Key;
 use rocket::{routes, Config};
-use rocket_oauth2::{HyperRustlsAdapter, OAuth2};
-use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
+use rocket_oauth2::HyperRustlsAdapter;
 use sea_orm::DatabaseConnection;
 use std::env;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+use utoipa::openapi::security::{AuthorizationCode, Flow, OAuth2, Scopes};
+use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
+use utoipa_redoc::{Redoc, Servable};
+use utoipa_scalar::{Scalar, Servable as ScalarServable};
+use utoipa_swagger_ui::SwaggerUi;
 
 fn get_secret_key() -> SecretKey {
     match env::var("SECRET_KEY") {
@@ -37,25 +42,68 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
             ..Default::default()
         };
 
+        #[derive(OpenApi)]
+        #[openapi(
+            nest(
+                (path = "/api", api = AURApi, tags = ["AUR"]),
+                (path = "/api", api = crate::api::auth::AuthApi, tags = ["Auth"]),
+                (path = "/api", api = crate::api::build::BuildApi, tags = ["Build"]),
+                (path = "/api", api = crate::api::health::HealthApi, tags = ["Health"]),
+                (path = "/api", api = crate::api::package::PackageApi, tags = ["Package"]),
+                (path = "/api", api = crate::api::stats::StatsApi, tags = ["Stats"]),
+            ),
+            tags(
+                (name = "AUR", description = "AUR management endpoints."),
+                (name = "Build", description = "Build management endpoints."),
+                (name = "Auth", description = "Authentication"),
+                (name = "Health", description = "Health endpoints"),
+                (name = "Package", description = "Package management endpoints."),
+                (name = "Stats", description = "Statistics endpoints."),
+            ),
+            modifiers(&SecurityAddon)
+        )]
+        struct ApiDoc;
+
+        struct SecurityAddon;
+
+        impl Modify for SecurityAddon {
+            fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+                let components = openapi.components.as_mut().unwrap(); // we can unwrap safely since there already is components registered.
+                let oauth_config = oauth_config_from_env();
+                if let Ok(oauth_config) = oauth_config {
+                    components.add_security_scheme(
+                        "openid_connect",
+                        SecurityScheme::OAuth2(OAuth2::new([Flow::AuthorizationCode(
+                            AuthorizationCode::new(
+                                oauth_config.provider().auth_uri(),
+                                oauth_config.provider().token_uri(),
+                                Scopes::new(),
+                            ),
+                        )])),
+                    )
+                }
+            }
+        }
+
         let oauth_config = oauth_config_from_env();
         let mut rock = rocket::custom(config)
             .manage(db)
             .manage(tx)
             .manage(OauthEnabled(oauth_config.is_ok()))
             .mount("/api/", build_api())
+            .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
             .mount(
-                "/docs/",
-                make_swagger_ui(&SwaggerUIConfig {
-                    url: "../api/openapi.json".to_owned(),
-                    ..Default::default()
-                }),
-            );
+                "/",
+                SwaggerUi::new("/swagger-ui/<_..>")
+                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
+            )
+            .mount("/", Redoc::with_url("/redoc", ApiDoc::openapi()));
 
         if let Ok(oauth_config) = oauth_config {
             rock = rock
                 .mount("/api/", routes![oauth_login, oauth_callback])
                 .attach(AdHoc::on_ignite("OAuth Config", |rocket| async {
-                    rocket.attach(OAuth2::<()>::custom(
+                    rocket.attach(rocket_oauth2::OAuth2::<()>::custom(
                         HyperRustlsAdapter::default(),
                         oauth_config,
                     ))

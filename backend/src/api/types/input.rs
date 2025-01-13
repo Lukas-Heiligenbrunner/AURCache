@@ -1,16 +1,15 @@
 use rocket::serde::{Deserialize, Serialize};
-use rocket_okapi::okapi::schemars;
-use rocket_okapi::JsonSchema;
 use sea_orm::FromQueryResult;
+use utoipa::ToSchema;
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(crate = "rocket::serde")]
 pub struct ApiPackage {
     pub name: String,
     pub version: String,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct SimplePackageModel {
     pub id: i32,
@@ -21,7 +20,7 @@ pub struct SimplePackageModel {
     pub latest_aur_version: String,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize, Default)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize, Default)]
 #[serde(crate = "rocket::serde")]
 pub struct ExtendedPackageModel {
     pub id: i32,
@@ -42,7 +41,7 @@ pub struct ExtendedPackageModel {
     pub description: Option<String>,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize, Default)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize, Default)]
 pub struct PackagePatchModel {
     pub name: Option<String>,
     pub status: Option<i32>,
@@ -54,7 +53,7 @@ pub struct PackagePatchModel {
     pub platforms: Option<Vec<String>>,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct ListBuildsModel {
     id: i32,
@@ -67,7 +66,7 @@ pub struct ListBuildsModel {
     platform: String,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct ListStats {
     pub total_builds: u32,
