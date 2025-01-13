@@ -21,7 +21,6 @@ use utoipa::OpenApi;
 #[openapi(paths(stats))]
 pub struct StatsApi;
 
-/// get general build-server stats
 #[utoipa::path(
     responses(
             (status = 200, description = "Get general build-server stats", body = [ListStats]),

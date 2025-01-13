@@ -101,7 +101,6 @@ pub async fn package_update_entity_endpoint(
     Ok(())
 }
 
-/// Update a package with id
 #[utoipa::path(
     responses(
             (status = 200, description = "Update package to newest AUR version"),
@@ -124,7 +123,6 @@ pub async fn package_update_endpoint(
         .map_err(|e| BadRequest(e.to_string()))
 }
 
-/// Delete package with id
 #[utoipa::path(
     responses(
             (status = 200, description = "Delete package"),
@@ -143,7 +141,6 @@ pub async fn package_del(
     Ok(())
 }
 
-/// Get all packages currently in Repo
 #[utoipa::path(
     responses(
             (status = 200, description = "List of all packages", body = [SimplePackageModel]),
@@ -181,12 +178,11 @@ pub async fn package_list(
     Ok(Json(all))
 }
 
-/// get specific package by id
-/// This requires 1 API call to the AUR (rate limited 4000 per day)
-/// https://wiki.archlinux.org/title/Aurweb_RPC_interface
 #[utoipa::path(
     responses(
-            (status = 200, description = "Get package details", body = ExtendedPackageModel),
+            (status = 200, description = "Get package details
+This requires 1 API call to the AUR (rate limited 4000 per day)
+https://wiki.archlinux.org/title/Aurweb_RPC_interface", body = ExtendedPackageModel),
     ),
     params(
             ("id", description = "Id of package")
