@@ -1,13 +1,23 @@
 use crate::aur::api::query_aur;
 use rocket::serde::json::Json;
 
-use rocket::get;
-
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ApiPackage;
-use rocket_okapi::openapi;
+use rocket::get;
+use utoipa::OpenApi;
 
-#[openapi(tag = "aur")]
+#[derive(OpenApi)]
+#[openapi(paths(search))]
+pub struct AURApi;
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get all todos", body = [ApiPackage]),
+    ),
+    params(
+        ("query", description = "AUR query"),
+    )
+)]
 #[get("/search?<query>")]
 pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackage>>, String> {
     if query.len() < 2 {
