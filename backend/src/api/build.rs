@@ -10,16 +10,33 @@ use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ListBuildsModel;
 use crate::builder::types::{Action, BuildStates};
 use crate::package::update::update_platform;
-use rocket_okapi::openapi;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter,
     QueryOrder, QuerySelect, RelationTrait, Set,
 };
 use tokio::sync::broadcast::Sender;
+use utoipa::OpenApi;
 
-/// Get build output of specified build
-/// use startline to specify a start-line (to fetch only new content)
-#[openapi(tag = "build")]
+#[derive(OpenApi)]
+#[openapi(paths(
+    build_output,
+    list_builds,
+    get_build,
+    delete_build,
+    cancel_build,
+    rery_build
+))]
+pub struct BuildApi;
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "get build output of specified build"),
+    ),
+    params(
+            ("buildid", description = "Id of build"),
+            ("startline", description = "Startline to fetch from (only content from this line on)")
+    )
+)]
 #[get("/build/<buildid>/output?<startline>")]
 pub async fn build_output(
     db: &State<DatabaseConnection>,
@@ -47,8 +64,16 @@ pub async fn build_output(
     }
 }
 
-/// get list of all builds
-#[openapi(tag = "build")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "List of all builds"),
+    ),
+    params(
+            ("pkgid", description = "Id of Package"),
+            ("limit", description = "Limit of items to fetch"),
+            ("page", description = "Page to fetch")
+    )
+)]
 #[get("/builds?<pkgid>&<limit>&<page>")]
 pub async fn list_builds(
     db: &State<DatabaseConnection>,
@@ -87,7 +112,14 @@ pub async fn list_builds(
     Ok(Json(build))
 }
 
-#[openapi(tag = "build")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get build details"),
+    ),
+    params(
+            ("buildid", description = "Id of build")
+    )
+)]
 #[get("/build/<buildid>")]
 pub async fn get_build(
     db: &State<DatabaseConnection>,
@@ -117,7 +149,14 @@ pub async fn get_build(
     Ok(Json(result))
 }
 
-#[openapi(tag = "build")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Delete build"),
+    ),
+    params(
+            ("buildid", description = "Id of build")
+    )
+)]
 #[delete("/build/<buildid>")]
 pub async fn delete_build(
     db: &State<DatabaseConnection>,
@@ -140,7 +179,14 @@ pub async fn delete_build(
     Ok(())
 }
 
-#[openapi(tag = "build")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Cancel build job"),
+    ),
+    params(
+            ("buildid", description = "Id of build")
+    )
+)]
 #[post("/build/<buildid>/cancel")]
 pub async fn cancel_build(
     tx: &State<Sender<Action>>,
@@ -154,7 +200,14 @@ pub async fn cancel_build(
     Ok(())
 }
 
-#[openapi(tag = "build")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Retry build"),
+    ),
+    params(
+            ("buildid", description = "Id of build"),
+    )
+)]
 #[post("/build/<buildid>/retry")]
 pub async fn rery_build(
     db: &State<DatabaseConnection>,

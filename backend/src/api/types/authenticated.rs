@@ -1,12 +1,11 @@
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
 use rocket::Request;
-use rocket_okapi::OpenApiFromRequest;
 
 #[derive(Debug, Clone)]
 pub struct OauthEnabled(pub bool);
 
-#[derive(OpenApiFromRequest)]
+#[derive(Debug)]
 pub struct Authenticated;
 
 #[derive(Debug)]

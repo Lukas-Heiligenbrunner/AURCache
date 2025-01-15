@@ -17,9 +17,17 @@ use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
+use utoipa::OpenApi;
 
-/// get general build-server stats
-#[openapi(tag = "stats")]
+#[derive(OpenApi)]
+#[openapi(paths(stats, dashboard_graph_data))]
+pub struct StatsApi;
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get general build-server stats", body = [ListStats]),
+    )
+)]
 #[get("/stats")]
 pub async fn stats(
     db: &State<DatabaseConnection>,
@@ -33,7 +41,11 @@ pub async fn stats(
         .map(Json)
 }
 
-/// get graph data for dashboard
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get graph data for dashboard", body = [Vec<GraphDataPoint>]),
+    )
+)]
 #[openapi(tag = "stats")]
 #[get("/graph")]
 pub async fn dashboard_graph_data(

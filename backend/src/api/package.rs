@@ -14,14 +14,28 @@ use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
 use crate::api::types::output::{AddBody, UpdateBody};
 use crate::aur::api::get_info_by_name;
-use rocket_okapi::openapi;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
+use utoipa::OpenApi;
 
-/// Add new Package to build queue
-#[openapi(tag = "Packages")]
+#[derive(OpenApi)]
+#[openapi(paths(
+    package_add_endpoint,
+    package_update_entity_endpoint,
+    package_update_endpoint,
+    package_del,
+    package_list,
+    get_package
+))]
+pub struct PackageApi;
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Add new Package"),
+    )
+)]
 #[post("/package", data = "<input>")]
 pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
@@ -40,8 +54,14 @@ pub async fn package_add_endpoint(
     .map_err(|e| BadRequest(e.to_string()))
 }
 
-/// Add new Package to build queue
-#[openapi(tag = "Packages")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Update parts of package"),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
 #[patch("/package/<id>", data = "<input>")]
 pub async fn package_update_entity_endpoint(
     db: &State<DatabaseConnection>,
@@ -81,8 +101,14 @@ pub async fn package_update_entity_endpoint(
     Ok(())
 }
 
-/// Update a package with id
-#[openapi(tag = "Packages")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Update package to newest AUR version"),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
 #[post("/package/<id>/update", data = "<input>")]
 pub async fn package_update_endpoint(
     db: &State<DatabaseConnection>,
@@ -97,8 +123,14 @@ pub async fn package_update_endpoint(
         .map_err(|e| BadRequest(e.to_string()))
 }
 
-/// Delete package with id
-#[openapi(tag = "Packages")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Delete package"),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
 #[delete("/package/<id>")]
 pub async fn package_del(
     db: &State<DatabaseConnection>,
@@ -109,8 +141,15 @@ pub async fn package_del(
     Ok(())
 }
 
-/// Get all packages currently in Repo
-#[openapi(tag = "Packages")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "List of all packages", body = [SimplePackageModel]),
+    ),
+    params(
+            ("limit", description = "limit of packages"),
+            ("page", description = "page of packages")
+    )
+)]
 #[get("/packages/list?<limit>&<page>")]
 pub async fn package_list(
     db: &State<DatabaseConnection>,
@@ -139,10 +178,16 @@ pub async fn package_list(
     Ok(Json(all))
 }
 
-/// get specific package by id
-/// This requires 1 API call to the AUR (rate limited 4000 per day)
-/// https://wiki.archlinux.org/title/Aurweb_RPC_interface
-#[openapi(tag = "Packages")]
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get package details
+This requires 1 API call to the AUR (rate limited 4000 per day)
+https://wiki.archlinux.org/title/Aurweb_RPC_interface", body = ExtendedPackageModel),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
 #[get("/package/<id>")]
 pub async fn get_package(
     db: &State<DatabaseConnection>,
