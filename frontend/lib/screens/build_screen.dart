@@ -1,7 +1,6 @@
 import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
-import 'package:aurcache/components/api/APIBuilder.dart';
 import 'package:aurcache/providers/build_log_provider.dart';
 import 'package:aurcache/utils/time_formatter.dart';
 import 'package:dio/dio.dart';
@@ -11,10 +10,10 @@ import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
+import '../components/api/api_builder.dart';
 import '../components/confirm_popup.dart';
 import '../components/dashboard/chart_card.dart';
 import '../constants/color_constants.dart';
-import '../providers/api/build_provider.dart';
 import '../utils/package_color.dart';
 
 class BuildScreen extends StatefulWidget {
@@ -32,40 +31,33 @@ class _BuildScreenState extends State<BuildScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: MultiProvider(
-        providers: [
-          ChangeNotifierProvider<BuildProvider>(create: (_) => BuildProvider()),
-          ChangeNotifierProvider<BuildLogProvider>(
-              create: (_) => BuildLogProvider()),
-        ],
-        builder: (context, child) {
-          return APIBuilder<BuildProvider, Build, BuildDTO>(
-              key: const Key("Build on seperate page"),
-              dto: BuildDTO(buildID: widget.buildID),
-              interval: const Duration(seconds: 10),
-              onLoad: () => const Text("loading"),
-              onData: (buildData) {
-                return Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.start,
-                        children: [
-                          _buildTopBar(buildData, context),
-                          const SizedBox(
-                            height: 15,
-                          ),
-                          _buildPage(buildData)
-                        ],
-                      ),
+      body: ChangeNotifierProvider(
+        create: (BuildContext context) => BuildLogProvider(),
+        child: APIBuilder(
+            interval: const Duration(seconds: 10),
+            onLoad: () => const Text("loading"),
+            onData: (buildData) {
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      children: [
+                        _buildTopBar(buildData, context),
+                        const SizedBox(
+                          height: 15,
+                        ),
+                        _buildPage(buildData)
+                      ],
                     ),
-                    _buildSideBar(buildData),
-                  ],
-                );
-              });
-        },
+                  ),
+                  _buildSideBar(buildData),
+                ],
+              );
+            },
+            api: () => API.getBuild(widget.buildID)),
       ),
     );
   }
@@ -237,8 +229,8 @@ class _BuildScreenState extends State<BuildScreen> {
                 context, "Cancel Build", "Are you sure to cancel this Build?",
                 () {
               API.cancelBuild(widget.buildID);
-              Provider.of<BuildProvider>(context, listen: false)
-                  .refresh(context);
+              //Provider.of<BuildProvider>(context, listen: false)
+              //    .refresh(context);
             }, null);
           },
           child: const Text(
