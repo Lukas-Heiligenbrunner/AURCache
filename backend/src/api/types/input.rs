@@ -83,7 +83,7 @@ pub struct ListStats {
     pub build_success_trend: f32,
 }
 
-#[derive(FromQueryResult, Deserialize, JsonSchema, Serialize)]
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct GraphDataPoint {
     pub month: u8,

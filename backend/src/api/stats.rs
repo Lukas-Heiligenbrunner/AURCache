@@ -12,7 +12,6 @@ use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::{GraphDataPoint, ListStats};
 use crate::builder::types::BuildStates;
 use crate::db::helpers::dbtype::{database_type, DbType};
-use rocket_okapi::openapi;
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
@@ -43,10 +42,9 @@ pub async fn stats(
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Get graph data for dashboard", body = [Vec<GraphDataPoint>]),
+        (status = 200, description = "Get graph data for dashboard", body = [Vec<GraphDataPoint>]),
     )
 )]
-#[openapi(tag = "stats")]
 #[get("/graph")]
 pub async fn dashboard_graph_data(
     db: &State<DatabaseConnection>,
