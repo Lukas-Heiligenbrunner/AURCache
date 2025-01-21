@@ -17,6 +17,7 @@ pub fn build_api() -> Vec<Route> {
         list_builds,
         stats,
         dashboard_graph_data,
+        user_info,
         get_build,
         get_package,
         rery_build,

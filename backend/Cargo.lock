@@ -284,6 +284,7 @@ dependencies = [
  "sea-orm",
  "sea-orm-migration",
  "serde",
+ "serde_json",
  "tokio",
  "utoipa",
  "utoipa-redoc",

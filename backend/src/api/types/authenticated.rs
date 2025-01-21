@@ -6,7 +6,9 @@ use rocket::Request;
 pub struct OauthEnabled(pub bool);
 
 #[derive(Debug)]
-pub struct Authenticated;
+pub struct Authenticated {
+    pub username: Option<String>,
+}
 
 #[derive(Debug)]
 pub enum LoginError {
@@ -28,10 +30,17 @@ impl<'r> FromRequest<'r> for Authenticated {
                 .and_then(|cookie| cookie.value().parse().ok())
                 .map_or_else(
                     || Outcome::Error((Status::Unauthorized, LoginError::InvalidData)),
-                    |_: String| Outcome::Success(Authenticated),
+                    |_: String| {
+                        let username: Option<String> = req
+                            .cookies()
+                            .get_private("username")
+                            .and_then(|cookie| cookie.value().parse().ok());
+
+                        Outcome::Success(Authenticated { username })
+                    },
                 )
         } else {
-            Outcome::Success(Authenticated)
+            Outcome::Success(Authenticated { username: None })
         }
     }
 }

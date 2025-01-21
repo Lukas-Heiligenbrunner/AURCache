@@ -1,6 +1,10 @@
+import 'package:aurcache/api/statistics.dart';
+import 'package:aurcache/components/api/api_builder.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:skeletonizer/skeletonizer.dart';
+import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../../utils/responsive.dart';
 
@@ -23,10 +27,23 @@ class Header extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.start,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                "Hi, Arch User :)",
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
+              APIBuilder(
+                  onLoad: () {
+                    return Skeletonizer(
+                        child: Text(
+                      "Hi, Arch User :)",
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ));
+                  },
+                  onData: (data) {
+                    return Text(
+                      data.username == null
+                          ? "Hi, Arch User :)"
+                          : "Hi, ${data.username} :)",
+                      style: Theme.of(context).textTheme.titleLarge,
+                    );
+                  },
+                  api: API.userInfo),
               const SizedBox(
                 height: 8,
               ),

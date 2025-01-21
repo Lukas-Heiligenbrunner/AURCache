@@ -3,14 +3,12 @@ use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
-#[serde(crate = "rocket::serde")]
 pub struct ApiPackage {
     pub name: String,
     pub version: String,
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
 pub struct SimplePackageModel {
     pub id: i32,
     pub name: String,
@@ -21,7 +19,6 @@ pub struct SimplePackageModel {
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize, Default)]
-#[serde(crate = "rocket::serde")]
 pub struct ExtendedPackageModel {
     pub id: i32,
     pub name: String,
@@ -54,7 +51,6 @@ pub struct PackagePatchModel {
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
 pub struct ListBuildsModel {
     id: i32,
     pkg_id: i32,
@@ -67,7 +63,6 @@ pub struct ListBuildsModel {
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
 pub struct ListStats {
     pub total_builds: u32,
     pub successful_builds: u32,
@@ -84,9 +79,13 @@ pub struct ListStats {
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
-#[serde(crate = "rocket::serde")]
 pub struct GraphDataPoint {
     pub month: u8,
     pub year: u16,
     pub count: u32,
+}
+
+#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
+pub struct UserInfo {
+    pub username: Option<String>,
 }

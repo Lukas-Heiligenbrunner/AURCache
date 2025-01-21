@@ -1,5 +1,5 @@
 use crate::api::aur::AURApi;
-use crate::api::auth::{oauth_callback, oauth_login};
+use crate::api::auth::{oauth_callback, oauth_login, OauthUserInfo};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
@@ -97,7 +97,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
             rock = rock
                 .mount("/api/", routes![oauth_login, oauth_callback])
                 .attach(AdHoc::on_ignite("OAuth Config", |rocket| async {
-                    rocket.attach(rocket_oauth2::OAuth2::<()>::custom(
+                    rocket.attach(rocket_oauth2::OAuth2::<OauthUserInfo>::custom(
                         HyperRustlsAdapter::default(),
                         oauth_config,
                     ))

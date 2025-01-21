@@ -7,19 +7,19 @@ use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 
 use rocket::{get, State};
-
+use rocket::serde::{Deserialize, Serialize};
 use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{GraphDataPoint, ListStats};
+use crate::api::types::input::{GraphDataPoint, ListStats, UserInfo};
 use crate::builder::types::BuildStates;
 use crate::db::helpers::dbtype::{database_type, DbType};
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
-use utoipa::OpenApi;
+use utoipa::{OpenApi, ToSchema};
 
 #[derive(OpenApi)]
-#[openapi(paths(stats, dashboard_graph_data))]
+#[openapi(paths(stats, dashboard_graph_data, user_info))]
 pub struct StatsApi;
 
 #[utoipa::path(
@@ -38,6 +38,18 @@ pub async fn stats(
         .await
         .map_err(|e| NotFound(e.to_string()))
         .map(Json)
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get infos about the signed in user", body = [UserInfo]),
+    )
+)]
+#[get("/userinfo")]
+pub async fn user_info(
+    a: Authenticated,
+) -> Json<UserInfo> {
+    Json(UserInfo { username: a.username })
 }
 
 #[utoipa::path(
