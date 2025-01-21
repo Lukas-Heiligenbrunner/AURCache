@@ -1,10 +1,10 @@
 use anyhow::Context;
 use log::debug;
 use reqwest::header::AUTHORIZATION;
+use rocket::get;
 use rocket::http::{Cookie, CookieJar, SameSite};
 use rocket::response::status::Unauthorized;
 use rocket::response::Redirect;
-use rocket::get;
 use rocket_oauth2::{OAuth2, TokenResponse};
 use utoipa::OpenApi;
 
