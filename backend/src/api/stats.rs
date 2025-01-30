@@ -15,7 +15,7 @@ use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use sea_orm::{DbBackend, FromQueryResult, PaginatorTrait, Statement};
-use utoipa::{OpenApi};
+use utoipa::OpenApi;
 
 #[derive(OpenApi)]
 #[openapi(paths(stats, dashboard_graph_data, user_info))]
