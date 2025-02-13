@@ -7,7 +7,6 @@ import 'package:toastification/toastification.dart';
 import '../api/API.dart';
 import '../constants/color_constants.dart';
 import 'add_package_popup.dart';
-import 'confirm_popup.dart';
 
 class AurSearchTable extends StatelessWidget {
   const AurSearchTable({super.key, required this.data});

@@ -79,7 +79,7 @@ class PackagesTable extends StatelessWidget {
                 ? () async {
                     try {
                       await API.updatePackage(id: package.id);
-                    } on DioException catch (e) {
+                    } on DioException {
                       toastification.show(
                         title: Text('Failed to update package!'),
                         autoCloseDuration: const Duration(seconds: 5),

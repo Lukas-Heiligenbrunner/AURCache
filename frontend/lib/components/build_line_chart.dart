@@ -1,6 +1,5 @@
 import 'package:aurcache/api/API.dart';
 import 'package:aurcache/api/statistics.dart';
-import 'package:aurcache/models/graph_datapoint.dart';
 import 'package:aurcache/utils/num_formatter.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';

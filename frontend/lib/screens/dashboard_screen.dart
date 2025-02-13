@@ -1,20 +1,19 @@
-import 'package:aurcache/api/statistics.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/models/simple_packge.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../api/API.dart';
 import '../components/dashboard/header.dart';
 import '../constants/color_constants.dart';
 import '../models/build.dart';
-import '../models/stats.dart';
 import '../utils/responsive.dart';
 import '../components/dashboard/quick_info_banner.dart';
 import '../components/dashboard/dashboard_tables.dart';
 import '../components/dashboard/side_panel.dart';
 
 class DashboardScreen extends StatefulWidget {
+  const DashboardScreen({super.key});
+
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
 }

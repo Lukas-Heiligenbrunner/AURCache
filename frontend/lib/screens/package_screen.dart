@@ -4,7 +4,6 @@ import 'package:aurcache/models/extended_package.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/API.dart';
@@ -51,7 +50,7 @@ class _PackageScreenState extends State<PackageScreen> {
                         IconButton(
                             onPressed: () async {
                               await launchUrl(
-                                Uri.parse(pkg.aur_url!),
+                                Uri.parse(pkg.aur_url),
                                 webOnlyWindowName: '_blank',
                               );
                             },
@@ -155,9 +154,9 @@ class _PackageScreenState extends State<PackageScreen> {
   }
 
   Widget _buildSideBar(ExtendedPackage pkg) {
-    final last_updated =
+    final lastUpdated =
         DateTime.fromMillisecondsSinceEpoch(pkg.last_updated * 1000);
-    final first_submitted =
+    final firstSubmitted =
         DateTime.fromMillisecondsSinceEpoch(pkg.first_submitted * 1000);
 
     return SizedBox(
@@ -184,12 +183,12 @@ class _PackageScreenState extends State<PackageScreen> {
             _sideCard(
               title: "Last Updated",
               subtitle:
-                  "${last_updated.year}-${last_updated.month.toString().padLeft(2, '0')}-${last_updated.day.toString().padLeft(2, '0')}",
+                  "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
             ),
             _sideCard(
               title: "First submitted",
               subtitle:
-                  "${first_submitted.year}-${first_submitted.month.toString().padLeft(2, '0')}-${first_submitted.day.toString().padLeft(2, '0')}",
+                  "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
             ),
             _sideCard(
               title: "Licenses",

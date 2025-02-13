@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import '../api/API.dart';
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
-import '../models/build.dart';
 
 class BuildsScreen extends StatelessWidget {
   const BuildsScreen({super.key});

@@ -1,6 +1,5 @@
 import 'package:aurcache/models/extended_package.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 
 import '../constants/platforms.dart';

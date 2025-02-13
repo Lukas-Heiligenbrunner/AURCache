@@ -18,14 +18,14 @@ class QuickInfoBanner extends StatelessWidget {
 
   List<Widget> _buildElements(Stats? stats, BuildContext context) {
     final double iconSize = context.desktop ? 64 : 42;
-    final build_success_rate = stats != null
+    final buildSuccessRate = stats != null
         ? (stats.total_builds != 0
             ? (stats.successful_builds / stats.total_builds)
             : 0)
         : 0;
 
-    final build_success =
-        stats != null ? "${(build_success_rate * 100).toInt()}%" : null;
+    final buildSuccess =
+        stats != null ? "${(buildSuccessRate * 100).toInt()}%" : null;
 
     return [
       QuickInfoTile(
@@ -84,14 +84,14 @@ class QuickInfoBanner extends StatelessWidget {
               child: RotatedBox(
                   quarterTurns: -1,
                   child: CircularProgressIndicator(
-                    value: build_success_rate.toDouble(),
+                    value: buildSuccessRate.toDouble(),
                     strokeWidth: 8,
                     color: Color(0xffA9FF0F),
                     backgroundColor: Color(0xff292e35),
                   ))),
         ),
         title: "Build Success",
-        value: build_success ?? "10%",
+        value: buildSuccess ?? "10%",
         positive: !(stats?.build_success_trend.isNegative ?? false),
         trend: "${stats?.build_success_trend ?? 42}%",
       ),

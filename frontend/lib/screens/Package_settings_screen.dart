@@ -3,12 +3,10 @@ import 'package:aurcache/components/build_flag_settings.dart';
 import 'package:aurcache/components/platform_settings.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../components/api/api_builder.dart';
-import '../models/extended_package.dart';
 
 class Packagesettingsscreen extends StatefulWidget {
   const Packagesettingsscreen({super.key, required this.pkgID});

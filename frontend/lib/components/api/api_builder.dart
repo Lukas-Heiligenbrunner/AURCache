@@ -1,4 +1,3 @@
-import 'dart:math';
 
 import 'package:flutter/widgets.dart';
 import 'package:toastification/toastification.dart';
@@ -75,7 +74,7 @@ class _APIBuilderState<T> extends State<APIBuilder<T>> {
                   ));
         }
         if (snapshot.hasData) {
-          return widget.onData(snapshot.data!);
+          return widget.onData(snapshot.data as T);
         } else {
           return widget.onLoad();
         }

@@ -2,10 +2,8 @@ import 'dart:async';
 
 import 'package:aurcache/api/aur.dart';
 import 'package:aurcache/components/aur_search_table.dart';
-import 'package:aurcache/models/aur_package.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../api/API.dart';
 import '../components/api/api_builder.dart';

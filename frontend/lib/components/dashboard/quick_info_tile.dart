@@ -2,7 +2,6 @@ import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
-import '../../constants/color_constants.dart';
 
 class QuickInfoTile extends StatefulWidget {
   const QuickInfoTile(

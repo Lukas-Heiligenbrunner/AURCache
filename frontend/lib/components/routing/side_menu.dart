@@ -1,4 +1,3 @@
-import 'package:aurcache/components/dashboard/header.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -11,7 +10,7 @@ class SideMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active_uri = GoRouterState.of(context).uri.toString();
+    final activeUri = GoRouterState.of(context).uri.toString();
 
     return Drawer(
       //backgroundColor: Color(0xff131418),
@@ -59,7 +58,7 @@ class SideMenu extends StatelessWidget {
               DrawerListTile(
                 title: "Dashboard",
                 svgSrc: "assets/icons/menu/dashboard.svg",
-                active: active_uri == "/",
+                active: activeUri == "/",
                 press: () {
                   context.go("/");
                 },
@@ -67,7 +66,7 @@ class SideMenu extends StatelessWidget {
               DrawerListTile(
                 title: "Builds",
                 svgSrc: "assets/icons/menu/builds.svg",
-                active: active_uri.startsWith("/builds"),
+                active: activeUri.startsWith("/builds"),
                 press: () {
                   context.go("/builds");
                 },
@@ -75,7 +74,7 @@ class SideMenu extends StatelessWidget {
               DrawerListTile(
                 title: "AUR",
                 svgSrc: "assets/icons/menu/aur.svg",
-                active: active_uri.startsWith("/aur"),
+                active: activeUri.startsWith("/aur"),
                 press: () {
                   context.go("/aur");
                 },
@@ -88,7 +87,7 @@ class SideMenu extends StatelessWidget {
               DrawerListTile(
                 title: "Settings",
                 svgSrc: "assets/icons/menu/settings.svg",
-                active: active_uri.startsWith("/settings"),
+                active: activeUri.startsWith("/settings"),
                 press: () {
                   context.go("/settings");
                 },
@@ -96,7 +95,7 @@ class SideMenu extends StatelessWidget {
               DrawerListTile(
                 title: "Help",
                 svgSrc: "assets/icons/menu/help.svg",
-                active: active_uri.startsWith("/help"),
+                active: activeUri.startsWith("/help"),
                 press: () {
                   context.go("/help");
                 },
