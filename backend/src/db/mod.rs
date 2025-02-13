@@ -2,6 +2,7 @@
 
 pub mod prelude;
 
+pub mod activities;
 pub mod builds;
 pub mod files;
 pub mod helpers;

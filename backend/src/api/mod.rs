@@ -1,3 +1,4 @@
+mod activity;
 mod aur;
 mod auth;
 pub mod backend;

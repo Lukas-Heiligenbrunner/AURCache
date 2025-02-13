@@ -1,3 +1,4 @@
+use crate::api::activity::*;
 use crate::api::aur::*;
 use crate::api::build::*;
 use crate::api::health::*;
@@ -23,6 +24,7 @@ pub fn build_api() -> Vec<Route> {
         rery_build,
         package_update_endpoint,
         cancel_build,
-        health
+        health,
+        activity,
     ]
 }
