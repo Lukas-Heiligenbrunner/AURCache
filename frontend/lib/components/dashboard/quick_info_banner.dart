@@ -38,7 +38,7 @@ class QuickInfoBanner extends StatelessWidget {
         title: "Total Packages",
         value: stats?.total_packages.toString() ?? "42",
         positive: !(stats?.total_packages_trend.isNegative ?? false),
-        trend: "${stats?.total_packages_trend ?? 42}%",
+        trend: "${stats?.total_packages_trend.abs().toStringAsFixed(2) ?? 42}%",
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -50,7 +50,8 @@ class QuickInfoBanner extends StatelessWidget {
         title: "Total Builds",
         value: stats?.total_builds.toString() ?? "42",
         positive: !(stats?.total_build_trend.isNegative ?? false),
-        trend: "${stats?.total_build_trend ?? 42}%",
+        trend:
+            "${((stats?.total_build_trend ?? 0.42) * 100).abs().toStringAsFixed(1)}%",
       ),
       QuickInfoTile(
         icon: Skeleton.shade(

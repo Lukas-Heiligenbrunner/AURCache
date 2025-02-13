@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:aurcache/api/aur.dart';
 import 'package:aurcache/components/aur_search_table.dart';
 import 'package:aurcache/models/aur_package.dart';
+import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -38,6 +39,14 @@ class _AurScreenState extends State<AurScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text("AUR"),
+        leading: context.mobile
+            ? IconButton(
+                icon: const Icon(Icons.menu),
+                onPressed: () {
+                  Scaffold.of(context).openDrawer();
+                },
+              )
+            : null,
       ),
       body: Padding(
         padding: const EdgeInsets.all(defaultPadding),
@@ -73,6 +82,7 @@ class _AurScreenState extends State<AurScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder(
+                      key: ValueKey(query),
                       onLoad: () => Center(
                             child: Column(
                               children: [
@@ -86,7 +96,16 @@ class _AurScreenState extends State<AurScreen> {
                               ],
                             ),
                           ),
-                      onData: (data) => AurSearchTable(data: data),
+                      onData: (data) => query.length < 3
+                          ? Column(
+                              children: [
+                                const SizedBox(
+                                  height: 15,
+                                ),
+                                Text("Type to search for an AUR package")
+                              ],
+                            )
+                          : AurSearchTable(data: data),
                       api: () => API.getAurPackages(query)),
                 )
               ],

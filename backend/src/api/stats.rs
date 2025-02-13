@@ -1,6 +1,7 @@
 use crate::db::builds;
 use crate::db::prelude::{Builds, Packages};
 use crate::utils::dir_size::dir_size;
+use anyhow::bail;
 use bigdecimal::ToPrimitive;
 
 use rocket::response::status::NotFound;
@@ -9,7 +10,7 @@ use rocket::serde::json::Json;
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::{GraphDataPoint, ListStats, UserInfo};
 use crate::builder::types::BuildStates;
-use crate::db::helpers::dbtype::{database_type, DbType};
+use crate::db::helpers::dbtype::database_type;
 use rocket::{get, State};
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
@@ -71,7 +72,7 @@ pub async fn dashboard_graph_data(
 
 async fn get_graph_datapoints(db: &DatabaseConnection) -> anyhow::Result<Vec<GraphDataPoint>> {
     let query = match database_type() {
-        DbType::Sqlite => {
+        DbBackend::Sqlite => {
             "SELECT
     CAST(strftime('%Y', datetime(start_time, 'unixepoch')) AS INTEGER) AS year,
     CAST(strftime('%m', datetime(start_time, 'unixepoch')) AS INTEGER) AS month,
@@ -85,7 +86,7 @@ GROUP BY
 ORDER BY
     year DESC, month DESC;"
         }
-        DbType::Postgres => {
+        DbBackend::Postgres => {
             "SELECT
     EXTRACT(YEAR FROM to_timestamp(timestamp_column))::INTEGER AS year,
     EXTRACT(MONTH FROM to_timestamp(timestamp_column))::INTEGER AS month,
@@ -99,10 +100,11 @@ GROUP BY
 ORDER BY
     year DESC, month DESC;"
         }
+        _ => bail!("Unsupported database type"),
     };
 
     let result = GraphDataPoint::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Sqlite,
+        database_type(),
         query,
         vec![],
     ))
@@ -159,6 +161,59 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
     // Count total packages
     let total_packages: u32 = Packages::find().count(db).await?.try_into()?;
 
+    #[derive(Debug, FromQueryResult)]
+    struct LastBuildsStruct {
+        last_30_days_builds: u32,
+        prev_30_days_builds: u32,
+    }
+
+    let query = match database_type() {
+        DbBackend::Sqlite => "
+WITH build_counts AS (
+    SELECT
+        CASE
+            WHEN start_time >= strftime('%s', 'now', '-30 days') THEN 'last_30_days'
+            WHEN start_time >= strftime('%s', 'now', '-60 days') THEN 'prev_30_days'
+            END AS period,
+        COUNT(*) AS build_count
+    FROM builds
+    WHERE start_time >= strftime('%s', 'now', '-60 days') -- Only consider last 60 days
+    GROUP BY period
+)
+SELECT
+    COALESCE((SELECT build_count FROM build_counts WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
+    COALESCE((SELECT build_count FROM build_counts WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+    ",
+        DbBackend::Postgres => "
+WITH build_counts AS (
+    SELECT
+        CASE
+            WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '30 days') THEN 'last_30_days'
+            WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days') THEN 'prev_30_days'
+        END AS period,
+        COUNT(*) AS build_count
+    FROM builds
+    WHERE start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days')
+    GROUP BY period
+)
+SELECT
+    COALESCE((SELECT build_count FROM build_counts WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
+    COALESCE((SELECT build_count FROM build_counts WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+",
+        _ => bail!("Unsupported database type"),
+    };
+
+    let last_build_cnt: LastBuildsStruct = LastBuildsStruct::find_by_statement(
+        Statement::from_sql_and_values(database_type(), query, []),
+    )
+    .one(db)
+    .await?
+    .ok_or(anyhow::anyhow!("No last build cnts"))?;
+
+    let build_trend = (last_build_cnt.last_30_days_builds as f32
+        / last_build_cnt.prev_30_days_builds as f32)
+        - 1.0;
+
     Ok(ListStats {
         total_builds,
         successful_builds,
@@ -166,7 +221,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         avg_build_time,
         repo_size,
         total_packages,
-        total_build_trend: 0.0,
+        total_build_trend: build_trend,
         total_packages_trend: 0.0,
         repo_size_trend: -0.0,
         avg_build_time_trend: 0.0,

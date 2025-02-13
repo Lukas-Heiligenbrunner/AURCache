@@ -1,4 +1,5 @@
-use crate::db::helpers::dbtype::{database_type, DbType};
+use crate::db::helpers::dbtype::database_type;
+use sea_orm::DbBackend;
 use sea_orm_migration::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -12,7 +13,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         match database_type() {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 db.execute_unprepared(
                     r#"
 ALTER TABLE packages
@@ -40,7 +41,7 @@ UPDATE files
                 )
                 .await?;
             }
-            DbType::Postgres => {
+            DbBackend::Postgres => {
                 db.execute_unprepared(
                     r#"
 ALTER TABLE public.packages
@@ -68,6 +69,7 @@ UPDATE public.files
                 )
                 .await?;
             }
+            _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
 
         // try to copy pkg files to new location
@@ -98,7 +100,7 @@ UPDATE public.files
         let db = manager.get_connection();
 
         match database_type() {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 db.execute_unprepared(
                     r#"
 ALTER TABLE packages
@@ -116,7 +118,7 @@ DROP COLUMN platform;
                 )
                 .await?;
             }
-            DbType::Postgres => {
+            DbBackend::Postgres => {
                 db.execute_unprepared(
                     r#"
 ALTER TABLE public.packages
@@ -134,6 +136,7 @@ DROP COLUMN platform;
                 )
                 .await?;
             }
+            _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
 
         Ok(())

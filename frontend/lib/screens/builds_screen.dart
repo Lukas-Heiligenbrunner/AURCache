@@ -1,6 +1,7 @@
 import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/builds_table.dart';
 import 'package:aurcache/components/table_info.dart';
+import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import '../api/API.dart';
 import '../components/api/api_builder.dart';
@@ -15,6 +16,14 @@ class BuildsScreen extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text("All Builds"),
+        leading: context.mobile
+            ? IconButton(
+                icon: const Icon(Icons.menu),
+                onPressed: () {
+                  Scaffold.of(context).openDrawer();
+                },
+              )
+            : null,
       ),
       body: Padding(
         padding: const EdgeInsets.all(defaultPadding),

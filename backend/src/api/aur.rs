@@ -4,7 +4,7 @@ use rocket::serde::json::Json;
 use crate::api::types::authenticated::Authenticated;
 use crate::api::types::input::ApiPackage;
 use rocket::get;
-use rocket::response::status::{BadRequest, NotFound};
+use rocket::response::status::BadRequest;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
@@ -24,7 +24,7 @@ pub async fn search(
     query: &str,
     _a: Authenticated,
 ) -> Result<Json<Vec<ApiPackage>>, BadRequest<String>> {
-    if query.len() < 2 {
+    if query.len() < 3 {
         return Err(BadRequest("Query too short".to_string()));
     }
 

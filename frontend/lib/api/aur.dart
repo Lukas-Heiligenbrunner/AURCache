@@ -4,8 +4,11 @@ import 'api_client.dart';
 
 extension AURApi on ApiClient {
   Future<List<AurPackage>> getAurPackages(String query) async {
+    if (query.length < 3) {
+      return [];
+    }
+
     final resp = await getRawClient().get("/search?query=$query");
-    print(resp);
     final responseObject = resp.data as List;
     final List<AurPackage> packages = responseObject
         .map((e) => AurPackage.fromJson(e))

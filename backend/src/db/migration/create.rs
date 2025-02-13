@@ -1,4 +1,5 @@
-use crate::db::helpers::dbtype::{database_type, DbType};
+use crate::db::helpers::dbtype::database_type;
+use sea_orm::DbBackend;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -10,7 +11,7 @@ impl MigrationTrait for Migration {
         let db = manager.get_connection();
 
         match database_type() {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 db.execute_unprepared(
                     r#"
 create table builds
@@ -60,7 +61,7 @@ create table packages_files
                 )
                 .await?;
             }
-            DbType::Postgres => {
+            DbBackend::Postgres => {
                 db.execute_unprepared(
                     r#"
 CREATE SCHEMA IF NOT EXISTS public;
@@ -99,6 +100,7 @@ CREATE TABLE public.packages_files
                 )
                 .await?;
             }
+            _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
 
         Ok(())
