@@ -1,5 +1,10 @@
+import 'package:aurcache/api/activity_log.dart';
+import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
+import 'package:skeletonizer/skeletonizer.dart';
+
+import '../api/API.dart';
 
 class ActivityLog extends StatefulWidget {
   const ActivityLog({super.key});
@@ -11,30 +16,45 @@ class ActivityLog extends StatefulWidget {
 class _ActivityLogState extends State<ActivityLog> {
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        ActivityLogItem(
-          text: "added Package \"Power\"",
-          timestamp: DateTime.timestamp(),
-          user: "Lukas Heiligenbrunner",
-        ),
-        ActivityLogItem(
-          text: "added Package \"Naps\"",
-          timestamp: DateTime.timestamp(),
-          user: "Evin Arslan",
-        ),
-        ActivityLogItem(
-          text: "added Package \"Not\"",
-          timestamp: DateTime.timestamp(),
-          user: "Sophie Francz",
-        ),
-        ActivityLogItem(
-          text: "added Package \"Powerapps\"",
-          timestamp: DateTime.timestamp(),
-          user: "Lukas Kessler",
-        )
-      ],
-    );
+    return APIBuilder(
+        onLoad: () => Skeletonizer(
+              enabled: true,
+              child: Column(
+                children: [
+                  ActivityLogItem(
+                    text: "added Package \"Power\"",
+                    timestamp: DateTime.timestamp(),
+                    user: "Lukas Heiligenbrunner",
+                  ),
+                  ActivityLogItem(
+                    text: "added Package \"Naps\"",
+                    timestamp: DateTime.timestamp(),
+                    user: "Evin Arslan",
+                  ),
+                  ActivityLogItem(
+                    text: "added Package \"Not\"",
+                    timestamp: DateTime.timestamp(),
+                    user: "Sophie Francz",
+                  ),
+                  ActivityLogItem(
+                    text: "added Package \"Powerapps\"",
+                    timestamp: DateTime.timestamp(),
+                    user: "Lukas Kessler",
+                  )
+                ],
+              ),
+            ),
+        onData: (v) => Column(
+            children: v
+                .map(
+                  (e) => ActivityLogItem(
+                    text: e.text,
+                    timestamp: e.timestamp,
+                    user: e.user,
+                  ),
+                )
+                .toList(growable: false)),
+        api: API.listActivities);
   }
 }
 
@@ -70,7 +90,7 @@ class ActivityLogItem extends StatelessWidget {
               Row(
                 children: [
                   Text(
-                    user ?? "Unknown User",
+                    user ?? "You",
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                   ),
                   if (context.desktop)

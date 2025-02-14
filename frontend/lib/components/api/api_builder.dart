@@ -1,4 +1,3 @@
-
 import 'package:flutter/widgets.dart';
 import 'package:toastification/toastification.dart';
 import 'package:visibility_detector/visibility_detector.dart';

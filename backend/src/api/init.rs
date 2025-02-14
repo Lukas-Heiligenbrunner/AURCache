@@ -1,10 +1,11 @@
+use crate::activity_log::activity_log::ActivityLog;
 use crate::api::aur::AURApi;
 use crate::api::auth::{oauth_callback, oauth_login, OauthUserInfo};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
-use crate::api::types::authenticated::OauthEnabled;
+use crate::api::models::authenticated::OauthEnabled;
 use crate::builder::types::Action;
 use crate::utils::oauth_config::oauth_config_from_env;
 use log::{error, info, warn};
@@ -88,9 +89,10 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
 
         let oauth_config = oauth_config_from_env();
         let mut rock = rocket::custom(config)
-            .manage(db)
+            .manage(db.clone())
             .manage(tx)
             .manage(OauthEnabled(oauth_config.is_ok()))
+            .manage(ActivityLog::new(db))
             .mount("/api/", build_api())
             .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
             .mount("/", Redoc::with_url("/redoc", ApiDoc::openapi()));

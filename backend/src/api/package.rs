@@ -10,9 +10,11 @@ use rocket::serde::json::Json;
 
 use rocket::{delete, get, patch, post, State};
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
-use crate::api::types::output::{AddBody, UpdateBody};
+use crate::activity_log::activity_log::ActivityLog;
+use crate::activity_log::package_add_activity::PackageAddActivity;
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
+use crate::api::models::output::{AddBody, UpdateBody};
 use crate::aur::api::get_info_by_name;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
@@ -41,7 +43,8 @@ pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
     input: Json<AddBody>,
     tx: &State<Sender<Action>>,
-    _a: Authenticated,
+    a: Authenticated,
+    al: &State<ActivityLog>,
 ) -> Result<(), BadRequest<String>> {
     package_add(
         db,
@@ -51,7 +54,17 @@ pub async fn package_add_endpoint(
         input.build_flags.clone(),
     )
     .await
-    .map_err(|e| BadRequest(e.to_string()))
+    .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageAddActivity {
+            package: input.name.clone(),
+        },
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+    Ok(())
 }
 
 #[utoipa::path(

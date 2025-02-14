@@ -14,10 +14,10 @@ pub struct AuthApi;
 
 #[derive(serde::Deserialize, Debug)]
 pub struct OauthUserInfo {
-    pub email: String,
+    //pub email: String,
     pub name: String,
-    pub preferred_username: String,
-    pub nickname: String,
+    //pub preferred_username: String,
+    //pub nickname: String,
 }
 
 #[utoipa::path(

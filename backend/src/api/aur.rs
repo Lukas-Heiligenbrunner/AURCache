@@ -1,8 +1,8 @@
 use crate::aur::api::query_aur;
 use rocket::serde::json::Json;
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::ApiPackage;
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::ApiPackage;
 use rocket::get;
 use rocket::response::status::BadRequest;
 use utoipa::OpenApi;

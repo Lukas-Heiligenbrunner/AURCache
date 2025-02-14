@@ -89,10 +89,3 @@ pub struct GraphDataPoint {
 pub struct UserInfo {
     pub username: Option<String>,
 }
-
-#[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
-pub struct Activity {
-    pub timestamp: i64,
-    pub text: String,
-    pub user: Option<String>,
-}

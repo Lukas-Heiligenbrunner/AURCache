@@ -7,8 +7,8 @@ use bigdecimal::ToPrimitive;
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{GraphDataPoint, ListStats, UserInfo};
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::{GraphDataPoint, ListStats, UserInfo};
 use crate::builder::types::BuildStates;
 use crate::db::helpers::dbtype::database_type;
 use rocket::{get, State};
