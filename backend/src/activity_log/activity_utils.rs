@@ -1,5 +1,7 @@
 use crate::activity_log::activity_serializer::ActivitySerializer;
 use crate::activity_log::package_add_activity::PackageAddActivity;
+use crate::activity_log::package_delete_activity::PackageDeleteActivity;
+use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::db;
 use crate::db::activities;
 use crate::db::activities::ActivityType;
@@ -34,6 +36,7 @@ impl ActivityLog {
     pub async fn add<T: Serialize + ActivitySerializer>(
         &self,
         activity: T,
+        activity_type: ActivityType,
         user: Option<String>,
     ) -> anyhow::Result<()> {
         let activity = serde_json::to_string(&activity)?;
@@ -43,7 +46,7 @@ impl ActivityLog {
             timestamp: Set(timestamp),
             data: Set(activity),
             user: Set(user),
-            typ: Set(ActivityType::AddPackage),
+            typ: Set(activity_type),
             ..std::default::Default::default()
         }
         .save(&self.db)
@@ -64,32 +67,38 @@ impl ActivityLog {
 
         let t: Vec<Activity> = activities
             .iter()
-            .map(|x| {
-                let v: Box<dyn ActivitySerializer> = match x.typ {
-                    ActivityType::AddPackage => Box::from(
-                        serde_json::from_str::<PackageAddActivity>(x.data.as_str()).unwrap(),
-                    ),
-                    ActivityType::RemovePackage => {
-                        todo!("RemovePackage")
-                    }
-                    ActivityType::UpdatePackage => {
-                        todo!("UpdatePackage")
-                    }
-                    ActivityType::StartBuild => {
-                        todo!("StartBuild")
-                    }
-                    ActivityType::FinishBuild => {
-                        todo!("FinishBuild")
-                    }
-                };
-
-                Activity {
-                    timestamp: x.timestamp,
-                    text: v.format(),
-                    user: x.user.clone(),
+            .filter_map(|x| {
+                if let Ok(v) = self.deserialize_type(x.typ, &x.data) {
+                    Some(Activity {
+                        timestamp: x.timestamp,
+                        text: v.format(),
+                        user: x.user.clone(),
+                    })
+                } else {
+                    None
                 }
             })
             .collect();
         Ok(t)
+    }
+
+    fn deserialize_type(
+        &self,
+        activity_type: ActivityType,
+        data: &str,
+    ) -> anyhow::Result<Box<dyn ActivitySerializer>> {
+        match activity_type {
+            ActivityType::AddPackage => {
+                Ok(Box::from(serde_json::from_str::<PackageAddActivity>(data)?))
+            }
+            ActivityType::RemovePackage => Ok(Box::from(serde_json::from_str::<
+                PackageDeleteActivity,
+            >(data)?)),
+            ActivityType::UpdatePackage => Ok(Box::from(serde_json::from_str::<
+                PackageUpdateActivity,
+            >(data)?)),
+            ActivityType::StartBuild => todo!("StartBuild"),
+            ActivityType::FinishBuild => todo!("FinishBuild"),
+        }
     }
 }
