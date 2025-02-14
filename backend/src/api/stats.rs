@@ -210,9 +210,13 @@ SELECT
     .await?
     .ok_or(anyhow::anyhow!("No last build cnts"))?;
 
-    let build_trend = (last_build_cnt.last_30_days_builds as f32
-        / last_build_cnt.prev_30_days_builds as f32)
-        - 1.0;
+    let build_trend = match last_build_cnt.prev_30_days_builds {
+        0 => 0.0,
+        _ => {
+            (last_build_cnt.last_30_days_builds as f32 / last_build_cnt.prev_30_days_builds as f32)
+                - 1.0
+        }
+    };
 
     Ok(ListStats {
         total_builds,

@@ -178,19 +178,20 @@ pub async fn package_del(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    package_delete(db, id)
-        .await
-        .map_err(|e| BadRequest(e.to_string()))?;
-
+    // query this before deleting package!
     let pkg = Packages::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| BadRequest(e.to_string()))?
         .ok_or(BadRequest("id not found".to_string()))?;
 
+    package_delete(db, id)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?;
+
     al.add(
         PackageDeleteActivity { package: pkg.name },
-        ActivityType::UpdatePackage,
+        ActivityType::RemovePackage,
         a.username,
     )
     .await
