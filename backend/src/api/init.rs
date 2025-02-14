@@ -1,4 +1,4 @@
-use crate::activity_log::activity_log::ActivityLog;
+use crate::activity_log::activity_utils::ActivityLog;
 use crate::api::aur::AURApi;
 use crate::api::auth::{oauth_callback, oauth_login, OauthUserInfo};
 use crate::api::backend::build_api;

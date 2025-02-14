@@ -10,7 +10,7 @@ use rocket::serde::json::Json;
 
 use rocket::{delete, get, patch, post, State};
 
-use crate::activity_log::activity_log::ActivityLog;
+use crate::activity_log::activity_utils::ActivityLog;
 use crate::activity_log::package_add_activity::PackageAddActivity;
 use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
