@@ -1,10 +1,11 @@
+use crate::activity_log::activity_utils::ActivityLog;
 use crate::api::aur::AURApi;
-use crate::api::auth::{oauth_callback, oauth_login};
+use crate::api::auth::{oauth_callback, oauth_login, OauthUserInfo};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::api::embed::CustomHandler;
-use crate::api::types::authenticated::OauthEnabled;
+use crate::api::models::authenticated::OauthEnabled;
 use crate::builder::types::Action;
 use crate::utils::oauth_config::oauth_config_from_env;
 use log::{error, info, warn};
@@ -50,6 +51,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                 (path = "/api", api = crate::api::health::HealthApi, tags = ["Health"]),
                 (path = "/api", api = crate::api::package::PackageApi, tags = ["Package"]),
                 (path = "/api", api = crate::api::stats::StatsApi, tags = ["Stats"]),
+                (path = "/api", api = crate::api::activity::ActivityApi, tags = ["Activity"]),
             ),
             tags(
                 (name = "AUR", description = "AUR management endpoints."),
@@ -58,6 +60,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                 (name = "Health", description = "Health endpoints"),
                 (name = "Package", description = "Package management endpoints."),
                 (name = "Stats", description = "Statistics endpoints."),
+                (name = "Activity", description = "Activity endpoints."),
             ),
             modifiers(&SecurityAddon)
         )]
@@ -86,9 +89,10 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
 
         let oauth_config = oauth_config_from_env();
         let mut rock = rocket::custom(config)
-            .manage(db)
+            .manage(db.clone())
             .manage(tx)
             .manage(OauthEnabled(oauth_config.is_ok()))
+            .manage(ActivityLog::new(db))
             .mount("/api/", build_api())
             .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
             .mount("/", Redoc::with_url("/redoc", ApiDoc::openapi()));
@@ -97,7 +101,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
             rock = rock
                 .mount("/api/", routes![oauth_login, oauth_callback])
                 .attach(AdHoc::on_ignite("OAuth Config", |rocket| async {
-                    rocket.attach(rocket_oauth2::OAuth2::<()>::custom(
+                    rocket.attach(rocket_oauth2::OAuth2::<OauthUserInfo>::custom(
                         HyperRustlsAdapter::default(),
                         oauth_config,
                     ))

@@ -1,4 +1,4 @@
-use crate::api::types::authenticated::Authenticated;
+use crate::api::models::authenticated::Authenticated;
 use log::error;
 use rocket::http::uri::fmt::Path;
 use rocket::http::uri::Segments;

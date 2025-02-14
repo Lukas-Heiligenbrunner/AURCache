@@ -45,6 +45,9 @@ dependencies:
   flutter_tags_x: any
   url_launcher: any
   toastification: ^2.3.0
+  device_preview: ^1.2.0
+  toggle_switch: ^2.3.0
+  skeletonizer: ^1.4.2
 
 dev_dependencies:
   flutter_test:
@@ -69,6 +72,8 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icons/
+    - assets/icons/tile/
+    - assets/icons/menu/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

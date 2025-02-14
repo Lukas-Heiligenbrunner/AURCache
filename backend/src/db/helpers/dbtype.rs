@@ -1,16 +1,12 @@
+use sea_orm::DbBackend;
 use std::env;
 
-pub enum DbType {
-    Sqlite,
-    Postgres,
-}
-
-pub fn database_type() -> DbType {
-    env::var("DB_TYPE").map_or(DbType::Sqlite, |t| {
+pub fn database_type() -> DbBackend {
+    env::var("DB_TYPE").map_or(DbBackend::Sqlite, |t| {
         if t == "POSTGRESQL" {
-            DbType::Postgres
+            DbBackend::Postgres
         } else {
-            DbType::Sqlite
+            DbBackend::Sqlite
         }
     })
 }

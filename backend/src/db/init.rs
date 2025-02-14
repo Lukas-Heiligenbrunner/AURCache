@@ -1,14 +1,14 @@
-use crate::db::helpers::dbtype::{database_type, DbType};
+use crate::db::helpers::dbtype::database_type;
 use crate::db::migration::Migrator;
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use rocket::log::private::LevelFilter;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend};
 use sea_orm_migration::MigratorTrait;
 use std::{env, fs};
 
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
     let db: DatabaseConnection = match database_type() {
-        DbType::Sqlite => {
+        DbBackend::Sqlite => {
             if fs::metadata("./db").is_err() {
                 fs::create_dir("./db")?;
             }
@@ -28,7 +28,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
             ").await?;
             db
         }
-        DbType::Postgres => {
+        DbBackend::Postgres => {
             let db_user = env::var("DB_USER")
                 .map_err(|_| anyhow!("No DB_USER envvar for POSTGRES Username specified"))?;
             let db_pwd = env::var("DB_PWD")
@@ -42,6 +42,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
             conn_opts.sqlx_logging_level(LevelFilter::Trace);
             Database::connect(conn_opts).await?
         }
+        _ => bail!("Unsupported database type"),
     };
 
     Migrator::up(&db, None).await?;

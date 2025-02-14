@@ -1,3 +1,4 @@
+use crate::api::activity::*;
 use crate::api::aur::*;
 use crate::api::build::*;
 use crate::api::health::*;
@@ -16,11 +17,14 @@ pub fn build_api() -> Vec<Route> {
         delete_build,
         list_builds,
         stats,
+        dashboard_graph_data,
+        user_info,
         get_build,
         get_package,
         rery_build,
         package_update_endpoint,
         cancel_build,
-        health
+        health,
+        activity,
     ]
 }

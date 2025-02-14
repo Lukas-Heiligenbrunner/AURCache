@@ -6,8 +6,8 @@ use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 use rocket::{delete, get, post, State};
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::ListBuildsModel;
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::ListBuildsModel;
 use crate::builder::types::{Action, BuildStates};
 use crate::package::update::update_platform;
 use sea_orm::{

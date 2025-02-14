@@ -3,13 +3,10 @@ import 'package:aurcache/components/build_flag_settings.dart';
 import 'package:aurcache/components/platform_settings.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
-import '../components/api/APIBuilder.dart';
-import '../models/extended_package.dart';
-import '../providers/api/package_provider.dart';
+import '../components/api/api_builder.dart';
 
 class Packagesettingsscreen extends StatefulWidget {
   const Packagesettingsscreen({super.key, required this.pkgID});
@@ -53,43 +50,37 @@ class _PackagesettingsscreenState extends State<Packagesettingsscreen> {
           )
         ],
       ),
-      body: MultiProvider(
-        providers: [
-          ChangeNotifierProvider<PackageProvider>(
-              create: (_) => PackageProvider()),
-        ],
-        child: APIBuilder<PackageProvider, ExtendedPackage, PackageDTO>(
-            dto: PackageDTO(pkgID: widget.pkgID),
-            onLoad: () => const Text("loading"),
-            onData: (pkg) {
-              buildFlags = pkg.selected_build_flags;
-              buildPlatforms = pkg.selected_platforms;
+      body: APIBuilder(
+          onLoad: () => const Text("loading"),
+          onData: (pkg) {
+            buildFlags = pkg.selected_build_flags;
+            buildPlatforms = pkg.selected_platforms;
 
-              return Padding(
-                padding: const EdgeInsets.all(15.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                        flex: 1,
-                        child: PlatformSettings(
-                          pkg: pkg,
-                          changed: (List<String> v) {
-                            buildPlatforms = v;
-                          },
-                        )),
-                    Expanded(
-                        flex: 1,
-                        child: BuildFlagSettings(
-                          pkg: pkg,
-                          changed: (List<String> v) {
-                            buildFlags = v;
-                          },
-                        ))
-                  ],
-                ),
-              );
-            }),
-      ),
+            return Padding(
+              padding: const EdgeInsets.all(15.0),
+              child: Row(
+                children: [
+                  Expanded(
+                      flex: 1,
+                      child: PlatformSettings(
+                        pkg: pkg,
+                        changed: (List<String> v) {
+                          buildPlatforms = v;
+                        },
+                      )),
+                  Expanded(
+                      flex: 1,
+                      child: BuildFlagSettings(
+                        pkg: pkg,
+                        changed: (List<String> v) {
+                          buildFlags = v;
+                        },
+                      ))
+                ],
+              ),
+            );
+          },
+          api: () => API.getPackage(widget.pkgID)),
     );
   }
 }

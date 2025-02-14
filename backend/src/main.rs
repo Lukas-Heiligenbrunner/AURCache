@@ -1,3 +1,4 @@
+mod activity_log;
 mod api;
 mod aur;
 mod builder;

@@ -10,10 +10,15 @@ use rocket::serde::json::Json;
 
 use rocket::{delete, get, patch, post, State};
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
-use crate::api::types::output::{AddBody, UpdateBody};
+use crate::activity_log::activity_utils::ActivityLog;
+use crate::activity_log::package_add_activity::PackageAddActivity;
+use crate::activity_log::package_delete_activity::PackageDeleteActivity;
+use crate::activity_log::package_update_activity::PackageUpdateActivity;
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
+use crate::api::models::output::{AddBody, UpdateBody};
 use crate::aur::api::get_info_by_name;
+use crate::db::activities::ActivityType;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -41,7 +46,8 @@ pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
     input: Json<AddBody>,
     tx: &State<Sender<Action>>,
-    _a: Authenticated,
+    a: Authenticated,
+    al: &State<ActivityLog>,
 ) -> Result<(), BadRequest<String>> {
     package_add(
         db,
@@ -51,7 +57,18 @@ pub async fn package_add_endpoint(
         input.build_flags.clone(),
     )
     .await
-    .map_err(|e| BadRequest(e.to_string()))
+    .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageAddActivity {
+            package: input.name.clone(),
+        },
+        ActivityType::AddPackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+    Ok(())
 }
 
 #[utoipa::path(
@@ -115,12 +132,33 @@ pub async fn package_update_endpoint(
     id: i32,
     input: Json<UpdateBody>,
     tx: &State<Sender<Action>>,
-    _a: Authenticated,
+    a: Authenticated,
+    al: &State<ActivityLog>,
 ) -> Result<Json<Vec<i32>>, BadRequest<String>> {
-    package_update(db, id, input.force, tx)
+    let db = db as &DatabaseConnection;
+
+    let pkg_update = package_update(db, id, input.force, tx)
         .await
         .map(Json)
-        .map_err(|e| BadRequest(e.to_string()))
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    let pkg = Packages::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?
+        .ok_or(BadRequest("id not found".to_string()))?;
+
+    al.add(
+        PackageUpdateActivity {
+            package: pkg.name,
+            forced: input.force,
+        },
+        ActivityType::UpdatePackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+    Ok(pkg_update)
 }
 
 #[utoipa::path(
@@ -135,9 +173,30 @@ pub async fn package_update_endpoint(
 pub async fn package_del(
     db: &State<DatabaseConnection>,
     id: i32,
-    _a: Authenticated,
-) -> Result<(), String> {
-    package_delete(db, id).await.map_err(|e| e.to_string())?;
+    a: Authenticated,
+    al: &State<ActivityLog>,
+) -> Result<(), BadRequest<String>> {
+    let db = db as &DatabaseConnection;
+
+    // query this before deleting package!
+    let pkg = Packages::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?
+        .ok_or(BadRequest("id not found".to_string()))?;
+
+    package_delete(db, id)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageDeleteActivity { package: pkg.name },
+        ActivityType::RemovePackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+
     Ok(())
 }
 

@@ -1,9 +1,10 @@
 use crate::aur::api::query_aur;
 use rocket::serde::json::Json;
 
-use crate::api::types::authenticated::Authenticated;
-use crate::api::types::input::ApiPackage;
+use crate::api::models::authenticated::Authenticated;
+use crate::api::models::input::ApiPackage;
 use rocket::get;
+use rocket::response::status::BadRequest;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
@@ -19,9 +20,12 @@ pub struct AURApi;
     )
 )]
 #[get("/search?<query>")]
-pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackage>>, String> {
-    if query.len() < 2 {
-        return Err("Query too short".to_string());
+pub async fn search(
+    query: &str,
+    _a: Authenticated,
+) -> Result<Json<Vec<ApiPackage>>, BadRequest<String>> {
+    if query.len() < 3 {
+        return Err(BadRequest("Query too short".to_string()));
     }
 
     match query_aur(query).await {
@@ -35,6 +39,6 @@ pub async fn search(query: &str, _a: Authenticated) -> Result<Json<Vec<ApiPackag
                 .collect();
             Ok(Json(mapped))
         }
-        Err(e) => Err(format!("{}", e)),
+        Err(e) => Err(BadRequest(e.to_string())),
     }
 }

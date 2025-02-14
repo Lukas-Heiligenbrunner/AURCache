@@ -1,12 +1,20 @@
-import 'package:aurcache/models/quick_info_data.dart';
+import 'package:aurcache/components/dashboard/tile_container.dart';
+import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
-import '../../constants/color_constants.dart';
-
 class QuickInfoTile extends StatefulWidget {
-  const QuickInfoTile({Key? key, required this.data}) : super(key: key);
+  const QuickInfoTile(
+      {super.key,
+      required this.icon,
+      required this.title,
+      required this.value,
+      required this.positive,
+      required this.trend});
 
-  final QuickInfoData data;
+  final Widget icon;
+  final String title, value;
+  final bool positive;
+  final String trend;
 
   @override
   _QuickInfoTileState createState() => _QuickInfoTileState();
@@ -15,51 +23,81 @@ class QuickInfoTile extends StatefulWidget {
 class _QuickInfoTileState extends State<QuickInfoTile> {
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(defaultPadding),
-      decoration: const BoxDecoration(
-        color: secondaryColor,
-        borderRadius: BorderRadius.all(Radius.circular(10)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+    return Tilecontainer(
+        child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          widget.title,
+          style: TextStyle(fontSize: 16, color: Colors.white.withOpacity(0.8)),
+        ),
+        if (context.desktop)
+          SizedBox(
+            height: 8,
+          ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 0),
+                  child: Text(
+                    widget.value,
+                    style: TextStyle(
+                        fontSize: context.desktop ? 30 : 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white),
+                  ),
+                ),
+                if (context.desktop)
+                  SizedBox(
+                    height: 8,
+                  ),
+                _buildTrend(),
+              ],
+            ),
+            SizedBox(
+              height: context.desktop ? 64 : 42,
+              child: widget.icon,
+            )
+          ],
+        )
+      ],
+    ));
+  }
+
+  Widget _buildTrend() {
+    if (widget.positive) {
+      return Row(
         children: [
-          Container(
-            padding: const EdgeInsets.all(defaultPadding * 0.75),
-            height: 64,
-            width: 64,
-            decoration: BoxDecoration(
-              color: widget.data.color.withOpacity(0.1),
-              borderRadius: const BorderRadius.all(Radius.circular(10)),
-            ),
-            child: Icon(
-              widget.data.icon,
-              color: widget.data.color,
-              size: 32,
-            ),
+          Icon(
+            Icons.keyboard_double_arrow_up_outlined,
+            color: Color(0xffA9FF0F),
           ),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                widget.data.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              Text(
-                widget.data.subtitle,
-                style: Theme.of(context)
-                    .textTheme
-                    .titleLarge!
-                    .copyWith(color: Colors.white70),
-              ),
-            ],
-          ),
+          Text(
+            widget.trend,
+            style: TextStyle(
+              color: Color(0xffA9FF0F),
+            ),
+          )
         ],
-      ),
-    );
+      );
+    } else {
+      return Row(
+        children: [
+          Icon(
+            Icons.keyboard_double_arrow_down_outlined,
+            color: Color(0xffFF4752),
+          ),
+          Text(
+            widget.trend,
+            style: TextStyle(color: Color(0xffFF4752)),
+          )
+        ],
+      );
+    }
   }
 }
