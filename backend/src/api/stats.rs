@@ -88,13 +88,13 @@ ORDER BY
         }
         DbBackend::Postgres => {
             "SELECT
-    EXTRACT(YEAR FROM to_timestamp(timestamp_column))::INTEGER AS year,
-    EXTRACT(MONTH FROM to_timestamp(timestamp_column))::INTEGER AS month,
+    EXTRACT(YEAR FROM to_timestamp(start_time))::INTEGER AS year,
+    EXTRACT(MONTH FROM to_timestamp(start_time))::INTEGER AS month,
     COUNT(*) AS count
 FROM
-    your_table
+    builds
 WHERE
-    timestamp_column >= extract(epoch FROM now() - interval '12 months')
+    start_time >= extract(epoch FROM now() - interval '12 months')
 GROUP BY
     year, month
 ORDER BY
@@ -163,8 +163,8 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
 
     #[derive(Debug, FromQueryResult)]
     struct LastBuildsStruct {
-        last_30_days_builds: u32,
-        prev_30_days_builds: u32,
+        last_30_days_builds: i64,
+        prev_30_days_builds: i64,
     }
 
     let query = match database_type() {

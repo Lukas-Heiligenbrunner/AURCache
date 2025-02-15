@@ -1,5 +1,6 @@
 import 'package:aurcache/api/activity_log.dart';
 import 'package:aurcache/components/api/api_builder.dart';
+import 'package:aurcache/components/table_info.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:skeletonizer/skeletonizer.dart';
@@ -44,7 +45,7 @@ class _ActivityLogState extends State<ActivityLog> {
                 ],
               ),
             ),
-        onData: (v) => Column(
+        onData: (v) => v.isEmpty ? TableInfo(title: "No Activity items available yet") : Column(
             children: v
                 .map(
                   (e) => ActivityLogItem(
