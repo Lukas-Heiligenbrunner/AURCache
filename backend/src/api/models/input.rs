@@ -80,9 +80,9 @@ pub struct ListStats {
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
 pub struct GraphDataPoint {
-    pub month: u8,
-    pub year: u16,
-    pub count: u32,
+    pub month: i32,
+    pub year: i32,
+    pub count: i32,
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]
