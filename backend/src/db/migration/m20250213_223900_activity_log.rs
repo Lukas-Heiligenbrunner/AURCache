@@ -35,8 +35,8 @@ CREATE TABLE public.activity (
     id SERIAL PRIMARY KEY,
     typ INTEGER NOT NULL,
     data TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    user TEXT NOT NULL
+    timestamp BIGINT NOT NULL,
+    "user" TEXT
 );
 "#,
                 )
