@@ -226,6 +226,7 @@ pub async fn package_list(
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
         .column_as(packages::Column::Version, "latest_version")
+        .order_by(packages::Column::OutOfDate, Order::Desc)
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
         .offset(page.zip(limit).map(|(page, limit)| page * limit))
