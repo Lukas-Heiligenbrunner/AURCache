@@ -90,7 +90,7 @@ ORDER BY
             "SELECT
     EXTRACT(YEAR FROM to_timestamp(start_time))::INTEGER AS year,
     EXTRACT(MONTH FROM to_timestamp(start_time))::INTEGER AS month,
-    COUNT(*) AS count
+    COUNT(*)::INTEGER AS count
 FROM
     builds
 WHERE
