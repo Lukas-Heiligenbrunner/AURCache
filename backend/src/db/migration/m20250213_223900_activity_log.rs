@@ -36,7 +36,7 @@ CREATE TABLE public.activity (
     typ INTEGER NOT NULL,
     data TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
-    user TEXTNOT NULL
+    user TEXT NOT NULL
 );
 "#,
                 )
