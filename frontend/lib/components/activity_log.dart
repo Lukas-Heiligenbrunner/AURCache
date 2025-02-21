@@ -45,16 +45,18 @@ class _ActivityLogState extends State<ActivityLog> {
                 ],
               ),
             ),
-        onData: (v) => v.isEmpty ? TableInfo(title: "No Activity items available yet") : Column(
-            children: v
-                .map(
-                  (e) => ActivityLogItem(
-                    text: e.text,
-                    timestamp: e.timestamp,
-                    user: e.user,
-                  ),
-                )
-                .toList(growable: false)),
+        onData: (v) => v.isEmpty
+            ? TableInfo(title: "No Activity items available yet")
+            : Column(
+                children: v
+                    .map(
+                      (e) => ActivityLogItem(
+                        text: e.text,
+                        timestamp: e.timestamp,
+                        user: e.user,
+                      ),
+                    )
+                    .toList(growable: false)),
         api: API.listActivities);
   }
 }

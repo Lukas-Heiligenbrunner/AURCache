@@ -1,6 +1,7 @@
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:skeletonizer/skeletonizer.dart';
 
 import '../constants/color_constants.dart';
 import '../models/build.dart';
@@ -8,7 +9,24 @@ import '../utils/package_color.dart';
 
 class BuildsTable extends StatelessWidget {
   const BuildsTable({super.key, required this.data});
+
   final List<Build> data;
+
+  static Widget loading() {
+    final demoBuild = Build(
+        id: 42,
+        pkg_id: 0,
+        pkg_name: "MyPackage",
+        platform: "x86_64",
+        version: "1.0.1",
+        start_time: DateTime.now(),
+        end_time: DateTime.now(),
+        status: 0);
+
+    return Skeletonizer(
+      child: BuildsTable(data: List.generate(20, (_) => demoBuild)),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -23,20 +41,20 @@ class BuildsTable extends StatelessWidget {
       columns: [
         if (context.desktop)
           DataColumn(
-            label: Text("Build ID"),
+            label: Skeleton.keep(child: Text("Build ID")),
           ),
         DataColumn(
-          label: Text("Package Name"),
+          label: Skeleton.keep(child: Text("Package Name")),
         ),
         DataColumn(
-          label: Text("Version"),
+          label: Skeleton.keep(child: Text("Version")),
         ),
         if (context.desktop)
           DataColumn(
-            label: Text("Platform"),
+            label: Skeleton.keep(child: Text("Platform")),
           ),
         DataColumn(
-          label: Text("Status"),
+          label: Skeleton.keep(child: Text("Status")),
         ),
       ],
       rows: data.map((e) => buildDataRow(context, e)).toList(),

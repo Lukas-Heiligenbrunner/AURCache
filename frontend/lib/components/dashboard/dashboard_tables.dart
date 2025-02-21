@@ -98,12 +98,12 @@ class _DashboardTablesState extends State<DashboardTables> {
             return PackagesTable(data: data);
           }
         },
-        onLoad: () => const CircularProgressIndicator(),
-        api: () => API.listPackages(limit: 10),
+        onLoad: () => PackagesTable.loading(),
+        api: () => API.listPackages(limit: 20),
       );
     } else {
       return APIBuilder(
-        onLoad: () => const CircularProgressIndicator(),
+        onLoad: () => BuildsTable.loading(),
         refreshOnComeback: true,
         onData: (data) {
           if (data.isEmpty) {
@@ -112,7 +112,7 @@ class _DashboardTablesState extends State<DashboardTables> {
             return BuildsTable(data: data);
           }
         },
-        api: () => API.listAllBuilds(limit: 10),
+        api: () => API.listAllBuilds(limit: 20),
       );
     }
   }
