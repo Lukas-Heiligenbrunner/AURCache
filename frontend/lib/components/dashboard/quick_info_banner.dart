@@ -101,7 +101,7 @@ class QuickInfoBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return APIBuilder(
-      interval: const Duration(seconds: 10),
+      refreshOnComeback: true,
       onData: (stats) {
         final items = _buildElements(stats, context);
         return _buildBanner(items, false);

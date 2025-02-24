@@ -41,6 +41,7 @@ class APIBuilder<T> extends StatefulWidget {
 
 class _APIBuilderState<T> extends State<APIBuilder<T>> {
   late Future<T> _futureData;
+  bool _hasBeenVisible = false; // Flag to track initial visibility
 
   @override
   void initState() {
@@ -85,7 +86,14 @@ class _APIBuilderState<T> extends State<APIBuilder<T>> {
           key: widget.key ?? Key(hashCode.toString()),
           onVisibilityChanged: (VisibilityInfo info) {
             if (info.visibleFraction > 0) {
-              _refreshData();
+              if (_hasBeenVisible) {
+                // This isn't the initial load, so trigger refresh.
+                print("widget api data refreshed on comeback!");
+                _refreshData();
+              } else {
+                // First time visibility; mark as visible without refreshing.
+                _hasBeenVisible = true;
+              }
             }
           },
           child: builder);

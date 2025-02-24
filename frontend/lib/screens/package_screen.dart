@@ -291,27 +291,23 @@ class _PackageScreenState extends State<PackageScreen> {
           color: secondaryColor,
           borderRadius: BorderRadius.all(Radius.circular(10)),
         ),
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                "Builds of ${pkg.name}",
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              SizedBox(
-                width: double.infinity,
-                child: APIBuilder(
-                  interval: const Duration(seconds: 5),
-                  onData: (data) {
-                    return BuildsTable(data: data);
-                  },
-                  onLoad: () => const Text("no data"),
-                  api: () => API.listAllBuilds(pkgID: pkg.id),
-                ),
-              ),
-            ],
-          ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              "Builds of ${pkg.name}",
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            APIBuilder(
+              interval: const Duration(seconds: 5),
+              onData: (data) {
+                return BuildsTable(data: data);
+              },
+              onLoad: () => const Text("no data"),
+              api: () => API.listAllBuilds(pkgID: pkg.id),
+            ),
+          ],
         ),
       )
     ]);

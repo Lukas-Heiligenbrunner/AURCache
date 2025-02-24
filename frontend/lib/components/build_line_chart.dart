@@ -74,7 +74,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
 
     if (ivalue % 2 == 0 || value % 1 != 0) {
       return SideTitleWidget(
-        axisSide: meta.axisSide,
+        meta: meta,
         child: Text(""),
       );
     } else {
@@ -84,7 +84,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
       );
 
       return SideTitleWidget(
-        axisSide: meta.axisSide,
+        meta: meta,
         child: text,
       );
     }
