@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:skeletonizer/skeletonizer.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
@@ -16,6 +17,20 @@ import '../utils/package_color.dart';
 class PackagesTable extends StatelessWidget {
   const PackagesTable({super.key, required this.data});
   final List<SimplePackage> data;
+
+  static Widget loading() {
+    final demoBuild = SimplePackage(
+        id: 42,
+        name: 'MyPackage',
+        status: 0,
+        latest_version: '1.0.0',
+        latest_aur_version: '1.0.0',
+        outofdate: false);
+
+    return Skeletonizer(
+      child: PackagesTable(data: List.generate(20, (_) => demoBuild)),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -30,24 +45,24 @@ class PackagesTable extends StatelessWidget {
         columns: [
           if (context.desktop)
             DataColumn(
-              label: Text("ID"),
+              label: Skeleton.keep(child: Text("ID")),
             ),
           DataColumn(
-            label: Text("Package Name"),
+            label: Skeleton.keep(child: Text("Package Name")),
           ),
           DataColumn(
-            label: Text("Version"),
+            label: Skeleton.keep(child: Text("Version")),
           ),
           if (context.desktop)
             DataColumn(
-              label: Text("Up-To-Date"),
+              label: Skeleton.keep(child: Text("Up-To-Date")),
             ),
           DataColumn(
-            label: Text("Status"),
+            label: Skeleton.keep(child: Text("Status")),
           ),
           if (context.desktop)
             DataColumn(
-              label: Text("Action"),
+              label: Skeleton.keep(child: Text("Action")),
             ),
         ],
         rows:

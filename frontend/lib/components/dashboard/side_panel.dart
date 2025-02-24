@@ -1,5 +1,5 @@
-import 'package:aurcache/components/build_line_chart.dart';
 import 'package:aurcache/components/activity_log.dart';
+import 'package:aurcache/components/build_line_chart.dart';
 import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
@@ -26,7 +26,13 @@ class SidePanel extends StatelessWidget {
             ),
           ),
           const SizedBox(height: defaultPadding),
-          ActivityLog()
+          Responsive(
+            mobileChild: ActivityLog(),
+            desktopChild: Expanded(
+                child: SingleChildScrollView(
+              child: ActivityLog(),
+            )),
+          ),
         ],
       ),
     );
@@ -57,7 +63,7 @@ class SidePanel extends StatelessWidget {
         ),
         Responsive(
             mobileChild: activityWidget,
-            desktopChild: Expanded(child: activityWidget))
+            desktopChild: Expanded(child: activityWidget)),
       ],
     );
   }

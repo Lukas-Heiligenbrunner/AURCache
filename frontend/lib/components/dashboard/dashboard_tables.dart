@@ -95,24 +95,32 @@ class _DashboardTablesState extends State<DashboardTables> {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no packages yet");
           } else {
-            return PackagesTable(data: data);
+            return Responsive(
+                mobileChild: PackagesTable(data: data),
+                desktopChild: SingleChildScrollView(
+                  child: PackagesTable(data: data),
+                ));
           }
         },
-        onLoad: () => const CircularProgressIndicator(),
-        api: () => API.listPackages(limit: 10),
+        onLoad: () => PackagesTable.loading(),
+        api: () => API.listPackages(limit: 20),
       );
     } else {
       return APIBuilder(
-        onLoad: () => const CircularProgressIndicator(),
+        onLoad: () => BuildsTable.loading(),
         refreshOnComeback: true,
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no builds yet");
           } else {
-            return BuildsTable(data: data);
+            return Responsive(
+                mobileChild: BuildsTable(data: data),
+                desktopChild: SingleChildScrollView(
+                  child: BuildsTable(data: data),
+                ));
           }
         },
-        api: () => API.listAllBuilds(limit: 10),
+        api: () => API.listAllBuilds(limit: 20),
       );
     }
   }
