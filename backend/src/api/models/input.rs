@@ -72,10 +72,7 @@ pub struct ListStats {
     pub total_packages: u32,
 
     pub total_build_trend: f32,
-    pub total_packages_trend: f32,
-    pub repo_size_trend: f32,
     pub avg_build_time_trend: f32,
-    pub build_success_trend: f32,
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize)]

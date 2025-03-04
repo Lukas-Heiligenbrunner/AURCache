@@ -37,8 +37,6 @@ class QuickInfoBanner extends StatelessWidget {
         ),
         title: "Total Packages",
         value: stats?.total_packages.toString() ?? "42",
-        positive: !(stats?.total_packages_trend.isNegative ?? false),
-        trend: "${stats?.total_packages_trend.abs().toStringAsFixed(2) ?? 42}%",
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -49,21 +47,7 @@ class QuickInfoBanner extends StatelessWidget {
         ),
         title: "Total Builds",
         value: stats?.total_builds.toString() ?? "42",
-        positive: !(stats?.total_build_trend.isNegative ?? false),
-        trend:
-            "${((stats?.total_build_trend ?? 0.42) * 100).abs().toStringAsFixed(1)}%",
-      ),
-      QuickInfoTile(
-        icon: Skeleton.shade(
-          child: SvgPicture.asset("assets/icons/tile/clock.svg",
-              colorFilter:
-                  const ColorFilter.mode(Colors.white, BlendMode.srcIn),
-              width: iconSize),
-        ),
-        title: "Repo Size",
-        value: stats?.repo_size.readableFileSize() ?? "42.42 MiB",
-        positive: !(stats?.repo_size_trend.isNegative ?? false),
-        trend: "${stats?.repo_size_trend ?? 42}%",
+        trendPercent: ((stats?.total_build_trend ?? 0.42) * 100),
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -72,11 +56,19 @@ class QuickInfoBanner extends StatelessWidget {
                   const ColorFilter.mode(Colors.white, BlendMode.srcIn),
               width: iconSize),
         ),
-        title: "Average Build Time",
-        value: stats?.avg_build_time.readableDuration() ?? "42 Seconds",
-        positive: !(stats?.avg_build_time_trend.isNegative ?? false),
-        trend: "${stats?.avg_build_time_trend ?? 42}%",
+        title: "Repo Size",
+        value: stats?.repo_size.readableFileSize() ?? "42.42 MiB",
       ),
+      QuickInfoTile(
+          icon: Skeleton.shade(
+            child: SvgPicture.asset("assets/icons/tile/clock.svg",
+                colorFilter:
+                    const ColorFilter.mode(Colors.white, BlendMode.srcIn),
+                width: iconSize),
+          ),
+          title: "Average Build Time",
+          value: stats?.avg_build_time.readableDuration() ?? "42 Seconds",
+          trendPercent: stats?.avg_build_time_trend),
       QuickInfoTile(
         icon: Skeleton.shade(
           child: AspectRatio(
@@ -92,8 +84,6 @@ class QuickInfoBanner extends StatelessWidget {
         ),
         title: "Build Success",
         value: buildSuccess ?? "10%",
-        positive: !(stats?.build_success_trend.isNegative ?? false),
-        trend: "${stats?.build_success_trend ?? 42}%",
       ),
     ];
   }

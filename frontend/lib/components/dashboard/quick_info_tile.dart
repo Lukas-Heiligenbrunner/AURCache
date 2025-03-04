@@ -8,13 +8,11 @@ class QuickInfoTile extends StatefulWidget {
       required this.icon,
       required this.title,
       required this.value,
-      required this.positive,
-      required this.trend});
+      this.trendPercent});
 
   final Widget icon;
   final String title, value;
-  final bool positive;
-  final String trend;
+  final double? trendPercent;
 
   @override
   _QuickInfoTileState createState() => _QuickInfoTileState();
@@ -70,7 +68,11 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
   }
 
   Widget _buildTrend() {
-    if (widget.positive) {
+    if (widget.trendPercent == null) {
+      return Row();
+    }
+
+    if (widget.trendPercent! > .0) {
       return Row(
         children: [
           Icon(
@@ -78,14 +80,14 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
             color: Color(0xffA9FF0F),
           ),
           Text(
-            widget.trend,
+            "${widget.trendPercent?.abs().toStringAsFixed(1) ?? 42}%",
             style: TextStyle(
               color: Color(0xffA9FF0F),
             ),
           )
         ],
       );
-    } else {
+    } else if (widget.trendPercent! > .0) {
       return Row(
         children: [
           Icon(
@@ -93,8 +95,21 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
             color: Color(0xffFF4752),
           ),
           Text(
-            widget.trend,
+            "${widget.trendPercent?.abs().toStringAsFixed(1) ?? 42}%",
             style: TextStyle(color: Color(0xffFF4752)),
+          )
+        ],
+      );
+    } else {
+      return Row(
+        children: [
+          Icon(
+            Icons.keyboard_double_arrow_right,
+            color: Color(0xff868686),
+          ),
+          Text(
+            "${widget.trendPercent?.abs().toStringAsFixed(1) ?? 42}%",
+            style: TextStyle(color: Color(0xff868686)),
           )
         ],
       );

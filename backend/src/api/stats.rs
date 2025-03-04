@@ -240,9 +240,6 @@ SELECT
         repo_size,
         total_packages,
         total_build_trend: build_trend,
-        total_packages_trend: 0.0,
-        repo_size_trend: -0.0,
         avg_build_time_trend: build_duration_trend,
-        build_success_trend: 0.0,
     })
 }
