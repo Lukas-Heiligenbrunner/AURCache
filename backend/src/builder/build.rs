@@ -8,8 +8,8 @@ use crate::db::{builds, files, packages, packages_files};
 use crate::repo::utils::try_remove_archive_file;
 use crate::utils::db::ActiveValueExt;
 use anyhow::{anyhow, bail};
-use bollard::container::{KillContainerOptions, WaitContainerOptions};
 use bollard::Docker;
+use bollard::container::{KillContainerOptions, WaitContainerOptions};
 use log::{debug, info};
 use rocket::futures::StreamExt;
 use sea_orm::{

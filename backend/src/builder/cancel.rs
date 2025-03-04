@@ -1,8 +1,8 @@
 use crate::db::builds;
 use crate::db::prelude::Builds;
 use anyhow::anyhow;
-use bollard::container::RemoveContainerOptions;
 use bollard::Docker;
+use bollard::container::RemoveContainerOptions;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use std::sync::Arc;

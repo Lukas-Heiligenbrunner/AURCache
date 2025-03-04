@@ -1,5 +1,5 @@
 use bollard::Docker;
-use rocket::{get, State};
+use rocket::{State, get};
 use sea_orm::DatabaseConnection;
 use utoipa::OpenApi;
 

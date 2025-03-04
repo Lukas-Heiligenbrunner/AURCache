@@ -4,7 +4,7 @@ use crate::api::build::*;
 use crate::api::health::*;
 use crate::api::package::*;
 use crate::api::stats::*;
-use rocket::{routes, Route};
+use rocket::{Route, routes};
 
 pub fn build_api() -> Vec<Route> {
     routes![

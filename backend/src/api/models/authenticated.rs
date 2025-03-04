@@ -1,6 +1,6 @@
+use rocket::Request;
 use rocket::http::Status;
 use rocket::request::{FromRequest, Outcome};
-use rocket::Request;
 
 #[derive(Debug, Clone)]
 pub struct OauthEnabled(pub bool);

@@ -11,7 +11,7 @@ use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::{GraphDataPoint, ListStats, UserInfo};
 use crate::builder::types::BuildStates;
 use crate::db::helpers::dbtype::database_type;
-use rocket::{get, State};
+use rocket::{State, get};
 use sea_orm::prelude::BigDecimal;
 use sea_orm::{ColumnTrait, QueryFilter};
 use sea_orm::{DatabaseConnection, EntityTrait};

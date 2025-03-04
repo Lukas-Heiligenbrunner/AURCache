@@ -8,7 +8,7 @@ use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 
-use rocket::{delete, get, patch, post, State};
+use rocket::{State, delete, get, patch, post};
 
 use crate::activity_log::activity_utils::ActivityLog;
 use crate::activity_log::package_add_activity::PackageAddActivity;

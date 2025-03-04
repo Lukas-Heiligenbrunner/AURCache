@@ -8,8 +8,8 @@ use crate::db::{builds, packages};
 use crate::repo::platforms::PLATFORMS;
 #[cfg(debug_assertions)]
 use log::warn;
-use sea_orm::prelude::Expr;
 use sea_orm::QueryFilter;
+use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
 #[cfg(not(debug_assertions))]
 #[cfg(target_arch = "x86_64")]

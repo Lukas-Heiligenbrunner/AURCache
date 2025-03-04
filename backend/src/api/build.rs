@@ -4,7 +4,7 @@ use crate::db::{builds, packages};
 use itertools::Itertools;
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
-use rocket::{delete, get, post, State};
+use rocket::{State, delete, get, post};
 
 use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::ListBuildsModel;
