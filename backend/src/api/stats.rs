@@ -165,40 +165,48 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
     struct LastBuildsStruct {
         last_30_days_builds: i64,
         prev_30_days_builds: i64,
+        last_30_days_avg_duration: f32,
+        prev_30_days_avg_duration: f32,
     }
 
     let query = match database_type() {
         DbBackend::Sqlite => "
-WITH build_counts AS (
+WITH build_stats AS (
     SELECT
         CASE
             WHEN start_time >= strftime('%s', 'now', '-30 days') THEN 'last_30_days'
             WHEN start_time >= strftime('%s', 'now', '-60 days') THEN 'prev_30_days'
             END AS period,
-        COUNT(*) AS build_count
+        COUNT(*) AS build_count,
+        AVG(end_time - start_time) AS avg_build_duration
     FROM builds
     WHERE start_time >= strftime('%s', 'now', '-60 days') -- Only consider last 60 days
     GROUP BY period
 )
 SELECT
-    COALESCE((SELECT build_count FROM build_counts WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
-    COALESCE((SELECT build_count FROM build_counts WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+    COALESCE((SELECT build_count FROM build_stats WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
+    COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'last_30_days'), 0.0) AS last_30_days_avg_duration,
+    COALESCE((SELECT build_count FROM build_stats WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds,
+    COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'prev_30_days'), 0.0) AS prev_30_days_avg_duration;
     ",
         DbBackend::Postgres => "
-WITH build_counts AS (
+WITH build_stats AS (
     SELECT
         CASE
             WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '30 days') THEN 'last_30_days'
             WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days') THEN 'prev_30_days'
         END AS period,
-        COUNT(*) AS build_count
+        COUNT(*) AS build_count,
+        AVG(end_time - start_time) AS avg_build_duration
     FROM builds
     WHERE start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days')
     GROUP BY period
 )
 SELECT
-    COALESCE((SELECT build_count FROM build_counts WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
-    COALESCE((SELECT build_count FROM build_counts WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+    COALESCE((SELECT build_count FROM build_stats WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
+    COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'last_30_days'), 0.0) AS last_30_days_avg_duration,
+    COALESCE((SELECT build_count FROM build_stats WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+    COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'prev_30_days'), 0.0) AS prev_30_days_avg_duration;
 ",
         _ => bail!("Unsupported database type"),
     };
@@ -212,9 +220,15 @@ SELECT
 
     let build_trend = match last_build_cnt.prev_30_days_builds {
         0 => 0.0,
-        _ => {
-            (last_build_cnt.last_30_days_builds as f32 / last_build_cnt.prev_30_days_builds as f32)
-                - 1.0
+        prev_30_days_builds => {
+            (last_build_cnt.last_30_days_builds as f32 / prev_30_days_builds as f32) - 1.0
+        }
+    };
+
+    let build_duration_trend = match last_build_cnt.prev_30_days_avg_duration {
+        0.0 => 0.0,
+        prev_30_days_avg_duration => {
+            (last_build_cnt.last_30_days_avg_duration / prev_30_days_avg_duration) - 1.0
         }
     };
 
@@ -228,7 +242,7 @@ SELECT
         total_build_trend: build_trend,
         total_packages_trend: 0.0,
         repo_size_trend: -0.0,
-        avg_build_time_trend: 0.0,
+        avg_build_time_trend: build_duration_trend,
         build_success_trend: 0.0,
     })
 }
