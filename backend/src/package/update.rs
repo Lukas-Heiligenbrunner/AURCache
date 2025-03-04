@@ -4,25 +4,68 @@ use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
 use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait, TryIntoModel,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    TransactionTrait, TryIntoModel,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
+/// Updates all outdated packages in the database.
+///
+/// This function queries the database for packages marked as outdated and updates them.
+///
+/// # Arguments
+///
+/// * `db` - A reference to the database connection.
+/// * `tx` - A broadcast channel sender for triggering build actions.
+///
+/// # Returns
+///
+/// * `Ok(Vec<i32>)` - A vector of build IDs that were updated.
+/// * `Err(anyhow::Error)` - If any error occurs during the update process.
+pub async fn package_update_all_outdated(
+    db: &DatabaseConnection,
+    tx: &Sender<Action>,
+) -> anyhow::Result<Vec<i32>> {
+    let txn = db.begin().await?;
+
+    let pkg_models: Vec<packages::Model> = Packages::find()
+        .filter(packages::Column::OutOfDate.eq(1))
+        .all(&txn)
+        .await?;
+
+    let mut ids_total = vec![];
+    for pkg in pkg_models.iter() {
+        let mut ids = package_update(db, pkg.to_owned(), false, tx).await?;
+        ids_total.append(&mut ids);
+    }
+    Ok(ids_total)
+}
+
+/// Updates a single package for all required platforms.
+///
+/// This function fetches the latest package metadata and updates it if necessary.
+///
+/// # Arguments
+///
+/// * `db` - A reference to the database connection.
+/// * `pkg_model` - The package model to update.
+/// * `force` - A boolean flag to force an update even if the package version is unchanged.
+/// * `tx` - A broadcast channel sender for triggering build actions.
+///
+/// # Returns
+///
+/// * `Ok(Vec<i32>)` - A vector of build IDs for the updated package.
+/// * `Err(anyhow::Error)` - If any error occurs during the update trigger.
 pub async fn package_update(
     db: &DatabaseConnection,
-    pkg_id: i32,
+    pkg_model: packages::Model,
     force: bool,
     tx: &Sender<Action>,
 ) -> anyhow::Result<Vec<i32>> {
     let txn = db.begin().await?;
 
-    let mut pkg_model_active: packages::ActiveModel = Packages::find_by_id(pkg_id)
-        .one(&txn)
-        .await?
-        .ok_or(anyhow!("id not found"))?
-        .into();
-    let pkg_model: packages::Model = pkg_model_active.clone().try_into()?;
+    let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
 
     let pkg = get_info_by_name(pkg_model.name.as_str())
         .await
@@ -48,6 +91,21 @@ pub async fn package_update(
     Ok(build_ids)
 }
 
+/// Creates a build entry for a package on a specific platform.
+///
+/// This function initializes a new build job in the database and triggers the build process.
+///
+/// # Arguments
+///
+/// * `platform` - The platform on which the package should be built.
+/// * `pkg` - The package model associated with the build.
+/// * `db` - A reference to the database connection.
+/// * `tx` - A broadcast channel sender for triggering build actions.
+///
+/// # Returns
+///
+/// * `Ok(i32)` - The ID of the created build entry.
+/// * `Err(anyhow::Error)` - If any error occurs during the build process.
 pub async fn update_platform(
     platform: &str,
     pkg: packages::Model,

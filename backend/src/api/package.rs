@@ -137,20 +137,20 @@ pub async fn package_update_endpoint(
 ) -> Result<Json<Vec<i32>>, BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    let pkg_update = package_update(db, id, input.force, tx)
-        .await
-        .map(Json)
-        .map_err(|e| BadRequest(e.to_string()))?;
-
-    let pkg = Packages::find_by_id(id)
+    let pkg_model: packages::Model = Packages::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| BadRequest(e.to_string()))?
         .ok_or(BadRequest("id not found".to_string()))?;
 
+    let pkg_update = package_update(db, pkg_model.clone(), input.force, tx)
+        .await
+        .map(Json)
+        .map_err(|e| BadRequest(e.to_string()))?;
+
     al.add(
         PackageUpdateActivity {
-            package: pkg.name,
+            package: pkg_model.name,
             forced: input.force,
         },
         ActivityType::UpdatePackage,
