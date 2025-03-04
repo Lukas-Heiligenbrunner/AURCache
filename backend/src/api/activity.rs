@@ -2,7 +2,7 @@ use crate::activity_log::activity_utils::{Activity, ActivityLog};
 use crate::api::models::authenticated::Authenticated;
 use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
-use rocket::{get, State};
+use rocket::{State, get};
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]

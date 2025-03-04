@@ -1,7 +1,7 @@
 use crate::api::models::authenticated::Authenticated;
 use log::error;
-use rocket::http::uri::fmt::Path;
 use rocket::http::uri::Segments;
+use rocket::http::uri::fmt::Path;
 use rocket::http::{ContentType, Method, Status};
 use rocket::request::FromRequest;
 use rocket::response::{Redirect, Responder};

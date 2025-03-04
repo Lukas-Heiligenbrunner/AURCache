@@ -3,7 +3,7 @@ use rocket::http::uri::Segments;
 use rocket::http::{Method, Status};
 use rocket::response::Responder;
 use rocket::route::{Handler, Outcome};
-use rocket::{async_trait, figment, Data, Request, Route};
+use rocket::{Data, Request, Route, async_trait, figment};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]

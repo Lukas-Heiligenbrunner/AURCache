@@ -1,6 +1,6 @@
 use crate::activity_log::activity_utils::ActivityLog;
 use crate::api::aur::AURApi;
-use crate::api::auth::{oauth_callback, oauth_login, OauthUserInfo};
+use crate::api::auth::{OauthUserInfo, oauth_callback, oauth_login};
 use crate::api::backend::build_api;
 use crate::api::cusom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
@@ -12,14 +12,14 @@ use log::{error, info, warn};
 use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
 use rocket::http::private::cookie::Key;
-use rocket::{routes, Config};
+use rocket::{Config, routes};
 use rocket_oauth2::HyperRustlsAdapter;
 use sea_orm::DatabaseConnection;
 use std::env;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
 use utoipa::openapi::security::{AuthorizationCode, Flow, OAuth2, Scopes};
-use utoipa::{openapi::security::SecurityScheme, Modify, OpenApi};
+use utoipa::{Modify, OpenApi, openapi::security::SecurityScheme};
 use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 
