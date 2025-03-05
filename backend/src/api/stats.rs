@@ -197,7 +197,7 @@ WITH build_stats AS (
             WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days') THEN 'prev_30_days'
         END AS period,
         COUNT(*) AS build_count,
-        AVG(end_time - start_time) AS avg_build_duration
+        AVG(end_time - start_time)::FLOAT4 AS avg_build_duration
     FROM builds
     WHERE start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days')
     GROUP BY period
