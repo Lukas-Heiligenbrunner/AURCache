@@ -197,7 +197,7 @@ WITH build_stats AS (
             WHEN start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days') THEN 'prev_30_days'
         END AS period,
         COUNT(*) AS build_count,
-        AVG(end_time - start_time) AS avg_build_duration
+        AVG(end_time - start_time)::FLOAT4 AS avg_build_duration
     FROM builds
     WHERE start_time >= EXTRACT(EPOCH FROM NOW() - INTERVAL '60 days')
     GROUP BY period
@@ -205,7 +205,7 @@ WITH build_stats AS (
 SELECT
     COALESCE((SELECT build_count FROM build_stats WHERE period = 'last_30_days'), 0) AS last_30_days_builds,
     COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'last_30_days'), 0.0) AS last_30_days_avg_duration,
-    COALESCE((SELECT build_count FROM build_stats WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds
+    COALESCE((SELECT build_count FROM build_stats WHERE period = 'prev_30_days'), 0) AS prev_30_days_builds,
     COALESCE((SELECT avg_build_duration FROM build_stats WHERE period = 'prev_30_days'), 0.0) AS prev_30_days_avg_duration;
 ",
         _ => bail!("Unsupported database type"),
