@@ -48,11 +48,10 @@ dependencies:
   device_preview: ^1.2.0
   toggle_switch: ^2.3.0
   skeletonizer: ^1.4.2
+  flutter_riverpod: ^2.6.1
+  riverpod_annotation: ^2.6.1
 
 dev_dependencies:
-  flutter_test:
-    sdk: flutter
-
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your
@@ -60,6 +59,10 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
 
+  build_runner:
+  custom_lint:
+  riverpod_generator: ^2.6.0
+  riverpod_lint: ^2.6.0
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 

@@ -1,6 +1,39 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:toastification/toastification.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+
+/// A StateNotifier that handles fetching API data and refreshing it.
+class APIDataNotifier<T> extends StateNotifier<AsyncValue<T>> {
+  final Future<T> Function() api;
+
+  APIDataNotifier({required this.api}) : super(const AsyncValue.loading()) {
+    _fetchData();
+  }
+
+  Future<void> _fetchData() async {
+    try {
+      final data = await api();
+      state = AsyncValue.data(data);
+    } catch (error, stack) {
+      state = AsyncValue.error(error, stack);
+    }
+  }
+
+  /// Call this to re-fetch API data.
+  Future<void> refresh() async {
+    state = const AsyncValue.loading();
+    await _fetchData();
+  }
+}
+
+StateNotifierProviderFamily<APIDataNotifier<T>, AsyncValue<T>,
+    Future<T> Function()> createAPIDataNotifierProvider<T>() {
+  return StateNotifierProvider.family<APIDataNotifier<T>, AsyncValue<T>,
+      Future<T> Function()>(
+    (ref, api) => APIDataNotifier<T>(api: api),
+  );
+}
 
 class APIController<T> extends ChangeNotifier {
   void Function()? _refresh;
