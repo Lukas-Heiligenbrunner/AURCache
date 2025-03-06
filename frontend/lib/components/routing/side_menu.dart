@@ -80,27 +80,6 @@ class SideMenu extends StatelessWidget {
                 },
               )
             ]),
-            SizedBox(
-              height: 40,
-            ),
-            DrawerSection(title: "Settings", children: [
-              DrawerListTile(
-                title: "Settings",
-                svgSrc: "assets/icons/menu/settings.svg",
-                active: activeUri.startsWith("/settings"),
-                press: () {
-                  context.go("/settings");
-                },
-              ),
-              DrawerListTile(
-                title: "Help",
-                svgSrc: "assets/icons/menu/help.svg",
-                active: activeUri.startsWith("/help"),
-                press: () {
-                  context.go("/help");
-                },
-              ),
-            ]),
           ],
         ),
       ),
