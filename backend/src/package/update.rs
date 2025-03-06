@@ -6,6 +6,7 @@ use crate::db::activities::ActivityType;
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
+use log::warn;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
     TransactionTrait, TryIntoModel,
@@ -54,6 +55,11 @@ pub async fn package_update_all_outdated(
                 )
                 .await?;
             ids_total.append(&mut ids);
+        } else {
+            warn!(
+                "Package auto update was not triggered for package {} because of prev. build status: {}",
+                pkg.name, pkg.status
+            );
         }
     }
     Ok(ids_total)
