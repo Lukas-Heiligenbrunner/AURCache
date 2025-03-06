@@ -1,5 +1,8 @@
+use crate::activity_log::activity_utils::ActivityLog;
+use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::aur::api::get_info_by_name;
 use crate::builder::types::{Action, BuildStates};
+use crate::db::activities::ActivityType;
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
@@ -33,11 +36,25 @@ pub async fn package_update_all_outdated(
         .filter(packages::Column::OutOfDate.eq(1))
         .all(&txn)
         .await?;
+    let activity_log = ActivityLog::new(db.clone());
 
     let mut ids_total = vec![];
     for pkg in pkg_models.iter() {
-        let mut ids = package_update(db, pkg.to_owned(), false, tx).await?;
-        ids_total.append(&mut ids);
+        // only trigger build if previous build was successful and no build active
+        if pkg.status == BuildStates::SUCCESSFUL_BUILD {
+            let mut ids = package_update(db, pkg.to_owned(), false, tx).await?;
+            activity_log
+                .add(
+                    PackageUpdateActivity {
+                        package: pkg.name.clone(),
+                        forced: false,
+                    },
+                    ActivityType::UpdatePackage,
+                    Some("Server".to_string()),
+                )
+                .await?;
+            ids_total.append(&mut ids);
+        }
     }
     Ok(ids_total)
 }
