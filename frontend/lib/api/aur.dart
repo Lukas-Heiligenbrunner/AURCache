@@ -8,7 +8,10 @@ extension AURApi on ApiClient {
       return [];
     }
 
-    final resp = await getRawClient().get("/search?query=$query");
+    final resp = await getRawClient().get(
+      "/search",
+      queryParameters: {'query': query},
+    );
     final responseObject = resp.data as List;
     final List<AurPackage> packages = responseObject
         .map((e) => AurPackage.fromJson(e))

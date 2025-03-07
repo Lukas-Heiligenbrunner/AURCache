@@ -92,8 +92,11 @@ impl Builder {
 
         let (cpu_limit, memory_limit) = limits_from_env();
 
+        // docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]* regex
+        let filtered_name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+
         let build_id = self.build_model.id.get()?;
-        let container_name = format!("aurcache_build_{}_{}", name, build_id);
+        let container_name = format!("aurcache_build_{}_{}", filtered_name, build_id);
         let conf = Config {
             image: Some(image_id.as_str()),
             attach_stdout: Some(true),
