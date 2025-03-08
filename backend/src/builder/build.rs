@@ -72,21 +72,15 @@ impl Builder {
             "Build #{}: Repull builder image",
             self.build_model.id.get()?
         );
-        let image_id = self
-            .repull_image(BUILDER_IMAGE, target_platform.clone())
+        self.repull_image(BUILDER_IMAGE, target_platform.clone())
             .await?;
-        debug!(
-            "Build #{}: Image pulled with id: {}",
-            self.build_model.id.get()?,
-            image_id
-        );
 
         debug!(
             "Build #{}: Creating build container",
             self.build_model.id.get()?
         );
         let (create_info, host_active_build_path) = self
-            .create_build_container(target_platform, image_id)
+            .create_build_container(target_platform, BUILDER_IMAGE)
             .await?;
         let id = create_info.id;
         debug!(
