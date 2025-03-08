@@ -26,7 +26,7 @@ impl Builder {
 
     /// repull docker image with specified arch
     /// returns image id hash
-    pub async fn repull_image(&self, image: &str, arch: String) -> anyhow::Result<String> {
+    pub async fn repull_image(&self, image: &str, arch: String) -> anyhow::Result<()> {
         self.logger
             .append(format!("Pulling image: {}", image))
             .await;
@@ -65,13 +65,19 @@ impl Builder {
             }
         }
 
-        image_id.ok_or(anyhow!("No Image Id found"))
+        let image_id = image_id.ok_or(anyhow!("No Image Id found after pulling: {}", image))?;
+        debug!(
+            "Build #{}: Image pulled with id: {}",
+            self.build_model.id.get()?,
+            image_id
+        );
+        Ok(())
     }
 
     pub async fn create_build_container(
         &self,
         arch: String,
-        image_id: String,
+        image_name: &str,
     ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
         let name = self.package_model.name.get()?;
         let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
@@ -98,7 +104,7 @@ impl Builder {
         let build_id = self.build_model.id.get()?;
         let container_name = format!("aurcache_build_{}_{}", filtered_name, build_id);
         let conf = Config {
-            image: Some(image_id.as_str()),
+            image: Some(image_name),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             open_stdin: Some(false),
