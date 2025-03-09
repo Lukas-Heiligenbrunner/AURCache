@@ -22,3 +22,8 @@ To build the Rust backend, make sure you have Rust installed. Then, navigate to 
 cd backend
 cargo build --release
 ```
+
+### Api Docs
+You can access the API docs (scalar) `http://localhost:8080/docs` after starting the backend.
+
+Or if you prefer Redoc `http://localhost:8080/redoc`.
