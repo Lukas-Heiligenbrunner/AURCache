@@ -22,7 +22,6 @@ dotenvy = "0.15.7"
 sea-orm = { version = "1.1.2", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
 sea-orm-migration = {version = "1.1.2", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 rust-embed = "8.5.0"
-rocket_seek_stream = "0.2.6"
 bollard = "0.18.1"
 bigdecimal = "0.4.7"
 env_logger = "0.11.5"
