@@ -143,7 +143,7 @@ In this example the `artifact_cache` volume is mounted to the aurcache container
 
 ## Accessing WebUI
 
-Access AURCache through your web browser at http://localhost:8081.
+Access AURCache through your web browser at http://localhost:8080.
 
 You can now start adding packages for building and utilizing the AURCache repository.
 
