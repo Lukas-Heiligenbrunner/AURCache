@@ -6,5 +6,5 @@
   "automerge": false,
   "prCreation": "immediate",
   "rebaseWhen": "conflicted",
-  "dependencyDashboard": false
+  "dependencyDashboard": true
 }
