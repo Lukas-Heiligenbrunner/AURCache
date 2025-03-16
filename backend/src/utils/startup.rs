@@ -12,7 +12,6 @@ use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
 #[cfg(not(debug_assertions))]
-#[cfg(target_arch = "x86_64")]
 use {
     log::debug,
     std::fs::File,
@@ -58,7 +57,6 @@ pub async fn pre_startup_tasks() {
 
     // disable on debug builds since annoying bc. of root permissions
     #[cfg(not(debug_assertions))]
-    #[cfg(target_arch = "x86_64")]
     init_qemu_binfmt().await.unwrap();
 }
 
@@ -92,10 +90,9 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
 }
 
 /// This is required to initialize the binfmt configuration for QEMU on x86_64 correctly
-/// aarch64 is not supported by qemu binfmt
+/// aarch64 is not supported by qemu binfmt, but might tho?
 /// see https://stackoverflow.com/questions/75954301/using-sudo-in-podman-with-qemu-architecture-emulation-leads-to-sudo-effective-u
 #[cfg(not(debug_assertions))]
-#[cfg(target_arch = "x86_64")]
 async fn init_qemu_binfmt() -> anyhow::Result<()> {
     let source_dir = Path::new("/usr/lib/binfmt.d");
     let target_dir = Path::new("/etc/binfmt.d");

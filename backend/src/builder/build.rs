@@ -250,12 +250,6 @@ impl Builder {
         self.package_model = self.package_model.clone().save(&self.db).await?;
 
         let target_platform = format!("linux/{}", self.build_model.platform.get()?);
-
-        #[cfg(target_arch = "aarch64")]
-        if target_platform != "linux/arm64" {
-            bail!("Unsupported host architecture aarch64 for cross-compile");
-        }
-
         Ok(target_platform)
     }
 
