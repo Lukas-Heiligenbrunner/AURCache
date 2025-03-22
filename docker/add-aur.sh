@@ -69,4 +69,5 @@ rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
 
 # chuck deps
+pacman -Rns --noconfirm reflector
 pacman -Rns --noconfirm $(pacman -Qtdq) || echo "Nothing to remove"
