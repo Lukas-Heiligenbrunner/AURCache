@@ -13,7 +13,10 @@ sed -i '/#\[multilib\]/,+1 s/^#//' /etc/pacman.conf
 
 # we're gonna need sudo to use the helper properly
 pacman -Sy --noconfirm
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git reflector || echo "Nothing to do"
+
+# use reflector to get the fastest mirrors
+reflector --protocol https --sort rate --number 10 --verbose --save /etc/pacman.d/mirrorlist
 
 # create the user
 AUR_USER_HOME="/var/${AUR_USER}"
@@ -66,4 +69,5 @@ rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
 
 # chuck deps
+pacman -Rns --noconfirm reflector
 pacman -Rns --noconfirm $(pacman -Qtdq) || echo "Nothing to remove"
