@@ -1,8 +1,12 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/api/api_builder.dart';
+import 'package:aurcache/providers/builds.dart';
+import 'package:aurcache/providers/packages.dart';
+import 'package:aurcache/providers/statistics.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:skeletonizer/skeletonizer.dart';
@@ -14,7 +18,7 @@ import '../models/build.dart';
 import '../models/simple_packge.dart';
 import '../utils/package_color.dart';
 
-class PackagesTable extends StatelessWidget {
+class PackagesTable extends ConsumerWidget {
   const PackagesTable({super.key, required this.data});
   final List<SimplePackage> data;
 
@@ -33,7 +37,7 @@ class PackagesTable extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return DataTable(
         horizontalMargin: 12,
         columnSpacing: defaultPadding,
@@ -65,11 +69,13 @@ class PackagesTable extends StatelessWidget {
               label: Skeleton.keep(child: Text("Action")),
             ),
         ],
-        rows:
-            data.map((e) => buildDataRow(e, context)).toList(growable: false));
+        rows: data
+            .map((e) => buildDataRow(e, context, ref))
+            .toList(growable: false));
   }
 
-  DataRow buildDataRow(SimplePackage package, BuildContext context) {
+  DataRow buildDataRow(
+      SimplePackage package, BuildContext context, WidgetRef ref) {
     return DataRow(
       cells: [
         if (context.desktop) DataCell(Text(package.id.toString())),
@@ -101,22 +107,11 @@ class PackagesTable extends StatelessWidget {
                         type: ToastificationType.error,
                       );
                     }
-                    final apiController =
-                        Provider.of<APIController<List<SimplePackage>>>(context,
-                            listen: false);
-                    apiController.refresh();
 
-                    final buildsController =
-                        Provider.of<APIController<List<Build>>>(context,
-                            listen: false);
-                    buildsController.refresh();
-
-                    //Provider.of<PackagesProvider>(context, listen: false)
-                    //    .refresh(context);
-                    //Provider.of<BuildsProvider>(context, listen: false)
-                    //    .refresh(context);
-                    //Provider.of<StatsProvider>(context, listen: false)
-                    //    .refresh(context);
+                    ref.refresh(listPackagesProvider());
+                    ref.refresh(listAllBuildsProvider());
+                    ref.refresh(listStatsProvider);
+                    ref.refresh(getGraphDataProvider);
                   }
                 : null,
           )),

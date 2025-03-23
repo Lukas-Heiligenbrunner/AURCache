@@ -1,6 +1,7 @@
-import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/models/extended_package.dart';
+import 'package:aurcache/providers/builds.dart';
+import 'package:aurcache/providers/packages.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
@@ -78,7 +79,7 @@ class _PackageScreenState extends State<PackageScreen> {
             ),
           );
         },
-        api: () => API.getPackage(widget.pkgID),
+        provider: getPackageProvider(widget.pkgID),
       ),
     );
   }
@@ -305,7 +306,7 @@ class _PackageScreenState extends State<PackageScreen> {
                 return BuildsTable(data: data);
               },
               onLoad: () => const Text("no data"),
-              api: () => API.listAllBuilds(pkgID: pkg.id),
+              provider: listAllBuildsProvider(pkgID: pkg.id),
             ),
           ],
         ),

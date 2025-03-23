@@ -1,12 +1,12 @@
 import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
-import 'package:aurcache/providers/build_log_provider.dart';
+import 'package:aurcache/providers/build_log.dart';
+import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/utils/time_formatter.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
@@ -31,33 +31,31 @@ class _BuildScreenState extends State<BuildScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: ChangeNotifierProvider(
-        create: (BuildContext context) => BuildLogProvider(),
-        child: APIBuilder(
-            interval: const Duration(seconds: 10),
-            onLoad: () => const Text("loading"),
-            onData: (buildData) {
-              return Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        _buildTopBar(buildData, context),
-                        const SizedBox(
-                          height: 15,
-                        ),
-                        _buildPage(buildData)
-                      ],
+      body: APIBuilder(
+        interval: const Duration(seconds: 10),
+        onLoad: () => const Text("loading"),
+        onData: (buildData) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  children: [
+                    _buildTopBar(buildData, context),
+                    const SizedBox(
+                      height: 15,
                     ),
-                  ),
-                  _buildSideBar(buildData),
-                ],
-              );
-            },
-            api: () => API.getBuild(widget.buildID)),
+                    _buildPage(buildData)
+                  ],
+                ),
+              ),
+              _buildSideBar(buildData),
+            ],
+          );
+        },
+        provider: getBuildProvider(widget.buildID),
       ),
     );
   }
@@ -116,8 +114,8 @@ class _BuildScreenState extends State<BuildScreen> {
                   onPressed: () {
                     setState(() {
                       scrollFollowActive = !scrollFollowActive;
-                      Provider.of<BuildLogProvider>(context, listen: false)
-                          .followLog = scrollFollowActive;
+                      //Provider.of<BuildLogProvider>(context, listen: false)
+                      //    .followLog = scrollFollowActive;
                     });
                   },
                   isSelected: scrollFollowActive,
@@ -127,16 +125,16 @@ class _BuildScreenState extends State<BuildScreen> {
                 ),
                 IconButton(
                   onPressed: () {
-                    Provider.of<BuildLogProvider>(context, listen: false)
-                        .go_to_top();
+                    //Provider.of<BuildLogProvider>(context, listen: false)
+                    //    .go_to_top();
                   },
                   icon: const Icon(Icons.vertical_align_top_rounded),
                   tooltip: "Go to Top",
                 ),
                 IconButton(
                   onPressed: () {
-                    Provider.of<BuildLogProvider>(context, listen: false)
-                        .go_to_bottom();
+                    //Provider.of<BuildLogProvider>(context, listen: false)
+                    //    .go_to_bottom();
                   },
                   icon: const Icon(Icons.vertical_align_bottom_rounded),
                   tooltip: "Go to Bottom",

@@ -1,9 +1,9 @@
-import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/builds_table.dart';
 import 'package:aurcache/components/table_info.dart';
+import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
-import '../api/API.dart';
+
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
 
@@ -43,17 +43,17 @@ class BuildsScreen extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder(
-                      interval: const Duration(seconds: 10),
-                      onLoad: () => const Text("no data"),
-                      onData: (data) {
-                        if (data.isEmpty) {
-                          return const TableInfo(
-                              title: "You have no builds yet");
-                        } else {
-                          return BuildsTable(data: data);
-                        }
-                      },
-                      api: API.listAllBuilds),
+                    interval: const Duration(seconds: 10),
+                    onLoad: () => const Text("no data"),
+                    onData: (data) {
+                      if (data.isEmpty) {
+                        return const TableInfo(title: "You have no builds yet");
+                      } else {
+                        return BuildsTable(data: data);
+                      }
+                    },
+                    provider: listAllBuildsProvider(),
+                  ),
                 )
               ],
             ),

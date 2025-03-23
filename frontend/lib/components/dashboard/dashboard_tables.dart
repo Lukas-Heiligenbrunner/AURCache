@@ -2,6 +2,8 @@ import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/providers/builds.dart';
+import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -103,7 +105,7 @@ class _DashboardTablesState extends State<DashboardTables> {
           }
         },
         onLoad: () => PackagesTable.loading(),
-        api: () => API.listPackages(limit: 20),
+        provider: listPackagesProvider(limit: 20),
       );
     } else {
       return APIBuilder(
@@ -120,7 +122,7 @@ class _DashboardTablesState extends State<DashboardTables> {
                 ));
           }
         },
-        api: () => API.listAllBuilds(limit: 20),
+        provider: listAllBuildsProvider(limit: 20),
       );
     }
   }

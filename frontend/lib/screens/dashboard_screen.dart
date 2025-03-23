@@ -38,18 +38,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               const SizedBox(height: defaultPadding),
               QuickInfoBanner(),
-              MultiProvider(
-                  providers: [
-                    ChangeNotifierProvider(
-                      create: (context) => APIController<List<SimplePackage>>(),
-                    ),
-                    ChangeNotifierProvider(
-                      create: (context) => APIController<List<Build>>(),
-                    ),
-                  ],
-                  child: Responsive(
-                      mobileChild: _buildMobileBody(),
-                      desktopChild: _buildDesktopBody()))
+              Responsive(
+                  mobileChild: _buildMobileBody(),
+                  desktopChild: _buildDesktopBody())
             ],
           ),
         );

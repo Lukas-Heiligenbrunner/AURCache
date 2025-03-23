@@ -1,11 +1,10 @@
 import 'dart:async';
 
-import 'package:aurcache/api/aur.dart';
 import 'package:aurcache/components/aur_search_table.dart';
+import 'package:aurcache/providers/aur.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 
-import '../api/API.dart';
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
 
@@ -80,31 +79,31 @@ class _AurScreenState extends State<AurScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder(
-                      key: ValueKey(query),
-                      onLoad: () => Center(
-                            child: Column(
-                              children: [
-                                const SizedBox(
-                                  height: 15,
-                                ),
-                                query.length < 3
-                                    ? const Text(
-                                        "Type to search for an AUR package")
-                                    : const Text("loading")
-                              ],
-                            ),
+                    key: ValueKey(query),
+                    onLoad: () => Center(
+                      child: Column(
+                        children: [
+                          const SizedBox(
+                            height: 15,
                           ),
-                      onData: (data) => query.length < 3
-                          ? Column(
-                              children: [
-                                const SizedBox(
-                                  height: 15,
-                                ),
-                                Text("Type to search for an AUR package")
-                              ],
-                            )
-                          : AurSearchTable(data: data),
-                      api: () => API.getAurPackages(query)),
+                          query.length < 3
+                              ? const Text("Type to search for an AUR package")
+                              : const Text("loading")
+                        ],
+                      ),
+                    ),
+                    onData: (data) => query.length < 3
+                        ? Column(
+                            children: [
+                              const SizedBox(
+                                height: 15,
+                              ),
+                              Text("Type to search for an AUR package")
+                            ],
+                          )
+                        : AurSearchTable(data: data),
+                    provider: getAurPackagesProvider(query),
+                  ),
                 )
               ],
             ),

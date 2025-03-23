@@ -2,22 +2,23 @@ import 'dart:async';
 
 import 'package:aurcache/api/builds.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:provider/provider.dart';
 
 import '../api/API.dart';
 import '../models/build.dart';
-import '../providers/build_log_provider.dart';
+import '../providers/build_log.dart';
 
-class BuildOutput extends StatefulWidget {
+class BuildOutput extends ConsumerStatefulWidget {
   const BuildOutput({super.key, required this.build});
 
   final Build build;
 
   @override
-  State<BuildOutput> createState() => _BuildOutputState();
+  ConsumerState<BuildOutput> createState() => _BuildOutputState();
 }
 
-class _BuildOutputState extends State<BuildOutput> {
+class _BuildOutputState extends ConsumerState<BuildOutput> {
   late Future<String> initialOutput;
 
   String output = "";
@@ -25,8 +26,8 @@ class _BuildOutputState extends State<BuildOutput> {
 
   @override
   Widget build(BuildContext context) {
-    final sc =
-        Provider.of<BuildLogProvider>(context, listen: false).scrollController;
+    final sc = ref.read(buildLogProvider.notifier).scrollController;
+
     return Expanded(
       flex: 1,
       child: SingleChildScrollView(
@@ -60,7 +61,7 @@ class _BuildOutputState extends State<BuildOutput> {
       setState(() {
         output = value;
       });
-      Provider.of<BuildLogProvider>(context, listen: false).go_to_bottom();
+      ref.read(buildLogProvider.notifier).go_to_bottom();
     });
 
     // poll new output only if not finished
@@ -75,11 +76,8 @@ class _BuildOutputState extends State<BuildOutput> {
           });
         }
 
-        final follow =
-            Provider.of<BuildLogProvider>(context, listen: false).followLog;
-
-        if (follow) {
-          Provider.of<BuildLogProvider>(context, listen: false).go_to_bottom();
+        if (ref.read(buildLogProvider).value!) {
+          ref.read(buildLogProvider.notifier).go_to_bottom();
         }
       });
     }

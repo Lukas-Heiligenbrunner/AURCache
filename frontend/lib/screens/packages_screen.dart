@@ -1,15 +1,17 @@
 import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/models/simple_packge.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../api/API.dart';
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
+import '../providers/packages.dart';
 
 class PackagesScreen extends StatelessWidget {
   PackagesScreen({super.key});
-
-  final controller = APIController();
 
   @override
   Widget build(BuildContext context) {
@@ -35,12 +37,11 @@ class PackagesScreen extends StatelessWidget {
                   width: double.infinity,
                   child: APIBuilder(
                       interval: const Duration(seconds: 10),
-                      controller: controller,
                       onLoad: () => const Text("no data"),
                       onData: (data) {
                         return PackagesTable(data: data);
                       },
-                      api: API.listPackages),
+                      provider: listPackagesProvider()),
                 )
               ],
             ),

@@ -1,30 +1,15 @@
 import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:toastification/toastification.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 
-class APIController<T> extends ChangeNotifier {
-  void Function()? _refresh;
-
-  // Internal method to bind the refresh function from the state.
-  void _attachRefresh(void Function() refreshCallback) {
-    _refresh = refreshCallback;
-  }
-
-  // Public method to trigger a refresh.
-  void refresh() {
-    _refresh?.call();
-    notifyListeners();
-  }
-}
-
-class APIBuilder<T> extends StatefulWidget {
-  const APIBuilder(
+class APIBuilder<T> extends ConsumerWidget {
+  APIBuilder(
       {super.key,
       this.interval,
       required this.onLoad,
       required this.onData,
-      required this.api,
-      this.controller,
+      required this.provider,
       this.refreshOnComeback = false});
 
   final Duration? interval;
@@ -32,73 +17,45 @@ class APIBuilder<T> extends StatefulWidget {
 
   final Widget Function() onLoad;
   final Widget Function(T data) onData;
-  final Future<T> Function() api;
-  final APIController<T>? controller;
+  final AutoDisposeFutureProvider<T> provider;
 
-  @override
-  State<APIBuilder<T>> createState() => _APIBuilderState<T>();
-}
-
-class _APIBuilderState<T> extends State<APIBuilder<T>> {
-  late Future<T> _futureData;
   bool _hasBeenVisible = false; // Flag to track initial visibility
 
   @override
-  void initState() {
-    super.initState();
-    _futureData = widget.api();
-
-    // Attach the refresh callback to the controller.
-    widget.controller?._attachRefresh(_refreshData);
-  }
-
-  // Method to refresh data.
-  void _refreshData() {
-    setState(() {
-      _futureData = widget.api();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final builder = FutureBuilder<T>(
-      future: _futureData,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          print(snapshot.error);
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => toastification.show(
-                    title: Text('API Request failed! ${snapshot.error}'),
-                    autoCloseDuration: const Duration(seconds: 5),
-                    type: ToastificationType.error,
-                  ));
-        }
-        if (snapshot.hasData) {
-          return widget.onData(snapshot.data as T);
-        } else {
-          return widget.onLoad();
-        }
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncValue = ref.watch(provider);
+    final t = asyncValue.when(
+      data: (data) => onData(data),
+      loading: () => onLoad(),
+      error: (error, stack) {
+        // Optionally show an error toast or widget.
+        WidgetsBinding.instance.addPostFrameCallback((_) => toastification.show(
+              title: Text('API Request failed! ${error}'),
+              autoCloseDuration: const Duration(seconds: 5),
+              type: ToastificationType.error,
+            ));
+        return Center(child: Text('API Request failed! $error'));
       },
     );
 
-    if (widget.refreshOnComeback) {
+    if (refreshOnComeback) {
       return VisibilityDetector(
-          key: widget.key ?? Key(hashCode.toString()),
+          key: key ?? Key(hashCode.toString()),
           onVisibilityChanged: (VisibilityInfo info) {
             if (info.visibleFraction > 0) {
               if (_hasBeenVisible) {
                 // This isn't the initial load, so trigger refresh.
                 print("widget api data refreshed on comeback!");
-                _refreshData();
+                ref.invalidate(provider);
               } else {
                 // First time visibility; mark as visible without refreshing.
                 _hasBeenVisible = true;
               }
             }
           },
-          child: builder);
+          child: t);
     } else {
-      return builder;
+      return t;
     }
   }
 }

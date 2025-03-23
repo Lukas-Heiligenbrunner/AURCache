@@ -1,6 +1,7 @@
 import 'package:aurcache/api/activity_log.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/components/table_info.dart';
+import 'package:aurcache/providers/activity_log.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:skeletonizer/skeletonizer.dart';
@@ -18,47 +19,48 @@ class _ActivityLogState extends State<ActivityLog> {
   @override
   Widget build(BuildContext context) {
     return APIBuilder(
-        refreshOnComeback: true,
-        onLoad: () => Skeletonizer(
-              enabled: true,
-              child: Column(
-                children: [
-                  ActivityLogItem(
-                    text: "added Package \"Power\"",
-                    timestamp: DateTime.timestamp(),
-                    user: "Lukas Heiligenbrunner",
-                  ),
-                  ActivityLogItem(
-                    text: "added Package \"Naps\"",
-                    timestamp: DateTime.timestamp(),
-                    user: "Evin Arslan",
-                  ),
-                  ActivityLogItem(
-                    text: "added Package \"Not\"",
-                    timestamp: DateTime.timestamp(),
-                    user: "Sophie Francz",
-                  ),
-                  ActivityLogItem(
-                    text: "added Package \"Powerapps\"",
-                    timestamp: DateTime.timestamp(),
-                    user: "Lukas Kessler",
-                  )
-                ],
-              ),
+      refreshOnComeback: true,
+      onLoad: () => Skeletonizer(
+        enabled: true,
+        child: Column(
+          children: [
+            ActivityLogItem(
+              text: "added Package \"Power\"",
+              timestamp: DateTime.timestamp(),
+              user: "Lukas Heiligenbrunner",
             ),
-        onData: (v) => v.isEmpty
-            ? TableInfo(title: "No Activity items available yet")
-            : Column(
-                children: v
-                    .map(
-                      (e) => ActivityLogItem(
-                        text: e.text,
-                        timestamp: e.timestamp,
-                        user: e.user,
-                      ),
-                    )
-                    .toList(growable: false)),
-        api: API.listActivities);
+            ActivityLogItem(
+              text: "added Package \"Naps\"",
+              timestamp: DateTime.timestamp(),
+              user: "Evin Arslan",
+            ),
+            ActivityLogItem(
+              text: "added Package \"Not\"",
+              timestamp: DateTime.timestamp(),
+              user: "Sophie Francz",
+            ),
+            ActivityLogItem(
+              text: "added Package \"Powerapps\"",
+              timestamp: DateTime.timestamp(),
+              user: "Lukas Kessler",
+            )
+          ],
+        ),
+      ),
+      onData: (v) => v.isEmpty
+          ? TableInfo(title: "No Activity items available yet")
+          : Column(
+              children: v
+                  .map(
+                    (e) => ActivityLogItem(
+                      text: e.text,
+                      timestamp: e.timestamp,
+                      user: e.user,
+                    ),
+                  )
+                  .toList(growable: false)),
+      provider: listActivitiesProvider(),
+    );
   }
 }
 
