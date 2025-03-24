@@ -89,6 +89,9 @@ class _DashboardTablesState extends State<DashboardTables> {
   Widget _buildActivePage() {
     if (activePage == 0) {
       return APIBuilder(
+        // this should be the landing page with first infos
+        // so we refresh a bit more often
+        interval: Duration(seconds: 30),
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no packages yet");
@@ -105,6 +108,7 @@ class _DashboardTablesState extends State<DashboardTables> {
       );
     } else {
       return APIBuilder(
+        interval: Duration(minutes: 1),
         onLoad: () => BuildsTable.loading(),
         onData: (data) {
           if (data.isEmpty) {

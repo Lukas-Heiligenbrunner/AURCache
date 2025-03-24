@@ -16,6 +16,7 @@ class _ActivityLogState extends State<ActivityLog> {
   @override
   Widget build(BuildContext context) {
     return APIBuilder(
+      interval: Duration(minutes: 1),
       onLoad: () => Skeletonizer(
         enabled: true,
         child: Column(

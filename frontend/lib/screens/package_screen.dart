@@ -31,6 +31,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
     return Scaffold(
       appBar: AppBar(),
       body: APIBuilder(
+        interval: Duration(minutes: 1),
         onLoad: () => const Text("loading"),
         onData: (pkg) {
           return Padding(
@@ -308,7 +309,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             APIBuilder(
-              interval: const Duration(seconds: 5),
+              interval: const Duration(seconds: 30),
               onData: (data) {
                 return BuildsTable(data: data);
               },
