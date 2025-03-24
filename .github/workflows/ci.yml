@@ -6,7 +6,7 @@ on:
       - '**'
 
 jobs:
-  test:
+  lintAndTestRust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,3 +35,22 @@ jobs:
           cargo check
           cargo test --all
           cd src/pacman-repo-utils && cargo test --all
+  lintFlutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.29.2
+
+      - name: Toolchain info
+        run: flutter doctor
+
+      - name: Lint
+        run: flutter analyze --no-fatal-infos
+
+      - name: formatting
+        run: flutter format --set-exit-if-changed .
