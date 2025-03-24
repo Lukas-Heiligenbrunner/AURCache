@@ -56,7 +56,7 @@ jobs:
       - name: Build Runner
         run: |
           flutter pub get
-          lutter pub run build_runner build --delete-conflicting-outputs
+          flutter pub run build_runner build --delete-conflicting-outputs
       - name: Lint
         run: flutter analyze --no-fatal-infos
 
