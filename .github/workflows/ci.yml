@@ -8,6 +8,9 @@ on:
 jobs:
   lintAndTestRust:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
     steps:
       - uses: actions/checkout@v4
 
@@ -25,18 +28,19 @@ jobs:
 
       - name: Lint
         run: |
-          cd backend
           cargo fmt -- --check
           cargo clippy -- -D warnings          
 
       - name: Test
         run: |
-          cd backend
           cargo check
           cargo test --all
           cd src/pacman-repo-utils && cargo test --all
   lintFlutter:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
     steps:
       - uses: actions/checkout@v4
 
