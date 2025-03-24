@@ -9,6 +9,15 @@ import 'package:toastification/toastification.dart';
 import 'constants/color_constants.dart';
 
 void main() {
+  if (kIsWeb) {
+    if (bool.fromEnvironment('dart.tool.dart2wasm')) {
+      print("You are using the WASM build of Flutter");
+    } else {
+      print(
+          "you are using the JS build of Flutter. Your Browser doesn't support WASM");
+    }
+  }
+
   GoRouter.optionURLReflectsImperativeAPIs = true;
   runApp(
     ProviderScope(
