@@ -150,15 +150,6 @@ class _BuildLineChartState extends State<BuildLineChart> {
             } else {
               return FlLine(strokeWidth: 0);
             }
-
-            if (value % 4 == 0) {
-              return FlLine(
-                  color: Colors.grey.withOpacity(0.8),
-                  strokeWidth: 1,
-                  dashArray: [5, 5]);
-            } else {
-              return FlLine(strokeWidth: 0);
-            }
           },
         ),
         titlesData: FlTitlesData(

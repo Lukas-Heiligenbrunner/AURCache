@@ -1,12 +1,14 @@
 import 'package:aurcache/api/builds.dart';
 import 'package:aurcache/components/build_output.dart';
 import 'package:aurcache/models/build.dart';
-import 'package:aurcache/providers/build_log_provider.dart';
+import 'package:aurcache/providers/build_log.dart';
+import 'package:aurcache/providers/builds.dart';
+import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/utils/time_formatter.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
@@ -16,53 +18,53 @@ import '../components/dashboard/chart_card.dart';
 import '../constants/color_constants.dart';
 import '../utils/package_color.dart';
 
-class BuildScreen extends StatefulWidget {
+class BuildScreen extends ConsumerStatefulWidget {
   const BuildScreen({super.key, required this.buildID});
 
   final int buildID;
 
   @override
-  State<BuildScreen> createState() => _BuildScreenState();
+  ConsumerState<BuildScreen> createState() => _BuildScreenState();
 }
 
-class _BuildScreenState extends State<BuildScreen> {
+class _BuildScreenState extends ConsumerState<BuildScreen> {
   bool scrollFollowActive = true;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: ChangeNotifierProvider(
-        create: (BuildContext context) => BuildLogProvider(),
-        child: APIBuilder(
-            interval: const Duration(seconds: 10),
-            onLoad: () => const Text("loading"),
-            onData: (buildData) {
-              return Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        _buildTopBar(buildData, context),
-                        const SizedBox(
-                          height: 15,
-                        ),
-                        _buildPage(buildData)
-                      ],
+      body: APIBuilder(
+        interval: const Duration(seconds: 10),
+        onLoad: () => const Text("loading"),
+        onData: (buildData) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  children: [
+                    _buildTopBar(buildData, context),
+                    const SizedBox(
+                      height: 15,
                     ),
-                  ),
-                  _buildSideBar(buildData),
-                ],
-              );
-            },
-            api: () => API.getBuild(widget.buildID)),
+                    _buildPage(buildData)
+                  ],
+                ),
+              ),
+              _buildSideBar(buildData),
+            ],
+          );
+        },
+        provider: getBuildProvider(widget.buildID),
       ),
     );
   }
 
   Widget _buildTopBar(Build buildData, BuildContext context) {
+    final followLog = ref.watch(buildLogProvider);
+
     return Container(
       color: secondaryColor,
       child: Padding(
@@ -115,28 +117,25 @@ class _BuildScreenState extends State<BuildScreen> {
                 IconButton(
                   onPressed: () {
                     setState(() {
-                      scrollFollowActive = !scrollFollowActive;
-                      Provider.of<BuildLogProvider>(context, listen: false)
-                          .followLog = scrollFollowActive;
+                      ref.read(buildLogProvider.notifier).follow_log =
+                          !followLog;
                     });
                   },
-                  isSelected: scrollFollowActive,
+                  isSelected: followLog,
                   icon: const Icon(Icons.read_more),
                   selectedIcon: const Icon(Icons.read_more),
                   tooltip: "Follow log",
                 ),
                 IconButton(
                   onPressed: () {
-                    Provider.of<BuildLogProvider>(context, listen: false)
-                        .go_to_top();
+                    ref.read(buildLogProvider.notifier).go_to_top();
                   },
                   icon: const Icon(Icons.vertical_align_top_rounded),
                   tooltip: "Go to Top",
                 ),
                 IconButton(
                   onPressed: () {
-                    Provider.of<BuildLogProvider>(context, listen: false)
-                        .go_to_bottom();
+                    ref.read(buildLogProvider.notifier).go_to_bottom();
                   },
                   icon: const Icon(Icons.vertical_align_bottom_rounded),
                   tooltip: "Go to Bottom",
@@ -229,8 +228,8 @@ class _BuildScreenState extends State<BuildScreen> {
                 context, "Cancel Build", "Are you sure to cancel this Build?",
                 () {
               API.cancelBuild(widget.buildID);
-              //Provider.of<BuildProvider>(context, listen: false)
-              //    .refresh(context);
+              // refresh current build screen
+              ref.invalidate(getBuildProvider(widget.buildID));
             }, null);
           },
           child: const Text(
@@ -245,9 +244,15 @@ class _BuildScreenState extends State<BuildScreen> {
           onPressed: () async {
             await showConfirmationDialog(
                 context, "Delete Build", "Are you sure to delete this Build?",
-                () {
-              API.deleteBuild(widget.buildID);
-              context.pop();
+                () async {
+              await API.deleteBuild(widget.buildID);
+
+              // invalidate package page provider
+              ref.invalidate(getPackageProvider(build.pkg_id));
+
+              if (mounted) {
+                context.pop();
+              }
             }, null);
           },
           child: const Text(

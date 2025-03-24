@@ -1,13 +1,18 @@
 import 'package:flutter/widgets.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+part 'build_log.g.dart';
 
-class BuildLogProvider with ChangeNotifier {
+@riverpod
+class BuildLog extends _$BuildLog {
   final scrollController = ScrollController();
 
-  bool followLog = true;
+  @override
+  bool build() {
+    return true;
+  }
 
   set follow_log(bool value) {
-    followLog = value;
-    notifyListeners();
+    state = value;
   }
 
   void go_to_bottom() {

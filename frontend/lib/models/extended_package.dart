@@ -1,6 +1,11 @@
+import 'package:freezed_annotation/freezed_annotation.dart';
+part 'extended_package.g.dart';
+
+@JsonSerializable()
 class ExtendedPackage {
   final int id;
   final String name;
+  @JsonKey(fromJson: _fromJson)
   final bool outofdate;
   final int status, last_updated, first_submitted;
   final String latest_version, latest_aur_version, aur_url;
@@ -28,28 +33,9 @@ class ExtendedPackage {
     required this.description,
   });
 
-  factory ExtendedPackage.fromJson(Map<String, dynamic> json) {
-    return ExtendedPackage(
-      id: json["id"] as int,
-      outofdate: json["outofdate"] as num != 0,
-      status: json["status"] as int,
-      name: json["name"] as String,
-      latest_version: json["latest_version"] as String,
-      latest_aur_version: json["latest_aur_version"] as String,
-      last_updated: json["last_updated"] as int,
-      first_submitted: json["first_submitted"] as int,
-      licenses: json["licenses"] as String?,
-      maintainer: json["maintainer"] as String?,
-      aur_flagged_outdated: json["aur_flagged_outdated"] as bool,
-      selected_platforms: (json["selected_platforms"] as List)
-          .map((e) => e as String)
-          .toList(growable: false),
-      selected_build_flags: (json["selected_build_flags"] as List)
-          .map((e) => e as String)
-          .toList(growable: false),
-      aur_url: json['aur_url'] as String,
-      project_url: json['project_url'] as String?,
-      description: json['description'] as String?,
-    );
-  }
+  factory ExtendedPackage.fromJson(Map<String, dynamic> json) =>
+      _$ExtendedPackageFromJson(json);
+  Map<String, dynamic> toJson() => _$ExtendedPackageToJson(this);
+
+  static bool _fromJson(num value) => value != 0;
 }

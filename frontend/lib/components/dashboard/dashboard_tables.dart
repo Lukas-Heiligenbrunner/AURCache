@@ -1,12 +1,11 @@
-import 'package:aurcache/api/builds.dart';
-import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/providers/builds.dart';
+import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:toggle_switch/toggle_switch.dart';
-import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../api/api_builder.dart';
 import '../builds_table.dart';
@@ -90,7 +89,9 @@ class _DashboardTablesState extends State<DashboardTables> {
   Widget _buildActivePage() {
     if (activePage == 0) {
       return APIBuilder(
-        refreshOnComeback: true,
+        // this should be the landing page with first infos
+        // so we refresh a bit more often
+        interval: Duration(seconds: 30),
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no packages yet");
@@ -103,12 +104,12 @@ class _DashboardTablesState extends State<DashboardTables> {
           }
         },
         onLoad: () => PackagesTable.loading(),
-        api: () => API.listPackages(limit: 20),
+        provider: listPackagesProvider(limit: 20),
       );
     } else {
       return APIBuilder(
+        interval: Duration(minutes: 1),
         onLoad: () => BuildsTable.loading(),
-        refreshOnComeback: true,
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no builds yet");
@@ -120,7 +121,7 @@ class _DashboardTablesState extends State<DashboardTables> {
                 ));
           }
         },
-        api: () => API.listAllBuilds(limit: 20),
+        provider: listBuildsProvider(limit: 20),
       );
     }
   }

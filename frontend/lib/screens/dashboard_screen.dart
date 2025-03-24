@@ -1,11 +1,7 @@
-import 'package:aurcache/components/api/api_builder.dart';
-import 'package:aurcache/models/simple_packge.dart';
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../components/dashboard/header.dart';
 import '../constants/color_constants.dart';
-import '../models/build.dart';
 import '../utils/responsive.dart';
 import '../components/dashboard/quick_info_banner.dart';
 import '../components/dashboard/dashboard_tables.dart';
@@ -38,18 +34,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
               const SizedBox(height: defaultPadding),
               QuickInfoBanner(),
-              MultiProvider(
-                  providers: [
-                    ChangeNotifierProvider(
-                      create: (context) => APIController<List<SimplePackage>>(),
-                    ),
-                    ChangeNotifierProvider(
-                      create: (context) => APIController<List<Build>>(),
-                    ),
-                  ],
-                  child: Responsive(
-                      mobileChild: _buildMobileBody(),
-                      desktopChild: _buildDesktopBody()))
+              Responsive(
+                  mobileChild: _buildMobileBody(),
+                  desktopChild: _buildDesktopBody())
             ],
           ),
         );
