@@ -5,6 +5,7 @@ FROM ghcr.io/cirruslabs/flutter:3.29.2 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
+RUN flutter pub run build_runner build --delete-conflicting-outputs --verbose
 RUN flutter build web --release
 
 FROM rust:1.85.0 AS builder
