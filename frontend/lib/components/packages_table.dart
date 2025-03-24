@@ -1,5 +1,4 @@
 import 'package:aurcache/api/packages.dart';
-import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/providers/statistics.dart';
@@ -8,13 +7,11 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../constants/color_constants.dart';
-import '../models/build.dart';
 import '../models/simple_packge.dart';
 import '../utils/package_color.dart';
 
@@ -109,7 +106,7 @@ class PackagesTable extends ConsumerWidget {
                     }
 
                     ref.refresh(listPackagesProvider());
-                    ref.refresh(listAllBuildsProvider());
+                    ref.refresh(listBuildsProvider());
                     ref.refresh(listStatsProvider);
                     ref.refresh(getGraphDataProvider);
                   }

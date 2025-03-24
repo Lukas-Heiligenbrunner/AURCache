@@ -1,12 +1,9 @@
-import 'package:aurcache/api/activity_log.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/components/table_info.dart';
 import 'package:aurcache/providers/activity_log.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:skeletonizer/skeletonizer.dart';
-
-import '../api/API.dart';
 
 class ActivityLog extends StatefulWidget {
   const ActivityLog({super.key});
@@ -19,7 +16,6 @@ class _ActivityLogState extends State<ActivityLog> {
   @override
   Widget build(BuildContext context) {
     return APIBuilder(
-      refreshOnComeback: true,
       onLoad: () => Skeletonizer(
         enabled: true,
         child: Column(

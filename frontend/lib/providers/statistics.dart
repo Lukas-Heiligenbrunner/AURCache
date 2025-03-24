@@ -2,7 +2,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../api/API.dart';
-import '../api/api_client.dart';
 import '../models/graph_datapoint.dart';
 import '../models/stats.dart';
 import '../models/user_info.dart';

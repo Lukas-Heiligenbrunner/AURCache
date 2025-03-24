@@ -35,14 +35,14 @@ class MyApp extends StatelessWidget {
                 const AppBarTheme(backgroundColor: bgColor, elevation: 0),
             scaffoldBackgroundColor: bgColor,
             primaryColor: greenColor,
-            dialogBackgroundColor: secondaryColor,
             textTheme:
                 GoogleFonts.openSansTextTheme(Theme.of(context).textTheme)
                     .apply(bodyColor: Colors.white),
             canvasColor: secondaryColor,
             drawerTheme: ThemeData.dark()
                 .drawerTheme
-                .copyWith(backgroundColor: Color(0xff131418))),
+                .copyWith(backgroundColor: Color(0xff131418)),
+            dialogTheme: DialogThemeData(backgroundColor: secondaryColor)),
       ),
     );
   }

@@ -2,13 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../api/API.dart';
-import '../api/api_client.dart';
 import '../models/build.dart';
 
 part 'builds.g.dart';
 
 @riverpod
-Future<List<Build>> listAllBuilds(Ref ref, {int? pkgID, int? limit}) async {
+Future<List<Build>> listBuilds(Ref ref, {int? pkgID, int? limit}) async {
   String uri = "/builds?";
   if (pkgID != null) {
     uri += "pkgid=$pkgID";

@@ -1,11 +1,8 @@
-import 'package:aurcache/api/statistics.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/providers/statistics.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:skeletonizer/skeletonizer.dart';
-import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../../utils/responsive.dart';
 

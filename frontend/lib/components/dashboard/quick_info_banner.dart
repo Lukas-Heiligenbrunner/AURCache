@@ -1,4 +1,3 @@
-import 'package:aurcache/api/statistics.dart';
 import 'package:aurcache/components/dashboard/quick_info_tile.dart';
 import 'package:aurcache/providers/statistics.dart';
 import 'package:aurcache/utils/file_formatter.dart';
@@ -7,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 
-import '../../api/API.dart';
 import '../../models/stats.dart';
 import '../../utils/responsive.dart';
 import '../api/api_builder.dart';
@@ -92,7 +90,6 @@ class QuickInfoBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return APIBuilder(
-        refreshOnComeback: true,
         onData: (stats) {
           final items = _buildElements(stats, context);
           return _buildBanner(items, false);

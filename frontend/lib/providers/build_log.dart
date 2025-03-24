@@ -7,15 +7,12 @@ class BuildLog extends _$BuildLog {
   final scrollController = ScrollController();
 
   @override
-  Future<bool> build() async {
-    state = AsyncData(true);
+  bool build() {
     return true;
   }
 
-  bool followLog = true;
-
   set follow_log(bool value) {
-    state = AsyncData(value);
+    state = value;
   }
 
   void go_to_bottom() {

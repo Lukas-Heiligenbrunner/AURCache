@@ -1,5 +1,3 @@
-import 'package:aurcache/api/builds.dart';
-import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/components/packages_table.dart';
 import 'package:aurcache/providers/builds.dart';
@@ -8,7 +6,6 @@ import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:toggle_switch/toggle_switch.dart';
-import '../../api/API.dart';
 import '../../constants/color_constants.dart';
 import '../api/api_builder.dart';
 import '../builds_table.dart';
@@ -92,7 +89,6 @@ class _DashboardTablesState extends State<DashboardTables> {
   Widget _buildActivePage() {
     if (activePage == 0) {
       return APIBuilder(
-        refreshOnComeback: true,
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no packages yet");
@@ -110,7 +106,6 @@ class _DashboardTablesState extends State<DashboardTables> {
     } else {
       return APIBuilder(
         onLoad: () => BuildsTable.loading(),
-        refreshOnComeback: true,
         onData: (data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no builds yet");
@@ -122,7 +117,7 @@ class _DashboardTablesState extends State<DashboardTables> {
                 ));
           }
         },
-        provider: listAllBuildsProvider(limit: 20),
+        provider: listBuildsProvider(limit: 20),
       );
     }
   }

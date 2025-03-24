@@ -5,6 +5,7 @@ import 'package:aurcache/providers/packages.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
@@ -39,7 +40,12 @@ class _PackagesettingsscreenState extends ConsumerState<Packagesettingsscreen> {
                         id: widget.pkgID,
                         build_flags: buildFlags,
                         platforms: buildPlatforms);
-                    Navigator.pop(context);
+                    // refresh provider (also of package page)
+                    ref.invalidate(getPackageProvider(widget.pkgID));
+
+                    if (mounted) {
+                      context.pop();
+                    }
                   } on DioException catch (e) {
                     print(e);
                     toastification.show(

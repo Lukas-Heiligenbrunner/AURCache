@@ -3,6 +3,7 @@ import 'package:aurcache/models/extended_package.dart';
 import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/providers/packages.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -12,17 +13,19 @@ import '../components/api/api_builder.dart';
 import '../components/builds_table.dart';
 import '../components/confirm_popup.dart';
 import '../constants/color_constants.dart';
+import '../providers/activity_log.dart';
+import '../providers/statistics.dart';
 
-class PackageScreen extends StatefulWidget {
+class PackageScreen extends ConsumerStatefulWidget {
   const PackageScreen({super.key, required this.pkgID});
 
   final int pkgID;
 
   @override
-  State<PackageScreen> createState() => _PackageScreenState();
+  ConsumerState<PackageScreen> createState() => _PackageScreenState();
 }
 
-class _PackageScreenState extends State<PackageScreen> {
+class _PackageScreenState extends ConsumerState<PackageScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -95,10 +98,12 @@ class _PackageScreenState extends State<PackageScreen> {
               "Are you sure to force an Package rebuild?",
               () async {
                 await API.updatePackage(force: true, id: pkg.id);
-                if (mounted) {
-                  // Provider.of<BuildsProvider>(context, listen: false)
-                  //   .refresh(context);
-                }
+                // invalidate all dashboard providers
+                ref.invalidate(listActivitiesProvider);
+                ref.invalidate(listPackagesProvider);
+                ref.invalidate(listBuildsProvider);
+                ref.invalidate(listStatsProvider);
+                ref.invalidate(getGraphDataProvider);
               },
               () {},
             );
@@ -120,14 +125,16 @@ class _PackageScreenState extends State<PackageScreen> {
               () async {
                 final succ = await API.deletePackage(pkg.id);
                 if (succ) {
-                  context.pop();
+                  // invalidate all dashboard providers
+                  ref.invalidate(listActivitiesProvider);
+                  ref.invalidate(listPackagesProvider);
+                  ref.invalidate(listBuildsProvider);
+                  ref.invalidate(listStatsProvider);
+                  ref.invalidate(getGraphDataProvider);
 
-                  /*Provider.of<PackagesProvider>(context, listen: false)
-                      .refresh(context);
-                  Provider.of<BuildsProvider>(context, listen: false)
-                      .refresh(context);
-                  Provider.of<StatsProvider>(context, listen: false)
-                      .refresh(context);*/
+                  if (mounted) {
+                    context.pop();
+                  }
                 }
               },
               () {},
@@ -306,7 +313,7 @@ class _PackageScreenState extends State<PackageScreen> {
                 return BuildsTable(data: data);
               },
               onLoad: () => const Text("no data"),
-              provider: listAllBuildsProvider(pkgID: pkg.id),
+              provider: listBuildsProvider(pkgID: pkg.id),
             ),
           ],
         ),

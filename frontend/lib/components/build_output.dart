@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:aurcache/api/builds.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:provider/provider.dart';
 
 import '../api/API.dart';
 import '../models/build.dart';
@@ -26,7 +25,7 @@ class _BuildOutputState extends ConsumerState<BuildOutput> {
 
   @override
   Widget build(BuildContext context) {
-    final sc = ref.read(buildLogProvider.notifier).scrollController;
+    final sc = ref.watch(buildLogProvider.notifier).scrollController;
 
     return Expanded(
       flex: 1,
@@ -57,6 +56,7 @@ class _BuildOutputState extends ConsumerState<BuildOutput> {
 
   void initOutputLoader() {
     initialOutput = API.getOutput(buildID: widget.build.id);
+    // first pull iteration on initial load
     initialOutput.then((value) {
       setState(() {
         output = value;
@@ -76,7 +76,8 @@ class _BuildOutputState extends ConsumerState<BuildOutput> {
           });
         }
 
-        if (ref.read(buildLogProvider).value!) {
+        // only scroll to bottom if follow mode is active
+        if (ref.read(buildLogProvider)) {
           ref.read(buildLogProvider.notifier).go_to_bottom();
         }
       });

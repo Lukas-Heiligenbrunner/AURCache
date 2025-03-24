@@ -1,17 +1,12 @@
-import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/packages_table.dart';
-import 'package:aurcache/models/simple_packge.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:riverpod_annotation/riverpod_annotation.dart';
 
-import '../api/API.dart';
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
 import '../providers/packages.dart';
 
 class PackagesScreen extends StatelessWidget {
-  PackagesScreen({super.key});
+  const PackagesScreen({super.key});
 
   @override
   Widget build(BuildContext context) {

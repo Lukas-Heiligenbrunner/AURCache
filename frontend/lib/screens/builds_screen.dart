@@ -52,7 +52,7 @@ class BuildsScreen extends StatelessWidget {
                         return BuildsTable(data: data);
                       }
                     },
-                    provider: listAllBuildsProvider(),
+                    provider: listBuildsProvider(),
                   ),
                 )
               ],
