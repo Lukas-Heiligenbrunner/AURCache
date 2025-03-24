@@ -228,8 +228,8 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
                 context, "Cancel Build", "Are you sure to cancel this Build?",
                 () {
               API.cancelBuild(widget.buildID);
-              //Provider.of<BuildProvider>(context, listen: false)
-              //    .refresh(context);
+              // refresh current build screen
+              ref.invalidate(getBuildProvider(widget.buildID));
             }, null);
           },
           child: const Text(

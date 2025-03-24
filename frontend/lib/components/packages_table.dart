@@ -105,10 +105,10 @@ class PackagesTable extends ConsumerWidget {
                       );
                     }
 
-                    ref.refresh(listPackagesProvider());
-                    ref.refresh(listBuildsProvider());
-                    ref.refresh(listStatsProvider);
-                    ref.refresh(getGraphDataProvider);
+                    ref.invalidate(listPackagesProvider());
+                    ref.invalidate(listBuildsProvider());
+                    ref.invalidate(listStatsProvider);
+                    ref.invalidate(getGraphDataProvider);
                   }
                 : null,
           )),
