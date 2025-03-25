@@ -12,7 +12,20 @@ AUR_USER="${1:-ab}"
 sed -i '/#\[multilib\]/,+1 s/^#//' /etc/pacman.conf
 
 # we're gonna need sudo to use the helper properly
-pacman -Sy --noconfirm
+pacman -Syy --noconfirm
+pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
+
+# repopulate keychain
+pacman-key --init
+pacman-key --populate archlinux
+
+cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+# uncomment all mirrors
+sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
+# test speed of mirrors and select fastest ones
+rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
+rm /etc/pacman.d/mirrorlist.backup
+
 pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
 
 # create the user
