@@ -1,5 +1,4 @@
 use crate::builder::types::Action;
-use crate::package::update::package_update_all_outdated;
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
@@ -12,8 +11,8 @@ use tokio::task::JoinHandle;
 use pacman_mirrors::benchmark::Rank;
 
 pub fn start_mirror_rank_job(
-    db: DatabaseConnection,
-    tx: Sender<Action>,
+    _db: DatabaseConnection,
+    _tx: Sender<Action>,
 ) -> anyhow::Result<JoinHandle<()>> {
     let cron_str = env::var("MIRROR_RANK_SCHEDULE")?;
     // This parses the string following this spec: https://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html

@@ -1,13 +1,12 @@
 [package]
 name = "pacman-mirrors"
-version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 chrono = {workspace = true, features = ["serde"] }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+anyhow = {workspace = true}
+log = {workspace = true}
 
 url = { version = "2.2.2", features = ["serde"] }
-anyhow = {workspace = true}
-log = "0.4.27"
