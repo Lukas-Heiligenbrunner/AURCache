@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
-use anyhow::bail;
-use log::{debug};
-use url::Url;
 use crate::Mirror;
 use crate::mirror::Mirrors;
+use anyhow::bail;
+use log::debug;
+use std::time::{Duration, Instant};
+use url::Url;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum TargetDb {
@@ -24,10 +24,14 @@ pub trait Rank {
 
 impl Rank for Mirrors {
     fn rank(&mut self) -> anyhow::Result<Vec<Mirror>> {
-        let mut val = self.0.iter_mut().map(|mirror| {
-            let duration = mirror.measure_duration(TargetDb::Extra);
-            (mirror, duration)
-        }).filter_map(|(mirror, duration)| duration.map(|duration| (mirror, duration)).ok())
+        let mut val = self
+            .0
+            .iter_mut()
+            .map(|mirror| {
+                let duration = mirror.measure_duration(TargetDb::Extra);
+                (mirror, duration)
+            })
+            .filter_map(|(mirror, duration)| duration.map(|duration| (mirror, duration)).ok())
             .collect::<Vec<(&mut Mirror, f64)>>();
 
         // Sort by duration (ascending order)
@@ -51,7 +55,9 @@ impl Benchmark for Mirror {
         match reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
-            .build()?.get(url.as_str()).build()
+            .build()?
+            .get(url.as_str())
+            .build()
         {
             Ok(response) => {
                 let transfer_time: f64 = start.elapsed().as_secs_f64();

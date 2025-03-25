@@ -1,6 +1,6 @@
 //! This is where the [`Status`] struct and all of its direct dependencies go.
-use serde::{Deserialize, Serialize};
 use crate::mirror::Mirrors;
+use serde::{Deserialize, Serialize};
 
 /// Raw, typed form of the JSON output given by performing a GET request on [`Status::URL`](Status::URL).
 #[derive(Debug, Serialize, Deserialize)]

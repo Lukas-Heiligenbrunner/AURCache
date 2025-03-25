@@ -14,12 +14,12 @@ use crate::builder::types::Action;
 use crate::db::init::init_db;
 use crate::scheduler::aur_version_update::start_aur_version_checking;
 use crate::scheduler::auto_update::start_auto_update_job;
+use crate::scheduler::mirror_ranking::start_mirror_rank_job;
 use crate::utils::logger::init_logger;
 use crate::utils::startup::{post_startup_tasks, pre_startup_tasks};
 use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
-use crate::scheduler::mirror_ranking::start_mirror_rank_job;
 
 #[tokio::main]
 async fn main() {

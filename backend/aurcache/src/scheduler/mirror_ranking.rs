@@ -2,13 +2,13 @@ use crate::builder::types::Action;
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
+use pacman_mirrors::benchmark::Rank;
 use sea_orm::DatabaseConnection;
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
-use pacman_mirrors::benchmark::Rank;
 
 pub fn start_mirror_rank_job(
     _db: DatabaseConnection,
@@ -57,7 +57,7 @@ pub fn start_mirror_rank_job(
                             println!("## {}", mirror.country.kind);
                             println!("#Server = {}$repo/os/$arch", mirror.url)
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!("Failed to get mirror list: {}", e);
                     }

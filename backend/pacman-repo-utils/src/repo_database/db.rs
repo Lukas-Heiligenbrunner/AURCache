@@ -3,9 +3,9 @@ use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
 use tar::{Archive, Builder, Header};
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 
 pub fn remove_from_db_file(db_archive: String, dir_name: String) -> anyhow::Result<()> {
     if !Path::new(&db_archive).exists() {
@@ -26,14 +26,12 @@ pub fn remove_from_db_file(db_archive: String, dir_name: String) -> anyhow::Resu
         let mut tar_builder = Builder::new(enc);
 
         // Copy existing entries to the new archive
-        for entry in archive.entries()? {
-            if let Ok(mut entry) = entry {
-                // skip file and folder we want to delete
-                if entry.header().path()?.starts_with(dir_name.clone()) {
-                    continue;
-                }
-                tar_builder.append(&entry.header().clone(), &mut entry)?;
+        for mut entry in (archive.entries()?).flatten() {
+            // skip file and folder we want to delete
+            if entry.header().path()?.starts_with(dir_name.clone()) {
+                continue;
             }
+            tar_builder.append(&entry.header().clone(), &mut entry)?;
         }
 
         tar_builder.finish()?;
@@ -67,10 +65,8 @@ pub fn add_to_db_file(
             let mut tar_builder = Builder::new(enc);
 
             // Copy existing entries to the new archive
-            for entry in archive.entries()? {
-                if let Ok(mut entry) = entry {
-                    tar_builder.append(&entry.header().clone(), &mut entry)?;
-                }
+            for mut entry in archive.entries()?.flatten() {
+                tar_builder.append(&entry.header().clone(), &mut entry)?;
             }
             tar_builder
         } else {

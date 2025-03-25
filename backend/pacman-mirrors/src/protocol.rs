@@ -1,7 +1,7 @@
 //! This is where the [`Protocol`](Protocol) structs and its dependencies go.
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use anyhow::anyhow;
 
 /// This contains every supported protocol by Arch Linux mirror status as of the time of writing
 /// (05/20/2021).
