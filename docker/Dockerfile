@@ -17,10 +17,7 @@ ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
 WORKDIR /app
 
 # Copy the Rust project files
-COPY backend/src /app/src
-COPY backend/Cargo.lock /app
-COPY backend/Cargo.toml /app
-
+COPY backend/ /app/
 COPY --from=frontend_builder /app/build/web /app/web
 
 ARG TARGET_ARCH
