@@ -1,6 +1,6 @@
 //! # Arch Mirrors
 //! Get and parse the Arch Linux mirrors.
-#![warn(invalid_codeblock_attributes)]
+#![warn(rustdoc::invalid_codeblock_attributes)]
 pub mod benchmark;
 pub mod country;
 pub mod mirror;
