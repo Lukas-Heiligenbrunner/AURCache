@@ -7,11 +7,12 @@ use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
 use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions, LogOutput};
-use bollard::image::CreateImageOptions;
+use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
 use itertools::Itertools;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 impl Builder {
@@ -71,6 +72,41 @@ impl Builder {
             self.build_model.id.get()?,
             image_id
         );
+
+        // Delete untagged (dangling) images after pulling a new one.
+        self.cleanup_untagged_images().await?;
+        Ok(())
+    }
+
+    /// Remove all untagged (dangling) images from Docker.
+    pub async fn cleanup_untagged_images(&self) -> anyhow::Result<()> {
+        // Create a filter to list only dangling images.
+        let mut filters = HashMap::new();
+        filters.insert("dangling", vec!["true"]);
+
+        let list_options = Some(ListImagesOptions {
+            all: false,
+            filters,
+            ..Default::default()
+        });
+
+        let images = self.docker.list_images(list_options).await?;
+        for image in images {
+            self.logger
+                .append(format!("Removing untagged image: {}", image.id))
+                .await;
+            // force remove images
+            self.docker
+                .remove_image(
+                    &image.id,
+                    Some(RemoveImageOptions {
+                        force: true,
+                        noprune: false,
+                    }),
+                    None,
+                )
+                .await?;
+        }
         Ok(())
     }
 
