@@ -2,8 +2,8 @@ use crate::aur::api::get_info_by_name;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
-use crate::repo::platforms::PLATFORMS;
 use anyhow::bail;
+use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use sea_orm::{ColumnTrait, TryIntoModel};
@@ -14,11 +14,11 @@ pub async fn package_add(
     db: &DatabaseConnection,
     pkg_name: String,
     tx: &Sender<Action>,
-    platforms: Option<Vec<String>>,
+    platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let platforms = match platforms {
-        None => vec!["x86_64".to_string()],
+        None => vec![Platform::X86_64],
         Some(platforms) => {
             check_platforms(&platforms)?;
             platforms
@@ -52,7 +52,11 @@ pub async fn package_add(
         status: Set(BuildStates::ENQUEUED_BUILD),
         version: Set(Some(pkg.version.clone())),
         latest_aur_version: Set(Option::from(pkg.version.clone())),
-        platforms: Set(platforms.join(";")),
+        platforms: Set(platforms
+            .iter()
+            .map(|platform| platform.as_str())
+            .collect::<Vec<_>>()
+            .join(";")),
         build_flags: Set(build_flags.join(";")),
         ..Default::default()
     };
@@ -68,7 +72,7 @@ pub async fn package_add(
             output: Set(None),
             status: Set(Some(BuildStates::ENQUEUED_BUILD)),
             // todo add new column for enqueued_time
-            platform: Set(platform.clone()),
+            platform: Set(platform.to_string()),
             start_time: Set(Some(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -80,7 +84,7 @@ pub async fn package_add(
         let new_build = build.save(&txn).await?;
 
         // todo -- setting latest build to latest x86_64 build for now
-        if platform == "x86_64" {
+        if platform == Platform::X86_64 {
             new_package.latest_build = Set(Some(new_build.id.clone().unwrap()));
             new_package = new_package.save(&txn).await?;
         }
@@ -95,9 +99,9 @@ pub async fn package_add(
     Ok(())
 }
 
-fn check_platforms(platforms: &Vec<String>) -> anyhow::Result<()> {
+fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {
     for platform in platforms {
-        if !PLATFORMS.contains(&platform.as_str()) {
+        if !Platforms.into_iter().any(|p| p == *platform) {
             bail!("Invalid platform: {}", platform);
         }
     }

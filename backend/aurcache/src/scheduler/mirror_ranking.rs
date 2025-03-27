@@ -3,6 +3,7 @@ use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
 use pacman_mirrors::benchmark::Rank;
+use pacman_mirrors::platforms::Platform;
 use sea_orm::DatabaseConnection;
 use std::env;
 use std::str::FromStr;
@@ -39,7 +40,7 @@ pub fn start_mirror_rank_job(
 
                 // Execute your scheduled code
                 info!("Executing mirror ranking job at: {}", Utc::now());
-                match pacman_mirrors::get_status().await {
+                match pacman_mirrors::get_status(Platform::X86_64).await {
                     Ok(mut status) => {
                         let mirrors = status.urls.rank().unwrap();
 

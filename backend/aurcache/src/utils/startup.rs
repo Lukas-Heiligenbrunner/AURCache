@@ -5,9 +5,9 @@ use tokio::fs;
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
-use crate::repo::platforms::PLATFORMS;
 #[cfg(debug_assertions)]
 use log::warn;
+use pacman_mirrors::platforms::Platforms;
 use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
@@ -47,9 +47,9 @@ pub async fn pre_startup_tasks() {
         }
     }
 
-    for platform in PLATFORMS {
+    for platform in Platforms {
         if let Err(e) =
-            pacman_repo_utils::init_repo(&PathBuf::from(format!("./repo/{platform}")), "repo")
+            pacman_repo_utils::init_repo(&PathBuf::from(format!("./repo/{}", platform)), "repo")
         {
             error!("Failed to initialize pacman repo: {:?}", e);
         }
