@@ -1,6 +1,6 @@
 use anyhow::bail;
-use base64::engine::general_purpose;
 use base64::Engine;
+use base64::engine::general_purpose;
 use std::io::{BufRead, Read};
 use std::path::Path;
 use std::{fs, io};
@@ -124,11 +124,11 @@ mod tests {
     #[test]
     fn name_missing() {
         let mut pkginfo = Pkginfo::new();
-        assert_eq!(pkginfo.valid(), false);
+        assert!(!pkginfo.valid());
         pkginfo.pkgname = "test".to_string();
-        assert_eq!(pkginfo.valid(), false);
+        assert!(!pkginfo.valid());
         pkginfo.pkgver = "1.0".to_string();
-        assert_eq!(pkginfo.valid(), true);
+        assert!(pkginfo.valid());
     }
 
     #[test]

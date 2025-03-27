@@ -7,6 +7,7 @@ use crate::package::delete::package_delete;
 use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
+use std::str::FromStr;
 
 use rocket::{State, delete, get, patch, post};
 
@@ -19,6 +20,7 @@ use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimpleP
 use crate::api::models::output::{AddBody, UpdateBody};
 use crate::aur::api::get_info_by_name;
 use crate::db::activities::ActivityType;
+use pacman_mirrors::platforms::Platform;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -49,11 +51,21 @@ pub async fn package_add_endpoint(
     a: Authenticated,
     al: &State<ActivityLog>,
 ) -> Result<(), BadRequest<String>> {
+    let platforms = match input.platforms.clone() {
+        None => None,
+        Some(v) => Some(
+            v.into_iter()
+                .map(|s| Platform::from_str(&s).ok())
+                .collect::<Option<Vec<Platform>>>()
+                .ok_or(BadRequest("Invalid Platform name".to_string()))?,
+        ),
+    };
+
     package_add(
         db,
         input.name.clone(),
         tx,
-        input.platforms.clone(),
+        platforms,
         input.build_flags.clone(),
     )
     .await

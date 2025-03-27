@@ -1,8 +1,9 @@
 use crate::builder::types::Action;
-use crate::package::update::package_update_all_outdated;
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
+use pacman_mirrors::benchmark::Rank;
+use pacman_mirrors::platforms::Platform;
 use sea_orm::DatabaseConnection;
 use std::env;
 use std::str::FromStr;
@@ -10,11 +11,11 @@ use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
 
-pub fn start_auto_update_job(
-    db: DatabaseConnection,
-    tx: Sender<Action>,
+pub fn start_mirror_rank_job(
+    _db: DatabaseConnection,
+    _tx: Sender<Action>,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let cron_str = env::var("AUTO_UPDATE_SCHEDULE")?;
+    let cron_str = env::var("MIRROR_RANK_SCHEDULE")?;
     // This parses the string following this spec: https://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html
     let schedule = Schedule::from_str(cron_str.as_str())?;
 
@@ -29,7 +30,7 @@ pub fn start_auto_update_job(
                     .to_std()
                     .expect("Time went backwards?");
                 info!(
-                    "Waiting for scheduled update until {} ({} seconds)",
+                    "Waiting for scheduled mirror ranking until {} ({} seconds)",
                     next_time,
                     duration.as_secs()
                 );
@@ -38,16 +39,30 @@ pub fn start_auto_update_job(
                 tokio::time::sleep(duration).await;
 
                 // Execute your scheduled code
-                info!("Executing scheduled job at: {}", Utc::now());
-                // Place your job code here...
-                match package_update_all_outdated(&db, &tx).await {
-                    Ok(v) => {
-                        info!("Triggered update of all outdated packages: {:?}", v);
+                info!("Executing mirror ranking job at: {}", Utc::now());
+                match pacman_mirrors::get_status(Platform::X86_64).await {
+                    Ok(mut status) => {
+                        let mirrors = status.urls.rank().unwrap();
+
+                        println!(
+                            r#"##
+## Arch Linux repository mirrorlist
+## Created by arch_mirrors
+## Generated on {}
+##
+"#,
+                            Utc::now().date_naive()
+                        );
+
+                        for mirror in mirrors {
+                            println!("## {}", mirror.country.kind);
+                            println!("#Server = {}$repo/os/$arch", mirror.url)
+                        }
                     }
                     Err(e) => {
-                        warn!("Failed to trigger update of all outdated packages: {}", e);
+                        warn!("Failed to get mirror list: {}", e);
                     }
-                }
+                };
             } else {
                 // If there is no upcoming occurrence (unlikely with cron), wait a default duration before retrying.
                 warn!(

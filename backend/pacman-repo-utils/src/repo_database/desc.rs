@@ -67,7 +67,13 @@ impl Desc {
     }
 
     fn add_desc_entries(&self, header: &str, values: &[String]) -> String {
-        if values.is_empty() || (values.len() == 1 && values.first().unwrap().eq("")) {
+        if values.is_empty()
+            || (values.len() == 1
+                && values
+                    .first()
+                    .expect("Must be populated bc. of short-circuit evaluation")
+                    .is_empty())
+        {
             String::new()
         } else {
             self.add_desc_entry(header, values.join("\n"))
