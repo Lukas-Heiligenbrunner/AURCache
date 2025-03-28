@@ -9,7 +9,7 @@ RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
 RUN flutter build web --release --wasm
 
-FROM rust:1.85.0 AS builder
+FROM rust:1.85.1 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
