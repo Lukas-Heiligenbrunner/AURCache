@@ -1,7 +1,9 @@
 use crate::Mirror;
 use crate::mirror::Mirrors;
-use anyhow::bail;
-use log::debug;
+use anyhow::anyhow;
+use chrono::Utc;
+use log::info;
+use reqwest::Client;
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -14,36 +16,77 @@ pub enum TargetDb {
 trait Benchmark {
     /// Measure time (in seconds) it took to connect (from user's geography)
     /// and retrive the '[core,extra]/os/x86_64/[core,extra].db' file from the given URL.
-    fn measure_duration(&mut self, target_db: TargetDb) -> anyhow::Result<f64>;
+    async fn measure_duration(&mut self, target_db: TargetDb) -> anyhow::Result<f64>;
 }
 
-pub trait Rank {
+pub trait Bench {
     /// Rank the mirrors based on the score.
-    fn rank(&mut self) -> anyhow::Result<Vec<Mirror>>;
+    fn rank(&mut self) -> impl Future<Output = anyhow::Result<Vec<Mirror>>> + Send;
+
+    fn gen_mirrorlist(&self, mirrors: Vec<Mirror>) -> anyhow::Result<String>;
 }
 
-impl Rank for Mirrors {
-    fn rank(&mut self) -> anyhow::Result<Vec<Mirror>> {
-        let mut val = self
-            .0
-            .iter_mut()
-            .map(|mirror| {
-                let duration = mirror.measure_duration(TargetDb::Extra);
-                (mirror, duration)
-            })
-            .filter_map(|(mirror, duration)| duration.map(|duration| (mirror, duration)).ok())
-            .collect::<Vec<(&mut Mirror, f64)>>();
+impl Bench for Mirrors {
+    async fn rank(&mut self) -> anyhow::Result<Vec<Mirror>> {
+        let mut durations = Vec::new();
+        for mirror in self.0.iter_mut() {
+            // Skip mirrors that are not active
+            if !mirror.active {
+                continue;
+            }
+
+            // only use http(s) mirrors
+            if mirror.protocol != crate::Protocol::Http && mirror.protocol != crate::Protocol::Https
+            {
+                continue;
+            }
+
+            info!("Benchmarking {}", mirror.url);
+            let duration = mirror.measure_duration(TargetDb::Core).await;
+            match duration {
+                Ok(duration) => {
+                    durations.push((mirror, duration));
+                }
+                Err(err) => {
+                    info!("Failed to measure duration for {}: {}", mirror.url, err);
+                    continue;
+                }
+            }
+        }
 
         // Sort by duration (ascending order)
-        val.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        durations.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
         // Extract only the sorted Mirror references
-        Ok(val.into_iter().map(|(mirror, _)| mirror.clone()).collect())
+        Ok(durations
+            .into_iter()
+            .map(|(mirror, _)| mirror.clone())
+            .collect())
+    }
+
+    fn gen_mirrorlist(&self, mirrors: Vec<Mirror>) -> anyhow::Result<String> {
+        let mut body = format!(
+            r#"##
+## Arch Linux repository mirrorlist
+## Created by aurcache
+## Generated on {}
+##
+"#,
+            Utc::now().date_naive()
+        );
+
+        for mirror in &mirrors[..10] {
+            body.push_str(&format!("## {}\n", mirror.country.kind));
+            body.push_str(&format!("Server = {}$repo/os/$arch\n", mirror.url));
+            body.push('\n');
+        }
+
+        Ok(body)
     }
 }
 
 impl Benchmark for Mirror {
-    fn measure_duration(&mut self, target_db: TargetDb) -> anyhow::Result<f64> {
+    async fn measure_duration(&mut self, target_db: TargetDb) -> anyhow::Result<f64> {
         let url = &self.url;
         let url: Url = match target_db {
             TargetDb::Core => url.join("core/os/x86_64/core.db")?,
@@ -52,24 +95,23 @@ impl Benchmark for Mirror {
 
         let start = Instant::now();
 
-        match reqwest::blocking::Client::builder()
+        match Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .build()?
             .get(url.as_str())
-            .build()
+            .send()
+            .await
         {
             Ok(response) => {
                 let transfer_time: f64 = start.elapsed().as_secs_f64();
 
-                let file_size = response.body().unwrap().as_bytes().unwrap().len();
-                let transfer_rate = (file_size as f64) / transfer_time;
-                debug!("Transfer Rate: {url} => {transfer_rate}");
+                let file_size = response.bytes().await?.len();
+                let transfer_rate = (file_size as f64) / (transfer_time * 1024.0);
+                info!("Transfer Rate: {url} => {transfer_rate:.2} kb/s");
                 Ok(transfer_rate)
             }
-            Err(err) => {
-                bail!(format!("Failed to fetch `{url}, HTTP status code: {err}`"))
-            }
+            Err(err) => Err(anyhow!(err)),
         }
     }
 }

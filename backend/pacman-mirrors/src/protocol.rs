@@ -18,6 +18,10 @@ pub enum Protocol {
     /// The rsync protocol.
     #[serde(rename = "rsync")]
     Rsync,
+
+    /// The ftp protocol.
+    #[serde(rename = "ftp")]
+    Ftp,
 }
 
 impl FromStr for Protocol {
@@ -28,6 +32,7 @@ impl FromStr for Protocol {
             "http" => Ok(Self::Http),
             "https" => Ok(Self::Https),
             "rsync" => Ok(Self::Rsync),
+            "ftp" => Ok(Self::Ftp),
             other => Err(anyhow!("Invalid Protocol: {}", other)),
         }
     }
