@@ -22,7 +22,7 @@ pub(crate) struct Raw {
 }
 
 #[derive(Default, Deserialize, Clone, Debug, PartialEq, PartialOrd, Serialize)]
-pub struct Mirrors(pub(crate) Vec<Mirror>);
+pub struct Mirrors(pub Vec<Mirror>);
 
 /// An Arch Linux mirror and its statistics.
 #[derive(Debug, Clone, PartialOrd, PartialEq, Serialize, Deserialize)]

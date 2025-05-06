@@ -7,7 +7,7 @@ use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
 #[cfg(debug_assertions)]
 use log::warn;
-use pacman_mirrors::platforms::Platforms;
+use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
@@ -18,6 +18,7 @@ use {
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
 };
+use pacman_mirrors::benchmark::Bench;
 
 const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
 const START_BANNER: &str = r"
@@ -86,6 +87,28 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         )
         .exec(db)
         .await?;
+
+    // init config dir
+    if std::fs::metadata("./config").is_err() {
+        std::fs::create_dir("./config")?;
+    }
+
+    let mirrorlist_path = "./config/mirrorlist_x86_64";
+    if std::fs::metadata(mirrorlist_path).is_err() {
+        info!("Perform initial load of pacman mirrorlist");
+        match pacman_mirrors::get_status(Platform::X86_64).await {
+            Ok(status) => {
+                let urls = status.urls;
+                let mirrorlist = urls.gen_mirrorlist(urls.0.clone())?;
+                fs::write(mirrorlist_path, mirrorlist).await?;
+                info!("Wrote mirrorlist to {}", mirrorlist_path);
+            }
+            Err(e) => {
+                warn!("Failed to get mirror list: {}", e);
+            }
+        };
+    }
+    
     Ok(())
 }
 
