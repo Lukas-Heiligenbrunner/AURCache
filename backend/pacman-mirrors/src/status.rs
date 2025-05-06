@@ -1,6 +1,8 @@
 //! This is where the [`Status`] struct and all of its direct dependencies go.
+
 use crate::mirror::Mirrors;
 use crate::platforms::Platform;
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
 /// Raw, typed form of the JSON output given by performing a GET request on [`Status::URL`](Status::URL).
@@ -39,20 +41,18 @@ pub struct Status {
 impl Status {
     /// The URL where the JSON is found from.
     pub const URL_X86_64: &'static str = "https://archlinux.org/mirrors/status/json";
-    pub const URL_AARCH64: &'static str = "todo";
-    pub const URL_ARMV7H: &'static str = "todo";
 
     /// Get the status from [`Status::URL`](Self::URL).
-    pub async fn get_from_default_url(platform: Platform) -> reqwest::Result<Self> {
-        match platform {
-            Platform::X86_64 => Self::get_from_url(Self::URL_X86_64, platform).await,
-            Platform::Aarch64 => Self::get_from_url(Self::URL_AARCH64, platform).await,
-            Platform::Armv7h => Self::get_from_url(Self::URL_ARMV7H, platform).await,
+    pub async fn get_from_default_url(target_platform: Platform) -> anyhow::Result<Self> {
+        match target_platform {
+            Platform::X86_64 => Self::get_from_url(Self::URL_X86_64, target_platform).await,
+            Platform::Aarch64 => bail!("Aarch64 rank mirroring not supported"),
+            Platform::Armv7h => bail!("ARM32 rank mirroring not supported"),
         }
     }
 
     /// Get the status from a given url.
-    pub async fn get_from_url(url: &str, _platform: Platform) -> reqwest::Result<Self> {
+    pub async fn get_from_url(url: &str, _platform: Platform) -> anyhow::Result<Self> {
         // todo we need to fetch mirror list differently dependent on platform
         let response = reqwest::get(url).await?;
         let raw: Raw = response

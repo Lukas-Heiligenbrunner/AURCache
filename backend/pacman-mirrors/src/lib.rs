@@ -16,6 +16,6 @@ pub use status::Status;
 
 /// Shorthand for [`Status::get()`](Status::get). This gets the mirror status of all Arch Linux
 /// mirrors.
-pub async fn get_status(platform: Platform) -> reqwest::Result<Status> {
+pub async fn get_status(platform: Platform) -> anyhow::Result<Status> {
     Status::get_from_default_url(platform).await
 }

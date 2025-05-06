@@ -45,6 +45,7 @@ pub fn start_mirror_rank_job(
                         let mut urls = status.urls;
                         let mirrors = urls.rank().await.unwrap();
                         let mirrorlist = urls.gen_mirrorlist(mirrors).unwrap();
+                        // todo dump mirrorlist to file which can be mounted to the builder containers
                         println!("Mirrorlist:\n{}", mirrorlist);
                     }
                     Err(e) => {
