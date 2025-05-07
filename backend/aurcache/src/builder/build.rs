@@ -9,7 +9,9 @@ use crate::repo::utils::try_remove_archive_file;
 use crate::utils::db::ActiveValueExt;
 use anyhow::{anyhow, bail};
 use bollard::Docker;
-use bollard::container::{KillContainerOptions, WaitContainerOptions};
+use bollard::query_parameters::{
+    KillContainerOptions, StartContainerOptions, WaitContainerOptions,
+};
 use log::{debug, info};
 use rocket::futures::StreamExt;
 use sea_orm::{
@@ -102,7 +104,9 @@ impl Builder {
             "Build #{}: starting build container",
             self.build_model.id.get()?
         );
-        self.docker.start_container::<String>(&id, None).await?;
+        self.docker
+            .start_container(&id, None::<StartContainerOptions>)
+            .await?;
 
         // insert container id to container map
         self.job_containers
@@ -141,7 +145,7 @@ impl Builder {
                 .wait_container(
                     container_id,
                     Some(WaitContainerOptions {
-                        condition: "not-running",
+                        condition: "not-running".to_string(),
                     }),
                 )
                 .next(),
@@ -181,7 +185,9 @@ impl Builder {
                 self.docker
                     .kill_container(
                         container_id,
-                        Some(KillContainerOptions { signal: "SIGKILL" }),
+                        Some(KillContainerOptions {
+                            signal: "SIGKILL".to_string(),
+                        }),
                     )
                     .await?;
                 bail!("Build timed out")

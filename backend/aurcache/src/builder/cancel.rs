@@ -2,7 +2,7 @@ use crate::db::builds;
 use crate::db::prelude::Builds;
 use anyhow::anyhow;
 use bollard::Docker;
-use bollard::container::RemoveContainerOptions;
+use bollard::query_parameters::RemoveContainerOptions;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use std::sync::Arc;

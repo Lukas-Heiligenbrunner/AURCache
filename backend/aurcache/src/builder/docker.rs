@@ -6,9 +6,10 @@ use crate::builder::path_utils::create_build_paths;
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
-use bollard::container::{AttachContainerOptions, Config, CreateContainerOptions, LogOutput};
-use bollard::image::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
-use bollard::models::{ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::container::LogOutput;
+use bollard::models::{ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
+use bollard::query_parameters::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use itertools::Itertools;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
@@ -34,8 +35,8 @@ impl Builder {
         // repull image to make sure it's up to date
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
-                from_image: image,
-                platform: arch.as_str(),
+                from_image: Some(image.to_string()),
+                platform: arch,
                 ..Default::default()
             }),
             None,
@@ -82,11 +83,11 @@ impl Builder {
     pub async fn cleanup_untagged_images(&self) -> anyhow::Result<()> {
         // Create a filter to list only dangling images.
         let mut filters = HashMap::new();
-        filters.insert("dangling", vec!["true"]);
+        filters.insert("dangling".to_string(), vec!["true".to_string()]);
 
         let list_options = Some(ListImagesOptions {
             all: false,
-            filters,
+            filters: Some(filters),
             ..Default::default()
         });
 
@@ -145,13 +146,13 @@ impl Builder {
 
         let build_id = self.build_model.id.get()?;
         let container_name = format!("aurcache_build_{}_{}", filtered_name, build_id);
-        let conf = Config {
-            image: Some(image_name),
+        let conf = ContainerCreateBody {
+            image: Some(image_name.to_string()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             open_stdin: Some(false),
-            user: Some("ab"),
-            cmd: Some(vec!["sh", "-c", cmd.as_str()]),
+            user: Some("ab".to_string()),
+            cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd]),
             host_config: Some(HostConfig {
                 auto_remove: Some(true),
                 nano_cpus: Some(cpu_limit as i64),
@@ -163,10 +164,10 @@ impl Builder {
         };
         let create_info = self
             .docker
-            .create_container::<&str, &str>(
+            .create_container(
                 Some(CreateContainerOptions {
-                    name: container_name.as_str(),
-                    platform: Some(arch.as_str()),
+                    name: Some(container_name),
+                    platform: arch,
                 }),
                 conf,
             )
@@ -182,11 +183,11 @@ impl Builder {
         let mut attach_results = docker
             .attach_container(
                 &id,
-                Some(AttachContainerOptions::<String> {
-                    stdout: Some(true),
-                    stderr: Some(true),
-                    stdin: Some(false),
-                    stream: Some(true),
+                Some(AttachContainerOptions {
+                    stdout: true,
+                    stderr: true,
+                    stdin: false,
+                    stream: true,
                     ..Default::default()
                 }),
             )
