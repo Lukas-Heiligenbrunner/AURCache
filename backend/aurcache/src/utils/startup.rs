@@ -5,7 +5,6 @@ use tokio::fs;
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
-#[cfg(debug_assertions)]
 use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
