@@ -7,6 +7,7 @@ use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
 #[cfg(debug_assertions)]
 use log::warn;
+use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
@@ -18,7 +19,6 @@ use {
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
 };
-use pacman_mirrors::benchmark::Bench;
 
 const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
 const START_BANNER: &str = r"
@@ -108,7 +108,7 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
             }
         };
     }
-    
+
     Ok(())
 }
 

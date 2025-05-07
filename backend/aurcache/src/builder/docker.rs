@@ -121,8 +121,8 @@ impl Builder {
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
-        let mut mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base), ];
-        
+        let mut mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
+
         // todo allow for custom mirrorlists for other archs
         if arch == "linux/x86_64" {
             let mirrorlist_path = "./config/mirrorlist_x86_64";
