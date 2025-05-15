@@ -1,7 +1,7 @@
 ARG TARGET_ARCH=linux/amd64
 ARG LATEST_COMMIT_SHA=dev
 
-FROM ghcr.io/cirruslabs/flutter:3.29.2 AS frontend_builder
+FROM ghcr.io/cirruslabs/flutter:3.29.3 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
@@ -9,7 +9,7 @@ RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
 RUN flutter build web --release --wasm
 
-FROM rust:1.85.0 AS builder
+FROM rust:1.87.0 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
