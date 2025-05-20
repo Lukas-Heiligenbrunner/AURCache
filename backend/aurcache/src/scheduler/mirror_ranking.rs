@@ -81,7 +81,7 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
 }
 
 pub fn get_mirrorlist_path() -> String {
-    let mirrorlist_path = env::var("MIRRORLIST_PATH_X86_64").unwrap_or_else(|_| {
+    env::var("MIRRORLIST_PATH_X86_64").unwrap_or_else(|_| {
         // use either docker volume or base dir as docker host mount path
         match env::var("BUILD_ARTIFACT_DIR") {
             Ok(host_build_path) => {
@@ -107,6 +107,5 @@ pub fn get_mirrorlist_path() -> String {
                 format!("{}/mirrorlist_x86_64", config_dir)
             }
         }
-    });
-    mirrorlist_path
+    })
 }
