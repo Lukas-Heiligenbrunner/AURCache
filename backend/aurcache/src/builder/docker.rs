@@ -3,6 +3,7 @@ use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
 use crate::builder::path_utils::create_build_paths;
+use crate::scheduler::mirror_ranking::get_mirrorlist_path;
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
@@ -126,7 +127,7 @@ impl Builder {
 
         // todo allow for custom mirrorlists for other archs
         if arch == "linux/x86_64" {
-            let mirrorlist_path = "./config/mirrorlist_x86_64";
+            let mirrorlist_path = get_mirrorlist_path();
             mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path))
         }
 

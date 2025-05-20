@@ -5,6 +5,7 @@ use tokio::fs;
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
+use crate::scheduler::mirror_ranking::get_mirrorlist_path;
 use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
@@ -87,19 +88,17 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         .exec(db)
         .await?;
 
-    // init config dir
-    if std::fs::metadata("./config").is_err() {
-        std::fs::create_dir("./config")?;
-    }
+    // config dir from env
+    // todo arm mirrorlists unsupported for now!
+    let mirrorlist_path = get_mirrorlist_path();
 
-    let mirrorlist_path = "./config/mirrorlist_x86_64";
-    if std::fs::metadata(mirrorlist_path).is_err() {
+    if std::fs::metadata(mirrorlist_path.as_str()).is_err() {
         info!("Perform initial load of pacman mirrorlist");
         match pacman_mirrors::get_status(Platform::X86_64).await {
             Ok(status) => {
                 let urls = status.urls;
                 let mirrorlist = urls.gen_mirrorlist(urls.0.clone())?;
-                fs::write(mirrorlist_path, mirrorlist).await?;
+                fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
                 info!("Wrote mirrorlist to {}", mirrorlist_path);
             }
             Err(e) => {
