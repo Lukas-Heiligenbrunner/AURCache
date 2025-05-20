@@ -5,6 +5,7 @@ use std::{env, fs};
 
 pub fn create_build_paths(name: String) -> anyhow::Result<(String, PathBuf)> {
     // create builds dir
+    // default build directory is ./builds
     let mut host_build_path_base = env::current_dir()?;
     host_build_path_base.push("builds");
     fs::create_dir_all(host_build_path_base.clone())?;

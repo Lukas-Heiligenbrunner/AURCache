@@ -81,14 +81,32 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
 }
 
 pub fn get_mirrorlist_path() -> String {
-    let mirrorlist_path = option_env!("MIRRORLIST_PATH_X86_64").unwrap_or_else(|| {
-        if std::fs::metadata("./config").is_err() {
-            std::fs::create_dir("./config").expect(
-                "Failed to create config directory. Maybe container directory is not writeable?",
-            );
-            info!("Created default MIRRORLIST_PATH_X86_64: ./config");
+    let mirrorlist_path = env::var("MIRRORLIST_PATH_X86_64").unwrap_or_else(|_| {
+        // use either docker volume or base dir as docker host mount path
+        match env::var("BUILD_ARTIFACT_DIR") {
+            Ok(host_build_path) => {
+                let config_dir = format!("{}/config", host_build_path);
+
+                if std::fs::metadata(config_dir.as_str()).is_err() {
+                    std::fs::create_dir(config_dir.as_str()).expect(
+                        "Failed to create config directory. Maybe container directory is not writeable?"
+                    );
+                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
+                }
+
+                format!("{}/mirrorlist_x86_64", config_dir)
+            },
+            Err(_) => {
+                let config_dir = "./config";
+                if std::fs::metadata(config_dir).is_err() {
+                    std::fs::create_dir(config_dir).expect(
+                        "Failed to create config directory. Maybe container directory is not writeable?",
+                    );
+                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
+                }
+                format!("{}/mirrorlist_x86_64", config_dir)
+            }
         }
-        "./config/mirrorlist_x86_64"
     });
-    mirrorlist_path.to_string()
+    mirrorlist_path
 }
