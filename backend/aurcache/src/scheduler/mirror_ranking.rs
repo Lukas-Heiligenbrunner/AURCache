@@ -88,7 +88,7 @@ pub fn get_mirrorlist_path() -> String {
                 let config_dir = format!("{}/config", host_build_path);
 
                 if std::fs::metadata(config_dir.as_str()).is_err() {
-                    std::fs::create_dir(config_dir.as_str()).expect(
+                    std::fs::create_dir_all(config_dir.as_str()).expect(
                         "Failed to create config directory. Maybe container directory is not writeable?"
                     );
                     info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
@@ -97,14 +97,17 @@ pub fn get_mirrorlist_path() -> String {
                 format!("{}/mirrorlist_x86_64", config_dir)
             },
             Err(_) => {
-                let config_dir = "./config";
-                if std::fs::metadata(config_dir).is_err() {
-                    std::fs::create_dir(config_dir).expect(
+                // default mirrorlist dir is "./config/mirrorlist_x86_64"
+                let mut config_dir = env::current_dir().expect("Failed to get current working directory");
+                config_dir.push("config");
+
+                if std::fs::metadata(config_dir.clone()).is_err() {
+                    std::fs::create_dir_all(config_dir.clone()).expect(
                         "Failed to create config directory. Maybe container directory is not writeable?",
                     );
-                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
+                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir.display());
                 }
-                format!("{}/mirrorlist_x86_64", config_dir)
+                format!("{}/mirrorlist_x86_64", config_dir.display())
             }
         }
     })

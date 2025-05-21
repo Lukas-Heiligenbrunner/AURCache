@@ -7,6 +7,12 @@ The mirrorlist is fetched from the archlinux api on initial application load.
 With two environment variables the mirrorlist can be auto updaten on a cron schedule and ranked per mirror speed.
 Moreover, a mirrorlist can be manually passed, if you want to manage the mirrorlist yourself.
 
+:::info
+
+Only **x86_64** build architecture is supported to set mirrorlist and rerank mirrors at the moment.
+
+:::
+
 ## Env Config
 | Variable               | Type         | Description                                                                    | Default                       |
 |------------------------|--------------|--------------------------------------------------------------------------------|-------------------------------|
