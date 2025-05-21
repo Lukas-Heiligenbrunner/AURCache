@@ -19,7 +19,7 @@ pub struct Pkginfo {
     pub pkgbase: String,
     pub pkgver: String,
     pub pkgdesc: String,
-    pub size: u32,
+    pub size: u64,
     pub url: String,
     pub arch: String,
     pub builddate: String,
@@ -56,17 +56,17 @@ impl Pkginfo {
         let reader = io::BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            self.parse_line(line);
+            self.parse_line(line)?;
         }
         Ok(())
     }
 
-    pub fn parse_line(&mut self, line: String) {
+    pub fn parse_line(&mut self, line: String) -> anyhow::Result<()> {
         if line.starts_with('#') {
-            return;
+            return Ok(());
         }
         let (key, value) = match line.split_once('=') {
-            None => return,
+            None => return Ok(()),
             Some((key, value)) => (key.trim(), value.trim()),
         };
         match key {
@@ -83,13 +83,14 @@ impl Pkginfo {
             "pkgbase" => self.pkgbase = value.to_string(),
             "pkgver" => self.pkgver = value.to_string(),
             "pkgdesc" => self.pkgdesc = value.to_string(),
-            "size" => self.size = value.parse().unwrap_or(0),
+            "size" => self.size = value.parse()?,
             "url" => self.url = value.to_string(),
             "arch" => self.arch = value.to_string(),
             "builddate" => self.builddate = value.to_string(),
             "packager" => self.packager = value.to_string(),
             _ => {}
         }
+        Ok(())
     }
 
     pub fn set_signature(&mut self, pkgfile: &str) -> anyhow::Result<()> {
