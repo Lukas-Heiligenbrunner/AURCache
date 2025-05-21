@@ -1,3 +1,7 @@
+---
+sidebar_position: 2
+---
+
 # Authentication via OAuth2
 
 AURCache supports OAuth2 authentication via various Oauth2 providers such as Authentik or Keycloak. 
