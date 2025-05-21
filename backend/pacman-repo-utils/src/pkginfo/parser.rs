@@ -157,6 +157,16 @@ mod tests {
     }
 
     #[test]
+    fn test_large_size_parse() {
+        let mut pkginfo = Pkginfo::new();
+        let data = r#"
+            size = 6000000000
+            "#;
+        pkginfo.parse(data.as_bytes()).unwrap();
+        assert_eq!(pkginfo.size, 6000000000);
+    }
+
+    #[test]
     fn parse_array() {
         let mut pkginfo = Pkginfo::new();
         let data = r#"
