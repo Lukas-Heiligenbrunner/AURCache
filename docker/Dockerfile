@@ -1,7 +1,7 @@
 ARG TARGET_ARCH=linux/amd64
 ARG LATEST_COMMIT_SHA=dev
 
-FROM ghcr.io/cirruslabs/flutter:3.29.3 AS frontend_builder
+FROM ghcr.io/cirruslabs/flutter:3.32.0 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
