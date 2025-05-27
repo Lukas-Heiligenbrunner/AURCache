@@ -14,7 +14,7 @@
     "write-heading-ids": "docusaurus write-heading-ids"
   },
   "dependencies": {
-    "@docusaurus/core": "^3.5.2",
+    "@docusaurus/core": "3.7.0",
     "@docusaurus/cssnano-preset": "3.7.0",
     "@docusaurus/plugin-debug": "3.7.0",
     "@docusaurus/plugin-google-analytics": "3.7.0",
