@@ -50,7 +50,7 @@ dependencies:
       path: device_preview
       ref: Fix-issue-#153--Upgrade-freezed_annotation-dependency
   toggle_switch: 2.3.0
-  skeletonizer: ^1.4.3
+  skeletonizer: ^2.0.0
   riverpod: 2.6.1
   flutter_riverpod: 2.6.1
   riverpod_annotation: 2.6.1
