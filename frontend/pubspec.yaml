@@ -74,7 +74,7 @@ dev_dependencies:
   # activated in the `analysis_options.yaml` file located at the root of your
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
-  flutter_lints: 5.0.0
+  flutter_lints: 6.0.0
   riverpod_generator: ^2.6.5
   build_runner: 2.4.15
   custom_lint: ^0.7.5
