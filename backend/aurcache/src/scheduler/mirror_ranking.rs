@@ -1,4 +1,5 @@
 use crate::builder::types::Action;
+use crate::utils::build_mode::{BuildMode, get_build_mode};
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
@@ -11,7 +12,6 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
-use crate::utils::build_mode::{get_build_mode, BuildMode};
 
 pub fn start_mirror_rank_job(
     _db: DatabaseConnection,
@@ -74,7 +74,7 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
                 BuildMode::DinD(cfg) => cfg.mirrorlist_path,
                 BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
             };
-            fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
+            fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
             info!("Wrote mirrorlist to {}", mirrorlist_path);
         }
         Err(e) => {

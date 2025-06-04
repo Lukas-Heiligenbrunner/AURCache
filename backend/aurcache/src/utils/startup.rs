@@ -5,6 +5,7 @@ use tokio::fs;
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
+use crate::utils::build_mode::{BuildMode, get_build_mode};
 use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
@@ -18,7 +19,6 @@ use {
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
 };
-use crate::utils::build_mode::{get_build_mode, BuildMode};
 
 const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
 const START_BANNER: &str = r"
@@ -94,13 +94,13 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
     };
 
-    if std::fs::metadata(mirrorlist_path.as_str()).is_err() {
+    if std::fs::metadata(format!("{}/mirrorlist", mirrorlist_path)).is_err() {
         info!("Perform initial load of pacman mirrorlist");
         match pacman_mirrors::get_status(Platform::X86_64).await {
             Ok(status) => {
                 let urls = status.urls;
                 let mirrorlist = urls.gen_mirrorlist(urls.0.clone())?;
-                fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
+                fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
                 info!("Wrote mirrorlist to {}", mirrorlist_path);
             }
             Err(e) => {

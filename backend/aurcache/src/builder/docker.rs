@@ -3,11 +3,15 @@ use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
 use crate::builder::path_utils::create_build_paths;
+use crate::utils::build_mode::{BuildMode, get_build_mode};
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
 use bollard::container::LogOutput;
-use bollard::models::{ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig};
+use bollard::models::{
+    ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
+    MountTypeEnum, MountVolumeOptions,
+};
 use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
 use bollard::query_parameters::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
 use itertools::Itertools;
@@ -15,7 +19,6 @@ use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::utils::build_mode::{get_build_mode, BuildMode};
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -123,25 +126,61 @@ impl Builder {
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
-        let mut mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
+        let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
+
+        let mut mounts = vec![];
 
         // todo allow for custom mirrorlists for other archs
         if arch == "linux/x86_64" {
-            match get_build_mode() {
+            let archlinux_mirrorlist_path = "/etc/pacman.d";
+            let mnt = match get_build_mode() {
                 BuildMode::DinD(cfg) => {
                     let mirrorlist_path = cfg.mirrorlist_path;
-                    mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path));
+
+                    Mount {
+                        target: Some(archlinux_mirrorlist_path.to_string()),
+                        source: Some(mirrorlist_path.to_string()),
+                        typ: Some(MountTypeEnum::BIND),
+                        read_only: Some(false),
+                        ..Default::default()
+                    }
                 }
                 BuildMode::Host(cfg) => {
                     let mirrorlist_path = cfg.mirrorlist_path_host;
-                    mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path));
+                    if mirrorlist_path.starts_with("/") {
+                        Mount {
+                            target: Some(archlinux_mirrorlist_path.to_string()),
+                            source: Some(mirrorlist_path.to_string()),
+                            typ: Some(MountTypeEnum::BIND),
+                            read_only: Some(false),
+                            ..Default::default()
+                        }
+                    } else {
+                        let (volume_name, subpath) = mirrorlist_path.split_once("/").unwrap();
+
+                        Mount {
+                            target: Some(archlinux_mirrorlist_path.to_string()),
+                            source: Some(volume_name.to_string()),
+                            typ: Some(MountTypeEnum::VOLUME),
+                            read_only: Some(false),
+                            volume_options: Some(MountVolumeOptions {
+                                subpath: Some(subpath.to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }
+                    }
                 }
-            }            
+            };
+            mounts.push(mnt);
         }
 
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
-        let build_cmd = format!("paru {} {}", build_flags, name);
+        let build_cmd = format!(
+            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {} {}",
+            build_flags, name
+        );
         info!("Build command: {}", build_cmd);
         let cmd = format!(
             "cat <<EOF > {}\n{}\nEOF\n{}",
@@ -163,10 +202,14 @@ impl Builder {
             user: Some("ab".to_string()),
             cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd]),
             host_config: Some(HostConfig {
+                #[cfg(debug_assertions)]
+                auto_remove: Some(false),
+                #[cfg(not(debug_assertions))]
                 auto_remove: Some(true),
                 nano_cpus: Some(cpu_limit as i64),
                 memory_swap: Some(memory_limit),
                 binds: Some(mountpoints),
+                mounts: Some(mounts),
                 ..Default::default()
             }),
             ..Default::default()

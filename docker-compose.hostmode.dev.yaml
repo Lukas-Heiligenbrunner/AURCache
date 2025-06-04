@@ -1,6 +1,3 @@
-# do not use this dockerfile for deployments. This is just for development and trying things out.
-# Go to https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction for examples.
-version: '3'
 services:
   aurcache:
     build:
@@ -12,15 +9,21 @@ services:
     environment:
       - LOG_LEVEL=debug
       #- BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
-      - BUILD_ARTIFACT_DIR=/home/lukas/IdeaProjects/AURCache/tmp_cache # also absolute path is possible
+      - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
     volumes:
       - ./aurcache/db:/app/db
       - ./aurcache/repo:/app/repo
-      - /run/user/1000/podman/podman.sock:/var/run/docker.sock
-      - /home/lukas/IdeaProjects/AURCache/tmp_cache:/app/builds
+      - /var/run/docker.sock:/var/run/docker.sock
+      - artifact_cache:/app/builds
     privileged: true
+    networks:
+      aurcache_network:
 
 volumes:
   artifact_cache:
     name: artifact_cache
     driver: local
+
+networks:
+  aurcache_network:
+    driver: bridge
