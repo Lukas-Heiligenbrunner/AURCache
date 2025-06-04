@@ -24,7 +24,7 @@ ARG TARGET_ARCH
 ADD docker/build-rust.sh /root
 RUN bash /root/build-rust.sh $TARGET_ARCH
 
-FROM --platform=$TARGET_ARCH quay.io/podman/stable
+FROM --platform=$TARGET_ARCH quay.io/podman/stable:v5.5.0
 # Copy the built binary from the previous stage
 COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh

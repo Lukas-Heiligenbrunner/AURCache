@@ -58,7 +58,7 @@ pub fn get_build_mode() -> BuildMode {
                 Ok(v) => v,
                 Err(_) => {
                     // default mirrorlist dir is "./config/mirrorlist_x86_64"
-                    let mut config_dir = current_dir;
+                    let mut config_dir = current_dir.clone();
                     config_dir.push("config");
                     config_dir.push("pacman_x86_64");
 
@@ -70,8 +70,7 @@ pub fn get_build_mode() -> BuildMode {
             };
 
             // in dind mode packages are stored to ./builds/ by default
-            let mut aurcache_build_path =
-                env::current_dir().expect("Failed to get current working directory");
+            let mut aurcache_build_path = current_dir;
             aurcache_build_path.push("builds");
             create_config_dir(aurcache_build_path.display().to_string());
 
