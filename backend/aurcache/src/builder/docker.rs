@@ -3,7 +3,6 @@ use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
 use crate::builder::path_utils::create_build_paths;
-use crate::scheduler::mirror_ranking::get_mirrorlist_path;
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
@@ -16,6 +15,7 @@ use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use crate::utils::build_mode::{get_build_mode, BuildMode};
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -127,8 +127,16 @@ impl Builder {
 
         // todo allow for custom mirrorlists for other archs
         if arch == "linux/x86_64" {
-            let mirrorlist_path = get_mirrorlist_path();
-            mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path))
+            match get_build_mode() {
+                BuildMode::DinD(cfg) => {
+                    let mirrorlist_path = cfg.mirrorlist_path;
+                    mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path));
+                }
+                BuildMode::Host(cfg) => {
+                    let mirrorlist_path = cfg.mirrorlist_path_host;
+                    mountpoints.push(format!("{}:/etc/pacman.d/mirrorlist", mirrorlist_path));
+                }
+            }            
         }
 
         let (makepkg_config, makepkg_config_path) =

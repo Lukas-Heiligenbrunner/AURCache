@@ -5,7 +5,6 @@ use tokio::fs;
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
-use crate::scheduler::mirror_ranking::get_mirrorlist_path;
 use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
@@ -19,6 +18,7 @@ use {
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
 };
+use crate::utils::build_mode::{get_build_mode, BuildMode};
 
 const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
 const START_BANNER: &str = r"
@@ -88,9 +88,11 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         .exec(db)
         .await?;
 
-    // config dir from env
     // todo arm mirrorlists unsupported for now!
-    let mirrorlist_path = get_mirrorlist_path();
+    let mirrorlist_path = match get_build_mode() {
+        BuildMode::DinD(cfg) => cfg.mirrorlist_path,
+        BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
+    };
 
     if std::fs::metadata(mirrorlist_path.as_str()).is_err() {
         info!("Perform initial load of pacman mirrorlist");
