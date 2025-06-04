@@ -141,6 +141,13 @@ Use SQLite database only for development, I don't recommend using it in producti
 For this method to work you need to mount a exchange volume to pass the built packages to the aurcache container.
 In this example the `artifact_cache` volume is mounted to the aurcache container and the `BUILD_ARTIFACT_DIR` environment variable is set to the volume.
 
+:::info
+
+When using **Podman**: Pointing the artifact cache to a volume mount won't work since Podman doesn't support subpath Volume-mounts.
+So use absolute cache path when using podman.
+
+:::
+
 ## Accessing WebUI
 
 Access AURCache through your web browser at http://localhost:8080.
