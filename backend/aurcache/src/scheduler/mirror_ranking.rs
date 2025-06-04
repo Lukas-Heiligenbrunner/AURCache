@@ -1,5 +1,5 @@
+use crate::builder::build_mode::{BuildMode, get_build_mode};
 use crate::builder::types::Action;
-use crate::utils::build_mode::{BuildMode, get_build_mode};
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
@@ -74,7 +74,8 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
                 BuildMode::DinD(cfg) => cfg.mirrorlist_path,
                 BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
             };
-            fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
+            let mirrorlist_path = format!("{}/mirrorlist", mirrorlist_path);
+            fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
             info!("Wrote mirrorlist to {}", mirrorlist_path);
         }
         Err(e) => {
