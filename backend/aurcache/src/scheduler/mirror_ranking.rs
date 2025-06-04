@@ -74,7 +74,8 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
                 BuildMode::DinD(cfg) => cfg.mirrorlist_path,
                 BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
             };
-            fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
+            let mirrorlist_path = format!("{}/mirrorlist", mirrorlist_path);
+            fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
             info!("Wrote mirrorlist to {}", mirrorlist_path);
         }
         Err(e) => {
