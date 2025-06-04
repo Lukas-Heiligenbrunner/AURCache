@@ -156,7 +156,9 @@ impl Builder {
                             ..Default::default()
                         }
                     } else {
-                        let (volume_name, subpath) = mirrorlist_path.split_once("/").unwrap();
+                        let (volume_name, subpath) = mirrorlist_path
+                            .split_once("/")
+                            .ok_or(anyhow!("Mirrorlist path not containing '/': Invalid"))?;
 
                         Mount {
                             target: Some(archlinux_mirrorlist_path.to_string()),
