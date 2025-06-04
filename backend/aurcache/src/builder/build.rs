@@ -1,5 +1,6 @@
 use crate::builder::env::job_timeout_from_env;
 use crate::builder::logger::BuildLogger;
+use crate::builder::path_utils::create_active_build_path;
 use crate::builder::types::BuildStates;
 use crate::db::files::ActiveModel;
 use crate::db::migration::JoinType;
@@ -81,7 +82,11 @@ impl Builder {
             "Build #{}: Creating build container",
             self.build_model.id.get()?
         );
-        let (create_info, host_active_build_path) = self
+
+        let pkgname = self.package_model.name.get()?;
+        let host_active_build_path = create_active_build_path(pkgname.to_string())?;
+
+        let create_info = self
             .create_build_container(target_platform, BUILDER_IMAGE)
             .await?;
         let id = create_info.id;

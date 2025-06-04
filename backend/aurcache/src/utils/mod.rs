@@ -1,4 +1,3 @@
-pub mod build_mode;
 pub mod db;
 pub mod dir_size;
 pub mod logger;

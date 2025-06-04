@@ -1,5 +1,7 @@
 use log::info;
-use std::env;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
+use std::{env, fs};
 
 pub enum BuildMode {
     DinD(DinDBuildconfig),
@@ -10,26 +12,29 @@ pub struct HostBuildconfig {
     pub mirrorlist_path_host: String,
     pub mirrorlist_path_aurcache: String,
 
-    // todo integrate build artifact path mappings with those paths
-    #[allow(dead_code)]
     pub build_artifact_dir_host: String,
-    #[allow(dead_code)]
-    pub build_artifact_dir_aurcache: String,
 }
 
 pub struct DinDBuildconfig {
     pub mirrorlist_path: String,
+    /// package build path in aurcache container
+    pub aurcache_build_path: String,
 }
 
 pub fn get_build_mode() -> BuildMode {
+    let current_dir = env::current_dir().expect("Failed to get current working directory");
+
     match env::var("BUILD_ARTIFACT_DIR") {
         Ok(v) => {
-            let build_artifact_dir_aurcache = "/app/builds".to_string();
+            let mut build_artifact_dir_aurcache = current_dir;
+            build_artifact_dir_aurcache.push("builds");
+
             let build_artifact_dir_host = v.clone();
-            let mirrorlist_path_aurcache =
-                format!("{}/config/pacman_x86_64", build_artifact_dir_aurcache);
-            // todo handle artifact dir is docker volume and not abs path!!
-            // todo maybe mirrorlist_path_aurcache also needs a change if env var is set?
+            let mirrorlist_path_aurcache = format!(
+                "{}/config/pacman_x86_64",
+                build_artifact_dir_aurcache.display()
+            );
+
             let mirrorlist_path_host = match env::var("MIRRORLIST_PATH_X86_64") {
                 Ok(v) => v,
                 Err(_) => format!("{}/config/pacman_x86_64", v),
@@ -38,14 +43,13 @@ pub fn get_build_mode() -> BuildMode {
             // create config dir if not existing
             create_config_dir(format!(
                 "{}/config/pacman_x86_64",
-                build_artifact_dir_aurcache
+                build_artifact_dir_aurcache.display()
             ));
 
             let cfg = HostBuildconfig {
                 mirrorlist_path_host,
                 mirrorlist_path_aurcache,
                 build_artifact_dir_host,
-                build_artifact_dir_aurcache,
             };
             BuildMode::Host(cfg)
         }
@@ -54,8 +58,7 @@ pub fn get_build_mode() -> BuildMode {
                 Ok(v) => v,
                 Err(_) => {
                     // default mirrorlist dir is "./config/mirrorlist_x86_64"
-                    let mut config_dir =
-                        env::current_dir().expect("Failed to get current working directory");
+                    let mut config_dir = current_dir;
                     config_dir.push("config");
                     config_dir.push("pacman_x86_64");
 
@@ -66,7 +69,16 @@ pub fn get_build_mode() -> BuildMode {
                 }
             };
 
-            let cfg = DinDBuildconfig { mirrorlist_path };
+            // in dind mode packages are stored to ./builds/ by default
+            let mut aurcache_build_path =
+                env::current_dir().expect("Failed to get current working directory");
+            aurcache_build_path.push("builds");
+            create_config_dir(aurcache_build_path.display().to_string());
+
+            let cfg = DinDBuildconfig {
+                mirrorlist_path,
+                aurcache_build_path: aurcache_build_path.display().to_string(),
+            };
             BuildMode::DinD(cfg)
         }
     }
@@ -74,10 +86,11 @@ pub fn get_build_mode() -> BuildMode {
 
 /// create config dir if not existing
 fn create_config_dir(config_dir: String) {
-    if std::fs::metadata(config_dir.as_str()).is_err() {
-        std::fs::create_dir_all(config_dir.as_str()).expect(
+    if fs::metadata(config_dir.as_str()).is_err() {
+        fs::create_dir_all(config_dir.as_str()).expect(
             "Failed to create config directory. Maybe container directory is not writeable?",
         );
-        info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
+        _ = fs::set_permissions(config_dir.clone(), Permissions::from_mode(0o777));
+        info!("Created dir: {}", config_dir);
     }
 }

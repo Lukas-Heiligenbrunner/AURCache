@@ -1,4 +1,5 @@
 mod build;
+pub mod build_mode;
 mod cancel;
 mod docker;
 mod env;

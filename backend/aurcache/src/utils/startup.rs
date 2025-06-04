@@ -2,10 +2,10 @@ use log::{error, info};
 use std::path::PathBuf;
 use tokio::fs;
 
+use crate::builder::build_mode::{BuildMode, get_build_mode};
 use crate::builder::types::BuildStates;
 use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
-use crate::utils::build_mode::{BuildMode, get_build_mode};
 use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};

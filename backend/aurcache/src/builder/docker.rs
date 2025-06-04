@@ -1,9 +1,8 @@
 use crate::builder::build::Builder;
+use crate::builder::build_mode::{BuildMode, get_build_mode};
 use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
-use crate::builder::path_utils::create_build_paths;
-use crate::utils::build_mode::{BuildMode, get_build_mode};
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
@@ -18,7 +17,6 @@ use itertools::Itertools;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -119,13 +117,16 @@ impl Builder {
         &self,
         arch: String,
         image_name: &str,
-    ) -> anyhow::Result<(ContainerCreateResponse, PathBuf)> {
+    ) -> anyhow::Result<ContainerCreateResponse> {
         let name = self.package_model.name.get()?;
-        let (host_build_path_docker, host_active_build_path) = create_build_paths(name.clone())?;
 
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
+        let host_build_path_docker = match get_build_mode() {
+            BuildMode::DinD(cfg) => cfg.aurcache_build_path,
+            BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
+        };
         let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
 
         let mut mounts = vec![];
@@ -226,7 +227,7 @@ impl Builder {
                 conf,
             )
             .await?;
-        Ok((create_info, host_active_build_path))
+        Ok(create_info)
     }
 
     pub async fn monitor_build_output(
