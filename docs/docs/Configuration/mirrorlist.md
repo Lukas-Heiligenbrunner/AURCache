@@ -14,15 +14,15 @@ Only **x86_64** build architecture is supported to set mirrorlist and rerank mir
 :::
 
 ## Env Config
-| Variable               | Type         | Description                                                                    | Default                       |
-|------------------------|--------------|--------------------------------------------------------------------------------|-------------------------------|
-| MIRROR_RANK_SCHEDULE                | String(CRON) | Auto mirrorlist rank schedule in cronjob syntax with seconds (null to disable) | 0 0 2 * * 0 (once a week)     |
-| MIRRORLIST_PATH_X86_64                | String       | mirrorlist path inside aurcache container                                      | /app/config/mirrorlist_x86_64 |
+| Variable               | Type         | Description                                                                    | Default                   |
+|------------------------|--------------|--------------------------------------------------------------------------------|---------------------------|
+| MIRROR_RANK_SCHEDULE                | String(CRON) | Auto mirrorlist rank schedule in cronjob syntax with seconds (null to disable) | 0 0 2 * * 0 (once a week) |
+| MIRRORLIST_PATH_X86_64                | String       | directory containing mirrorlist inside aurcache container                 | /app/config/pacman_x86_64 |
 
 To enable auto mirror ranking set `MIRROR_RANK_SCHEDULE` to your desired cron schedule and it will automatically rerank the mirrors based on their download speed.
 
 ## Manually set mirrorlist
-To manually set a mirrorlist mount your mirrorlist to the same path as `MIRRORLIST_PATH_X86_64` with a volume or bind mount.
+To manually set a mirrorlist mount a directory containing your `mirrorlist` to the same path as `MIRRORLIST_PATH_X86_64` with a volume or bind mount.
 (And unset `MIRROR_RANK_SCHEDULE` since it would overwrite your mirrorlist when the cron schedule triggers)
 ## Example
 ### Auto Ranking
@@ -75,7 +75,8 @@ services:
       - "8081:8081" # Repository
     volumes:
       - ./aurcache/repo:/app/repo
-      - ./hostmirrorlistpath:/app/config/mirrorlist_x86_64 # the container path must match with MIRRORLIST_PATH_X86_64
+      - ./hostmirrorlistpath:/app/config/pacman_x86_64 # the container path must match with MIRRORLIST_PATH_X86_64
+      # hostmirrorlistpath is a directory containing a `mirrorlist` file with your mirrorlist
     privileged: true
     environment:
       - DB_TYPE=POSTGRESQL
@@ -104,5 +105,5 @@ networks:
 ```
 
 If you use host build mode things get more complicated since your mirrorlist must be accessible from the builder containers.
-The default `MIRRORLIST_PATH_X86_64` in host build mode is `BUILD_ARTIFACT_DIR/config/mirrorlist_x86_64`, so just overwrite this file with your mirrorlist or mount another path to this file.
-Remember this path has to be within the `BUILD_ARTIFACT_DIR/` directory to be accissible by the builder.
+The default `MIRRORLIST_PATH_X86_64` in host build mode is `BUILD_ARTIFACT_DIR/config/pacman_x86_64`, so just overwrite this directory with your dir containing the mirrorlist or mount another path to this location.
+Remember this path has to be within the `BUILD_ARTIFACT_DIR/` directory to be accessible by the builder.

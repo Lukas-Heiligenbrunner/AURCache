@@ -1,4 +1,5 @@
 use crate::builder::types::Action;
+use crate::utils::build_mode::{BuildMode, get_build_mode};
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
@@ -69,8 +70,11 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
             let mirrors = urls.rank().await?;
             let mirrorlist = urls.gen_mirrorlist(mirrors)?;
 
-            let mirrorlist_path = get_mirrorlist_path();
-            fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
+            let mirrorlist_path = match get_build_mode() {
+                BuildMode::DinD(cfg) => cfg.mirrorlist_path,
+                BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
+            };
+            fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
             info!("Wrote mirrorlist to {}", mirrorlist_path);
         }
         Err(e) => {
@@ -78,37 +82,4 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
         }
     };
     Ok(())
-}
-
-pub fn get_mirrorlist_path() -> String {
-    env::var("MIRRORLIST_PATH_X86_64").unwrap_or_else(|_| {
-        // use either docker volume or base dir as docker host mount path
-        match env::var("BUILD_ARTIFACT_DIR") {
-            Ok(host_build_path) => {
-                let config_dir = format!("{}/config", host_build_path);
-
-                if std::fs::metadata(config_dir.as_str()).is_err() {
-                    std::fs::create_dir_all(config_dir.as_str()).expect(
-                        "Failed to create config directory. Maybe container directory is not writeable?"
-                    );
-                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir);
-                }
-
-                format!("{}/mirrorlist_x86_64", config_dir)
-            },
-            Err(_) => {
-                // default mirrorlist dir is "./config/mirrorlist_x86_64"
-                let mut config_dir = env::current_dir().expect("Failed to get current working directory");
-                config_dir.push("config");
-
-                if std::fs::metadata(config_dir.clone()).is_err() {
-                    std::fs::create_dir_all(config_dir.clone()).expect(
-                        "Failed to create config directory. Maybe container directory is not writeable?",
-                    );
-                    info!("Created default MIRRORLIST_PATH_X86_64: {}", config_dir.display());
-                }
-                format!("{}/mirrorlist_x86_64", config_dir.display())
-            }
-        }
-    })
 }

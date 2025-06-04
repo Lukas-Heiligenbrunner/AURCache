@@ -1,6 +1,3 @@
-# do not use this dockerfile for deployments. This is just for development and trying things out.
-# Go to https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction for examples.
-version: '3'
 services:
   aurcache:
     build:
