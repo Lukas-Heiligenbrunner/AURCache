@@ -8,9 +8,6 @@ set -o xtrace
 
 AUR_USER="${1:-ab}"
 
-# Enable the multilib repository
-sed -i '/#\[multilib\]/,+1 s/^#//' /etc/pacman.conf
-
 # we're gonna need sudo to use the helper properly
 pacman -Syy --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
