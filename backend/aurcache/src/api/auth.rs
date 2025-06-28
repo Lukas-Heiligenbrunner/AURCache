@@ -28,7 +28,7 @@ pub struct OauthUserInfo {
 #[get("/login")]
 pub fn oauth_login(oauth2: OAuth2<OauthUserInfo>, cookies: &CookieJar<'_>) -> Redirect {
     oauth2
-        .get_redirect(cookies, &["user:email", "profile", "openid", "email"])
+        .get_redirect(cookies, &["profile", "openid", "email"])
         .unwrap()
 }
 
