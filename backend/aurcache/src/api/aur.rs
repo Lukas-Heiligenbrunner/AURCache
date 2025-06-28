@@ -1,4 +1,4 @@
-use crate::aur::api::query_aur;
+use crate::aur::api::{get_info_by_name, query_aur};
 use rocket::serde::json::Json;
 
 use crate::api::models::authenticated::Authenticated;
@@ -25,18 +25,18 @@ pub async fn search(
     _a: Authenticated,
 ) -> Result<Json<Vec<ApiPackage>>, BadRequest<String>> {
     if query.len() < 3 {
-        return Err(BadRequest("Query too short".to_string()));
+        return match get_info_by_name(query).await {
+            Ok(x) => {
+                let mapped = vec![ApiPackage::from(x)];
+                Ok(Json(mapped))
+            }
+            Err(e) => Err(BadRequest(e.to_string())),
+        };
     }
 
     match query_aur(query).await {
         Ok(v) => {
-            let mapped = v
-                .iter()
-                .map(|x| ApiPackage {
-                    name: x.name.clone(),
-                    version: x.version.clone(),
-                })
-                .collect();
+            let mapped = v.into_iter().map(ApiPackage::from).collect();
             Ok(Json(mapped))
         }
         Err(e) => Err(BadRequest(e.to_string())),
