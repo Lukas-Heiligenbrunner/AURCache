@@ -125,7 +125,7 @@ impl Builder {
             self.build_model.id.get()?
         );
         self.wait_container_exit(&id).await?;
-        debug!("Build #{}: docker container exited successfully", id);
+        debug!("Build #{id}: docker container exited successfully");
 
         // move built tar.gz archives to host and repo-add
         debug!(
@@ -163,7 +163,7 @@ impl Builder {
             Ok(v) => {
                 let t = v.ok_or(anyhow!("Failed to get build result"))??;
                 let exit_code = t.status_code;
-                debug!("Build container exited with code: {}", exit_code);
+                debug!("Build container exited with code: {exit_code}");
                 if exit_code > 0 {
                     self.logger
                         .append(format!(
@@ -345,7 +345,7 @@ impl Builder {
                     self.build_model.platform.get()?
                 ),
             )?;
-            info!("Successfully added '{}' to the repo archive", archive_name);
+            info!("Successfully added '{archive_name}' to the repo archive");
         }
         txn.commit().await?;
         Ok(())

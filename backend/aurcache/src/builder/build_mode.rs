@@ -37,7 +37,7 @@ pub fn get_build_mode() -> BuildMode {
 
             let mirrorlist_path_host = match env::var("MIRRORLIST_PATH_X86_64") {
                 Ok(v) => v,
-                Err(_) => format!("{}/config/pacman_x86_64", v),
+                Err(_) => format!("{v}/config/pacman_x86_64"),
             };
 
             // create config dir if not existing
@@ -90,6 +90,6 @@ fn create_config_dir(config_dir: String) {
             "Failed to create config directory. Maybe container directory is not writeable?",
         );
         _ = fs::set_permissions(config_dir.clone(), Permissions::from_mode(0o777));
-        info!("Created dir: {}", config_dir);
+        info!("Created dir: {config_dir}");
     }
 }

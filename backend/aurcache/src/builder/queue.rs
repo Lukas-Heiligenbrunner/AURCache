@@ -35,7 +35,7 @@ async fn start_build(
         match Builder::new(db.clone(), job_containers, package_model, build_model).await {
             Ok(v) => v,
             Err(e) => {
-                error!("Error while creating builder: {}", e);
+                error!("Error while creating builder: {e}");
                 return;
             }
         };

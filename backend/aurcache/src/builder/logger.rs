@@ -36,7 +36,7 @@ impl BuildLogger {
                 notifier_clone.notified().await;
                 interval.tick().await;
                 if let Err(e) = Self::flush_buffer(&db_clone, build_id, &buffer_clone).await {
-                    error!("Failed to flush log buffer for build #{}: {}", build_id, e);
+                    error!("Failed to flush log buffer for build #{build_id}: {e}");
                 }
             }
         });
@@ -45,7 +45,7 @@ impl BuildLogger {
     }
 
     pub async fn append(&self, text: String) {
-        debug!("{}", text);
+        debug!("{text}");
 
         // Add the text to the buffer
         let mut buffer = self.buffer.lock().await;

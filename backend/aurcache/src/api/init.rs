@@ -114,7 +114,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
         let rock = rock.launch().await;
         match rock {
             Ok(_) => info!("Rocket shut down gracefully."),
-            Err(err) => error!("Rocket had an error: {}", err),
+            Err(err) => error!("Rocket had an error: {err}"),
         };
     })
 }
@@ -134,7 +134,7 @@ pub fn init_repo() -> JoinHandle<()> {
             .await;
         match launch_result {
             Ok(_) => info!("Rocket shut down gracefully."),
-            Err(err) => error!("Rocket had an error: {}", err),
+            Err(err) => error!("Rocket had an error: {err}"),
         };
     })
 }

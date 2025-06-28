@@ -94,16 +94,16 @@ impl Pkginfo {
     }
 
     pub fn set_signature(&mut self, pkgfile: &str) -> anyhow::Result<()> {
-        let sigfile = format!("{}.sig", pkgfile);
+        let sigfile = format!("{pkgfile}.sig");
         if Path::new(&sigfile).exists() {
             let sigdata = fs::read(&sigfile)?;
             if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
-                eprintln!("Cannot use armored signatures for packages: {}", sigfile);
+                eprintln!("Cannot use armored signatures for packages: {sigfile}");
                 bail!("Invalid package signature file");
             }
             let pgpsigsize = sigdata.len();
             if pgpsigsize > 16384 {
-                eprintln!("Invalid package signature file '{}'.", sigfile);
+                eprintln!("Invalid package signature file '{sigfile}'.");
                 bail!("Invalid package signature file");
             }
 

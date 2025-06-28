@@ -46,15 +46,12 @@ pub fn start_mirror_rank_job(
                         info!("Mirror ranking finished");
                     }
                     Err(e) => {
-                        warn!("Mirror ranking failed: {}", e);
+                        warn!("Mirror ranking failed: {e}");
                     }
                 }
             } else {
                 // If there is no upcoming occurrence (unlikely with cron), wait a default duration before retrying.
-                warn!(
-                    "Your defined cron-job doesn't have a future schedule: '{}'",
-                    cron_str
-                );
+                warn!("Your defined cron-job doesn't have a future schedule: '{cron_str}'");
                 tokio::time::sleep(Duration::from_secs(60 * 30)).await;
             }
         }
@@ -74,12 +71,12 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
                 BuildMode::DinD(cfg) => cfg.mirrorlist_path,
                 BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
             };
-            let mirrorlist_path = format!("{}/mirrorlist", mirrorlist_path);
+            let mirrorlist_path = format!("{mirrorlist_path}/mirrorlist");
             fs::write(mirrorlist_path.as_str(), mirrorlist).await?;
-            info!("Wrote mirrorlist to {}", mirrorlist_path);
+            info!("Wrote mirrorlist to {mirrorlist_path}");
         }
         Err(e) => {
-            warn!("Failed to get mirror list: {}", e);
+            warn!("Failed to get mirror list: {e}");
         }
     };
     Ok(())

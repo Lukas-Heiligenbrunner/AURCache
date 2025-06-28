@@ -25,8 +25,8 @@ pub async fn try_remove_archive_file(
 
         let file_path = format!("./repo/{}/{}", platform, file.filename);
         match fs::remove_file(file_path.clone()) {
-            Ok(_) => info!("Removed old file: {}", file_path),
-            Err(_) => warn!("Failed to remove package file: {}", file_path),
+            Ok(_) => info!("Removed old file: {file_path}"),
+            Err(_) => warn!("Failed to remove package file: {file_path}"),
         }
 
         file.delete(db).await?;

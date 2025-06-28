@@ -19,13 +19,13 @@ pub fn limits_from_env() -> (u64, i64) {
         .and_then(|x| x.parse::<u64>().ok())
         .map(|x| x * 1_000_000)
         .unwrap_or(0);
-    debug!("cpu_limit: {} mCPUs", cpu_limit);
+    debug!("cpu_limit: {cpu_limit} mCPUs");
     // memory_limit in megabytes
     let memory_limit = env::var("MEMORY_LIMIT")
         .ok()
         .and_then(|x| x.parse::<i64>().ok())
         .map(|x| x * 1024 * 1024)
         .unwrap_or(-1);
-    debug!("memory_limit: {}MB", memory_limit);
+    debug!("memory_limit: {memory_limit}MB");
     (cpu_limit, memory_limit)
 }

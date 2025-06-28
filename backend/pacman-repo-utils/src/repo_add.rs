@@ -50,28 +50,28 @@ pub fn repo_add_impl(
                     }
 
                     if path == Path::new(".PKGINFO") {
-                        debug!("Found .PKGINFO file in '{}'.", pkgfile);
+                        debug!("Found .PKGINFO file in '{pkgfile}'.");
                         pkginfo.parse(entry)?;
                     }
                 }
             }
-            Err(e) => warn!("Error reading entry: {:?}", e),
+            Err(e) => warn!("Error reading entry: {e:?}"),
         }
     }
 
     if !pkginfo.valid() {
-        error!("Invalid package file '{}'.", pkgfile);
+        error!("Invalid package file '{pkgfile}'.");
         bail!("Invalid package file");
     }
 
     // Compute base64'd PGP signature
-    debug!("Setting signature for '{}'.", pkgfile);
+    debug!("Setting signature for '{pkgfile}'.");
     pkginfo.set_signature(pkgfile)?;
 
-    debug!("Calculating compressed size for '{}'.", pkgfile);
+    debug!("Calculating compressed size for '{pkgfile}'.");
     let csize = fs::metadata(pkgfile)?.len() as usize;
 
-    debug!("Calculating checksums for '{}'.", pkgfile);
+    debug!("Calculating checksums for '{pkgfile}'.");
     let (md5sum, sha256sum) = calc_checksums(pkgfile)?;
 
     let filename = Path::new(pkgfile)

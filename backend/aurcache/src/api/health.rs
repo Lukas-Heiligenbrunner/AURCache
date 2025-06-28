@@ -14,7 +14,7 @@ pub struct HealthApi;
 )]
 #[get("/health")]
 pub async fn health(db: &State<DatabaseConnection>) -> Result<(), String> {
-    check_health(db).await.map_err(|e| format!("{:?}", e))?;
+    check_health(db).await.map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
 

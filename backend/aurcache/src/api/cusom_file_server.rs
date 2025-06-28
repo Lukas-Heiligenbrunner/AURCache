@@ -43,7 +43,7 @@ impl From<CustomFileServer> for Vec<Route> {
     fn from(server: CustomFileServer) -> Self {
         let source = figment::Source::File(server.root.clone());
         let mut route = Route::ranked(server.rank, Method::Get, "/<path..>", server);
-        route.name = Some(format!("FileServer: {}", source).into());
+        route.name = Some(format!("FileServer: {source}").into());
         vec![route]
     }
 }

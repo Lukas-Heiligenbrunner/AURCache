@@ -87,7 +87,7 @@ pub fn add_to_db_file(
 
         // Add a file
         let mut header = Header::new_gnu();
-        header.set_path(format!("{}/{}", dir_name, file_name))?;
+        header.set_path(format!("{dir_name}/{file_name}"))?;
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();

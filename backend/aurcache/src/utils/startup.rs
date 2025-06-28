@@ -31,7 +31,7 @@ const START_BANNER: &str = r"
 ";
 
 pub async fn pre_startup_tasks() {
-    info!("{}", START_BANNER);
+    info!("{START_BANNER}");
     let latest_commit_sha = option_env!("LATEST_COMMIT_SHA").unwrap_or("dev");
     info!(
         "Version: {}#{}",
@@ -44,15 +44,15 @@ pub async fn pre_startup_tasks() {
 
     for cs in CONTAINER_STORAGE_DIRS {
         if fs::remove_dir_all(cs).await.is_ok() {
-            info!("Removed old container storage `{}`", cs);
+            info!("Removed old container storage `{cs}`");
         }
     }
 
     for platform in Platforms {
         if let Err(e) =
-            pacman_repo_utils::init_repo(&PathBuf::from(format!("./repo/{}", platform)), "repo")
+            pacman_repo_utils::init_repo(&PathBuf::from(format!("./repo/{platform}")), "repo")
         {
-            error!("Failed to initialize pacman repo: {:?}", e);
+            error!("Failed to initialize pacman repo: {e:?}");
         }
     }
 
@@ -94,17 +94,17 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
     };
 
-    if std::fs::metadata(format!("{}/mirrorlist", mirrorlist_path)).is_err() {
+    if std::fs::metadata(format!("{mirrorlist_path}/mirrorlist")).is_err() {
         info!("Perform initial load of pacman mirrorlist");
         match pacman_mirrors::get_status(Platform::X86_64).await {
             Ok(status) => {
                 let urls = status.urls;
                 let mirrorlist = urls.gen_mirrorlist(urls.0.clone())?;
-                fs::write(format!("{}/mirrorlist", mirrorlist_path), mirrorlist).await?;
-                info!("Wrote mirrorlist to {}", mirrorlist_path);
+                fs::write(format!("{mirrorlist_path}/mirrorlist"), mirrorlist).await?;
+                info!("Wrote mirrorlist to {mirrorlist_path}");
             }
             Err(e) => {
-                warn!("Failed to get mirror list: {}", e);
+                warn!("Failed to get mirror list: {e}");
             }
         };
     }

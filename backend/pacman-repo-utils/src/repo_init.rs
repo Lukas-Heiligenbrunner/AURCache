@@ -41,8 +41,8 @@ fn repo_exists(path: &Path, name: &str) -> anyhow::Result<()> {
 
 /// assembles filneame of archive and symlink
 fn get_archive_names(name: &str, suffix: &str) -> (String, String) {
-    let file_name = format!("{}.{}.tar.gz", name, suffix);
-    let symlink_name = format!("{}.{}", name, suffix);
+    let file_name = format!("{name}.{suffix}.tar.gz");
+    let symlink_name = format!("{name}.{suffix}");
     (file_name, symlink_name)
 }
 

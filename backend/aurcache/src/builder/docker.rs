@@ -31,9 +31,7 @@ impl Builder {
     /// repull docker image with specified arch
     /// returns image id hash
     pub async fn repull_image(&self, image: &str, arch: String) -> anyhow::Result<()> {
-        self.logger
-            .append(format!("Pulling image: {}", image))
-            .await;
+        self.logger.append(format!("Pulling image: {image}")).await;
         // repull image to make sure it's up to date
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
@@ -49,8 +47,8 @@ impl Builder {
 
         while let Some(pull_result) = stream.next().await {
             match pull_result {
-                Err(e) => self.logger.append(format!("{}", e)).await,
-                Ok(info @ CreateImageInfo { status: None, .. }) => debug!("{:?}", info),
+                Err(e) => self.logger.append(format!("{e}")).await,
+                Ok(info @ CreateImageInfo { status: None, .. }) => debug!("{info:?}"),
                 Ok(CreateImageInfo { id: Some(id), .. }) => image_id = Some(id),
                 Ok(
                     ref info @ CreateImageInfo {
@@ -60,7 +58,7 @@ impl Builder {
                 ) => match status.as_str() {
                     "Pulling fs layer" | "Waiting" | "Downloading" | "Verifying Checksum"
                     | "Extracting" => {
-                        trace!("{:?}", info);
+                        trace!("{info:?}");
                     }
                     _ => {
                         self.logger.append(status.clone()).await;
@@ -181,14 +179,10 @@ impl Builder {
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
         let build_cmd = format!(
-            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {} {}",
-            build_flags, name
+            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
         );
-        info!("Build command: {}", build_cmd);
-        let cmd = format!(
-            "cat <<EOF > {}\n{}\nEOF\n{}",
-            makepkg_config_path, makepkg_config, build_cmd
-        );
+        info!("Build command: {build_cmd}");
+        let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
 
         let (cpu_limit, memory_limit) = limits_from_env();
 
@@ -196,7 +190,7 @@ impl Builder {
         let filtered_name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
 
         let build_id = self.build_model.id.get()?;
-        let container_name = format!("aurcache_build_{}_{}", filtered_name, build_id);
+        let container_name = format!("aurcache_build_{filtered_name}_{build_id}");
         let conf = ContainerCreateBody {
             image: Some(image_name.to_string()),
             attach_stdout: Some(true),

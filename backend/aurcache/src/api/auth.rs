@@ -64,7 +64,7 @@ pub async fn oauth_callback(
         .map_err(|e| Unauthorized(e.to_string()))?;
 
     let real_name = user_info.name;
-    debug!("Logged in username: {}", real_name);
+    debug!("Logged in username: {real_name}");
 
     // Set a private cookie with the user's name, and redirect to the home page.
     cookies.add_private(

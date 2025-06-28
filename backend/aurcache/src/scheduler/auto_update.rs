@@ -41,18 +41,15 @@ pub fn start_auto_update_job(
                 info!("Executing scheduled job at: {}", Utc::now());
                 match package_update_all_outdated(&db, &tx).await {
                     Ok(v) => {
-                        info!("Triggered update of all outdated packages: {:?}", v);
+                        info!("Triggered update of all outdated packages: {v:?}");
                     }
                     Err(e) => {
-                        warn!("Failed to trigger update of all outdated packages: {}", e);
+                        warn!("Failed to trigger update of all outdated packages: {e}");
                     }
                 }
             } else {
                 // If there is no upcoming occurrence (unlikely with cron), wait a default duration before retrying.
-                warn!(
-                    "Your defined cron-job doesn't have a future schedule: '{}'",
-                    cron_str
-                );
+                warn!("Your defined cron-job doesn't have a future schedule: '{cron_str}'");
                 tokio::time::sleep(Duration::from_secs(60 * 30)).await;
             }
         }

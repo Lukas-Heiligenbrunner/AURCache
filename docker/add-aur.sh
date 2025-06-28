@@ -8,6 +8,10 @@ set -o xtrace
 
 AUR_USER="${1:-ab}"
 
+if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
+    echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf; \
+fi
+
 # we're gonna need sudo to use the helper properly
 pacman -Syy --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar pacman-contrib

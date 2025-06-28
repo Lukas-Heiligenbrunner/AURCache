@@ -15,7 +15,7 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
 
             let db_name = env::var("DB_NAME").unwrap_or("db.sqlite".to_string());
 
-            let mut conn_opts = ConnectOptions::new(format!("sqlite://db/{}?mode=rwc", db_name));
+            let mut conn_opts = ConnectOptions::new(format!("sqlite://db/{db_name}?mode=rwc"));
             conn_opts
                 .max_connections(100)
                 .sqlx_logging_level(LevelFilter::Trace);
