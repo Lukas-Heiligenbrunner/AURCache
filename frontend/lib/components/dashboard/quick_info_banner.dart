@@ -18,8 +18,9 @@ class QuickInfoBanner extends StatelessWidget {
   List<Widget> _buildElements(Stats? stats, BuildContext context) {
     final double iconSize = context.desktop ? 64 : 42;
     final buildSuccessRate = stats != null
-        ? (stats.total_builds != 0
-            ? (stats.successful_builds / stats.total_builds)
+        ? ((stats.successful_builds + stats.failed_builds) != 0
+            ? (stats.successful_builds /
+                (stats.successful_builds + stats.failed_builds))
             : 0)
         : 0;
 
