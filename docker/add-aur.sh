@@ -8,8 +8,9 @@ set -o xtrace
 
 AUR_USER="${1:-ab}"
 
+# overwrite config if amd64 imaage
 if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
-    echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf; \
+  cp /etc/pacman.conf.amd64 /etc/pacman.conf
 fi
 
 # we're gonna need sudo to use the helper properly
