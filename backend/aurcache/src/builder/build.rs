@@ -266,8 +266,7 @@ impl Builder {
 
     /// move built files from build container to host and add them to the repo
     async fn move_and_add_pkgs(&self, host_build_path: PathBuf) -> anyhow::Result<()> {
-        let archive_paths: Vec<_> =
-            fs::read_dir(host_build_path.clone())?.collect::<Result<_, _>>()?;
+        let archive_paths: Vec<_> = fs::read_dir(&host_build_path)?.collect::<Result<_, _>>()?;
         if archive_paths.is_empty() {
             bail!("No files found in build directory");
         }
@@ -313,7 +312,7 @@ impl Builder {
                 self.build_model.platform.get()?,
                 archive_name
             );
-            fs::copy(archive.path(), pkg_path.clone())?;
+            fs::copy(archive.path(), &pkg_path)?;
             // remove old file from shared path
             fs::remove_file(archive.path())?;
 
