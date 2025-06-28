@@ -120,15 +120,12 @@ impl Builder {
 
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
-        let build_dir_base = "/out";
+        let build_dir_base = "/build";
         let host_build_path_docker = match get_build_mode() {
             BuildMode::DinD(cfg) => cfg.aurcache_build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
-        let mountpoints = vec![format!(
-            "{}/{name}:{}",
-            host_build_path_docker, build_dir_base
-        )];
+        let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
 
         let mut mounts = vec![];
 
@@ -191,18 +188,16 @@ impl Builder {
         // Do we actually need custom build flags? Since we're not installing anymore, there's not
         // much we _could_ do.
         let build_cmd = format!(
-            "paru -G {name}
+            "cd {build_dir_base}
+             paru -G {name}
              paru {build_flags} {name}"
         );
-        let move_cmd = format!("mv {name}/*.pkg.tar.zst {build_dir_base}/");
         info!("Init command: {init_cmd}");
         info!("Build command: {build_cmd}");
-        info!("Move command: {move_cmd}");
         let cmd = format!(
             "cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF
             {init_cmd}
-            {build_cmd}
-            {move_cmd}"
+            {build_cmd}"
         );
 
         let (cpu_limit, memory_limit) = limits_from_env();

@@ -266,7 +266,8 @@ impl Builder {
 
     /// move built files from build container to host and add them to the repo
     async fn move_and_add_pkgs(&self, host_build_path: PathBuf) -> anyhow::Result<()> {
-        let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
+        let archive_paths: Vec<_> =
+            fs::read_dir(host_build_path.clone())?.collect::<Result<_, _>>()?;
         if archive_paths.is_empty() {
             bail!("No files found in build directory");
         }
@@ -299,12 +300,14 @@ impl Builder {
         }
 
         for archive in archive_paths {
-            let archive = archive?;
             let archive_name = archive
                 .file_name()
                 .to_str()
                 .ok_or(anyhow!("Failed to get string from filename"))?
                 .to_string();
+            if !archive_name.ends_with(".pkg.tar.zst") {
+                continue;
+            }
             let pkg_path = format!(
                 "./repo/{}/{}",
                 self.build_model.platform.get()?,
