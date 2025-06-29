@@ -139,7 +139,7 @@ impl Builder {
             "Build {}: Remove shared build folder",
             self.build_model.id.get()?
         );
-        fs::remove_dir(host_active_build_path)?;
+        fs::remove_dir_all(host_active_build_path)?;
         Ok(())
     }
 
