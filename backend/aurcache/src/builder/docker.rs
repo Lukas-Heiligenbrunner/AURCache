@@ -183,7 +183,7 @@ impl Builder {
         let init_cmd = "
             sudo pacman-key --init
             sudo pacman-key --populate archlinux
-            paru -Syu
+            paru -Syu --noconfirm
         ";
         // Do we actually need custom build flags? Since we're not installing anymore, there's not
         // much we _could_ do.
