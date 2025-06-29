@@ -214,12 +214,7 @@ impl Builder {
             attach_stderr: Some(true),
             open_stdin: Some(false),
             user: Some("ab".to_string()),
-            cmd: Some(vec![
-                "sh".to_string(),
-                "-l".to_string(),
-                "-c".to_string(),
-                cmd,
-            ]),
+            cmd: Some(vec!["sh".to_string(), "-lec".to_string(), cmd]),
             host_config: Some(HostConfig {
                 auto_remove: Some(auto_remove),
                 nano_cpus: Some(cpu_limit as i64),
