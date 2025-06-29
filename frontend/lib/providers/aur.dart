@@ -8,10 +8,6 @@ part 'aur.g.dart';
 
 @riverpod
 Future<List<AurPackage>> getAurPackages(Ref ref, String query) async {
-  if (query.length < 3) {
-    return [];
-  }
-
   final resp = await API.getRawClient().get(
     "/search",
     queryParameters: {'query': query},
