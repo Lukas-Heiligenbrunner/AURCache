@@ -189,6 +189,7 @@ impl Builder {
         // much we _could_ do.
         let build_cmd = format!(
             "cd {build_dir_base}
+             git config --global --add safe.directory '*'
              paru -G {name}
              paru {build_flags} {name}"
         );
