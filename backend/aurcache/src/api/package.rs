@@ -18,7 +18,7 @@ use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
 use crate::api::models::output::{AddBody, UpdateBody};
-use crate::aur::api::get_info_by_name;
+use crate::aur::api::get_package_info;
 use crate::db::activities::ActivityType;
 use pacman_mirrors::platforms::Platform;
 use sea_orm::ActiveValue::Set;
@@ -275,7 +275,7 @@ pub async fn get_package(
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("id not found".to_string()))?;
 
-    let aur_info = get_info_by_name(&pkg.name)
+    let aur_info = get_package_info(&pkg.name)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 

@@ -23,13 +23,7 @@ pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
     Ok(response)
 }
 
-pub async fn get_info_by_name(pkg_name: &str) -> anyhow::Result<Package> {
-    try_get_info_by_name(pkg_name)
-        .await
-        .and_then(|res| res.ok_or_else(|| anyhow!("no package found")))
-}
-
-pub async fn try_get_info_by_name(pkg_name: &str) -> anyhow::Result<Option<Package>> {
+pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Package> {
     let request = Request::default();
     let mut response = (|| async { request.search_info_by_name(pkg_name).await })
         .retry(
@@ -40,7 +34,5 @@ pub async fn try_get_info_by_name(pkg_name: &str) -> anyhow::Result<Option<Packa
         .await
         .map_err(|e| anyhow!("failed to get package: {}", e))?;
 
-    let response = response.results.pop();
-
-    Ok(response)
+    response.results.pop().ok_or(anyhow!("no package found"))
 }
