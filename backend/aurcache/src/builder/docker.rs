@@ -197,7 +197,12 @@ impl Builder {
             attach_stderr: Some(true),
             open_stdin: Some(false),
             user: Some("ab".to_string()),
-            cmd: Some(vec!["sh".to_string(), "-c".to_string(), cmd]),
+            cmd: Some(vec![
+                "sh".to_string(),
+                "-l".to_string(),
+                "-c".to_string(),
+                cmd,
+            ]),
             host_config: Some(HostConfig {
                 #[cfg(debug_assertions)]
                 auto_remove: Some(false),
