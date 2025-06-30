@@ -27,8 +27,9 @@ pub async fn search(
     if query.len() < 3 {
         return match get_package_info(query).await {
             Ok(x) => {
-                let pkg = ApiPackage::from(x);
-                Ok(Json(vec![pkg]))
+                // Iterate over the Option, giving either a single result or an empty list.
+                let pkg = x.into_iter().map(ApiPackage::from).collect();
+                Ok(Json(pkg))
             }
             Err(e) => Err(BadRequest(e.to_string())),
         };

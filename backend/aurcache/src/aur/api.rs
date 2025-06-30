@@ -25,7 +25,8 @@ pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
 }
 
 /// Retrieve AUR package information by its name.
-pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Package> {
+/// Returns `None` if the package is not found
+pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>> {
     let request = Request::default();
     let mut response = (|| async { request.search_info_by_name(pkg_name).await })
         .retry(
@@ -36,5 +37,5 @@ pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Package> {
         .await
         .map_err(|e| anyhow!("failed to get package: {}", e))?;
 
-    response.results.pop().ok_or(anyhow!("no package found"))
+    Ok(response.results.pop())
 }

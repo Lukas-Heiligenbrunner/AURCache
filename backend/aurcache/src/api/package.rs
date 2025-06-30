@@ -277,7 +277,8 @@ pub async fn get_package(
 
     let aur_info = get_package_info(&pkg.name)
         .await
-        .map_err(|e| NotFound(e.to_string()))?;
+        .map_err(|e| NotFound(e.to_string()))?
+        .ok_or(NotFound("Package not found".to_string()))?;
 
     let aur_url = format!(
         "https://aur.archlinux.org/packages/{}",
