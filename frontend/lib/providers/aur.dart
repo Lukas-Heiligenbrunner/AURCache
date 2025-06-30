@@ -8,7 +8,7 @@ part 'aur.g.dart';
 
 @riverpod
 Future<List<AurPackage>> getAurPackages(Ref ref, String query) async {
-  if (query.length < 3) {
+  if (query.isEmpty) {
     return [];
   }
 

@@ -92,7 +92,7 @@ class _AurScreenState extends State<AurScreen> {
                         ],
                       ),
                     ),
-                    onData: (data) => query.length < 3
+                    onData: (data) => (query.length < 3 && data.isEmpty)
                         ? Column(
                             children: [
                               const SizedBox(

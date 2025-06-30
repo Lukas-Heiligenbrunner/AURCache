@@ -11,7 +11,7 @@ RUN flutter build web --release --wasm
 
 FROM rust:1.88.0 AS builder
 ARG LATEST_COMMIT_SHA
-ENV LATEST_COMMIT_SHA ${LATEST_COMMIT_SHA}
+ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
 
 WORKDIR /app
@@ -30,4 +30,4 @@ COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 
 WORKDIR /app
-CMD /entrypoint.sh
+CMD ["/entrypoint.sh"]
