@@ -1,4 +1,4 @@
-use crate::aur::api::{query_aur, try_get_info_by_name};
+use crate::aur::api::{get_package_info, query_aur};
 use rocket::serde::json::Json;
 
 use crate::api::models::authenticated::Authenticated;
@@ -25,11 +25,11 @@ pub async fn search(
     _a: Authenticated,
 ) -> Result<Json<Vec<ApiPackage>>, BadRequest<String>> {
     if query.len() < 3 {
-        return match try_get_info_by_name(query).await {
+        return match get_package_info(query).await {
             Ok(x) => {
                 // Iterate over the Option, giving either a single result or an empty list.
-                let mapped = x.into_iter().map(ApiPackage::from).collect();
-                Ok(Json(mapped))
+                let pkg = x.into_iter().map(ApiPackage::from).collect();
+                Ok(Json(pkg))
             }
             Err(e) => Err(BadRequest(e.to_string())),
         };

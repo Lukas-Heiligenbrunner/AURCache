@@ -1,18 +1,19 @@
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
-use backon::{ConstantBuilder, FibonacciBuilder, Retryable};
+use backon::{FibonacciBuilder, Retryable};
 use std::time::Duration;
 
 // https://wiki.archlinux.org/title/Aurweb_RPC_interface
 // API rate limit 4000 requests per day
 
+/// Query the AUR for packages matching the given query string
 pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
     let request = Request::default();
     let response = (|| async { request.search_package_by_name(query).await })
         .retry(
-            ConstantBuilder::default()
-                .with_max_times(3)
-                .with_delay(Duration::from_millis(500)),
+            FibonacciBuilder::default()
+                .with_min_delay(Duration::from_millis(500))
+                .with_max_times(4),
         )
         .await
         .map_err(|e| anyhow!("failed to get package: {}", e))?;
@@ -23,13 +24,9 @@ pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
     Ok(response)
 }
 
-pub async fn get_info_by_name(pkg_name: &str) -> anyhow::Result<Package> {
-    try_get_info_by_name(pkg_name)
-        .await
-        .and_then(|res| res.ok_or_else(|| anyhow!("no package found")))
-}
-
-pub async fn try_get_info_by_name(pkg_name: &str) -> anyhow::Result<Option<Package>> {
+/// Retrieve AUR package information by its name.
+/// Returns `None` if the package is not found
+pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>> {
     let request = Request::default();
     let mut response = (|| async { request.search_info_by_name(pkg_name).await })
         .retry(
@@ -40,7 +37,5 @@ pub async fn try_get_info_by_name(pkg_name: &str) -> anyhow::Result<Option<Packa
         .await
         .map_err(|e| anyhow!("failed to get package: {}", e))?;
 
-    let response = response.results.pop();
-
-    Ok(response)
+    Ok(response.results.pop())
 }

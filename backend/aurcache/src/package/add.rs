@@ -1,8 +1,8 @@
-use crate::aur::api::get_info_by_name;
+use crate::aur::api::get_package_info;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
@@ -45,7 +45,9 @@ pub async fn package_add(
         bail!("Package already exists");
     }
 
-    let pkg = get_info_by_name(pkg_name).await?;
+    let pkg = get_package_info(pkg_name)
+        .await?
+        .ok_or(anyhow!("Package not found"))?;
 
     let new_package = packages::ActiveModel {
         name: Set(pkg_name.to_string()),

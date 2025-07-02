@@ -5,11 +5,9 @@ use crate::db::prelude::Packages;
 use crate::package::add::package_add;
 use crate::package::delete::package_delete;
 use crate::package::update::package_update;
-use rocket::response::status::{BadRequest, NotFound};
+use rocket::response::status::{BadRequest, Custom, NotFound};
 use rocket::serde::json::Json;
 use std::str::FromStr;
-
-use rocket::{State, delete, get, patch, post};
 
 use crate::activity_log::activity_utils::ActivityLog;
 use crate::activity_log::package_add_activity::PackageAddActivity;
@@ -18,9 +16,11 @@ use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
 use crate::api::models::output::{AddBody, UpdateBody};
-use crate::aur::api::get_info_by_name;
+use crate::aur::api::get_package_info;
 use crate::db::activities::ActivityType;
 use pacman_mirrors::platforms::Platform;
+use rocket::http::Status;
+use rocket::{State, delete, get, patch, post};
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -265,19 +265,20 @@ pub async fn get_package(
     db: &State<DatabaseConnection>,
     id: i32,
     _a: Authenticated,
-) -> Result<Json<ExtendedPackageModel>, NotFound<String>> {
+) -> Result<Json<ExtendedPackageModel>, Custom<String>> {
     let db = db as &DatabaseConnection;
 
     let pkg = Packages::find()
         .filter(packages::Column::Id.eq(id))
         .one(db)
         .await
-        .map_err(|e| NotFound(e.to_string()))?
-        .ok_or(NotFound("id not found".to_string()))?;
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
+        .ok_or(Custom(Status::NotFound, "ID not found".to_string()))?;
 
-    let aur_info = get_info_by_name(&pkg.name)
+    let aur_info = get_package_info(&pkg.name)
         .await
-        .map_err(|e| NotFound(e.to_string()))?;
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
+        .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
 
     let aur_url = format!(
         "https://aur.archlinux.org/packages/{}",

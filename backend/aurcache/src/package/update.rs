@@ -1,6 +1,6 @@
 use crate::activity_log::activity_utils::ActivityLog;
 use crate::activity_log::package_update_activity::PackageUpdateActivity;
-use crate::aur::api::get_info_by_name;
+use crate::aur::api::get_package_info;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::activities::ActivityType;
 use crate::db::prelude::Packages;
@@ -90,9 +90,9 @@ pub async fn package_update(
 
     let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
 
-    let pkg = get_info_by_name(pkg_model.name.as_str())
-        .await
-        .map_err(|_| anyhow!("couldn't download package metadata".to_string()))?;
+    let pkg = get_package_info(pkg_model.name.as_str())
+        .await?
+        .ok_or(anyhow!("Package not found"))?;
 
     if !force && pkg_model.version == Some(pkg.version.clone()) {
         bail!("Package is already up to date");
