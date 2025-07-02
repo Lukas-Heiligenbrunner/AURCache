@@ -42,7 +42,7 @@ dependencies:
   go_router: ^15.0.0
   flutter_tags_x: 1.1.0
   url_launcher: 6.3.1
-  toastification: 3.0.2
+  toastification: 3.0.3
   # todo blocked by https://github.com/aloisdeniel/flutter_device_preview/pull/263
   device_preview:
     git:
@@ -76,7 +76,7 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: 6.0.0
   riverpod_generator: ^2.6.5
-  build_runner: 2.4.15
+  build_runner: 2.5.4
   custom_lint: ^0.7.5
   riverpod_lint: ^2.6.5
   json_serializable: ^6.9.4

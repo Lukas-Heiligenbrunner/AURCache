@@ -7,7 +7,7 @@ anyhow = {workspace = true}
 log = {workspace = true}
 
 base64 = "0.22.1"
-md5 = "0.7.0"
+md5 = "0.8.0"
 sha2 = "0.10.8"
 flate2 = "1.1.1"
 xz2 = "0.1.7"
