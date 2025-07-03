@@ -84,7 +84,7 @@ impl Builder {
         );
 
         let pkgname = self.package_model.name.get()?;
-        let host_active_build_path = create_active_build_path(pkgname.to_string())?;
+        let host_active_build_path = create_active_build_path(pkgname)?;
 
         let create_info = self
             .create_build_container(target_platform, BUILDER_IMAGE)
@@ -304,9 +304,12 @@ impl Builder {
                 .to_str()
                 .ok_or(anyhow!("Failed to get string from filename"))?
                 .to_string();
-            if !archive_name.ends_with(".pkg.tar.zst") {
+
+            // Archives could end in .tar, .tar.zst, .tar.lz4, ...
+            if !archive_name.contains(".pkg.tar") {
                 continue;
             }
+
             let pkg_path = format!(
                 "./repo/{}/{}",
                 self.build_model.platform.get()?,

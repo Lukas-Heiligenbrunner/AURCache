@@ -120,12 +120,12 @@ impl Builder {
 
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
-        let build_dir_base = "/build";
-        let host_build_path_docker = match get_build_mode() {
+        let host_build_dir = match get_build_mode() {
             BuildMode::DinD(cfg) => cfg.aurcache_build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
-        let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
+        let container_build_dir = "/build";
+        let mountpoints = vec![format!("{}/{name}:{}", host_build_dir, container_build_dir)];
 
         let mut mounts = vec![];
 
@@ -176,28 +176,20 @@ impl Builder {
             mounts.push(mnt);
         }
 
-        let (makepkg_config, makepkg_config_path) =
-            create_makepkg_config(name.clone(), build_dir_base)?;
+        let (makepkg_config, makepkg_config_path) = create_makepkg_config(container_build_dir)?;
 
-        // Do we need to update everything (paru -Syu) every time?
-        let init_cmd = "
-            sudo pacman-key --init
-            sudo pacman-key --populate archlinux
-            paru -Syu --noconfirm
-        ";
-        // Do we actually need custom build flags? Since we're not installing anymore, there's not
-        // much we _could_ do.
+        // Note that `paru -G {name}` will download the pkgbase of {name},
+        // which might be a different name if it's a split package.
         let build_cmd = format!(
-            "cd {build_dir_base}
-             git config --global --add safe.directory '*'
-             paru -G {name}
-             paru {build_flags} {name}"
+            "
+                cd {container_build_dir}
+                paru -G {name}
+                paru {build_flags} *
+            "
         );
-        info!("Init command: {init_cmd}");
         info!("Build command: {build_cmd}");
         let cmd = format!(
             "cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF
-            {init_cmd}
             {build_cmd}"
         );
 
@@ -208,7 +200,7 @@ impl Builder {
 
         let build_id = self.build_model.id.get()?;
         let container_name = format!("aurcache_build_{filtered_name}_{build_id}");
-        let auto_remove = !cfg!(debug_assertions);
+        let auto_remove = cfg!(not(debug_assertions));
         let conf = ContainerCreateBody {
             image: Some(image_name.to_string()),
             attach_stdout: Some(true),
