@@ -1,5 +1,7 @@
 //! This is where the [`Mirror`] struct and all of its dependencies go.
+
 use crate::Country;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 /// Raw, typed form of the JSON output of each url listed in [`country::Raw`](crate::country::Raw).
@@ -68,23 +70,26 @@ pub struct Mirror {
     pub details: String,
 }
 
-impl From<Raw> for Mirror {
-    fn from(raw: Raw) -> Self {
+impl TryFrom<Raw> for Mirror {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: Raw) -> Result<Self, Self::Error> {
         let url: url::Url = raw
             .url
             .parse()
-            .expect("failed to parse url field from raw url");
+            .context("failed to parse url field from raw url")?;
         let protocol: crate::Protocol = raw
             .protocol
             .parse()
-            .expect("failed to parse protocol field from raw url");
-        let last_sync = raw.last_sync.map(|raw| {
-            raw.parse::<chrono::DateTime<chrono::Utc>>()
-                .expect("failed to parse last_sync field from raw url")
-        });
+            .context("failed to parse protocol field from raw url")?;
+        let last_sync = raw
+            .last_sync
+            .map(|raw| raw.parse::<chrono::DateTime<chrono::Utc>>())
+            .transpose()
+            .context("failed to parse last_sync field from raw url")?;
         let country = Country::new(&raw.country, &raw.country_code);
 
-        Self {
+        Ok(Self {
             url,
             protocol,
             last_sync,
@@ -98,6 +103,6 @@ impl From<Raw> for Mirror {
             ipv4: raw.ipv4,
             ipv6: raw.ipv6,
             details: raw.details,
-        }
+        })
     }
 }
