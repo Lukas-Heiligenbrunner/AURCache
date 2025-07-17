@@ -55,7 +55,7 @@ impl Bench for Mirrors {
         }
 
         // Sort by duration (ascending order)
-        durations.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        durations.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("Failed to compare durations"));
 
         // Extract only the sorted Mirror references
         Ok(durations

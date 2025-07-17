@@ -2,7 +2,7 @@
 
 use crate::mirror::Mirrors;
 use crate::platforms::Platform;
-use anyhow::bail;
+use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 /// Raw, typed form of the JSON output given by performing a GET request on [`Status::URL`](Status::URL).
@@ -55,30 +55,33 @@ impl Status {
     pub async fn get_from_url(url: &str, _platform: Platform) -> anyhow::Result<Self> {
         // todo we need to fetch mirror list differently dependent on platform
         let response = reqwest::get(url).await?;
-        let raw: Raw = response
-            .json()
-            .await
-            .expect("failed to parse response to json");
+        let raw: Raw = response.json().await?;
 
-        Ok(Self::from(raw))
+        Self::try_from(raw)
     }
 }
 
-impl From<Raw> for Status {
-    fn from(raw: Raw) -> Self {
+impl TryFrom<Raw> for Status {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: Raw) -> Result<Self, Self::Error> {
         let last_check: chrono::DateTime<chrono::Utc> = raw
             .last_check
             .parse()
-            .expect("failed to parse last_check field from raw status");
-        let urls: Vec<crate::Mirror> = raw.urls.into_iter().map(crate::Mirror::from).collect();
+            .context("Failed to parse last check")?;
+        let urls: Vec<crate::Mirror> = raw
+            .urls
+            .into_iter()
+            .map(crate::Mirror::try_from)
+            .collect::<Result<_, _>>()?;
 
-        Self {
+        Ok(Self {
             cutoff: raw.cutoff,
             last_check,
             num_checks: raw.num_checks,
             check_frequency: raw.check_frequency,
             urls: Mirrors(urls),
             version: raw.version,
-        }
+        })
     }
 }
