@@ -24,7 +24,10 @@ impl Builder {
         docker
             .ping()
             .await
-            .map_err(|e| anyhow!("Connection to Docker Socket failed: {}", e))?;
+            .map_err(|e| anyhow!("Connection to Docker Socket failed: {}
+If using podman remember to install 'podman-docker' to mimic the docker socket
+or if you run podman rootless to start the user service with 'systemctl --user start podman.socket'
+and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock' env variable is set to the correct docker socket!", e))?;
         Ok(docker)
     }
 

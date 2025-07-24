@@ -17,7 +17,7 @@ pub fn start_mirror_rank_job(
     _db: DatabaseConnection,
     _tx: Sender<Action>,
 ) -> anyhow::Result<JoinHandle<()>> {
-    let cron_str = env::var("MIRROR_RANK_SCHEDULE").unwrap_or("0 0 2 * * 0".to_string());
+    let cron_str = env::var("MIRROR_RANK_SCHEDULE").unwrap_or("0 0 2 * * 1".to_string());
     // This parses the string following this spec: https://www.quartz-scheduler.org/documentation/quartz-2.3.0/tutorials/crontrigger.html
     let schedule = Schedule::from_str(cron_str.as_str())?;
 
