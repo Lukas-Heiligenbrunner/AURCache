@@ -10,7 +10,7 @@ pub(crate) struct Raw {
     url: String,
     protocol: String,
     last_sync: Option<String>,
-    completion_pct: f64,
+    completion_pct: Option<f64>,
     duration_avg: Option<f64>,
     duration_stddev: Option<f64>,
     score: Option<f64>,
@@ -39,10 +39,10 @@ pub struct Mirror {
     pub last_sync: Option<chrono::DateTime<chrono::Utc>>,
 
     /// Completion PCT. Unknown what this means.
-    pub completion_pct: f64,
+    pub completion_pct: Option<f64>,
 
     /// The average duration. Unknown what this means.
-    pub duration_average: Option<f64>,
+    pub duration_avg: Option<f64>,
 
     /// Duration StdDev. Unknown what this means.
     pub duration_stddev: Option<f64>,
@@ -55,7 +55,7 @@ pub struct Mirror {
     pub active: bool,
 
     /// The country where the mirror resides in.
-    pub country: crate::Country,
+    pub country: Country,
 
     /// Whether or not this mirror has Arch Linux ISOs(?)
     pub isos: bool,
@@ -94,7 +94,7 @@ impl TryFrom<Raw> for Mirror {
             protocol,
             last_sync,
             completion_pct: raw.completion_pct,
-            duration_average: raw.duration_avg,
+            duration_avg: raw.duration_avg,
             duration_stddev: raw.duration_stddev,
             score: raw.score,
             active: raw.active,

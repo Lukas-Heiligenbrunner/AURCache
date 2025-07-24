@@ -51,8 +51,8 @@ impl Builder {
 
         let docker = match docker {
             Ok(docker) => docker,
-            Err(_) => {
-                bail!("Failed to establish docker connection");
+            Err(e) => {
+                bail!("{e}");
             }
         };
 
