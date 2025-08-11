@@ -5,9 +5,9 @@ resolver = "2"
 members = ["pacman-mirrors", "pacman-repo-utils", "aurcache"]
 
 [workspace.dependencies]
-tokio = "1.45.0"
+tokio = "1.47.1"
 anyhow = "1.0.98"
-reqwest = "0.12.15"
+reqwest = "0.12.22"
 log = "0.4.27"
 chrono = "0.4.41"
 serde = "1.0.219"
