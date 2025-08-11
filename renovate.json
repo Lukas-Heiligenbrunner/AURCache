@@ -1,10 +1,25 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "group:allNonMajor"
-  ],
   "automerge": false,
   "prCreation": "immediate",
   "rebaseWhen": "conflicted",
-  "dependencyDashboard": true
+  "dependencyDashboard": true,
+
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Rust (Cargo) non-major updates"
+    },
+    {
+      "matchManagers": ["pub"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "Dart (pub) non-major updates"
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "JavaScript (npm/yarn/pnpm) non-major updates"
+    }
+  ]
 }
