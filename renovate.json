@@ -8,6 +8,10 @@
   "packageRules": [
     {
       "matchManagers": ["cargo"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "matchManagers": ["cargo"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "Rust (Cargo) non-major updates"
     },
