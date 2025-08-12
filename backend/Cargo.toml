@@ -7,7 +7,7 @@ members = ["pacman-mirrors", "pacman-repo-utils", "aurcache"]
 [workspace.dependencies]
 tokio = "1.47.1"
 anyhow = "1.0.99"
-reqwest = "0.12.22"
+reqwest = "0.12.23"
 log = "0.4.27"
 chrono = "0.4.41"
 serde = "1.0.219"
