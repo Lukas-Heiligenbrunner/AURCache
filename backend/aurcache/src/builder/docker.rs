@@ -3,6 +3,7 @@ use crate::builder::build_mode::{BuildMode, get_build_mode};
 use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
+use crate::package::types::PackageType;
 use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use bollard::Docker;
@@ -179,11 +180,43 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             mounts.push(mnt);
         }
 
+        // Check if this is a custom package and add PKGBUILD mount
+        let package_type = *self.package_model.package_type.get()?;
+        if package_type == (PackageType::Custom as i32) {
+            if let Some(ref custom_pkgbuild_path) = *self.package_model.custom_pkgbuild_path.get()? {
+                // Mount the directory containing the PKGBUILD file
+                if let Some(parent_dir) = std::path::Path::new(custom_pkgbuild_path).parent() {
+                    let custom_mount = Mount {
+                        target: Some("/mnt/custom_pkgbuild".to_string()),
+                        source: Some(parent_dir.to_string_lossy().to_string()),
+                        typ: Some(MountTypeEnum::BIND),
+                        read_only: Some(true),
+                        ..Default::default()
+                    };
+                    mounts.push(custom_mount);
+                }
+            }
+        }
+
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
-        let build_cmd = format!(
-            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
-        );
+        
+        // Check if this is a custom package or AUR package
+        let package_type = *self.package_model.package_type.get()?;
+        
+        let build_cmd = if package_type == (PackageType::Custom as i32) {
+            // Custom package - use local PKGBUILD
+            let custom_build_dir = "/tmp/custom_build";
+            format!(
+                "sudo pacman-key --init && sudo pacman-key --populate archlinux && mkdir -p {custom_build_dir} && cp /mnt/custom_pkgbuild/PKGBUILD {custom_build_dir}/ && cd {custom_build_dir} && makepkg {build_flags} --dest {build_dir_base}"
+            )
+        } else {
+            // AUR package - use paru
+            format!(
+                "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
+            )
+        };
+        
         info!("Build command: {build_cmd}");
         let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
 
