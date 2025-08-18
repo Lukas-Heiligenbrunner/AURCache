@@ -7,7 +7,7 @@ class ExtendedPackage {
   final String name;
   @JsonKey(fromJson: _fromJson)
   final bool outofdate;
-  final int status, last_updated, first_submitted;
+  final int status, last_updated, first_submitted, package_type;
   final String latest_version, latest_aur_version, aur_url;
   final String? licenses, maintainer, project_url, description;
   final bool aur_flagged_outdated;
@@ -31,6 +31,7 @@ class ExtendedPackage {
     required this.aur_url,
     required this.project_url,
     required this.description,
+    required this.package_type,
   });
 
   factory ExtendedPackage.fromJson(Map<String, dynamic> json) =>
@@ -38,4 +39,7 @@ class ExtendedPackage {
   Map<String, dynamic> toJson() => _$ExtendedPackageToJson(this);
 
   static bool _fromJson(num value) => value != 0;
+  
+  String get packageTypeLabel => package_type == 0 ? 'AUR' : 'Custom';
+  bool get isCustom => package_type == 1;
 }

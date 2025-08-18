@@ -26,7 +26,8 @@ class PackagesTable extends ConsumerWidget {
         status: 0,
         latest_version: '1.0.0',
         latest_aur_version: '1.0.0',
-        outofdate: false);
+        outofdate: false,
+        package_type: 0);
 
     return Skeletonizer(
       child: PackagesTable(data: List.generate(20, (_) => demoBuild)),
@@ -50,6 +51,9 @@ class PackagesTable extends ConsumerWidget {
             ),
           DataColumn(
             label: Skeleton.keep(child: Text("Package Name")),
+          ),
+          DataColumn(
+            label: Skeleton.keep(child: Text("Type")),
           ),
           DataColumn(
             label: Skeleton.keep(child: Text("Version")),
@@ -83,6 +87,23 @@ class PackagesTable extends ConsumerWidget {
                   context.push("/package/${package.id}");
                 }
               : null,
+        ),
+        DataCell(
+          Container(
+            padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: package.isCustom ? Color(0xFF2E7D32) : Color(0xFF1976D2),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              package.packageTypeLabel,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
         ),
         DataCell(Text(package.latest_version.toString())),
         if (context.desktop)
