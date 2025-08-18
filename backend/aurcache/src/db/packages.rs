@@ -17,6 +17,8 @@ pub struct Model {
     pub latest_build: Option<i32>,
     pub build_flags: String,
     pub platforms: String,
+    pub package_type: i32,
+    pub custom_pkgbuild_path: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -3,7 +3,9 @@ use crate::db::migration::Order;
 use crate::db::packages;
 use crate::db::prelude::Packages;
 use crate::package::add::package_add;
+use crate::package::custom::{package_add_custom, package_update_custom};
 use crate::package::delete::package_delete;
+use crate::package::types::PackageType;
 use crate::package::update::package_update;
 use rocket::response::status::{BadRequest, Custom, NotFound};
 use rocket::serde::json::Json;
@@ -15,7 +17,7 @@ use crate::activity_log::package_delete_activity::PackageDeleteActivity;
 use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::api::models::authenticated::Authenticated;
 use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
-use crate::api::models::output::{AddBody, UpdateBody};
+use crate::api::models::output::{AddBody, AddCustomBody, UpdateBody, UpdateCustomBody};
 use crate::aur::api::get_package_info;
 use crate::db::activities::ActivityType;
 use pacman_mirrors::platforms::Platform;
@@ -30,8 +32,10 @@ use utoipa::OpenApi;
 #[derive(OpenApi)]
 #[openapi(paths(
     package_add_endpoint,
+    package_add_custom_endpoint,
     package_update_entity_endpoint,
     package_update_endpoint,
+    package_update_custom_endpoint,
     package_del,
     package_list,
     get_package
@@ -64,6 +68,53 @@ pub async fn package_add_endpoint(
     package_add(
         db,
         input.name.clone(),
+        tx,
+        platforms,
+        input.build_flags.clone(),
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageAddActivity {
+            package: input.name.clone(),
+        },
+        ActivityType::AddPackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+    Ok(())
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Add new Custom Package"),
+    )
+)]
+#[post("/package/custom", data = "<input>")]
+pub async fn package_add_custom_endpoint(
+    db: &State<DatabaseConnection>,
+    input: Json<AddCustomBody>,
+    tx: &State<Sender<Action>>,
+    a: Authenticated,
+    al: &State<ActivityLog>,
+) -> Result<(), BadRequest<String>> {
+    let platforms = match input.platforms.clone() {
+        None => None,
+        Some(v) => Some(
+            v.into_iter()
+                .map(|s| Platform::from_str(&s).ok())
+                .collect::<Option<Vec<Platform>>>()
+                .ok_or(BadRequest("Invalid Platform name".to_string()))?,
+        ),
+    };
+
+    package_add_custom(
+        db,
+        input.name.clone(),
+        input.pkgbuild_content.clone(),
+        input.version.clone(),
         tx,
         platforms,
         input.build_flags.clone(),
@@ -119,6 +170,8 @@ pub async fn package_update_entity_endpoint(
             .clone()
             .map(|v| Set(v.join(";")))
             .unwrap_or(NotSet),
+        package_type: NotSet,
+        custom_pkgbuild_path: NotSet,
     };
 
     // Execute the update query
@@ -164,6 +217,53 @@ pub async fn package_update_endpoint(
         PackageUpdateActivity {
             package: pkg_model.name,
             forced: input.force,
+        },
+        ActivityType::UpdatePackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+    Ok(pkg_update)
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Update custom package with new PKGBUILD"),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
+#[post("/package/<id>/update-custom", data = "<input>")]
+pub async fn package_update_custom_endpoint(
+    db: &State<DatabaseConnection>,
+    id: i32,
+    input: Json<UpdateCustomBody>,
+    tx: &State<Sender<Action>>,
+    a: Authenticated,
+    al: &State<ActivityLog>,
+) -> Result<Json<Vec<i32>>, BadRequest<String>> {
+    let db = db as &DatabaseConnection;
+
+    let pkg_model: packages::Model = Packages::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?
+        .ok_or(BadRequest("id not found".to_string()))?;
+
+    if pkg_model.package_type != (PackageType::Custom as i32) {
+        return Err(BadRequest("Package is not a custom package".to_string()));
+    }
+
+    let pkg_update = package_update_custom(db, id, input.pkgbuild_content.clone(), input.version.clone(), tx)
+        .await
+        .map(Json)
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageUpdateActivity {
+            package: pkg_model.name,
+            forced: false,
         },
         ActivityType::UpdatePackage,
         a.username,
@@ -238,6 +338,7 @@ pub async fn package_list(
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
         .column_as(packages::Column::Version, "latest_version")
+        .column(packages::Column::PackageType)
         .order_by(packages::Column::OutOfDate, Order::Desc)
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
@@ -275,33 +376,58 @@ pub async fn get_package(
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
         .ok_or(Custom(Status::NotFound, "ID not found".to_string()))?;
 
-    let aur_info = get_package_info(&pkg.name)
-        .await
-        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
-        .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
+    let ext_pkg = if pkg.package_type == (PackageType::Custom as i32) {
+        // Custom package - no AUR info
+        ExtendedPackageModel {
+            id: pkg.id,
+            name: pkg.name,
+            status: pkg.status,
+            outofdate: pkg.out_of_date,
+            latest_version: pkg.version,
+            latest_aur_version: "N/A (Custom)".to_string(),
+            last_updated: 0,
+            first_submitted: 0,
+            licenses: None,
+            maintainer: None,
+            aur_flagged_outdated: false,
+            selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
+            selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
+            aur_url: "N/A (Custom Package)".to_string(),
+            project_url: None,
+            description: Some("Custom PKGBUILD package".to_string()),
+            package_type: pkg.package_type,
+        }
+    } else {
+        // AUR package - fetch AUR info
+        let aur_info = get_package_info(&pkg.name)
+            .await
+            .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
+            .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
 
-    let aur_url = format!(
-        "https://aur.archlinux.org/packages/{}",
-        aur_info.package_base
-    );
+        let aur_url = format!(
+            "https://aur.archlinux.org/packages/{}",
+            aur_info.package_base
+        );
 
-    let ext_pkg = ExtendedPackageModel {
-        id: pkg.id,
-        name: pkg.name,
-        status: pkg.status,
-        outofdate: pkg.out_of_date,
-        latest_version: pkg.version,
-        latest_aur_version: aur_info.version,
-        last_updated: aur_info.last_modified,
-        first_submitted: aur_info.first_submitted,
-        licenses: aur_info.license.map(|l| l.join(", ")),
-        maintainer: aur_info.maintainer,
-        aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
-        selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
-        selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
-        aur_url,
-        project_url: aur_info.url,
-        description: aur_info.description,
+        ExtendedPackageModel {
+            id: pkg.id,
+            name: pkg.name,
+            status: pkg.status,
+            outofdate: pkg.out_of_date,
+            latest_version: pkg.version,
+            latest_aur_version: aur_info.version,
+            last_updated: aur_info.last_modified,
+            first_submitted: aur_info.first_submitted,
+            licenses: aur_info.license.map(|l| l.join(", ")),
+            maintainer: aur_info.maintainer,
+            aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+            selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
+            selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
+            aur_url,
+            project_url: aur_info.url,
+            description: aur_info.description,
+            package_type: pkg.package_type,
+        }
     };
     Ok(Json(ext_pkg))
 }
