@@ -205,10 +205,10 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let package_type = *self.package_model.package_type.get()?;
         
         let build_cmd = if package_type == (PackageType::Custom as i32) {
-            // Custom package - use local PKGBUILD
+            // Custom package - use paru -B to handle AUR dependencies
             let custom_build_dir = "/tmp/custom_build";
             format!(
-                "sudo pacman-key --init && sudo pacman-key --populate archlinux && mkdir -p {custom_build_dir} && cp /mnt/custom_pkgbuild/PKGBUILD {custom_build_dir}/ && cd {custom_build_dir} && makepkg {build_flags} --dest {build_dir_base}"
+                "sudo pacman-key --init && sudo pacman-key --populate archlinux && mkdir -p {custom_build_dir} && cp /mnt/custom_pkgbuild/PKGBUILD {custom_build_dir}/ && paru -B {build_flags} {custom_build_dir}"
             )
         } else {
             // AUR package - use paru
