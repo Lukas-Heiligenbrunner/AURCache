@@ -52,9 +52,41 @@ extension PackagesAPI on ApiClient {
     print(resp.data);
   }
 
+  Future<void> addCustomPackage({
+    required String name,
+    required String version,
+    required String pkgbuildContent,
+    required List<String> selectedArchs,
+    List<String>? buildFlags,
+  }) async {
+    final resp = await getRawClient().post("/package/custom", data: {
+      'name': name,
+      'version': version,
+      'pkgbuild_content': pkgbuildContent,
+      'platforms': selectedArchs,
+      'build_flags': buildFlags,
+    });
+    print(resp.data);
+  }
+
   Future<List<int>> updatePackage({bool force = false, required int id}) async {
     final resp = await getRawClient()
         .post("/package/$id/update", data: {'force': force});
+    print(resp.data);
+    final List<int> ids =
+        (resp.data as List).map((e) => e as int).toList(growable: false);
+    return ids;
+  }
+
+  Future<List<int>> updateCustomPackage({
+    required int id,
+    required String version,
+    required String pkgbuildContent,
+  }) async {
+    final resp = await getRawClient().post("/package/$id/update-custom", data: {
+      'version': version,
+      'pkgbuild_content': pkgbuildContent,
+    });
     print(resp.data);
     final List<int> ids =
         (resp.data as List).map((e) => e as int).toList(growable: false);

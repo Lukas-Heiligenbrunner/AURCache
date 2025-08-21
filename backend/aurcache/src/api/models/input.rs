@@ -26,6 +26,7 @@ pub struct SimplePackageModel {
     pub outofdate: i32,
     pub latest_version: Option<String>,
     pub latest_aur_version: String,
+    pub package_type: i32,
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize, Default)]
@@ -46,6 +47,7 @@ pub struct ExtendedPackageModel {
     pub aur_url: String,
     pub project_url: Option<String>,
     pub description: Option<String>,
+    pub package_type: i32,
 }
 
 #[derive(FromQueryResult, Deserialize, ToSchema, Serialize, Default)]

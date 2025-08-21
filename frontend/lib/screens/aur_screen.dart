@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:aurcache/components/aur_search_table.dart';
+import 'package:aurcache/components/custom_package_form.dart';
 import 'package:aurcache/providers/aur.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
@@ -17,14 +18,16 @@ class AurScreen extends StatefulWidget {
   State<AurScreen> createState() => _AurScreenState();
 }
 
-class _AurScreenState extends State<AurScreen> {
+class _AurScreenState extends State<AurScreen> with TickerProviderStateMixin {
   TextEditingController controller = TextEditingController();
   String query = "";
   Timer? timer;
+  late TabController _tabController;
 
   @override
   void initState() {
     super.initState();
+    _tabController = TabController(length: 2, vsync: this);
     if (widget.initalQuery != null) {
       query = widget.initalQuery!;
       controller.text = widget.initalQuery!;
@@ -32,10 +35,17 @@ class _AurScreenState extends State<AurScreen> {
   }
 
   @override
+  void dispose() {
+    _tabController.dispose();
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("AUR"),
+        title: const Text("Package Management"),
         leading: context.mobile
             ? IconButton(
                 icon: const Icon(Icons.menu),
@@ -44,70 +54,103 @@ class _AurScreenState extends State<AurScreen> {
                 },
               )
             : null,
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: "AUR Packages"),
+            Tab(text: "Custom PKGBUILD"),
+          ],
+        ),
       ),
-      body: Padding(
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildAurTab(),
+          _buildCustomTab(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAurTab() {
+    return Padding(
+      padding: const EdgeInsets.all(defaultPadding),
+      child: Container(
         padding: const EdgeInsets.all(defaultPadding),
-        child: Container(
-          padding: const EdgeInsets.all(defaultPadding),
-          decoration: const BoxDecoration(
-            color: secondaryColor,
-            borderRadius: BorderRadius.all(Radius.circular(10)),
-          ),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "AUR Packages",
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const Text("Search:"),
-                TextField(
-                    controller: controller,
-                    onChanged: (value) {
-                      // cancel old timer if active
-                      timer?.cancel();
-                      // schedule new timer
-                      timer = Timer(const Duration(milliseconds: 300), () {
-                        setState(() {
-                          query = value;
-                        });
+        decoration: const BoxDecoration(
+          color: secondaryColor,
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "AUR Packages",
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const Text("Search:"),
+              TextField(
+                  controller: controller,
+                  onChanged: (value) {
+                    // cancel old timer if active
+                    timer?.cancel();
+                    // schedule new timer
+                    timer = Timer(const Duration(milliseconds: 300), () {
+                      setState(() {
+                        query = value;
                       });
-                    },
-                    decoration:
-                        const InputDecoration(hintText: "Type to search...")),
-                SizedBox(
-                  width: double.infinity,
-                  child: APIBuilder(
-                    key: ValueKey(query),
-                    onLoad: () => Center(
-                      child: Column(
-                        children: [
-                          const SizedBox(
-                            height: 15,
-                          ),
-                          query.length < 3
-                              ? const Text("Type to search for an AUR package")
-                              : const Text("loading")
-                        ],
-                      ),
+                    });
+                  },
+                  decoration:
+                      const InputDecoration(hintText: "Type to search...")),
+              SizedBox(
+                width: double.infinity,
+                child: APIBuilder(
+                  key: ValueKey(query),
+                  onLoad: () => Center(
+                    child: Column(
+                      children: [
+                        const SizedBox(
+                          height: 15,
+                        ),
+                        query.length < 3
+                            ? const Text("Type to search for an AUR package")
+                            : const Text("loading")
+                      ],
                     ),
-                    onData: (data) => (query.length < 3 && data.isEmpty)
-                        ? Column(
-                            children: [
-                              const SizedBox(
-                                height: 15,
-                              ),
-                              Text("Type to search for an AUR package")
-                            ],
-                          )
-                        : AurSearchTable(data: data),
-                    provider: getAurPackagesProvider(query),
                   ),
-                )
-              ],
-            ),
+                  onData: (data) => (query.length < 3 && data.isEmpty)
+                      ? Column(
+                          children: [
+                            const SizedBox(
+                              height: 15,
+                            ),
+                            Text("Type to search for an AUR package")
+                          ],
+                        )
+                      : AurSearchTable(data: data),
+                  provider: getAurPackagesProvider(query),
+                ),
+              )
+            ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCustomTab() {
+    return Padding(
+      padding: const EdgeInsets.all(defaultPadding),
+      child: Container(
+        padding: const EdgeInsets.all(defaultPadding),
+        decoration: const BoxDecoration(
+          color: secondaryColor,
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+        ),
+        child: const SingleChildScrollView(
+          child: CustomPackageForm(),
         ),
       ),
     );
