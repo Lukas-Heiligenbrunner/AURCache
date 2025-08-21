@@ -2232,6 +2232,7 @@ name = "pacman-mirrors"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "backon",
  "chrono",
  "log",
  "reqwest 0.12.22",
