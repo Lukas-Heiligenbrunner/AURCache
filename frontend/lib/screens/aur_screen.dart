@@ -93,16 +93,17 @@ class _AurScreenState extends State<AurScreen> {
                         ],
                       ),
                     ),
-                    onData: (List<AurPackage> data) => (query.length < 3 && data.isEmpty)
-                        ? Column(
-                            children: [
-                              const SizedBox(
-                                height: 15,
-                              ),
-                              Text("Type to search for an AUR package")
-                            ],
-                          )
-                        : AurSearchTable(data: data),
+                    onData: (List<AurPackage> data) =>
+                        (query.length < 3 && data.isEmpty)
+                            ? Column(
+                                children: [
+                                  const SizedBox(
+                                    height: 15,
+                                  ),
+                                  Text("Type to search for an AUR package")
+                                ],
+                              )
+                            : AurSearchTable(data: data),
                     provider: getAurPackagesProvider(query),
                   ),
                 )

@@ -49,8 +49,8 @@ class _APIBuilderState<T> extends ConsumerState<APIBuilder<T>> {
     super.initState();
 
     if (widget.interval != null) {
-      timer = Timer.periodic(
-          widget.interval!, (_) => ref.invalidate(widget.provider as ProviderOrFamily));
+      timer = Timer.periodic(widget.interval!,
+          (_) => ref.invalidate(widget.provider as ProviderOrFamily));
     }
   }
 
