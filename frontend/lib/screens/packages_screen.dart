@@ -1,4 +1,5 @@
 import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/models/simple_packge.dart';
 import 'package:flutter/material.dart';
 
 import '../components/api/api_builder.dart';
@@ -33,7 +34,7 @@ class PackagesScreen extends StatelessWidget {
                   child: APIBuilder(
                       interval: const Duration(seconds: 10),
                       onLoad: () => const Text("no data"),
-                      onData: (data) {
+                      onData: (List<SimplePackage> data) {
                         return PackagesTable(data: data);
                       },
                       provider: listPackagesProvider()),

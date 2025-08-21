@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import '../../constants/color_constants.dart';
+import '../../models/user_info.dart';
 import '../../utils/responsive.dart';
 
 class Header extends StatelessWidget {
@@ -33,7 +34,7 @@ class Header extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleLarge,
                   ));
                 },
-                onData: (data) {
+                onData: (UserInfo data) {
                   return Text(
                     data.username == null
                         ? "Hi, Arch User :)"

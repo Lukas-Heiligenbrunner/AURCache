@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../components/api/api_builder.dart';
 import '../constants/color_constants.dart';
+import '../models/build.dart';
 
 class BuildsScreen extends StatelessWidget {
   const BuildsScreen({super.key});
@@ -45,7 +46,7 @@ class BuildsScreen extends StatelessWidget {
                   child: APIBuilder(
                     interval: const Duration(seconds: 10),
                     onLoad: () => const Text("no data"),
-                    onData: (data) {
+                    onData: (List<Build> data) {
                       if (data.isEmpty) {
                         return const TableInfo(title: "You have no builds yet");
                       } else {
