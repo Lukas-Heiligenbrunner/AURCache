@@ -3,7 +3,11 @@
 use crate::mirror::Mirrors;
 use crate::platforms::Platform;
 use anyhow::{Context, bail};
+use backon::{FibonacciBuilder, Retryable};
+use reqwest::Client;
+use reqwest::header::ACCEPT;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// Raw, typed form of the JSON output given by performing a GET request on [`Status::URL`](Status::URL).
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,7 +49,11 @@ impl Status {
     /// Get the status from [`Status::URL`](Self::URL).
     pub async fn get_from_default_url(target_platform: Platform) -> anyhow::Result<Self> {
         match target_platform {
-            Platform::X86_64 => Self::get_from_url(Self::URL_X86_64, target_platform).await,
+            Platform::X86_64 => {
+                (|| async { Self::get_from_url(Self::URL_X86_64, target_platform).await })
+                    .retry(FibonacciBuilder::default())
+                    .await
+            }
             Platform::Aarch64 => bail!("Aarch64 rank mirroring not supported"),
             Platform::Armv7h => bail!("ARM32 rank mirroring not supported"),
         }
@@ -54,8 +62,20 @@ impl Status {
     /// Get the status from a given url.
     pub async fn get_from_url(url: &str, _platform: Platform) -> anyhow::Result<Self> {
         // todo we need to fetch mirror list differently dependent on platform
-        let response = reqwest::get(url).await?;
-        let raw: Raw = response.json().await?;
+        let client = Client::builder()
+            .user_agent("Mozilla/5.0 (compatible; AURCache/1.0;)")
+            .http1_only()
+            .timeout(Duration::from_secs(30))
+            .build()?;
+
+        let res = client
+            .get(url)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let raw: Raw = res.json().await?;
 
         Self::try_from(raw)
     }

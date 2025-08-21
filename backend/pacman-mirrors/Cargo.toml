@@ -8,5 +8,6 @@ reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 anyhow = {workspace = true}
 log = {workspace = true}
+backon = {workspace = true}
 
 url = { version = "2.5.4", features = ["serde"] }
