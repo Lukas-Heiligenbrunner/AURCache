@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:aurcache/components/aur_search_table.dart';
+import 'package:aurcache/models/aur_package.dart';
 import 'package:aurcache/providers/aur.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
@@ -92,16 +93,17 @@ class _AurScreenState extends State<AurScreen> {
                         ],
                       ),
                     ),
-                    onData: (data) => (query.length < 3 && data.isEmpty)
-                        ? Column(
-                            children: [
-                              const SizedBox(
-                                height: 15,
-                              ),
-                              Text("Type to search for an AUR package")
-                            ],
-                          )
-                        : AurSearchTable(data: data),
+                    onData: (List<AurPackage> data) =>
+                        (query.length < 3 && data.isEmpty)
+                            ? Column(
+                                children: [
+                                  const SizedBox(
+                                    height: 15,
+                                  ),
+                                  Text("Type to search for an AUR package")
+                                ],
+                              )
+                            : AurSearchTable(data: data),
                     provider: getAurPackagesProvider(query),
                   ),
                 )

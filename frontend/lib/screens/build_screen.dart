@@ -36,7 +36,7 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
       body: APIBuilder(
         interval: const Duration(seconds: 10),
         onLoad: () => const Text("loading"),
-        onData: (buildData) {
+        onData: (Build buildData) {
           return Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [

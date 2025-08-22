@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:toastification/toastification.dart';
 
 class APIBuilder<T> extends ConsumerStatefulWidget {
@@ -16,7 +17,7 @@ class APIBuilder<T> extends ConsumerStatefulWidget {
 
   final Widget Function() onLoad;
   final Widget Function(T data) onData;
-  final AutoDisposeFutureProvider<T> provider;
+  final ProviderListenable<AsyncValue<T>> provider;
 
   @override
   ConsumerState<APIBuilder<T>> createState() => _APIBuilderState<T>();
@@ -48,8 +49,8 @@ class _APIBuilderState<T> extends ConsumerState<APIBuilder<T>> {
     super.initState();
 
     if (widget.interval != null) {
-      timer = Timer.periodic(
-          widget.interval!, (_) => ref.invalidate(widget.provider));
+      timer = Timer.periodic(widget.interval!,
+          (_) => ref.invalidate(widget.provider as ProviderOrFamily));
     }
   }
 

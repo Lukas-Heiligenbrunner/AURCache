@@ -10,6 +10,7 @@ import 'package:toastification/toastification.dart';
 
 import '../api/API.dart';
 import '../components/api/api_builder.dart';
+import '../models/extended_package.dart';
 
 class Packagesettingsscreen extends ConsumerStatefulWidget {
   const Packagesettingsscreen({super.key, required this.pkgID});
@@ -61,7 +62,7 @@ class _PackagesettingsscreenState extends ConsumerState<Packagesettingsscreen> {
       ),
       body: APIBuilder(
         onLoad: () => const Text("loading"),
-        onData: (pkg) {
+        onData: (ExtendedPackage pkg) {
           buildFlags = pkg.selected_build_flags;
           buildPlatforms = pkg.selected_platforms;
 

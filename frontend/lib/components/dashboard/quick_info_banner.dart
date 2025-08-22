@@ -92,7 +92,7 @@ class QuickInfoBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return APIBuilder(
         interval: Duration(minutes: 1),
-        onData: (stats) {
+        onData: (Stats stats) {
           final items = _buildElements(stats, context);
           return _buildBanner(items, false);
         },

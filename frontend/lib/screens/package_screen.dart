@@ -13,6 +13,7 @@ import '../components/api/api_builder.dart';
 import '../components/builds_table.dart';
 import '../components/confirm_popup.dart';
 import '../constants/color_constants.dart';
+import '../models/build.dart';
 import '../providers/activity_log.dart';
 import '../providers/statistics.dart';
 
@@ -33,7 +34,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
       body: APIBuilder(
         interval: Duration(minutes: 1),
         onLoad: () => const Text("loading"),
-        onData: (pkg) {
+        onData: (ExtendedPackage pkg) {
           return Padding(
             padding: const EdgeInsets.all(defaultPadding),
             child: Column(
@@ -310,7 +311,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
             ),
             APIBuilder(
               interval: const Duration(seconds: 30),
-              onData: (data) {
+              onData: (List<Build> data) {
                 return BuildsTable(data: data);
               },
               onLoad: () => const Text("no data"),

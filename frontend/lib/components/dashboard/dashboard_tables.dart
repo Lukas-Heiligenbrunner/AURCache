@@ -1,5 +1,7 @@
 import 'package:aurcache/components/dashboard/tile_container.dart';
 import 'package:aurcache/components/packages_table.dart';
+import 'package:aurcache/models/build.dart';
+import 'package:aurcache/models/simple_packge.dart';
 import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/utils/responsive.dart';
@@ -92,7 +94,7 @@ class _DashboardTablesState extends State<DashboardTables> {
         // this should be the landing page with first infos
         // so we refresh a bit more often
         interval: Duration(seconds: 30),
-        onData: (data) {
+        onData: (List<SimplePackage> data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no packages yet");
           } else {
@@ -110,7 +112,7 @@ class _DashboardTablesState extends State<DashboardTables> {
       return APIBuilder(
         interval: Duration(minutes: 1),
         onLoad: () => BuildsTable.loading(),
-        onData: (data) {
+        onData: (List<Build> data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no builds yet");
           } else {
