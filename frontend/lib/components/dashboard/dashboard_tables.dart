@@ -6,7 +6,6 @@ import 'package:aurcache/providers/builds.dart';
 import 'package:aurcache/providers/packages.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:toggle_switch/toggle_switch.dart';
 import '../../constants/color_constants.dart';
