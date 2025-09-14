@@ -10,4 +10,4 @@ anyhow = {workspace = true}
 log = {workspace = true}
 backon = {workspace = true}
 
-url = { version = "2.5.6", features = ["serde"] }
+url = { version = "2.5.7", features = ["serde"] }
