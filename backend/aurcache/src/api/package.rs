@@ -119,6 +119,9 @@ pub async fn package_update_entity_endpoint(
             .clone()
             .map(|v| Set(v.join(";")))
             .unwrap_or(NotSet),
+        // todo decide if source updates should be even possible
+        source_type: NotSet,
+        source_data: NotSet,
     };
 
     // Execute the update query
