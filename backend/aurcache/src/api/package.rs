@@ -26,6 +26,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
 use utoipa::OpenApi;
+use crate::db::packages::SourceType;
 
 #[derive(OpenApi)]
 #[openapi(paths(
@@ -67,6 +68,7 @@ pub async fn package_add_endpoint(
         tx,
         platforms,
         input.build_flags.clone(),
+        SourceType::Aur // todo dynamic
     )
     .await
     .map_err(|e| BadRequest(e.to_string()))?;
