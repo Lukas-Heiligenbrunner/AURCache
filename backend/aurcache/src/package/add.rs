@@ -9,6 +9,7 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, Transactio
 use sea_orm::{ColumnTrait, TryIntoModel};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
+use crate::db::packages::{SourceData, SourceType};
 
 pub async fn package_add(
     db: &DatabaseConnection,
@@ -16,6 +17,7 @@ pub async fn package_add(
     tx: &Sender<Action>,
     platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
+    source_type: SourceType
 ) -> anyhow::Result<()> {
     let platforms = match platforms {
         None => vec![Platform::X86_64],
@@ -45,24 +47,89 @@ pub async fn package_add(
         bail!("Package already exists");
     }
 
-    let pkg = get_package_info(pkg_name)
-        .await?
-        .ok_or(anyhow!("Package not found"))?;
+    let mut new_package = match source_type {
+        SourceType::Aur => {
+            let pkg = get_package_info(pkg_name)
+                .await?
+                .ok_or(anyhow!("Package not found"))?;
 
-    let new_package = packages::ActiveModel {
-        name: Set(pkg_name.to_string()),
-        status: Set(BuildStates::ENQUEUED_BUILD),
-        version: Set(Some(pkg.version.clone())),
-        latest_aur_version: Set(Option::from(pkg.version.clone())),
-        platforms: Set(platforms
-            .iter()
-            .map(|platform| platform.as_str())
-            .collect::<Vec<_>>()
-            .join(";")),
-        build_flags: Set(build_flags.join(";")),
-        ..Default::default()
+            let source_data = SourceData::Aur {};
+
+            let new_package = packages::ActiveModel {
+                name: Set(pkg_name.to_string()),
+                status: Set(BuildStates::ENQUEUED_BUILD),
+                version: Set(Some(pkg.version.clone())),
+                latest_aur_version: Set(Option::from(pkg.version.clone())),
+                platforms: Set(platforms
+                    .iter()
+                    .map(|platform| platform.as_str())
+                    .collect::<Vec<_>>()
+                    .join(";")),
+                build_flags: Set(build_flags.join(";")),
+                source_type: Set(source_type),
+                source_data: Set(source_data.to_string()),
+                ..Default::default()
+            };
+            let mut new_package = new_package.save(db).await?;
+            new_package
+        }
+        SourceType::Git => {
+            let gitref = "#42" ;
+            let source_data = SourceData::Git {
+                // todo get real infos
+                url: "".to_string(),
+                r#ref: gitref.to_string(),
+            };
+
+            let new_package = packages::ActiveModel {
+                name: Set(pkg_name.to_string()),
+                status: Set(BuildStates::ENQUEUED_BUILD),
+                version: Set(Some(gitref.to_string())),
+                latest_aur_version: Set(Some(gitref.to_string())),
+                platforms: Set(platforms
+                    .iter()
+                    .map(|platform| platform.as_str())
+                    .collect::<Vec<_>>()
+                    .join(";")),
+                build_flags: Set(build_flags.join(";")),
+                source_type: Set(source_type),
+                source_data: Set(source_data.to_string()),
+                ..Default::default()
+            };
+            let mut new_package = new_package.save(db).await?;
+            new_package
+        }
+        SourceType::Upload => {
+            let source_data = SourceData::Upload {
+                // todo get blob from upload
+                archive: vec![],
+            };
+
+            // todo parse zip and its pkgbuild to get a version
+            let version = "1.0.0";
+
+            let new_package = packages::ActiveModel {
+                name: Set(pkg_name.to_string()),
+                status: Set(BuildStates::ENQUEUED_BUILD),
+                // todo change to real versions
+                version: Set(Some(version.to_string())),
+                latest_aur_version: Set(Some(version.to_string())),
+                platforms: Set(platforms
+                    .iter()
+                    .map(|platform| platform.as_str())
+                    .collect::<Vec<_>>()
+                    .join(";")),
+                build_flags: Set(build_flags.join(";")),
+                source_type: Set(source_type),
+                source_data: Set(source_data.to_string()),
+                ..Default::default()
+            };
+            let mut new_package = new_package.save(db).await?;
+            new_package
+        }
     };
-    let mut new_package = new_package.save(db).await?;
+
+
 
     // trigger new build for each platform
     for platform in platforms {
