@@ -26,7 +26,7 @@ pub async fn package_add(
     };
     let build_flags = build_flags.unwrap_or_else(|| {
         vec![
-            "-Syu".to_string(),
+            "-B".to_string(),
             "--noconfirm".to_string(),
             "--noprogressbar".to_string(),
             "--color never".to_string(),

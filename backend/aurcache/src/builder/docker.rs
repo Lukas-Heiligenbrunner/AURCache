@@ -123,12 +123,12 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
         // create new docker container for current build
-        let build_dir_base = "/var/cache/makepkg/pkg";
-        let host_build_path_docker = match get_build_mode() {
+        let host_build_dir = match get_build_mode() {
             BuildMode::DinD(cfg) => cfg.aurcache_build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
-        let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];
+        let container_build_dir = "/build";
+        let mountpoints = vec![format!("{}/{name}:{}", host_build_dir, container_build_dir)];
 
         let mut mounts = vec![];
 
@@ -179,13 +179,22 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             mounts.push(mnt);
         }
 
-        let (makepkg_config, makepkg_config_path) =
-            create_makepkg_config(name.clone(), build_dir_base)?;
+        let (makepkg_config, makepkg_config_path) = create_makepkg_config(container_build_dir)?;
+
+        // Note that `paru -G {name}` will download the pkgbase of {name},
+        // which might be a different name if it's a split package.
         let build_cmd = format!(
-            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
+            "
+                cd {container_build_dir}
+                paru -G {name}
+                paru {build_flags} *
+            "
         );
         info!("Build command: {build_cmd}");
-        let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
+        let cmd = format!(
+            "cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF
+            {build_cmd}"
+        );
 
         let (cpu_limit, memory_limit) = limits_from_env();
 
@@ -194,23 +203,16 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_id = self.build_model.id.get()?;
         let container_name = format!("aurcache_build_{filtered_name}_{build_id}");
+        let auto_remove = cfg!(not(debug_assertions));
         let conf = ContainerCreateBody {
             image: Some(image_name.to_string()),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
             open_stdin: Some(false),
             user: Some("ab".to_string()),
-            cmd: Some(vec![
-                "sh".to_string(),
-                "-l".to_string(),
-                "-c".to_string(),
-                cmd,
-            ]),
+            cmd: Some(vec!["sh".to_string(), "-lec".to_string(), cmd]),
             host_config: Some(HostConfig {
-                #[cfg(debug_assertions)]
-                auto_remove: Some(false),
-                #[cfg(not(debug_assertions))]
-                auto_remove: Some(true),
+                auto_remove: Some(auto_remove),
                 nano_cpus: Some(cpu_limit as i64),
                 memory_swap: Some(memory_limit),
                 binds: Some(mountpoints),
