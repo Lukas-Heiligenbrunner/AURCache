@@ -18,6 +18,7 @@ use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimpleP
 use crate::api::models::output::{AddBody, UpdateBody};
 use crate::aur::api::get_package_info;
 use crate::db::activities::ActivityType;
+use crate::db::packages::SourceType;
 use pacman_mirrors::platforms::Platform;
 use rocket::http::Status;
 use rocket::{State, delete, get, patch, post};
@@ -67,6 +68,7 @@ pub async fn package_add_endpoint(
         tx,
         platforms,
         input.build_flags.clone(),
+        SourceType::Aur, // todo dynamic
     )
     .await
     .map_err(|e| BadRequest(e.to_string()))?;
@@ -119,6 +121,9 @@ pub async fn package_update_entity_endpoint(
             .clone()
             .map(|v| Set(v.join(";")))
             .unwrap_or(NotSet),
+        // todo decide if source updates should be even possible
+        source_type: NotSet,
+        source_data: NotSet,
     };
 
     // Execute the update query
