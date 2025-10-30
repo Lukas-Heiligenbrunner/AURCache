@@ -47,6 +47,12 @@ pub async fn package_add(
         bail!("Package already exists");
     }
 
+    let platforms_str = platforms
+        .iter()
+        .map(|platform| platform.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+
     let mut new_package = match source_type {
         SourceType::Aur => {
             let pkg = get_package_info(pkg_name)
@@ -60,18 +66,13 @@ pub async fn package_add(
                 status: Set(BuildStates::ENQUEUED_BUILD),
                 version: Set(Some(pkg.version.clone())),
                 latest_aur_version: Set(Option::from(pkg.version.clone())),
-                platforms: Set(platforms
-                    .iter()
-                    .map(|platform| platform.as_str())
-                    .collect::<Vec<_>>()
-                    .join(";")),
+                platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            let mut new_package = new_package.save(db).await?;
-            new_package
+            new_package.save(db).await?
         }
         SourceType::Git => {
             let gitref = "#42" ;
@@ -86,18 +87,13 @@ pub async fn package_add(
                 status: Set(BuildStates::ENQUEUED_BUILD),
                 version: Set(Some(gitref.to_string())),
                 latest_aur_version: Set(Some(gitref.to_string())),
-                platforms: Set(platforms
-                    .iter()
-                    .map(|platform| platform.as_str())
-                    .collect::<Vec<_>>()
-                    .join(";")),
+                platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            let mut new_package = new_package.save(db).await?;
-            new_package
+            new_package.save(db).await?
         }
         SourceType::Upload => {
             let source_data = SourceData::Upload {
@@ -114,22 +110,15 @@ pub async fn package_add(
                 // todo change to real versions
                 version: Set(Some(version.to_string())),
                 latest_aur_version: Set(Some(version.to_string())),
-                platforms: Set(platforms
-                    .iter()
-                    .map(|platform| platform.as_str())
-                    .collect::<Vec<_>>()
-                    .join(";")),
+                platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            let mut new_package = new_package.save(db).await?;
-            new_package
+            new_package.save(db).await?
         }
     };
-
-
 
     // trigger new build for each platform
     for platform in platforms {
@@ -145,7 +134,7 @@ pub async fn package_add(
             start_time: Set(Some(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap()
+                    .expect("Duration must exist")
                     .as_secs() as i64,
             )),
             ..Default::default()

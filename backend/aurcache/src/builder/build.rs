@@ -67,7 +67,7 @@ impl Builder {
     }
 
     pub async fn build(&mut self) -> anyhow::Result<()> {
-        println!("Preparing build #{:?}", self.build_model);
+        info!("Preparing build #{:?}", self.build_model);
         debug!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 

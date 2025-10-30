@@ -4,7 +4,7 @@ use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
 use crate::utils::db::ActiveValueExt;
-use anyhow::anyhow;
+use anyhow::{anyhow};
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
@@ -17,6 +17,8 @@ use itertools::Itertools;
 use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use std::collections::HashMap;
+use std::str::FromStr;
+use crate::db::packages::SourceData;
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -181,9 +183,21 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
-        let build_cmd = format!(
-            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
-        );
+
+        let build_cmd = match SourceData::from_str(self.package_model.source_data.get()?)? {
+            SourceData::Aur { .. } => {
+                format!("sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}")
+            }
+            SourceData::Git { .. } => {
+                // todo clone git repo into container with specified ref
+                todo!()
+            }
+            SourceData::Upload { .. } => {
+                // todo unpack zip and store it in build container dir
+                todo!()
+            }
+        };
+
         info!("Build command: {build_cmd}");
         let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
 
