@@ -18,6 +18,7 @@ use crate::api::models::input::{ExtendedPackageModel, PackagePatchModel, SimpleP
 use crate::api::models::output::{AddBody, UpdateBody};
 use crate::aur::api::get_package_info;
 use crate::db::activities::ActivityType;
+use crate::db::packages::SourceType;
 use pacman_mirrors::platforms::Platform;
 use rocket::http::Status;
 use rocket::{State, delete, get, patch, post};
@@ -26,7 +27,6 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
 use utoipa::OpenApi;
-use crate::db::packages::SourceType;
 
 #[derive(OpenApi)]
 #[openapi(paths(
@@ -68,7 +68,7 @@ pub async fn package_add_endpoint(
         tx,
         platforms,
         input.build_flags.clone(),
-        SourceType::Aur // todo dynamic
+        SourceType::Aur, // todo dynamic
     )
     .await
     .map_err(|e| BadRequest(e.to_string()))?;

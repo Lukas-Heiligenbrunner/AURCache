@@ -22,7 +22,7 @@ alter table packages
 
 "#,
                 )
-                    .await?;
+                .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
@@ -35,7 +35,7 @@ alter table packages
 
 "#,
                 )
-                    .await?;
+                .await?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
@@ -57,7 +57,7 @@ ALTER TABLE packages
 DROP COLUMN source_data;
 "#,
                 )
-                    .await?;
+                .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
@@ -69,7 +69,7 @@ ALTER TABLE packages
 DROP COLUMN source_data;
 "#,
                 )
-                    .await?;
+                .await?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }

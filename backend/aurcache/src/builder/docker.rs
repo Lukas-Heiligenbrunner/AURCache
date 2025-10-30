@@ -3,8 +3,9 @@ use crate::builder::build_mode::{BuildMode, get_build_mode};
 use crate::builder::env::limits_from_env;
 use crate::builder::logger::BuildLogger;
 use crate::builder::makepkg_utils::create_makepkg_config;
+use crate::db::packages::SourceData;
 use crate::utils::db::ActiveValueExt;
-use anyhow::{anyhow};
+use anyhow::anyhow;
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
@@ -18,7 +19,6 @@ use log::{debug, info, trace};
 use rocket::futures::StreamExt;
 use std::collections::HashMap;
 use std::str::FromStr;
-use crate::db::packages::SourceData;
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -186,7 +186,9 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_cmd = match SourceData::from_str(self.package_model.source_data.get()?)? {
             SourceData::Aur { .. } => {
-                format!("sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}")
+                format!(
+                    "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
+                )
             }
             SourceData::Git { .. } => {
                 // todo clone git repo into container with specified ref

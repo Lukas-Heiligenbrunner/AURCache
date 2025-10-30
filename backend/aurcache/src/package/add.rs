@@ -1,5 +1,6 @@
 use crate::aur::api::get_package_info;
 use crate::builder::types::{Action, BuildStates};
+use crate::db::packages::{SourceData, SourceType};
 use crate::db::prelude::Packages;
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
@@ -9,7 +10,6 @@ use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, Transactio
 use sea_orm::{ColumnTrait, TryIntoModel};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
-use crate::db::packages::{SourceData, SourceType};
 
 pub async fn package_add(
     db: &DatabaseConnection,
@@ -17,7 +17,7 @@ pub async fn package_add(
     tx: &Sender<Action>,
     platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
-    source_type: SourceType
+    source_type: SourceType,
 ) -> anyhow::Result<()> {
     let platforms = match platforms {
         None => vec![Platform::X86_64],
@@ -75,7 +75,7 @@ pub async fn package_add(
             new_package.save(db).await?
         }
         SourceType::Git => {
-            let gitref = "#42" ;
+            let gitref = "#42";
             let source_data = SourceData::Git {
                 // todo get real infos
                 url: "".to_string(),
