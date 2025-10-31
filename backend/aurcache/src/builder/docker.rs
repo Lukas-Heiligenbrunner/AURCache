@@ -184,7 +184,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_cmd = format!("paru {build_flags} {name}");
         // first update the package list, then update trustdb and then build cmd
-        let steps = vec![
+        let steps = [
             "sudo pacman -Sy --noconfirm",
             "sudo pacman-key --init",
             "sudo pacman-key --populate archlinux",
