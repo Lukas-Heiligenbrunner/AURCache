@@ -181,11 +181,19 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
-        let build_cmd = format!(
-            "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
-        );
-        info!("Build command: {build_cmd}");
-        let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
+
+        let build_cmd = format!("paru {build_flags} {name}");
+        // first update the package list, then update trustdb and then build cmd
+        let steps = [
+            "sudo pacman -Sy --noconfirm",
+            "sudo pacman-key --init",
+            "sudo pacman-key --populate archlinux",
+            build_cmd.as_str(),
+        ];
+        let steps_cmd = steps.join(" && ");
+
+        info!("Build command: {steps_cmd}");
+        let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{steps_cmd}");
 
         let (cpu_limit, memory_limit) = limits_from_env();
 
