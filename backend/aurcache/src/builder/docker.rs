@@ -186,9 +186,15 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_cmd = match SourceData::from_str(self.package_model.source_data.get()?)? {
             SourceData::Aur { .. } => {
-                format!(
-                    "sudo pacman-key --init && sudo pacman-key --populate archlinux && paru {build_flags} {name}"
-                )
+                let build_cmd = format!("paru {build_flags} {name}");
+                // first update the package list, then update trustdb and then build cmd
+                let steps = [
+                    "sudo pacman -Sy --noconfirm",
+                    "sudo pacman-key --init",
+                    "sudo pacman-key --populate archlinux",
+                    build_cmd.as_str(),
+                ];
+                steps.join(" && ")
             }
             SourceData::Git { .. } => {
                 // todo clone git repo into container with specified ref

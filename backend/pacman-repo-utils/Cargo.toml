@@ -9,7 +9,7 @@ log = {workspace = true}
 base64 = "0.22.1"
 md5 = "0.8.0"
 sha2 = "0.10.9"
-flate2 = "1.1.2"
+flate2 = "1.1.5"
 xz2 = "0.1.7"
 zstd = "0.13.3"
 tar = "0.4.44"
