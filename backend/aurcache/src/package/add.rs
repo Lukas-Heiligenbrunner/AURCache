@@ -81,6 +81,7 @@ pub async fn package_add(
                     .unwrap()
                     .as_secs() as i64,
             )),
+            version: Set(pkg.version.clone()),
             ..Default::default()
         };
         let new_build = build.save(&txn).await?;
