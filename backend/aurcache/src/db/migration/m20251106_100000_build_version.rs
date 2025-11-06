@@ -12,6 +12,7 @@ impl MigrationTrait for Migration {
 
         match database_type() {
             DbBackend::Sqlite => {
+                // add new column version to builds
                 db.execute_unprepared(
                     r#"
 alter table builds
@@ -20,6 +21,7 @@ add version TEXT not null default '';
                 )
                 .await?;
 
+                // copy versions from package versions to new columns
                 db.execute_unprepared(
                     r#"
 UPDATE builds
@@ -28,6 +30,15 @@ SET version = (
     FROM packages
     WHERE packages.id = builds.pkg_id
 );
+"#,
+                )
+                .await?;
+
+                // drop the old packages version
+                db.execute_unprepared(
+                    r#"
+alter table packages
+drop column version;
 "#,
                 )
                 .await?;
@@ -50,6 +61,15 @@ WHERE packages.id = builds.pkg_id;
 "#,
                 )
                 .await?;
+
+                // drop the old packages version
+                db.execute_unprepared(
+                    r#"
+ALTER TABLE packages
+DROP COLUMN version;
+"#,
+                )
+                .await?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
@@ -57,34 +77,39 @@ WHERE packages.id = builds.pkg_id;
         Ok(())
     }
 
+    // Reverse the migration: restore packages.version from builds.version and remove builds.version.
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
         match database_type() {
             DbBackend::Sqlite => {
+                // add version column back to packages
                 db.execute_unprepared(
                     r#"
-create table builds_dg_tmp
-(
-    id         integer not null
-        constraint builds_pk
-            primary key autoincrement,
-    pkg_id     integer not null,
-    output     TEXT,
-    status     integer,
-    start_time INTEGER,
-    end_time   integer,
-    platform   TEXT
+alter table packages
+add version TEXT not null default '';
+"#,
+                )
+                .await?;
+
+                // copy versions from builds back to packages
+                db.execute_unprepared(
+                    r#"
+UPDATE packages
+SET version = (
+    SELECT COALESCE(builds.version, '')
+    FROM builds
+    WHERE builds.pkg_id = packages.id
 );
+"#,
+                )
+                .await?;
 
-insert into builds_dg_tmp(id, pkg_id, output, status, start_time, end_time, platform)
-select id, pkg_id, output, status, start_time, end_time, platform
-from builds;
-
-drop table builds;
-
-alter table builds_dg_tmp
-    rename to builds;
+                // drop the version column from builds
+                db.execute_unprepared(
+                    r#"
+alter table builds
+drop column version;
 "#,
                 )
                 .await?;
@@ -92,7 +117,27 @@ alter table builds_dg_tmp
             DbBackend::Postgres => {
                 db.execute_unprepared(
                     r#"
-ALTER TABLE builds DROP COLUMN IF EXISTS version;
+ALTER TABLE packages
+ADD COLUMN version TEXT NOT NULL DEFAULT '';
+"#,
+                )
+                .await?;
+
+                db.execute_unprepared(
+                    r#"
+UPDATE packages
+SET version = COALESCE(builds.version, '')
+FROM builds
+WHERE builds.pkg_id = packages.id;
+"#,
+                )
+                .await?;
+
+                // drop the version column from builds
+                db.execute_unprepared(
+                    r#"
+ALTER TABLE builds
+DROP COLUMN version;
 "#,
                 )
                 .await?;
