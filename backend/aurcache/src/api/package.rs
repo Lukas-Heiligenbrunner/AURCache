@@ -1,7 +1,7 @@
 use crate::builder::types::Action;
 use crate::db::migration::Order;
-use crate::db::packages;
-use crate::db::prelude::Packages;
+use crate::db::prelude::{Builds, Packages};
+use crate::db::{builds, packages};
 use crate::package::add::package_add;
 use crate::package::delete::package_delete;
 use crate::package::update::package_update;
@@ -22,6 +22,7 @@ use pacman_mirrors::platforms::Platform;
 use rocket::http::Status;
 use rocket::{State, delete, get, patch, post};
 use sea_orm::ActiveValue::Set;
+use sea_orm::prelude::Expr;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use tokio::sync::broadcast::Sender;
@@ -106,7 +107,6 @@ pub async fn package_update_entity_endpoint(
         name: input.name.clone().map(Set).unwrap_or(NotSet),
         status: input.status.map(Set).unwrap_or(NotSet),
         out_of_date: input.out_of_date.map(Set).unwrap_or(NotSet),
-        version: input.version.clone().map(Set).unwrap_or(NotSet),
         latest_aur_version: input.latest_aur_version.clone().map(Set).unwrap_or(NotSet),
         latest_build: input.latest_build.map(Set).unwrap_or(NotSet),
         build_flags: input
@@ -230,6 +230,14 @@ pub async fn package_list(
 ) -> Result<Json<Vec<SimplePackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
+    // correlated subquery: picks the version from builds for the package ordered by most
+    // recent timestamp (end_time preferred, fallback to start_time)
+    let latest_version_subquery = "(SELECT version \
+        FROM builds b \
+        WHERE b.pkg_id = packages.id \
+        ORDER BY COALESCE(b.end_time, b.start_time) DESC \
+        LIMIT 1)";
+
     let all: Vec<SimplePackageModel> = Packages::find()
         .select_only()
         .column(packages::Column::Name)
@@ -237,7 +245,11 @@ pub async fn package_list(
         .column(packages::Column::Status)
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
-        .column_as(packages::Column::Version, "latest_version")
+        // wrap the correlated subquery in COALESCE -> fallback to empty string
+        .column_as(
+            Expr::cust(format!("COALESCE({}, '')", latest_version_subquery)),
+            "latest_version",
+        )
         .order_by(packages::Column::OutOfDate, Order::Desc)
         .order_by(packages::Column::Id, Order::Desc)
         .limit(limit)
@@ -285,12 +297,27 @@ pub async fn get_package(
         aur_info.package_base
     );
 
+    // Query the latest build.version for this package (most recent by end_time then start_time)
+    let latest_version_row = Builds::find()
+        .select_only()
+        .column(builds::Column::Version)
+        .filter(builds::Column::PkgId.eq(pkg.id))
+        .order_by(builds::Column::EndTime, Order::Desc)
+        .order_by(builds::Column::StartTime, Order::Desc)
+        .limit(1)
+        .into_tuple::<(String,)>()
+        .one(db)
+        .await
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+
+    let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
+
     let ext_pkg = ExtendedPackageModel {
         id: pkg.id,
         name: pkg.name,
         status: pkg.status,
         outofdate: pkg.out_of_date,
-        latest_version: pkg.version,
+        latest_version,
         latest_aur_version: aur_info.version,
         last_updated: aur_info.last_modified,
         first_submitted: aur_info.first_submitted,

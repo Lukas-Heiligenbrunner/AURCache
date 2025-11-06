@@ -3,12 +3,12 @@ use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::aur::api::get_package_info;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::activities::ActivityType;
-use crate::db::prelude::Packages;
+use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
 use log::warn;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,18 +88,29 @@ pub async fn package_update(
 ) -> anyhow::Result<Vec<i32>> {
     let txn = db.begin().await?;
 
-    let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
-
     let pkg = get_package_info(pkg_model.name.as_str())
         .await?
         .ok_or(anyhow!("Package not found"))?;
 
-    if !force && pkg_model.version == Some(pkg.version.clone()) {
-        bail!("Package is already up to date");
+    // get the latest build
+    let latest_build = Builds::find()
+        .filter(builds::Column::PkgId.eq(pkg_model.id))
+        .order_by_desc(builds::Column::StartTime)
+        .one(&txn)
+        .await?;
+
+    if let Some(build) = latest_build {
+        // Compare its version to the latest one from AUR
+        if !force && build.version == pkg.version {
+            bail!(
+                "Latest build is already up to date (version {})",
+                pkg.version
+            );
+        }
     }
 
+    let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
     pkg_model_active.status = Set(BuildStates::ENQUEUED_BUILD);
-    pkg_model_active.version = Set(Some(pkg.version.clone()));
     let pkg_aktive_model = pkg_model_active.save(&txn).await?;
     txn.commit().await?;
 
