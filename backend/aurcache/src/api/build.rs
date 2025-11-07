@@ -135,7 +135,7 @@ pub async fn get_build(
         .column_as(builds::Column::Id, "id")
         .column(builds::Column::Status)
         .column_as(packages::Column::Name, "pkg_name")
-        .column_as(packages::Column::Id, "pkg_id")
+        .column_as(builds::Column::PkgId, "pkg_id")
         .column(builds::Column::Version)
         .column(builds::Column::EndTime)
         .column(builds::Column::StartTime)
@@ -227,6 +227,7 @@ pub async fn rery_build(
     // Extract the platform and package ID
     let platform = old_build.platform;
     let pkg_id = old_build.pkg_id;
+    let version = old_build.version;
 
     // Fetch the package details
     let package = packages::Entity::find_by_id(pkg_id)
@@ -242,7 +243,7 @@ pub async fn rery_build(
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
-    let new_buildid = update_platform(&platform, package, db, tx)
+    let new_buildid = update_platform(&platform, package, version, db, tx)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
