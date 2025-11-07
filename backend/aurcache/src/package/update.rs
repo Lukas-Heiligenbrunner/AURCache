@@ -91,6 +91,7 @@ pub async fn package_update(
     let pkg = get_package_info(pkg_model.name.as_str())
         .await?
         .ok_or(anyhow!("Package not found"))?;
+    let aur_version = pkg.version.clone();
 
     // get the latest build
     let latest_build = Builds::find()
@@ -101,10 +102,10 @@ pub async fn package_update(
 
     if let Some(build) = latest_build {
         // Compare its version to the latest one from AUR
-        if !force && build.version == pkg.version {
+        if !force && build.version == aur_version {
             bail!(
                 "Latest build is already up to date (version {})",
-                pkg.version
+                aur_version
             );
         }
     }
@@ -118,7 +119,8 @@ pub async fn package_update(
 
     let pkg_model: packages::Model = pkg_aktive_model.clone().try_into()?;
     for platform in pkg_model.platforms.clone().split(";") {
-        let build_id = update_platform(platform, pkg_model.clone(), db, tx).await?;
+        let build_id =
+            update_platform(platform, pkg_model.clone(), aur_version.clone(), db, tx).await?;
         build_ids.push(build_id);
     }
 
@@ -133,6 +135,7 @@ pub async fn package_update(
 ///
 /// * `platform` - The platform on which the package should be built.
 /// * `pkg` - The package model associated with the build.
+/// * `new_version` - The package version to build
 /// * `db` - A reference to the database connection.
 /// * `tx` - A broadcast channel sender for triggering build actions.
 ///
@@ -143,6 +146,7 @@ pub async fn package_update(
 pub async fn update_platform(
     platform: &str,
     pkg: packages::Model,
+    new_version: String,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
 ) -> anyhow::Result<i32> {
@@ -155,6 +159,7 @@ pub async fn update_platform(
         status: Set(Some(BuildStates::ENQUEUED_BUILD)),
         start_time: Set(Some(start_time)),
         platform: Set(platform.to_string()),
+        version: Set(new_version),
         ..Default::default()
     };
     let new_build = build.save(&txn).await?;
