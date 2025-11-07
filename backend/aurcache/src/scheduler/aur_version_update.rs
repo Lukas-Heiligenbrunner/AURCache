@@ -1,11 +1,12 @@
-use crate::db::migration::Order;
-use crate::db::prelude::{Builds, Packages};
-use crate::db::{builds, packages};
-use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
+use aurcache_db::helpers::active_value_ext::ActiveValueExt;
+use aurcache_db::prelude::{Builds, Packages};
+use aurcache_db::{builds, packages};
 use log::{error, info, warn};
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
+};
 use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 use std::env;
 use std::time::Duration;

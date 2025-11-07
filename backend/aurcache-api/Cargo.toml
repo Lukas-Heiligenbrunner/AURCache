@@ -1,0 +1,35 @@
+[package]
+name = "aurcache-api"
+edition = "2024"
+
+[dependencies]
+anyhow = {workspace = true}
+log = {workspace = true}
+tokio = {workspace = true}
+sea-orm = {workspace = true}
+itertools = {workspace = true}
+serde = { workspace = true }
+chrono = {workspace = true}
+
+# todo try to remove this dep from here, shouldn't be required
+aur-rs = {workspace = true}
+
+rocket = "0.5.1"
+rocket_oauth2 = "0.5.0"
+utoipa = { version = "5.4.0", features = ["rocket_extras"] }
+utoipa-redoc = { version = "6.0.0", features = ["rocket"] }
+utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
+rust-embed = "8.9.0"
+bigdecimal = "0.4.9"
+reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
+
+
+aurcache-db = {path = "../aurcache-db"}
+aurcache-builder = {path = "../aurcache-builder"}
+aurcache-activitylog = {path = "../aurcache-activitylog"}
+aurcache-utils = {path = "../aurcache-utils"}
+pacman-mirrors = {path = "../pacman-mirrors"}
+
+[features]
+default = []
+static = []

@@ -1,5 +1,5 @@
-use crate::builder::types::Action;
-use crate::package::update::package_update_all_outdated;
+use aurcache_builder::types::Action;
+use aurcache_utils::package::update::package_update_all_outdated;
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};

@@ -1,0 +1,19 @@
+[package]
+name = "aurcache-utils"
+edition = "2024"
+
+[dependencies]
+anyhow = {workspace = true}
+sea-orm = {workspace = true}
+tokio = {workspace = true}
+log = {workspace = true}
+
+aur-rs = {workspace = true}
+
+backon = {workspace = true}
+
+aurcache-db = {path = "../aurcache-db"}
+aurcache-builder = {path = "../aurcache-builder"}
+aurcache-activitylog = {path = "../aurcache-activitylog"}
+pacman-mirrors = {path = "../pacman-mirrors"}
+pacman-repo-utils = {path = "../pacman-repo-utils"}

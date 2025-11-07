@@ -1,5 +1,5 @@
-use crate::builder::build_mode::{BuildMode, get_build_mode};
-use crate::builder::types::Action;
+use aurcache_builder::build_mode::{BuildMode, get_build_mode};
+use aurcache_builder::types::Action;
 use chrono::Utc;
 use cron::Schedule;
 use log::{info, warn};
