@@ -5,9 +5,11 @@ FROM ghcr.io/cirruslabs/flutter:3.35.7 AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
+COPY backend/aurcache/Cargo.toml /app
+
 RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
-RUN flutter build web --release --wasm
+RUN flutter build web --release --wasm --dart-define APP_VERSION=$(grep '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
 
 FROM rust:1.91.0 AS builder
 ARG LATEST_COMMIT_SHA

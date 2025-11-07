@@ -43,6 +43,10 @@ class BuildsTable extends StatelessWidget {
           DataColumn(
             label: Skeleton.keep(child: Text("Build ID")),
           ),
+        if (context.desktop)
+          DataColumn(
+            label: Skeleton.keep(child: Text("Date")),
+          ),
         DataColumn(
           label: Skeleton.keep(child: Text("Package Name")),
         ),
@@ -65,6 +69,8 @@ class BuildsTable extends StatelessWidget {
     return DataRow(
       cells: [
         if (context.desktop) DataCell(Text(build.id.toString())),
+        DataCell(Text(
+            '${build.start_time.day.toString().padLeft(2, '0')}.${build.start_time.month.toString().padLeft(2, '0')}.${build.start_time.year.toString()}')),
         DataCell(Text(build.pkg_name),
             onTap: context.mobile
                 ? () => context.push("/build/${build.id}")
