@@ -1,9 +1,9 @@
-#[cfg(feature = "static")]
-use crate::embed::CustomHandler;
 use crate::aur::AURApi;
 use crate::auth::{OauthUserInfo, oauth_callback, oauth_login};
 use crate::backend::build_api;
 use crate::cusom_file_server::CustomFileServer;
+#[cfg(feature = "static")]
+use crate::embed::CustomHandler;
 use crate::models::authenticated::OauthEnabled;
 use crate::utils::config::oauth_config_from_env;
 use aurcache_activitylog::activity_utils::ActivityLog;

@@ -4,12 +4,12 @@ use aurcache_api::init::{init_api, init_repo};
 use aurcache_builder::init::init_build_queue;
 use aurcache_builder::types::Action;
 use aurcache_db::init::init_db;
-use dotenvy::dotenv;
-use log::warn;
-use tokio::sync::broadcast;
 use aurcache_scheduler::aur_version_update::start_aur_version_checking;
 use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
+use dotenvy::dotenv;
+use log::warn;
+use tokio::sync::broadcast;
 
 mod logger;
 mod startup;
