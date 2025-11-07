@@ -1,5 +1,5 @@
 #[cfg(feature = "static")]
-use crate::api::embed::CustomHandler;
+use crate::embed::CustomHandler;
 use crate::aur::AURApi;
 use crate::auth::{OauthUserInfo, oauth_callback, oauth_login};
 use crate::backend::build_api;

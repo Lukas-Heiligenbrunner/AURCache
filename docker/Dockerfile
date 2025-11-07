@@ -18,7 +18,7 @@ WORKDIR /app
 
 # Copy the Rust project files
 COPY backend/ /app/
-COPY --from=frontend_builder /app/build/web /app/aurcache/web
+COPY --from=frontend_builder /app/build/web /app/aurcache-api/web
 
 ARG TARGET_ARCH
 ADD docker/build-rust.sh /root
