@@ -240,13 +240,10 @@ name = "aurcache"
 version = "0.3.6"
 dependencies = [
  "anyhow",
- "aur-rs",
  "aurcache-api",
  "aurcache-builder",
  "aurcache-db",
- "aurcache-utils",
- "chrono",
- "cron",
+ "aurcache-scheduler",
  "dotenvy",
  "env_logger",
  "log",
@@ -323,6 +320,23 @@ dependencies = [
  "serde",
  "serde_json",
  "utoipa",
+]
+
+[[package]]
+name = "aurcache-scheduler"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aur-rs",
+ "aurcache-builder",
+ "aurcache-db",
+ "aurcache-utils",
+ "chrono",
+ "cron",
+ "log",
+ "pacman-mirrors",
+ "sea-orm",
+ "tokio",
 ]
 
 [[package]]

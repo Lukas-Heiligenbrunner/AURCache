@@ -1,9 +1,4 @@
-mod scheduler;
-
 use crate::logger::init_logger;
-use crate::scheduler::aur_version_update::start_aur_version_checking;
-use crate::scheduler::auto_update::start_auto_update_job;
-use crate::scheduler::mirror_ranking::start_mirror_rank_job;
 use crate::startup::{post_startup_tasks, pre_startup_tasks};
 use aurcache_api::init::{init_api, init_repo};
 use aurcache_builder::init::init_build_queue;
@@ -12,6 +7,9 @@ use aurcache_db::init::init_db;
 use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
+use aurcache_scheduler::aur_version_update::start_aur_version_checking;
+use aurcache_scheduler::auto_update::start_auto_update_job;
+use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
 
 mod logger;
 mod startup;

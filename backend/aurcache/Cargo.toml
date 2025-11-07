@@ -6,21 +6,18 @@ edition = "2024"
 [dependencies]
 tokio = {workspace = true}
 anyhow ={workspace = true}
-chrono = {workspace = true}
 sea-orm = {workspace = true}
 log = {workspace = true}
-aur-rs = {workspace = true}
 
 pacman-repo-utils = {path = "../pacman-repo-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
 aurcache-builder = {path = "../aurcache-builder"}
 aurcache-db = {path = "../aurcache-db"}
 aurcache-api = { path = "../aurcache-api" }
-aurcache-utils = {path = "../aurcache-utils"}
+aurcache-scheduler = {path = "../aurcache-scheduler"}
 
 dotenvy = "0.15.7"
 env_logger = "0.11.8"
-cron = "0.15.0"
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 openssl = { version = "*", features = ["vendored"] }
