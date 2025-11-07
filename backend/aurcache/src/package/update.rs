@@ -3,12 +3,12 @@ use crate::activity_log::package_update_activity::PackageUpdateActivity;
 use crate::aur::api::get_package_info;
 use crate::builder::types::{Action, BuildStates};
 use crate::db::activities::ActivityType;
-use crate::db::prelude::Packages;
+use crate::db::prelude::{Builds, Packages};
 use crate::db::{builds, packages};
 use anyhow::{anyhow, bail};
 use log::warn;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -88,18 +88,30 @@ pub async fn package_update(
 ) -> anyhow::Result<Vec<i32>> {
     let txn = db.begin().await?;
 
-    let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
-
     let pkg = get_package_info(pkg_model.name.as_str())
         .await?
         .ok_or(anyhow!("Package not found"))?;
+    let aur_version = pkg.version.clone();
 
-    if !force && pkg_model.version == Some(pkg.version.clone()) {
-        bail!("Package is already up to date");
+    // get the latest build
+    let latest_build = Builds::find()
+        .filter(builds::Column::PkgId.eq(pkg_model.id))
+        .order_by_desc(builds::Column::StartTime)
+        .one(&txn)
+        .await?;
+
+    if let Some(build) = latest_build {
+        // Compare its version to the latest one from AUR
+        if !force && build.version == aur_version {
+            bail!(
+                "Latest build is already up to date (version {})",
+                aur_version
+            );
+        }
     }
 
+    let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
     pkg_model_active.status = Set(BuildStates::ENQUEUED_BUILD);
-    pkg_model_active.version = Set(Some(pkg.version.clone()));
     let pkg_aktive_model = pkg_model_active.save(&txn).await?;
     txn.commit().await?;
 
@@ -107,7 +119,8 @@ pub async fn package_update(
 
     let pkg_model: packages::Model = pkg_aktive_model.clone().try_into()?;
     for platform in pkg_model.platforms.clone().split(";") {
-        let build_id = update_platform(platform, pkg_model.clone(), db, tx).await?;
+        let build_id =
+            update_platform(platform, pkg_model.clone(), aur_version.clone(), db, tx).await?;
         build_ids.push(build_id);
     }
 
@@ -122,6 +135,7 @@ pub async fn package_update(
 ///
 /// * `platform` - The platform on which the package should be built.
 /// * `pkg` - The package model associated with the build.
+/// * `new_version` - The package version to build
 /// * `db` - A reference to the database connection.
 /// * `tx` - A broadcast channel sender for triggering build actions.
 ///
@@ -132,6 +146,7 @@ pub async fn package_update(
 pub async fn update_platform(
     platform: &str,
     pkg: packages::Model,
+    new_version: String,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
 ) -> anyhow::Result<i32> {
@@ -144,6 +159,7 @@ pub async fn update_platform(
         status: Set(Some(BuildStates::ENQUEUED_BUILD)),
         start_time: Set(Some(start_time)),
         platform: Set(platform.to_string()),
+        version: Set(new_version),
         ..Default::default()
     };
     let new_build = build.save(&txn).await?;

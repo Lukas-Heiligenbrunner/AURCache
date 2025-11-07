@@ -8,8 +8,8 @@ class ExtendedPackage {
   @JsonKey(fromJson: _fromJson)
   final bool outofdate;
   final int status, last_updated, first_submitted;
-  final String latest_version, latest_aur_version, aur_url;
-  final String? licenses, maintainer, project_url, description;
+  final String latest_aur_version, aur_url;
+  final String? licenses, maintainer, project_url, description, latest_version;
   final bool aur_flagged_outdated;
   final List<String> selected_platforms;
   final List<String> selected_build_flags;

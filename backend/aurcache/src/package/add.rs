@@ -53,7 +53,7 @@ pub async fn package_add(
         .collect::<Vec<_>>()
         .join(";");
 
-    let mut new_package = match source_type {
+    let (mut new_package, new_version) = match source_type {
         SourceType::Aur => {
             let pkg = get_package_info(pkg_name)
                 .await?
@@ -72,7 +72,7 @@ pub async fn package_add(
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            new_package.save(db).await?
+            (new_package.save(db).await?, pkg.version.clone())
         }
         SourceType::Git => {
             let gitref = "#42";
@@ -85,7 +85,6 @@ pub async fn package_add(
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                version: Set(Some(gitref.to_string())),
                 latest_aur_version: Set(Some(gitref.to_string())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
@@ -93,7 +92,7 @@ pub async fn package_add(
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            new_package.save(db).await?
+            (new_package.save(db).await?, gitref.to_string())
         }
         SourceType::Upload => {
             let source_data = SourceData::Upload {
@@ -107,8 +106,6 @@ pub async fn package_add(
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                // todo change to real versions
-                version: Set(Some(version.to_string())),
                 latest_aur_version: Set(Some(version.to_string())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
@@ -116,7 +113,7 @@ pub async fn package_add(
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            new_package.save(db).await?
+            (new_package.save(db).await?, version.to_string())
         }
     };
 
@@ -137,6 +134,7 @@ pub async fn package_add(
                     .expect("Duration must exist")
                     .as_secs() as i64,
             )),
+            version: Set(new_version.clone()),
             ..Default::default()
         };
         let new_build = build.save(&txn).await?;

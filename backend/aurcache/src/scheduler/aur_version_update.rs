@@ -1,9 +1,12 @@
-use crate::db::packages;
-use crate::db::prelude::Packages;
+use crate::db::migration::Order;
+use crate::db::prelude::{Builds, Packages};
+use crate::db::{builds, packages};
+use crate::utils::db::ActiveValueExt;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
 use log::{error, info, warn};
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, QuerySelect};
+use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 use std::env;
 use std::time::Duration;
 use tokio::{task::JoinHandle, time};
@@ -52,7 +55,21 @@ async fn aur_check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
             }
             Some(result) => {
                 let mut package: packages::ActiveModel = package.into();
-                let latest_version = package.version.clone().unwrap();
+                let package_id = package.id.get()?;
+
+                // Query the latest build.version for this package (most recent by end_time then start_time)
+                let latest_version_row = Builds::find()
+                    .select_only()
+                    .column(builds::Column::Version)
+                    .filter(builds::Column::PkgId.eq(*package_id))
+                    .order_by(builds::Column::EndTime, Order::Desc)
+                    .order_by(builds::Column::StartTime, Order::Desc)
+                    .limit(1)
+                    .into_tuple::<(String,)>()
+                    .one(&db)
+                    .await?;
+
+                let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
 
                 package.latest_aur_version = Set(Option::from(result.version.clone()));
                 package.out_of_date = Set(if latest_version == Some(result.version.clone()) {

@@ -25,8 +25,8 @@ utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
 dotenvy = "0.15.7"
 sea-orm = { version = "1.1.17", features = [ "sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal" ] }
 sea-orm-migration = {version = "1.1.17", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
-rust-embed = "8.8.0"
-bollard = "0.19.3"
+rust-embed = "8.9.0"
+bollard = "0.19.4"
 bigdecimal = "0.4.9"
 env_logger = "0.11.8"
 log = {workspace = true}
