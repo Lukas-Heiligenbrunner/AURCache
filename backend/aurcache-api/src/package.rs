@@ -1,13 +1,12 @@
 use crate::models::authenticated::Authenticated;
-use crate::models::input::{ExtendedPackageModel, PackagePatchModel, SimplePackageModel};
-use crate::models::output::{AddBody, UpdateBody};
+use crate::models::input::{ExtendedPackageModel, SimplePackageModel};
+use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
 use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_builder::types::Action;
 use aurcache_db::activities::ActivityType;
-use aurcache_db::packages::SourceType;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_utils::aur::api::get_package_info;
@@ -46,7 +45,7 @@ pub struct PackageApi;
 #[post("/package", data = "<input>")]
 pub async fn package_add_endpoint(
     db: &State<DatabaseConnection>,
-    input: Json<AddBody>,
+    input: Json<AddPackage>,
     tx: &State<Sender<Action>>,
     a: Authenticated,
     al: &State<ActivityLog>,
@@ -67,7 +66,7 @@ pub async fn package_add_endpoint(
         tx,
         platforms,
         input.build_flags.clone(),
-        SourceType::Aur, // todo dynamic
+        input.source.clone(),
     )
     .await
     .map_err(|e| BadRequest(e.to_string()))?;
@@ -119,7 +118,6 @@ pub async fn package_update_entity_endpoint(
             .clone()
             .map(|v| Set(v.join(";")))
             .unwrap_or(NotSet),
-        // todo decide if source updates should be even possible
         source_type: NotSet,
         source_data: NotSet,
     };
@@ -145,7 +143,7 @@ pub async fn package_update_entity_endpoint(
 pub async fn package_update_endpoint(
     db: &State<DatabaseConnection>,
     id: i32,
-    input: Json<UpdateBody>,
+    input: Json<UpdatePackage>,
     tx: &State<Sender<Action>>,
     a: Authenticated,
     al: &State<ActivityLog>,

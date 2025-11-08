@@ -88,6 +88,7 @@ pub async fn package_update(
 ) -> anyhow::Result<Vec<i32>> {
     let txn = db.begin().await?;
 
+    // todo we can't retrieve aur version info when we have a git or zip build
     let pkg = get_package_info(pkg_model.name.as_str())
         .await?
         .ok_or(anyhow!("Package not found"))?;

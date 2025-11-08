@@ -6,13 +6,17 @@ use std::fmt::Display;
 use std::str::FromStr;
 use utoipa::ToSchema;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type")] // the JSON field that acts as the tag
 pub enum SourceData {
     #[serde(rename = "aur")]
     Aur {},
     #[serde(rename = "git")]
-    Git { url: String, r#ref: String },
+    Git {
+        url: String,
+        r#ref: String,
+        subfolder: String,
+    },
     #[serde(rename = "upload")]
     Upload { archive: Vec<u8> },
 }

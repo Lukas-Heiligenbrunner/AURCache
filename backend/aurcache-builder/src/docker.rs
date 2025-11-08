@@ -30,7 +30,7 @@ use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
 /// git repo path inside builder container in git build mode
-static GIT_REPO_PATH: &str = "/repo";
+static GIT_REPO_PATH: &str = "/tmp";
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -210,9 +210,9 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 steps.join(" && ")
             }
             SourceData::Git { .. } => {
-                // todo Handle git repos with packages as subfolders
-
-                let build_cmd = format!("paru -B {GIT_REPO_PATH}");
+                // somehow we need also to `cd` into the repo dir, otherwise builds fail
+                let build_cmd =
+                    format!("cd {GIT_REPO_PATH} && paru --noconfirm -B {GIT_REPO_PATH}");
                 // first update the package list, then update trustdb and then build cmd
                 let steps = [
                     "sudo pacman -Sy --noconfirm",
@@ -274,12 +274,17 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             .await?;
 
         match source_data {
-            SourceData::Git { url, r#ref } => {
+            SourceData::Git {
+                url,
+                r#ref,
+                subfolder,
+            } => {
                 self.git_checkout_to_container(
                     create_info.id.clone(),
-                    "/repo".to_string(),
+                    GIT_REPO_PATH.to_string(),
                     url,
                     r#ref,
+                    subfolder,
                 )
                 .await?;
             }
@@ -293,11 +298,15 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
     }
 
     /// Create a .tar.gz archive from a directory
-    async fn create_tar_gz(src_dir: &Path, dest_path: &Path) -> anyhow::Result<()> {
+    async fn create_tar_gz(
+        src_dir: &Path,
+        dest_path: &Path,
+        subfolder: String,
+    ) -> anyhow::Result<()> {
         let tar_gz = std::fs::File::create(dest_path)?;
         let enc = GzEncoder::new(tar_gz, Compression::default());
         let mut tar = tar::Builder::new(enc);
-        tar.append_dir_all(".", src_dir)?;
+        tar.append_dir_all(".", src_dir.join(subfolder))?;
         tar.finish()?;
         Ok(())
     }
@@ -331,6 +340,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         path: String,
         git_repo: String,
         git_ref: String,
+        git_subfolder: String,
     ) -> anyhow::Result<()> {
         info!("Cloning repository {git_repo}...");
 
@@ -343,10 +353,11 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         // Create a tar.gz of the cloned repo
         let tar_path = dir.path().join("repo.tar.gz");
         debug!("Creating tar archive at {:?}", tar_path);
-        Self::create_tar_gz(&repo_dir, &tar_path).await?;
+        Self::create_tar_gz(&repo_dir, &tar_path, git_subfolder).await?;
 
         let options = Some(UploadToContainerOptions {
             path,
+            copy_uidgid: Some("false".to_string()),
             ..Default::default()
         });
 
@@ -358,6 +369,8 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             .upload_to_container(container_id.as_str(), options, body_try_stream(file))
             .await
             .expect("upload failed");
+
+        _ = dir.close();
         Ok(())
     }
 

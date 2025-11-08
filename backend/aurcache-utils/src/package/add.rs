@@ -17,7 +17,7 @@ pub async fn package_add(
     tx: &Sender<Action>,
     platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
-    source_type: SourceType,
+    source_data: SourceData,
 ) -> anyhow::Result<()> {
     let platforms = match platforms {
         None => vec![Platform::X86_64],
@@ -34,6 +34,12 @@ pub async fn package_add(
             "--color never".to_string(),
         ]
     });
+
+    let source_type = match source_data {
+        SourceData::Aur { .. } => SourceType::Aur,
+        SourceData::Git { .. } => SourceType::Git,
+        SourceData::Upload { .. } => SourceType::Upload,
+    };
 
     // remove leading and trailing whitespaces
     let pkg_name = pkg_name.trim();
@@ -53,13 +59,11 @@ pub async fn package_add(
         .collect::<Vec<_>>()
         .join(";");
 
-    let (mut new_package, new_version) = match source_type {
-        SourceType::Aur => {
+    let (mut new_package, new_version) = match source_data {
+        SourceData::Aur { .. } => {
             let pkg = get_package_info(pkg_name)
                 .await?
                 .ok_or(anyhow!("Package not found"))?;
-
-            let source_data = SourceData::Aur {};
 
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
@@ -73,27 +77,20 @@ pub async fn package_add(
             };
             (new_package.save(db).await?, pkg.version.clone())
         }
-        SourceType::Git => {
-            let gitref = "#42";
-            let source_data = SourceData::Git {
-                // todo get real infos
-                url: "".to_string(),
-                r#ref: gitref.to_string(),
-            };
-
+        SourceData::Git { ref r#ref, .. } => {
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(gitref.to_string())),
+                latest_aur_version: Set(Some(r#ref.clone())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            (new_package.save(db).await?, gitref.to_string())
+            (new_package.save(db).await?, r#ref.clone())
         }
-        SourceType::Upload => {
+        SourceData::Upload { .. } => {
             let source_data = SourceData::Upload {
                 // todo get blob from upload
                 archive: vec![],
