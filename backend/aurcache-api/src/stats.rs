@@ -5,7 +5,7 @@ use rocket::response::status::NotFound;
 use rocket::serde::json::Json;
 
 use crate::models::authenticated::Authenticated;
-use crate::models::input::{GraphDataPoint, ListStats, UserInfo};
+use crate::models::stats::{GraphDataPoint, ListStats, UserInfo};
 use aurcache_builder::types::BuildStates;
 use aurcache_db::builds;
 use aurcache_db::helpers::dbtype::database_type;

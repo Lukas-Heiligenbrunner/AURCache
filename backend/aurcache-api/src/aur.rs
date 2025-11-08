@@ -1,5 +1,5 @@
+use crate::models::aur::ApiPackage;
 use crate::models::authenticated::Authenticated;
-use crate::models::input::ApiPackage;
 use aurcache_utils::aur::api::{get_package_info, query_aur};
 use rocket::get;
 use rocket::response::status::BadRequest;

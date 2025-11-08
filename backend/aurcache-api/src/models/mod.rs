@@ -1,3 +1,5 @@
+pub mod aur;
 pub mod authenticated;
-pub mod input;
+pub mod builds;
 pub mod package;
+pub mod stats;

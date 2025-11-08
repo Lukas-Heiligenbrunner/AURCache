@@ -1,12 +1,15 @@
 use crate::models::authenticated::Authenticated;
-use crate::models::input::{ExtendedPackageModel, SimplePackageModel};
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
+use crate::models::package::{
+    AurPackage, ExtendedPackageModel, GitPackage, PackageType, SimplePackageModel,
+};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
 use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_builder::types::Action;
 use aurcache_db::activities::ActivityType;
+use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_utils::aur::api::get_package_info;
@@ -288,16 +291,6 @@ pub async fn get_package(
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
         .ok_or(Custom(Status::NotFound, "ID not found".to_string()))?;
 
-    let aur_info = get_package_info(&pkg.name)
-        .await
-        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
-        .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
-
-    let aur_url = format!(
-        "https://aur.archlinux.org/packages/{}",
-        aur_info.package_base
-    );
-
     // Query the latest build.version for this package (most recent by end_time then start_time)
     let latest_version_row = Builds::find()
         .select_only()
@@ -313,23 +306,63 @@ pub async fn get_package(
 
     let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
 
+    let source_data = SourceData::from_str(pkg.source_data.as_str())
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+
+    let (package_type, version) = match source_data {
+        SourceData::Aur {} => {
+            let aur_info = get_package_info(&pkg.name)
+                .await
+                .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
+                .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
+
+            let aur_url = format!(
+                "https://aur.archlinux.org/packages/{}",
+                aur_info.package_base
+            );
+
+            (
+                PackageType::Aur(AurPackage {
+                    project_url: aur_info.url,
+                    description: aur_info.description,
+                    last_updated: aur_info.last_modified,
+                    first_submitted: aur_info.first_submitted,
+                    licenses: aur_info.license.map(|l| l.join(", ")),
+                    maintainer: aur_info.maintainer,
+                    aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+                    aur_url,
+                }),
+                aur_info.version,
+            )
+        }
+        SourceData::Git {
+            subfolder,
+            url,
+            r#ref,
+        } => (
+            PackageType::Git(GitPackage {
+                git_url: url,
+                git_ref: r#ref.clone(),
+                subfolder,
+            }),
+            r#ref,
+        ),
+        SourceData::Upload { .. } => {
+            todo!("upload zip is not yet implemented")
+        }
+    };
+
     let ext_pkg = ExtendedPackageModel {
         id: pkg.id,
         name: pkg.name,
         status: pkg.status,
         outofdate: pkg.out_of_date,
         latest_version,
-        latest_aur_version: aur_info.version,
-        last_updated: aur_info.last_modified,
-        first_submitted: aur_info.first_submitted,
-        licenses: aur_info.license.map(|l| l.join(", ")),
-        maintainer: aur_info.maintainer,
-        aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+        package_type,
         selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
         selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
-        aur_url,
-        project_url: aur_info.url,
-        description: aur_info.description,
+        latest_aur_version: version,
     };
+
     Ok(Json(ext_pkg))
 }

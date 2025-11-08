@@ -4,7 +4,7 @@ use rocket::serde::json::Json;
 use rocket::{State, delete, get, post};
 
 use crate::models::authenticated::Authenticated;
-use crate::models::input::ListBuildsModel;
+use crate::models::builds::ListBuildsModel;
 use aurcache_builder::types::{Action, BuildStates};
 use aurcache_db::prelude::Builds;
 use aurcache_db::{builds, packages};
