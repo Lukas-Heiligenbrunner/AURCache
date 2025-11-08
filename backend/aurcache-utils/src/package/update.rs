@@ -4,6 +4,7 @@ use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_builder::types::{Action, BuildStates};
 use aurcache_db::activities::ActivityType;
+use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use log::warn;
@@ -11,6 +12,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,
 };
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 
@@ -88,11 +90,19 @@ pub async fn package_update(
 ) -> anyhow::Result<Vec<i32>> {
     let txn = db.begin().await?;
 
-    // todo we can't retrieve aur version info when we have a git or zip build
-    let pkg = get_package_info(pkg_model.name.as_str())
-        .await?
-        .ok_or(anyhow!("Package not found"))?;
-    let aur_version = pkg.version.clone();
+    let source_data = SourceData::from_str(pkg_model.source_data.as_str())?;
+    let upstream_version = match source_data {
+        SourceData::Aur { .. } => {
+            let pkg = get_package_info(pkg_model.name.as_str())
+                .await?
+                .ok_or(anyhow!("Package not found"))?;
+            pkg.version
+        }
+        SourceData::Git { r#ref, .. } => r#ref,
+        SourceData::Upload { .. } => {
+            todo!("Get version from zip")
+        }
+    };
 
     // get the latest build
     let latest_build = Builds::find()
@@ -103,10 +113,10 @@ pub async fn package_update(
 
     if let Some(build) = latest_build {
         // Compare its version to the latest one from AUR
-        if !force && build.version == aur_version {
+        if !force && build.version == upstream_version {
             bail!(
                 "Latest build is already up to date (version {})",
-                aur_version
+                upstream_version
             );
         }
     }
@@ -120,8 +130,14 @@ pub async fn package_update(
 
     let pkg_model: packages::Model = pkg_aktive_model.clone().try_into()?;
     for platform in pkg_model.platforms.clone().split(";") {
-        let build_id =
-            update_platform(platform, pkg_model.clone(), aur_version.clone(), db, tx).await?;
+        let build_id = update_platform(
+            platform,
+            pkg_model.clone(),
+            upstream_version.clone(),
+            db,
+            tx,
+        )
+        .await?;
         build_ids.push(build_id);
     }
 
