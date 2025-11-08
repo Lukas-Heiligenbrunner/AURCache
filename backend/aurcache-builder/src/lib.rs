@@ -9,5 +9,4 @@ mod makepkg_utils;
 mod path_utils;
 mod queue;
 pub mod types;
-
 pub mod utils;

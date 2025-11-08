@@ -6,19 +6,31 @@ use crate::makepkg_utils::create_makepkg_config;
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
-use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
     MountTypeEnum, MountVolumeOptions,
 };
-use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
+use bollard::query_parameters::{
+    AttachContainerOptions, CreateContainerOptions, UploadToContainerOptions,
+};
 use bollard::query_parameters::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
-use futures::StreamExt;
+use bollard::{Docker, body_try_stream};
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use futures::{StreamExt, TryFutureExt};
+use git2::Repository;
 use itertools::Itertools;
 use log::{debug, info, trace};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tempfile::tempdir;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
+
+/// git repo path inside builder container in git build mode
+static GIT_REPO_PATH: &str = "/repo";
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -184,7 +196,8 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(name.clone(), build_dir_base)?;
 
-        let build_cmd = match SourceData::from_str(self.package_model.source_data.get()?)? {
+        let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
+        let build_cmd = match source_data {
             SourceData::Aur { .. } => {
                 let build_cmd = format!("paru {build_flags} {name}");
                 // first update the package list, then update trustdb and then build cmd
@@ -197,12 +210,20 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 steps.join(" && ")
             }
             SourceData::Git { .. } => {
-                // todo clone git repo into container with specified ref
-                todo!()
+                // todo Handle git repos with packages as subfolders
+
+                let build_cmd = format!("paru -B {GIT_REPO_PATH}");
+                // first update the package list, then update trustdb and then build cmd
+                let steps = [
+                    "sudo pacman -Sy --noconfirm",
+                    "sudo pacman-key --init",
+                    "sudo pacman-key --populate archlinux",
+                    build_cmd.as_str(),
+                ];
+                steps.join(" && ")
             }
             SourceData::Upload { .. } => {
-                // todo unpack zip and store it in build container dir
-                todo!()
+                todo!("unpack zip and store it in build container dir")
             }
         };
 
@@ -251,7 +272,93 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 conf,
             )
             .await?;
+
+        match source_data {
+            SourceData::Git { url, r#ref } => {
+                self.git_checkout_to_container(
+                    create_info.id.clone(),
+                    "/repo".to_string(),
+                    url,
+                    r#ref,
+                )
+                .await?;
+            }
+            SourceData::Upload { .. } => {
+                todo!("Unpack zip into build container")
+            }
+            _ => {}
+        }
+
         Ok(create_info)
+    }
+
+    /// Create a .tar.gz archive from a directory
+    async fn create_tar_gz(src_dir: &Path, dest_path: &Path) -> anyhow::Result<()> {
+        let tar_gz = std::fs::File::create(dest_path)?;
+        let enc = GzEncoder::new(tar_gz, Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        tar.append_dir_all(".", src_dir)?;
+        tar.finish()?;
+        Ok(())
+    }
+
+    /// checkout git repo at specific ref
+    /// parts of this are not 'Send' so they need to be scoped
+    fn checkout_repo_ref(git_repo: String, git_ref: String, path: PathBuf) -> anyhow::Result<()> {
+        // checkout repo
+        let repo = Repository::clone(git_repo.as_str(), &path)?;
+
+        // Resolve the ref to an object
+        let (object, reference) = repo.revparse_ext(git_ref.as_str())?;
+
+        // Checkout the tree (updates working directory)
+        repo.checkout_tree(&object, None)?;
+
+        // If it's a branch or tag, make HEAD point to it
+        if let Some(reference) = reference {
+            repo.set_head(reference.name().ok_or(anyhow!("Reference name invalid"))?)?;
+        } else {
+            // Detached HEAD for a commit hash
+            repo.set_head_detached(object.id())?;
+        }
+        Ok(())
+    }
+
+    /// checkout a git repo into a docker container
+    async fn git_checkout_to_container(
+        &self,
+        container_id: String,
+        path: String,
+        git_repo: String,
+        git_ref: String,
+    ) -> anyhow::Result<()> {
+        info!("Cloning repository {git_repo}...");
+
+        let dir = tempdir()?;
+        let repo_dir = dir.path().join("repo");
+
+        Self::checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
+        info!("Checked out {:?}", git_ref);
+
+        // Create a tar.gz of the cloned repo
+        let tar_path = dir.path().join("repo.tar.gz");
+        debug!("Creating tar archive at {:?}", tar_path);
+        Self::create_tar_gz(&repo_dir, &tar_path).await?;
+
+        let options = Some(UploadToContainerOptions {
+            path,
+            ..Default::default()
+        });
+
+        let file = File::open(tar_path)
+            .map_ok(ReaderStream::new)
+            .try_flatten_stream();
+
+        self.docker
+            .upload_to_container(container_id.as_str(), options, body_try_stream(file))
+            .await
+            .expect("upload failed");
+        Ok(())
     }
 
     pub async fn monitor_build_output(
