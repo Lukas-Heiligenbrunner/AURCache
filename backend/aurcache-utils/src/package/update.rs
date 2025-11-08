@@ -7,7 +7,7 @@ use aurcache_db::activities::ActivityType;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use log::warn;
+use log::info;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,
@@ -58,7 +58,7 @@ pub async fn package_update_all_outdated(
                 .await?;
             ids_total.append(&mut ids);
         } else {
-            warn!(
+            info!(
                 "Package auto update was not triggered for package {} because of prev. build status: {}",
                 pkg.name, pkg.status
             );

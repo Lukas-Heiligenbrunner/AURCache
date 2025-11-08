@@ -4,9 +4,9 @@ use aurcache_api::init::{init_api, init_repo};
 use aurcache_builder::init::init_build_queue;
 use aurcache_builder::types::Action;
 use aurcache_db::init::init_db;
-use aurcache_scheduler::aur_version_update::start_aur_version_checking;
 use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
+use aurcache_scheduler::update_version_check::start_update_version_checking;
 use dotenvy::dotenv;
 use log::warn;
 use tokio::sync::broadcast;
@@ -26,7 +26,7 @@ async fn main() {
     let _ = post_startup_tasks(&db).await;
 
     let build_queue_handle = init_build_queue(db.clone(), tx.clone());
-    let version_check_handle = start_aur_version_checking(db.clone());
+    let version_check_handle = start_update_version_checking(db.clone());
     if let Err(e) = start_auto_update_job(db.clone(), tx.clone()) {
         warn!("auto_update job not properly configured: {e}");
     };
