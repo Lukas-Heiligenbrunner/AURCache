@@ -29,5 +29,12 @@ FROM --platform=$TARGET_ARCH quay.io/podman/stable:v5.6.2
 COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 
+RUN dnf install -y just && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+RUN git clone https://gitlab.archlinux.org/archlinux/alpm/alpm-pkgbuild-bridge.git /tmp
+RUN cd /tmp && just install && rm -R /tmp/*
+
 WORKDIR /app
 CMD ["/entrypoint.sh"]

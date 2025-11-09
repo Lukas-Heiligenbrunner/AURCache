@@ -3,6 +3,7 @@ use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use aurcache_builder::git::checkout::checkout_repo_ref;
 use aurcache_builder::types::{Action, BuildStates};
+use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
 use aurcache_db::{builds, packages};
@@ -16,12 +17,11 @@ use tokio::sync::broadcast::Sender;
 
 pub async fn package_add(
     db: &DatabaseConnection,
-    pkg_name: String,
     tx: &Sender<Action>,
     platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
     source_data: SourceData,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let platforms = match platforms {
         None => vec![Platform::X86_64],
         Some(platforms) => {
@@ -44,18 +44,6 @@ pub async fn package_add(
         SourceData::Upload { .. } => SourceType::Upload,
     };
 
-    // remove leading and trailing whitespaces
-    let pkg_name = pkg_name.trim();
-
-    if Packages::find()
-        .filter(packages::Column::Name.eq(pkg_name))
-        .one(db)
-        .await?
-        .is_some()
-    {
-        bail!("Package already exists");
-    }
-
     let platforms_str = platforms
         .iter()
         .map(|platform| platform.as_str())
@@ -63,7 +51,19 @@ pub async fn package_add(
         .join(";");
 
     let (mut new_package, new_version) = match source_data {
-        SourceData::Aur { .. } => {
+        SourceData::Aur { ref name } => {
+            // remove leading and trailing whitespaces
+            let pkg_name = name.trim();
+
+            if Packages::find()
+                .filter(packages::Column::Name.eq(pkg_name))
+                .one(db)
+                .await?
+                .is_some()
+            {
+                bail!("Package already exists");
+            }
+
             let pkg = get_package_info(pkg_name)
                 .await?
                 .ok_or(anyhow!("Package not found"))?;
@@ -94,12 +94,24 @@ pub async fn package_add(
             // get package version from pkgbuild in subfolder
             let sourceinfo =
                 SourceInfoV1::from_pkgbuild(repo_path.join(subfolder).join("PKGBUILD").as_path())?;
-            let version = sourceinfo.base.version.to_string();
+            let pkgbase_version = sourceinfo.base.version.to_string();
+            let pkgbasee_name = sourceinfo.base.name;
+
+            let pkg_name = pkgbasee_name.to_string();
+
+            if Packages::find()
+                .filter(packages::Column::Name.eq(pkg_name))
+                .one(db)
+                .await?
+                .is_some()
+            {
+                bail!("Package already exists");
+            }
 
             let new_package = packages::ActiveModel {
-                name: Set(pkg_name.to_string()),
+                name: Set(pkgbasee_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(version)),
+                latest_aur_version: Set(Some(pkgbase_version)),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
@@ -116,9 +128,10 @@ pub async fn package_add(
 
             // todo parse zip and its pkgbuild to get a version
             let version = "1.0.0";
+            let name = "mypkg";
 
             let new_package = packages::ActiveModel {
-                name: Set(pkg_name.to_string()),
+                name: Set(name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
                 latest_aur_version: Set(Some(version.to_string())),
                 platforms: Set(platforms_str),
@@ -166,7 +179,7 @@ pub async fn package_add(
         ));
     }
 
-    Ok(())
+    Ok(new_package.name.get()?.clone())
 }
 
 fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {

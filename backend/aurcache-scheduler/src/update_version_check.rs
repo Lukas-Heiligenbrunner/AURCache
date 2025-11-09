@@ -43,20 +43,25 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     let packages = Packages::find().all(&db).await?;
     let aur_names: Vec<&str> = packages
         .iter()
-        .filter(|x| x.source_type != SourceType::Aur)
+        .filter(|x| x.source_type == SourceType::Aur)
         .map(|x| x.name.as_str())
         .collect();
 
-    let request = Request::default();
-    let response = request
-        .search_multi_info_by_names(aur_names.as_slice())
-        .await;
+    let results = if !aur_names.is_empty() {
+        let request = Request::default();
+        let response = request
+            .search_multi_info_by_names(aur_names.as_slice())
+            .await;
 
-    let results: Vec<Package> = response
-        .map_err(|_| anyhow!("couldn't download version update"))?
-        .results;
+        let results: Vec<Package> = response
+            .map_err(|_| anyhow!("couldn't download version update"))?
+            .results;
+        results
+    } else {
+        vec![]
+    };
 
-    if results.len() != packages.len() {
+    if results.len() != aur_names.len() {
         warn!("Package nr in repo and aur api response has different size");
     }
 

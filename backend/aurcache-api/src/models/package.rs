@@ -3,10 +3,9 @@ use rocket::serde::{Deserialize, Serialize};
 use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, Clone)]
 #[serde(crate = "rocket::serde")]
 pub struct AddPackage {
-    pub(crate) name: String,
     pub(crate) platforms: Option<Vec<String>>,
     pub(crate) build_flags: Option<Vec<String>>,
     pub(crate) source: SourceData,
@@ -40,7 +39,7 @@ pub struct SimplePackageModel {
     pub latest_aur_version: String,
 }
 
-#[derive(Deserialize, ToSchema, Serialize)]
+#[derive(Deserialize, ToSchema, Serialize, Clone)]
 pub struct ExtendedPackageModel {
     pub id: i32,
     pub name: String,
@@ -55,14 +54,14 @@ pub struct ExtendedPackageModel {
     pub package_type: PackageType,
 }
 
-#[derive(Deserialize, ToSchema, Serialize)]
+#[derive(Deserialize, ToSchema, Serialize, Clone)]
 pub enum PackageType {
     Aur(AurPackage),
     Git(GitPackage),
     Upload(UploadPackage),
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Default)]
+#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
 pub struct GitPackage {
     pub git_url: String,
     pub git_ref: String,
@@ -70,11 +69,12 @@ pub struct GitPackage {
 }
 
 // todo upload package
-#[derive(Deserialize, ToSchema, Serialize, Default)]
+#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
 pub struct UploadPackage {}
 
-#[derive(Deserialize, ToSchema, Serialize, Default)]
+#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
 pub struct AurPackage {
+    pub(crate) name: String,
     pub project_url: Option<String>,
     pub description: Option<String>,
     pub last_updated: u32,

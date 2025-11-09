@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 #[serde(tag = "type")] // the JSON field that acts as the tag
 pub enum SourceData {
     #[serde(rename = "aur")]
-    Aur {},
+    Aur { name: String },
     #[serde(rename = "git")]
     Git {
         url: String,

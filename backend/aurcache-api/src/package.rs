@@ -63,9 +63,8 @@ pub async fn package_add_endpoint(
         ),
     };
 
-    package_add(
+    let new_pkg_name = package_add(
         db,
-        input.name.clone(),
         tx,
         platforms,
         input.build_flags.clone(),
@@ -76,7 +75,7 @@ pub async fn package_add_endpoint(
 
     al.add(
         PackageAddActivity {
-            package: input.name.clone(),
+            package: new_pkg_name,
         },
         ActivityType::AddPackage,
         a.username,
@@ -310,7 +309,7 @@ pub async fn get_package(
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
     let (package_type, version) = match source_data {
-        SourceData::Aur {} => {
+        SourceData::Aur { .. } => {
             let aur_info = get_package_info(&pkg.name)
                 .await
                 .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
@@ -323,6 +322,7 @@ pub async fn get_package(
 
             (
                 PackageType::Aur(AurPackage {
+                    name: pkg.name.to_string(),
                     project_url: aur_info.url,
                     description: aur_info.description,
                     last_updated: aur_info.last_modified,
