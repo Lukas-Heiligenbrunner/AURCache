@@ -95,7 +95,7 @@ class SideMenu extends StatelessWidget {
                 children: [
                   DrawerListTile(
                     title: "Github",
-                    icon: Icons.commit,
+                    icon: Icons.open_in_new,
                     press: () async {
                       await launchUrl(
                         Uri.parse(
@@ -104,9 +104,20 @@ class SideMenu extends StatelessWidget {
                       );
                     },
                   ),
-                  DrawerListTile(
-                    title: "Version $appVersion",
-                    icon: Icons.info,
+                  SizedBox(
+                    height: 10,
+                  ),
+                  Padding(
+                    padding: EdgeInsetsGeometry.only(left: 25),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Version $appVersion",
+                          style: TextStyle(color: Color(0xff868686)),
+                        )
+                      ],
+                    ),
                   ),
                   SizedBox(
                     height: 20,
