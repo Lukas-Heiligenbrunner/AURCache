@@ -69,7 +69,9 @@ class AurSearchTable extends ConsumerWidget {
                 ref.invalidate(listStatsProvider);
                 ref.invalidate(getGraphDataProvider);
 
-                context.go("/");
+                if (context.mounted) {
+                  context.go("/");
+                }
               });
               if (!confirmResult) return;
             },

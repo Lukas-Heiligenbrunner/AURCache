@@ -1,3 +1,4 @@
+import 'package:aurcache/components/add_package_popup_new.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/providers/statistics.dart';
 import 'package:flutter/material.dart';
@@ -66,7 +67,9 @@ class Header extends StatelessWidget {
             ),
           ),
           onPressed: () {
-            context.push("/aur");
+            showPackageAddPopupNew(context);
+
+            //context.push("/aur");
           },
           icon: const Icon(
             Icons.add,
