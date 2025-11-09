@@ -10,6 +10,8 @@ chrono = {workspace = true}
 sea-orm = {workspace = true}
 log = {workspace = true}
 aur-rs = {workspace = true}
+tempfile = {workspace = true}
+alpm-srcinfo = {workspace = true}
 
 pacman-mirrors = {path = "../pacman-mirrors"}
 aurcache-builder = {path = "../aurcache-builder"}

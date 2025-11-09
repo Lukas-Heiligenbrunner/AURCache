@@ -1,5 +1,7 @@
+use alpm_srcinfo::SourceInfoV1;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
+use aurcache_builder::git::checkout::checkout_repo_ref;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
@@ -12,6 +14,7 @@ use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::{task::JoinHandle, time};
 
 pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
@@ -58,49 +61,70 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     }
 
     for package in packages {
+        let mut package_model: packages::ActiveModel = package.clone().into();
+        let package_id = package_model.id.get()?;
+
+        // Query the latest build.version for this package (most recent by end_time then start_time)
+        let latest_version_row = Builds::find()
+            .select_only()
+            .column(builds::Column::Version)
+            .filter(builds::Column::PkgId.eq(*package_id))
+            .order_by(builds::Column::EndTime, Order::Desc)
+            .order_by(builds::Column::StartTime, Order::Desc)
+            .limit(1)
+            .into_tuple::<(String,)>()
+            .one(&db)
+            .await?;
+
+        let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
+
         let source_data = SourceData::from_str(package.source_data.as_str())?;
         match source_data {
-            SourceData::Aur { .. } => {
-                match results.iter().find(|x1| x1.name == package.name) {
-                    None => {
-                        warn!("Couldn't find {} in AUR response", package.name)
-                    }
-                    Some(result) => {
-                        let mut package: packages::ActiveModel = package.into();
-                        let package_id = package.id.get()?;
-
-                        // Query the latest build.version for this package (most recent by end_time then start_time)
-                        let latest_version_row = Builds::find()
-                            .select_only()
-                            .column(builds::Column::Version)
-                            .filter(builds::Column::PkgId.eq(*package_id))
-                            .order_by(builds::Column::EndTime, Order::Desc)
-                            .order_by(builds::Column::StartTime, Order::Desc)
-                            .limit(1)
-                            .into_tuple::<(String,)>()
-                            .one(&db)
-                            .await?;
-
-                        let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
-
-                        package.latest_aur_version = Set(Option::from(result.version.clone()));
-                        package.out_of_date =
-                            Set(if latest_version == Some(result.version.clone()) {
-                                0
-                            } else {
-                                1
-                            });
-                        let _ = package.update(&db).await;
-                    }
+            SourceData::Aur { .. } => match results.iter().find(|x1| x1.name == package.name) {
+                None => {
+                    warn!("Couldn't find {} in AUR response", package.name)
                 }
-            }
-            SourceData::Git { .. } => {
-                todo!("checkout repo, compare newest ref if its different")
+                Some(result) => {
+                    package_model.latest_aur_version = Set(Option::from(result.version.clone()));
+                    package_model.out_of_date =
+                        Set(if latest_version == Some(result.version.clone()) {
+                            0
+                        } else {
+                            1
+                        });
+                }
+            },
+            SourceData::Git {
+                url,
+                subfolder,
+                r#ref,
+            } => {
+                let dir = tempdir()?;
+                let repo_path = dir.path().join("repo");
+
+                checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
+                // todo maybe check also if latest commit hash changed
+
+                let sourceinfo = SourceInfoV1::from_pkgbuild(
+                    repo_path.join(subfolder).join("PKGBUILD").as_path(),
+                )?;
+                let version = sourceinfo.base.version.to_string();
+
+                package_model.latest_aur_version = Set(Option::from(version.clone()));
+                package_model.out_of_date = Set(if latest_version == Some(version) {
+                    0
+                } else {
+                    1
+                });
+
+                _ = dir.close();
             }
             SourceData::Upload { .. } => {
                 // noop since update is only triggered by new upload
             }
         }
+
+        let _ = package_model.update(&db).await;
     }
     Ok(())
 }

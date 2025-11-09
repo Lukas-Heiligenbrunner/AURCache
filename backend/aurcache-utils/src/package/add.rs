@@ -1,5 +1,7 @@
 use crate::aur::api::get_package_info;
+use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
+use aurcache_builder::git::checkout::checkout_repo_ref;
 use aurcache_builder::types::{Action, BuildStates};
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
@@ -9,6 +11,7 @@ use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use sea_orm::{ColumnTrait, TryIntoModel};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::tempdir;
 use tokio::sync::broadcast::Sender;
 
 pub async fn package_add(
@@ -77,11 +80,26 @@ pub async fn package_add(
             };
             (new_package.save(db).await?, pkg.version.clone())
         }
-        SourceData::Git { ref r#ref, .. } => {
+        SourceData::Git {
+            ref r#ref,
+            ref subfolder,
+            ref url,
+        } => {
+            let dir = tempdir()?;
+            let repo_path = dir.path().join("repo");
+
+            // checkout repo to temp dir
+            checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
+
+            // get package version from pkgbuild in subfolder
+            let sourceinfo =
+                SourceInfoV1::from_pkgbuild(repo_path.join(subfolder).join("PKGBUILD").as_path())?;
+            let version = sourceinfo.base.version.to_string();
+
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(r#ref.clone())),
+                latest_aur_version: Set(Some(version)),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),

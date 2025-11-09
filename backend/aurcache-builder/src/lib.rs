@@ -3,6 +3,7 @@ pub mod build_mode;
 mod cancel;
 mod docker;
 mod env;
+pub mod git;
 pub mod init;
 mod logger;
 mod makepkg_utils;

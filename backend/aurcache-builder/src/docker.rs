@@ -1,6 +1,7 @@
 use crate::build::Builder;
 use crate::build_mode::{BuildMode, get_build_mode};
 use crate::env::limits_from_env;
+use crate::git::checkout::checkout_repo_ref;
 use crate::logger::BuildLogger;
 use crate::makepkg_utils::create_makepkg_config;
 use anyhow::anyhow;
@@ -19,11 +20,10 @@ use bollard::{Docker, body_try_stream};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures::{StreamExt, TryFutureExt};
-use git2::Repository;
 use itertools::Itertools;
 use log::{debug, info, trace};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use tempfile::tempdir;
 use tokio::fs::File;
@@ -311,28 +311,6 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         Ok(())
     }
 
-    /// checkout git repo at specific ref
-    /// parts of this are not 'Send' so they need to be scoped
-    fn checkout_repo_ref(git_repo: String, git_ref: String, path: PathBuf) -> anyhow::Result<()> {
-        // checkout repo
-        let repo = Repository::clone(git_repo.as_str(), &path)?;
-
-        // Resolve the ref to an object
-        let (object, reference) = repo.revparse_ext(git_ref.as_str())?;
-
-        // Checkout the tree (updates working directory)
-        repo.checkout_tree(&object, None)?;
-
-        // If it's a branch or tag, make HEAD point to it
-        if let Some(reference) = reference {
-            repo.set_head(reference.name().ok_or(anyhow!("Reference name invalid"))?)?;
-        } else {
-            // Detached HEAD for a commit hash
-            repo.set_head_detached(object.id())?;
-        }
-        Ok(())
-    }
-
     /// checkout a git repo into a docker container
     async fn git_checkout_to_container(
         &self,
@@ -347,7 +325,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let dir = tempdir()?;
         let repo_dir = dir.path().join("repo");
 
-        Self::checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
+        checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
         info!("Checked out {:?}", git_ref);
 
         // Create a tar.gz of the cloned repo
