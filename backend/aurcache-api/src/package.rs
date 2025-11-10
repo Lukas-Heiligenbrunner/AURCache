@@ -9,7 +9,7 @@ use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_builder::types::Action;
 use aurcache_db::activities::ActivityType;
-use aurcache_db::packages::{SourceData};
+use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_utils::aur::api::get_package_info;
@@ -358,8 +358,7 @@ pub async fn get_package(
         status: pkg.status,
         outofdate: pkg.out_of_date,
         latest_version,
-        package_type: pkg.source_type,
-        package_source: package_source,
+        package_source,
         selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
         selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
         latest_aur_version: version,

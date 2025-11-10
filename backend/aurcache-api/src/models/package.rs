@@ -1,4 +1,4 @@
-use aurcache_db::packages::{SourceData, SourceType};
+use aurcache_db::packages::SourceData;
 use rocket::serde::{Deserialize, Serialize};
 use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
@@ -50,9 +50,7 @@ pub struct ExtendedPackageModel {
     pub selected_build_flags: Option<Vec<String>>,
     // todo this should be renamed to "latest_upstream_version" or sth
     pub latest_aur_version: String,
-
     pub package_source: PackageSource,
-    pub package_type: SourceType
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]
