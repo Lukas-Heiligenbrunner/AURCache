@@ -20,26 +20,24 @@ class AurSearchTable extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return DataTable(
-        horizontalMargin: 0,
-        columnSpacing: defaultPadding,
-        columns: const [
-          DataColumn(
-            label: Text("Package Name"),
-          ),
-          DataColumn(
-            label: Text("Version"),
-          ),
-          DataColumn(
-            label: Text("Action"),
-          ),
-        ],
-        rows: data
-            .map((e) => buildDataRow(e, context, ref))
-            .toList(growable: false));
+      horizontalMargin: 0,
+      columnSpacing: defaultPadding,
+      columns: const [
+        DataColumn(label: Text("Package Name")),
+        DataColumn(label: Text("Version")),
+        DataColumn(label: Text("Action")),
+      ],
+      rows: data
+          .map((e) => buildDataRow(e, context, ref))
+          .toList(growable: false),
+    );
   }
 
   DataRow buildDataRow(
-      AurPackage package, BuildContext context, WidgetRef ref) {
+    AurPackage package,
+    BuildContext context,
+    WidgetRef ref,
+  ) {
     return DataRow(
       cells: [
         DataCell(Text(package.name)),
@@ -49,30 +47,35 @@ class AurSearchTable extends ConsumerWidget {
             child: const Text("Install", style: TextStyle(color: greenColor)),
             onPressed: () async {
               final confirmResult = await showPackageAddPopup(
-                  context, package.name, (archs) async {
-                try {
-                  await API.addPackage(
-                      name: package.name, selectedArchs: archs);
-                } on DioException catch (e) {
-                  print(e);
-                  toastification.show(
-                    title: Text('Failed to add package!'),
-                    autoCloseDuration: const Duration(seconds: 5),
-                    type: ToastificationType.error,
-                  );
-                }
+                context,
+                package.name,
+                (archs) async {
+                  try {
+                    await API.addPackage(
+                      name: package.name,
+                      selectedArchs: archs,
+                    );
+                  } on DioException catch (e) {
+                    print(e);
+                    toastification.show(
+                      title: Text('Failed to add package!'),
+                      autoCloseDuration: const Duration(seconds: 5),
+                      type: ToastificationType.error,
+                    );
+                  }
 
-                // invalidate all dashboard providers
-                ref.invalidate(listActivitiesProvider);
-                ref.invalidate(listPackagesProvider);
-                ref.invalidate(listBuildsProvider);
-                ref.invalidate(listStatsProvider);
-                ref.invalidate(getGraphDataProvider);
+                  // invalidate all dashboard providers
+                  ref.invalidate(listActivitiesProvider);
+                  ref.invalidate(listPackagesProvider);
+                  ref.invalidate(listBuildsProvider);
+                  ref.invalidate(listStatsProvider);
+                  ref.invalidate(getGraphDataProvider);
 
-                if (context.mounted) {
-                  context.go("/");
-                }
-              });
+                  if (context.mounted) {
+                    context.go("/");
+                  }
+                },
+              );
               if (!confirmResult) return;
             },
           ),

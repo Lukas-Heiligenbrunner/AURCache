@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 
 class AddPackagePopup extends StatelessWidget {
-  const AddPackagePopup(
-      {super.key, required this.packageName, required this.successCallback});
+  const AddPackagePopup({
+    super.key,
+    required this.packageName,
+    required this.successCallback,
+  });
   final String packageName;
   final void Function(List<String> successCallback) successCallback;
 
@@ -31,16 +34,14 @@ class AddPackagePopup extends StatelessWidget {
             child: Column(
               children: [
                 const Text(
-                    "Select the target architectures you want this package build for:"),
-                const SizedBox(
-                  height: 10,
+                  "Select the target architectures you want this package build for:",
                 ),
+                const SizedBox(height: 10),
                 ArchTags(selectedArchs: selectedArchs),
-                const SizedBox(
-                  height: 15,
-                ),
+                const SizedBox(height: 15),
                 const Text(
-                    "Remember: Supported platforms depend strongly on the AUR package and its PKGBUILD."),
+                  "Remember: Supported platforms depend strongly on the AUR package and its PKGBUILD.",
+                ),
               ],
             ),
           ),
@@ -74,7 +75,9 @@ Future<bool> showPackageAddPopup(
     context: context,
     barrierDismissible: false,
     builder: (BuildContext context) => AddPackagePopup(
-        packageName: packageName, successCallback: successCallback),
+      packageName: packageName,
+      successCallback: successCallback,
+    ),
   ))!;
 }
 

@@ -55,7 +55,7 @@ class BuildsScreen extends StatelessWidget {
                     },
                     provider: listBuildsProvider(),
                   ),
-                )
+                ),
               ],
             ),
           ),

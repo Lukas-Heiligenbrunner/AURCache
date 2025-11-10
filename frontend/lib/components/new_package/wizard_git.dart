@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
 class GitWizard extends StatefulWidget {
-  const GitWizard({super.key});
+  const GitWizard({super.key, required this.onChange});
+  final void Function((String, String, String)) onChange;
 
   @override
   State<GitWizard> createState() => _GitWizardState();
@@ -22,7 +23,7 @@ class _GitWizardState extends State<GitWizard> {
     super.dispose();
   }
 
-  void _onNext() {
+  void _onTextChanged(String _) {
     if (_formKey.currentState!.validate()) {
       final repoUrl = _repoUrlController.text.trim();
       final subfolder = _subfolderController.text.trim();
@@ -30,10 +31,7 @@ class _GitWizardState extends State<GitWizard> {
           ? "master"
           : _gitRefController.text.trim();
 
-      // TODO: Handle the form data (e.g., pass to next wizard step)
-      debugPrint('Repo: $repoUrl');
-      debugPrint('Subfolder: $subfolder');
-      debugPrint('Git Ref: $gitRef');
+      widget.onChange((repoUrl, gitRef, subfolder));
     }
   }
 
@@ -53,6 +51,7 @@ class _GitWizardState extends State<GitWizard> {
                 hintText: 'https://github.com/user/repo.git',
                 border: OutlineInputBorder(),
               ),
+              onChanged: this._onTextChanged,
               validator: (value) {
                 if (value == null || value.trim().isEmpty) {
                   return 'Repository URL is required';
@@ -71,6 +70,7 @@ class _GitWizardState extends State<GitWizard> {
                 hintText: 'use root dir',
                 border: OutlineInputBorder(),
               ),
+              onChanged: this._onTextChanged,
             ),
             const SizedBox(height: 16),
             TextFormField(
@@ -80,7 +80,8 @@ class _GitWizardState extends State<GitWizard> {
                 hintText: 'master',
                 border: OutlineInputBorder(),
               ),
-            )
+              onChanged: this._onTextChanged,
+            ),
           ],
         ),
       ),

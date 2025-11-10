@@ -22,43 +22,31 @@ class SideCard extends StatelessWidget {
       padding: const EdgeInsets.all(defaultPadding),
       decoration: BoxDecoration(
         border: Border.all(width: 2, color: primaryColor.withOpacity(0.15)),
-        borderRadius: const BorderRadius.all(
-          Radius.circular(defaultPadding),
-        ),
+        borderRadius: const BorderRadius.all(Radius.circular(defaultPadding)),
       ),
       child: Row(
         children: [
           if (color != null)
-            SizedBox(
-                height: 20,
-                width: 20,
-                child: Container(
-                  color: color,
-                )),
+            SizedBox(height: 20, width: 20, child: Container(color: color)),
           Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: defaultPadding),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
                   if (subtitle != null)
                     Text(
                       subtitle!,
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall!
-                          .copyWith(color: Colors.white70),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall!.copyWith(color: Colors.white70),
                     ),
                 ],
               ),
             ),
           ),
-          Text(textRight)
+          Text(textRight),
         ],
       ),
     );

@@ -1,7 +1,7 @@
 use crate::models::authenticated::Authenticated;
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use crate::models::package::{
-    AurPackage, ExtendedPackageModel, GitPackage, PackageType, SimplePackageModel,
+    AurPackage, ExtendedPackageModel, GitPackage, PackageSource, SimplePackageModel,
 };
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
@@ -9,7 +9,7 @@ use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_builder::types::Action;
 use aurcache_db::activities::ActivityType;
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{SourceData};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_utils::aur::api::get_package_info;
@@ -308,7 +308,7 @@ pub async fn get_package(
     let source_data = SourceData::from_str(pkg.source_data.as_str())
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
-    let (package_type, version) = match source_data {
+    let (package_source, version) = match source_data {
         SourceData::Aur { .. } => {
             let aur_info = get_package_info(&pkg.name)
                 .await
@@ -321,7 +321,7 @@ pub async fn get_package(
             );
 
             (
-                PackageType::Aur(AurPackage {
+                PackageSource::Aur(AurPackage {
                     name: pkg.name.to_string(),
                     project_url: aur_info.url,
                     description: aur_info.description,
@@ -340,7 +340,7 @@ pub async fn get_package(
             url,
             r#ref,
         } => (
-            PackageType::Git(GitPackage {
+            PackageSource::Git(GitPackage {
                 git_url: url,
                 git_ref: r#ref.clone(),
                 subfolder,
@@ -358,7 +358,8 @@ pub async fn get_package(
         status: pkg.status,
         outofdate: pkg.out_of_date,
         latest_version,
-        package_type,
+        package_type: pkg.source_type,
+        package_source: package_source,
         selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
         selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
         latest_aur_version: version,

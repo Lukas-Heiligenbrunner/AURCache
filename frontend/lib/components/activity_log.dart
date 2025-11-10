@@ -40,7 +40,7 @@ class _ActivityLogState extends State<ActivityLog> {
               text: "added Package \"Powerapps\"",
               timestamp: DateTime.timestamp(),
               user: "Lukas Kessler",
-            )
+            ),
           ],
         ),
       ),
@@ -55,15 +55,20 @@ class _ActivityLogState extends State<ActivityLog> {
                       user: e.user,
                     ),
                   )
-                  .toList(growable: false)),
+                  .toList(growable: false),
+            ),
       provider: listActivitiesProvider(),
     );
   }
 }
 
 class ActivityLogItem extends StatelessWidget {
-  const ActivityLogItem(
-      {super.key, this.user, required this.text, required this.timestamp});
+  const ActivityLogItem({
+    super.key,
+    this.user,
+    required this.text,
+    required this.timestamp,
+  });
 
   final String? user;
   final String text;
@@ -84,9 +89,7 @@ class ActivityLogItem extends StatelessWidget {
               color: Color(0xff393C42),
             ),
           ),
-          SizedBox(
-            width: 10,
-          ),
+          SizedBox(width: 10),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -96,15 +99,9 @@ class ActivityLogItem extends StatelessWidget {
                     user ?? "You",
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                   ),
+                  if (context.desktop) SizedBox(width: 5),
                   if (context.desktop)
-                    SizedBox(
-                      width: 5,
-                    ),
-                  if (context.desktop)
-                    Text(
-                      text,
-                      style: TextStyle(fontSize: 18),
-                    )
+                    Text(text, style: TextStyle(fontSize: 18)),
                 ],
               ),
               context.desktop
@@ -112,10 +109,7 @@ class ActivityLogItem extends StatelessWidget {
                       timestamp.toString(),
                       style: TextStyle(fontSize: 16, color: Colors.white70),
                     )
-                  : Text(
-                      text,
-                      style: TextStyle(fontSize: 14),
-                    )
+                  : Text(text, style: TextStyle(fontSize: 14)),
             ],
           ),
         ],

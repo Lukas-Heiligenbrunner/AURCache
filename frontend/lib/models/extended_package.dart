@@ -1,41 +1,89 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
+
+part 'extended_package.freezed.dart';
 part 'extended_package.g.dart';
 
-@JsonSerializable()
-class ExtendedPackage {
-  final int id;
-  final String name;
-  @JsonKey(fromJson: _fromJson)
-  final bool outofdate;
-  final int status, last_updated, first_submitted;
-  final String latest_aur_version, aur_url;
-  final String? licenses, maintainer, project_url, description, latest_version;
-  final bool aur_flagged_outdated;
-  final List<String> selected_platforms;
-  final List<String> selected_build_flags;
+bool _fromJson(num value) => value != 0;
 
-  ExtendedPackage({
-    required this.id,
-    required this.name,
-    required this.status,
-    required this.latest_version,
-    required this.latest_aur_version,
-    required this.outofdate,
-    required this.last_updated,
-    required this.first_submitted,
-    required this.licenses,
-    required this.maintainer,
-    required this.aur_flagged_outdated,
-    required this.selected_platforms,
-    required this.selected_build_flags,
-    required this.aur_url,
-    required this.project_url,
-    required this.description,
-  });
+String _toString(PackageSource src) {
+  return src.toString();
+}
+
+@freezed
+sealed class ExtendedPackage with _$ExtendedPackage {
+  factory ExtendedPackage({
+    required int id,
+    required String name,
+    required int status,
+    // ignore: invalid_annotation_target
+    @JsonKey(fromJson: _fromJson) required bool outofdate,
+    required String latest_aur_version,
+    final String? latest_version,
+    required List<String> selected_platforms,
+    required List<String> selected_build_flags,
+    // ignore: invalid_annotation_target
+    @JsonKey(toJson: _toString) required PackageSource package_source,
+  }) = _ExtendedPackage;
 
   factory ExtendedPackage.fromJson(Map<String, dynamic> json) =>
       _$ExtendedPackageFromJson(json);
-  Map<String, dynamic> toJson() => _$ExtendedPackageToJson(this);
+}
 
-  static bool _fromJson(num value) => value != 0;
+@Freezed(unionKey: 'package_type', unionValueCase: FreezedUnionCase.pascal)
+sealed class PackageSource with _$PackageSource {
+  const factory PackageSource.aur(AurPackage aur) = Aur;
+  const factory PackageSource.git(GitPackage git) = Git;
+  const factory PackageSource.upload(UploadPackage upload) = Upload;
+
+  factory PackageSource.fromJson(Map<String, dynamic> json) {
+    final type = json['package_type'];
+    switch (type) {
+      case 'Aur':
+        return PackageSource.aur(AurPackage.fromJson(json));
+      case 'Git':
+        return PackageSource.git(GitPackage.fromJson(json));
+      case 'Upload':
+        return PackageSource.upload(UploadPackage.fromJson(json));
+      default:
+        throw UnsupportedError('Unknown package_type: $type');
+    }
+  }
+}
+
+@freezed
+sealed class AurPackage with _$AurPackage {
+  const factory AurPackage({
+    required String name,
+    String? project_url,
+    String? description,
+    required int last_updated,
+    required int first_submitted,
+    String? licenses,
+    String? maintainer,
+    required bool aur_flagged_outdated,
+    required String aur_url,
+  }) = _AurPackage;
+
+  factory AurPackage.fromJson(Map<String, dynamic> json) =>
+      _$AurPackageFromJson(json);
+}
+
+@freezed
+sealed class GitPackage with _$GitPackage {
+  const factory GitPackage({
+    required String git_url,
+    required String git_ref,
+    required String subfolder,
+  }) = _GitPackage;
+
+  factory GitPackage.fromJson(Map<String, dynamic> json) =>
+      _$GitPackageFromJson(json);
+}
+
+@freezed
+sealed class UploadPackage with _$UploadPackage {
+  const factory UploadPackage() = _UploadPackage;
+
+  factory UploadPackage.fromJson(Map<String, dynamic> json) =>
+      _$UploadPackageFromJson(json);
 }

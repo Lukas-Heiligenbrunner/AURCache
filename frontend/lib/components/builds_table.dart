@@ -14,14 +14,15 @@ class BuildsTable extends StatelessWidget {
 
   static Widget loading() {
     final demoBuild = Build(
-        id: 42,
-        pkg_id: 0,
-        pkg_name: "MyPackage",
-        platform: "x86_64",
-        version: "1.0.1",
-        start_time: DateTime.now(),
-        end_time: DateTime.now(),
-        status: 0);
+      id: 42,
+      pkg_id: 0,
+      pkg_name: "MyPackage",
+      platform: "x86_64",
+      version: "1.0.1",
+      start_time: DateTime.now(),
+      end_time: DateTime.now(),
+      status: 0,
+    );
 
     return Skeletonizer(
       child: BuildsTable(data: List.generate(20, (_) => demoBuild)),
@@ -33,33 +34,22 @@ class BuildsTable extends StatelessWidget {
     return DataTable(
       horizontalMargin: 12,
       columnSpacing: defaultPadding,
-      headingRowColor:
-          WidgetStateProperty.resolveWith<Color?>((Set<WidgetState> states) {
+      headingRowColor: WidgetStateProperty.resolveWith<Color?>((
+        Set<WidgetState> states,
+      ) {
         return Color(0xff131418);
       }),
       headingRowHeight: 50,
       columns: [
         if (context.desktop)
-          DataColumn(
-            label: Skeleton.keep(child: Text("Build ID")),
-          ),
+          DataColumn(label: Skeleton.keep(child: Text("Build ID"))),
         if (context.desktop)
-          DataColumn(
-            label: Skeleton.keep(child: Text("Date")),
-          ),
-        DataColumn(
-          label: Skeleton.keep(child: Text("Package Name")),
-        ),
-        DataColumn(
-          label: Skeleton.keep(child: Text("Version")),
-        ),
+          DataColumn(label: Skeleton.keep(child: Text("Date"))),
+        DataColumn(label: Skeleton.keep(child: Text("Package Name"))),
+        DataColumn(label: Skeleton.keep(child: Text("Version"))),
         if (context.desktop)
-          DataColumn(
-            label: Skeleton.keep(child: Text("Platform")),
-          ),
-        DataColumn(
-          label: Skeleton.keep(child: Text("Status")),
-        ),
+          DataColumn(label: Skeleton.keep(child: Text("Platform"))),
+        DataColumn(label: Skeleton.keep(child: Text("Status"))),
       ],
       rows: data.map((e) => buildDataRow(context, e)).toList(),
     );
@@ -70,23 +60,30 @@ class BuildsTable extends StatelessWidget {
       cells: [
         if (context.desktop) DataCell(Text(build.id.toString())),
         if (context.desktop)
-          DataCell(Text(
-              '${build.start_time.day.toString().padLeft(2, '0')}.${build.start_time.month.toString().padLeft(2, '0')}.${build.start_time.year.toString()}')),
-        DataCell(Text(build.pkg_name),
-            onTap: context.mobile
-                ? () => context.push("/build/${build.id}")
-                : null),
+          DataCell(
+            Text(
+              '${build.start_time.day.toString().padLeft(2, '0')}.${build.start_time.month.toString().padLeft(2, '0')}.${build.start_time.year.toString()}',
+            ),
+          ),
+        DataCell(
+          Text(build.pkg_name),
+          onTap: context.mobile
+              ? () => context.push("/build/${build.id}")
+              : null,
+        ),
         DataCell(Text(build.version)),
         if (context.desktop) DataCell(Text(build.platform)),
-        DataCell(IconButton(
-          icon: Icon(
-            switchSuccessIcon(build.status),
-            color: switchSuccessColor(build.status),
+        DataCell(
+          IconButton(
+            icon: Icon(
+              switchSuccessIcon(build.status),
+              color: switchSuccessColor(build.status),
+            ),
+            onPressed: () {
+              context.push("/build/${build.id}");
+            },
           ),
-          onPressed: () {
-            context.push("/build/${build.id}");
-          },
-        )),
+        ),
       ],
     );
   }

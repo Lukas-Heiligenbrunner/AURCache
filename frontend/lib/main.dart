@@ -14,17 +14,19 @@ void main() {
       print("You are using the WASM build of Flutter");
     } else {
       print(
-          "you are using the JS build of Flutter. Your Browser doesn't support WASM");
+        "you are using the JS build of Flutter. Your Browser doesn't support WASM",
+      );
     }
   }
 
   GoRouter.optionURLReflectsImperativeAPIs = true;
   runApp(
     ProviderScope(
-        child: DevicePreview(
-      enabled: !kReleaseMode && !kIsWeb,
-      builder: (context) => const MyApp(), // Wrap your app
-    )),
+      child: DevicePreview(
+        enabled: !kReleaseMode && !kIsWeb,
+        builder: (context) => const MyApp(), // Wrap your app
+      ),
+    ),
   );
 }
 
@@ -40,18 +42,21 @@ class MyApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         title: 'AURCache',
         theme: ThemeData.dark().copyWith(
-            appBarTheme:
-                const AppBarTheme(backgroundColor: bgColor, elevation: 0),
-            scaffoldBackgroundColor: bgColor,
-            primaryColor: greenColor,
-            textTheme:
-                GoogleFonts.openSansTextTheme(Theme.of(context).textTheme)
-                    .apply(bodyColor: Colors.white),
-            canvasColor: secondaryColor,
-            drawerTheme: ThemeData.dark()
-                .drawerTheme
-                .copyWith(backgroundColor: Color(0xff131418)),
-            dialogTheme: DialogThemeData(backgroundColor: secondaryColor)),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: bgColor,
+            elevation: 0,
+          ),
+          scaffoldBackgroundColor: bgColor,
+          primaryColor: greenColor,
+          textTheme: GoogleFonts.openSansTextTheme(
+            Theme.of(context).textTheme,
+          ).apply(bodyColor: Colors.white),
+          canvasColor: secondaryColor,
+          drawerTheme: ThemeData.dark().drawerTheme.copyWith(
+            backgroundColor: Color(0xff131418),
+          ),
+          dialogTheme: DialogThemeData(backgroundColor: secondaryColor),
+        ),
       ),
     );
   }

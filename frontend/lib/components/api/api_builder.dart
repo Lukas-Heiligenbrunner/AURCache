@@ -6,12 +6,13 @@ import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:toastification/toastification.dart';
 
 class APIBuilder<T> extends ConsumerStatefulWidget {
-  const APIBuilder(
-      {super.key,
-      this.interval,
-      required this.onLoad,
-      required this.onData,
-      required this.provider});
+  const APIBuilder({
+    super.key,
+    this.interval,
+    required this.onLoad,
+    required this.onData,
+    required this.provider,
+  });
 
   final Duration? interval;
 
@@ -34,11 +35,13 @@ class _APIBuilderState<T> extends ConsumerState<APIBuilder<T>> {
       loading: () => widget.onLoad(),
       error: (error, stack) {
         // Optionally show an error toast or widget.
-        WidgetsBinding.instance.addPostFrameCallback((_) => toastification.show(
-              title: Text('API Request failed! $error'),
-              autoCloseDuration: const Duration(seconds: 5),
-              type: ToastificationType.error,
-            ));
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => toastification.show(
+            title: Text('API Request failed! $error'),
+            autoCloseDuration: const Duration(seconds: 5),
+            type: ToastificationType.error,
+          ),
+        );
         return Center(child: Text('API Request failed! $error'));
       },
     );
@@ -49,8 +52,10 @@ class _APIBuilderState<T> extends ConsumerState<APIBuilder<T>> {
     super.initState();
 
     if (widget.interval != null) {
-      timer = Timer.periodic(widget.interval!,
-          (_) => ref.invalidate(widget.provider as ProviderOrFamily));
+      timer = Timer.periodic(
+        widget.interval!,
+        (_) => ref.invalidate(widget.provider as ProviderOrFamily),
+      );
     }
   }
 

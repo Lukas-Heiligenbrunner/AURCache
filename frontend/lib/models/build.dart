@@ -13,15 +13,16 @@ class Build {
   @JsonKey(fromJson: _fromJson)
   final DateTime start_time;
 
-  Build(
-      {required this.id,
-      required this.pkg_id,
-      required this.pkg_name,
-      required this.platform,
-      required this.version,
-      required this.start_time,
-      required this.end_time,
-      required this.status});
+  Build({
+    required this.id,
+    required this.pkg_id,
+    required this.pkg_name,
+    required this.platform,
+    required this.version,
+    required this.start_time,
+    required this.end_time,
+    required this.status,
+  });
 
   factory Build.fromJson(Map<String, dynamic> json) => _$BuildFromJson(json);
   Map<String, dynamic> toJson() => _$BuildToJson(this);

@@ -35,29 +35,31 @@ class _PackagesettingsscreenState extends ConsumerState<Packagesettingsscreen> {
           Padding(
             padding: const EdgeInsets.only(right: 10),
             child: TextButton(
-                onPressed: () async {
-                  try {
-                    await API.patchPackage(
-                        id: widget.pkgID,
-                        build_flags: buildFlags,
-                        platforms: buildPlatforms);
-                    // refresh provider (also of package page)
-                    ref.invalidate(getPackageProvider(widget.pkgID));
+              onPressed: () async {
+                try {
+                  await API.patchPackage(
+                    id: widget.pkgID,
+                    build_flags: buildFlags,
+                    platforms: buildPlatforms,
+                  );
+                  // refresh provider (also of package page)
+                  ref.invalidate(getPackageProvider(widget.pkgID));
 
-                    if (mounted) {
-                      context.pop();
-                    }
-                  } on DioException catch (e) {
-                    print(e);
-                    toastification.show(
-                      title: Text('Failed to save package settings!'),
-                      autoCloseDuration: const Duration(seconds: 5),
-                      type: ToastificationType.error,
-                    );
+                  if (mounted) {
+                    context.pop();
                   }
-                },
-                child: const Text("Save")),
-          )
+                } on DioException catch (e) {
+                  print(e);
+                  toastification.show(
+                    title: Text('Failed to save package settings!'),
+                    autoCloseDuration: const Duration(seconds: 5),
+                    type: ToastificationType.error,
+                  );
+                }
+              },
+              child: const Text("Save"),
+            ),
+          ),
         ],
       ),
       body: APIBuilder(
@@ -71,21 +73,23 @@ class _PackagesettingsscreenState extends ConsumerState<Packagesettingsscreen> {
             child: Row(
               children: [
                 Expanded(
-                    flex: 1,
-                    child: PlatformSettings(
-                      pkg: pkg,
-                      changed: (List<String> v) {
-                        buildPlatforms = v;
-                      },
-                    )),
+                  flex: 1,
+                  child: PlatformSettings(
+                    pkg: pkg,
+                    changed: (List<String> v) {
+                      buildPlatforms = v;
+                    },
+                  ),
+                ),
                 Expanded(
-                    flex: 1,
-                    child: BuildFlagSettings(
-                      pkg: pkg,
-                      changed: (List<String> v) {
-                        buildFlags = v;
-                      },
-                    ))
+                  flex: 1,
+                  child: BuildFlagSettings(
+                    pkg: pkg,
+                    changed: (List<String> v) {
+                      buildFlags = v;
+                    },
+                  ),
+                ),
               ],
             ),
           );

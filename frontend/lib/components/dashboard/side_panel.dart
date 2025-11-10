@@ -19,19 +19,15 @@ class SidePanel extends StatelessWidget {
             padding: const EdgeInsets.only(left: 12),
             child: const Text(
               "Recent Activity",
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w500,
-              ),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
             ),
           ),
           const SizedBox(height: defaultPadding),
           Responsive(
             mobileChild: ActivityLog(),
             desktopChild: Expanded(
-                child: SingleChildScrollView(
-              child: ActivityLog(),
-            )),
+              child: SingleChildScrollView(child: ActivityLog()),
+            ),
           ),
         ],
       ),
@@ -48,22 +44,20 @@ class SidePanel extends StatelessWidget {
                 padding: const EdgeInsets.only(left: 12),
                 child: const Text(
                   "Builds Per Month",
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
                 ),
               ),
               Padding(
                 padding: const EdgeInsets.only(left: 12, right: 12),
                 child: BuildLineChart(),
-              )
+              ),
             ],
           ),
         ),
         Responsive(
-            mobileChild: activityWidget,
-            desktopChild: Expanded(child: activityWidget)),
+          mobileChild: activityWidget,
+          desktopChild: Expanded(child: activityWidget),
+        ),
       ],
     );
   }

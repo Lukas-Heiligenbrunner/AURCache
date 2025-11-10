@@ -54,16 +54,27 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                           ),
                         ),
                         IconButton(
-                            onPressed: () async {
-                              await launchUrl(
-                                Uri.parse(pkg.aur_url),
-                                webOnlyWindowName: '_blank',
-                              );
-                            },
-                            icon: const Icon(Icons.link))
+                          onPressed: () async {
+                            pkg.package_source.when(
+                              aur: (aur) async {
+                                await launchUrl(
+                                  Uri.parse(aur.aur_url),
+                                  webOnlyWindowName: '_blank',
+                                );
+                              },
+                              git: (git) {
+                                // todo redirect to git page
+                              },
+                              upload: (upload) {
+                                // todo do idk what
+                              },
+                            );
+                          },
+                          icon: const Icon(Icons.link),
+                        ),
                       ],
                     ),
-                    _buildTopActionButtons(pkg)
+                    _buildTopActionButtons(pkg),
                   ],
                 ),
                 Row(
@@ -115,9 +126,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
             style: TextStyle(color: Colors.yellowAccent),
           ),
         ),
-        const SizedBox(
-          width: 10,
-        ),
+        const SizedBox(width: 10),
         ElevatedButton(
           onPressed: () async {
             await showConfirmationDialog(
@@ -147,9 +156,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
             style: TextStyle(color: Colors.redAccent),
           ),
         ),
-        const SizedBox(
-          width: 10,
-        ),
+        const SizedBox(width: 10),
         ElevatedButton(
           onPressed: () {
             context.push("/package/${pkg.id}/settings");
@@ -164,11 +171,6 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
   }
 
   Widget _buildSideBar(ExtendedPackage pkg) {
-    final lastUpdated =
-        DateTime.fromMillisecondsSinceEpoch(pkg.last_updated * 1000);
-    final firstSubmitted =
-        DateTime.fromMillisecondsSinceEpoch(pkg.first_submitted * 1000);
-
     return SizedBox(
       width: 300,
       child: Container(
@@ -178,9 +180,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(
-              height: 5,
-            ),
+            const SizedBox(height: 5),
             Text(
               "Details for ${pkg.name}:",
               style: const TextStyle(fontSize: 18),
@@ -190,40 +190,52 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
               title: "Latest AUR version",
               subtitle: pkg.latest_aur_version,
             ),
-            _sideCard(
-              title: "Last Updated",
-              subtitle:
-                  "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
-            ),
-            _sideCard(
-              title: "First submitted",
-              subtitle:
-                  "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
-            ),
-            _sideCard(
-              title: "Licenses",
-              subtitle: pkg.licenses ?? "-",
-            ),
-            _sideCard(
-              title: "Maintainer",
-              subtitle: pkg.maintainer ?? "-",
-            ),
-            _sideCard(
-              title: "Flagged outdated",
-              subtitle: pkg.aur_flagged_outdated ? "yes" : "no",
+            ...pkg.package_source.when(
+              aur: (aur) {
+                final lastUpdated = DateTime.fromMillisecondsSinceEpoch(
+                  aur.last_updated * 1000,
+                );
+                final firstSubmitted = DateTime.fromMillisecondsSinceEpoch(
+                  aur.first_submitted * 1000,
+                );
+
+                return [
+                  _sideCard(
+                    title: "Last Updated",
+                    subtitle:
+                        "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
+                  ),
+                  _sideCard(
+                    title: "First submitted",
+                    subtitle:
+                        "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
+                  ),
+                  _sideCard(title: "Licenses", subtitle: aur.licenses ?? "-"),
+                  _sideCard(
+                    title: "Maintainer",
+                    subtitle: aur.maintainer ?? "-",
+                  ),
+                  _sideCard(
+                    title: "Flagged outdated",
+                    subtitle: aur.aur_flagged_outdated ? "yes" : "no",
+                  ),
+                ];
+              },
+              git: (git) => {
+                // todo git
+              },
+              upload: (upload) => {
+                // todo upload type
+              },
             ),
             const Divider(),
-            const SizedBox(
-              height: 5,
-            ),
+            const SizedBox(height: 5),
             const Text(
               "Selected build platforms:",
               style: TextStyle(fontSize: 18),
               textAlign: TextAlign.start,
             ),
-            const SizedBox(
-              height: 20,
-            ),
+            const SizedBox(height: 20),
             Tags(
               itemBuilder: (idx) => ItemTags(
                 index: idx,
@@ -234,21 +246,15 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
               ),
               itemCount: pkg.selected_platforms.length,
             ),
-            const SizedBox(
-              height: 15,
-            ),
+            const SizedBox(height: 15),
             const Divider(),
-            const SizedBox(
-              height: 5,
-            ),
+            const SizedBox(height: 5),
             const Text(
               "Build flags:",
               style: TextStyle(fontSize: 18),
               textAlign: TextAlign.start,
             ),
-            const SizedBox(
-              height: 20,
-            ),
+            const SizedBox(height: 20),
             Tags(
               itemBuilder: (idx) => ItemTags(
                 index: idx,
@@ -266,60 +272,74 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
   }
 
   Widget _sideCard({required String title, required String subtitle}) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const SizedBox(
-        height: 5,
-      ),
-      Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-      const SizedBox(
-        height: 3,
-      ),
-      Text(subtitle),
-      const SizedBox(
-        height: 10,
-      ),
-    ]);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 5),
+        Text(
+          title,
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 3),
+        Text(subtitle),
+        const SizedBox(height: 10),
+      ],
+    );
   }
 
   Widget _buildMainBody(ExtendedPackage pkg) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      if (pkg.description != null) ...[
-        const SizedBox(
-          height: 25,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ...pkg.package_source.when(
+          aur: (aur) {
+            if (aur.description != null) {
+              return [
+                const SizedBox(height: 25),
+                Padding(
+                  padding: const EdgeInsets.all(5.0),
+                  child: Text(aur.description!),
+                ),
+                const SizedBox(height: 25),
+              ];
+            } else {
+              return [];
+            }
+          },
+          git: (git) {
+            // todo description from git
+            return [];
+          },
+          upload: (upload) {
+            return [];
+          },
         ),
-        Padding(
-          padding: const EdgeInsets.all(5.0),
-          child: Text(pkg.description!),
+        Container(
+          padding: const EdgeInsets.all(defaultPadding),
+          decoration: const BoxDecoration(
+            color: secondaryColor,
+            borderRadius: BorderRadius.all(Radius.circular(10)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                "Builds of ${pkg.name}",
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              APIBuilder(
+                interval: const Duration(seconds: 30),
+                onData: (List<Build> data) {
+                  return BuildsTable(data: data);
+                },
+                onLoad: () => const Text("no data"),
+                provider: listBuildsProvider(pkgID: pkg.id),
+              ),
+            ],
+          ),
         ),
-        const SizedBox(
-          height: 25,
-        )
       ],
-      Container(
-        padding: const EdgeInsets.all(defaultPadding),
-        decoration: const BoxDecoration(
-          color: secondaryColor,
-          borderRadius: BorderRadius.all(Radius.circular(10)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              "Builds of ${pkg.name}",
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            APIBuilder(
-              interval: const Duration(seconds: 30),
-              onData: (List<Build> data) {
-                return BuildsTable(data: data);
-              },
-              onLoad: () => const Text("no data"),
-              provider: listBuildsProvider(pkgID: pkg.id),
-            ),
-          ],
-        ),
-      )
-    ]);
+    );
   }
 }

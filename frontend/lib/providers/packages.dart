@@ -9,9 +9,10 @@ part 'packages.g.dart';
 
 @riverpod
 Future<List<SimplePackage>> listPackages(Ref ref, {int? limit}) async {
-  final resp = await API
-      .getRawClient()
-      .get("/packages/list", queryParameters: {'limit': limit});
+  final resp = await API.getRawClient().get(
+    "/packages/list",
+    queryParameters: {'limit': limit},
+  );
 
   final responseObject = resp.data as List;
   final List<SimplePackage> packages = responseObject

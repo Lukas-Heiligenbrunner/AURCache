@@ -64,19 +64,21 @@ class _AurScreenState extends State<AurScreen> {
                 ),
                 const Text("Search:"),
                 TextField(
-                    controller: controller,
-                    onChanged: (value) {
-                      // cancel old timer if active
-                      timer?.cancel();
-                      // schedule new timer
-                      timer = Timer(const Duration(milliseconds: 300), () {
-                        setState(() {
-                          query = value;
-                        });
+                  controller: controller,
+                  onChanged: (value) {
+                    // cancel old timer if active
+                    timer?.cancel();
+                    // schedule new timer
+                    timer = Timer(const Duration(milliseconds: 300), () {
+                      setState(() {
+                        query = value;
                       });
-                    },
-                    decoration:
-                        const InputDecoration(hintText: "Type to search...")),
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    hintText: "Type to search...",
+                  ),
+                ),
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder(
@@ -84,29 +86,25 @@ class _AurScreenState extends State<AurScreen> {
                     onLoad: () => Center(
                       child: Column(
                         children: [
-                          const SizedBox(
-                            height: 15,
-                          ),
+                          const SizedBox(height: 15),
                           query.length < 3
                               ? const Text("Type to search for an AUR package")
-                              : const Text("loading")
+                              : const Text("loading"),
                         ],
                       ),
                     ),
                     onData: (List<AurPackage> data) =>
                         (query.length < 3 && data.isEmpty)
-                            ? Column(
-                                children: [
-                                  const SizedBox(
-                                    height: 15,
-                                  ),
-                                  Text("Type to search for an AUR package")
-                                ],
-                              )
-                            : AurSearchTable(data: data),
+                        ? Column(
+                            children: [
+                              const SizedBox(height: 15),
+                              Text("Type to search for an AUR package"),
+                            ],
+                          )
+                        : AurSearchTable(data: data),
                     provider: getAurPackagesProvider(query),
                   ),
-                )
+                ),
               ],
             ),
           ),

@@ -6,129 +6,126 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class SideMenu extends StatelessWidget {
-  const SideMenu({
-    super.key,
-  });
+  const SideMenu({super.key});
 
   @override
   Widget build(BuildContext context) {
     final activeUri = GoRouterState.of(context).uri.toString();
 
     return Drawer(
-        child: CustomScrollView(
-      slivers: [
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Column(
-                children: [
-                  SizedBox(
-                    height: 30,
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.only(left: 20),
-                        child: SvgPicture.asset(
-                          'assets/icons/icon.svg',
-                          height: 55,
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.only(right: 20),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.start,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              "AURCache",
-                              style: TextStyle(
-                                  fontWeight: FontWeight.w900, fontSize: 16),
-                            ),
-                            const Text(
-                              "The Archlinux AUR\nbuild server",
-                              style: TextStyle(fontSize: 12),
-                            )
-                          ],
-                        ),
-                      )
-                    ],
-                  ),
-                  SizedBox(
-                    height: 20,
-                  ),
-                  DrawerSection(title: "General", children: [
-                    DrawerListTile(
-                      title: "Dashboard",
-                      svgSrc: "assets/icons/menu/dashboard.svg",
-                      active: activeUri == "/",
-                      press: () {
-                        context.go("/");
-                      },
-                    ),
-                    DrawerListTile(
-                      title: "Builds",
-                      svgSrc: "assets/icons/menu/builds.svg",
-                      active: activeUri.startsWith("/builds"),
-                      press: () {
-                        context.go("/builds");
-                      },
-                    ),
-                    DrawerListTile(
-                      title: "AUR",
-                      svgSrc: "assets/icons/menu/aur.svg",
-                      active: activeUri.startsWith("/aur"),
-                      press: () {
-                        context.go("/aur");
-                      },
-                    )
-                  ]),
-                ],
-              ),
-              Expanded(child: Container()),
-              DrawerSection(
-                title: "Project Infos",
-                children: [
-                  DrawerListTile(
-                    title: "Github",
-                    icon: Icons.open_in_new,
-                    press: () async {
-                      await launchUrl(
-                        Uri.parse(
-                            "https://github.com/Lukas-Heiligenbrunner/AURCache"),
-                        webOnlyWindowName: '_blank',
-                      );
-                    },
-                  ),
-                  SizedBox(
-                    height: 10,
-                  ),
-                  Padding(
-                    padding: EdgeInsetsGeometry.only(left: 25),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.start,
+      child: CustomScrollView(
+        slivers: [
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Column(
+                  children: [
+                    SizedBox(height: 30),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          "Version $appVersion",
-                          style: TextStyle(color: Color(0xff868686)),
-                        )
+                        Padding(
+                          padding: const EdgeInsets.only(left: 20),
+                          child: SvgPicture.asset(
+                            'assets/icons/icon.svg',
+                            height: 55,
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.only(right: 20),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                "AURCache",
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              const Text(
+                                "The Archlinux AUR\nbuild server",
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
                       ],
                     ),
-                  ),
-                  SizedBox(
-                    height: 20,
-                  )
-                ],
-              )
-            ],
+                    SizedBox(height: 20),
+                    DrawerSection(
+                      title: "General",
+                      children: [
+                        DrawerListTile(
+                          title: "Dashboard",
+                          svgSrc: "assets/icons/menu/dashboard.svg",
+                          active: activeUri == "/",
+                          press: () {
+                            context.go("/");
+                          },
+                        ),
+                        DrawerListTile(
+                          title: "Builds",
+                          svgSrc: "assets/icons/menu/builds.svg",
+                          active: activeUri.startsWith("/builds"),
+                          press: () {
+                            context.go("/builds");
+                          },
+                        ),
+                        DrawerListTile(
+                          title: "AUR",
+                          svgSrc: "assets/icons/menu/aur.svg",
+                          active: activeUri.startsWith("/aur"),
+                          press: () {
+                            context.go("/aur");
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                Expanded(child: Container()),
+                DrawerSection(
+                  title: "Project Infos",
+                  children: [
+                    DrawerListTile(
+                      title: "Github",
+                      icon: Icons.open_in_new,
+                      press: () async {
+                        await launchUrl(
+                          Uri.parse(
+                            "https://github.com/Lukas-Heiligenbrunner/AURCache",
+                          ),
+                          webOnlyWindowName: '_blank',
+                        );
+                      },
+                    ),
+                    SizedBox(height: 10),
+                    Padding(
+                      padding: EdgeInsetsGeometry.only(left: 25),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Version $appVersion",
+                            style: TextStyle(color: Color(0xff868686)),
+                          ),
+                        ],
+                      ),
+                    ),
+                    SizedBox(height: 20),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
-    ));
+        ],
+      ),
+    );
   }
 }
 
@@ -145,29 +142,16 @@ class DrawerSection extends StatelessWidget {
       children: [
         Row(
           children: [
-            SizedBox(
-              width: 20,
-            ),
-            Text(
-              title,
-              style: TextStyle(fontSize: 12),
-            ),
-            SizedBox(
-              width: 10,
-            ),
+            SizedBox(width: 20),
+            Text(title, style: TextStyle(fontSize: 12)),
+            SizedBox(width: 10),
             Expanded(child: Divider()),
-            SizedBox(
-              width: 15,
-            ),
+            SizedBox(width: 15),
           ],
         ),
-        SizedBox(
-          height: 10,
-        ),
+        SizedBox(height: 10),
         ...children,
-        SizedBox(
-          height: 10,
-        )
+        SizedBox(height: 10),
       ],
     );
   }
@@ -181,8 +165,10 @@ class DrawerListTile extends StatelessWidget {
     this.icon,
     this.press,
     this.active = false,
-  }) : assert(svgSrc != null || icon != null,
-            'Either svgSrc or icon must be provided.');
+  }) : assert(
+         svgSrc != null || icon != null,
+         'Either svgSrc or icon must be provided.',
+       );
 
   final String title;
   final String? svgSrc;
@@ -202,30 +188,25 @@ class DrawerListTile extends StatelessWidget {
           press?.call();
         },
         child: Padding(
-          padding:
-              const EdgeInsets.only(left: 20, right: 15, bottom: 10, top: 10),
+          padding: const EdgeInsets.only(
+            left: 20,
+            right: 15,
+            bottom: 10,
+            top: 10,
+          ),
           child: Row(
             children: [
               if (svgSrc != null)
-                SvgPicture.asset(
-                  svgSrc!,
-                  color: Colors.white,
-                  height: 18,
-                )
+                SvgPicture.asset(svgSrc!, color: Colors.white, height: 18)
               else if (icon != null)
-                Icon(
-                  icon,
-                  color: Colors.white,
-                  size: 18,
-                ),
-              SizedBox(
-                width: 20,
-              ),
+                Icon(icon, color: Colors.white, size: 18),
+              SizedBox(width: 20),
               Text(
                 title,
                 style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: active ? FontWeight.bold : FontWeight.normal),
+                  color: Colors.white,
+                  fontWeight: active ? FontWeight.bold : FontWeight.normal,
+                ),
               ),
             ],
           ),

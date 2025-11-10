@@ -23,10 +23,7 @@ final appRouter = GoRouter(
         return MenuShell(child: child);
       },
       routes: [
-        GoRoute(
-          path: '/',
-          builder: (context, state) => DashboardScreen(),
-        ),
+        GoRoute(path: '/', builder: (context, state) => DashboardScreen()),
         GoRoute(
           path: '/build/:id',
           builder: (context, state) {

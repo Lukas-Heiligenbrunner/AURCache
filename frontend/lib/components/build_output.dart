@@ -37,10 +37,7 @@ class _BuildOutputState extends ConsumerState<BuildOutput> {
           child: SelectionArea(
             child: Text(
               output,
-              style: const TextStyle(
-                fontSize: 16.0,
-                color: Colors.white,
-              ),
+              style: const TextStyle(fontSize: 16.0, color: Colors.white),
             ),
           ),
         ),
@@ -69,7 +66,9 @@ class _BuildOutputState extends ConsumerState<BuildOutput> {
       outputTimer = Timer.periodic(const Duration(seconds: 3), (Timer t) async {
         print("refreshing output");
         final value = await API.getOutput(
-            buildID: widget.build.id, line: output.split("\n").length);
+          buildID: widget.build.id,
+          line: output.split("\n").length,
+        );
         if (value.isNotEmpty) {
           setState(() {
             output += "\n$value";

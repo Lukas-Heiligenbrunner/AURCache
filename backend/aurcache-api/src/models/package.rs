@@ -1,4 +1,4 @@
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{SourceData, SourceType};
 use rocket::serde::{Deserialize, Serialize};
 use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
@@ -51,11 +51,13 @@ pub struct ExtendedPackageModel {
     // todo this should be renamed to "latest_upstream_version" or sth
     pub latest_aur_version: String,
 
-    pub package_type: PackageType,
+    pub package_source: PackageSource,
+    pub package_type: SourceType
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]
-pub enum PackageType {
+#[serde(tag = "package_type", rename_all = "PascalCase")]
+pub enum PackageSource {
     Aur(AurPackage),
     Git(GitPackage),
     Upload(UploadPackage),

@@ -32,13 +32,14 @@ class PackagesScreen extends StatelessWidget {
                 SizedBox(
                   width: double.infinity,
                   child: APIBuilder(
-                      interval: const Duration(seconds: 10),
-                      onLoad: () => const Text("no data"),
-                      onData: (List<SimplePackage> data) {
-                        return PackagesTable(data: data);
-                      },
-                      provider: listPackagesProvider()),
-                )
+                    interval: const Duration(seconds: 10),
+                    onLoad: () => const Text("no data"),
+                    onData: (List<SimplePackage> data) {
+                      return PackagesTable(data: data);
+                    },
+                    provider: listPackagesProvider(),
+                  ),
+                ),
               ],
             ),
           ),
