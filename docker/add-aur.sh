@@ -68,7 +68,7 @@ mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
 # get helper pkgbuild
-sudo -u "${AUR_USER}" -D~ bash -c "curl --silent --location https://aur.archlinux.org/cgit/aur.git/snapshot/paru-bin.tar.gz | bsdtar -xvf -"
+sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
 
 # make helper
 sudo -u "${AUR_USER}" -D~//paru-bin bash -c "makepkg -s --noprogressbar --noconfirm --needed"
