@@ -18,10 +18,14 @@ alter table packages
     add source_type TEXT default 'aur' not null;
 
 alter table packages
-    add source_data TEXT;
+    add source_data TEXT default '{}' not null;
 
 ALTER TABLE packages
     RENAME COLUMN latest_aur_version TO upstream_version;
+
+-- Populate the new source_data column
+UPDATE packages
+SET source_data = json_object('type', 'aur', 'name', name);
 "#,
                 )
                 .await?;
@@ -33,10 +37,14 @@ alter table packages
     add source_type TEXT default 'aur' not null;
 
 alter table packages
-    add source_data TEXT;
+    add source_data TEXT default '{}' not null;
 
 ALTER TABLE packages
     RENAME COLUMN latest_aur_version TO upstream_version;
+
+-- Populate the new source_data column
+UPDATE packages
+SET source_data = json_build_object('type', 'aur', 'name', name);
 "#,
                 )
                 .await?;
