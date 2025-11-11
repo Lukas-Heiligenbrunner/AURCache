@@ -1,21 +1,36 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Images
 
 on:
   push:
     branches:
-      - '**'
-      - '!master'
+      - master
+    tags:
+      - '*'
   pull_request:
     branches:
-      - 'master'
+      - master
 
 jobs:
-  build-amd64:
+  build-and-push:
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        arch:
+          - amd64
+          - arm64/v8
+        include:
+          - arch: amd64
+            tag_suffix: ""
+          - arch: arm64/v8
+            tag_suffix: "-aarch64"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -24,23 +39,37 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Docker image
-        run: |
-          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/amd64 -f ./docker/Dockerfile .
-
-  build-aarch64:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - id: repo_name_lc
+        uses: ASzc/change-string-case-action@v6
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          string: ${{ github.repository }}
 
-      - name: Build ARM64 Docker image
+      - name: Determine image tag
+        id: vars
         run: |
-          docker build --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} --build-arg TARGET_ARCH=linux/arm64/v8 -f ./docker/Dockerfile .
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
+            echo "tag=git" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image (${{ matrix.tag_suffix }})
+        if: steps.vars.outputs.tag != 'unknown'
+        run: |
+          docker buildx build \
+            --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} \
+            --build-arg TARGET_ARCH=linux/${{ matrix.arch }} \
+            -f ./docker/Dockerfile \
+            -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
+            --push .
+
+      - name: Also tag and push latest${{ matrix.tag_suffix }} (for tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          docker buildx imagetools create \
+            ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
+            --tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest${{ matrix.tag_suffix }}
