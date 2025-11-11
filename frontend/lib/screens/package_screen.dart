@@ -62,8 +62,11 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                                   webOnlyWindowName: '_blank',
                                 );
                               },
-                              git: (git) {
-                                // todo redirect to git page
+                              git: (git) async {
+                                await launchUrl(
+                                  Uri.parse(git.git_url),
+                                  webOnlyWindowName: '_blank',
+                                );
                               },
                               upload: (upload) {
                                 // todo do idk what
@@ -222,18 +225,9 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                 ];
               },
               git: (git) => [
-                _sideCard(
-                  title: "Git Repository",
-                  subtitle: git.git_url,
-                ),
-                _sideCard(
-                  title: "Git Ref",
-                  subtitle: git.git_ref,
-                ),
-                _sideCard(
-                  title: "Subfolder",
-                  subtitle: git.subfolder,
-                ),
+                _sideCard(title: "Git Repository", subtitle: git.git_url),
+                _sideCard(title: "Git Ref", subtitle: git.git_ref),
+                _sideCard(title: "Subfolder", subtitle: git.subfolder),
               ],
               upload: (upload) => {
                 // todo upload type
