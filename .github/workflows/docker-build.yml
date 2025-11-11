@@ -57,8 +57,7 @@ jobs:
       - name: Build and push Docker image (${{ matrix.tag_suffix }})
         if: steps.vars.outputs.tag != 'unknown'
         run: |
-          docker buildx build \
-            --platform linux/${{ matrix.arch }} \
+          docker build build \
             --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} \
             --build-arg TARGET_ARCH=linux/${{ matrix.arch }} \
             -f ./docker/Dockerfile \
