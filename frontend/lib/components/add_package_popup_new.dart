@@ -1,25 +1,36 @@
+import 'package:aurcache/api/packages.dart';
 import 'package:aurcache/components/new_package/wizard_architecture.dart';
 import 'package:aurcache/components/new_package/wizard_aur.dart';
 import 'package:aurcache/components/new_package/wizard_git.dart';
 import 'package:aurcache/components/new_package/wizard_zip.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:step_progress/step_progress.dart';
+import 'package:toastification/toastification.dart';
 
-class AddPackagePopupNew extends StatefulWidget {
+import '../api/API.dart';
+import '../providers/activity_log.dart';
+import '../providers/builds.dart';
+import '../providers/packages.dart';
+import '../providers/statistics.dart';
+
+class AddPackagePopupNew extends ConsumerStatefulWidget {
   const AddPackagePopupNew({super.key});
 
   @override
-  State<AddPackagePopupNew> createState() => _AddPackagePopupNewState();
+  ConsumerState<AddPackagePopupNew> createState() => _AddPackagePopupNewState();
 }
 
-class _AddPackagePopupNewState extends State<AddPackagePopupNew> {
+class _AddPackagePopupNewState extends ConsumerState<AddPackagePopupNew> {
   StepProgressController stepController = StepProgressController(totalSteps: 3);
   int currentStep = 0;
   int? selectedSource;
   String? selectedAurPkgname;
+  final List<String> selectedArchs = ["x86_64"];
 
-  (String?, String?, String?) gitInfos = (null, null, null);
+  (String, String, String)? gitInfos;
 
   @override
   void initState() {
@@ -113,7 +124,7 @@ class _AddPackagePopupNewState extends State<AddPackagePopupNew> {
                     2 => ZipWizard(),
                     _ => Container(),
                   },
-                  2 => ArchitectureWizard(),
+                  2 => ArchitectureWizard(selectedArchs: selectedArchs),
                   _ => Text("test"),
                 }),
                 StepProgress(
@@ -140,9 +151,49 @@ class _AddPackagePopupNewState extends State<AddPackagePopupNew> {
               onPressed:
                   !(selectedSource == null ||
                       (currentStep == 1 && selectedSource == 2))
-                  ? () {
+                  ? () async {
                       if (currentStep == 2) {
-                        Navigator.of(context).pop(true);
+                        try {
+                          if (selectedSource == 0) {
+                            if (selectedAurPkgname != null) {
+                              await API.addAurPackage(
+                                selectedArchs: selectedArchs,
+                                name: selectedAurPkgname!,
+                              );
+                            }
+                          } else if (selectedSource == 1) {
+                            if (gitInfos != null) {
+                              final (gitUrl, gitRef, subFolder) = gitInfos!;
+
+                              await API.addGitPackage(
+                                selectedArchs: selectedArchs,
+                                gitUrl: gitUrl,
+                                gitRef: gitRef,
+                                subFolder: subFolder,
+                              );
+                            }
+                          } else {
+                            // todo upload still to implement
+                          }
+                        } on DioException catch (e) {
+                          print(e);
+                          toastification.show(
+                            title: Text('Failed to add package!'),
+                            autoCloseDuration: const Duration(seconds: 5),
+                            type: ToastificationType.error,
+                          );
+                        }
+
+                        // invalidate all dashboard providers
+                        ref.invalidate(listActivitiesProvider);
+                        ref.invalidate(listPackagesProvider);
+                        ref.invalidate(listBuildsProvider);
+                        ref.invalidate(listStatsProvider);
+                        ref.invalidate(getGraphDataProvider);
+
+                        if (context.mounted) {
+                          Navigator.of(context).pop(true);
+                        }
                         //successCallback(selectedArchs);
                       } else {
                         stepController.nextStep();

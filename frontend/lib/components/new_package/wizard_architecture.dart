@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../add_package_popup.dart';
 
 class ArchitectureWizard extends StatelessWidget {
-  ArchitectureWizard({super.key});
-  final List<String> selectedArchs = ["x86_64"];
+  ArchitectureWizard({super.key, required this.selectedArchs});
+  final List<String> selectedArchs;
 
   @override
   Widget build(BuildContext context) {

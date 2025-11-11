@@ -51,9 +51,9 @@ class AurSearchTable extends ConsumerWidget {
                 package.name,
                 (archs) async {
                   try {
-                    await API.addPackage(
-                      name: package.name,
+                    await API.addAurPackage(
                       selectedArchs: archs,
+                      name: package.name,
                     );
                   } on DioException catch (e) {
                     print(e);

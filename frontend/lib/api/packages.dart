@@ -51,13 +51,37 @@ extension PackagesAPI on ApiClient {
     return resp.statusCode == 200;
   }
 
-  Future<void> addPackage({
-    required String name,
+  Future<void> addAurPackage({
     required List<String> selectedArchs,
+    required String name,
   }) async {
     final resp = await getRawClient().post(
       "/package",
-      data: {'name': name, 'platforms': selectedArchs},
+      data: {
+        'platforms': selectedArchs,
+        'source': {'name': name, 'type': 'aur'},
+      },
+    );
+    print(resp.data);
+  }
+
+  Future<void> addGitPackage({
+    required List<String> selectedArchs,
+    required String gitUrl,
+    required String gitRef,
+    required String subFolder,
+  }) async {
+    final resp = await getRawClient().post(
+      "/package",
+      data: {
+        'platforms': selectedArchs,
+        'source': {
+          'ref': gitRef,
+          'url': gitUrl,
+          'subfolder': subFolder,
+          'type': 'git',
+        },
+      },
     );
     print(resp.data);
   }
