@@ -211,7 +211,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             }
             SourceData::Git { .. } => {
                 // somehow we need also to `cd` into the repo dir, otherwise builds fail
-                let build_cmd = format!("cd {GIT_REPO_PATH} && paru {build_flags} {GIT_REPO_PATH}");
+                let build_cmd = format!("sudo chmod -R 1777 {GIT_REPO_PATH} && cd {GIT_REPO_PATH} && paru {build_flags} {GIT_REPO_PATH}");
                 // first update the package list, then update trustdb and then build cmd
                 let steps = [
                     "sudo pacman -Sy --noconfirm",
@@ -252,7 +252,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 #[cfg(debug_assertions)]
                 auto_remove: Some(false),
                 #[cfg(not(debug_assertions))]
-                auto_remove: Some(true),
+                auto_remove: Some(false),
                 nano_cpus: Some(cpu_limit as i64),
                 memory_swap: Some(memory_limit),
                 binds: Some(mountpoints),
