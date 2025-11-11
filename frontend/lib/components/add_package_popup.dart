@@ -15,15 +15,16 @@ import '../providers/activity_log.dart';
 import '../providers/builds.dart';
 import '../providers/packages.dart';
 import '../providers/statistics.dart';
+import '../utils/responsive.dart';
 
-class AddPackagePopupNew extends ConsumerStatefulWidget {
-  const AddPackagePopupNew({super.key});
+class AddPackagePopup extends ConsumerStatefulWidget {
+  const AddPackagePopup({super.key});
 
   @override
-  ConsumerState<AddPackagePopupNew> createState() => _AddPackagePopupNewState();
+  ConsumerState<AddPackagePopup> createState() => _AddPackagePopupState();
 }
 
-class _AddPackagePopupNewState extends ConsumerState<AddPackagePopupNew> {
+class _AddPackagePopupState extends ConsumerState<AddPackagePopup> {
   StepProgressController stepController = StepProgressController(totalSteps: 3);
   int currentStep = 0;
   int? selectedSource;
@@ -77,7 +78,7 @@ class _AddPackagePopupNewState extends ConsumerState<AddPackagePopupNew> {
                               });
                               stepController.setCurrentStep(0);
                             },
-                            width: 100,
+                            width: context.desktop ? 100 : 45,
                           ),
                           SquareImageButton(
                             asset: "assets/icons/git.svg",
@@ -89,7 +90,7 @@ class _AddPackagePopupNewState extends ConsumerState<AddPackagePopupNew> {
                               });
                               stepController.setCurrentStep(0);
                             },
-                            width: 100,
+                            width: context.desktop ? 100 : 45,
                           ),
                           SquareImageButton(
                             asset: "assets/icons/zip-icon.svg",
@@ -101,7 +102,7 @@ class _AddPackagePopupNewState extends ConsumerState<AddPackagePopupNew> {
                               });
                               stepController.setCurrentStep(0);
                             },
-                            width: 100,
+                            width: context.desktop ? 100 : 45,
                           ),
                         ],
                       ),
@@ -215,7 +216,7 @@ Future<bool> showPackageAddPopupNew(BuildContext context) async {
   return (await showDialog<bool>(
     context: context,
     barrierDismissible: false,
-    builder: (BuildContext context) => AddPackagePopupNew(),
+    builder: (BuildContext context) => AddPackagePopup(),
   ))!;
 }
 
