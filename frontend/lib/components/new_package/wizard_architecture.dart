@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-
-import '../add_package_popup.dart';
+import '../arch_tags.dart';
 
 class ArchitectureWizard extends StatelessWidget {
   ArchitectureWizard({super.key, required this.selectedArchs});

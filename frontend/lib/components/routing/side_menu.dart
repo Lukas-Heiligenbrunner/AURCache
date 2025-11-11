@@ -77,11 +77,11 @@ class SideMenu extends StatelessWidget {
                           },
                         ),
                         DrawerListTile(
-                          title: "AUR",
-                          svgSrc: "assets/icons/menu/aur.svg",
-                          active: activeUri.startsWith("/aur"),
+                          title: "Activities",
+                          icon: Icons.list,
+                          active: activeUri.startsWith("/activities"),
                           press: () {
-                            context.go("/aur");
+                            context.go("/activities");
                           },
                         ),
                       ],

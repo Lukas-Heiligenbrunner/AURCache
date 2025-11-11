@@ -1,5 +1,5 @@
 import 'package:aurcache/screens/Package_settings_screen.dart';
-import 'package:aurcache/screens/aur_screen.dart';
+import 'package:aurcache/screens/activity_screen.dart';
 import 'package:aurcache/screens/build_screen.dart';
 import 'package:aurcache/screens/builds_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
@@ -40,9 +40,9 @@ final appRouter = GoRouter(
           builder: (context, state) => PackagesScreen(),
         ),
         GoRoute(
-          path: '/aur',
+          path: '/activities',
           builder: (context, state) {
-            return AurScreen(initalQuery: state.uri.queryParameters["query"]);
+            return ActivityScreen();
           },
         ),
         GoRoute(
