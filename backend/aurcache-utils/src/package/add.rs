@@ -29,14 +29,6 @@ pub async fn package_add(
             platforms
         }
     };
-    let build_flags = build_flags.unwrap_or_else(|| {
-        vec![
-            "-Syu".to_string(),
-            "--noconfirm".to_string(),
-            "--noprogressbar".to_string(),
-            "--color never".to_string(),
-        ]
-    });
 
     let source_type = match source_data {
         SourceData::Aur { .. } => SourceType::Aur,
@@ -63,6 +55,15 @@ pub async fn package_add(
             {
                 bail!("Package already exists");
             }
+
+            let build_flags = build_flags.unwrap_or_else(|| {
+                vec![
+                    "-Syu".to_string(),
+                    "--noconfirm".to_string(),
+                    "--noprogressbar".to_string(),
+                    "--color never".to_string(),
+                ]
+            });
 
             let pkg = get_package_info(pkg_name)
                 .await?
@@ -108,39 +109,29 @@ pub async fn package_add(
                 bail!("Package already exists");
             }
 
+            let build_flags = build_flags.unwrap_or_else(|| {
+                vec![
+                    "-B".to_string(),
+                    "--noconfirm".to_string(),
+                    "--noprogressbar".to_string(),
+                    "--color never".to_string(),
+                ]
+            });
+
             let new_package = packages::ActiveModel {
                 name: Set(pkgbasee_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(pkgbase_version)),
+                latest_aur_version: Set(Some(pkgbase_version.clone())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
                 source_data: Set(source_data.to_string()),
                 ..Default::default()
             };
-            (new_package.save(db).await?, r#ref.clone())
+            (new_package.save(db).await?, pkgbase_version)
         }
         SourceData::Upload { .. } => {
-            let source_data = SourceData::Upload {
-                // todo get blob from upload
-                archive: vec![],
-            };
-
-            // todo parse zip and its pkgbuild to get a version
-            let version = "1.0.0";
-            let name = "mypkg";
-
-            let new_package = packages::ActiveModel {
-                name: Set(name.to_string()),
-                status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(version.to_string())),
-                platforms: Set(platforms_str),
-                build_flags: Set(build_flags.join(";")),
-                source_type: Set(source_type),
-                source_data: Set(source_data.to_string()),
-                ..Default::default()
-            };
-            (new_package.save(db).await?, version.to_string())
+            todo!("upload")
         }
     };
 

@@ -345,7 +345,8 @@ pub async fn get_package(
                 git_ref: r#ref.clone(),
                 subfolder,
             }),
-            r#ref,
+            // This versions actuality dpendes on the update-version-check interval
+            pkg.latest_aur_version.unwrap_or("".to_string()),
         ),
         SourceData::Upload { .. } => {
             todo!("upload zip is not yet implemented")

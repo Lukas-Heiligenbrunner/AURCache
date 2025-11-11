@@ -187,7 +187,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
               textAlign: TextAlign.start,
             ),
             _sideCard(
-              title: "Latest AUR version",
+              title: "Latest Upstream version",
               subtitle: pkg.latest_aur_version,
             ),
             ...pkg.package_source.when(
@@ -221,9 +221,20 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                   ),
                 ];
               },
-              git: (git) => {
-                // todo git
-              },
+              git: (git) => [
+                _sideCard(
+                  title: "Git Repository",
+                  subtitle: git.git_url,
+                ),
+                _sideCard(
+                  title: "Git Ref",
+                  subtitle: git.git_ref,
+                ),
+                _sideCard(
+                  title: "Subfolder",
+                  subtitle: git.subfolder,
+                ),
+              ],
               upload: (upload) => {
                 // todo upload type
               },

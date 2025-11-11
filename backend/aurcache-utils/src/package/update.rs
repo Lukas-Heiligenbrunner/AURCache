@@ -98,7 +98,10 @@ pub async fn package_update(
                 .ok_or(anyhow!("Package not found"))?;
             pkg.version
         }
-        SourceData::Git { r#ref, .. } => r#ref,
+        SourceData::Git { .. } => pkg_model
+            .latest_aur_version
+            .clone()
+            .ok_or(anyhow!("No latest version in package"))?,
         SourceData::Upload { .. } => {
             todo!("Get version from zip")
         }
