@@ -108,7 +108,7 @@ pub async fn package_update_entity_endpoint(
         name: input.name.clone().map(Set).unwrap_or(NotSet),
         status: input.status.map(Set).unwrap_or(NotSet),
         out_of_date: input.out_of_date.map(Set).unwrap_or(NotSet),
-        latest_aur_version: input.latest_aur_version.clone().map(Set).unwrap_or(NotSet),
+        upstream_version: input.upstream_version.clone().map(Set).unwrap_or(NotSet),
         latest_build: input.latest_build.map(Set).unwrap_or(NotSet),
         build_flags: input
             .build_flags
@@ -247,7 +247,7 @@ pub async fn package_list(
         .column(packages::Column::Id)
         .column(packages::Column::Status)
         .column_as(packages::Column::OutOfDate, "outofdate")
-        .column_as(packages::Column::LatestAurVersion, "latest_aur_version")
+        .column_as(packages::Column::UpstreamVersion, "upstream_version")
         // wrap the correlated subquery in COALESCE -> fallback to empty string
         .column_as(
             Expr::cust(format!("COALESCE({}, '')", latest_version_subquery)),
@@ -346,7 +346,7 @@ pub async fn get_package(
                 subfolder,
             }),
             // This versions actuality dpendes on the update-version-check interval
-            pkg.latest_aur_version.unwrap_or("".to_string()),
+            pkg.upstream_version.unwrap_or("".to_string()),
         ),
         SourceData::Upload { .. } => {
             todo!("upload zip is not yet implemented")
@@ -362,7 +362,7 @@ pub async fn get_package(
         package_source,
         selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
         selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
-        latest_aur_version: version,
+        upstream_version: version,
     };
 
     Ok(Json(ext_pkg))

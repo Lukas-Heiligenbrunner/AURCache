@@ -99,7 +99,7 @@ pub async fn package_update(
             pkg.version
         }
         SourceData::Git { .. } => pkg_model
-            .latest_aur_version
+            .upstream_version
             .clone()
             .ok_or(anyhow!("No latest version in package"))?,
         SourceData::Upload { .. } => {

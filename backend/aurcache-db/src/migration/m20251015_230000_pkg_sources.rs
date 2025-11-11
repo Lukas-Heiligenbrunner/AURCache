@@ -20,6 +20,8 @@ alter table packages
 alter table packages
     add source_data TEXT;
 
+ALTER TABLE packages
+    RENAME COLUMN latest_aur_version TO upstream_version;
 "#,
                 )
                 .await?;
@@ -33,6 +35,8 @@ alter table packages
 alter table packages
     add source_data TEXT;
 
+ALTER TABLE packages
+    RENAME COLUMN latest_aur_version TO upstream_version;
 "#,
                 )
                 .await?;
@@ -51,6 +55,9 @@ alter table packages
                 db.execute_unprepared(
                     r#"
 ALTER TABLE packages
+    RENAME COLUMN upstream_version TO latest_aur_version;
+
+ALTER TABLE packages
 DROP COLUMN source_type;
 
 ALTER TABLE packages
@@ -62,6 +69,9 @@ DROP COLUMN source_data;
             DbBackend::Postgres => {
                 db.execute_unprepared(
                     r#"
+ALTER TABLE packages
+    RENAME COLUMN upstream_version TO latest_aur_version;
+
 ALTER TABLE packages
 DROP COLUMN source_type;
 

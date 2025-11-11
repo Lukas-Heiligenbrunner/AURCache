@@ -25,7 +25,7 @@ class PackagesTable extends ConsumerWidget {
       name: 'MyPackage',
       status: 0,
       latest_version: '1.0.0',
-      latest_aur_version: '1.0.0',
+      upstream_version: '1.0.0',
       outofdate: false,
     );
 

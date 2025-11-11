@@ -72,7 +72,7 @@ pub async fn package_add(
             let new_package = packages::ActiveModel {
                 name: Set(pkg_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Option::from(pkg.version.clone())),
+                upstream_version: Set(Option::from(pkg.version.clone())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),
@@ -121,7 +121,7 @@ pub async fn package_add(
             let new_package = packages::ActiveModel {
                 name: Set(pkgbasee_name.to_string()),
                 status: Set(BuildStates::ENQUEUED_BUILD),
-                latest_aur_version: Set(Some(pkgbase_version.clone())),
+                upstream_version: Set(Some(pkgbase_version.clone())),
                 platforms: Set(platforms_str),
                 build_flags: Set(build_flags.join(";")),
                 source_type: Set(source_type),

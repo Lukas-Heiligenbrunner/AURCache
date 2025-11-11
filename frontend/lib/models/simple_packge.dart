@@ -8,14 +8,14 @@ class SimplePackage {
   @JsonKey(fromJson: _fromJson)
   final bool outofdate;
   final int status;
-  final String latest_version, latest_aur_version;
+  final String latest_version, upstream_version;
 
   SimplePackage({
     required this.id,
     required this.name,
     required this.status,
     required this.latest_version,
-    required this.latest_aur_version,
+    required this.upstream_version,
     required this.outofdate,
   });
 

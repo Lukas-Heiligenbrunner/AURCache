@@ -90,7 +90,7 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                     warn!("Couldn't find {} in AUR response", package.name)
                 }
                 Some(result) => {
-                    package_model.latest_aur_version = Set(Option::from(result.version.clone()));
+                    package_model.upstream_version = Set(Option::from(result.version.clone()));
                     package_model.out_of_date =
                         Set(if latest_version == Some(result.version.clone()) {
                             0
@@ -115,7 +115,7 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                 )?;
                 let version = sourceinfo.base.version.to_string();
 
-                package_model.latest_aur_version = Set(Option::from(version.clone()));
+                package_model.upstream_version = Set(Option::from(version.clone()));
                 package_model.out_of_date = Set(if latest_version == Some(version) {
                     0
                 } else {

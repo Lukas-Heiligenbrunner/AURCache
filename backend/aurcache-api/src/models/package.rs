@@ -23,7 +23,7 @@ pub struct PackagePatchModel {
     pub status: Option<i32>,
     pub out_of_date: Option<i32>,
     pub version: Option<Option<String>>,
-    pub latest_aur_version: Option<Option<String>>,
+    pub upstream_version: Option<Option<String>>,
     pub latest_build: Option<Option<i32>>,
     pub build_flags: Option<Vec<String>>,
     pub platforms: Option<Vec<String>>,
@@ -36,7 +36,7 @@ pub struct SimplePackageModel {
     pub status: i32,
     pub outofdate: i32,
     pub latest_version: Option<String>,
-    pub latest_aur_version: String,
+    pub upstream_version: String,
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]
@@ -49,7 +49,7 @@ pub struct ExtendedPackageModel {
     pub selected_platforms: Vec<String>,
     pub selected_build_flags: Option<Vec<String>>,
     // todo this should be renamed to "latest_upstream_version" or sth
-    pub latest_aur_version: String,
+    pub upstream_version: String,
     pub package_source: PackageSource,
 }
 

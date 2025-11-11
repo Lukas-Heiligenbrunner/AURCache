@@ -191,7 +191,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
             ),
             _sideCard(
               title: "Latest Upstream version",
-              subtitle: pkg.latest_aur_version,
+              subtitle: pkg.upstream_version,
             ),
             ...pkg.package_source.when(
               aur: (aur) {
