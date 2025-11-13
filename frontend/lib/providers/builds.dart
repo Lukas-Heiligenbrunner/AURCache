@@ -20,8 +20,9 @@ Future<List<Build>> listBuilds(Ref ref, {int? pkgID, int? limit}) async {
   final resp = await API.getRawClient().get(uri);
 
   final responseObject = resp.data as List;
-  final List<Build> packages =
-      responseObject.map((e) => Build.fromJson(e)).toList(growable: false);
+  final List<Build> packages = responseObject
+      .map((e) => Build.fromJson(e))
+      .toList(growable: false);
   return packages;
 }
 

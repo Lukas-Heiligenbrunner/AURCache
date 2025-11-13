@@ -59,7 +59,8 @@ class _DashboardTablesState extends State<DashboardTables> {
                     style: OutlinedButton.styleFrom(
                       backgroundColor: secondaryColor,
                       shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8)),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                       padding: EdgeInsets.symmetric(
                         horizontal: defaultPadding,
                         vertical: defaultPadding / (context.mobile ? 2 : 1),
@@ -81,8 +82,9 @@ class _DashboardTablesState extends State<DashboardTables> {
             ),
           ),
           Responsive(
-              mobileChild: _buildActivePage(),
-              desktopChild: Expanded(child: _buildActivePage()))
+            mobileChild: _buildActivePage(),
+            desktopChild: Expanded(child: _buildActivePage()),
+          ),
         ],
       ),
     );
@@ -99,10 +101,11 @@ class _DashboardTablesState extends State<DashboardTables> {
             return const TableInfo(title: "You have no packages yet");
           } else {
             return Responsive(
-                mobileChild: PackagesTable(data: data),
-                desktopChild: SingleChildScrollView(
-                  child: PackagesTable(data: data),
-                ));
+              mobileChild: PackagesTable(data: data),
+              desktopChild: SingleChildScrollView(
+                child: PackagesTable(data: data),
+              ),
+            );
           }
         },
         onLoad: () => PackagesTable.loading(),
@@ -117,10 +120,11 @@ class _DashboardTablesState extends State<DashboardTables> {
             return const TableInfo(title: "You have no builds yet");
           } else {
             return Responsive(
-                mobileChild: BuildsTable(data: data),
-                desktopChild: SingleChildScrollView(
-                  child: BuildsTable(data: data),
-                ));
+              mobileChild: BuildsTable(data: data),
+              desktopChild: SingleChildScrollView(
+                child: BuildsTable(data: data),
+              ),
+            );
           }
         },
         provider: listBuildsProvider(limit: 20),

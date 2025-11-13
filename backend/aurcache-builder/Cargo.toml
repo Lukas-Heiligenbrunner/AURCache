@@ -1,0 +1,21 @@
+[package]
+name = "aurcache-builder"
+edition = "2024"
+
+[dependencies]
+anyhow = {workspace = true}
+log = {workspace = true}
+tokio = {workspace = true}
+sea-orm = {workspace = true}
+itertools = {workspace = true}
+flate2 = {workspace = true}
+tar = {workspace = true}
+tempfile = {workspace = true}
+
+git2 = "0.20.2"
+bollard = "0.19.4"
+futures = "0.3.31"
+tokio-util ={version = "0.7.17", features = ["io"]}
+
+aurcache-db = {path = "../aurcache-db"}
+pacman-repo-utils = {path = "../pacman-repo-utils"}

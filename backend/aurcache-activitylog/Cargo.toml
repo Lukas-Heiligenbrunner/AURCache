@@ -1,0 +1,14 @@
+[package]
+name = "aurcache-activitylog"
+edition = "2024"
+
+[dependencies]
+anyhow = {workspace = true}
+sea-orm = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+
+aurcache-db = {path = "../aurcache-db"}
+
+# todo utoipa should be removed to couple db from api fully
+utoipa = { version = "5.4.0"}

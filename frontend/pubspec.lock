@@ -17,6 +17,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "7.6.0"
+  analyzer_buffer:
+    dependency: transitive
+    description:
+      name: analyzer_buffer
+      sha256: f7833bee67c03c37241c67f8741b17cc501b69d9758df7a5a4a13ed6c947be43
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.10"
   analyzer_plugin:
     dependency: transitive
     description:
@@ -281,6 +289,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.1"
+  dotted_border:
+    dependency: transitive
+    description:
+      name: dotted_border
+      sha256: "99b091ec6891ba0c5331fdc2b502993c7c108f898995739a73c6845d71dad70c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.0"
   equatable:
     dependency: transitive
     description:
@@ -351,10 +367,10 @@ packages:
     dependency: "direct main"
     description:
       name: flutter_riverpod
-      sha256: "56c3cc75d04c34fc824ce1d52ec9076c431e3c47ed55fd8cbf9756ca6d50479e"
+      sha256: "9e2d6907f12cc7d23a846847615941bddee8709bf2bfd274acdf5e80bcf22fde"
       url: "https://pub.dev"
     source: hosted
-    version: "3.0.0-dev.17"
+    version: "3.0.3"
   flutter_svg:
     dependency: "direct main"
     description:
@@ -385,10 +401,10 @@ packages:
     dependency: "direct dev"
     description:
       name: freezed
-      sha256: da32f8ba8cfcd4ec71d9decc8cbf28bd2c31b5283d9887eb51eb4a0659d8110c
+      sha256: "13065f10e135263a4f5a4391b79a8efc5fb8106f8dd555a9e49b750b45393d77"
       url: "https://pub.dev"
     source: hosted
-    version: "3.2.0"
+    version: "3.2.3"
   freezed_annotation:
     dependency: "direct main"
     description:
@@ -513,10 +529,10 @@ packages:
     dependency: "direct dev"
     description:
       name: json_serializable
-      sha256: ce2cf974ccdee13be2a510832d7fba0b94b364e0b0395dee42abaa51b855be27
+      sha256: "33a040668b31b320aafa4822b7b1e177e163fc3c1e835c6750319d4ab23aa6fe"
       url: "https://pub.dev"
     source: hosted
-    version: "6.10.0"
+    version: "6.11.1"
   leak_tracker:
     dependency: transitive
     description:
@@ -753,42 +769,42 @@ packages:
     dependency: "direct main"
     description:
       name: riverpod
-      sha256: "82507cfb140c044f12e929c054dcdfc478359f473bcd2976af26908318e91b8e"
+      sha256: c406de02bff19d920b832bddfb8283548bfa05ce41c59afba57ce643e116aa59
       url: "https://pub.dev"
     source: hosted
-    version: "3.0.0-dev.17"
+    version: "3.0.3"
   riverpod_analyzer_utils:
     dependency: transitive
     description:
       name: riverpod_analyzer_utils
-      sha256: ce9dfa8dccc5029535a09d1582681c894c8853613aaca5869d372348cf432114
+      sha256: a0f68adb078b790faa3c655110a017f9a7b7b079a57bbd40f540e80dce5fcd29
       url: "https://pub.dev"
     source: hosted
-    version: "1.0.0-dev.4"
+    version: "1.0.0-dev.7"
   riverpod_annotation:
     dependency: "direct main"
     description:
       name: riverpod_annotation
-      sha256: d4449ce911fe1e211a2f6fbc110c907859b01419f720f604791fe8583a06620e
+      sha256: "7230014155777fc31ba3351bc2cb5a3b5717b11bfafe52b1553cb47d385f8897"
       url: "https://pub.dev"
     source: hosted
-    version: "3.0.0-dev.17"
+    version: "3.0.3"
   riverpod_generator:
     dependency: "direct dev"
     description:
       name: riverpod_generator
-      sha256: "16569af989111e5087da6cfd71660eb0dbcfb87e5395cfa5181ce089ff4f7729"
+      sha256: "49894543a42cf7a9954fc4e7366b6d3cb2e6ec0fa07775f660afcdd92d097702"
       url: "https://pub.dev"
     source: hosted
-    version: "3.0.0-dev.17"
+    version: "3.0.3"
   riverpod_lint:
     dependency: "direct dev"
     description:
       name: riverpod_lint
-      sha256: f9403db89a399bbdf50a56883cf0eaa42b69e3fef005cd967ff5072d7e90b838
+      sha256: "7ef9c43469e9b5ac4e4c3b24d7c30642e47ce1b12cd7dcdd643534db0a72ed13"
       url: "https://pub.dev"
     source: hosted
-    version: "3.0.0-dev.17"
+    version: "3.0.3"
   rxdart:
     dependency: transitive
     description:
@@ -962,6 +978,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.0"
+  step_progress:
+    dependency: "direct main"
+    description:
+      name: step_progress
+      sha256: "05fafdf9969bc7abe6111c3b27722d1880875974b314bbce8536d65c82acefa5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.7.1"
   stream_channel:
     dependency: transitive
     description:

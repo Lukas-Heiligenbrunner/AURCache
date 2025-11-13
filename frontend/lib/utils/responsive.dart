@@ -14,8 +14,11 @@ extension ResponsiveExt on BuildContext {
 }
 
 class Responsive extends StatelessWidget {
-  const Responsive(
-      {super.key, required this.mobileChild, required this.desktopChild});
+  const Responsive({
+    super.key,
+    required this.mobileChild,
+    required this.desktopChild,
+  });
   final Widget mobileChild;
   final Widget desktopChild;
 
@@ -30,8 +33,11 @@ class Responsive extends StatelessWidget {
 }
 
 class ResponsiveBuilder extends StatelessWidget {
-  const ResponsiveBuilder(
-      {super.key, required this.mobile, required this.desktop});
+  const ResponsiveBuilder({
+    super.key,
+    required this.mobile,
+    required this.desktop,
+  });
   final Widget Function() mobile;
   final Widget Function() desktop;
 

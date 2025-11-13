@@ -27,17 +27,13 @@ class _PlatformSettingsState extends State<PlatformSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(
-          height: 5,
-        ),
+        const SizedBox(height: 5),
         const Text(
           "Selected build platforms:",
           style: TextStyle(fontSize: 18),
           textAlign: TextAlign.start,
         ),
-        const SizedBox(
-          height: 20,
-        ),
+        const SizedBox(height: 20),
         Tags(
           itemBuilder: (idx) => ItemTags(
             index: idx,
@@ -59,9 +55,7 @@ class _PlatformSettingsState extends State<PlatformSettings> {
           ),
           itemCount: Platforms.length,
         ),
-        const SizedBox(
-          height: 15,
-        ),
+        const SizedBox(height: 15),
       ],
     );
   }

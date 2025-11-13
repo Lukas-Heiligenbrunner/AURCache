@@ -13,8 +13,9 @@ extension ActivityAPI on ApiClient {
     final resp = await getRawClient().get(uri);
 
     final responseObject = resp.data as List;
-    final List<Activity> activities =
-        responseObject.map((e) => Activity.fromJson(e)).toList(growable: false);
+    final List<Activity> activities = responseObject
+        .map((e) => Activity.fromJson(e))
+        .toList(growable: false);
     return activities;
   }
 }

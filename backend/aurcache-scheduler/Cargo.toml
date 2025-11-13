@@ -1,0 +1,21 @@
+[package]
+name = "aurcache-scheduler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = {workspace = true}
+anyhow ={workspace = true}
+chrono = {workspace = true}
+sea-orm = {workspace = true}
+log = {workspace = true}
+aur-rs = {workspace = true}
+tempfile = {workspace = true}
+alpm-srcinfo = {workspace = true}
+
+pacman-mirrors = {path = "../pacman-mirrors"}
+aurcache-builder = {path = "../aurcache-builder"}
+aurcache-db = {path = "../aurcache-db"}
+aurcache-utils = {path = "../aurcache-utils"}
+
+cron = "0.15.0"

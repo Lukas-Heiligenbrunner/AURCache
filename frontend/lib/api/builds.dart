@@ -15,8 +15,9 @@ extension BuildsAPI on ApiClient {
     final resp = await getRawClient().get(uri);
 
     final responseObject = resp.data as List;
-    final List<Build> packages =
-        responseObject.map((e) => Build.fromJson(e)).toList(growable: false);
+    final List<Build> packages = responseObject
+        .map((e) => Build.fromJson(e))
+        .toList(growable: false);
     return packages;
   }
 

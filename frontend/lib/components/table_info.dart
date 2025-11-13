@@ -9,20 +9,11 @@ class TableInfo extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        const SizedBox(
-          height: 5,
-        ),
+        const SizedBox(height: 5),
         const Divider(),
-        const SizedBox(
-          height: 15,
-        ),
-        const Icon(
-          Icons.info_outline_rounded,
-          size: 42,
-        ),
-        const SizedBox(
-          height: 15,
-        ),
+        const SizedBox(height: 15),
+        const Icon(Icons.info_outline_rounded, size: 42),
+        const SizedBox(height: 15),
         Text(title),
       ],
     );

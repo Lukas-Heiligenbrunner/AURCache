@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 
 class BuildFlagSettings extends StatefulWidget {
-  const BuildFlagSettings(
-      {super.key, required this.pkg, required this.changed});
+  const BuildFlagSettings({
+    super.key,
+    required this.pkg,
+    required this.changed,
+  });
   final ExtendedPackage pkg;
   final void Function(List<String>) changed;
 
@@ -27,17 +30,13 @@ class _BuildFlagSettingsState extends State<BuildFlagSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(
-          height: 5,
-        ),
+        const SizedBox(height: 5),
         const Text(
           "Build flags:",
           style: TextStyle(fontSize: 18),
           textAlign: TextAlign.start,
         ),
-        const SizedBox(
-          height: 20,
-        ),
+        const SizedBox(height: 20),
         Tags(
           itemBuilder: (idx) => ItemTags(
             index: idx,
@@ -57,29 +56,29 @@ class _BuildFlagSettingsState extends State<BuildFlagSettings> {
           ),
           itemCount: buildFlags.length,
         ),
-        const SizedBox(
-          height: 15,
-        ),
+        const SizedBox(height: 15),
         const Text("Add new build flags:"),
         SizedBox(
           width: 200,
           child: TextField(
             controller: _controller,
             decoration: InputDecoration(
-                label: const Text("--noconfirm"),
-                suffixIcon: IconButton(
-                    onPressed: () {
-                      setState(() {
-                        if (_controller.text.isNotEmpty &&
-                            !buildFlags.contains(_controller.text)) {
-                          buildFlags.add(_controller.text);
-                          widget.changed(buildFlags);
-                        }
-                      });
-                    },
-                    icon: const Icon(Icons.add))),
+              label: const Text("--noconfirm"),
+              suffixIcon: IconButton(
+                onPressed: () {
+                  setState(() {
+                    if (_controller.text.isNotEmpty &&
+                        !buildFlags.contains(_controller.text)) {
+                      buildFlags.add(_controller.text);
+                      widget.changed(buildFlags);
+                    }
+                  });
+                },
+                icon: const Icon(Icons.add),
+              ),
+            ),
           ),
-        )
+        ),
       ],
     );
   }

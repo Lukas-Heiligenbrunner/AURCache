@@ -1,7 +1,7 @@
+import 'package:aurcache/components/add_package_popup.dart';
 import 'package:aurcache/components/api/api_builder.dart';
 import 'package:aurcache/providers/statistics.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import '../../constants/color_constants.dart';
 import '../../models/user_info.dart';
@@ -29,10 +29,11 @@ class Header extends StatelessWidget {
               APIBuilder(
                 onLoad: () {
                   return Skeletonizer(
-                      child: Text(
-                    "Hi, Arch User :)",
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ));
+                    child: Text(
+                      "Hi, Arch User :)",
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  );
                 },
                 onData: (UserInfo data) {
                   return Text(
@@ -44,9 +45,7 @@ class Header extends StatelessWidget {
                 },
                 provider: userInfoProvider,
               ),
-              const SizedBox(
-                height: 8,
-              ),
+              const SizedBox(height: 8),
               Text(
                 "Welcome to your personal build server",
                 style: Theme.of(context).textTheme.titleSmall,
@@ -58,20 +57,20 @@ class Header extends StatelessWidget {
           style: OutlinedButton.styleFrom(
             backgroundColor: Color(0xff0059FF),
             side: BorderSide(color: Color(0xff0059FF), width: 0),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
             padding: EdgeInsets.symmetric(
               horizontal: defaultPadding,
               vertical: defaultPadding / (context.mobile ? 2 : 1),
             ),
           ),
           onPressed: () {
-            context.push("/aur");
+            showPackageAddPopupNew(context);
+
+            //context.push("/aur");
           },
-          icon: const Icon(
-            Icons.add,
-            color: Colors.white,
-          ),
+          icon: const Icon(Icons.add, color: Colors.white),
           label: const Text(
             "Add Package",
             style: TextStyle(color: Colors.white),

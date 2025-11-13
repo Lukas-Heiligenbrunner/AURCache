@@ -18,37 +18,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return SafeArea(
-      child: Builder(builder: (context) {
-        final allScreen = Container(
-          padding: const EdgeInsets.only(
+      child: Builder(
+        builder: (context) {
+          final allScreen = Container(
+            padding: const EdgeInsets.only(
               top: defaultPadding,
               left: defaultPadding / 2,
               right: defaultPadding / 2,
-              bottom: defaultPadding / 2),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(left: defaultPadding),
-                child: const Header(),
-              ),
-              const SizedBox(height: defaultPadding),
-              QuickInfoBanner(),
-              Responsive(
+              bottom: defaultPadding / 2,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: defaultPadding),
+                  child: const Header(),
+                ),
+                const SizedBox(height: defaultPadding),
+                QuickInfoBanner(),
+                Responsive(
                   mobileChild: _buildMobileBody(),
-                  desktopChild: _buildDesktopBody())
-            ],
-          ),
-        );
-
-        if (context.mobile) {
-          return SingleChildScrollView(
-            child: allScreen,
+                  desktopChild: _buildDesktopBody(),
+                ),
+              ],
+            ),
           );
-        } else {
-          return allScreen;
-        }
-      }),
+
+          if (context.mobile) {
+            return SingleChildScrollView(child: allScreen);
+          } else {
+            return allScreen;
+          }
+        },
+      ),
     );
   }
 
@@ -57,14 +59,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            flex: 3,
-            child: DashboardTables(),
-          ),
-          Expanded(
-            flex: 2,
-            child: SidePanel(),
-          ),
+          Expanded(flex: 3, child: DashboardTables()),
+          Expanded(flex: 2, child: SidePanel()),
         ],
       ),
     );
@@ -74,10 +70,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Column(
       mainAxisAlignment: MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        DashboardTables(),
-        SidePanel(),
-      ],
+      children: [DashboardTables(), SidePanel()],
     );
   }
 }
