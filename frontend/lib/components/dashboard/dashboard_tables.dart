@@ -108,13 +108,29 @@ class _DashboardTablesState extends State<DashboardTables> {
             );
           }
         },
-        onLoad: () => PackagesTable.loading(),
+        onLoad: () => Responsive(
+          mobileChild: PackagesTable(
+            data: List.generate(5, (_) => SimplePackage.dummy()),
+          ),
+          desktopChild: SingleChildScrollView(
+            child: PackagesTable(
+              data: List.generate(5, (_) => SimplePackage.dummy()),
+            ),
+          ),
+        ),
         provider: listPackagesProvider(limit: 20),
       );
     } else {
       return APIBuilder(
         interval: Duration(minutes: 1),
-        onLoad: () => BuildsTable.loading(),
+        onLoad: () => Responsive(
+          mobileChild: BuildsTable(
+            data: List.generate(5, (_) => Build.dummy()),
+          ),
+          desktopChild: SingleChildScrollView(
+            child: BuildsTable(data: List.generate(5, (_) => Build.dummy())),
+          ),
+        ),
         onData: (List<Build> data) {
           if (data.isEmpty) {
             return const TableInfo(title: "You have no builds yet");

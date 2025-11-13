@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:skeletonizer/skeletonizer.dart';
 import 'package:toastification/toastification.dart';
 
 class APIBuilder<T> extends ConsumerStatefulWidget {
@@ -32,9 +33,8 @@ class _APIBuilderState<T> extends ConsumerState<APIBuilder<T>> {
     final asyncValue = ref.watch(widget.provider);
     return asyncValue.when(
       data: (data) => widget.onData(data),
-      loading: () => widget.onLoad(),
+      loading: () => Skeletonizer(child: widget.onLoad()),
       error: (error, stack) {
-        // Optionally show an error toast or widget.
         WidgetsBinding.instance.addPostFrameCallback(
           (_) => toastification.show(
             title: Text('API Request failed! $error'),

@@ -28,11 +28,9 @@ class Header extends StatelessWidget {
             children: [
               APIBuilder(
                 onLoad: () {
-                  return Skeletonizer(
-                    child: Text(
-                      "Hi, Arch User :)",
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
+                  return Text(
+                    "Hi, Arch User :)",
+                    style: Theme.of(context).textTheme.titleLarge,
                   );
                 },
                 onData: (UserInfo data) {

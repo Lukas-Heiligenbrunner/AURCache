@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
+import 'package:skeletonizer/skeletonizer.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/API.dart';
@@ -33,72 +34,67 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
       appBar: AppBar(),
       body: APIBuilder(
         interval: Duration(minutes: 1),
-        onLoad: () => const Text("loading"),
-        onData: (ExtendedPackage pkg) {
-          return Padding(
-            padding: const EdgeInsets.all(defaultPadding),
-            child: Column(
+        onLoad: () => _build(ExtendedPackage.dummy()),
+        onData: (ExtendedPackage pkg) => _build(pkg),
+        provider: getPackageProvider(widget.pkgID),
+      ),
+    );
+  }
+
+  Widget _build(ExtendedPackage pkg) {
+    return Padding(
+      padding: const EdgeInsets.all(defaultPadding),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(left: 15),
+                    child: Text(pkg.name, style: const TextStyle(fontSize: 32)),
+                  ),
+                  IconButton(
+                    onPressed: () async {
+                      pkg.package_source.when(
+                        aur: (aur) async {
+                          await launchUrl(
+                            Uri.parse(aur.aur_url),
+                            webOnlyWindowName: '_blank',
+                          );
+                        },
+                        git: (git) async {
+                          await launchUrl(
+                            Uri.parse(git.git_url),
+                            webOnlyWindowName: '_blank',
+                          );
+                        },
+                        upload: (upload) {
+                          // todo do idk what
+                        },
+                      );
+                    },
+                    icon: const Icon(Icons.link),
+                  ),
+                ],
+              ),
+              _buildTopActionButtons(pkg),
+            ],
+          ),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          margin: const EdgeInsets.only(left: 15),
-                          child: Text(
-                            pkg.name,
-                            style: const TextStyle(fontSize: 32),
-                          ),
-                        ),
-                        IconButton(
-                          onPressed: () async {
-                            pkg.package_source.when(
-                              aur: (aur) async {
-                                await launchUrl(
-                                  Uri.parse(aur.aur_url),
-                                  webOnlyWindowName: '_blank',
-                                );
-                              },
-                              git: (git) async {
-                                await launchUrl(
-                                  Uri.parse(git.git_url),
-                                  webOnlyWindowName: '_blank',
-                                );
-                              },
-                              upload: (upload) {
-                                // todo do idk what
-                              },
-                            );
-                          },
-                          icon: const Icon(Icons.link),
-                        ),
-                      ],
-                    ),
-                    _buildTopActionButtons(pkg),
-                  ],
-                ),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.start,
-                        children: [_buildMainBody(pkg)],
-                      ),
-                    ),
-                    _buildSideBar(pkg),
-                  ],
-                ),
+                Expanded(child: _buildMainBody(pkg)),
+                _buildSideBar(pkg),
               ],
             ),
-          );
-        },
-        provider: getPackageProvider(widget.pkgID),
+          ),
+        ],
       ),
     );
   }
@@ -308,40 +304,46 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                 const SizedBox(height: 25),
               ];
             } else {
-              return [];
+              return [const SizedBox(height: 25)];
             }
           },
           git: (git) {
             // todo description from git
-            return [];
+            return [const SizedBox(height: 25)];
           },
           upload: (upload) {
             return [];
           },
         ),
-        Container(
-          padding: const EdgeInsets.all(defaultPadding),
-          decoration: const BoxDecoration(
-            color: secondaryColor,
-            borderRadius: BorderRadius.all(Radius.circular(10)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                "Builds of ${pkg.name}",
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              APIBuilder(
-                interval: const Duration(seconds: 30),
-                onData: (List<Build> data) {
-                  return BuildsTable(data: data);
-                },
-                onLoad: () => const Text("no data"),
-                provider: listBuildsProvider(pkgID: pkg.id),
-              ),
-            ],
+        Expanded(
+          child: Container(
+            padding: const EdgeInsets.all(defaultPadding),
+            decoration: const BoxDecoration(
+              color: secondaryColor,
+              borderRadius: BorderRadius.all(Radius.circular(10)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  "Builds of ${pkg.name}",
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: APIBuilder(
+                      interval: const Duration(seconds: 30),
+                      onData: (List<Build> data) {
+                        return BuildsTable(data: data);
+                      },
+                      onLoad: () => const Text("no data"),
+                      provider: listBuildsProvider(pkgID: pkg.id),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ],

@@ -27,6 +27,17 @@ class Build {
   factory Build.fromJson(Map<String, dynamic> json) => _$BuildFromJson(json);
   Map<String, dynamic> toJson() => _$BuildToJson(this);
 
+  factory Build.dummy() => Build(
+    id: 42,
+    pkg_id: 0,
+    pkg_name: "MyPackage",
+    platform: "x86_64",
+    version: "1.0.1",
+    start_time: DateTime.now(),
+    end_time: DateTime.now(),
+    status: 0,
+  );
+
   static dynamic _fromJson(int? value) =>
       value != null ? DateTime.fromMillisecondsSinceEpoch(value * 1000) : null;
 }
