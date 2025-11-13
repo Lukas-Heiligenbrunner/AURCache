@@ -1,4 +1,3 @@
-mod pkginfo;
 mod repo_add;
 mod repo_database;
 mod repo_init;

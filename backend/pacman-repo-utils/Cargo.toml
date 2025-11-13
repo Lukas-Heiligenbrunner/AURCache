@@ -7,6 +7,10 @@ anyhow = {workspace = true}
 tracing = {workspace = true}
 flate2 = {workspace = true}
 tar = {workspace = true}
+alpm-srcinfo = {workspace = true}
+
+alpm-pkginfo =  { git = "https://github.com/archlinux/alpm.git" }
+alpm-db = { git = "https://github.com/archlinux/alpm.git" }
 
 base64 = "0.22.1"
 md5 = "0.8.0"

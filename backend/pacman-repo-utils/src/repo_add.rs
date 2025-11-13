@@ -1,12 +1,15 @@
 use anyhow::{anyhow, bail};
 
-use crate::pkginfo::parser::Pkginfo;
 use crate::repo_database::db::add_to_db_file;
-use crate::repo_database::desc::Desc;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
+use std::io;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::str::FromStr;
+use alpm_pkginfo::{PackageInfoV2, RelationOrSoname};
+use alpm_db::desc::DbDescFileV2;
+use alpm_db::desc::Section::Version;
 use tar::Archive;
 use tracing::{debug, error, warn};
 use xz2::read::XzDecoder;
@@ -18,7 +21,6 @@ pub fn repo_add_impl(
     files_archive: String,
 ) -> anyhow::Result<()> {
     let mut files = vec![];
-    let mut pkginfo = Pkginfo::new();
 
     // Path to the .tar.zst file
     let file = File::open(Path::new(pkgfile))?;
@@ -40,6 +42,8 @@ pub fn repo_add_impl(
     };
     let mut archive = Archive::new(decompressor);
 
+    let mut pkginfo = None;
+
     // Iterate over the entries in the tar archive
     for entry in archive.entries()? {
         match entry {
@@ -51,7 +55,12 @@ pub fn repo_add_impl(
 
                     if path == Path::new(".PKGINFO") {
                         debug!("Found .PKGINFO file in '{pkgfile}'.");
-                        pkginfo.parse(entry)?;
+
+                        let mut reader = io::BufReader::new(entry);
+                        let mut pkginfo_str = String::new();
+                        reader.read_to_string(&mut pkginfo_str)?;
+
+                        pkginfo = Some(PackageInfoV2::from_str(pkginfo_str.as_str())?);
                     }
                 }
             }
@@ -59,14 +68,13 @@ pub fn repo_add_impl(
         }
     }
 
-    if !pkginfo.valid() {
-        error!("Invalid package file '{pkgfile}'.");
-        bail!("Invalid package file");
-    }
-
-    // Compute base64'd PGP signature
-    debug!("Setting signature for '{pkgfile}'.");
-    pkginfo.set_signature(pkgfile)?;
+    let pkginfo = match pkginfo {
+        None => {
+            error!("No valid .PKGINFO found in '{pkgfile}'.");
+            bail!("No valid .PKGINFO found in '{pkgfile}'.");
+        }
+        Some(v) => v,
+    };
 
     debug!("Calculating compressed size for '{pkgfile}'.");
     let csize = fs::metadata(pkgfile)?.len() as usize;
@@ -84,11 +92,49 @@ pub fn repo_add_impl(
     let dir_name = format!("{}-{}", pkginfo.pkgname, pkginfo.pkgver);
 
     debug!("Creating DESC file for db entry");
-    let mut desc = Desc::from(pkginfo);
-    desc.filename = filename.clone();
-    desc.md5sum = md5sum.clone();
-    desc.csize = csize.to_string();
-    desc.sha256sum = sha256sum.clone();
+    let desc = DbDescFileV2{
+        name: pkginfo.pkgname,
+        version: pkginfo.pkgver.into(),
+        base: pkginfo.pkgbase,
+        description: Some(pkginfo.pkgdesc),
+        url: Some(pkginfo.url),
+        arch: pkginfo.arch,
+        builddate: pkginfo.builddate,
+        installdate: 0,
+        packager: pkginfo.packager,
+        size: pkginfo.size,
+        groups: pkginfo.group,
+        reason: None,
+        license: pkginfo.license,
+        validation: vec![],
+        replaces: pkginfo.replaces.iter().map(|x| {x.name.clone()}).collect(),
+        depends: pkginfo.depend.iter()
+            .filter_map(|x| {
+                match x {
+                    RelationOrSoname::Relation(v) => Some(v.clone()),
+                    _ => None,
+                }
+            })
+            .collect(),
+        optdepends: pkginfo.optdepend,
+        conflicts: pkginfo.conflict.iter().map(|x| {x.name.clone()}).collect(),
+        provides: pkginfo.provides.iter()
+            .filter_map(|x| {
+                match x {
+                    RelationOrSoname::Relation(v) => Some(v.name.clone()),
+                    _ => None,
+                }
+            })
+            .collect(),
+        xdata: pkginfo.xdata,
+    };
+
+    //let mut desc = Desc::from(pkginfo);
+    //desc.filename = filename.clone();
+    //desc.md5sum = md5sum.clone();
+    //desc.csize = csize.to_string();
+    //desc.sha256sum = sha256sum.clone();
+    // todo the desc implementation of alpm doesn't contain the isize, csize and sha256 fields and so on
     let desc_str = desc.to_string();
 
     debug!("Adding DESC and FILES entries to db archive");
