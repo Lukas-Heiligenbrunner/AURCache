@@ -24,15 +24,15 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 
 fn get_secret_key() -> SecretKey {
-    match env::var("SECRET_KEY") {
-        Ok(secret_key) => SecretKey::from(secret_key.as_bytes()),
-        Err(_) => {
-            warn!("`SECRET_KEY` env not set, generating random key.");
-            SecretKey::from(Key::try_generate().unwrap().master())
-        }
+    if let Ok(secret_key) = env::var("SECRET_KEY") {
+        SecretKey::from(secret_key.as_bytes())
+    } else {
+        warn!("`SECRET_KEY` env not set, generating random key.");
+        SecretKey::from(Key::try_generate().unwrap().master())
     }
 }
 
+#[must_use]
 pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
@@ -82,7 +82,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                                 Scopes::new(),
                             ),
                         )])),
-                    )
+                    );
                 }
             }
         }
@@ -115,10 +115,11 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
         match rock {
             Ok(_) => info!("Rocket shut down gracefully."),
             Err(err) => error!("Rocket had an error: {err}"),
-        };
+        }
     })
 }
 
+#[must_use]
 pub fn init_repo() -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
@@ -135,6 +136,6 @@ pub fn init_repo() -> JoinHandle<()> {
         match launch_result {
             Ok(_) => info!("Rocket shut down gracefully."),
             Err(err) => error!("Rocket had an error: {err}"),
-        };
+        }
     })
 }

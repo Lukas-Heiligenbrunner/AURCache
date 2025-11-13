@@ -32,7 +32,7 @@ fn repo_exists(path: &Path, name: &str) -> anyhow::Result<()> {
         let files = get_archive_names(name, suffix);
         for file in [files.0, files.1] {
             if fs::metadata(path.join(&file)).is_err() {
-                bail!("{} doesn't exist", file);
+                bail!("{file} doesn't exist");
             }
         }
     }

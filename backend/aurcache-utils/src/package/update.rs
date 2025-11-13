@@ -42,7 +42,7 @@ pub async fn package_update_all_outdated(
     let activity_log = ActivityLog::new(db.clone());
 
     let mut ids_total = vec![];
-    for pkg in pkg_models.iter() {
+    for pkg in &pkg_models {
         // only trigger build if previous build was successful and no build active
         if pkg.status == BuildStates::SUCCESSFUL_BUILD {
             let mut ids = package_update(db, pkg.to_owned(), false, tx).await?;
@@ -117,10 +117,7 @@ pub async fn package_update(
     if let Some(build) = latest_build {
         // Compare its version to the latest one from AUR
         if !force && build.version == upstream_version {
-            bail!(
-                "Latest build is already up to date (version {})",
-                upstream_version
-            );
+            bail!("Latest build is already up to date (version {upstream_version})");
         }
     }
 
@@ -132,7 +129,7 @@ pub async fn package_update(
     let mut build_ids = vec![];
 
     let pkg_model: packages::Model = pkg_aktive_model.clone().try_into()?;
-    for platform in pkg_model.platforms.clone().split(";") {
+    for platform in pkg_model.platforms.clone().split(';') {
         let build_id = update_platform(
             platform,
             pkg_model.clone(),

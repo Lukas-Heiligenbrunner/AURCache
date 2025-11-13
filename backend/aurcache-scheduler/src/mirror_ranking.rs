@@ -42,7 +42,7 @@ pub fn start_mirror_rank_job(
 
                 // Execute your scheduled code
                 match update_mirrorlist().await {
-                    Ok(_) => {
+                    Ok(()) => {
                         info!("Mirror ranking finished");
                     }
                     Err(e) => {
@@ -78,6 +78,6 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
         Err(e) => {
             warn!("Failed to get mirror list: {e}");
         }
-    };
+    }
     Ok(())
 }

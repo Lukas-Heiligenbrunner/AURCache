@@ -9,9 +9,10 @@ pub struct PackageUpdateActivity {
 
 impl ActivitySerializer for PackageUpdateActivity {
     fn format(&self) -> String {
-        match self.forced {
-            true => format!("forced update of package {}", self.package),
-            false => format!("updated package {}", self.package),
+        if self.forced {
+            format!("forced update of package {}", self.package)
+        } else {
+            format!("updated package {}", self.package)
         }
     }
 }

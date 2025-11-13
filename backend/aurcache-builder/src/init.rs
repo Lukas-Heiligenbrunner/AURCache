@@ -9,6 +9,7 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
+#[must_use]
 pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = new_semaphore();

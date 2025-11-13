@@ -15,7 +15,7 @@ impl MigrationTrait for Migration {
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
 ADD COLUMN build_flags TEXT;
 
@@ -37,13 +37,13 @@ UPDATE builds
 
 UPDATE files
     SET platform = 'x86_64';
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE public.packages
 ADD COLUMN build_flags TEXT;
 
@@ -65,7 +65,7 @@ UPDATE public.builds
 
 UPDATE public.files
     SET platform = 'x86_64';
-"#,
+",
                 )
                 .await?;
             }
@@ -102,7 +102,7 @@ UPDATE public.files
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
 DROP COLUMN build_flags;
 
@@ -114,13 +114,13 @@ DROP COLUMN platform;
 
 ALTER TABLE files
 DROP COLUMN platform;
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE public.packages
 DROP COLUMN build_flags;
 
@@ -132,7 +132,7 @@ DROP COLUMN platform;
 
 ALTER TABLE files
 DROP COLUMN platform;
-"#,
+",
                 )
                 .await?;
             }

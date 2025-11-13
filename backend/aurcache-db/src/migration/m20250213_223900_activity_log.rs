@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 create table activity
 (
 	id integer not null
@@ -24,7 +24,7 @@ create table activity
 	timestamp INTEGER not null,
 	user TEXT
 );
-"#,
+",
                 )
                 .await?;
             }

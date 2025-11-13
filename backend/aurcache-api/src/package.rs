@@ -105,21 +105,16 @@ pub async fn package_update_entity_endpoint(
     // Start building the update operation
     let update_pkg = packages::ActiveModel {
         id: Set(id),
-        name: input.name.clone().map(Set).unwrap_or(NotSet),
-        status: input.status.map(Set).unwrap_or(NotSet),
-        out_of_date: input.out_of_date.map(Set).unwrap_or(NotSet),
-        upstream_version: input.upstream_version.clone().map(Set).unwrap_or(NotSet),
-        latest_build: input.latest_build.map(Set).unwrap_or(NotSet),
+        name: input.name.clone().map_or(NotSet, Set),
+        status: input.status.map_or(NotSet, Set),
+        out_of_date: input.out_of_date.map_or(NotSet, Set),
+        upstream_version: input.upstream_version.clone().map_or(NotSet, Set),
+        latest_build: input.latest_build.map_or(NotSet, Set),
         build_flags: input
             .build_flags
             .clone()
-            .map(|v| Set(v.join(";")))
-            .unwrap_or(NotSet),
-        platforms: input
-            .platforms
-            .clone()
-            .map(|v| Set(v.join(";")))
-            .unwrap_or(NotSet),
+            .map_or(NotSet, |v| Set(v.join(";"))),
+        platforms: input.platforms.clone().map_or(NotSet, |v| Set(v.join(";"))),
         source_type: NotSet,
         source_data: NotSet,
     };
@@ -250,7 +245,7 @@ pub async fn package_list(
         .column_as(packages::Column::UpstreamVersion, "upstream_version")
         // wrap the correlated subquery in COALESCE -> fallback to empty string
         .column_as(
-            Expr::cust(format!("COALESCE({}, '')", latest_version_subquery)),
+            Expr::cust(format!("COALESCE({latest_version_subquery}, '')")),
             "latest_version",
         )
         .order_by(packages::Column::OutOfDate, Order::Desc)
@@ -322,7 +317,7 @@ pub async fn get_package(
 
             (
                 PackageSource::Aur(AurPackage {
-                    name: pkg.name.to_string(),
+                    name: pkg.name.clone(),
                     project_url: aur_info.url,
                     description: aur_info.description,
                     last_updated: aur_info.last_modified,
@@ -346,7 +341,7 @@ pub async fn get_package(
                 subfolder,
             }),
             // This versions actuality dpendes on the update-version-check interval
-            pkg.upstream_version.unwrap_or("".to_string()),
+            pkg.upstream_version.unwrap_or(String::new()),
         ),
         SourceData::Upload { .. } => {
             todo!("upload zip is not yet implemented")
@@ -360,8 +355,17 @@ pub async fn get_package(
         outofdate: pkg.out_of_date,
         latest_version,
         package_source,
-        selected_platforms: pkg.platforms.split(";").map(|v| v.to_string()).collect(),
-        selected_build_flags: Some(pkg.build_flags.split(";").map(|v| v.to_string()).collect()),
+        selected_platforms: pkg
+            .platforms
+            .split(';')
+            .map(std::string::ToString::to_string)
+            .collect(),
+        selected_build_flags: Some(
+            pkg.build_flags
+                .split(';')
+                .map(std::string::ToString::to_string)
+                .collect(),
+        ),
         upstream_version: version,
     };
 

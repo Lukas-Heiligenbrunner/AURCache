@@ -14,10 +14,10 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
 use tracing::{error, info, warn};
 #[cfg(not(debug_assertions))]
 use {
-    tracing::debug,
     std::fs::File,
     std::io::{BufRead, BufReader, Write},
     std::path::Path,
+    tracing::debug,
 };
 
 const CONTAINER_STORAGE_DIRS: [&str; 2] = ["/run/containers/storage", "/run/libpod"];
@@ -104,7 +104,7 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
             Err(e) => {
                 warn!("Failed to get mirror list: {e}");
             }
-        };
+        }
     }
 
     Ok(())

@@ -1,11 +1,15 @@
-use crate::activity::*;
-use crate::aur::*;
-use crate::build::*;
-use crate::health::*;
-use crate::package::*;
-use crate::stats::*;
+use crate::activity::activity;
+use crate::aur::search;
+use crate::build::{build_output, cancel_build, delete_build, get_build, list_builds, rery_build};
+use crate::health::health;
+use crate::package::{
+    get_package, package_add_endpoint, package_del, package_list, package_update_endpoint,
+    package_update_entity_endpoint,
+};
+use crate::stats::{dashboard_graph_data, stats, user_info};
 use rocket::{Route, routes};
 
+#[must_use]
 pub fn build_api() -> Vec<Route> {
     routes![
         search,

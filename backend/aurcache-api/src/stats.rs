@@ -143,9 +143,9 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
     let unique: BuildTimeStruct =
         BuildTimeStruct::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            r#"SELECT AVG((builds.end_time - builds.start_time)) AS avg_build_time
+            r"SELECT AVG((builds.end_time - builds.start_time)) AS avg_build_time
         FROM builds
-        WHERE builds.end_time IS NOT NULL AND builds.status = 1;"#,
+        WHERE builds.end_time IS NOT NULL AND builds.status = 1;",
             [],
         ))
         .one(db)

@@ -59,10 +59,10 @@ impl Display for Desc {
 }
 impl Desc {
     fn add_desc_entry(&self, header: &str, value: String) -> String {
-        if !value.is_empty() {
-            format!("%{}%\n{}\n\n", header.to_uppercase(), value)
-        } else {
+        if value.is_empty() {
             String::new()
+        } else {
+            format!("%{}%\n{}\n\n", header.to_uppercase(), value)
         }
     }
 
@@ -84,14 +84,14 @@ impl Desc {
 impl From<Pkginfo> for Desc {
     fn from(value: Pkginfo) -> Self {
         Desc {
-            filename: "".to_string(),
+            filename: String::new(),
             name: value.pkgname,
             base: value.pkgbase,
             version: value.pkgver,
             desc: value.pkgdesc,
             isize: value.size.to_string(),
-            md5sum: "".to_string(),
-            csize: "".to_string(),
+            md5sum: String::new(),
+            csize: String::new(),
             url: value.url,
             arch: value.arch,
             builddate: value.builddate,
@@ -106,7 +106,7 @@ impl From<Pkginfo> for Desc {
             optdepends: value.optdepends,
             makedepends: value.makedepends,
             checkdepends: value.checkdepends,
-            sha256sum: "".to_string(),
+            sha256sum: String::new(),
         }
     }
 }

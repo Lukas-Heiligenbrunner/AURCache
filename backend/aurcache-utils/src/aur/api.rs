@@ -16,7 +16,7 @@ pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
                 .with_max_times(4),
         )
         .await
-        .map_err(|e| anyhow!("failed to get package: {}", e))?;
+        .map_err(|e| anyhow!("failed to get package: {e}"))?;
 
     let mut response = response.results;
     response.sort_by(|x, x1| x.popularity.partial_cmp(&x1.popularity).unwrap().reverse());
@@ -35,7 +35,7 @@ pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>>
                 .with_max_times(4),
         )
         .await
-        .map_err(|e| anyhow!("failed to get package: {}", e))?;
+        .map_err(|e| anyhow!("failed to get package: {e}"))?;
 
     Ok(response.results.pop())
 }

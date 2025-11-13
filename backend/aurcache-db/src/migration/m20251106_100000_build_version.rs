@@ -14,60 +14,60 @@ impl MigrationTrait for Migration {
             DbBackend::Sqlite => {
                 // add new column version to builds
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table builds
 add version TEXT not null default '';
-"#,
+",
                 )
                 .await?;
 
                 // copy versions from package versions to new columns
                 db.execute_unprepared(
-                    r#"
+                    r"
 UPDATE builds
 SET version = (
     SELECT COALESCE(packages.version, '')
     FROM packages
     WHERE packages.id = builds.pkg_id
 );
-"#,
+",
                 )
                 .await?;
 
                 // drop the old packages version
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table packages
 drop column version;
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE builds
 ADD COLUMN version TEXT NOT NULL DEFAULT '';
-"#,
+",
                 )
                 .await?;
 
                 db.execute_unprepared(
-                    r#"
+                    r"
 UPDATE builds
 SET version = COALESCE(packages.version, '')
 FROM packages
 WHERE packages.id = builds.pkg_id;
-"#,
+",
                 )
                 .await?;
 
                 // drop the old packages version
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
 DROP COLUMN version;
-"#,
+",
                 )
                 .await?;
             }
@@ -85,60 +85,60 @@ DROP COLUMN version;
             DbBackend::Sqlite => {
                 // add version column back to packages
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table packages
 add version TEXT not null default '';
-"#,
+",
                 )
                 .await?;
 
                 // copy versions from builds back to packages
                 db.execute_unprepared(
-                    r#"
+                    r"
 UPDATE packages
 SET version = (
     SELECT COALESCE(builds.version, '')
     FROM builds
     WHERE builds.pkg_id = packages.id
 );
-"#,
+",
                 )
                 .await?;
 
                 // drop the version column from builds
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table builds
 drop column version;
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
 ADD COLUMN version TEXT NOT NULL DEFAULT '';
-"#,
+",
                 )
                 .await?;
 
                 db.execute_unprepared(
-                    r#"
+                    r"
 UPDATE packages
 SET version = COALESCE(builds.version, '')
 FROM builds
 WHERE builds.pkg_id = packages.id;
-"#,
+",
                 )
                 .await?;
 
                 // drop the version column from builds
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE builds
 DROP COLUMN version;
-"#,
+",
                 )
                 .await?;
             }

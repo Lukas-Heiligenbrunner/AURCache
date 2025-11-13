@@ -68,7 +68,7 @@ pub async fn oauth_callback(
 
     // Set a private cookie with the user's name, and redirect to the home page.
     cookies.add_private(
-        Cookie::build(("username", real_name.to_string()))
+        Cookie::build(("username", real_name.clone()))
             .same_site(SameSite::Lax)
             .build(),
     );
