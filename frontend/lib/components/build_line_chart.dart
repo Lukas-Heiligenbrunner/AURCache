@@ -84,7 +84,7 @@ class _BuildLineChartState extends State<BuildLineChart> {
     }
   }
 
-  getGraphData() async {
+  void getGraphData() async {
     final graphdata = await API.getGraphData();
 
     final spotData = data;

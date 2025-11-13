@@ -12,7 +12,6 @@ use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use log::{debug, info};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, JoinType,
     ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
@@ -24,6 +23,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tracing::{debug, info};
 
 static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
@@ -82,7 +82,7 @@ impl Builder {
         );
 
         let pkgname = self.package_model.name.get()?;
-        let host_active_build_path = create_active_build_path(pkgname.to_string())?;
+        let host_active_build_path = create_active_build_path(pkgname.clone())?;
 
         let create_info = self
             .create_build_container(target_platform, BUILDER_IMAGE)
@@ -171,7 +171,7 @@ impl Builder {
                             exit_code
                         ))
                         .await;
-                    bail!("Build failed with exit code: {}", exit_code);
+                    bail!("Build failed with exit code: {exit_code}");
                 }
                 Ok(())
             }
@@ -205,10 +205,10 @@ impl Builder {
         ));
 
         match result {
-            Ok(_) => {
+            Ok(()) => {
                 // update package success status
                 self.package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
-                self.package_model.out_of_date = Set(false as i32);
+                self.package_model.out_of_date = Set(i32::from(false));
                 self.package_model = self.package_model.clone().save(&txn).await?;
 
                 self.build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
@@ -234,7 +234,7 @@ impl Builder {
                     .await;
                 self.logger.append(e.to_string()).await;
             }
-        };
+        }
 
         // remove build from container map
         self.job_containers

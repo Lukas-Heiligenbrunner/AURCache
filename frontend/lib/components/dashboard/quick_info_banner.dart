@@ -13,18 +13,29 @@ import '../api/api_builder.dart';
 class QuickInfoBanner extends StatelessWidget {
   const QuickInfoBanner({super.key});
 
-  List<Widget> _buildElements(Stats? stats, BuildContext context) {
-    final double iconSize = context.desktop ? 64 : 42;
-    final buildSuccessRate = stats != null
-        ? ((stats.successful_builds + stats.failed_builds) != 0
-              ? (stats.successful_builds /
-                    (stats.successful_builds + stats.failed_builds))
-              : 0)
-        : 0;
+  @override
+  Widget build(BuildContext context) {
+    return APIBuilder(
+      interval: Duration(minutes: 1),
+      onData: (Stats stats) {
+        return _buildBanner(stats, context);
+      },
+      onLoad: () {
+        return _buildBanner(Stats.dummy(), context);
+      },
+      provider: listStatsProvider,
+    );
+  }
 
-    final buildSuccess = stats != null
-        ? "${(buildSuccessRate * 100).toInt()}%"
-        : null;
+  List<Widget> _buildElements(Stats stats, BuildContext context) {
+    final double iconSize = context.desktop ? 64 : 42;
+    final buildSuccessRate =
+        ((stats.successful_builds + stats.failed_builds) != 0
+        ? (stats.successful_builds /
+              (stats.successful_builds + stats.failed_builds))
+        : 0);
+
+    final buildSuccess = "${(buildSuccessRate * 100).toInt()}%";
 
     return [
       QuickInfoTile(
@@ -36,7 +47,7 @@ class QuickInfoBanner extends StatelessWidget {
           ),
         ),
         title: "Total Packages",
-        value: stats?.total_packages.toString() ?? "42",
+        value: stats.total_packages.toString(),
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -47,8 +58,8 @@ class QuickInfoBanner extends StatelessWidget {
           ),
         ),
         title: "Total Builds",
-        value: stats?.total_builds.toString() ?? "42",
-        trendPercent: ((stats?.total_build_trend ?? 0.42) * 100),
+        value: stats.total_builds.toString(),
+        trendPercent: ((stats.total_build_trend) * 100),
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -59,7 +70,7 @@ class QuickInfoBanner extends StatelessWidget {
           ),
         ),
         title: "Repo Size",
-        value: stats?.repo_size.readableFileSize() ?? "42.42 MiB",
+        value: stats.repo_size.readableFileSize(),
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -70,8 +81,8 @@ class QuickInfoBanner extends StatelessWidget {
           ),
         ),
         title: "Average Build Time",
-        value: stats?.avg_build_time.readableDuration() ?? "42 Seconds",
-        trendPercent: stats?.avg_build_time_trend,
+        value: stats.avg_build_time.readableDuration(),
+        trendPercent: stats.avg_build_time_trend,
       ),
       QuickInfoTile(
         icon: Skeleton.shade(
@@ -89,44 +100,22 @@ class QuickInfoBanner extends StatelessWidget {
           ),
         ),
         title: "Build Success",
-        value: buildSuccess ?? "10%",
+        value: buildSuccess,
       ),
     ];
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return APIBuilder(
-      interval: Duration(minutes: 1),
-      onData: (Stats stats) {
-        final items = _buildElements(stats, context);
-        return _buildBanner(items, false);
-      },
-      onLoad: () {
-        final items = _buildElements(null, context);
-        return _buildBanner(items, true);
-      },
-      provider: listStatsProvider,
-    );
-  }
+  Widget _buildBanner(Stats stats, BuildContext context) {
+    final items = _buildElements(stats, context);
 
-  Widget _buildBanner(List<Widget> items, bool loading) {
     return ResponsiveBuilder(
       mobile: () {
-        return Column(
-          children: items
-              .map((e) => Skeletonizer(enabled: loading, child: e))
-              .toList(growable: false),
-        );
+        return Column(children: items.map((e) => e).toList(growable: false));
       },
       desktop: () {
         return Row(
           children: items
-              .map(
-                (e) => Expanded(
-                  child: Skeletonizer(enabled: loading, child: e),
-                ),
-              )
+              .map((e) => Expanded(child: e))
               .toList(growable: false),
         );
       },

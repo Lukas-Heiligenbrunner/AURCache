@@ -26,5 +26,16 @@ class Stats {
   factory Stats.fromJson(Map<String, dynamic> json) => _$StatsFromJson(json);
   Map<String, dynamic> toJson() => _$StatsToJson(this);
 
+  factory Stats.dummy() => Stats(
+    total_builds: 42,
+    successful_builds: 5,
+    failed_builds: 2,
+    avg_build_time: Duration(minutes: 3, seconds: 43),
+    repo_size: 42668,
+    total_packages: 5,
+    total_build_trend: 1.1,
+    avg_build_time_trend: 1.1,
+  );
+
   static Duration _fromJson(int value) => Duration(seconds: value);
 }

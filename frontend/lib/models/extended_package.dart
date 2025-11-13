@@ -27,6 +27,23 @@ sealed class ExtendedPackage with _$ExtendedPackage {
 
   factory ExtendedPackage.fromJson(Map<String, dynamic> json) =>
       _$ExtendedPackageFromJson(json);
+
+  factory ExtendedPackage.dummy() => ExtendedPackage(
+    id: 42,
+    name: "Dummy",
+    status: 0,
+    outofdate: true,
+    upstream_version: "1.0.0",
+    selected_platforms: ["arm64"],
+    selected_build_flags: ["-S", "--noconfirm", "--dummyflag"],
+    package_source: PackageSource.git(
+      GitPackage(
+        git_ref: "master",
+        git_url: "http://dummyur.org",
+        subfolder: "dummyfolder",
+      ),
+    ),
+  );
 }
 
 @Freezed(unionKey: 'package_type', unionValueCase: FreezedUnionCase.pascal)

@@ -33,6 +33,7 @@ impl CustomFileServer {
         }
     }
 
+    #[must_use]
     pub fn rank(mut self, rank: isize) -> Self {
         self.rank = rank;
         self
@@ -69,7 +70,7 @@ impl Handler for CustomFileServer {
         };
 
         let metadata = named_file.metadata().await.ok();
-        let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let file_size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
         let last_modified = metadata.and_then(|m| m.modified().ok()).map(|mtime| {
             let datetime: chrono::DateTime<chrono::Utc> = mtime.into();
             datetime.to_rfc2822()
@@ -147,7 +148,7 @@ fn parse_range_header(header: &str, file_size: u64) -> Option<(u64, u64)> {
 async fn read_file_range(path: &Path, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
     let mut file = File::open(path).await?;
     file.seek(SeekFrom::Start(start)).await?;
-    let mut buffer = vec![0; (end - start) as usize];
+    let mut buffer = vec![0; usize::try_from(end - start)?];
     file.read_exact(&mut buffer).await?;
     Ok(buffer)
 }

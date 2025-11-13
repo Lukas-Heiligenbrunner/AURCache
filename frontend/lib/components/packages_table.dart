@@ -19,21 +19,6 @@ class PackagesTable extends ConsumerWidget {
   const PackagesTable({super.key, required this.data});
   final List<SimplePackage> data;
 
-  static Widget loading() {
-    final demoBuild = SimplePackage(
-      id: 42,
-      name: 'MyPackage',
-      status: 0,
-      latest_version: '1.0.0',
-      upstream_version: '1.0.0',
-      outofdate: false,
-    );
-
-    return Skeletonizer(
-      child: PackagesTable(data: List.generate(20, (_) => demoBuild)),
-    );
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return DataTable(

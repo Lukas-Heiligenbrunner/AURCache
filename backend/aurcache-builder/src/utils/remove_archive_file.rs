@@ -1,10 +1,10 @@
 use aurcache_db::prelude::PackagesFiles;
 use aurcache_db::{files, packages_files};
-use log::{info, warn};
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
 use std::fs;
+use tracing::{info, warn};
 
 pub async fn try_remove_archive_file(
     file: files::Model,
@@ -24,9 +24,10 @@ pub async fn try_remove_archive_file(
         )?;
 
         let file_path = format!("./repo/{}/{}", platform, file.filename);
-        match fs::remove_file(file_path.clone()) {
-            Ok(_) => info!("Removed old file: {file_path}"),
-            Err(_) => warn!("Failed to remove package file: {file_path}"),
+        if let Ok(()) = fs::remove_file(file_path.clone()) {
+            info!("Removed old file: {file_path}")
+        } else {
+            warn!("Failed to remove package file: {file_path}")
         }
 
         file.delete(db).await?;

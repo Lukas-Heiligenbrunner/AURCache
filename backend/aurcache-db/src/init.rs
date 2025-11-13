@@ -1,10 +1,10 @@
 use crate::helpers::dbtype::database_type;
 use crate::migration::Migrator;
 use anyhow::{anyhow, bail};
-use log::LevelFilter;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend};
 use sea_orm_migration::MigratorTrait;
 use std::{env, fs};
+use tracing::log::LevelFilter;
 
 pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
     let db: DatabaseConnection = match database_type() {

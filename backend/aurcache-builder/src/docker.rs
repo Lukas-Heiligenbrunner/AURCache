@@ -21,13 +21,13 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures::{StreamExt, TryFutureExt};
 use itertools::Itertools;
-use log::{debug, info, trace};
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use tempfile::tempdir;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use tracing::{debug, info, trace};
 
 /// git repo path inside builder container in git build mode
 static GIT_REPO_PATH: &str = "/tmp";
@@ -38,10 +38,10 @@ impl Builder {
         docker
             .ping()
             .await
-            .map_err(|e| anyhow!("Connection to Docker Socket failed: {}
+            .map_err(|e| anyhow!("Connection to Docker Socket failed: {e}
 If using podman remember to install 'podman-docker' to mimic the docker socket
 or if you run podman rootless to start the user service with 'systemctl --user start podman.socket'
-and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock' env variable is set to the correct docker socket!", e))?;
+and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock' env variable is set to the correct docker socket!"))?;
         Ok(docker)
     }
 
@@ -84,7 +84,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             }
         }
 
-        let image_id = image_id.ok_or(anyhow!("No Image Id found after pulling: {}", image))?;
+        let image_id = image_id.ok_or(anyhow!("No Image Id found after pulling: {image}"))?;
         debug!(
             "Build #{}: Image pulled with id: {}",
             self.build_model.id.get()?,
@@ -135,7 +135,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
     ) -> anyhow::Result<ContainerCreateResponse> {
         let name = self.package_model.name.get()?;
 
-        let build_flags = self.package_model.build_flags.get()?.split(";").join(" ");
+        let build_flags = self.package_model.build_flags.get()?.split(';').join(" ");
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
         let host_build_path_docker = match get_build_mode() {
@@ -155,7 +155,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
                     Mount {
                         target: Some(archlinux_mirrorlist_path.to_string()),
-                        source: Some(mirrorlist_path.to_string()),
+                        source: Some(mirrorlist_path.clone()),
                         typ: Some(MountTypeEnum::BIND),
                         read_only: Some(false),
                         ..Default::default()
@@ -163,17 +163,17 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 }
                 BuildMode::Host(cfg) => {
                     let mirrorlist_path = cfg.mirrorlist_path_host;
-                    if mirrorlist_path.starts_with("/") {
+                    if mirrorlist_path.starts_with('/') {
                         Mount {
                             target: Some(archlinux_mirrorlist_path.to_string()),
-                            source: Some(mirrorlist_path.to_string()),
+                            source: Some(mirrorlist_path.clone()),
                             typ: Some(MountTypeEnum::BIND),
                             read_only: Some(false),
                             ..Default::default()
                         }
                     } else {
                         let (volume_name, subpath) = mirrorlist_path
-                            .split_once("/")
+                            .split_once('/')
                             .ok_or(anyhow!("Mirrorlist path not containing '/': Invalid"))?;
 
                         Mount {
@@ -379,12 +379,12 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                     LogOutput::StdOut { message } => {
                         build_logger
                             .append(String::from_utf8_lossy(&message).into_owned())
-                            .await
+                            .await;
                     }
                     LogOutput::StdErr { message } => {
                         build_logger
                             .append(String::from_utf8_lossy(&message).into_owned())
-                            .await
+                            .await;
                     }
                 },
                 Err(e) => build_logger.append(e.to_string()).await,

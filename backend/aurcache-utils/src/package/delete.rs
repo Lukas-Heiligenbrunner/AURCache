@@ -37,7 +37,11 @@ pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
     for (pf, file) in package_files {
         pf.delete(&txn).await?;
 
-        try_remove_archive_file(file.unwrap(), &txn).await?;
+        try_remove_archive_file(
+            file.ok_or(anyhow!("package id has no attached file"))?,
+            &txn,
+        )
+        .await?;
     }
 
     txn.commit().await?;

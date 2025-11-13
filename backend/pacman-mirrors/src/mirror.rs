@@ -44,7 +44,7 @@ pub struct Mirror {
     /// The average duration. Unknown what this means.
     pub duration_avg: Option<f64>,
 
-    /// Duration StdDev. Unknown what this means.
+    /// Duration `StdDev`. Unknown what this means.
     pub duration_stddev: Option<f64>,
 
     /// The score of the mirror. This is currently calculated as `(hours delay + average duration + standard deviation) / completion percentage`.

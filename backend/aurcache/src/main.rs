@@ -8,8 +8,8 @@ use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
 use dotenvy::dotenv;
-use log::warn;
 use tokio::sync::broadcast;
+use tracing::warn;
 
 mod logger;
 mod startup;
@@ -29,10 +29,10 @@ async fn main() {
     let version_check_handle = start_update_version_checking(db.clone());
     if let Err(e) = start_auto_update_job(db.clone(), tx.clone()) {
         warn!("auto_update job not properly configured: {e}");
-    };
+    }
     if let Err(e) = start_mirror_rank_job(db.clone(), tx.clone()) {
         warn!("mirror_rank job not properly configured: {e}");
-    };
+    }
     let api_handle = init_api(db, tx);
     let repo_handle = init_repo();
 

@@ -6,7 +6,6 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use log::{error, info, warn};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
 };
@@ -16,7 +15,9 @@ use std::str::FromStr;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::{task::JoinHandle, time};
+use tracing::{error, info, warn};
 
+#[must_use]
 pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     let default_version_check_interval = 3600;
     let check_interval = env::var("VERSION_CHECK_INTERVAL")
@@ -30,9 +31,9 @@ pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
             interval.tick().await;
             info!("performing aur version checks");
             match check_versions(db.clone()).await {
-                Ok(_) => {}
+                Ok(()) => {}
                 Err(e) => {
-                    error!("Failed to perform aur version check: {e}")
+                    error!("Failed to perform aur version check: {e}");
                 }
             }
         }
@@ -47,7 +48,9 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
         .map(|x| x.name.as_str())
         .collect();
 
-    let results = if !aur_names.is_empty() {
+    let results = if aur_names.is_empty() {
+        vec![]
+    } else {
         let request = Request::default();
         let response = request
             .search_multi_info_by_names(aur_names.as_slice())
@@ -57,8 +60,6 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
             .map_err(|_| anyhow!("couldn't download version update"))?
             .results;
         results
-    } else {
-        vec![]
     };
 
     if results.len() != aur_names.len() {
@@ -87,16 +88,12 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
         match source_data {
             SourceData::Aur { .. } => match results.iter().find(|x1| x1.name == package.name) {
                 None => {
-                    warn!("Couldn't find {} in AUR response", package.name)
+                    warn!("Couldn't find {} in AUR response", package.name);
                 }
                 Some(result) => {
                     package_model.upstream_version = Set(Option::from(result.version.clone()));
                     package_model.out_of_date =
-                        Set(if latest_version == Some(result.version.clone()) {
-                            0
-                        } else {
-                            1
-                        });
+                        Set(i32::from(latest_version != Some(result.version.clone())));
                 }
             },
             SourceData::Git {
@@ -107,7 +104,7 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                 let dir = tempdir()?;
                 let repo_path = dir.path().join("repo");
 
-                checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
+                checkout_repo_ref(url.clone(), r#ref.clone(), repo_path.clone())?;
                 // todo maybe check also if latest commit hash changed
 
                 let sourceinfo = SourceInfoV1::from_pkgbuild(
@@ -116,11 +113,7 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                 let version = sourceinfo.base.version.to_string();
 
                 package_model.upstream_version = Set(Option::from(version.clone()));
-                package_model.out_of_date = Set(if latest_version == Some(version) {
-                    0
-                } else {
-                    1
-                });
+                package_model.out_of_date = Set(i32::from(latest_version != Some(version)));
 
                 _ = dir.close();
             }

@@ -12,23 +12,6 @@ class BuildsTable extends StatelessWidget {
 
   final List<Build> data;
 
-  static Widget loading() {
-    final demoBuild = Build(
-      id: 42,
-      pkg_id: 0,
-      pkg_name: "MyPackage",
-      platform: "x86_64",
-      version: "1.0.1",
-      start_time: DateTime.now(),
-      end_time: DateTime.now(),
-      status: 0,
-    );
-
-    return Skeletonizer(
-      child: BuildsTable(data: List.generate(20, (_) => demoBuild)),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return DataTable(

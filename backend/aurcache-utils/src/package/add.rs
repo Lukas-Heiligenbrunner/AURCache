@@ -38,7 +38,7 @@ pub async fn package_add(
 
     let platforms_str = platforms
         .iter()
-        .map(|platform| platform.as_str())
+        .map(pacman_mirrors::platforms::Platform::as_str)
         .collect::<Vec<_>>()
         .join(";");
 
@@ -90,7 +90,7 @@ pub async fn package_add(
             let repo_path = dir.path().join("repo");
 
             // checkout repo to temp dir
-            checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
+            checkout_repo_ref(url.clone(), r#ref.clone(), repo_path.clone())?;
 
             // get package version from pkgbuild in subfolder
             let sourceinfo =
@@ -176,7 +176,7 @@ pub async fn package_add(
 fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {
     for platform in platforms {
         if !Platforms.into_iter().any(|p| p == *platform) {
-            bail!("Invalid platform: {}", platform);
+            bail!("Invalid platform: {platform}");
         }
     }
     Ok(())

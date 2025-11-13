@@ -2,13 +2,13 @@ use aurcache_builder::types::Action;
 use aurcache_utils::package::update::package_update_all_outdated;
 use chrono::Utc;
 use cron::Schedule;
-use log::{info, warn};
 use sea_orm::DatabaseConnection;
 use std::env;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+use tracing::{info, warn};
 
 pub fn start_auto_update_job(
     db: DatabaseConnection,

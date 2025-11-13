@@ -1,11 +1,11 @@
 use anyhow::{anyhow, bail};
 use flate2::Compression;
 use flate2::read::GzEncoder;
-use log::info;
 use std::fs;
 use std::fs::File;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
     if repo_exists(path, name).is_ok() {
@@ -32,7 +32,7 @@ fn repo_exists(path: &Path, name: &str) -> anyhow::Result<()> {
         let files = get_archive_names(name, suffix);
         for file in [files.0, files.1] {
             if fs::metadata(path.join(&file)).is_err() {
-                bail!("{} doesn't exist", file);
+                bail!("{file} doesn't exist");
             }
         }
     }

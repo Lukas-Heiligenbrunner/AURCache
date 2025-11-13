@@ -31,7 +31,7 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
             widget.title,
             style: TextStyle(
               fontSize: 16,
-              color: Colors.white.withOpacity(0.8),
+              color: Colors.white.withValues(alpha: 0.8),
             ),
           ),
           if (context.desktop) SizedBox(height: 8),
@@ -52,7 +52,6 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
                       ),
                     ),
                   ),
-                  if (context.desktop) SizedBox(height: 8),
                   _buildTrend(),
                 ],
               ),
@@ -66,7 +65,10 @@ class _QuickInfoTileState extends State<QuickInfoTile> {
 
   Widget _buildTrend() {
     if (widget.trendPercent == null) {
-      return Row();
+      return Responsive(
+        desktopChild: SizedBox(height: 8),
+        mobileChild: Container(),
+      );
     }
 
     if (widget.trendPercent! > .0) {

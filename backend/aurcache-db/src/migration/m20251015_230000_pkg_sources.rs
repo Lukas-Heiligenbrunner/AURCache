@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table packages
     add source_type TEXT default 'aur' not null;
 
@@ -26,13 +26,13 @@ ALTER TABLE packages
 -- Populate the new source_data column
 UPDATE packages
 SET source_data = json_object('type', 'aur', 'name', name);
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 alter table packages
     add source_type TEXT default 'aur' not null;
 
@@ -45,7 +45,7 @@ ALTER TABLE packages
 -- Populate the new source_data column
 UPDATE packages
 SET source_data = json_build_object('type', 'aur', 'name', name);
-"#,
+",
                 )
                 .await?;
             }
@@ -61,7 +61,7 @@ SET source_data = json_build_object('type', 'aur', 'name', name);
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
     RENAME COLUMN upstream_version TO latest_aur_version;
 
@@ -70,13 +70,13 @@ DROP COLUMN source_type;
 
 ALTER TABLE packages
 DROP COLUMN source_data;
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 ALTER TABLE packages
     RENAME COLUMN upstream_version TO latest_aur_version;
 
@@ -85,7 +85,7 @@ DROP COLUMN source_type;
 
 ALTER TABLE packages
 DROP COLUMN source_data;
-"#,
+",
                 )
                 .await?;
             }

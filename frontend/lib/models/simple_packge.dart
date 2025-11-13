@@ -23,5 +23,14 @@ class SimplePackage {
       _$SimplePackageFromJson(json);
   Map<String, dynamic> toJson() => _$SimplePackageToJson(this);
 
+  factory SimplePackage.dummy() => SimplePackage(
+    id: 42,
+    name: 'MyPackage',
+    status: 0,
+    latest_version: '1.0.0',
+    upstream_version: '1.0.0',
+    outofdate: false,
+  );
+
   static bool _fromJson(num value) => value != 0;
 }

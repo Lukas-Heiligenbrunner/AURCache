@@ -2,7 +2,6 @@ use aurcache_builder::build_mode::{BuildMode, get_build_mode};
 use aurcache_builder::types::Action;
 use chrono::Utc;
 use cron::Schedule;
-use log::{info, warn};
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::Platform;
 use sea_orm::DatabaseConnection;
@@ -12,6 +11,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+use tracing::{info, warn};
 
 pub fn start_mirror_rank_job(
     _db: DatabaseConnection,
@@ -42,7 +42,7 @@ pub fn start_mirror_rank_job(
 
                 // Execute your scheduled code
                 match update_mirrorlist().await {
-                    Ok(_) => {
+                    Ok(()) => {
                         info!("Mirror ranking finished");
                     }
                     Err(e) => {
@@ -78,6 +78,6 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
         Err(e) => {
             warn!("Failed to get mirror list: {e}");
         }
-    };
+    }
     Ok(())
 }

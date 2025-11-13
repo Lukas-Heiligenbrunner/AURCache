@@ -3,7 +3,6 @@ import 'package:aurcache/components/table_info.dart';
 import 'package:aurcache/providers/activity_log.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
-import 'package:skeletonizer/skeletonizer.dart';
 
 class ActivityLog extends StatefulWidget {
   const ActivityLog({super.key});
@@ -17,33 +16,8 @@ class _ActivityLogState extends State<ActivityLog> {
   Widget build(BuildContext context) {
     return APIBuilder(
       interval: Duration(minutes: 1),
-      onLoad: () => Skeletonizer(
-        enabled: true,
-        child: Column(
-          children: [
-            ActivityLogItem(
-              text: "added Package \"Power\"",
-              timestamp: DateTime.timestamp(),
-              user: "Lukas Heiligenbrunner",
-            ),
-            ActivityLogItem(
-              text: "added Package \"Naps\"",
-              timestamp: DateTime.timestamp(),
-              user: "Evin Arslan",
-            ),
-            ActivityLogItem(
-              text: "added Package \"Not\"",
-              timestamp: DateTime.timestamp(),
-              user: "Sophie Francz",
-            ),
-            ActivityLogItem(
-              text: "added Package \"Powerapps\"",
-              timestamp: DateTime.timestamp(),
-              user: "Lukas Kessler",
-            ),
-          ],
-        ),
-      ),
+      onLoad: () =>
+          Column(children: List.generate(5, (_) => ActivityLogItem.dummy())),
       onData: (v) => v.isEmpty
           ? TableInfo(title: "No Activity items available yet")
           : Column(
@@ -69,6 +43,12 @@ class ActivityLogItem extends StatelessWidget {
     required this.text,
     required this.timestamp,
   });
+
+  factory ActivityLogItem.dummy() => ActivityLogItem(
+    text: "added Package \"Power\"",
+    timestamp: DateTime.timestamp(),
+    user: "Max Mustermann",
+  );
 
   final String? user;
   final String text;

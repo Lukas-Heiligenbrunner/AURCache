@@ -33,7 +33,7 @@ impl FromStr for Protocol {
             "https" => Ok(Self::Https),
             "rsync" => Ok(Self::Rsync),
             "ftp" => Ok(Self::Ftp),
-            other => Err(anyhow!("Invalid Protocol: {}", other)),
+            other => Err(anyhow!("Invalid Protocol: {other}")),
         }
     }
 }

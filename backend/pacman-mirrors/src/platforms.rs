@@ -10,6 +10,7 @@ pub enum Platform {
 
 impl Platform {
     /// Returns the string representation of the platform.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Platform::X86_64 => "x86_64",

@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
         match database_type() {
             DbBackend::Sqlite => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 create table builds
 (
 	id integer not null
@@ -57,13 +57,13 @@ create table packages_files
 		constraint packages_files_pk
 			primary key autoincrement
 );
-"#,
+",
                 )
                 .await?;
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
-                    r#"
+                    r"
 CREATE SCHEMA IF NOT EXISTS public;
 
 CREATE TABLE public.builds (
@@ -96,7 +96,7 @@ CREATE TABLE public.packages_files
     package_id INTEGER NOT NULL,
     id SERIAL PRIMARY KEY
 );
-"#,
+",
                 )
                 .await?;
             }

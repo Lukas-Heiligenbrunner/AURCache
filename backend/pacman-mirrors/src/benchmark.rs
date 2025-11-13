@@ -2,9 +2,9 @@ use crate::Mirror;
 use crate::mirror::Mirrors;
 use anyhow::anyhow;
 use chrono::Utc;
-use log::info;
 use reqwest::Client;
 use std::time::{Duration, Instant};
+use tracing::info;
 use url::Url;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -15,7 +15,7 @@ pub enum TargetDb {
 
 trait Benchmark {
     /// Measure time (in seconds) it took to connect (from user's geography)
-    /// and retrive the '[core,extra]/os/x86_64/[core,extra].db' file from the given URL.
+    /// and retrive the '[core,extra]/`os/x86_64`/[core,extra].db' file from the given URL.
     async fn measure_duration(&mut self, target_db: TargetDb) -> anyhow::Result<f64>;
 }
 
@@ -29,7 +29,7 @@ pub trait Bench {
 impl Bench for Mirrors {
     async fn rank(&mut self) -> anyhow::Result<Vec<Mirror>> {
         let mut durations = Vec::new();
-        for mirror in self.0.iter_mut() {
+        for mirror in &mut self.0 {
             // Skip mirrors that are not active
             if !mirror.active {
                 continue;
@@ -66,12 +66,12 @@ impl Bench for Mirrors {
 
     fn gen_mirrorlist(&self, mirrors: Vec<Mirror>) -> anyhow::Result<String> {
         let mut body = format!(
-            r#"##
+            r"##
 ## Arch Linux repository mirrorlist
 ## Created by aurcache
 ## Generated on {}
 ##
-"#,
+",
             Utc::now().date_naive()
         );
 

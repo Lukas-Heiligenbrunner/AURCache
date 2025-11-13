@@ -35,28 +35,30 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
     return Scaffold(
       body: APIBuilder(
         interval: const Duration(seconds: 10),
-        onLoad: () => const Text("loading"),
-        onData: (Build buildData) {
-          return Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  children: [
-                    _buildTopBar(buildData, context),
-                    const SizedBox(height: 15),
-                    _buildPage(buildData),
-                  ],
-                ),
-              ),
-              _buildSideBar(buildData),
-            ],
-          );
-        },
+        onLoad: () => _build(Build.dummy()),
+        onData: (Build buildData) => _build(buildData),
         provider: getBuildProvider(widget.buildID),
       ),
+    );
+  }
+
+  Widget _build(Build buildData) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.start,
+            children: [
+              _buildTopBar(buildData, context),
+              const SizedBox(height: 15),
+              _buildPage(buildData),
+            ],
+          ),
+        ),
+        _buildSideBar(buildData),
+      ],
     );
   }
 
@@ -238,7 +240,9 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
           onPressed: () async {
             try {
               final buildid = await API.retryBuild(id: build.id);
-              context.pushReplacement("/build/$buildid");
+              if (context.mounted) {
+                context.pushReplacement("/build/$buildid");
+              }
             } on DioException catch (e) {
               print(e);
               toastification.show(

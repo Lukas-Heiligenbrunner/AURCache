@@ -1,11 +1,11 @@
 use crate::build::Builder;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::{builds, packages};
-use log::error;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
+use tracing::error;
 
 /// Queue a package for building
 pub(crate) async fn queue_package(

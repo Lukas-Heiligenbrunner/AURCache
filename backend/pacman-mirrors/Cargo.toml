@@ -7,7 +7,7 @@ chrono = {workspace = true, features = ["serde"] }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 anyhow = {workspace = true}
-log = {workspace = true}
+tracing = {workspace = true}
 backon = {workspace = true}
 
 url = { version = "2.5.7", features = ["serde"] }

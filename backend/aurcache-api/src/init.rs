@@ -8,7 +8,6 @@ use crate::models::authenticated::OauthEnabled;
 use crate::utils::config::oauth_config_from_env;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_builder::types::Action;
-use log::{error, info, warn};
 use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
 use rocket::http::private::cookie::Key;
@@ -18,21 +17,22 @@ use sea_orm::DatabaseConnection;
 use std::env;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 use utoipa::openapi::security::{AuthorizationCode, Flow, OAuth2, Scopes};
 use utoipa::{Modify, OpenApi, openapi::security::SecurityScheme};
 use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 
 fn get_secret_key() -> SecretKey {
-    match env::var("SECRET_KEY") {
-        Ok(secret_key) => SecretKey::from(secret_key.as_bytes()),
-        Err(_) => {
-            warn!("`SECRET_KEY` env not set, generating random key.");
-            SecretKey::from(Key::try_generate().unwrap().master())
-        }
+    if let Ok(secret_key) = env::var("SECRET_KEY") {
+        SecretKey::from(secret_key.as_bytes())
+    } else {
+        warn!("`SECRET_KEY` env not set, generating random key.");
+        SecretKey::from(Key::try_generate().unwrap().master())
     }
 }
 
+#[must_use]
 pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
@@ -82,7 +82,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                                 Scopes::new(),
                             ),
                         )])),
-                    )
+                    );
                 }
             }
         }
@@ -115,10 +115,11 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
         match rock {
             Ok(_) => info!("Rocket shut down gracefully."),
             Err(err) => error!("Rocket had an error: {err}"),
-        };
+        }
     })
 }
 
+#[must_use]
 pub fn init_repo() -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
@@ -135,6 +136,6 @@ pub fn init_repo() -> JoinHandle<()> {
         match launch_result {
             Ok(_) => info!("Rocket shut down gracefully."),
             Err(err) => error!("Rocket had an error: {err}"),
-        };
+        }
     })
 }

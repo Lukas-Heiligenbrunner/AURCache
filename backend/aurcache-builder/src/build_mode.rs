@@ -1,7 +1,7 @@
-use log::info;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::{env, fs};
+use tracing::info;
 
 pub enum BuildMode {
     DinD(DinDBuildconfig),
@@ -21,65 +21,62 @@ pub struct DinDBuildconfig {
     pub aurcache_build_path: String,
 }
 
+#[must_use]
 pub fn get_build_mode() -> BuildMode {
     let current_dir = env::current_dir().expect("Failed to get current working directory");
 
-    match env::var("BUILD_ARTIFACT_DIR") {
-        Ok(v) => {
-            let mut build_artifact_dir_aurcache = current_dir;
-            build_artifact_dir_aurcache.push("../../builds");
+    if let Ok(v) = env::var("BUILD_ARTIFACT_DIR") {
+        let mut build_artifact_dir_aurcache = current_dir;
+        build_artifact_dir_aurcache.push("../../builds");
 
-            let build_artifact_dir_host = v.clone();
-            let mirrorlist_path_aurcache = format!(
-                "{}/config/pacman_x86_64",
-                build_artifact_dir_aurcache.display()
-            );
+        let build_artifact_dir_host = v.clone();
+        let mirrorlist_path_aurcache = format!(
+            "{}/config/pacman_x86_64",
+            build_artifact_dir_aurcache.display()
+        );
 
-            let mirrorlist_path_host = match env::var("MIRRORLIST_PATH_X86_64") {
-                Ok(v) => v,
-                Err(_) => format!("{v}/config/pacman_x86_64"),
-            };
+        let mirrorlist_path_host = match env::var("MIRRORLIST_PATH_X86_64") {
+            Ok(v) => v,
+            Err(_) => format!("{v}/config/pacman_x86_64"),
+        };
+
+        // create config dir if not existing
+        create_config_dir(format!(
+            "{}/config/pacman_x86_64",
+            build_artifact_dir_aurcache.display()
+        ));
+
+        let cfg = HostBuildconfig {
+            mirrorlist_path_host,
+            mirrorlist_path_aurcache,
+            build_artifact_dir_host,
+        };
+        BuildMode::Host(cfg)
+    } else {
+        let mirrorlist_path = if let Ok(v) = env::var("MIRRORLIST_PATH_X86_64") {
+            v
+        } else {
+            // default mirrorlist dir is "./config/mirrorlist_x86_64"
+            let mut config_dir = current_dir.clone();
+            config_dir.push("config");
+            config_dir.push("pacman_x86_64");
 
             // create config dir if not existing
-            create_config_dir(format!(
-                "{}/config/pacman_x86_64",
-                build_artifact_dir_aurcache.display()
-            ));
+            create_config_dir(config_dir.display().to_string());
 
-            let cfg = HostBuildconfig {
-                mirrorlist_path_host,
-                mirrorlist_path_aurcache,
-                build_artifact_dir_host,
-            };
-            BuildMode::Host(cfg)
-        }
-        Err(_) => {
-            let mirrorlist_path = match env::var("MIRRORLIST_PATH_X86_64") {
-                Ok(v) => v,
-                Err(_) => {
-                    // default mirrorlist dir is "./config/mirrorlist_x86_64"
-                    let mut config_dir = current_dir.clone();
-                    config_dir.push("config");
-                    config_dir.push("pacman_x86_64");
+            format!("{}", config_dir.display())
+        };
 
-                    // create config dir if not existing
-                    create_config_dir(config_dir.display().to_string());
+        // in dind mode packages are stored to ./builds/ by default
+        let mut aurcache_build_path = current_dir;
+        aurcache_build_path.push("../../builds");
+        create_config_dir(aurcache_build_path.display().to_string());
 
-                    format!("{}", config_dir.display())
-                }
-            };
-
-            // in dind mode packages are stored to ./builds/ by default
-            let mut aurcache_build_path = current_dir;
-            aurcache_build_path.push("../../builds");
-            create_config_dir(aurcache_build_path.display().to_string());
-
-            let cfg = DinDBuildconfig {
-                mirrorlist_path,
-                aurcache_build_path: aurcache_build_path.display().to_string(),
-            };
-            BuildMode::DinD(cfg)
-        }
+        let cfg = DinDBuildconfig {
+            mirrorlist_path,
+            aurcache_build_path: aurcache_build_path.display().to_string(),
+        };
+        BuildMode::DinD(cfg)
     }
 }
 
