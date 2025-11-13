@@ -1,4 +1,3 @@
-use log::{error, info};
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -6,13 +5,13 @@ use aurcache_builder::build_mode::{BuildMode, get_build_mode};
 use aurcache_builder::types::BuildStates;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use log::warn;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
 use pacman_repo_utils::init_repo;
 use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
+use tracing::{error, info, warn};
 #[cfg(not(debug_assertions))]
 use {
     log::debug,

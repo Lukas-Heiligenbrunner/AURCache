@@ -7,7 +7,6 @@ use aurcache_db::activities::ActivityType;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use log::info;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,
@@ -15,6 +14,7 @@ use sea_orm::{
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
+use tracing::info;
 
 /// Updates all outdated packages in the database.
 ///

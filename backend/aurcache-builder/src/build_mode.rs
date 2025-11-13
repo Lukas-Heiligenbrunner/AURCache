@@ -1,7 +1,7 @@
-use log::info;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::{env, fs};
+use tracing::info;
 
 pub enum BuildMode {
     DinD(DinDBuildconfig),

@@ -1,12 +1,12 @@
 use anyhow::anyhow;
 use aurcache_db::builds;
 use aurcache_db::prelude::Builds;
-use log::{debug, error};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 use tokio::time;
+use tracing::{debug, error};
 
 #[derive(Debug, Clone)]
 pub struct BuildLogger {

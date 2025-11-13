@@ -21,13 +21,13 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures::{StreamExt, TryFutureExt};
 use itertools::Itertools;
-use log::{debug, info, trace};
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use tempfile::tempdir;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use tracing::{debug, info, trace};
 
 /// git repo path inside builder container in git build mode
 static GIT_REPO_PATH: &str = "/tmp";

@@ -6,7 +6,7 @@ edition = "2024"
 anyhow = {workspace = true}
 sea-orm = {workspace = true}
 tokio = {workspace = true}
-log = {workspace = true}
+tracing = {workspace = true}
 aur-rs = {workspace = true}
 backon = {workspace = true}
 tempfile = {workspace = true}

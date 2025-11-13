@@ -2,9 +2,9 @@ use crate::Mirror;
 use crate::mirror::Mirrors;
 use anyhow::anyhow;
 use chrono::Utc;
-use log::info;
 use reqwest::Client;
 use std::time::{Duration, Instant};
+use tracing::info;
 use url::Url;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]

@@ -1,11 +1,11 @@
 use anyhow::{anyhow, bail};
 use flate2::Compression;
 use flate2::read::GzEncoder;
-use log::info;
 use std::fs;
 use std::fs::File;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
     if repo_exists(path, name).is_ok() {

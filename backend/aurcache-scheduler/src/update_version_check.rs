@@ -6,7 +6,6 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use log::{error, info, warn};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
 };
@@ -16,6 +15,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::{task::JoinHandle, time};
+use tracing::{error, info, warn};
 
 pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     let default_version_check_interval = 3600;

@@ -1,10 +1,10 @@
 use aurcache_db::prelude::PackagesFiles;
 use aurcache_db::{files, packages_files};
-use log::{info, warn};
 use sea_orm::ColumnTrait;
 use sea_orm::QueryFilter;
 use sea_orm::{DatabaseTransaction, EntityTrait, ModelTrait};
 use std::fs;
+use tracing::{info, warn};
 
 pub async fn try_remove_archive_file(
     file: files::Model,
