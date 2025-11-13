@@ -21,7 +21,7 @@ chrono = "0.4.42"
 serde = "1.0.228"
 backon = "1.6.0"
 serde_json = "1.0.145"
-sea-orm = { version = "1.1.17", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
+sea-orm = { version = "1.1.19", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.14.0"
 aur-rs = "0.1.1"
 flate2 = "1.1.5"

@@ -10,6 +10,6 @@ serde_json = {workspace = true}
 sea-orm = {workspace = true}
 
 
-sea-orm-migration = {version = "1.1.17", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
+sea-orm-migration = {version = "1.1.19", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 # todo utoipa should be removed to couple db from api fully
 utoipa = { version = "5.4.0"}

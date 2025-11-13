@@ -17,7 +17,7 @@ aurcache-api = { path = "../aurcache-api" }
 aurcache-scheduler = {path = "../aurcache-scheduler"}
 
 dotenvy = "0.15.7"
-tracing-subscriber = "0.3.19"
+tracing-subscriber = "0.3.20"
 
 [target.aarch64-unknown-linux-gnu.dependencies]
 openssl = { version = "*", features = ["vendored"] }
