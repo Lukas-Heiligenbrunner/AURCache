@@ -355,15 +355,11 @@ pub async fn get_package(
         outofdate: pkg.out_of_date,
         latest_version,
         package_source,
-        selected_platforms: pkg
-            .platforms
-            .split(';')
-            .map(std::string::ToString::to_string)
-            .collect(),
+        selected_platforms: pkg.platforms.split(';').map(ToString::to_string).collect(),
         selected_build_flags: Some(
             pkg.build_flags
                 .split(';')
-                .map(std::string::ToString::to_string)
+                .map(ToString::to_string)
                 .collect(),
         ),
         upstream_version: version,
