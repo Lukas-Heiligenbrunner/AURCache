@@ -27,7 +27,7 @@ aur-rs = "0.1.1"
 flate2 = "1.1.5"
 tar = "0.4.44"
 tempfile = "3.23.0"
-alpm-srcinfo = "0.5.0"
+alpm-srcinfo = "0.6.0"
 
 [profile.release]
 strip = "debuginfo"  # Automatically strip symbols from the binary.
