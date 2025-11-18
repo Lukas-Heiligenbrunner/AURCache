@@ -31,7 +31,7 @@ class _ActivityLogState extends State<ActivityLog> {
                   )
                   .toList(growable: false),
             ),
-      provider: listActivitiesProvider(),
+      provider: listActivitiesProvider(limit: 10),
     );
   }
 }

@@ -59,7 +59,7 @@ impl ActivityLog {
         // List activities from database
         let activities = Activities::find()
             .order_by(activities::Column::Timestamp, Order::Desc)
-            .limit(limit.unwrap_or(10))
+            .limit(limit)
             .into_model::<activities::Model>()
             .all(&self.db)
             .await
