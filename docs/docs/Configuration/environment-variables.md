@@ -27,3 +27,9 @@ AURCache can be configured using the following environment variables:
 | MEMORY_LIMIT           | Integer       | Memory limit of build container in MB                                 | -1      |
 | JOB_TIMEOUT            | Integer       | Job timeout for build in Seconds                                      | 3600    |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
+
+## Advanced Settings
+
+| Variable      | Type   | Description                                               | Default                                               |
+|---------------|--------|-----------------------------------------------------------|-------------------------------------------------------|
+| BUILDER_IMAGE | String | Docker image of Builder which spawns with every build job | ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest |

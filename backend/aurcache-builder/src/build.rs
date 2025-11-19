@@ -17,15 +17,15 @@ use sea_orm::{
     ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
-static BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
+static BUILDER_IMAGE_DEFAULT: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
@@ -69,11 +69,19 @@ impl Builder {
         debug!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
+        let builder_image = match env::var("BUILDER_IMAGE") {
+            Ok(v) => {
+                info!("Using non-default Builder image: {v}");
+                v
+            }
+            Err(_) => BUILDER_IMAGE_DEFAULT.to_string(),
+        };
+
         debug!(
             "Build #{}: Repull builder image",
             self.build_model.id.get()?
         );
-        self.repull_image(BUILDER_IMAGE, target_platform.clone())
+        self.repull_image(builder_image.as_str(), target_platform.clone())
             .await?;
 
         debug!(
@@ -85,7 +93,7 @@ impl Builder {
         let host_active_build_path = create_active_build_path(pkgname.clone())?;
 
         let create_info = self
-            .create_build_container(target_platform, BUILDER_IMAGE)
+            .create_build_container(target_platform, builder_image.as_str())
             .await?;
         let id = create_info.id;
         debug!(
