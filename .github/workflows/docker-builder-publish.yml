@@ -13,7 +13,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - id: repo_name_lc
         uses: ASzc/change-string-case-action@v6
         with:
