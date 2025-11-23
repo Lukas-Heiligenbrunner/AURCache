@@ -238,22 +238,30 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
         const SizedBox(width: 10),
         ElevatedButton(
           onPressed: () async {
-            try {
-              final buildid = await API.retryBuild(id: build.id);
-              if (context.mounted) {
-                context.pushReplacement("/build/$buildid");
-              }
-            } on DioException catch (e) {
-              print(e);
-              toastification.show(
-                title: Text('Failed to retry build!'),
-                autoCloseDuration: const Duration(seconds: 5),
-                type: ToastificationType.error,
-              );
-            }
+            await showConfirmationDialog(
+              context,
+              "Rebuild Package",
+              "Are you sure to rebuild this package?\nAlways the newest available version is built.",
+              () async {
+                try {
+                  final buildid = await API.retryBuild(id: build.id);
+                  if (context.mounted) {
+                    context.pushReplacement("/build/$buildid");
+                  }
+                } on DioException catch (e) {
+                  print(e);
+                  toastification.show(
+                    title: Text('Failed to start build!'),
+                    autoCloseDuration: const Duration(seconds: 5),
+                    type: ToastificationType.error,
+                  );
+                }
+              },
+              () {},
+            );
           },
           child: const Text(
-            "Retry",
+            "Rebuild",
             style: TextStyle(color: Colors.orangeAccent),
           ),
         ),
