@@ -106,8 +106,8 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
           onPressed: () async {
             await showConfirmationDialog(
               context,
-              "Force update Package",
-              "Are you sure to force an Package rebuild?",
+              "Force Rebuild Package",
+              "Are you sure to force an Package rebuild?\nIf the Package is outdated, the newest version is built.",
               () async {
                 await API.updatePackage(force: true, id: pkg.id);
                 // invalidate all dashboard providers
@@ -121,7 +121,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
             );
           },
           child: const Text(
-            "Force Update",
+            "Force Rebuild",
             style: TextStyle(color: Colors.yellowAccent),
           ),
         ),
