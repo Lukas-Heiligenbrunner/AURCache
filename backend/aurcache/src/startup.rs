@@ -7,7 +7,6 @@ use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
-use pacman_repo_utils::init_repo;
 use sea_orm::QueryFilter;
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait};
@@ -49,7 +48,10 @@ pub async fn pre_startup_tasks() {
     }
 
     for platform in Platforms {
-        if let Err(e) = init_repo(&PathBuf::from(format!("./repo/{platform}")), "repo") {
+        if let Err(e) = pacman_repo_utils::repo_init::init_repo(
+            &PathBuf::from(format!("./repo/{platform}")),
+            "repo",
+        ) {
             error!("Failed to initialize pacman repo: {e:?}");
         }
     }

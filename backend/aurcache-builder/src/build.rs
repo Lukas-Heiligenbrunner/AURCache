@@ -316,6 +316,7 @@ impl Builder {
                 self.build_model.platform.get()?,
                 archive_name
             );
+            // copy archive to repo, overwrite if file with same name exists
             fs::copy(archive.path(), pkg_path.clone())?;
             // remove old file from shared path
             fs::remove_file(archive.path())?;
@@ -343,7 +344,7 @@ impl Builder {
             };
             package_file.save(&txn).await?;
 
-            pacman_repo_utils::repo_add(
+            pacman_repo_utils::repo_add::repo_add(
                 pkg_path.as_str(),
                 format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
                 format!(

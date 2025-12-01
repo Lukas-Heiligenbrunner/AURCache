@@ -1,6 +1,6 @@
 use crate::repo_database::db::remove_from_db_file;
 
-pub fn repo_remove_impl(
+pub fn repo_remove(
     filename: String,
     db_archive: String,
     files_archive: String,

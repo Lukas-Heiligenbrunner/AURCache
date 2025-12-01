@@ -54,18 +54,26 @@ pub fn add_to_db_file(
     {
         let mut builder = if archive_exists {
             let mut existing_archive_data = Vec::new();
-            {
-                let mut file = File::open(db_archive.clone())?;
-                file.read_to_end(&mut existing_archive_data)?;
-            }
+
             // Decode the existing archive
+            File::open(&db_archive)?.read_to_end(&mut existing_archive_data)?;
             let mut archive = Archive::new(GzDecoder::new(Cursor::new(existing_archive_data)));
 
             let enc = GzEncoder::new(&mut new_archive_data, Compression::default());
             let mut tar_builder = Builder::new(enc);
 
-            // Copy existing entries to the new archive
+            let target_dir = dir_name.clone();
+            let target_file = format!("{}/{}", dir_name, file_name);
+
+            // Copy all entries *except* the ones we will replace
             for mut entry in archive.entries()?.flatten() {
+                let path = entry.path()?.to_string_lossy().to_string();
+
+                // Skip the directory and file that will be replaced
+                if path == target_dir || path == target_file {
+                    continue;
+                }
+
                 tar_builder.append(&entry.header().clone(), &mut entry)?;
             }
             tar_builder
@@ -76,18 +84,18 @@ pub fn add_to_db_file(
             Builder::new(encoder)
         };
 
-        // Add a folder
+        // Add folder (replacing old one)
         let mut header = Header::new_gnu();
-        header.set_path(dir_name.clone())?;
+        header.set_path(&dir_name)?;
         header.set_entry_type(tar::EntryType::Directory);
         header.set_mode(0o755);
         header.set_size(0);
         header.set_cksum();
         builder.append(&header, io::empty())?;
 
-        // Add a file
+        // Add file (replacing old one)
         let mut header = Header::new_gnu();
-        header.set_path(format!("{dir_name}/{file_name}"))?;
+        header.set_path(format!("{}/{}", dir_name, file_name))?;
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
@@ -95,8 +103,7 @@ pub fn add_to_db_file(
 
         builder.finish()?;
     }
-    let mut new_file = File::create(db_archive)?;
-    new_file.write_all(&new_archive_data)?;
 
+    File::create(&db_archive)?.write_all(&new_archive_data)?;
     Ok(())
 }
