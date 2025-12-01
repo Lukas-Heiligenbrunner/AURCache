@@ -7,7 +7,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub fn init_repo_impl(path: &PathBuf, name: &str) -> anyhow::Result<()> {
+pub fn init_repo(path: &PathBuf, name: &str) -> anyhow::Result<()> {
     if repo_exists(path, name).is_ok() {
         info!(
             "Pacman repo '{}' archive already exists at path '{}'",

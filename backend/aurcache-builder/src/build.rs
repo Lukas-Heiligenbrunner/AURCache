@@ -344,7 +344,7 @@ impl Builder {
             };
             package_file.save(&txn).await?;
 
-            pacman_repo_utils::repo_add(
+            pacman_repo_utils::repo_add::repo_add(
                 pkg_path.as_str(),
                 format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
                 format!(

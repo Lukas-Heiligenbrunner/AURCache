@@ -17,7 +17,7 @@ pub async fn try_remove_archive_file(
     if package_files.is_empty() {
         let platform = file.platform.clone();
 
-        pacman_repo_utils::repo_remove(
+        pacman_repo_utils::repo_remove::repo_remove(
             file.filename.clone(),
             format!("./repo/{platform}/repo.db.tar.gz"),
             format!("./repo/{platform}/repo.files.tar.gz"),

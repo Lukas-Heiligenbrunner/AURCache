@@ -12,11 +12,7 @@ use tracing::{debug, error, warn};
 use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
-pub fn repo_add_impl(
-    pkgfile: &str,
-    db_archive: String,
-    files_archive: String,
-) -> anyhow::Result<()> {
+pub fn repo_add(pkgfile: &str, db_archive: String, files_archive: String) -> anyhow::Result<()> {
     let mut files = vec![];
     let mut pkginfo = Pkginfo::new();
 
