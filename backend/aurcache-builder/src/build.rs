@@ -316,6 +316,7 @@ impl Builder {
                 self.build_model.platform.get()?,
                 archive_name
             );
+            // copy archive to repo, overwrite if file with same name exists
             fs::copy(archive.path(), pkg_path.clone())?;
             // remove old file from shared path
             fs::remove_file(archive.path())?;
