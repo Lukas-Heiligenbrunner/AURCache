@@ -1,13 +1,16 @@
 use rocket::fs::NamedFile;
 use rocket::http::uri::Segments;
-use rocket::http::{Header, Method, Status};
-use rocket::response::Responder;
+use rocket::http::{Header, Method, Status, ContentType};
+use rocket::response::{Responder};
 use rocket::route::{Handler, Outcome};
-use rocket::{Data, Request, Response, Route, async_trait, figment};
+use rocket::{Data, Request, Route, async_trait, figment, Response};
 use std::io::{Cursor, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use std::fmt::Write as FmtWrite;
+use tokio::fs;
+// For formatting the HTML string
 
 #[derive(Debug, Clone)]
 pub struct CustomFileServer {
@@ -63,47 +66,140 @@ impl Handler for CustomFileServer {
             None => return Outcome::forward(data, Status::NotFound),
         };
 
-        // open file
-        let named_file = match NamedFile::open(&file_path).await {
-            Ok(f) => f,
-            Err(_) => return Outcome::forward(data, Status::NotFound),
-        };
+        // Always prefer files/symlinks-to-files over directories
+        match fs::symlink_metadata(&file_path).await {
+            Ok(metadata) => {
+                let ftype = metadata.file_type();
 
-        let metadata = named_file.metadata().await.ok();
-        let file_size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
-        let last_modified = metadata.and_then(|m| m.modified().ok()).map(|mtime| {
-            let datetime: chrono::DateTime<chrono::Utc> = mtime.into();
-            datetime.to_rfc2822()
-        });
+                // If it's a symlink, resolve it and re-check metadata
+                let target_metadata = if ftype.is_symlink() {
+                    match fs::read_link(&file_path).await {
+                        Ok(target_path) => {
+                            let absolute_target = if target_path.is_absolute() {
+                                target_path
+                            } else {
+                                file_path.parent().unwrap_or(Path::new("")).join(target_path)
+                            };
+                            fs::metadata(&absolute_target).await.ok()
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    Some(metadata.clone())
+                };
 
-        let mut builder = match get_range_header_data(req, file_size, &file_path).await {
-            Some((partial_data, start, end)) => {
-                // Build a 206 Partial Content response.
-                let mut builder = Response::build();
-                builder
-                    .status(Status::PartialContent)
-                    .raw_header(
-                        "Content-Range",
-                        format!("bytes {}-{}/{}", start, end - 1, file_size),
-                    )
-                    .raw_header("Accept-Ranges", "bytes")
-                    .sized_body(partial_data.len(), Cursor::new(partial_data));
-                builder
+                if let Some(tmeta) = target_metadata {
+                    if tmeta.is_file() {
+                        // Serve the file, follow symlink if necessary
+                        let named_file = match NamedFile::open(&file_path).await {
+                            Ok(f) => f,
+                            Err(_) => return Outcome::forward(data, Status::NotFound),
+                        };
+
+                        let file_size = tmeta.len();
+                        let last_modified = tmeta.modified().ok().map(|mtime| {
+                            let datetime: chrono::DateTime<chrono::Utc> = mtime.into();
+                            datetime.to_rfc2822()
+                        });
+
+                        let mut builder = match get_range_header_data(req, file_size, &file_path).await {
+                            Some((partial_data, start, end)) => {
+                                let mut builder = Response::build();
+                                builder
+                                    .status(Status::PartialContent)
+                                    .raw_header(
+                                        "Content-Range",
+                                        format!("bytes {}-{}/{}", start, end - 1, file_size),
+                                    )
+                                    .raw_header("Accept-Ranges", "bytes")
+                                    .sized_body(partial_data.len(), Cursor::new(partial_data));
+                                builder
+                            }
+                            None => match named_file.respond_to(req) {
+                                Ok(resp) => Response::build_from(resp),
+                                Err(_) => return Outcome::error(Status::InternalServerError),
+                            },
+                        };
+
+                        if let Some(lm) = last_modified {
+                            builder.header(Header::new("Last-Modified", lm));
+                        }
+                        builder.header(Header::new("Accept-Ranges", "bytes"));
+
+                        Outcome::Success(builder.finalize())
+                    } else if tmeta.is_dir() {
+                        // Symlink points to directory
+                        match generate_directory_index(&file_path, req.uri().path().as_str()).await {
+                            Ok(html) => {
+                                let mut response = Response::build();
+                                response.header(ContentType::HTML);
+                                response.sized_body(html.len(), Cursor::new(html));
+                                Outcome::Success(response.finalize())
+                            }
+                            Err(_) => Outcome::error(Status::InternalServerError),
+                        }
+                    } else {
+                        Outcome::forward(data, Status::NotFound)
+                    }
+                } else if metadata.is_dir() {
+                    // Normal directory
+                    match generate_directory_index(&file_path, req.uri().path().as_str()).await {
+                        Ok(html) => {
+                            let mut response = Response::build();
+                            response.header(ContentType::HTML);
+                            response.sized_body(html.len(), Cursor::new(html));
+                            Outcome::Success(response.finalize())
+                        }
+                        Err(_) => Outcome::error(Status::InternalServerError),
+                    }
+                } else {
+                    Outcome::forward(data, Status::NotFound)
+                }
             }
-            None => match named_file.respond_to(req) {
-                Ok(resp) => Response::build_from(resp),
-                Err(_) => return Outcome::error(Status::InternalServerError),
-            },
-        };
-
-        // Add Headers
-        if let Some(lm) = last_modified {
-            builder.header(Header::new("Last-Modified", lm));
+            Err(_) => Outcome::forward(data, Status::NotFound),
         }
-        builder.header(Header::new("Accept-Ranges", "bytes"));
-
-        Outcome::Success(builder.finalize())
     }
+}
+
+/// Generates an HTML index page for the given directory.
+async fn generate_directory_index(dir_path: &Path, req_path: &str) -> anyhow::Result<String> {
+    let mut entries = tokio::fs::read_dir(dir_path).await?;
+    let mut rows = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Add '/' to directories in listing
+        let display_name = if file_type.is_dir() { format!("{}/", name) } else { name.clone() };
+        let href = if req_path.ends_with('/') {
+            format!("{}{}", req_path, name)
+        } else {
+            format!("{}/{}", req_path, name)
+        };
+        rows.push(format!(r#"<li><a href="{href}">{display_name}</a></li>"#));
+    }
+
+    let mut html = String::new();
+    write!(
+        html,
+        r#"<!DOCTYPE html>
+<html>
+<head>
+  <title>AURCache Index of {}</title>
+</head>
+<body>
+  <h1>AURCache Index of {}</h1>
+  <ul>
+    {}
+  </ul>
+</body>
+</html>"#,
+        req_path,
+        req_path,
+        rows.join("\n    ")
+    )?;
+
+    Ok(html)
 }
 
 /// get range header and read bytes from file
