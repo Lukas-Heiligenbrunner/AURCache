@@ -374,9 +374,11 @@ packages:
   flutter_settings_ui:
     dependency: "direct main"
     description:
-      path: "../../flutter_settings_ui"
-      relative: true
-    source: path
+      path: "."
+      ref: aurcache
+      resolved-ref: "358cc1b43f261e83070b6859f32a278e6307b660"
+      url: "https://github.com/Lukas-Heiligenbrunner/flutter_settings_ui.git"
+    source: git
     version: "3.0.1"
   flutter_svg:
     dependency: "direct main"

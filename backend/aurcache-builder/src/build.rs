@@ -1,12 +1,12 @@
 use crate::env::job_timeout_from_env;
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
-use crate::types::BuildStates;
-use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{builds, files, packages, packages_files};
+use aurcache_utils::types::types::BuildStates;
+use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,

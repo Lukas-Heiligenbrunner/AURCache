@@ -14,7 +14,19 @@ class SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Settings"),
+        title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text("Settings"),
+            Padding(
+              padding: const EdgeInsets.only(right: 32),
+              child: Text(
+                "Settings saved!",
+                style: TextStyle(fontSize: 14, color: Colors.green.shade700),
+              ),
+            ),
+          ],
+        ),
         leading: context.mobile
             ? IconButton(
                 icon: const Icon(Icons.menu),
@@ -23,6 +35,7 @@ class SettingsScreen extends StatelessWidget {
                 },
               )
             : null,
+        actions: [],
       ),
       body: SettingsList(
         platform: context.desktop ? DevicePlatform.web : DevicePlatform.android,
@@ -32,7 +45,7 @@ class SettingsScreen extends StatelessWidget {
 
         shrinkWrap: false,
         contentPadding: context.desktop
-            ? EdgeInsets.only(left: 32, right: 32)
+            ? EdgeInsets.only(left: 32, right: 32, bottom: 32)
             : null,
         sections: [
           SettingsSection(

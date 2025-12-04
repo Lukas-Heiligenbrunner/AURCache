@@ -1,12 +1,13 @@
 use crate::build::Builder;
 use crate::build_mode::{BuildMode, get_build_mode};
-use crate::env::limits_from_env;
-use crate::git::checkout::checkout_repo_ref;
 use crate::logger::BuildLogger;
 use crate::makepkg_utils::create_makepkg_config;
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
+use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::settings::general::get_setting;
+use aurcache_utils::settings::types::{SettingType, SettingsEntry};
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
@@ -231,7 +232,22 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         info!("Build command: {build_cmd}");
         let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
 
-        let (cpu_limit, memory_limit) = limits_from_env();
+        let cpu_limit: SettingsEntry<u64> = get_setting(
+            SettingType::CpuLimit,
+            Some(self.package_model.id.get()?.clone()),
+            &self.db,
+        )
+        .await?;
+        // we store cpu in uCPU in db
+        let cpu_limit = cpu_limit.value * 1_000_000;
+        let memory_limit: SettingsEntry<i64> = get_setting(
+            SettingType::MemoryLimit,
+            Some(self.package_model.id.get()?.clone()),
+            &self.db,
+        )
+        .await?;
+        // we store memory limit in mb in db
+        let memory_limit = memory_limit.value * 1024 * 1024;
 
         // docker container names must match [a-zA-Z0-9][a-zA-Z0-9_.-]* regex
         let filtered_name: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
