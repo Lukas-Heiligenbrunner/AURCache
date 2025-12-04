@@ -52,6 +52,11 @@ dependencies:
   json_annotation: 4.9.0
   freezed_annotation: ^3.1.0
   step_progress: ^2.7.1
+  flutter_settings_ui:
+    # path: ../../flutter_settings_ui  # local dev
+    git:
+      url: https://github.com/Lukas-Heiligenbrunner/flutter_settings_ui.git
+      ref: aurcache
 
 dev_dependencies:
   flutter_test:
