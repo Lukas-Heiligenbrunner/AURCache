@@ -12,3 +12,4 @@ mod models;
 mod package;
 mod stats;
 mod utils;
+mod settings;

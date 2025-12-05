@@ -52,6 +52,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                 (path = "/api", api = crate::package::PackageApi, tags = ["Package"]),
                 (path = "/api", api = crate::stats::StatsApi, tags = ["Stats"]),
                 (path = "/api", api = crate::activity::ActivityApi, tags = ["Activity"]),
+                (path = "/api", api = crate::settings::SettingsApi, tags = ["Settings"]),
             ),
             tags(
                 (name = "AUR", description = "AUR management endpoints."),
@@ -61,6 +62,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
                 (name = "Package", description = "Package management endpoints."),
                 (name = "Stats", description = "Statistics endpoints."),
                 (name = "Activity", description = "Activity endpoints."),
+                (name = "Settings", description = "Settings endpoints."),
             ),
             modifiers(&SecurityAddon)
         )]

@@ -7,7 +7,7 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
 use aurcache_utils::git::checkout::checkout_repo_ref;
 use aurcache_utils::settings::general::get_setting;
-use aurcache_utils::settings::types::{SettingType, SettingsEntry};
+use aurcache_utils::settings::types::{SettingType};
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
@@ -29,6 +29,7 @@ use tempfile::tempdir;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, trace};
+use aurcache_types::settings::SettingsEntry;
 
 /// git repo path inside builder container in git build mode
 static GIT_REPO_PATH: &str = "/tmp";

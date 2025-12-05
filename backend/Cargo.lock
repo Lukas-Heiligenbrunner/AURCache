@@ -360,6 +360,7 @@ dependencies = [
  "aurcache-activitylog",
  "aurcache-builder",
  "aurcache-db",
+ "aurcache-types",
  "aurcache-utils",
  "bigdecimal",
  "chrono",
@@ -384,6 +385,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "aurcache-db",
+ "aurcache-types",
  "aurcache-utils",
  "bollard",
  "flate2",
@@ -431,6 +433,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "utoipa",
+]
+
+[[package]]
 name = "aurcache-utils"
 version = "0.0.0"
 dependencies = [
@@ -439,12 +449,14 @@ dependencies = [
  "aur-rs",
  "aurcache-activitylog",
  "aurcache-db",
+ "aurcache-types",
  "backon",
  "git2",
  "pacman-mirrors",
  "pacman-repo-utils",
  "phf",
  "sea-orm",
+ "serde",
  "tempfile",
  "tokio",
  "tracing",

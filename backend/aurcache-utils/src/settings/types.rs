@@ -1,9 +1,3 @@
-pub struct SettingsEntry<T> {
-    pub value: T,
-    pub env_forced: bool,
-    pub default: bool,
-}
-
 #[derive(Clone)]
 pub enum SettingType {
     CpuLimit,

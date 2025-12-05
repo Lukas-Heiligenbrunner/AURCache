@@ -14,8 +14,10 @@ aur-rs = {workspace = true}
 backon = {workspace = true}
 tempfile = {workspace = true}
 alpm-srcinfo = {workspace = true}
+serde = { workspace = true }
 
 aurcache-db = {path = "../aurcache-db"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 pacman-mirrors = {path = "../pacman-mirrors"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}
+aurcache-types = {path = "../aurcache-types"}
