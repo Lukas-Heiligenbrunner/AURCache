@@ -8,7 +8,7 @@ use crate::package::{
 };
 use crate::stats::{dashboard_graph_data, stats, user_info};
 use rocket::{Route, routes};
-use crate::settings::settings;
+use crate::settings::{setting_update, settings};
 
 #[must_use]
 pub fn build_api() -> Vec<Route> {
@@ -31,6 +31,7 @@ pub fn build_api() -> Vec<Route> {
         cancel_build,
         health,
         activity,
-        settings
+        settings,
+        setting_update
     ]
 }
