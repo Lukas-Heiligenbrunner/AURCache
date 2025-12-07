@@ -1,6 +1,6 @@
 use crate::cancel::cancel_build;
 use crate::queue::queue_package;
-use crate::types::Action;
+use aurcache_utils::types::types::Action;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::env;

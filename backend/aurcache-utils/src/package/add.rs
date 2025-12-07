@@ -1,8 +1,8 @@
 use crate::aur::api::get_package_info;
+use crate::git::checkout::checkout_repo_ref;
+use crate::types::types::{Action, BuildStates};
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
-use aurcache_builder::git::checkout::checkout_repo_ref;
-use aurcache_builder::types::{Action, BuildStates};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;

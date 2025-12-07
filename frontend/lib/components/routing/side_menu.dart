@@ -88,6 +88,31 @@ class SideMenu extends StatelessWidget {
                     ),
                   ],
                 ),
+                DrawerSection(
+                  title: "Settings",
+                  children: [
+                    DrawerListTile(
+                      title: "Settings",
+                      svgSrc: "assets/icons/menu/settings.svg",
+                      active: activeUri.startsWith("/settings"),
+                      press: () {
+                        context.go("/settings");
+                      },
+                    ),
+                    DrawerListTile(
+                      title: "Help",
+                      svgSrc: "assets/icons/menu/help.svg",
+                      press: () async {
+                        await launchUrl(
+                          Uri.parse(
+                            "https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction",
+                          ),
+                          webOnlyWindowName: '_blank',
+                        );
+                      },
+                    ),
+                  ],
+                ),
                 Expanded(child: Container()),
                 DrawerSection(
                   title: "Project Infos",

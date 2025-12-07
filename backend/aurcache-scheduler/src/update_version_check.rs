@@ -1,11 +1,11 @@
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::anyhow;
 use aur_rs::{Package, Request};
-use aurcache_builder::git::checkout::checkout_repo_ref;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_utils::git::checkout::checkout_repo_ref;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
 };
