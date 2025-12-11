@@ -1,8 +1,8 @@
-use crate::settings::types::{SettingType};
+use crate::settings::types::SettingType;
 use aurcache_db::settings;
+use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
 use sea_orm::*;
 use std::str::FromStr;
-use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
 
 /// Priority:
 ///   1. ENV variable
@@ -99,15 +99,34 @@ where
     })
 }
 
-pub trait GetAllSettings {
-    fn get(db: &DatabaseConnection, pkgid: Option<i32>) -> impl Future<Output = anyhow::Result<ApplicationSettings>> + Send;
+pub trait SettingsTraits {
+    fn get(
+        db: &DatabaseConnection,
+        pkgid: Option<i32>,
+    ) -> impl Future<Output = anyhow::Result<ApplicationSettings>> + Send;
+    fn patch(
+        db: &DatabaseConnection,
+        settings: ApplicationSettings,
+        pkgid: Option<i32>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-impl GetAllSettings for ApplicationSettings{
-    async fn get(db: &DatabaseConnection, pkgid: Option<i32>) -> anyhow::Result<ApplicationSettings> {
+impl SettingsTraits for ApplicationSettings {
+    async fn get(
+        db: &DatabaseConnection,
+        pkgid: Option<i32>,
+    ) -> anyhow::Result<ApplicationSettings> {
         Ok(ApplicationSettings {
             cpu_limit: get_setting(SettingType::CpuLimit, pkgid, db).await?,
             memory_limit: get_setting(SettingType::MemoryLimit, pkgid, db).await?,
         })
+    }
+
+    async fn patch(
+        db: &DatabaseConnection,
+        settings: ApplicationSettings,
+        pkgid: Option<i32>,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }

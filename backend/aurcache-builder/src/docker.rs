@@ -5,9 +5,10 @@ use crate::makepkg_utils::create_makepkg_config;
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
+use aurcache_types::settings::SettingsEntry;
 use aurcache_utils::git::checkout::checkout_repo_ref;
 use aurcache_utils::settings::general::get_setting;
-use aurcache_utils::settings::types::{SettingType};
+use aurcache_utils::settings::types::SettingType;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
@@ -29,7 +30,6 @@ use tempfile::tempdir;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, info, trace};
-use aurcache_types::settings::SettingsEntry;
 
 /// git repo path inside builder container in git build mode
 static GIT_REPO_PATH: &str = "/tmp";
@@ -235,7 +235,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let cpu_limit: SettingsEntry<u64> = get_setting(
             SettingType::CpuLimit,
-            Some(self.package_model.id.get()?.clone()),
+            Some(*self.package_model.id.get()?),
             &self.db,
         )
         .await?;
@@ -243,7 +243,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let cpu_limit = cpu_limit.value * 1_000_000;
         let memory_limit: SettingsEntry<i64> = get_setting(
             SettingType::MemoryLimit,
-            Some(self.package_model.id.get()?.clone()),
+            Some(*self.package_model.id.get()?),
             &self.db,
         )
         .await?;

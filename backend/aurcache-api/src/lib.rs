@@ -10,6 +10,6 @@ mod health;
 pub mod init;
 mod models;
 mod package;
+mod settings;
 mod stats;
 mod utils;
-mod settings;
