@@ -15,7 +15,7 @@ members = [
 [workspace.dependencies]
 tokio = "1.48.0"
 anyhow = "1.0.100"
-reqwest = "0.12.25"
+reqwest = "0.12.26"
 tracing = "0.1.43"
 chrono = "0.4.42"
 serde = "1.0.228"
