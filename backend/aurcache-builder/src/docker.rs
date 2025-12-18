@@ -271,7 +271,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 #[cfg(debug_assertions)]
                 auto_remove: Some(false),
                 #[cfg(not(debug_assertions))]
-                auto_remove: Some(false),
+                auto_remove: Some(true),
                 nano_cpus: Some(cpu_limit as i64),
                 memory_swap: Some(memory_limit),
                 binds: Some(mountpoints),

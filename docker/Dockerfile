@@ -1,7 +1,7 @@
 ARG TARGET_ARCH=linux/amd64
 ARG LATEST_COMMIT_SHA=dev
 
-FROM registry.gitlab.com/polycule_client/flutter-dockerimages:3.38.1-web AS frontend_builder
+FROM --platform=linux/amd64 registry.gitlab.com/polycule_client/flutter-dockerimages:3.38.1-web AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
@@ -11,7 +11,7 @@ RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
 RUN flutter build web --release --wasm --dart-define APP_VERSION=$(grep '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
 
-FROM rust:1.91.1 AS builder
+FROM --platform=linux/amd64 rust:1.92.0 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies
@@ -26,7 +26,7 @@ ARG TARGET_ARCH
 ADD docker/build-rust.sh /root
 RUN bash /root/build-rust.sh $TARGET_ARCH
 
-FROM --platform=$TARGET_ARCH quay.io/podman/stable:v5.7.0
+FROM --platform=$TARGET_ARCH quay.io/podman/stable:v5.7.1
 # Copy the built binary from the previous stage
 COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
