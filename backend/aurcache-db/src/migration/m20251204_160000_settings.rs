@@ -26,6 +26,16 @@ create table settings
         constraint settings_packages_id_fk
             references packages
 );
+
+-- Global settings (pkg_id IS NULL)
+CREATE UNIQUE INDEX settings_key_global_unique
+ON settings(key)
+WHERE pkg_id IS NULL;
+
+-- Package-specific settings
+CREATE UNIQUE INDEX settings_key_pkg_unique
+ON settings(key, pkg_id)
+WHERE pkg_id IS NOT NULL;
 ",
                 )
                 .await?;

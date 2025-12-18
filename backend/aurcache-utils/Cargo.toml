@@ -3,7 +3,6 @@ name = "aurcache-utils"
 edition = "2024"
 
 [dependencies]
-phf = {version = "0.13.1", features = ["macros"]}
 git2 = "0.20.2"
 
 anyhow = {workspace = true}

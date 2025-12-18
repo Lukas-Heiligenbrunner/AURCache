@@ -4,6 +4,78 @@ use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
 use sea_orm::*;
 use std::str::FromStr;
 
+pub async fn set_settings_bulk<I>(
+    entries: I,
+    db: &DatabaseConnection,
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)>,
+{
+    let mut inserts = Vec::new();
+    let mut deletes = Vec::new();
+
+    for (st, pkg_id, value) in entries {
+        let s = st.get();
+
+        match value {
+            Some(v) => {
+                inserts.push(settings::ActiveModel {
+                    key: Set(s.key.to_string()),
+                    pkg_id: Set(pkg_id),
+                    value: Set(Some(v)),
+                    ..Default::default()
+                });
+            }
+            None => {
+                deletes.push((s.key.to_string(), pkg_id));
+            }
+        }
+    }
+
+    // 1️⃣ DELETE overrides
+    if !deletes.is_empty() {
+        let mut condition = sea_orm::Condition::any();
+
+        for (key, pkg_id) in deletes {
+            let mut c = sea_orm::Condition::all()
+                .add(settings::Column::Key.eq(key));
+
+            match pkg_id {
+                Some(pid) => {
+                    c = c.add(settings::Column::PkgId.eq(pid));
+                }
+                None => {
+                    c = c.add(settings::Column::PkgId.is_null());
+                }
+            }
+
+            condition = condition.add(c);
+        }
+
+        settings::Entity::delete_many()
+            .filter(condition)
+            .exec(db)
+            .await?;
+    }
+
+    // 2️⃣ UPSERT remaining values
+    if !inserts.is_empty() {
+        settings::Entity::insert_many(inserts)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::columns([
+                    settings::Column::Key,
+                    settings::Column::PkgId,
+                ])
+                    .update_column(settings::Column::Value)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+    }
+
+    Ok(())
+}
+
 /// Priority:
 ///   1. ENV variable
 ///   2. global setting (pkg_id NULL)
@@ -104,11 +176,12 @@ pub trait SettingsTraits {
         db: &DatabaseConnection,
         pkgid: Option<i32>,
     ) -> impl Future<Output = anyhow::Result<ApplicationSettings>> + Send;
-    fn patch(
+    fn patch<I>(
         db: &DatabaseConnection,
-        settings: ApplicationSettings,
-        pkgid: Option<i32>,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+        settings: I,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send
+    where
+        I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)> + Send;
 }
 
 impl SettingsTraits for ApplicationSettings {
@@ -122,11 +195,13 @@ impl SettingsTraits for ApplicationSettings {
         })
     }
 
-    async fn patch(
+    async fn patch<I>(
         db: &DatabaseConnection,
-        settings: ApplicationSettings,
-        pkgid: Option<i32>,
-    ) -> anyhow::Result<()> {
-        Ok(())
+        settings: I,
+    ) -> anyhow::Result<()>
+    where
+        I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)> + Send,
+    {
+        set_settings_bulk(settings, db).await
     }
 }
