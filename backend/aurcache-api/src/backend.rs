@@ -6,6 +6,7 @@ use crate::package::{
     get_package, package_add_endpoint, package_del, package_list, package_update_endpoint,
     package_update_entity_endpoint,
 };
+use crate::settings::{setting_update, setting_update_package, settings};
 use crate::stats::{dashboard_graph_data, stats, user_info};
 use rocket::{Route, routes};
 
@@ -30,5 +31,8 @@ pub fn build_api() -> Vec<Route> {
         cancel_build,
         health,
         activity,
+        settings,
+        setting_update,
+        setting_update_package
     ]
 }

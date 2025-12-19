@@ -9,8 +9,8 @@ members = [
     "aurcache-api",
     "aurcache-activitylog",
     "aurcache-utils",
-    "aurcache-scheduler"
-]
+    "aurcache-scheduler",
+    "aurcache-types"]
 
 [workspace.dependencies]
 tokio = "1.48.0"
@@ -28,6 +28,7 @@ flate2 = "1.1.5"
 tar = "0.4.44"
 tempfile = "3.23.0"
 alpm-srcinfo = "0.6.0"
+utoipa = { version = "5.4.0", features = ["rocket_extras"] }
 
 [profile.release]
 strip = "debuginfo"  # Automatically strip symbols from the binary.
