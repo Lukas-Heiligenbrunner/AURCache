@@ -15,7 +15,7 @@ aurcache-builder = {path = "../aurcache-builder"}
 aurcache-db = {path = "../aurcache-db"}
 aurcache-api = { path = "../aurcache-api" }
 aurcache-scheduler = {path = "../aurcache-scheduler"}
-aurcache-utils = {path = "../aurcache-utils"}
+aurcache-types = {path = "../aurcache-types"}
 
 dotenvy = "0.15.7"
 tracing-subscriber = "0.3.22"

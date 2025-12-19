@@ -1,5 +1,4 @@
 use crate::aur::api::get_package_info;
-use crate::types::types::{Action, BuildStates};
 use anyhow::{anyhow, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
@@ -7,6 +6,7 @@ use aurcache_db::activities::ActivityType;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::{Action, BuildStates};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
     TransactionTrait, TryIntoModel,

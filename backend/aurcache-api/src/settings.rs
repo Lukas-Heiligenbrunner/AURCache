@@ -1,13 +1,13 @@
 use crate::models::authenticated::Authenticated;
+use crate::models::settings::ApplicationSettingsPatch;
 use aurcache_types::settings::ApplicationSettings;
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::settings::types::SettingType;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 use rocket::{State, get, patch};
 use sea_orm::DatabaseConnection;
 use utoipa::OpenApi;
-use aurcache_utils::settings::types::SettingType;
-use crate::models::settings::ApplicationSettingsPatch;
 
 #[derive(OpenApi)]
 #[openapi(paths(settings, setting_update_package, setting_update))]
@@ -26,7 +26,7 @@ pub async fn settings(
 ) -> Result<Json<ApplicationSettings>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    ApplicationSettings::get(&db, pkgid)
+    ApplicationSettings::get(db, pkgid)
         .await
         .map(Json)
         .map_err(|e| NotFound(e.to_string()))
@@ -53,21 +53,25 @@ pub async fn setting_update_package(
 
     // cpu limit
     if let Some(cpu_limt) = input.cpu_limit {
-        changedsettings.push((SettingType::CpuLimit,
-                              Some(pkgid),
-                              cpu_limt.map(|v| v.to_string())))
+        changedsettings.push((
+            SettingType::CpuLimit,
+            Some(pkgid),
+            cpu_limt.map(|v| v.to_string()),
+        ))
     }
 
     // memory limit
     if let Some(memory_limit) = input.memory_limit {
-        changedsettings.push((SettingType::MemoryLimit,
-                              None,
-                              memory_limit.map(|v| v.to_string())))
+        changedsettings.push((
+            SettingType::MemoryLimit,
+            None,
+            memory_limit.map(|v| v.to_string()),
+        ))
     }
 
     // todo change this ifletsome into helper functions
 
-    ApplicationSettings::patch(&db, changedsettings)
+    ApplicationSettings::patch(db, changedsettings)
         .await
         .map(drop)
         .map_err(|e| BadRequest(e.to_string()))
@@ -93,21 +97,21 @@ pub async fn setting_update(
 
     // cpu limit
     if let Some(cpu_limt) = input.cpu_limit {
-        changedsettings.push((SettingType::CpuLimit,
-                              None,
-                              cpu_limt.map(|v| v.to_string())))
+        changedsettings.push((SettingType::CpuLimit, None, cpu_limt.map(|v| v.to_string())))
     }
 
     // memory limit
     if let Some(memory_limit) = input.memory_limit {
-        changedsettings.push((SettingType::MemoryLimit,
-                              None,
-                              memory_limit.map(|v| v.to_string())))
+        changedsettings.push((
+            SettingType::MemoryLimit,
+            None,
+            memory_limit.map(|v| v.to_string()),
+        ))
     }
 
     // todo change this ifletsome into helper functions
 
-    ApplicationSettings::patch(&db, changedsettings)
+    ApplicationSettings::patch(db, changedsettings)
         .await
         .map(drop)
         .map_err(|e| BadRequest(e.to_string()))

@@ -7,8 +7,8 @@ use crate::models::authenticated::Authenticated;
 use crate::models::builds::ListBuildsModel;
 use aurcache_db::prelude::Builds;
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::{Action, BuildStates};
 use aurcache_utils::package::update::update_platform;
-use aurcache_utils::types::types::{Action, BuildStates};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, JoinType, ModelTrait, Order,
     QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,

@@ -1,5 +1,5 @@
+use aurcache_types::builder::Action;
 use aurcache_utils::package::update::package_update_all_outdated;
-use aurcache_utils::types::types::Action;
 use chrono::Utc;
 use cron::Schedule;
 use sea_orm::DatabaseConnection;

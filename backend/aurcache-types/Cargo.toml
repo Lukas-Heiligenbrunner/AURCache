@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 serde = { workspace = true }
 utoipa = { workspace = true }
+
+aurcache-db = {path = "../aurcache-db"}

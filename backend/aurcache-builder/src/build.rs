@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{builds, files, packages, packages_files};
-use aurcache_utils::types::types::BuildStates;
+use aurcache_types::builder::BuildStates;
 use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{

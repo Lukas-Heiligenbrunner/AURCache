@@ -17,5 +17,6 @@ pacman-mirrors = {path = "../pacman-mirrors"}
 aurcache-builder = {path = "../aurcache-builder"}
 aurcache-db = {path = "../aurcache-db"}
 aurcache-utils = {path = "../aurcache-utils"}
+aurcache-types = {path = "../aurcache-types"}
 
 cron = "0.15.0"

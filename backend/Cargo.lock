@@ -328,7 +328,7 @@ dependencies = [
  "aurcache-builder",
  "aurcache-db",
  "aurcache-scheduler",
- "aurcache-utils",
+ "aurcache-types",
  "dotenvy",
  "openssl",
  "pacman-mirrors",
@@ -422,6 +422,7 @@ dependencies = [
  "aur-rs",
  "aurcache-builder",
  "aurcache-db",
+ "aurcache-types",
  "aurcache-utils",
  "chrono",
  "cron",
@@ -436,6 +437,7 @@ dependencies = [
 name = "aurcache-types"
 version = "0.1.0"
 dependencies = [
+ "aurcache-db",
  "serde",
  "utoipa",
 ]

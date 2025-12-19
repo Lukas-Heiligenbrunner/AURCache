@@ -6,10 +6,7 @@ use std::str::FromStr;
 
 const GLOBAL_PKG_ID: i32 = -1;
 
-pub async fn set_settings_bulk<I>(
-    entries: I,
-    db: &DatabaseConnection,
-) -> anyhow::Result<()>
+pub async fn set_settings_bulk<I>(entries: I, db: &DatabaseConnection) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)>,
 {
@@ -61,8 +58,8 @@ where
                     settings::Column::Key,
                     settings::Column::PkgId,
                 ])
-                    .update_column(settings::Column::Value)
-                    .to_owned(),
+                .update_column(settings::Column::Value)
+                .to_owned(),
             )
             .exec(db)
             .await?;
@@ -111,51 +108,48 @@ where
         .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
         .one(db)
         .await?
+        && let Some(v) = global.value
     {
-        if let Some(v) = global.value {
-            let parsed: T = v.parse().map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to parse global setting {}='{}': {}",
-                    setting.key,
-                    v,
-                    e
-                )
-            })?;
+        let parsed: T = v.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse global setting {}='{}': {}",
+                setting.key,
+                v,
+                e
+            )
+        })?;
 
-            return Ok(SettingsEntry {
-                value: parsed,
-                env_forced: false,
-                default: false,
-            });
-        }
+        return Ok(SettingsEntry {
+            value: parsed,
+            env_forced: false,
+            default: false,
+        });
     }
 
     // pkg-specific setting
-    if let Some(pid) = pkg_id {
-        if let Some(pkg_entry) = settings::Entity::find()
+    if let Some(pid) = pkg_id
+        && let Some(pkg_entry) = settings::Entity::find()
             .filter(settings::Column::Key.eq(setting.key))
             .filter(settings::Column::PkgId.eq(pid))
             .one(db)
             .await?
-        {
-            if let Some(v) = pkg_entry.value {
-                let parsed: T = v.parse().map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to parse pkg setting {} pkg={} val='{}': {}",
-                        setting.key,
-                        pid,
-                        v,
-                        e
-                    )
-                })?;
+        && let Some(v) = pkg_entry.value
+    {
+        let parsed: T = v.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse pkg setting {} pkg={} val='{}': {}",
+                setting.key,
+                pid,
+                v,
+                e
+            )
+        })?;
 
-                return Ok(SettingsEntry {
-                    value: parsed,
-                    env_forced: false,
-                    default: false,
-                });
-            }
-        }
+        return Ok(SettingsEntry {
+            value: parsed,
+            env_forced: false,
+            default: false,
+        });
     }
 
     // default value
@@ -191,10 +185,7 @@ impl SettingsTraits for ApplicationSettings {
         })
     }
 
-    async fn patch<I>(
-        db: &DatabaseConnection,
-        settings: I,
-    ) -> anyhow::Result<()>
+    async fn patch<I>(db: &DatabaseConnection, settings: I) -> anyhow::Result<()>
     where
         I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)> + Send,
     {

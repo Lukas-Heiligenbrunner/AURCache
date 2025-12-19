@@ -1,12 +1,12 @@
 use crate::aur::api::get_package_info;
 use crate::git::checkout::checkout_repo_ref;
-use crate::types::types::{Action, BuildStates};
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::{Action, BuildStates};
 use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};

@@ -6,7 +6,7 @@ use aurcache_db::init::init_db;
 use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
-use aurcache_utils::types::types::Action;
+use aurcache_types::builder::Action;
 use dotenvy::dotenv;
 use tokio::sync::broadcast;
 use tracing::warn;

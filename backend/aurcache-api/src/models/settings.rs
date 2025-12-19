@@ -2,7 +2,6 @@ use rocket::serde::{Deserialize, Serialize};
 use serde::Deserializer;
 use utoipa::ToSchema;
 
-
 fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,

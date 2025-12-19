@@ -7,7 +7,7 @@ use crate::embed::CustomHandler;
 use crate::models::authenticated::OauthEnabled;
 use crate::utils::config::oauth_config_from_env;
 use aurcache_activitylog::activity_utils::ActivityLog;
-use aurcache_utils::types::types::Action;
+use aurcache_types::builder::Action;
 use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
 use rocket::http::private::cookie::Key;
