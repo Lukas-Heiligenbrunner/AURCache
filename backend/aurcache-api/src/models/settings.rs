@@ -31,6 +31,49 @@ impl ApplicationSettingsPatch {
                 memory_limit.map(|v| v.to_string()),
             ))
         }
+
+        if let Some(builder_image) = self.builder_image.clone() {
+            changedsettings.push((
+                Setting::BuilderImage,
+                pkgid,
+                builder_image,
+            ))
+        }
+
+        if let Some(job_timeout) = self.job_timeout {
+            changedsettings.push((
+                Setting::JobTimeout,
+                pkgid,
+                job_timeout.map(|v| v.to_string()),
+            ))
+        }
+
+        if let Some(auto_update_interval) = self.auto_update_interval {
+            changedsettings.push((
+                Setting::AutoUpdateInterval,
+                pkgid,
+                auto_update_interval.map(|v| match v {
+                    None => "".to_string(),
+                    Some(vv) => vv.to_string()
+                }),
+            ))
+        }
+
+        if let Some(max_concurrent_builds) = self.max_concurrent_builds {
+            changedsettings.push((
+                Setting::MaxConcurrentBuilds,
+                pkgid,
+                max_concurrent_builds.map(|v| v.to_string()),
+            ))
+        }
+
+        if let Some(version_check_interval) = self.version_check_interval {
+            changedsettings.push((
+                Setting::MemoryLimit,
+                pkgid,
+                version_check_interval.map(|v| v.to_string()),
+            ))
+        }
         changedsettings
     }
 }
@@ -52,5 +95,4 @@ pub struct ApplicationSettingsPatch {
     pub job_timeout: Option<Option<u32>>,
     #[serde(default, deserialize_with = "double_option")]
     pub builder_image: Option<Option<String>>,
-    // todo add all the other settings
 }
