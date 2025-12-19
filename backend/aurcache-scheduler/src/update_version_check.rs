@@ -5,37 +5,31 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
 };
 use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
-use std::env;
 use std::str::FromStr;
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::{task::JoinHandle, time};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 #[must_use]
 pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
-    let default_version_check_interval = 3600;
-    let check_interval = env::var("VERSION_CHECK_INTERVAL")
-        .map(|x| x.parse::<u64>().unwrap_or(default_version_check_interval))
-        .unwrap_or(default_version_check_interval);
-
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(check_interval));
-
         loop {
-            interval.tick().await;
             info!("performing aur version checks");
-            match check_versions(db.clone()).await {
-                Ok(()) => {}
-                Err(e) => {
-                    error!("Failed to perform aur version check: {e}");
-                }
+            if let Err(e) = check_versions(db.clone()).await {
+                error!("Failed to perform aur version check: {e}");
             }
+
+            let check_interval: SettingsEntry<u64> =
+                ApplicationSettings::get(Setting::VersionCheckInterval, None, &db).await;
+            tokio::time::sleep(Duration::from_secs(check_interval.value)).await;
         }
     })
 }
