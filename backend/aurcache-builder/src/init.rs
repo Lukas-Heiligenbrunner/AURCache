@@ -1,9 +1,8 @@
 use crate::cancel::cancel_build;
 use crate::queue::queue_package;
 use aurcache_types::builder::Action;
-use aurcache_types::settings::SettingsEntry;
-use aurcache_utils::settings::definitions::SettingType;
-use aurcache_utils::settings::general::get_setting;
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,6 +53,6 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
 
 async fn get_max_concurrent_builds(db: &DatabaseConnection) -> usize {
     let max_concurrent_builds: SettingsEntry<u32> =
-        get_setting(SettingType::MaxConcurrentBuilds, None, db).await;
+        ApplicationSettings::get(Setting::MaxConcurrentBuilds, None, db).await;
     max_concurrent_builds.value as usize
 }

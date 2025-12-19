@@ -1,20 +1,20 @@
-use crate::settings::definitions::SettingType;
+use crate::settings::meta::SettingsMetaTrait;
+use crate::settings::parser::ParseSetting;
 use aurcache_db::settings;
-use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use sea_orm::*;
-use std::str::FromStr;
 
 const GLOBAL_PKG_ID: i32 = -1;
 
-pub async fn set_settings_bulk<I>(entries: I, db: &DatabaseConnection) -> anyhow::Result<()>
+async fn set_settings_bulk<I>(entries: I, db: &DatabaseConnection) -> anyhow::Result<()>
 where
-    I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)>,
+    I: IntoIterator<Item = (Setting, Option<i32>, Option<String>)>,
 {
     let mut inserts = Vec::new();
     let mut deletes = Vec::new();
 
     for (st, pkg_id, value) in entries {
-        let s = st.get();
+        let s = st.meta();
         let internal_pkg_id = pkg_id.unwrap_or(GLOBAL_PKG_ID); // Use -1 for global
 
         match value {
@@ -68,27 +68,26 @@ where
     Ok(())
 }
 
-pub async fn get_setting<T>(
-    setting_type: SettingType,
+async fn get_setting<T>(
+    setting_type: Setting,
     pkg_id: Option<i32>,
     db: &DatabaseConnection,
 ) -> SettingsEntry<T>
 where
-    T: FromStr + Clone,
-    <T as FromStr>::Err: std::fmt::Display,
+    T: ParseSetting,
 {
-    let setting = setting_type.get();
+    let setting = setting_type.meta();
 
     // Helper to parse a string or fallback to default with a warning
     let parse_or_default = |val: &str, context: &str| -> T {
-        match val.parse::<T>() {
+        match T::parse_setting(val) {
             Ok(parsed) => parsed,
             Err(e) => {
                 eprintln!(
                     "Warning: Failed to parse {}: {}. Using default '{}'.",
                     context, e, setting.default
                 );
-                T::from_str(setting.default)
+                T::parse_setting(setting.default)
                     .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))
                     .unwrap() // safe because default is valid
             }
@@ -136,24 +135,17 @@ where
         .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
         .one(db)
         .await
-    {
-        if let Some(v) = global.value {
+        && let Some(v) = global.value {
             return SettingsEntry {
                 value: parse_or_default(&v, &format!("global setting {}", setting.key)),
                 env_forced: false,
                 default: false,
             };
         }
-    } else {
-        eprintln!(
-            "Warning: Failed to fetch global setting {}. Using default.",
-            setting.key
-        );
-    }
 
     // fallback default -- unwrap fine here checked value with type before
     SettingsEntry {
-        value: T::from_str(setting.default)
+        value: T::parse_setting(setting.default)
             .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))
             .unwrap(),
         env_forced: false,
@@ -162,32 +154,50 @@ where
 }
 
 pub trait SettingsTraits {
-    fn get(
+    fn get_all(
         db: &DatabaseConnection,
         pkgid: Option<i32>,
     ) -> impl Future<Output = anyhow::Result<ApplicationSettings>> + Send;
+    fn get<T: ParseSetting>(
+        setting: Setting,
+        pkgid: Option<i32>,
+        db: &DatabaseConnection,
+    ) -> impl Future<Output = SettingsEntry<T>> + Send;
     fn patch<I>(
         db: &DatabaseConnection,
         settings: I,
     ) -> impl Future<Output = anyhow::Result<()>> + Send
     where
-        I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)> + Send;
+        I: IntoIterator<Item = (Setting, Option<i32>, Option<String>)> + Send;
 }
 
 impl SettingsTraits for ApplicationSettings {
-    async fn get(
+    async fn get_all(
         db: &DatabaseConnection,
         pkgid: Option<i32>,
     ) -> anyhow::Result<ApplicationSettings> {
         Ok(ApplicationSettings {
-            cpu_limit: get_setting(SettingType::CpuLimit, pkgid, db).await,
-            memory_limit: get_setting(SettingType::MemoryLimit, pkgid, db).await,
+            cpu_limit: get_setting(Setting::CpuLimit, pkgid, db).await,
+            memory_limit: get_setting(Setting::MemoryLimit, pkgid, db).await,
+            max_concurrent_builds: get_setting(Setting::MaxConcurrentBuilds, pkgid, db).await,
+            version_check_interval: get_setting(Setting::VersionCheckInterval, pkgid, db).await,
+            auto_update_interval: get_setting(Setting::AutoUpdateInterval, pkgid, db).await,
+            job_timeout: get_setting(Setting::JobTimeout, pkgid, db).await,
+            builder_image: get_setting(Setting::BuilderImage, pkgid, db).await,
         })
+    }
+
+    async fn get<T: ParseSetting>(
+        setting: Setting,
+        pkgid: Option<i32>,
+        db: &DatabaseConnection,
+    ) -> SettingsEntry<T> {
+        get_setting(setting, pkgid, db).await
     }
 
     async fn patch<I>(db: &DatabaseConnection, settings: I) -> anyhow::Result<()>
     where
-        I: IntoIterator<Item = (SettingType, Option<i32>, Option<String>)> + Send,
+        I: IntoIterator<Item = (Setting, Option<i32>, Option<String>)> + Send,
     {
         set_settings_bulk(settings, db).await
     }

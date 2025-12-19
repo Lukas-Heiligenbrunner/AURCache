@@ -1,2 +1,3 @@
-pub mod definitions;
 pub mod general;
+mod meta;
+mod parser;

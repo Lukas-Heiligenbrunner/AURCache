@@ -6,6 +6,8 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{builds, files, packages, packages_files};
 use aurcache_types::builder::BuildStates;
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_utils::settings::general::SettingsTraits;
 use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{
@@ -17,15 +19,13 @@ use sea_orm::{
     ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
-
-static BUILDER_IMAGE_DEFAULT: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
@@ -69,13 +69,21 @@ impl Builder {
         debug!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
-        let builder_image = match env::var("BUILDER_IMAGE") {
-            Ok(v) => {
-                info!("Using non-default Builder image: {v}");
-                v
-            }
-            Err(_) => BUILDER_IMAGE_DEFAULT.to_string(),
-        };
+        let builder_image: SettingsEntry<String> = ApplicationSettings::get(
+            Setting::BuilderImage,
+            Some(*self.package_model.id.get()?),
+            &self.db,
+        )
+        .await;
+
+        if !builder_image.default {
+            info!(
+                "Build #{}: Builder Image overwritten by user to: {}",
+                self.build_model.id.get()?,
+                builder_image.value
+            );
+        }
+        let builder_image = builder_image.value;
 
         debug!(
             "Build #{}: Repull builder image",

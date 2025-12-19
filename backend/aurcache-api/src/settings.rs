@@ -25,7 +25,7 @@ pub async fn settings(
 ) -> Result<Json<ApplicationSettings>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
-    ApplicationSettings::get(db, pkgid)
+    ApplicationSettings::get_all(db, pkgid)
         .await
         .map(Json)
         .map_err(|e| NotFound(e.to_string()))
