@@ -33,11 +33,7 @@ impl ApplicationSettingsPatch {
         }
 
         if let Some(builder_image) = self.builder_image.clone() {
-            changedsettings.push((
-                Setting::BuilderImage,
-                pkgid,
-                builder_image,
-            ))
+            changedsettings.push((Setting::BuilderImage, pkgid, builder_image))
         }
 
         if let Some(job_timeout) = self.job_timeout {
@@ -54,7 +50,7 @@ impl ApplicationSettingsPatch {
                 pkgid,
                 auto_update_interval.map(|v| match v {
                     None => "".to_string(),
-                    Some(vv) => vv.to_string()
+                    Some(vv) => vv.to_string(),
                 }),
             ))
         }
@@ -69,7 +65,7 @@ impl ApplicationSettingsPatch {
 
         if let Some(version_check_interval) = self.version_check_interval {
             changedsettings.push((
-                Setting::MemoryLimit,
+                Setting::VersionCheckInterval,
                 pkgid,
                 version_check_interval.map(|v| v.to_string()),
             ))
