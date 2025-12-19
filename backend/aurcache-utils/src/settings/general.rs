@@ -1,4 +1,4 @@
-use crate::settings::types::SettingType;
+use crate::settings::definitions::SettingType;
 use aurcache_db::settings;
 use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
 use sea_orm::*;
@@ -68,97 +68,97 @@ where
     Ok(())
 }
 
-/// Priority:
-///   1. ENV variable
-///   2. global setting (pkg_id = -1 internally)
-///   3. pkg-specific setting
-///   4. default
 pub async fn get_setting<T>(
     setting_type: SettingType,
     pkg_id: Option<i32>,
     db: &DatabaseConnection,
-) -> anyhow::Result<SettingsEntry<T>>
+) -> SettingsEntry<T>
 where
     T: FromStr + Clone,
     <T as FromStr>::Err: std::fmt::Display,
 {
     let setting = setting_type.get();
 
+    // Helper to parse a string or fallback to default with a warning
+    let parse_or_default = |val: &str, context: &str| -> T {
+        match val.parse::<T>() {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to parse {}: {}. Using default '{}'.",
+                    context, e, setting.default
+                );
+                T::from_str(setting.default)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))
+                    .unwrap() // safe because default is valid
+            }
+        }
+    };
+
     // ENV variable takes precedence
     if let Ok(env_value) = std::env::var(setting.env_name) {
-        let parsed: T = env_value.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse ENV {}='{}': {}",
-                setting.env_name,
-                env_value,
-                e
-            )
-        })?;
-
-        return Ok(SettingsEntry {
-            value: parsed,
+        return SettingsEntry {
+            value: parse_or_default(&env_value, &format!("ENV {}", setting.env_name)),
             env_forced: true,
             default: false,
-        });
-    }
-
-    // global setting
-    if let Some(global) = settings::Entity::find()
-        .filter(settings::Column::Key.eq(setting.key))
-        .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
-        .one(db)
-        .await?
-        && let Some(v) = global.value
-    {
-        let parsed: T = v.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse global setting {}='{}': {}",
-                setting.key,
-                v,
-                e
-            )
-        })?;
-
-        return Ok(SettingsEntry {
-            value: parsed,
-            env_forced: false,
-            default: false,
-        });
+        };
     }
 
     // pkg-specific setting
-    if let Some(pid) = pkg_id
-        && let Some(pkg_entry) = settings::Entity::find()
+    if let Some(pid) = pkg_id {
+        if let Ok(Some(pkg_entry)) = settings::Entity::find()
             .filter(settings::Column::Key.eq(setting.key))
             .filter(settings::Column::PkgId.eq(pid))
             .one(db)
-            .await?
-        && let Some(v) = pkg_entry.value
-    {
-        let parsed: T = v.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to parse pkg setting {} pkg={} val='{}': {}",
-                setting.key,
-                pid,
-                v,
-                e
-            )
-        })?;
-
-        return Ok(SettingsEntry {
-            value: parsed,
-            env_forced: false,
-            default: false,
-        });
+            .await
+        {
+            if let Some(v) = pkg_entry.value {
+                return SettingsEntry {
+                    value: parse_or_default(
+                        &v,
+                        &format!("pkg setting {} pkg={}", setting.key, pid),
+                    ),
+                    env_forced: false,
+                    default: false,
+                };
+            }
+        } else {
+            eprintln!(
+                "Warning: Failed to fetch pkg-specific setting {} pkg={}. Using default.",
+                setting.key, pid
+            );
+        }
     }
 
-    // default value
-    Ok(SettingsEntry {
+    // global setting
+    if let Ok(Some(global)) = settings::Entity::find()
+        .filter(settings::Column::Key.eq(setting.key))
+        .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
+        .one(db)
+        .await
+    {
+        if let Some(v) = global.value {
+            return SettingsEntry {
+                value: parse_or_default(&v, &format!("global setting {}", setting.key)),
+                env_forced: false,
+                default: false,
+            };
+        }
+    } else {
+        eprintln!(
+            "Warning: Failed to fetch global setting {}. Using default.",
+            setting.key
+        );
+    }
+
+    // fallback default -- unwrap fine here checked value with type before
+    SettingsEntry {
         value: T::from_str(setting.default)
-            .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))?,
+            .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))
+            .unwrap(),
         env_forced: false,
         default: true,
-    })
+    }
 }
 
 pub trait SettingsTraits {
@@ -180,8 +180,8 @@ impl SettingsTraits for ApplicationSettings {
         pkgid: Option<i32>,
     ) -> anyhow::Result<ApplicationSettings> {
         Ok(ApplicationSettings {
-            cpu_limit: get_setting(SettingType::CpuLimit, pkgid, db).await?,
-            memory_limit: get_setting(SettingType::MemoryLimit, pkgid, db).await?,
+            cpu_limit: get_setting(SettingType::CpuLimit, pkgid, db).await,
+            memory_limit: get_setting(SettingType::MemoryLimit, pkgid, db).await,
         })
     }
 

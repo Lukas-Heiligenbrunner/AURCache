@@ -2,7 +2,6 @@ use crate::models::authenticated::Authenticated;
 use crate::models::settings::ApplicationSettingsPatch;
 use aurcache_types::settings::ApplicationSettings;
 use aurcache_utils::settings::general::SettingsTraits;
-use aurcache_utils::settings::types::SettingType;
 use rocket::response::status::{BadRequest, NotFound};
 use rocket::serde::json::Json;
 use rocket::{State, get, patch};
@@ -49,29 +48,8 @@ pub async fn setting_update_package(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    let mut changedsettings = vec![];
-
-    // cpu limit
-    if let Some(cpu_limt) = input.cpu_limit {
-        changedsettings.push((
-            SettingType::CpuLimit,
-            Some(pkgid),
-            cpu_limt.map(|v| v.to_string()),
-        ))
-    }
-
-    // memory limit
-    if let Some(memory_limit) = input.memory_limit {
-        changedsettings.push((
-            SettingType::MemoryLimit,
-            None,
-            memory_limit.map(|v| v.to_string()),
-        ))
-    }
-
-    // todo change this ifletsome into helper functions
-
-    ApplicationSettings::patch(db, changedsettings)
+    let changed_settings = input.get_changed_settings(Some(pkgid));
+    ApplicationSettings::patch(db, changed_settings)
         .await
         .map(drop)
         .map_err(|e| BadRequest(e.to_string()))
@@ -93,25 +71,8 @@ pub async fn setting_update(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    let mut changedsettings = vec![];
-
-    // cpu limit
-    if let Some(cpu_limt) = input.cpu_limit {
-        changedsettings.push((SettingType::CpuLimit, None, cpu_limt.map(|v| v.to_string())))
-    }
-
-    // memory limit
-    if let Some(memory_limit) = input.memory_limit {
-        changedsettings.push((
-            SettingType::MemoryLimit,
-            None,
-            memory_limit.map(|v| v.to_string()),
-        ))
-    }
-
-    // todo change this ifletsome into helper functions
-
-    ApplicationSettings::patch(db, changedsettings)
+    let changed_settings = input.get_changed_settings(None);
+    ApplicationSettings::patch(db, changed_settings)
         .await
         .map(drop)
         .map_err(|e| BadRequest(e.to_string()))

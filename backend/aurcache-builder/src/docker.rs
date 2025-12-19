@@ -7,8 +7,8 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
 use aurcache_types::settings::SettingsEntry;
 use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::settings::definitions::SettingType;
 use aurcache_utils::settings::general::get_setting;
-use aurcache_utils::settings::types::SettingType;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
@@ -238,7 +238,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             Some(*self.package_model.id.get()?),
             &self.db,
         )
-        .await?;
+        .await;
         // we store cpu in uCPU in db
         let cpu_limit = cpu_limit.value * 1_000_000;
         let memory_limit: SettingsEntry<i64> = get_setting(
@@ -246,7 +246,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             Some(*self.package_model.id.get()?),
             &self.db,
         )
-        .await?;
+        .await;
         // we store memory limit in mb in db
         let memory_limit = memory_limit.value * 1024 * 1024;
 
