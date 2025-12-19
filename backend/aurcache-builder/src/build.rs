@@ -1,4 +1,3 @@
-use crate::env::job_timeout_from_env;
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
 use anyhow::{anyhow, bail};
@@ -22,7 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
@@ -138,7 +137,17 @@ impl Builder {
             "Build #{}: awaiting build container to exit",
             self.build_model.id.get()?
         );
-        self.wait_container_exit(&id).await?;
+
+        let job_timeout: u64 = ApplicationSettings::get(
+            Setting::JobTimeout,
+            Some(*self.package_model.id.get()?),
+            &self.db,
+        )
+        .await
+        .value;
+        let job_timeout = Duration::from_secs(job_timeout);
+        debug!("job_timeout: {} sec", job_timeout.as_secs());
+        self.wait_container_exit(&id, job_timeout).await?;
         debug!("Build #{id}: docker container exited successfully");
 
         // move built tar.gz archives to host and repo-add
@@ -157,9 +166,13 @@ impl Builder {
         Ok(())
     }
 
-    async fn wait_container_exit(&self, container_id: &str) -> anyhow::Result<()> {
+    async fn wait_container_exit(
+        &self,
+        container_id: &str,
+        job_timeout: Duration,
+    ) -> anyhow::Result<()> {
         let build_result = timeout(
-            job_timeout_from_env(),
+            job_timeout,
             self.docker
                 .wait_container(
                     container_id,

@@ -135,13 +135,14 @@ where
         .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
         .one(db)
         .await
-        && let Some(v) = global.value {
-            return SettingsEntry {
-                value: parse_or_default(&v, &format!("global setting {}", setting.key)),
-                env_forced: false,
-                default: false,
-            };
-        }
+        && let Some(v) = global.value
+    {
+        return SettingsEntry {
+            value: parse_or_default(&v, &format!("global setting {}", setting.key)),
+            env_forced: false,
+            default: false,
+        };
+    }
 
     // fallback default -- unwrap fine here checked value with type before
     SettingsEntry {
