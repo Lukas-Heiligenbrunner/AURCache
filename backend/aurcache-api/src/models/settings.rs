@@ -48,10 +48,7 @@ impl ApplicationSettingsPatch {
             changedsettings.push((
                 Setting::AutoUpdateInterval,
                 pkgid,
-                auto_update_interval.map(|v| match v {
-                    None => "".to_string(),
-                    Some(vv) => vv.to_string(),
-                }),
+                auto_update_interval.map(|v| v.to_string()),
             ))
         }
 
@@ -86,7 +83,7 @@ pub struct ApplicationSettingsPatch {
     #[serde(default, deserialize_with = "double_option")]
     pub version_check_interval: Option<Option<u32>>,
     #[serde(default, deserialize_with = "double_option")]
-    pub auto_update_interval: Option<Option<Option<u32>>>,
+    pub auto_update_interval: Option<Option<u32>>,
     #[serde(default, deserialize_with = "double_option")]
     pub job_timeout: Option<Option<u32>>,
     #[serde(default, deserialize_with = "double_option")]
