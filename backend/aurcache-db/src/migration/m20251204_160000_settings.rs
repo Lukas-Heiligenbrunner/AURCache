@@ -15,27 +15,15 @@ impl MigrationTrait for Migration {
                 // add new column version to builds
                 db.execute_unprepared(
                     r"
-create table settings
+CREATE TABLE settings
 (
-	id integer not null
-		constraint settings_pk
-			primary key autoincrement,
-    key    TEXT not null,
-    value  TEXT,
-    pkg_id integer
-        constraint settings_packages_id_fk
-            references packages
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    value TEXT,
+    pkg_id INTEGER NOT NULL, -- always NOT NULL now
+    -- should actually be foreign key -> but drops errors if null
+    UNIQUE (pkg_id, key)     -- full UNIQUE constraint
 );
-
--- Global settings (pkg_id IS NULL)
-CREATE UNIQUE INDEX settings_key_global_unique
-ON settings(key)
-WHERE pkg_id IS NULL;
-
--- Package-specific settings
-CREATE UNIQUE INDEX settings_key_pkg_unique
-ON settings(key, pkg_id)
-WHERE pkg_id IS NOT NULL;
 ",
                 )
                 .await?;
@@ -43,14 +31,17 @@ WHERE pkg_id IS NOT NULL;
             DbBackend::Postgres => {
                 db.execute_unprepared(
                     r"
-create table public.settings
+CREATE TABLE public.settings
 (
-    id SERIAL PRIMARY KEY
-    key    TEXT not null,
-    value  TEXT,
-    pkg_id integer
-        constraint settings_packages_id_fk
-            references packages
+    id SERIAL PRIMARY KEY,
+    key TEXT NOT NULL,
+    value TEXT,
+    pkg_id INTEGER NOT NULL,               -- global settings use -1
+    CONSTRAINT settings_packages_fk        -- optional foreign key, can point to packages table
+        FOREIGN KEY (pkg_id)
+        REFERENCES packages(id),
+    CONSTRAINT settings_unique_per_pkg     -- full UNIQUE constraint on (pkg_id, key)
+        UNIQUE (pkg_id, key)
 );
 ",
                 )

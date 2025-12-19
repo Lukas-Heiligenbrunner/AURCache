@@ -4,6 +4,8 @@ use aurcache_types::settings::{ApplicationSettings, SettingsEntry};
 use sea_orm::*;
 use std::str::FromStr;
 
+const GLOBAL_PKG_ID: i32 = -1;
+
 pub async fn set_settings_bulk<I>(
     entries: I,
     db: &DatabaseConnection,
@@ -16,18 +18,19 @@ where
 
     for (st, pkg_id, value) in entries {
         let s = st.get();
+        let internal_pkg_id = pkg_id.unwrap_or(GLOBAL_PKG_ID); // Use -1 for global
 
         match value {
             Some(v) => {
                 inserts.push(settings::ActiveModel {
                     key: Set(s.key.to_string()),
-                    pkg_id: Set(pkg_id),
+                    pkg_id: Set(Some(internal_pkg_id)),
                     value: Set(Some(v)),
                     ..Default::default()
                 });
             }
             None => {
-                deletes.push((s.key.to_string(), pkg_id));
+                deletes.push((s.key.to_string(), internal_pkg_id));
             }
         }
     }
@@ -36,18 +39,10 @@ where
     if !deletes.is_empty() {
         let mut condition = sea_orm::Condition::any();
 
-        for (key, pkg_id) in deletes {
-            let mut c = sea_orm::Condition::all()
-                .add(settings::Column::Key.eq(key));
-
-            match pkg_id {
-                Some(pid) => {
-                    c = c.add(settings::Column::PkgId.eq(pid));
-                }
-                None => {
-                    c = c.add(settings::Column::PkgId.is_null());
-                }
-            }
+        for (key, pid) in deletes {
+            let c = sea_orm::Condition::all()
+                .add(settings::Column::Key.eq(key))
+                .add(settings::Column::PkgId.eq(pid));
 
             condition = condition.add(c);
         }
@@ -78,7 +73,7 @@ where
 
 /// Priority:
 ///   1. ENV variable
-///   2. global setting (pkg_id NULL)
+///   2. global setting (pkg_id = -1 internally)
 ///   3. pkg-specific setting
 ///   4. default
 pub async fn get_setting<T>(
@@ -91,6 +86,7 @@ where
     <T as FromStr>::Err: std::fmt::Display,
 {
     let setting = setting_type.get();
+
     // ENV variable takes precedence
     if let Ok(env_value) = std::env::var(setting.env_name) {
         let parsed: T = env_value.parse().map_err(|e| {
@@ -109,10 +105,10 @@ where
         });
     }
 
-    // global setting (pkg_id IS NULL)
+    // global setting
     if let Some(global) = settings::Entity::find()
         .filter(settings::Column::Key.eq(setting.key))
-        .filter(settings::Column::PkgId.is_null())
+        .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
         .one(db)
         .await?
     {
@@ -134,7 +130,7 @@ where
         }
     }
 
-    // pkg-specific setting (pkg_id = Some(id))
+    // pkg-specific setting
     if let Some(pid) = pkg_id {
         if let Some(pkg_entry) = settings::Entity::find()
             .filter(settings::Column::Key.eq(setting.key))
