@@ -20,7 +20,7 @@ utoipa = { version = "5.4.0", features = ["rocket_extras"] }
 utoipa-redoc = { version = "6.0.0", features = ["rocket"] }
 utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
 rust-embed = "8.9.0"
-bigdecimal = "0.4.9"
+bigdecimal = "0.4.10"
 reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
 
 
