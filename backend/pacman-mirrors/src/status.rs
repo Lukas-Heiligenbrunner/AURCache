@@ -58,7 +58,7 @@ impl Status {
                     // fetch original archlinux.org mirrorlist
                     Self::get_from_url(Self::URL_X86_64, target_platform).await
                 })
-                .retry(FibonacciBuilder::default().with_max_times(4))
+                .retry(FibonacciBuilder::default().with_max_times(2))
                 .await;
                 match result {
                     Ok(v) => Ok(v),
@@ -72,7 +72,7 @@ impl Status {
                             // fetch alternative archlinux mirrorlist
                             Self::get_from_url(Self::URL_X86_64_ALT, target_platform).await
                         })
-                        .retry(FibonacciBuilder::default().with_max_times(3))
+                        .retry(FibonacciBuilder::default().with_max_times(4))
                         .await
                     }
                 }
