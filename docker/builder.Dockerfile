@@ -1,4 +1,4 @@
-FROM lopsided/archlinux:latest
+FROM archlinux/archlinux:latest
 ARG TARGETPLATFORM
 
 ADD docker/add-aur.sh /root
