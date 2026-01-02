@@ -54,10 +54,12 @@ impl Status {
     pub async fn get_from_default_url(target_platform: Platform) -> anyhow::Result<Self> {
         match target_platform {
             Platform::X86_64 => {
-                let result =
-                    (|| async { Self::get_from_url(Self::URL_X86_64, target_platform).await })
-                        .retry(FibonacciBuilder::default().with_max_times(4))
-                        .await;
+                let result = (|| async {
+                    // fetch original archlinux.org mirrorlist
+                    Self::get_from_url(Self::URL_X86_64, target_platform).await
+                })
+                .retry(FibonacciBuilder::default().with_max_times(4))
+                .await;
                 match result {
                     Ok(v) => Ok(v),
                     Err(_) => {
@@ -67,6 +69,7 @@ impl Status {
                             Self::URL_X86_64_ALT
                         );
                         (|| async {
+                            // fetch alternative archlinux mirrorlist
                             Self::get_from_url(Self::URL_X86_64_ALT, target_platform).await
                         })
                         .retry(FibonacciBuilder::default().with_max_times(3))
