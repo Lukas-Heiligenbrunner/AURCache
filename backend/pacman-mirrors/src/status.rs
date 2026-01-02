@@ -8,6 +8,7 @@ use reqwest::Client;
 use reqwest::header::ACCEPT;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tracing::warn;
 
 /// Raw, typed form of the JSON output given by performing a GET request on [`Status::URL`](Status::URL).
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,14 +46,36 @@ pub struct Status {
 impl Status {
     /// The URL where the JSON is found from.
     pub const URL_X86_64: &'static str = "https://archlinux.org/mirrors/status/json";
+    /// This is an alternative mirrorlist json -> since archlinux.org is down sometimes
+    pub const URL_X86_64_ALT: &'static str =
+        "https://arjixwastaken.github.io/arch-mirrorlist-mirror/mirrors.json";
 
     /// Get the status from [`Status::URL`](Self::URL).
     pub async fn get_from_default_url(target_platform: Platform) -> anyhow::Result<Self> {
         match target_platform {
             Platform::X86_64 => {
-                (|| async { Self::get_from_url(Self::URL_X86_64, target_platform).await })
-                    .retry(FibonacciBuilder::default())
-                    .await
+                let result = (|| async {
+                    // fetch original archlinux.org mirrorlist
+                    Self::get_from_url(Self::URL_X86_64, target_platform).await
+                })
+                .retry(FibonacciBuilder::default().with_max_times(2))
+                .await;
+                match result {
+                    Ok(v) => Ok(v),
+                    Err(_) => {
+                        warn!(
+                            "<{}> timed out! Using alternative mirrorlist URL: {}",
+                            Self::URL_X86_64,
+                            Self::URL_X86_64_ALT
+                        );
+                        (|| async {
+                            // fetch alternative archlinux mirrorlist
+                            Self::get_from_url(Self::URL_X86_64_ALT, target_platform).await
+                        })
+                        .retry(FibonacciBuilder::default().with_max_times(4))
+                        .await
+                    }
+                }
             }
             Platform::Aarch64 => bail!("Aarch64 rank mirroring not supported"),
             Platform::Armv7h => bail!("ARM32 rank mirroring not supported"),
