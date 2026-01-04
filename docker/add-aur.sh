@@ -68,7 +68,9 @@ mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
 # get helper pkgbuild
-sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
+#sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
+# use paru instead of paru-bin until their alpm dependency problem is solved
+sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru.git"
 
 # make helper
 sudo -u "${AUR_USER}" -D~//paru-bin bash -c "makepkg -s --noprogressbar --noconfirm --needed"
