@@ -1,4 +1,4 @@
-FROM archlinux/archlinux:latest
+FROM ogarcia/archlinux:latest
 ARG TARGETPLATFORM
 ENV TARGETPLATFORM=${TARGETPLATFORM}
 
