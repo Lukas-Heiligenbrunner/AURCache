@@ -73,14 +73,14 @@ install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru.git"
 
 # make helper
-sudo -u "${AUR_USER}" -D~//paru-bin bash -c "makepkg -s --noprogressbar --noconfirm --needed"
+sudo -u "${AUR_USER}" -D~//paru bash -c "makepkg -s --noprogressbar --noconfirm --needed"
 
 # install helper
 pacman --upgrade --needed --noconfirm --noprogressbar "${NEW_PKGDEST}"/*.pkg.*
 
 # cleanup
 sudo rm -rf "${NEW_PKGDEST}"/*
-rm -rf "${AUR_USER_HOME}/paru-bin"
+rm -rf "${AUR_USER_HOME}/paru"
 rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
 
