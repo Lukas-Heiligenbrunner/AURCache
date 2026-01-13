@@ -16,7 +16,7 @@ class SettingsEntry<T> {
 
   factory SettingsEntry.fromJson(
     Map<String, dynamic> json,
-    T Function(dynamic? json) fromJsonT,
+    T Function(dynamic json) fromJsonT,
   ) => _$SettingsEntryFromJson(json, fromJsonT);
   Map<String, dynamic> toJson(dynamic Function(T value) toJsonT) =>
       _$SettingsEntryToJson(this, toJsonT);

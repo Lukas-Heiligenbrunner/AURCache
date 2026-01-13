@@ -1,13 +1,9 @@
-import 'package:aurcache/components/activity_table.dart';
-import 'package:aurcache/models/activity.dart';
-import 'package:aurcache/providers/activity_log.dart';
 import 'package:aurcache/providers/settings.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_settings_ui/flutter_settings_ui.dart';
 
 import '../components/api/api_builder.dart';
-import '../constants/color_constants.dart';
 import '../models/settings.dart';
 
 class SettingsScreen extends StatelessWidget {
