@@ -37,7 +37,7 @@ dependencies:
   cupertino_icons: 1.0.8
   fl_chart: ^1.1.1
   flutter_svg: ^2.2.3
-  google_fonts: ^6.3.3
+  google_fonts: 7.0.2
   dio: ^5.9.0
   go_router: 17.0.1
   flutter_tags_x: 1.1.0
