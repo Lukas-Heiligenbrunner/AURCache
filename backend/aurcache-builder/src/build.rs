@@ -64,8 +64,8 @@ impl Builder {
     }
 
     pub async fn build(&mut self) -> anyhow::Result<()> {
-        debug!("Preparing build #{:?}", self.build_model);
-        debug!("Preparing build #{}", self.build_model.id.get()?);
+        debug!(model = ?self.build_model);
+        info!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
         let builder_image: SettingsEntry<String> = ApplicationSettings::get(
@@ -84,14 +84,14 @@ impl Builder {
         }
         let builder_image = builder_image.value;
 
-        debug!(
+        info!(
             "Build #{}: Repull builder image",
             self.build_model.id.get()?
         );
         self.repull_image(builder_image.as_str(), target_platform.clone())
             .await?;
 
-        debug!(
+        info!(
             "Build #{}: Creating build container",
             self.build_model.id.get()?
         );
@@ -118,7 +118,7 @@ impl Builder {
         });
 
         // start build container
-        debug!(
+        info!(
             "Build #{}: starting build container",
             self.build_model.id.get()?
         );
@@ -148,17 +148,17 @@ impl Builder {
         let job_timeout = Duration::from_secs(job_timeout);
         debug!("job_timeout: {} sec", job_timeout.as_secs());
         self.wait_container_exit(&id, job_timeout).await?;
-        debug!("Build #{id}: docker container exited successfully");
+        info!("Build #{id}: docker container exited successfully");
 
         // move built tar.gz archives to host and repo-add
-        debug!(
+        info!(
             "Build {}: Move built packages to repo",
             self.build_model.id.get()?
         );
         self.move_and_add_pkgs(host_active_build_path.clone())
             .await?;
         // remove active build dir
-        debug!(
+        info!(
             "Build {}: Remove shared build folder",
             self.build_model.id.get()?
         );
@@ -275,7 +275,6 @@ impl Builder {
     }
 
     pub async fn prepare_build(&mut self) -> anyhow::Result<String> {
-        println!("build_model: {:?}", self.build_model);
         // set build status to building
         self.build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
         self.build_model.start_time = Set(Some(

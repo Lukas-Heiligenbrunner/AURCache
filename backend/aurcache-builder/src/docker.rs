@@ -140,7 +140,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         // create new docker container for current build
         let build_dir_base = "/var/cache/makepkg/pkg";
         let host_build_path_docker = match get_build_mode() {
-            BuildMode::DinD(cfg) => cfg.aurcache_build_path,
+            BuildMode::DinD(cfg) => cfg.build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
         let mountpoints = vec![format!("{}:{}", host_build_path_docker, build_dir_base)];

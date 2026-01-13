@@ -12,13 +12,16 @@ pub struct HostBuildconfig {
     pub mirrorlist_path_host: String,
     pub mirrorlist_path_aurcache: String,
 
+    /// dir on docker host
     pub build_artifact_dir_host: String,
+    /// dir inside aurcache
+    pub build_artifact_dir_aurcache: String,
 }
 
 pub struct DinDBuildconfig {
     pub mirrorlist_path: String,
     /// package build path in aurcache container
-    pub aurcache_build_path: String,
+    pub build_path: String,
 }
 
 #[must_use]
@@ -27,7 +30,7 @@ pub fn get_build_mode() -> BuildMode {
 
     if let Ok(v) = env::var("BUILD_ARTIFACT_DIR") {
         let mut build_artifact_dir_aurcache = current_dir;
-        build_artifact_dir_aurcache.push("../../builds");
+        build_artifact_dir_aurcache.push("builds");
 
         let build_artifact_dir_host = v.clone();
         let mirrorlist_path_aurcache = format!(
@@ -50,6 +53,7 @@ pub fn get_build_mode() -> BuildMode {
             mirrorlist_path_host,
             mirrorlist_path_aurcache,
             build_artifact_dir_host,
+            build_artifact_dir_aurcache: build_artifact_dir_aurcache.display().to_string(),
         };
         BuildMode::Host(cfg)
     } else {
@@ -69,12 +73,12 @@ pub fn get_build_mode() -> BuildMode {
 
         // in dind mode packages are stored to ./builds/ by default
         let mut aurcache_build_path = current_dir;
-        aurcache_build_path.push("../../builds");
+        aurcache_build_path.push("builds");
         create_config_dir(aurcache_build_path.display().to_string());
 
         let cfg = DinDBuildconfig {
             mirrorlist_path,
-            aurcache_build_path: aurcache_build_path.display().to_string(),
+            build_path: aurcache_build_path.display().to_string(),
         };
         BuildMode::DinD(cfg)
     }
