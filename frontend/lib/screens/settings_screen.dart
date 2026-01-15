@@ -1,3 +1,4 @@
+import 'package:aurcache/components/settings_item.dart';
 import 'package:aurcache/providers/settings.dart';
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import '../models/settings.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -59,18 +61,22 @@ class SettingsScreen extends StatelessWidget {
         SettingsSection(
           title: Text('General'),
           tiles: [
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.update),
-              title: Text('Version check interval'),
-              description: Text('How often to check for new AUR/Git Versions?'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.schedule),
-              title: Text('Auto update schedule'),
-              description: Text('When to trigger auto-updates?'),
-            ),
+            SettingsItem(
+              title: 'Version check interval',
+              description:
+                  'How often to check for new AUR/Git Versions? (in Seconds)',
+              icon: Icons.update,
+              envOverwritten: settings.version_check_interval.env_forced,
+              value: settings.version_check_interval.value.toString(),
+            ).asCustomSettingstile(),
+            SettingsItem(
+              title: 'Auto update schedule',
+              description: 'When to trigger auto-updates?',
+              icon: Icons.schedule,
+              isNullable: true,
+              envOverwritten: settings.auto_update_interval.env_forced,
+              value: settings.auto_update_interval.value?.toString(),
+            ).asCustomSettingstile(),
           ],
         ),
         SettingsSection(
@@ -82,122 +88,50 @@ class SettingsScreen extends StatelessWidget {
               title: Text('Config Files'),
               trailing: Icon(Icons.chevron_right),
             ),
-            _renderSettingsTile(
-                  'CPU Limit',
-                  'µCPUs to use for each build',
-                  Icons.speed,
-                  settings.cpu_limit.env_forced,
-                  settings.cpu_limit.value.toString(),
-                )
-                as AbstractSettingsTile,
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.speed),
-              title: Text('CPU Limit'),
-              value: Text(settings.cpu_limit.value.toString()),
-              description: Text('µCPUs to use for each build'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.memory),
-              title: Text('Memory Limit'),
-              description: Text('Maximum memory each build is allowed to use'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.timer),
-              title: Text('Job Timeout'),
-              description: Text(
-                'Maxiumum amount of time a build is allowed to take',
-              ),
-            ),
+            SettingsItem(
+              title: 'CPU Limit',
+              description: 'µCPUs to use for each build',
+              icon: Icons.speed,
+              envOverwritten: settings.cpu_limit.env_forced,
+              value: settings.cpu_limit.value.toString(),
+            ).asCustomSettingstile(),
+            SettingsItem(
+              title: 'Memory Limit',
+              description: 'Maximum memory each build is allowed to use',
+              icon: Icons.memory,
+              envOverwritten: settings.memory_limit.env_forced,
+              value: settings.memory_limit.value.toString(),
+            ).asCustomSettingstile(),
+            SettingsItem(
+              title: 'Job concurrency',
+              description: 'Maxiumum build jobs allowed in parallel',
+              icon: Icons.device_hub,
+              envOverwritten: settings.max_concurrent_builds.env_forced,
+              value: settings.max_concurrent_builds.value.toString(),
+            ).asCustomSettingstile(),
+            SettingsItem(
+              title: 'Job Timeout',
+              description:
+                  'Maxiumum amount of time a build is allowed to take (in seconds)',
+              icon: Icons.timer,
+              envOverwritten: settings.job_timeout.env_forced,
+              value: settings.job_timeout.value.toString(),
+            ).asCustomSettingstile(),
           ],
         ),
         SettingsSection(
           title: Text('Advanced Settings'),
           tiles: [
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.image),
-              title: Text('Builder Image'),
-              description: Text(
-                'Use a custom builder image (change with care)',
-              ),
-            ),
-          ],
-        ),
-        SettingsSection(
-          title: Text('Authentication'),
-          tiles: [
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.link),
-              title: Text('Auth URI'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.credit_card_outlined),
-              title: Text('Token URI'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.redo),
-              title: Text('Redirect URI'),
-              description: Text(
-                'Oauth redirect URI back to AURCache (https://yourdomain/api/auth)',
-              ),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.person),
-              title: Text('Userinfo URI'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.badge),
-              title: Text('Client ID'),
-            ),
-            SettingsTile.navigation(
-              onPressed: (_) {},
-              leading: Icon(Icons.key),
-              title: Text('Client Secret'),
-              value: Text(
-                "Already set by Environment variable!",
-                style: TextStyle(color: Colors.red),
-              ),
-              enabled: false,
-            ),
+            SettingsItem(
+              value: settings.builder_image.value.toString(),
+              title: 'Builder Image',
+              icon: Icons.image,
+              envOverwritten: settings.builder_image.env_forced,
+              description: 'Use a custom builder image',
+            ).asCustomSettingstile(),
           ],
         ),
       ],
-    );
-  }
-
-  Widget _renderSettingsTile(
-    String title,
-    String? description,
-    IconData icon,
-    bool envOverwritten,
-    String value,
-  ) {
-    return SettingsTile.navigation(
-      onPressed: (_) {},
-      leading: Icon(icon),
-      title: Text(title),
-      description: description != null ? Text(description) : null,
-      value: envOverwritten
-          ? Row(
-              children: [
-                Text(
-                  "Already set by Environment variable!",
-                  style: TextStyle(color: Colors.red),
-                ),
-                SizedBox(width: 25),
-                Text(value),
-              ],
-            )
-          : Text(value),
-      enabled: !envOverwritten,
     );
   }
 }
