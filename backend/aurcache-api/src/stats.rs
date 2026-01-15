@@ -6,10 +6,10 @@ use rocket::serde::json::Json;
 
 use crate::models::authenticated::Authenticated;
 use crate::models::stats::{GraphDataPoint, ListStats, UserInfo};
-use aurcache_builder::types::BuildStates;
 use aurcache_db::builds;
 use aurcache_db::helpers::dbtype::database_type;
 use aurcache_db::prelude::{Builds, Packages};
+use aurcache_types::builder::BuildStates;
 use aurcache_utils::utils::dir_size::dir_size;
 use rocket::{State, get};
 use sea_orm::prelude::BigDecimal;

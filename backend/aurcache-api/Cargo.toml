@@ -16,7 +16,7 @@ aur-rs = {workspace = true}
 
 rocket = "0.5.1"
 rocket_oauth2 = "0.5.0"
-utoipa = { version = "5.4.0", features = ["rocket_extras"] }
+utoipa = { workspace = true }
 utoipa-redoc = { version = "6.0.0", features = ["rocket"] }
 utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
 rust-embed = "8.9.0"
@@ -29,6 +29,7 @@ aurcache-builder = {path = "../aurcache-builder"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-utils = {path = "../aurcache-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
+aurcache-types = {path = "../aurcache-types"}
 
 [features]
 default = []
