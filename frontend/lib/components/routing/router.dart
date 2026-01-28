@@ -9,6 +9,8 @@ import 'package:aurcache/screens/packages_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../screens/settings_screen.dart';
+
 final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
 final GlobalKey<NavigatorState> _shellNavigatorKey =
     GlobalKey<NavigatorState>();
@@ -43,6 +45,12 @@ final appRouter = GoRouter(
           path: '/activities',
           builder: (context, state) {
             return ActivityScreen();
+          },
+        ),
+        GoRoute(
+          path: '/settings',
+          builder: (context, state) {
+            return SettingsScreen();
           },
         ),
         GoRoute(
