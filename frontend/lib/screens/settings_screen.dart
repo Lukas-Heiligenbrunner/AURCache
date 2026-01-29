@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_settings_ui/flutter_settings_ui.dart';
+import 'package:toastification/toastification.dart';
 
 import '../components/api/api_builder.dart';
 import '../models/settings.dart';
@@ -18,19 +19,7 @@ class SettingsScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
       appBar: AppBar(
-        title: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text("Settings"),
-            Padding(
-              padding: const EdgeInsets.only(right: 32),
-              child: Text(
-                "Settings saved!",
-                style: TextStyle(fontSize: 14, color: Colors.green.shade700),
-              ),
-            ),
-          ],
-        ),
+        title: const Text("Settings"),
         leading: context.mobile
             ? IconButton(
                 icon: const Icon(Icons.menu),
@@ -84,9 +73,10 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(
+                final success = await API.patchSettings(
                   version_check_interval: int.tryParse(v!),
                 );
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -107,9 +97,10 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(
+                final success = await API.patchSettings(
                   auto_update_interval: v == null ? null : int.tryParse(v),
                 );
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -140,7 +131,8 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(cpu_limit: v);
+                final success = await API.patchSettings(cpu_limit: v);
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -160,7 +152,8 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(memory_limit: v);
+                final success = await API.patchSettings(memory_limit: v);
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -180,9 +173,10 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(
+                final success = await API.patchSettings(
                   max_concurrent_builds: int.tryParse(v!),
                 );
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -203,7 +197,8 @@ class SettingsScreen extends ConsumerWidget {
                 return null;
               },
               onChanged: (v) async {
-                await API.patchSettings(job_timeout: v);
+                final success = await API.patchSettings(job_timeout: v);
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -219,9 +214,8 @@ class SettingsScreen extends ConsumerWidget {
               envOverwritten: settings.builder_image.env_forced,
               description: 'Use a custom builder image',
               onChanged: (v) async {
-                print("stuff");
-                print(v);
-                await API.patchSettings(builder_image: v);
+                final success = await API.patchSettings(builder_image: v);
+                _showToast(success);
                 ref.invalidate(getSettingsProvider);
               },
             ).asCustomSettingstile(),
@@ -229,5 +223,21 @@ class SettingsScreen extends ConsumerWidget {
         ),
       ],
     );
+  }
+
+  void _showToast(bool success) {
+    if (success) {
+      toastification.show(
+        title: Text('Settings saved!'),
+        autoCloseDuration: const Duration(seconds: 5),
+        type: ToastificationType.success,
+      );
+    } else {
+      toastification.show(
+        title: Text('Failed to save settings!'),
+        autoCloseDuration: const Duration(seconds: 5),
+        type: ToastificationType.error,
+      );
+    }
   }
 }
