@@ -19,7 +19,12 @@ pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
 
 # repopulate keychain
 pacman-key --init
-pacman-key --populate archlinux
+
+if [ -f /usr/share/pacman/keyrings/archlinuxarm.gpg ]; then
+    pacman-key --populate archlinuxarm
+else
+    pacman-key --populate archlinux
+fi
 
 cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
 # uncomment all mirrors
@@ -28,7 +33,7 @@ sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git rust || echo "Nothing to do"
 
 # create the user
 AUR_USER_HOME="/var/${AUR_USER}"
@@ -67,20 +72,54 @@ FPP=$(dirname "${FOREIGN_PKG}")
 mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
+# arm build doesn't work for some reason: use -bin versrion
+if [ "${TARGETARCH}" = "arm" ]; then
+  HELPER_PKG="paru-bin"
+else
+  HELPER_PKG="paru"
+fi
+
 # get helper pkgbuild
-sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
+#sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
+# use paru instead of paru-bin until their alpm dependency problem is solved
+sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/${HELPER_PKG}.git"
+
+# ---- PATCH FOR RISCV64 ----
+if [ "${TARGETARCH}" = "riscv64" ]; then
+  echo "Patching paru PKGBUILD to allow riscv64"
+  sudo -u "${AUR_USER}" -D~ bash -c "
+    cd ${HELPER_PKG}
+    sed -i 's/^arch=(/arch=(\"riscv64\" /' PKGBUILD
+  "
+
+  # Allow installing unsigned local packages (must be root)
+  grep -q '^LocalFileSigLevel' /etc/pacman.conf || \
+    echo 'LocalFileSigLevel = Optional' >> /etc/pacman.conf
+fi
+# ---------------------------
 
 # make helper
-sudo -u "${AUR_USER}" -D~//paru-bin bash -c "makepkg -s --noprogressbar --noconfirm --needed"
+sudo -u "${AUR_USER}" -D~//${HELPER_PKG} bash -c "makepkg -s --noprogressbar --noconfirm --needed"
 
 # install helper
 pacman --upgrade --needed --noconfirm --noprogressbar "${NEW_PKGDEST}"/*.pkg.*
 
+# Remove all pacman caches
+pacman -Scc --noconfirm || echo "Pacman cache already clean"
+
+# Remove orphaned packages (installed as dependencies but no longer needed)
+pacman -Rns --noconfirm $(pacman -Qtdq) || echo "No orphaned packages to remove"
+
+# remove previously installed packages
+pacman -Rns --noconfirm rust || echo "Build dependencies already removed"
+
 # cleanup
 sudo rm -rf "${NEW_PKGDEST}"/*
-rm -rf "${AUR_USER_HOME}/paru-bin"
+rm -rf "${AUR_USER_HOME}/${HELPER_PKG}"
 rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
+rm -rf /tmp/*
+rm -rf /root/.cargo /usr/share/cargo || true
+rm -rf /var/tmp/* /var/cache/* || true
 
-# chuck deps
-pacman -Rns --noconfirm $(pacman -Qtdq) || echo "Nothing to remove"
+echo "Cleanup complete"
