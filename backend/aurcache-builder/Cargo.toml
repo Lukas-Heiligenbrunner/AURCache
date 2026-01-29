@@ -13,9 +13,9 @@ tar = {workspace = true}
 tempfile = {workspace = true}
 
 git2 = "0.20.3"
-bollard = "0.19.4"
+bollard = "0.20.0"
 futures = "0.3.31"
-tokio-util ={version = "0.7.17", features = ["io"]}
+tokio-util ={version = "0.7.18", features = ["io"]}
 
 aurcache-db = {path = "../aurcache-db"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}

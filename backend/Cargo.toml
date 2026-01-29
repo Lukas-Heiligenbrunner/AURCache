@@ -13,21 +13,21 @@ members = [
 ]
 
 [workspace.dependencies]
-tokio = "1.48.0"
+tokio = "1.49.0"
 anyhow = "1.0.100"
-reqwest = "0.12.28"
+reqwest = "0.13.1"
 tracing = "0.1.44"
-chrono = "0.4.42"
+chrono = "0.4.43"
 serde = "1.0.228"
 backon = "1.6.0"
-serde_json = "1.0.148"
+serde_json = "1.0.149"
 sea-orm = { version = "1.1.19", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.14.0"
 aur-rs = "0.1.1"
-flate2 = "1.1.5"
+flate2 = "1.1.8"
 tar = "0.4.44"
 tempfile = "3.24.0"
-alpm-srcinfo = "0.6.1"
+alpm-srcinfo = "0.6.2"
 
 [profile.release]
 strip = "debuginfo"  # Automatically strip symbols from the binary.
