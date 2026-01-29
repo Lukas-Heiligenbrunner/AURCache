@@ -108,7 +108,7 @@ pub async fn package_update_entity_endpoint(
         name: input.name.clone().map_or(NotSet, Set),
         status: input.status.map_or(NotSet, Set),
         out_of_date: input.out_of_date.map_or(NotSet, Set),
-        upstream_version: input.upstream_version.clone().map_or(NotSet, Set),
+        upstream_version: NotSet,
         latest_build: input.latest_build.map_or(NotSet, Set),
         build_flags: input
             .build_flags

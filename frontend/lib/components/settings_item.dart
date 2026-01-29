@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_settings_ui/flutter_settings_ui.dart';
 
 class SettingsItem extends StatelessWidget {
@@ -11,6 +12,9 @@ class SettingsItem extends StatelessWidget {
     required this.value,
     this.isNullable = false,
     this.onChanged,
+    this.validator,
+    this.keyboardType = TextInputType.text,
+    this.inputFormatters,
   });
 
   final String title;
@@ -20,6 +24,10 @@ class SettingsItem extends StatelessWidget {
   final String? value;
   final bool isNullable;
   final ValueChanged<String?>? onChanged;
+
+  final String? Function(String?)? validator;
+  final TextInputType keyboardType;
+  final List<TextInputFormatter>? inputFormatters;
 
   @override
   Widget build(BuildContext context) {
@@ -31,10 +39,7 @@ class SettingsItem extends StatelessWidget {
       value: _buildValue(),
       onPressed: (_) async {
         final result = await _showEditDialog(context);
-        if (result != null || isNullable) {
-          // todo doing an api call here or outside on settingspage depends on api call arch
-          onChanged?.call(result);
-        }
+        onChanged?.call(result);
       },
     );
   }
@@ -58,6 +63,7 @@ class SettingsItem extends StatelessWidget {
   Future<String?> _showEditDialog(BuildContext context) async {
     final controller = TextEditingController(text: value ?? "");
     bool enabled = value != null;
+    String? errorText;
 
     return showDialog<String?>(
       context: context,
@@ -65,6 +71,18 @@ class SettingsItem extends StatelessWidget {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setState) {
+            void validate() {
+              if (validator != null) {
+                errorText = validator!(
+                  isNullable && !enabled ? null : controller.text,
+                );
+              } else {
+                errorText = null;
+              }
+            }
+
+            validate();
+
             return AlertDialog(
               title: Text(title),
               content: Column(
@@ -90,9 +108,13 @@ class SettingsItem extends StatelessWidget {
                   TextField(
                     controller: controller,
                     enabled: !envOverwritten && (!isNullable || enabled),
-                    decoration: const InputDecoration(
+                    keyboardType: keyboardType,
+                    inputFormatters: inputFormatters,
+                    onChanged: (_) => setState(validate),
+                    decoration: InputDecoration(
                       labelText: "Value",
-                      border: OutlineInputBorder(),
+                      border: const OutlineInputBorder(),
+                      errorText: errorText,
                     ),
                   ),
                 ],
@@ -103,11 +125,15 @@ class SettingsItem extends StatelessWidget {
                   child: const Text("Cancel"),
                 ),
                 ElevatedButton(
-                  onPressed: () {
-                    Navigator.of(
-                      context,
-                    ).pop(isNullable && !enabled ? null : controller.text);
-                  },
+                  onPressed: errorText == null || (!enabled)
+                      ? (() {
+                          Navigator.of(context).pop(
+                            (!enabled || controller.text == "")
+                                ? null
+                                : controller.text,
+                          );
+                        })
+                      : null,
                   child: const Text("Save"),
                 ),
               ],

@@ -39,7 +39,7 @@ pub async fn settings(
             ("pkgid", description = "Id of package")
     )
 )]
-#[patch("/setting/<pkgid>", data = "<input>")]
+#[patch("/settings/<pkgid>", data = "<input>")]
 pub async fn setting_update_package(
     db: &State<DatabaseConnection>,
     input: Json<ApplicationSettingsPatch>,
@@ -63,7 +63,7 @@ pub async fn setting_update_package(
 
     )
 )]
-#[patch("/setting", data = "<input>")]
+#[patch("/settings", data = "<input>")]
 pub async fn setting_update(
     db: &State<DatabaseConnection>,
     input: Json<ApplicationSettingsPatch>,
