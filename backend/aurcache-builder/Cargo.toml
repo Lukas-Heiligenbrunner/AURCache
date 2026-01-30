@@ -12,10 +12,11 @@ flate2 = {workspace = true}
 tar = {workspace = true}
 tempfile = {workspace = true}
 
-git2 = "0.20.3"
 bollard = "0.20.0"
 futures = "0.3.31"
 tokio-util ={version = "0.7.18", features = ["io"]}
 
 aurcache-db = {path = "../aurcache-db"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}
+aurcache-utils = {path = "../aurcache-utils"}
+aurcache-types = {path = "../aurcache-types"}

@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use tokio::fs;
 
 use aurcache_builder::build_mode::{BuildMode, get_build_mode};
-use aurcache_builder::types::BuildStates;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::BuildStates;
 use pacman_mirrors::benchmark::Bench;
 use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;

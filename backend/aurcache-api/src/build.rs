@@ -5,9 +5,9 @@ use rocket::{State, delete, get, post};
 
 use crate::models::authenticated::Authenticated;
 use crate::models::builds::ListBuildsModel;
-use aurcache_builder::types::{Action, BuildStates};
 use aurcache_db::prelude::Builds;
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::{Action, BuildStates};
 use aurcache_utils::package::update::update_platform;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, JoinType, ModelTrait, Order,

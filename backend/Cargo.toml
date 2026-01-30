@@ -9,8 +9,8 @@ members = [
     "aurcache-api",
     "aurcache-activitylog",
     "aurcache-utils",
-    "aurcache-scheduler"
-]
+    "aurcache-scheduler",
+    "aurcache-types"]
 
 [workspace.dependencies]
 tokio = "1.49.0"
@@ -26,6 +26,7 @@ itertools = "0.14.0"
 aur-rs = "0.1.1"
 flate2 = "1.1.8"
 tar = "0.4.44"
+utoipa = { version = "5.4.0", features = ["rocket_extras"] }
 tempfile = "3.24.0"
 alpm-srcinfo = "0.6.2"
 

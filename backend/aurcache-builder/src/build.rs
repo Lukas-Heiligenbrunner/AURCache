@@ -1,12 +1,13 @@
-use crate::env::job_timeout_from_env;
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
-use crate::types::BuildStates;
-use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{builds, files, packages, packages_files};
+use aurcache_types::builder::BuildStates;
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
@@ -17,15 +18,13 @@ use sea_orm::{
     ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
 };
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{env, fs};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
-
-static BUILDER_IMAGE_DEFAULT: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
@@ -69,13 +68,21 @@ impl Builder {
         info!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
-        let builder_image = match env::var("BUILDER_IMAGE") {
-            Ok(v) => {
-                info!("Using non-default Builder image: {v}");
-                v
-            }
-            Err(_) => BUILDER_IMAGE_DEFAULT.to_string(),
-        };
+        let builder_image: SettingsEntry<String> = ApplicationSettings::get(
+            Setting::BuilderImage,
+            Some(*self.package_model.id.get()?),
+            &self.db,
+        )
+        .await;
+
+        if !builder_image.default {
+            info!(
+                "Build #{}: Builder Image overwritten by user to: {}",
+                self.build_model.id.get()?,
+                builder_image.value
+            );
+        }
+        let builder_image = builder_image.value;
 
         info!(
             "Build #{}: Repull builder image",
@@ -130,7 +137,17 @@ impl Builder {
             "Build #{}: awaiting build container to exit",
             self.build_model.id.get()?
         );
-        self.wait_container_exit(&id).await?;
+
+        let job_timeout: u64 = ApplicationSettings::get(
+            Setting::JobTimeout,
+            Some(*self.package_model.id.get()?),
+            &self.db,
+        )
+        .await
+        .value;
+        let job_timeout = Duration::from_secs(job_timeout);
+        debug!("job_timeout: {} sec", job_timeout.as_secs());
+        self.wait_container_exit(&id, job_timeout).await?;
         info!("Build #{id}: docker container exited successfully");
 
         // move built tar.gz archives to host and repo-add
@@ -149,9 +166,13 @@ impl Builder {
         Ok(())
     }
 
-    async fn wait_container_exit(&self, container_id: &str) -> anyhow::Result<()> {
+    async fn wait_container_exit(
+        &self,
+        container_id: &str,
+        job_timeout: Duration,
+    ) -> anyhow::Result<()> {
         let build_result = timeout(
-            job_timeout_from_env(),
+            job_timeout,
             self.docker
                 .wait_container(
                     container_id,

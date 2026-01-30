@@ -329,6 +329,7 @@ dependencies = [
  "aurcache-builder",
  "aurcache-db",
  "aurcache-scheduler",
+ "aurcache-types",
  "dotenvy",
  "openssl",
  "pacman-mirrors",
@@ -360,6 +361,7 @@ dependencies = [
  "aurcache-activitylog",
  "aurcache-builder",
  "aurcache-db",
+ "aurcache-types",
  "aurcache-utils",
  "bigdecimal",
  "chrono",
@@ -384,10 +386,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "aurcache-db",
+ "aurcache-types",
+ "aurcache-utils",
  "bollard",
  "flate2",
  "futures",
- "git2",
  "itertools",
  "pacman-repo-utils",
  "sea-orm",
@@ -420,6 +423,7 @@ dependencies = [
  "aur-rs",
  "aurcache-builder",
  "aurcache-db",
+ "aurcache-types",
  "aurcache-utils",
  "chrono",
  "cron",
@@ -431,6 +435,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-types"
+version = "0.1.0"
+dependencies = [
+ "aurcache-db",
+ "serde",
+ "utoipa",
+]
+
+[[package]]
 name = "aurcache-utils"
 version = "0.0.0"
 dependencies = [
@@ -438,11 +451,14 @@ dependencies = [
  "anyhow",
  "aur-rs",
  "aurcache-activitylog",
- "aurcache-builder",
  "aurcache-db",
+ "aurcache-types",
  "backon",
+ "git2",
  "pacman-mirrors",
+ "pacman-repo-utils",
  "sea-orm",
+ "serde",
  "tempfile",
  "tokio",
  "tracing",
@@ -2367,9 +2383,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.22"
+version = "1.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b70e7a7df205e92a1a4cd9aaae7898dac0aa555503cc0a649494d0d60e7651d"
+checksum = "15d118bbf3771060e7311cc7bb0545b01d08a8b4a7de949198dec1fa0ca1c0f7"
 dependencies = [
  "cc",
  "libc",
