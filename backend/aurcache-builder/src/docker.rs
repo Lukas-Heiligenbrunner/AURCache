@@ -121,6 +121,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                     Some(RemoveImageOptions {
                         force: true,
                         noprune: false,
+                        platforms: None,
                     }),
                     None,
                 )
