@@ -12,9 +12,9 @@ flate2 = {workspace = true}
 tar = {workspace = true}
 tempfile = {workspace = true}
 
-git2 = "0.20.3"
-bollard = "0.20.0"
-futures = "0.3.31"
+git2 = "0.20.4"
+bollard = "0.20.1"
+futures = "0.3.32"
 tokio-util ={version = "0.7.18", features = ["io"]}
 
 aurcache-db = {path = "../aurcache-db"}
