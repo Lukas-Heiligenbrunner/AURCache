@@ -2,22 +2,16 @@ use crate::env::job_timeout_from_env;
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
 use crate::types::BuildStates;
-use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::prelude::{Files, PackagesFiles};
-use aurcache_db::{builds, files, packages, packages_files};
+use aurcache_db::{builds, packages};
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, JoinType,
-    ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
@@ -267,93 +261,5 @@ impl Builder {
 
         let target_platform = format!("linux/{}", self.build_model.platform.get()?);
         Ok(target_platform)
-    }
-
-    /// move built files from build container to host and add them to the repo
-    async fn move_and_add_pkgs(&self, host_build_path: PathBuf) -> anyhow::Result<()> {
-        let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
-        if archive_paths.is_empty() {
-            bail!("No files found in build directory");
-        }
-
-        // remove old files from repo and from direcotry
-        // remove files assosicated with package
-        let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
-            .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
-            .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
-            .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
-            .select_also(files::Entity)
-            .all(&self.db)
-            .await?;
-
-        self.logger
-            .append(format!(
-                "Copy {} files from build dir to repo\nDeleting {} old files\n",
-                archive_paths.len(),
-                old_files.len()
-            ))
-            .await;
-
-        let txn = self.db.begin().await?;
-        for (pkg_file, file) in old_files {
-            pkg_file.delete(&txn).await?;
-
-            if let Some(file) = file {
-                try_remove_archive_file(file, &txn).await?;
-            }
-        }
-
-        for archive in archive_paths {
-            let archive = archive?;
-            let archive_name = archive
-                .file_name()
-                .to_str()
-                .ok_or(anyhow!("Failed to get string from filename"))?
-                .to_string();
-            let pkg_path = format!(
-                "./repo/{}/{}",
-                self.build_model.platform.get()?,
-                archive_name
-            );
-            // copy archive to repo, overwrite if file with same name exists
-            fs::copy(archive.path(), pkg_path.clone())?;
-            // remove old file from shared path
-            fs::remove_file(archive.path())?;
-
-            let file = match Files::find()
-                .filter(files::Column::Filename.eq(archive_name.clone()))
-                .one(&txn)
-                .await?
-            {
-                None => {
-                    let file = files::ActiveModel {
-                        filename: Set(archive_name.clone()),
-                        platform: Set(self.build_model.platform.get()?.clone()),
-                        ..Default::default()
-                    };
-                    file.save(&txn).await?
-                }
-                Some(file) => files::ActiveModel::from(file),
-            };
-
-            let package_file = packages_files::ActiveModel {
-                file_id: file.id,
-                package_id: Set(*self.package_model.id.get()?),
-                ..Default::default()
-            };
-            package_file.save(&txn).await?;
-
-            pacman_repo_utils::repo_add::repo_add(
-                pkg_path.as_str(),
-                format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
-                format!(
-                    "./repo/{}/repo.files.tar.gz",
-                    self.build_model.platform.get()?
-                ),
-            )?;
-            info!("Successfully added '{archive_name}' to the repo archive");
-        }
-        txn.commit().await?;
-        Ok(())
     }
 }
