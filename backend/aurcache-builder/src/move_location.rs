@@ -1,8 +1,9 @@
 use crate::build::Builder;
+use crate::logger::BuildLogger;
 use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::prelude::PackagesFiles;
+use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{files, packages_files};
 use sea_orm::ColumnTrait;
 use sea_orm::ModelTrait;
@@ -57,16 +58,29 @@ impl Builder {
                 archive_name
             );
 
+            self.logger
+                .append(format!("Move {} to repo directory\n", parsed.filename))
+                .await;
+
             fs::copy(archive_path.path(), &pkg_path)?;
             fs::remove_file(archive_path.path())?;
 
-            let file = files::ActiveModel {
-                filename: Set(archive_name.clone()),
-                platform: Set(self.build_model.platform.get()?.clone()),
-                ..Default::default()
-            }
-            .save(&txn)
-            .await?;
+            // reuse file if it already exists
+            let file = match Files::find()
+                .filter(files::Column::Filename.eq(archive_name.clone()))
+                .one(&txn)
+                .await?
+            {
+                None => {
+                    let file = files::ActiveModel {
+                        filename: Set(archive_name.clone()),
+                        platform: Set(self.build_model.platform.get()?.clone()),
+                        ..Default::default()
+                    };
+                    file.save(&txn).await?
+                }
+                Some(file) => files::ActiveModel::from(file),
+            };
 
             PackagesFiles::insert(packages_files::ActiveModel {
                 file_id: file.id.clone(),
@@ -78,6 +92,12 @@ impl Builder {
 
             new_file_ids.insert(parsed.name.clone(), file.id.unwrap());
 
+            self.logger
+                .append(format!(
+                    "Add {} to repo.db.tar.gz and repo.files.tar.gz\n",
+                    parsed.filename
+                ))
+                .await;
             pacman_repo_utils::repo_add::repo_add(
                 &pkg_path,
                 format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
@@ -99,15 +119,36 @@ impl Builder {
             match (dependents.is_empty(), new_file_ids.get(&parsed.name)) {
                 // nobody else needs it
                 (true, _) => {
+                    self.logger
+                        .append(format!(
+                            "Remove old {} from Repo and alpm database\n",
+                            file.filename
+                        ))
+                        .await;
                     pkg_file.delete(&txn).await?;
                     try_remove_archive_file(file, &txn).await?;
                 }
 
                 // others need it, but we provide replacement
                 (false, Some(&new_file_id)) => {
-                    repoint_dependents(&txn, file.id, new_file_id, *self.package_model.id.get()?)
-                        .await?;
+                    self.logger
+                        .append(format!("Other packages depend on {}\n", file.filename))
+                        .await;
+                    repoint_dependents(
+                        &txn,
+                        &self.logger,
+                        file.id,
+                        new_file_id,
+                        *self.package_model.id.get()?,
+                    )
+                    .await?;
 
+                    self.logger
+                        .append(format!(
+                            "Remove {} from Repo and alpm database\n",
+                            file.filename
+                        ))
+                        .await;
                     pkg_file.delete(&txn).await?;
                     try_remove_archive_file(file, &txn).await?;
                 }
@@ -120,6 +161,11 @@ impl Builder {
         }
 
         txn.commit().await?;
+
+        self.logger
+            .append("Successfully added package and its dependencies to the repo\n".to_string())
+            .await;
+
         Ok(())
     }
 }
@@ -179,11 +225,18 @@ async fn dependent_packages(
 
 async fn repoint_dependents(
     txn: &sea_orm::DatabaseTransaction,
+    logger: &BuildLogger,
     old_file_id: i32,
     new_file_id: i32,
     current_pkg_id: i32,
 ) -> anyhow::Result<()> {
     let deps = dependent_packages(txn, old_file_id, current_pkg_id).await?;
+    logger
+        .append(format!(
+            "Repointing {} dependents to updated package\n",
+            deps.len()
+        ))
+        .await;
 
     for dep in deps {
         let mut active = packages_files::ActiveModel::from(dep);
