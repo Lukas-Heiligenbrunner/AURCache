@@ -111,8 +111,17 @@ impl Builder {
         // HANDLE OLD FILES
         for (pkg_file, file) in old_files {
             let Some(file) = file else { continue };
-            let parsed = parse_arch_pkg(&file.filename)?;
 
+            // Check if we just added this exact file_id in the previous step
+            let is_currently_used_by_new_build = new_file_ids.values().any(|&id| id == file.id);
+
+            if is_currently_used_by_new_build {
+                // If the new build is using this file_id, we MUST NOT delete the file.
+                // We only need to remove the OLD association (pkg_file record) if it's different from the new one
+                continue;
+            }
+
+            let parsed = parse_arch_pkg(&file.filename)?;
             let dependents =
                 dependent_packages(&txn, file.id, *self.package_model.id.get()?).await?;
 
