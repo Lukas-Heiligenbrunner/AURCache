@@ -7,6 +7,7 @@ use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{files, packages_files};
 use sea_orm::ColumnTrait;
 use sea_orm::ModelTrait;
+use sea_orm::PaginatorTrait;
 use sea_orm::QueryFilter;
 use sea_orm::QuerySelect;
 use sea_orm::{ActiveModelTrait, EntityTrait, JoinType, RelationTrait, Set, TransactionTrait};
@@ -37,14 +38,6 @@ impl Builder {
 
         let build_pkgs = build_output_map(archive_paths)?;
         let txn = self.db.begin().await?;
-
-        let old_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
-            .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
-            .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
-            .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
-            .select_also(files::Entity)
-            .all(&txn)
-            .await?;
 
         // ADD NEW FILES FIRST
         let mut new_file_ids = std::collections::HashMap::new();
@@ -90,7 +83,8 @@ impl Builder {
             .exec(&txn)
             .await?;
 
-            new_file_ids.insert(parsed.name.clone(), file.id.unwrap());
+            let new_file_id = file.id.clone().unwrap();
+            new_file_ids.insert(parsed.name.clone(), new_file_id);
 
             self.logger
                 .append(format!(
@@ -106,75 +100,96 @@ impl Builder {
                     self.build_model.platform.get()?
                 ),
             )?;
-        }
 
-        // HANDLE OLD FILES
-        for (pkg_file, file) in old_files {
-            let Some(file) = file else { continue };
-
-            // Check if we just added this exact file_id in the previous step
-            let is_currently_used_by_new_build = new_file_ids.values().any(|&id| id == file.id);
-
-            if is_currently_used_by_new_build {
-                // If the new build is using this file_id, we MUST NOT delete the file.
-                // We only need to remove the OLD association (pkg_file record) if it's different from the new one
-                continue;
-            }
-
-            let parsed = parse_arch_pkg(&file.filename)?;
-            let dependents =
-                dependent_packages(&txn, file.id, *self.package_model.id.get()?).await?;
-
-            match (dependents.is_empty(), new_file_ids.get(&parsed.name)) {
-                // nobody else needs it
-                (true, _) => {
-                    self.logger
-                        .append(format!(
-                            "Remove old {} from Repo and alpm database\n",
-                            file.filename
-                        ))
-                        .await;
-                    pkg_file.delete(&txn).await?;
-                    try_remove_archive_file(file, &txn).await?;
-                }
-
-                // others need it, but we provide replacement
-                (false, Some(&new_file_id)) => {
-                    self.logger
-                        .append(format!("Other packages depend on {}\n", file.filename))
-                        .await;
+            // handle other package depending on an older version of this new package
+            let older_versions = Files::find()
+                .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
+                .filter(files::Column::Filename.starts_with(format!("{}-", parsed.name)))
+                .filter(files::Column::Id.ne(new_file_id))
+                .all(&txn)
+                .await?;
+            for old_v in older_versions {
+                if let Ok(old_p) = parse_arch_pkg(&old_v.filename)
+                    && old_p.name == parsed.name
+                {
+                    // repoint OTHER packages to this new version
                     repoint_dependents(
                         &txn,
                         &self.logger,
-                        file.id,
+                        old_v.id,
                         new_file_id,
                         *self.package_model.id.get()?,
                     )
                     .await?;
 
+                    // remove the link between our current package and the OLD version
+                    packages_files::Entity::delete_many()
+                        .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
+                        .filter(packages_files::Column::FileId.eq(old_v.id))
+                        .exec(&txn)
+                        .await?;
+
+                    // if no one else is using the old version, delete it from DB and Disk
+                    let usage_count = PackagesFiles::find()
+                        .filter(packages_files::Column::FileId.eq(old_v.id))
+                        .count(&txn)
+                        .await?;
+
+                    if usage_count == 0 {
+                        self.logger
+                            .append(format!(
+                                "Removing orphaned old version: {}\n",
+                                old_v.filename
+                            ))
+                            .await;
+                        try_remove_archive_file(old_v, &txn).await?;
+                    }
+                }
+            }
+        }
+
+        // handle dropped subpackages
+        // fetch old associations NOW to ensure we see what's left after the name-based cleanup
+        let remaining_old_files: Vec<(packages_files::Model, Option<files::Model>)> =
+            PackagesFiles::find()
+                .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
+                .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
+                .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
+                .select_also(files::Entity)
+                .all(&txn)
+                .await?;
+
+        for (pkg_file, file) in remaining_old_files {
+            let Some(file) = file else { continue };
+
+            // If this file was NOT one of the ones we just built, it means the
+            // PKGBUILD no longer produces this sub-package.
+            if !new_file_ids.values().any(|&id| id == file.id) {
+                let dependents =
+                    dependent_packages(&txn, file.id, *self.package_model.id.get()?).await?;
+
+                if dependents.is_empty() {
+                    self.logger
+                        .append(format!("Removing dropped sub-package: {}\n", file.filename))
+                        .await;
+                    pkg_file.delete(&txn).await?;
+                    try_remove_archive_file(file, &txn).await?;
+                } else {
                     self.logger
                         .append(format!(
-                            "Remove {} from Repo and alpm database\n",
+                            "Keeping dropped sub-package {} (other dependents exist)\n",
                             file.filename
                         ))
                         .await;
                     pkg_file.delete(&txn).await?;
-                    try_remove_archive_file(file, &txn).await?;
-                }
-
-                // others need it, no replacement -> keep
-                (false, None) => {
-                    // do nothing
                 }
             }
         }
 
         txn.commit().await?;
-
         self.logger
-            .append("Successfully added package and its dependencies to the repo\n".to_string())
+            .append("Successfully updated repo and cleaned up old files\n".to_string())
             .await;
-
         Ok(())
     }
 }
