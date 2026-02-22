@@ -1,7 +1,7 @@
 ARG TARGET_ARCH=linux/amd64
 ARG LATEST_COMMIT_SHA=dev
 
-FROM --platform=linux/amd64 registry.gitlab.com/polycule_client/flutter-dockerimages:3.38.1-web AS frontend_builder
+FROM --platform=linux/amd64 registry.gitlab.com/polycule_client/flutter-dockerimages:3.41.2-web AS frontend_builder
 WORKDIR /app
 
 COPY frontend /app
