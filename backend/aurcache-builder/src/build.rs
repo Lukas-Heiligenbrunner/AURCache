@@ -1,27 +1,19 @@
-use crate::env::job_timeout_from_env;
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
-use crate::types::BuildStates;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::prelude::{Files, PackagesFiles};
-use aurcache_db::{builds, files, packages, packages_files};
+use aurcache_db::{builds, packages};
 use aurcache_types::builder::BuildStates;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use aurcache_utils::settings::general::SettingsTraits;
-use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, JoinType,
-    ModelTrait, QueryFilter, QuerySelect, RelationTrait, Set, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
