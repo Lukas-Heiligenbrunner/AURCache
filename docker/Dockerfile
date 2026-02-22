@@ -11,7 +11,7 @@ RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
 RUN flutter build web --release --wasm --dart-define APP_VERSION=$(grep '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
 
-FROM --platform=linux/amd64 rust:1.93.0 AS builder
+FROM --platform=linux/amd64 rust:1.93.1 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies

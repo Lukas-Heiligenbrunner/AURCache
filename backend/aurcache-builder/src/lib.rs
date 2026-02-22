@@ -5,6 +5,7 @@ mod docker;
 pub mod init;
 mod logger;
 mod makepkg_utils;
+mod move_location;
 mod path_utils;
 mod queue;
 pub mod utils;
