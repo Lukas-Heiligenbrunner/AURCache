@@ -36,11 +36,9 @@ CREATE TABLE public.settings
     id SERIAL PRIMARY KEY,
     key TEXT NOT NULL,
     value TEXT,
-    pkg_id INTEGER NOT NULL,               -- global settings use -1
-    CONSTRAINT settings_packages_fk        -- optional foreign key, can point to packages table
-        FOREIGN KEY (pkg_id)
-        REFERENCES packages(id),
-    CONSTRAINT settings_unique_per_pkg     -- full UNIQUE constraint on (pkg_id, key)
+    pkg_id INTEGER NOT NULL,
+    -- should actually be foreign key -> but drops errors if null
+    CONSTRAINT settings_unique_per_pkg
         UNIQUE (pkg_id, key)
 );
 ",
