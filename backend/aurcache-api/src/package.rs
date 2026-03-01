@@ -7,11 +7,11 @@ use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
 use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
-use aurcache_builder::types::Action;
 use aurcache_db::activities::ActivityType;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_types::builder::Action;
 use aurcache_utils::aur::api::get_package_info;
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::delete::package_delete;
@@ -108,7 +108,7 @@ pub async fn package_update_entity_endpoint(
         name: input.name.clone().map_or(NotSet, Set),
         status: input.status.map_or(NotSet, Set),
         out_of_date: input.out_of_date.map_or(NotSet, Set),
-        upstream_version: input.upstream_version.clone().map_or(NotSet, Set),
+        upstream_version: NotSet,
         latest_build: input.latest_build.map_or(NotSet, Set),
         build_flags: input
             .build_flags
