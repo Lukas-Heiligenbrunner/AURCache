@@ -1,7 +1,8 @@
 use crate::models::authenticated::Authenticated;
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use crate::models::package::{
-    AurPackage, ExtendedPackageModel, GitPackage, PackageSource, SimplePackageModel,
+    AurNotFoundPackage, AurPackage, ExtendedPackageModel, GitPackage, PackageSource,
+    SimplePackageModel,
 };
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
@@ -307,28 +308,35 @@ pub async fn get_package(
         SourceData::Aur { .. } => {
             let aur_info = get_package_info(&pkg.name)
                 .await
-                .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?
-                .ok_or(Custom(Status::NotFound, "Package not found".to_string()))?;
+                .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
-            let aur_url = format!(
-                "https://aur.archlinux.org/packages/{}",
-                aur_info.package_base
-            );
+            match aur_info {
+                None => (
+                    PackageSource::AurNotFound(AurNotFoundPackage {}),
+                    pkg.upstream_version.unwrap_or_default(),
+                ),
+                Some(aur_info) => {
+                    let aur_url = format!(
+                        "https://aur.archlinux.org/packages/{}",
+                        aur_info.package_base
+                    );
 
-            (
-                PackageSource::Aur(AurPackage {
-                    name: pkg.name.clone(),
-                    project_url: aur_info.url,
-                    description: aur_info.description,
-                    last_updated: aur_info.last_modified,
-                    first_submitted: aur_info.first_submitted,
-                    licenses: aur_info.license.map(|l| l.join(", ")),
-                    maintainer: aur_info.maintainer,
-                    aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
-                    aur_url,
-                }),
-                aur_info.version,
-            )
+                    (
+                        PackageSource::Aur(AurPackage {
+                            name: pkg.name.clone(),
+                            project_url: aur_info.url,
+                            description: aur_info.description,
+                            last_updated: aur_info.last_modified,
+                            first_submitted: aur_info.first_submitted,
+                            licenses: aur_info.license.map(|l| l.join(", ")),
+                            maintainer: aur_info.maintainer,
+                            aur_flagged_outdated: aur_info.out_of_date.unwrap_or(0) != 0,
+                            aur_url,
+                        }),
+                        aur_info.version,
+                    )
+                }
+            }
         }
         SourceData::Git {
             subfolder,
