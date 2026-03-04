@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.dependencies]
-tokio = "1.49.0"
+tokio = "1.50.0"
 anyhow = "1.0.102"
 reqwest = "0.13.2"
 tracing = "0.1.44"
