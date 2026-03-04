@@ -49,6 +49,8 @@ sealed class ExtendedPackage with _$ExtendedPackage {
 @Freezed(unionKey: 'package_type', unionValueCase: FreezedUnionCase.pascal)
 sealed class PackageSource with _$PackageSource {
   const factory PackageSource.aur(AurPackage aur) = Aur;
+  const factory PackageSource.aurNotFound(AurNotFoundPackage aurNotFound) =
+      AurNotFound;
   const factory PackageSource.git(GitPackage git) = Git;
   const factory PackageSource.upload(UploadPackage upload) = Upload;
 
@@ -57,6 +59,8 @@ sealed class PackageSource with _$PackageSource {
     switch (type) {
       case 'Aur':
         return PackageSource.aur(AurPackage.fromJson(json));
+      case 'AurNotFound':
+        return PackageSource.aurNotFound(AurNotFoundPackage.fromJson(json));
       case 'Git':
         return PackageSource.git(GitPackage.fromJson(json));
       case 'Upload':
@@ -103,4 +107,12 @@ sealed class UploadPackage with _$UploadPackage {
 
   factory UploadPackage.fromJson(Map<String, dynamic> json) =>
       _$UploadPackageFromJson(json);
+}
+
+@freezed
+sealed class AurNotFoundPackage with _$AurNotFoundPackage {
+  const factory AurNotFoundPackage() = _AurNotFoundPackage;
+
+  factory AurNotFoundPackage.fromJson(Map<String, dynamic> json) =>
+      _$AurNotFoundPackageFromJson(json);
 }
