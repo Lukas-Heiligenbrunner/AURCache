@@ -1,0 +1,37 @@
+services:
+  registry:
+    image: registry:2
+    ports:
+      - "5000:5000"
+    environment:
+      - REGISTRY_HTTP_ADDR=0.0.0.0:5000
+    networks:
+      aurcache_network:
+
+  aurcache:
+    build:
+        context: .
+        dockerfile: docker/Dockerfile
+    ports:
+      - "${AURCACHE_PORT:-8080}:8080"
+      - "${AURCACHE_MIRROR_PORT:-8081}:8081"
+    environment:
+      - LOG_LEVEL=debug
+      - BUILDER_IMAGE=localhost:5000/aurcache-builder:test
+      - BUILD_ARTIFACT_DIR=${TEMP_DIR}/builds
+    volumes:
+      - ${TEMP_DIR}/db:/app/db
+      - ${TEMP_DIR}/repo:/app/repo
+      - ${TEMP_DIR}/builds:/app/builds
+      - ${TEMP_DIR}/config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    privileged: true
+    networks:
+      aurcache_network:
+    depends_on:
+      - registry
+
+
+networks:
+  aurcache_network:
+    driver: bridge

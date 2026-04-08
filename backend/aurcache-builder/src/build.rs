@@ -1,4 +1,4 @@
-use crate::env::job_timeout_from_env;
+use crate::env::{builder_image_from_env, job_timeout_from_env};
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
 use crate::types::BuildStates;
@@ -12,14 +12,12 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{env, fs};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
-
-static BUILDER_IMAGE_DEFAULT: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
@@ -63,13 +61,7 @@ impl Builder {
         info!("Preparing build #{}", self.build_model.id.get()?);
         let target_platform = self.prepare_build().await?;
 
-        let builder_image = match env::var("BUILDER_IMAGE") {
-            Ok(v) => {
-                info!("Using non-default Builder image: {v}");
-                v
-            }
-            Err(_) => BUILDER_IMAGE_DEFAULT.to_string(),
-        };
+        let builder_image = builder_image_from_env();
 
         info!(
             "Build #{}: Repull builder image",
@@ -84,7 +76,7 @@ impl Builder {
         );
 
         let pkgname = self.package_model.name.get()?;
-        let host_active_build_path = create_active_build_path(pkgname.clone())?;
+        let host_active_build_path = create_active_build_path(pkgname)?;
 
         let create_info = self
             .create_build_container(target_platform, builder_image.as_str())
@@ -139,7 +131,7 @@ impl Builder {
             "Build {}: Remove shared build folder",
             self.build_model.id.get()?
         );
-        fs::remove_dir(host_active_build_path)?;
+        fs::remove_dir_all(host_active_build_path)?;
         Ok(())
     }
 

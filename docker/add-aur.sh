@@ -14,7 +14,7 @@ if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
 fi
 
 # we're gonna need sudo to use the helper properly
-pacman -Syy --noconfirm
+pacman -Syyu --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
 
 # repopulate keychain
@@ -34,6 +34,7 @@ rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
 pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git rust || echo "Nothing to do"
+git config --global --add safe.directory '*'
 
 # create the user
 AUR_USER_HOME="/var/${AUR_USER}"
@@ -60,7 +61,7 @@ sudo -u ${AUR_USER} -D~ bash -c 'echo MAKEFLAGS="-j\$(nproc)" > .config/pacman/m
 #sudo -u ${AUR_USER} -D~ bash -c 'echo PKGEXT=".pkg.tar" >> .config/pacman/makepkg.conf'
 
 # setup storage for AUR packages built
-NEW_PKGDEST="/var/cache/makepkg/pkg"
+NEW_PKGDEST="/build"
 NPDP=$(dirname "${NEW_PKGDEST}")
 mkdir -p "${NPDP}"
 install -o "${AUR_USER}" -d "${NEW_PKGDEST}"
@@ -76,7 +77,7 @@ install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 if [ "${TARGETARCH}" = "arm" ]; then
   HELPER_PKG="paru-bin"
 else
-  HELPER_PKG="paru"
+  HELPER_PKG="paru-git"
 fi
 
 # get helper pkgbuild
