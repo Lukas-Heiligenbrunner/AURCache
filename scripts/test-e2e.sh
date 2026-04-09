@@ -161,14 +161,14 @@ validate() {
 
     # Try to install the package just like a user would.
     docker run --rm \
-        --network host \
+        --network aurcache_aurcache_network \
         archlinux:latest \
         sh -e -c '
             # First setup the repo we want to test
             cat >> /etc/pacman.conf << EOF
 [repo]
 SigLevel = Optional TrustAll
-Server = http://localhost:'${AURCACHE_MIRROR_PORT}'/\$arch
+Server = http://aurcache-aurcache-1:'${AURCACHE_MIRROR_PORT}'/\$arch
 EOF
 
             echo "Updating test container"
