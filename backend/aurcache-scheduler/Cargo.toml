@@ -18,4 +18,4 @@ aurcache-builder = {path = "../aurcache-builder"}
 aurcache-db = {path = "../aurcache-db"}
 aurcache-utils = {path = "../aurcache-utils"}
 
-cron = "0.15.0"
+cron = "0.16.0"
