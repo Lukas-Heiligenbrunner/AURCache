@@ -25,7 +25,6 @@ services:
       - ${TEMP_DIR}/builds:/app/builds
       - ${TEMP_DIR}/config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock
-    privileged: true
     networks:
       aurcache_network:
     depends_on:
