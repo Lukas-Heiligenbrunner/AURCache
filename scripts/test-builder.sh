@@ -3,11 +3,13 @@ set -e
 
 PACKAGE="${1:-hello}"
 BUILDER_IMAGE="${2:-aurcache-builder:test}"
+BUILD_FLAGS="${3--B --noconfirm --noprogressbar --color never}"
 
 docker build -f docker/builder.Dockerfile -t $BUILDER_IMAGE .
 
 TEMP_DIR=$(mktemp -d)
 BUILD_DIR="$TEMP_DIR/test_builds"
+MAKEPKG_CONF="/var/ab/.config/pacman/makepkg.conf"
 
 cleanup() {
     rm -rf "$BUILD_DIR" 2>/dev/null || true
@@ -19,14 +21,27 @@ chmod 777 "$BUILD_DIR"
 
 echo "=== Testing builder image: $BUILDER_IMAGE ==="
 echo "Building package: $PACKAGE"
+echo "Build flags: $BUILD_FLAGS"
 
 docker run --rm \
     -v "$BUILD_DIR:/build" \
     --user ab \
     "$BUILDER_IMAGE" sh -c "
         cd /build
+
+        # Write makepkg config (same as aurcache)
+        cat > $MAKEPKG_CONF << EOF
+MAKEFLAGS=-j\$(nproc)
+PKGDEST=/build
+EOF
+
+        # Run exact command that aurcache runs:
+        # 1. Self-update
+        # 2. Download PKGBUILD
+        # 3. Build package
+        paru -Syu --noconfirm --noprogressbar --color never
         paru -G $PACKAGE
-        paru -B --noconfirm --noprogressbar --color never *
+        paru $BUILD_FLAGS *
     "
 
 echo "=== Checking built package ==="
