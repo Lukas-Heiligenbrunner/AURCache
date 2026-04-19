@@ -77,7 +77,7 @@ install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 if [ "${TARGETARCH}" = "arm" ]; then
   HELPER_PKG="paru-bin"
 else
-  HELPER_PKG="paru-git"
+  HELPER_PKG="paru"
 fi
 
 # get helper pkgbuild
