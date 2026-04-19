@@ -61,5 +61,6 @@ else
     exit 1
 fi
 
-rm $TEMP_DIR -rf
+TEMP_PARENT=$(dirname "$TEMP_DIR")
+docker run --rm -v "$TEMP_PARENT:$TEMP_PARENT" archlinux bash -c " rm -rf '$TEMP_DIR' "
 echo "=== Builder test complete ==="
