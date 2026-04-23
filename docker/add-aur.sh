@@ -73,37 +73,12 @@ FPP=$(dirname "${FOREIGN_PKG}")
 mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
-# arm build doesn't work for some reason: use -bin versrion
-if [ "${TARGETARCH}" = "arm" ]; then
-  HELPER_PKG="paru-bin"
-else
-  HELPER_PKG="paru"
-fi
-
-# get helper pkgbuild
-#sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
-# use paru instead of paru-bin until their alpm dependency problem is solved
-sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/${HELPER_PKG}.git"
-
-# ---- PATCH FOR RISCV64 ----
-if [ "${TARGETARCH}" = "riscv64" ]; then
-  echo "Patching paru PKGBUILD to allow riscv64"
-  sudo -u "${AUR_USER}" -D~ bash -c "
-    cd ${HELPER_PKG}
-    sed -i 's/^arch=(/arch=(\"riscv64\" /' PKGBUILD
-  "
-
-  # Allow installing unsigned local packages (must be root)
-  grep -q '^LocalFileSigLevel' /etc/pacman.conf || \
-    echo 'LocalFileSigLevel = Optional' >> /etc/pacman.conf
-fi
-# ---------------------------
-
-# make helper
-sudo -u "${AUR_USER}" -D~//${HELPER_PKG} bash -c "makepkg -s --noprogressbar --noconfirm --needed"
-
-# install helper
-pacman --upgrade --needed --noconfirm --noprogressbar "${NEW_PKGDEST}"/*.pkg.*
+# Prepare paru helper.
+# Currently builds from source, from a fork with some fixes.
+# Eventually, we could build from upstream, from crates.io, or even install the paru package itself.
+sudo -u "${AUR_USER}" bash -c "cargo install --git https://github.com/gyscos/paru"
+cp "${AUR_USER_HOME}/.cargo/bin/paru" /usr/local/bin/
+chmod 755 /usr/local/bin/paru
 
 # Remove all pacman caches
 pacman -Scc --noconfirm || echo "Pacman cache already clean"
@@ -116,7 +91,6 @@ pacman -Rns --noconfirm rust || echo "Build dependencies already removed"
 
 # cleanup
 sudo rm -rf "${NEW_PKGDEST}"/*
-rm -rf "${AUR_USER_HOME}/${HELPER_PKG}"
 rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
 rm -rf /tmp/*
