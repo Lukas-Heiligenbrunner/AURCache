@@ -13,6 +13,9 @@ if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
   cp /etc/pacman.conf.amd64 /etc/pacman.conf
 fi
 
+# fix landlock errors in container builds
+sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+
 # we're gonna need sudo to use the helper properly
 pacman -Syyu --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
