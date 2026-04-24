@@ -13,8 +13,11 @@ if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
   cp /etc/pacman.conf.amd64 /etc/pacman.conf
 fi
 
+# fix landlock errors in container builds
+sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+
 # we're gonna need sudo to use the helper properly
-pacman -Syy --noconfirm
+pacman -Syyu --noconfirm
 pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
 
 # repopulate keychain
@@ -34,6 +37,7 @@ rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
 pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git rust || echo "Nothing to do"
+git config --global --add safe.directory '*'
 
 # create the user
 AUR_USER_HOME="/var/${AUR_USER}"
@@ -60,7 +64,7 @@ sudo -u ${AUR_USER} -D~ bash -c 'echo MAKEFLAGS="-j\$(nproc)" > .config/pacman/m
 #sudo -u ${AUR_USER} -D~ bash -c 'echo PKGEXT=".pkg.tar" >> .config/pacman/makepkg.conf'
 
 # setup storage for AUR packages built
-NEW_PKGDEST="/var/cache/makepkg/pkg"
+NEW_PKGDEST="/build"
 NPDP=$(dirname "${NEW_PKGDEST}")
 mkdir -p "${NPDP}"
 install -o "${AUR_USER}" -d "${NEW_PKGDEST}"
@@ -72,37 +76,12 @@ FPP=$(dirname "${FOREIGN_PKG}")
 mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
-# arm build doesn't work for some reason: use -bin versrion
-if [ "${TARGETARCH}" = "arm" ]; then
-  HELPER_PKG="paru-bin"
-else
-  HELPER_PKG="paru"
-fi
-
-# get helper pkgbuild
-#sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/paru-bin.git"
-# use paru instead of paru-bin until their alpm dependency problem is solved
-sudo -u "${AUR_USER}" -D~ bash -c "git clone https://aur.archlinux.org/${HELPER_PKG}.git"
-
-# ---- PATCH FOR RISCV64 ----
-if [ "${TARGETARCH}" = "riscv64" ]; then
-  echo "Patching paru PKGBUILD to allow riscv64"
-  sudo -u "${AUR_USER}" -D~ bash -c "
-    cd ${HELPER_PKG}
-    sed -i 's/^arch=(/arch=(\"riscv64\" /' PKGBUILD
-  "
-
-  # Allow installing unsigned local packages (must be root)
-  grep -q '^LocalFileSigLevel' /etc/pacman.conf || \
-    echo 'LocalFileSigLevel = Optional' >> /etc/pacman.conf
-fi
-# ---------------------------
-
-# make helper
-sudo -u "${AUR_USER}" -D~//${HELPER_PKG} bash -c "makepkg -s --noprogressbar --noconfirm --needed"
-
-# install helper
-pacman --upgrade --needed --noconfirm --noprogressbar "${NEW_PKGDEST}"/*.pkg.*
+# Prepare paru helper.
+# Currently builds from source, from a fork with some fixes.
+# Eventually, we could build from upstream, from crates.io, or even install the paru package itself.
+sudo -u "${AUR_USER}" bash -c "cargo install --git https://github.com/gyscos/paru"
+cp "${AUR_USER_HOME}/.cargo/bin/paru" /usr/local/bin/
+chmod 755 /usr/local/bin/paru
 
 # Remove all pacman caches
 pacman -Scc --noconfirm || echo "Pacman cache already clean"
@@ -115,7 +94,6 @@ pacman -Rns --noconfirm rust || echo "Build dependencies already removed"
 
 # cleanup
 sudo rm -rf "${NEW_PKGDEST}"/*
-rm -rf "${AUR_USER_HOME}/${HELPER_PKG}"
 rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf "${AUR_USER_HOME}/.cargo"
 rm -rf /tmp/*
