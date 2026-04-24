@@ -115,7 +115,11 @@ fn calc_checksums(path: &str) -> anyhow::Result<(String, String)> {
     let md5sum = format!("{:x}", md5::compute(&buffer));
     let mut hasher = Sha256::new();
     hasher.update(&buffer);
-    let sha256sum = format!("{:x}", hasher.finalize());
+    let sha256sum = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
 
     Ok((md5sum, sha256sum))
 }
