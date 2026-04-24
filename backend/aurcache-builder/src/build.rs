@@ -13,11 +13,24 @@ use futures::StreamExt;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info};
+
+struct BuildDirGuard {
+    path: PathBuf,
+    id: i32,
+}
+
+impl Drop for BuildDirGuard {
+    fn drop(&mut self) {
+        info!("Build {}: Remove shared build folder", self.id);
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
@@ -116,6 +129,12 @@ impl Builder {
             "Build #{}: awaiting build container to exit",
             self.build_model.id.get()?
         );
+        // RAII guard: clean up build dir when Builder is dropped, regardless of success/failure
+        let _guard = BuildDirGuard {
+            path: host_active_build_path.clone(),
+            id: *self.build_model.id.get()?,
+        };
+
         self.wait_container_exit(&id).await?;
         info!("Build #{id}: docker container exited successfully");
 
@@ -126,12 +145,7 @@ impl Builder {
         );
         self.move_and_add_pkgs(host_active_build_path.clone())
             .await?;
-        // remove active build dir
-        info!(
-            "Build {}: Remove shared build folder",
-            self.build_model.id.get()?
-        );
-        fs::remove_dir_all(host_active_build_path)?;
+
         Ok(())
     }
 
