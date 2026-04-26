@@ -142,9 +142,12 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             BuildMode::DinD(cfg) => cfg.build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
-        let container_build_dir = "/build/src";
-        let container_pkgdest_dir = "/build";
-        let mountpoints = vec![format!("{}/{name}:/build", host_build_dir)];
+        let container_pkgdest_dir = Path::new("/build");
+        let container_build_dir = container_pkgdest_dir.join("src");
+        let mountpoints = vec![format!(
+            "{host_build_dir}/{name}:{builder_root}",
+            builder_root = container_pkgdest_dir.display()
+        )];
 
         let mut mounts = vec![];
 
@@ -186,7 +189,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                             typ: Some(MountTypeEnum::VOLUME),
                             read_only: Some(false),
                             volume_options: Some(MountVolumeOptions {
-                                subpath: Some(format!("{}/mirrorlist", subpath)),
+                                subpath: Some(format!("{subpath}/mirrorlist")),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -204,7 +207,8 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let build_cmd = match source_data {
             SourceData::Aur { .. } => {
                 format!(
-                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -G {name} && paru {build_flags} *"
+                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -G {name} && paru {build_flags} *",
+                    container_build_dir = container_build_dir.display(),
                 )
             }
             SourceData::Git { .. } => {
