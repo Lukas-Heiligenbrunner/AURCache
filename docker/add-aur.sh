@@ -13,12 +13,18 @@ if [ "$TARGETPLATFORM" = "linux/amd64" ]; then
   cp /etc/pacman.conf.amd64 /etc/pacman.conf
 fi
 
-# fix landlock errors in container builds
-sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+# Pacman's landlock sandboxing requires kernel support.
+# When building with docker-container buildkit locally, landlock isn't available
+# and pacman fails with "switching to sandbox user 'alpm' failed".
+# In CI (GitHub Actions), landlock works so this isn't needed.
+# Use --build-arg DISABLE_SANDBOX=1 to enable this workaround.
+PACMAN_FLAGS="--noconfirm --noprogressbar"
+if [ "${DISABLE_SANDBOX:-0}" = "1" ]; then
+  PACMAN_FLAGS="$PACMAN_FLAGS --disable-sandbox"
+fi
 
-# we're gonna need sudo to use the helper properly
-pacman -Syyu --noconfirm
-pacman --sync --needed --noconfirm --noprogressbar pacman-contrib
+pacman $PACMAN_FLAGS -Syyu
+pacman $PACMAN_FLAGS --sync --needed pacman-contrib
 
 # repopulate keychain
 pacman-key --init
@@ -36,7 +42,8 @@ sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git rust || echo "Nothing to do"
+# we're gonna need sudo to use the helper properly
+pacman $PACMAN_FLAGS --sync --needed sudo base-devel git rust || echo "Nothing to do"
 git config --global --add safe.directory '*'
 
 # create the user
