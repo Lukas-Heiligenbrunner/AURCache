@@ -36,7 +36,7 @@ sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git rust || echo "Nothing to do"
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
 git config --global --add safe.directory '*'
 
 # create the user
@@ -76,28 +76,16 @@ FPP=$(dirname "${FOREIGN_PKG}")
 mkdir -p "${FPP}"
 install -o "${AUR_USER}" -d "${FOREIGN_PKG}"
 
-# Prepare paru helper.
-# Currently builds from source, from a fork with some fixes.
-# Eventually, we could build from upstream, from crates.io, or even install the paru package itself.
-sudo -u "${AUR_USER}" bash -c "cargo install --git https://github.com/gyscos/paru"
-cp "${AUR_USER_HOME}/.cargo/bin/paru" /usr/local/bin/
-chmod 755 /usr/local/bin/paru
-
 # Remove all pacman caches
 pacman -Scc --noconfirm || echo "Pacman cache already clean"
 
 # Remove orphaned packages (installed as dependencies but no longer needed)
 pacman -Rns --noconfirm $(pacman -Qtdq) || echo "No orphaned packages to remove"
 
-# remove previously installed packages
-pacman -Rns --noconfirm rust || echo "Build dependencies already removed"
-
 # cleanup
 sudo rm -rf "${NEW_PKGDEST}"/*
 rm -rf "${AUR_USER_HOME}/.cache/go-build"
-rm -rf "${AUR_USER_HOME}/.cargo"
 rm -rf /tmp/*
-rm -rf /root/.cargo /usr/share/cargo || true
 rm -rf /var/tmp/* /var/cache/* || true
 
 echo "Cleanup complete"
