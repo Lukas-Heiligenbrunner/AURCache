@@ -5,8 +5,8 @@ mod m20240907_131839_platform_buildflags;
 mod m20250213_223900_activity_log;
 mod m20251015_230000_pkg_sources;
 mod m20251106_100000_build_version;
-mod m20251204_160000_settings;
 mod m20251107_000000_build_flags_no_install;
+mod m20251204_160000_settings;
 
 pub struct Migrator;
 
