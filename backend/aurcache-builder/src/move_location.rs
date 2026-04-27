@@ -225,6 +225,9 @@ fn build_output_map(
 
     for a in archives {
         let a = a?;
+        if a.file_type()?.is_dir() {
+            continue;
+        }
         let name = a.file_name();
         let name = name.to_str().ok_or_else(|| anyhow!("Invalid filename"))?;
 

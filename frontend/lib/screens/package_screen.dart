@@ -57,27 +57,26 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                     margin: const EdgeInsets.only(left: 15),
                     child: Text(pkg.name, style: const TextStyle(fontSize: 32)),
                   ),
-                  IconButton(
-                    onPressed: () async {
-                      pkg.package_source.when(
-                        aur: (aur) async {
-                          await launchUrl(
-                            Uri.parse(aur.aur_url),
-                            webOnlyWindowName: '_blank',
-                          );
-                        },
-                        git: (git) async {
-                          await launchUrl(
-                            Uri.parse(git.git_url),
-                            webOnlyWindowName: '_blank',
-                          );
-                        },
-                        upload: (upload) {
-                          // todo do idk what
-                        },
-                      );
-                    },
-                    icon: const Icon(Icons.link),
+                  pkg.package_source.maybeWhen(
+                    aur: (aur) => IconButton(
+                      onPressed: () async {
+                        await launchUrl(
+                          Uri.parse(aur.aur_url),
+                          webOnlyWindowName: '_blank',
+                        );
+                      },
+                      icon: const Icon(Icons.link),
+                    ),
+                    git: (git) => IconButton(
+                      onPressed: () async {
+                        await launchUrl(
+                          Uri.parse(git.git_url),
+                          webOnlyWindowName: '_blank',
+                        );
+                      },
+                      icon: const Icon(Icons.link),
+                    ),
+                    orElse: () => const SizedBox.shrink(),
                   ),
                 ],
               ),
@@ -220,6 +219,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                   ),
                 ];
               },
+              aurNotFound: (_) => [],
               git: (git) => [
                 _sideCard(title: "Git Repository", subtitle: git.git_url),
                 _sideCard(title: "Git Ref", subtitle: git.git_ref),
@@ -307,6 +307,31 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
               return [const SizedBox(height: 25)];
             }
           },
+          aurNotFound: (_) => [
+            const SizedBox(height: 25),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.15),
+                border: Border.all(color: Colors.orange),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.orange),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'This package is no longer available in the AUR. '
+                      'It may have been moved to the official repositories or deleted. '
+                      'You can delete it using the button above.',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 25),
+          ],
           git: (git) {
             // todo description from git
             return [const SizedBox(height: 25)];

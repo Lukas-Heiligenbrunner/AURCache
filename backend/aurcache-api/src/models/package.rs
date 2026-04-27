@@ -55,6 +55,7 @@ pub struct ExtendedPackageModel {
 #[serde(tag = "package_type", rename_all = "PascalCase")]
 pub enum PackageSource {
     Aur(AurPackage),
+    AurNotFound(AurNotFoundPackage),
     Git(GitPackage),
     Upload(UploadPackage),
 }
@@ -69,6 +70,9 @@ pub struct GitPackage {
 // todo upload package
 #[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
 pub struct UploadPackage {}
+
+#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
+pub struct AurNotFoundPackage {}
 
 #[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
 pub struct AurPackage {

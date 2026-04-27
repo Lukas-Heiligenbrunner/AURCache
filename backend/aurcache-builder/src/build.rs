@@ -91,7 +91,7 @@ impl Builder {
         );
 
         let pkgname = self.package_model.name.get()?;
-        let host_active_build_path = create_active_build_path(pkgname.clone())?;
+        let host_active_build_path = create_active_build_path(pkgname)?;
 
         let create_info = self
             .create_build_container(target_platform, builder_image.as_str())
@@ -156,7 +156,7 @@ impl Builder {
             "Build {}: Remove shared build folder",
             self.build_model.id.get()?
         );
-        fs::remove_dir(host_active_build_path)?;
+        fs::remove_dir_all(host_active_build_path)?;
         Ok(())
     }
 
