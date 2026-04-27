@@ -1,10 +1,10 @@
 use crate::build::Builder;
 use crate::logger::BuildLogger;
-use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Files, PackagesFiles};
 use aurcache_db::{files, packages_files};
+use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use sea_orm::ColumnTrait;
 use sea_orm::ModelTrait;
 use sea_orm::PaginatorTrait;
