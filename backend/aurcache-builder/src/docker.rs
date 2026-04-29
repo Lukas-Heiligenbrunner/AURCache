@@ -213,7 +213,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             }
             SourceData::Git { .. } => {
                 format!(
-                    "chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && paru {build_flags} *"
+                    "sudo chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && paru {build_flags} ."
                 )
             }
             SourceData::Upload { .. } => {
