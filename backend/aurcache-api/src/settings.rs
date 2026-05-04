@@ -64,8 +64,7 @@ pub async fn setting_get(
     let entry = ApplicationSettings::get::<String>(setting, pkgid, db).await;
     Ok(Json(SettingResponse {
         value: entry.value,
-        env_forced: entry.env_forced,
-        default: entry.default,
+        source: entry.source,
     }))
 }
 

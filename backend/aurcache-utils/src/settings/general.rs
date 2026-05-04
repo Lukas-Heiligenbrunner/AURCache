@@ -1,7 +1,7 @@
 use crate::settings::meta::SettingsMetaTrait;
 use crate::settings::parser::ParseSetting;
 use aurcache_db::settings;
-use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
 use sea_orm::*;
 
 const GLOBAL_PKG_ID: i32 = -1;
@@ -100,8 +100,7 @@ where
     {
         return SettingsEntry {
             value: parse_or_default(&env_value, &format!("ENV {env_name}")),
-            env_forced: true,
-            default: false,
+            source: SettingSource::Env,
         };
     }
 
@@ -119,8 +118,7 @@ where
                         &v,
                         &format!("pkg setting {} pkg={}", setting.key, pid),
                     ),
-                    env_forced: false,
-                    default: false,
+                    source: SettingSource::Package,
                 };
             }
         } else {
@@ -141,8 +139,7 @@ where
     {
         return SettingsEntry {
             value: parse_or_default(&v, &format!("global setting {}", setting.key)),
-            env_forced: false,
-            default: false,
+            source: SettingSource::Global,
         };
     }
 
@@ -151,8 +148,7 @@ where
         value: T::parse_setting(setting.default)
             .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))
             .unwrap(),
-        env_forced: false,
-        default: true,
+        source: SettingSource::Default,
     }
 }
 

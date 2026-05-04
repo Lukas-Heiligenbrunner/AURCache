@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_settings_ui/flutter_settings_ui.dart';
 
+import '../models/settings.dart';
+
 enum SettingsAction { save, reset }
 
 class SettingsResult {
@@ -20,8 +22,8 @@ class SettingsItem extends StatelessWidget {
     required this.title,
     this.description,
     required this.icon,
-    required this.envOverwritten,
-    required this.isDefault,
+    required this.source,
+    this.isPackageScope = false,
     required this.value,
     this.isNullable = false,
     this.onResult,
@@ -33,8 +35,11 @@ class SettingsItem extends StatelessWidget {
   final String title;
   final String? description;
   final IconData icon;
-  final bool envOverwritten;
-  final bool isDefault;
+  final SettingSource source;
+
+  /// True when rendered on a per-package settings page. Changes the badge
+  /// labels ("inherited" vs "default") and which states show a Reset button.
+  final bool isPackageScope;
   final String? value;
   final bool isNullable;
   final SettingsResultCallback? onResult;
@@ -43,10 +48,26 @@ class SettingsItem extends StatelessWidget {
   final TextInputType keyboardType;
   final List<TextInputFormatter>? inputFormatters;
 
+  bool get _isEnvForced => source == SettingSource.env;
+
+  /// Whether this scope holds a stored override that "Reset" can clear. On
+  /// the global page that means a global row exists; on a package page it
+  /// means a package row exists. Inherited / default → no override to reset.
+  bool get _hasStoredOverride => isPackageScope
+      ? source == SettingSource.package
+      : source == SettingSource.global;
+
+  String? get _badgeLabel {
+    if (_isEnvForced) return null;
+    if (source == SettingSource.defaultSrc) return "(default)";
+    if (isPackageScope && source == SettingSource.global) return "(inherited)";
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return SettingsTile.navigation(
-      enabled: !envOverwritten,
+      enabled: !_isEnvForced,
       leading: Icon(icon),
       title: Text(title),
       description: description != null ? Text(description!) : null,
@@ -61,7 +82,7 @@ class SettingsItem extends StatelessWidget {
   }
 
   Widget _buildValue() {
-    if (envOverwritten) {
+    if (_isEnvForced) {
       return Row(
         children: [
           const Text(
@@ -75,20 +96,24 @@ class SettingsItem extends StatelessWidget {
     }
 
     final displayValue = value == null || value!.isEmpty ? "Disabled" : value!;
-    if (isDefault) {
+    final badge = _badgeLabel;
+    if (badge != null) {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(displayValue),
+          Flexible(child: Text(displayValue, overflow: TextOverflow.ellipsis)),
           const SizedBox(width: 8),
-          const Text(
-            "(default)",
-            style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+          Text(
+            badge,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontStyle: FontStyle.italic,
+            ),
           ),
         ],
       );
     }
-    return Text(displayValue);
+    return Text(displayValue, overflow: TextOverflow.ellipsis);
   }
 
   Future<SettingsResult?> _showEditDialog(BuildContext context) async {
@@ -114,6 +139,10 @@ class SettingsItem extends StatelessWidget {
 
             validate();
 
+            final resetLabel = isPackageScope
+                ? "Reset to global"
+                : "Reset to default";
+
             return AlertDialog(
               title: Text(title),
               content: Column(
@@ -129,7 +158,7 @@ class SettingsItem extends StatelessWidget {
                       contentPadding: EdgeInsets.zero,
                       title: const Text("Enabled"),
                       value: enabled,
-                      onChanged: envOverwritten
+                      onChanged: _isEnvForced
                           ? null
                           : (v) {
                               setState(() => enabled = v);
@@ -138,7 +167,7 @@ class SettingsItem extends StatelessWidget {
 
                   TextField(
                     controller: controller,
-                    enabled: !envOverwritten && (!isNullable || enabled),
+                    enabled: !_isEnvForced && (!isNullable || enabled),
                     keyboardType: keyboardType,
                     inputFormatters: inputFormatters,
                     onChanged: (_) => setState(validate),
@@ -151,11 +180,11 @@ class SettingsItem extends StatelessWidget {
                 ],
               ),
               actions: [
-                if (!isDefault)
+                if (_hasStoredOverride)
                   TextButton(
                     onPressed: () =>
                         Navigator.of(context).pop(const SettingsResult.reset()),
-                    child: const Text("Reset to default"),
+                    child: Text(resetLabel),
                   ),
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
