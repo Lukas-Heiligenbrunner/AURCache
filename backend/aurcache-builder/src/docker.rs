@@ -204,7 +204,27 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let pkg_id = *self.package_model.id.get()?;
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(&self.db, pkg_id, container_pkgdest_dir).await?;
-        let pacman_config = read_pacman_config(&self.db, pkg_id).await;
+
+        // pacman.conf override: write to the per-build dir on the aurcache
+        // side, then bind-mount as /etc/pacman.conf for the docker daemon.
+        if let Some(pacman_config) = read_pacman_config(&self.db, pkg_id).await {
+            let aurcache_build_dir = match get_build_mode() {
+                BuildMode::DinD(cfg) => cfg.build_path,
+                BuildMode::Host(cfg) => cfg.build_artifact_dir_aurcache,
+            };
+            let aurcache_pacman_path = format!("{aurcache_build_dir}/{name}/.aurcache_pacman.conf");
+            std::fs::write(&aurcache_pacman_path, &pacman_config)
+                .map_err(|e| anyhow!("Failed to write pacman.conf override: {e}"))?;
+
+            let docker_pacman_path = format!("{host_build_dir}/{name}/.aurcache_pacman.conf");
+            mounts.push(Mount {
+                target: Some("/etc/pacman.conf".to_string()),
+                source: Some(docker_pacman_path),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
 
         let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
@@ -227,15 +247,9 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         // Use a unique heredoc terminator so user config content cannot
         // accidentally close the heredoc early.
-        let mut cmd = format!(
-            "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n"
+        let cmd = format!(
+            "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n{build_cmd}"
         );
-        if let Some(pacman_config) = pacman_config {
-            cmd.push_str(&format!(
-                "sudo tee /etc/pacman.conf > /dev/null <<'__AURCACHE_PACMAN_EOF__'\n{pacman_config}\n__AURCACHE_PACMAN_EOF__\n"
-            ));
-        }
-        cmd.push_str(&build_cmd);
         info!("Build command: {build_cmd}");
 
         let cpu_limit: SettingsEntry<u64> = ApplicationSettings::get(
