@@ -3,7 +3,7 @@ set -e
 
 PACKAGE="${1:-hello}"
 BUILDER_IMAGE="${2:-aurcache-builder:test}"
-BUILD_FLAGS="${3--B --noconfirm --noprogressbar --color never}"
+BUILD_FLAGS="${3--B --noconfirm --noprogressbar --color never --pgpfetch}"
 
 docker build -f docker/builder.Dockerfile -t $BUILDER_IMAGE .
 
@@ -27,7 +27,8 @@ docker run --rm \
     -v "$BUILD_DIR:/build" \
     --user ab \
     "$BUILDER_IMAGE" sh -c "
-        cd /build
+        mkdir -p /build/src
+        cd /build/src
 
         # Write makepkg config (same as aurcache)
         cat > $MAKEPKG_CONF << EOF
