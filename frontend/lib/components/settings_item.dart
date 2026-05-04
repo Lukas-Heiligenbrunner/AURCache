@@ -2,6 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_settings_ui/flutter_settings_ui.dart';
 
+enum SettingsAction { save, reset }
+
+class SettingsResult {
+  const SettingsResult.save(this.value) : action = SettingsAction.save;
+  const SettingsResult.reset() : action = SettingsAction.reset, value = null;
+
+  final SettingsAction action;
+  final String? value;
+}
+
+typedef SettingsResultCallback = Future<void> Function(SettingsResult result);
+
 class SettingsItem extends StatelessWidget {
   const SettingsItem({
     super.key,
@@ -9,9 +21,10 @@ class SettingsItem extends StatelessWidget {
     this.description,
     required this.icon,
     required this.envOverwritten,
+    required this.isDefault,
     required this.value,
     this.isNullable = false,
-    this.onChanged,
+    this.onResult,
     this.validator,
     this.keyboardType = TextInputType.text,
     this.inputFormatters,
@@ -21,9 +34,10 @@ class SettingsItem extends StatelessWidget {
   final String? description;
   final IconData icon;
   final bool envOverwritten;
+  final bool isDefault;
   final String? value;
   final bool isNullable;
-  final ValueChanged<String?>? onChanged;
+  final SettingsResultCallback? onResult;
 
   final String? Function(String?)? validator;
   final TextInputType keyboardType;
@@ -39,7 +53,9 @@ class SettingsItem extends StatelessWidget {
       value: _buildValue(),
       onPressed: (_) async {
         final result = await _showEditDialog(context);
-        onChanged?.call(result);
+        if (result != null) {
+          await onResult?.call(result);
+        }
       },
     );
   }
@@ -57,15 +73,30 @@ class SettingsItem extends StatelessWidget {
         ],
       );
     }
-    return Text(value ?? "Disabled");
+
+    final displayValue = value == null || value!.isEmpty ? "Disabled" : value!;
+    if (isDefault) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(displayValue),
+          const SizedBox(width: 8),
+          const Text(
+            "(default)",
+            style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic),
+          ),
+        ],
+      );
+    }
+    return Text(displayValue);
   }
 
-  Future<String?> _showEditDialog(BuildContext context) async {
+  Future<SettingsResult?> _showEditDialog(BuildContext context) async {
     final controller = TextEditingController(text: value ?? "");
-    bool enabled = value != null;
+    bool enabled = value != null && value!.isNotEmpty;
     String? errorText;
 
-    return showDialog<String?>(
+    return showDialog<SettingsResult>(
       context: context,
       barrierDismissible: false,
       builder: (context) {
@@ -120,19 +151,24 @@ class SettingsItem extends StatelessWidget {
                 ],
               ),
               actions: [
+                if (!isDefault)
+                  TextButton(
+                    onPressed: () =>
+                        Navigator.of(context).pop(const SettingsResult.reset()),
+                    child: const Text("Reset to default"),
+                  ),
                 TextButton(
-                  onPressed: () => Navigator.of(context).pop(null),
+                  onPressed: () => Navigator.of(context).pop(),
                   child: const Text("Cancel"),
                 ),
                 ElevatedButton(
                   onPressed: errorText == null || (!enabled)
-                      ? (() {
-                          Navigator.of(context).pop(
-                            (!enabled || controller.text == "")
-                                ? null
-                                : controller.text,
-                          );
-                        })
+                      ? () {
+                          final raw = (!enabled || controller.text.isEmpty)
+                              ? null
+                              : controller.text;
+                          Navigator.of(context).pop(SettingsResult.save(raw));
+                        }
                       : null,
                   child: const Text("Save"),
                 ),

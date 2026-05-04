@@ -1,20 +1,29 @@
 use crate::models::authenticated::Authenticated;
-use crate::models::settings::ApplicationSettingsPatch;
-use aurcache_types::settings::ApplicationSettings;
+use crate::models::settings::{SettingResponse, SettingValue};
+use aurcache_types::settings::{ApplicationSettings, Setting};
 use aurcache_utils::settings::general::SettingsTraits;
-use rocket::response::status::{BadRequest, NotFound};
+use rocket::http::Status;
+use rocket::response::status::Custom;
 use rocket::serde::json::Json;
-use rocket::{State, get, patch};
+use rocket::{State, delete, get, patch};
 use sea_orm::DatabaseConnection;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
-#[openapi(paths(settings, setting_update_package, setting_update))]
+#[openapi(paths(settings, setting_get, setting_patch, setting_reset))]
 pub struct SettingsApi;
+
+fn parse_setting(key: &str) -> Result<Setting, Custom<String>> {
+    Setting::from_key(key)
+        .ok_or_else(|| Custom(Status::NotFound, format!("Unknown setting key: {key}")))
+}
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Get all settings", body = [ApplicationSettings]),
+        (status = 200, description = "Get all settings", body = ApplicationSettings),
+    ),
+    params(
+        ("pkgid" = Option<i32>, Query, description = "Optional package id for per-package settings"),
     )
 )]
 #[get("/settings?<pkgid>")]
@@ -22,58 +31,92 @@ pub async fn settings(
     db: &State<DatabaseConnection>,
     pkgid: Option<i32>,
     _a: Authenticated,
-) -> Result<Json<ApplicationSettings>, NotFound<String>> {
+) -> Result<Json<ApplicationSettings>, Custom<String>> {
     let db = db as &DatabaseConnection;
 
     ApplicationSettings::get_all(db, pkgid)
         .await
         .map(Json)
-        .map_err(|e| NotFound(e.to_string()))
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))
+}
+
+/// Fetch a single setting (any key, including the large config-file blobs).
+#[utoipa::path(
+    responses(
+        (status = 200, description = "Get a single setting", body = SettingResponse),
+        (status = 404, description = "Unknown setting key"),
+    ),
+    params(
+        ("key" = String, Path, description = "Setting key"),
+        ("pkgid" = Option<i32>, Query, description = "Optional package id"),
+    )
+)]
+#[get("/settings/<key>?<pkgid>")]
+pub async fn setting_get(
+    db: &State<DatabaseConnection>,
+    key: &str,
+    pkgid: Option<i32>,
+    _a: Authenticated,
+) -> Result<Json<SettingResponse>, Custom<String>> {
+    let setting = parse_setting(key)?;
+    let db = db as &DatabaseConnection;
+
+    let entry = ApplicationSettings::get::<String>(setting, pkgid, db).await;
+    Ok(Json(SettingResponse {
+        value: entry.value,
+        env_forced: entry.env_forced,
+        default: entry.default,
+    }))
 }
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Update settings for specific package id"),
+        (status = 200, description = "Update a single setting"),
+        (status = 404, description = "Unknown setting key"),
     ),
     params(
-            ("pkgid", description = "Id of package")
+        ("key" = String, Path, description = "Setting key"),
+        ("pkgid" = Option<i32>, Query, description = "Optional package id"),
     )
 )]
-#[patch("/settings/<pkgid>", data = "<input>")]
-pub async fn setting_update_package(
+#[patch("/settings/<key>?<pkgid>", data = "<input>")]
+pub async fn setting_patch(
     db: &State<DatabaseConnection>,
-    input: Json<ApplicationSettingsPatch>,
-    pkgid: i32,
+    key: &str,
+    pkgid: Option<i32>,
+    input: Json<SettingValue>,
     _a: Authenticated,
-) -> Result<(), BadRequest<String>> {
+) -> Result<(), Custom<String>> {
+    let setting = parse_setting(key)?;
     let db = db as &DatabaseConnection;
 
-    let changed_settings = input.get_changed_settings(Some(pkgid));
-    ApplicationSettings::patch(db, changed_settings)
+    ApplicationSettings::patch(db, [(setting, pkgid, Some(input.value.clone()))])
         .await
-        .map(drop)
-        .map_err(|e| BadRequest(e.to_string()))
+        .map_err(|e| Custom(Status::BadRequest, e.to_string()))
 }
 
+/// Reset a setting back to its default by deleting any stored override.
 #[utoipa::path(
     responses(
-            (status = 200, description = "Update global settings"),
+        (status = 200, description = "Reset a setting to its default"),
+        (status = 404, description = "Unknown setting key"),
     ),
     params(
-
+        ("key" = String, Path, description = "Setting key"),
+        ("pkgid" = Option<i32>, Query, description = "Optional package id"),
     )
 )]
-#[patch("/settings", data = "<input>")]
-pub async fn setting_update(
+#[delete("/settings/<key>?<pkgid>")]
+pub async fn setting_reset(
     db: &State<DatabaseConnection>,
-    input: Json<ApplicationSettingsPatch>,
+    key: &str,
+    pkgid: Option<i32>,
     _a: Authenticated,
-) -> Result<(), BadRequest<String>> {
+) -> Result<(), Custom<String>> {
+    let setting = parse_setting(key)?;
     let db = db as &DatabaseConnection;
 
-    let changed_settings = input.get_changed_settings(None);
-    ApplicationSettings::patch(db, changed_settings)
+    ApplicationSettings::patch(db, [(setting, pkgid, None)])
         .await
-        .map(drop)
-        .map_err(|e| BadRequest(e.to_string()))
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))
 }

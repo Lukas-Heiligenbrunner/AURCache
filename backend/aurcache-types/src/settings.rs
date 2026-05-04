@@ -22,11 +22,11 @@ pub struct ApplicationSettings {
 #[derive(Clone)]
 pub struct SettingsMeta {
     pub key: &'static str,
-    pub env_name: &'static str,
+    pub env_name: Option<&'static str>,
     pub default: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum Setting {
     CpuLimit,
     MemoryLimit,
@@ -35,4 +35,23 @@ pub enum Setting {
     AutoUpdateInterval,
     JobTimeout,
     BuilderImage,
+    MakepkgConf,
+    PacmanConf,
+}
+
+impl Setting {
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "cpu_limit" => Some(Self::CpuLimit),
+            "memory_limit" => Some(Self::MemoryLimit),
+            "max_concurrent_builds" => Some(Self::MaxConcurrentBuilds),
+            "version_check_interval" => Some(Self::VersionCheckInterval),
+            "auto_update_interval" => Some(Self::AutoUpdateInterval),
+            "job_timeout" => Some(Self::JobTimeout),
+            "builder_image" => Some(Self::BuilderImage),
+            "makepkg_conf" => Some(Self::MakepkgConf),
+            "pacman_conf" => Some(Self::PacmanConf),
+            _ => None,
+        }
+    }
 }

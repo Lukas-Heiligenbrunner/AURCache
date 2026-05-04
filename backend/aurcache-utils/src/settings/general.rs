@@ -95,9 +95,11 @@ where
     };
 
     // ENV variable takes precedence
-    if let Ok(env_value) = std::env::var(setting.env_name) {
+    if let Some(env_name) = setting.env_name
+        && let Ok(env_value) = std::env::var(env_name)
+    {
         return SettingsEntry {
-            value: parse_or_default(&env_value, &format!("ENV {}", setting.env_name)),
+            value: parse_or_default(&env_value, &format!("ENV {env_name}")),
             env_forced: true,
             default: false,
         };

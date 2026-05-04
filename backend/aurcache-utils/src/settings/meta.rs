@@ -9,38 +9,48 @@ impl SettingsMetaTrait for Setting {
         match self {
             Setting::CpuLimit => SettingsMeta {
                 key: "cpu_limit",
-                env_name: "CPU_LIMIT",
+                env_name: Some("CPU_LIMIT"),
                 default: "0",
             },
             Setting::MemoryLimit => SettingsMeta {
                 key: "memory_limit",
-                env_name: "MEMORY_LIMIT",
+                env_name: Some("MEMORY_LIMIT"),
                 default: "-1",
             },
             Setting::MaxConcurrentBuilds => SettingsMeta {
                 key: "max_concurrent_builds",
-                env_name: "MAX_CONCURRENT_BUILDS",
+                env_name: Some("MAX_CONCURRENT_BUILDS"),
                 default: "1",
             },
             Setting::VersionCheckInterval => SettingsMeta {
                 key: "version_check_interval",
-                env_name: "VERSION_CHECK_INTERVAL",
+                env_name: Some("VERSION_CHECK_INTERVAL"),
                 default: "3600",
             },
             Setting::AutoUpdateInterval => SettingsMeta {
                 key: "auto_update_interval",
-                env_name: "AUTO_UPDATE_SCHEDULE",
+                env_name: Some("AUTO_UPDATE_SCHEDULE"),
                 default: "", // parses to None
             },
             Setting::JobTimeout => SettingsMeta {
                 key: "job_timeout",
-                env_name: "JOB_TIMEOUT",
+                env_name: Some("JOB_TIMEOUT"),
                 default: "3600",
             },
             Setting::BuilderImage => SettingsMeta {
                 key: "builder_image",
-                env_name: "BUILDER_IMAGE",
+                env_name: Some("BUILDER_IMAGE"),
                 default: "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest",
+            },
+            Setting::MakepkgConf => SettingsMeta {
+                key: "makepkg_conf",
+                env_name: None,
+                default: "",
+            },
+            Setting::PacmanConf => SettingsMeta {
+                key: "pacman_conf",
+                env_name: None,
+                default: "",
             },
         }
     }

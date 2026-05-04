@@ -1,7 +1,7 @@
 use crate::build::Builder;
 use crate::build_mode::{BuildMode, get_build_mode};
 use crate::logger::BuildLogger;
-use crate::makepkg_utils::create_makepkg_config;
+use crate::makepkg_utils::{create_makepkg_config, read_pacman_config};
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
@@ -201,7 +201,10 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             mounts.push(mnt);
         }
 
-        let (makepkg_config, makepkg_config_path) = create_makepkg_config(container_pkgdest_dir)?;
+        let pkg_id = *self.package_model.id.get()?;
+        let (makepkg_config, makepkg_config_path) =
+            create_makepkg_config(&self.db, pkg_id, container_pkgdest_dir).await?;
+        let pacman_config = read_pacman_config(&self.db, pkg_id).await;
 
         let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
@@ -222,8 +225,18 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             }
         };
 
+        // Use a unique heredoc terminator so user config content cannot
+        // accidentally close the heredoc early.
+        let mut cmd = format!(
+            "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n"
+        );
+        if let Some(pacman_config) = pacman_config {
+            cmd.push_str(&format!(
+                "sudo tee /etc/pacman.conf > /dev/null <<'__AURCACHE_PACMAN_EOF__'\n{pacman_config}\n__AURCACHE_PACMAN_EOF__\n"
+            ));
+        }
+        cmd.push_str(&build_cmd);
         info!("Build command: {build_cmd}");
-        let cmd = format!("cat <<EOF > {makepkg_config_path}\n{makepkg_config}\nEOF\n{build_cmd}");
 
         let cpu_limit: SettingsEntry<u64> = ApplicationSettings::get(
             Setting::CpuLimit,
