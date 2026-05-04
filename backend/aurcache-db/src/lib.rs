@@ -10,3 +10,4 @@ pub mod init;
 pub mod migration;
 pub mod packages;
 pub mod packages_files;
+pub mod settings;

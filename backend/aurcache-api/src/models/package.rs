@@ -22,8 +22,6 @@ pub struct PackagePatchModel {
     pub name: Option<String>,
     pub status: Option<i32>,
     pub out_of_date: Option<i32>,
-    pub version: Option<Option<String>>,
-    pub upstream_version: Option<Option<String>>,
     pub latest_build: Option<Option<i32>>,
     pub build_flags: Option<Vec<String>>,
     pub platforms: Option<Vec<String>>,

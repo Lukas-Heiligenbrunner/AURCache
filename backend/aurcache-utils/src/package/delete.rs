@@ -1,7 +1,7 @@
+use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::anyhow;
-use aurcache_builder::utils::remove_archive_file::try_remove_archive_file;
-use aurcache_db::prelude::{Builds, Packages, PackagesFiles};
-use aurcache_db::{builds, files, packages_files};
+use aurcache_db::prelude::{Builds, Packages, PackagesFiles, Settings};
+use aurcache_db::{builds, files, packages_files, settings};
 use sea_orm::{ColumnTrait, QuerySelect, RelationTrait};
 use sea_orm::{DatabaseConnection, EntityTrait, ModelTrait, TransactionTrait};
 use sea_orm::{JoinType, QueryFilter};
@@ -43,6 +43,12 @@ pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
         )
         .await?;
     }
+
+    // delete corresponding settings entries
+    Settings::delete_many()
+        .filter(settings::Column::PkgId.eq(pkg.id))
+        .exec(&txn)
+        .await?;
 
     txn.commit().await?;
 

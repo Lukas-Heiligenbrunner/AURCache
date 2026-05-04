@@ -2,12 +2,15 @@ import 'package:aurcache/screens/Package_settings_screen.dart';
 import 'package:aurcache/screens/activity_screen.dart';
 import 'package:aurcache/screens/build_screen.dart';
 import 'package:aurcache/screens/builds_screen.dart';
+import 'package:aurcache/screens/config_files_screen.dart';
 import 'package:aurcache/screens/dashboard_screen.dart';
 import 'package:aurcache/components/routing/menu_shell.dart';
 import 'package:aurcache/screens/package_screen.dart';
 import 'package:aurcache/screens/packages_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+
+import '../../screens/settings_screen.dart';
 
 final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
 final GlobalKey<NavigatorState> _shellNavigatorKey =
@@ -44,6 +47,16 @@ final appRouter = GoRouter(
           builder: (context, state) {
             return ActivityScreen();
           },
+        ),
+        GoRoute(
+          path: '/settings',
+          builder: (context, state) {
+            return SettingsScreen();
+          },
+        ),
+        GoRoute(
+          path: '/config-files',
+          builder: (context, state) => const ConfigFilesScreen(),
         ),
         GoRoute(
           path: '/package/:id',

@@ -1,5 +1,5 @@
 use aurcache_builder::build_mode::{BuildMode, get_build_mode};
-use aurcache_builder::types::Action;
+use aurcache_types::builder::Action;
 use chrono::Utc;
 use cron::Schedule;
 use pacman_mirrors::benchmark::Bench;
