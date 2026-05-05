@@ -8,6 +8,7 @@ use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
 use aurcache_types::builder::Action;
 use dotenvy::dotenv;
+use std::env;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -30,7 +31,11 @@ async fn main() {
     if let Err(e) = start_auto_update_job(db.clone(), tx.clone()) {
         warn!("auto_update job not properly configured: {e}");
     }
-    if let Err(e) = start_mirror_rank_job(db.clone(), tx.clone()) {
+
+    let mirrorlist_override =
+        env::var("MIRRORLIST_SERVERS_X86_64").is_ok_and(|s| !s.trim().is_empty());
+
+    if !mirrorlist_override && let Err(e) = start_mirror_rank_job(db.clone(), tx.clone()) {
         warn!("mirror_rank job not properly configured: {e}");
     }
     let api_handle = init_api(db, tx);

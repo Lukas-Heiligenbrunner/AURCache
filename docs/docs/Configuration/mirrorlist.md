@@ -18,6 +18,24 @@ Only **x86_64** build architecture is supported to set mirrorlist and rerank mir
 |------------------------|--------------|--------------------------------------------------------------------------------|---------------------------|
 | MIRROR_RANK_SCHEDULE                | String(CRON) | Auto mirrorlist rank schedule in cronjob syntax with seconds (null to disable) | 0 0 2 * * 0 (once a week) |
 | MIRRORLIST_PATH_X86_64                | String       | directory containing mirrorlist inside aurcache container                 | /app/config/pacman_x86_64 |
+| MIRRORLIST_SERVERS_X86_64                | String       | semicolon-separated list of mirror URLs (disables auto ranking)                 | null |
+
+## Manually set mirrorlist via env var
+
+Use `MIRRORLIST_SERVERS_X86_64` with semicolon-separated mirror URLs:
+
+```yaml
+services:
+  aurcache:
+    image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
+    environment:
+      - MIRRORLIST_SERVERS_X86_64=https://mirror.rackspace.com/archlinux/$$repo/os/$$arch;https://mirrors.kernel.org/archlinux/$$repo/os/$$arch
+    # ... rest of config
+```
+
+When this env var is set, automatic mirror ranking is disabled.
+
+## Manually set mirrorlist via file mount
 
 To enable auto mirror ranking set `MIRROR_RANK_SCHEDULE` to your desired cron schedule and it will automatically rerank the mirrors based on their download speed.
 
