@@ -1,6 +1,7 @@
 import 'package:aurcache/utils/responsive.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 
 import '../constants/color_constants.dart';
@@ -43,11 +44,7 @@ class BuildsTable extends StatelessWidget {
       cells: [
         if (context.desktop) DataCell(Text(build.id.toString())),
         if (context.desktop)
-          DataCell(
-            Text(
-              '${build.start_time.day.toString().padLeft(2, '0')}.${build.start_time.month.toString().padLeft(2, '0')}.${build.start_time.year.toString()}',
-            ),
-          ),
+          DataCell(Text(DateFormat.yMd().format(build.start_time))),
         DataCell(
           Text(build.pkg_name),
           onTap: context.mobile
