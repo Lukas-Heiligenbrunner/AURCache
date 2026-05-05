@@ -143,7 +143,7 @@ class SettingsItem extends StatelessWidget {
             validate();
 
             final resetLabel = isPackageScope
-                ? "Reset to global"
+                ? "Reset to inherited"
                 : "Reset to default";
 
             return AlertDialog(

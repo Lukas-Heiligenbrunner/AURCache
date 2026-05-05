@@ -5,6 +5,26 @@ sidebar_position: 1
 # Environment Variables
 AURCache can be configured using the following environment variables:
 
+## Settings precedence
+
+Most settings can also be set in the UI — globally on the Settings page or
+per-package on the package's Settings page. When the same setting is
+configured in multiple places, the resolution order is, from highest to
+lowest priority:
+
+1. **Per-package setting** — explicit user intent for one package always
+   wins. This lets you override an env-imposed baseline for a single
+   package (e.g. give one heavy build more memory) without touching the
+   deployment defaults.
+2. **Environment variable** — the admin's deploy-time override of the
+   global default. Locks the global Settings page tile, but does **not**
+   prevent per-package overrides.
+3. **Global setting** — UI-set baseline stored in the database.
+4. **Static default** — built-in fallback (the "Default" column below).
+
+The UI badges reflect the source: `(default)`, `(inherited)` (= global),
+`(inherited from env)`, or no badge when this scope owns the value.
+
 ## Database Configuration
 | Variable               | Type                  | Description                                                         | Default                   |
 |------------------------|-----------------------|---------------------------------------------------------------------|---------------------------|

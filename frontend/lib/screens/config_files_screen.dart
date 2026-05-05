@@ -291,7 +291,7 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
                   onPressed: () => _resetOverride(storageKey),
                   icon: const Icon(Icons.restart_alt),
                   label: Text(
-                    _isPackageScope ? 'Reset to global' : 'Reset to default',
+                    _isPackageScope ? 'Reset to inherited' : 'Reset to default',
                   ),
                 ),
               OutlinedButton.icon(
