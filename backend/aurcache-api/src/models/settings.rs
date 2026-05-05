@@ -1,3 +1,4 @@
+use aurcache_types::settings::SettingSource;
 use rocket::serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -11,6 +12,5 @@ pub struct SettingValue {
 #[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
 pub struct SettingResponse {
     pub value: String,
-    pub env_forced: bool,
-    pub default: bool,
+    pub source: SettingSource,
 }

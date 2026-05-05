@@ -1,18 +1,36 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
 part 'settings.g.dart';
 
+/// Where a setting's resolved value came from in the lookup hierarchy
+/// (matches the backend `SettingSource` enum, JSON-encoded snake_case).
+enum SettingSource {
+  @JsonValue('env')
+  env,
+
+  /// Stored on the per-package settings row.
+  @JsonValue('package')
+  package,
+
+  /// Stored on the global settings row.
+  @JsonValue('global')
+  global,
+
+  /// No row stored — using the static built-in default.
+  @JsonValue('default')
+  defaultSrc,
+}
+
 @JsonSerializable(genericArgumentFactories: true)
 class SettingsEntry<T> {
   final T value;
-  final bool env_forced;
-  @JsonKey(name: 'default')
-  final bool defaultt;
+  final SettingSource source;
 
-  SettingsEntry({
-    required this.value,
-    required this.env_forced,
-    required this.defaultt,
-  });
+  SettingsEntry({required this.value, required this.source});
+
+  bool get envForced => source == SettingSource.env;
+  bool get isDefault => source == SettingSource.defaultSrc;
+  bool get isInherited => source == SettingSource.global;
+  bool get isPackageOverride => source == SettingSource.package;
 
   factory SettingsEntry.fromJson(
     Map<String, dynamic> json,
@@ -47,18 +65,19 @@ class ApplicationSettings {
   Map<String, dynamic> toJson() => _$ApplicationSettingsToJson(this);
 }
 
+/// Single-setting fetch (per-key endpoint). Used for large blobs like
+/// makepkg.conf / pacman.conf that don't sit in the dashboard payload.
 @JsonSerializable()
 class SingleSetting {
   final String value;
-  final bool env_forced;
-  @JsonKey(name: 'default')
-  final bool defaultt;
+  final SettingSource source;
 
-  SingleSetting({
-    required this.value,
-    required this.env_forced,
-    required this.defaultt,
-  });
+  SingleSetting({required this.value, required this.source});
+
+  bool get envForced => source == SettingSource.env;
+  bool get isDefault => source == SettingSource.defaultSrc;
+  bool get isInherited => source == SettingSource.global;
+  bool get isPackageOverride => source == SettingSource.package;
 
   factory SingleSetting.fromJson(Map<String, dynamic> json) =>
       _$SingleSettingFromJson(json);

@@ -3,6 +3,7 @@ use crate::migration::Migrator;
 use anyhow::{anyhow, bail};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend};
 use sea_orm_migration::MigratorTrait;
+use std::time::Duration;
 use std::{env, fs};
 use tracing::log::LevelFilter;
 
@@ -17,14 +18,17 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
 
             let mut conn_opts = ConnectOptions::new(format!("sqlite://db/{db_name}?mode=rwc"));
             conn_opts
-                .max_connections(100)
+                .max_connections(1)
+                .min_connections(1)
+                .acquire_timeout(Duration::from_secs(30))
                 .sqlx_logging_level(LevelFilter::Trace);
             let db = Database::connect(conn_opts).await?;
             db.execute_unprepared("
-                PRAGMA journal_mode = WAL;          -- better write-concurrency
-                PRAGMA synchronous = NORMAL;        -- fsync only in critical moments
-                PRAGMA wal_autocheckpoint = 1000;   -- write WAL changes back every 1000 pages, for an in average 1MB WAL file. May affect readers if number is increased
-                PRAGMA wal_checkpoint(TRUNCATE);    -- free some space by truncating possibly massive WAL files from the last run.
+                PRAGMA journal_mode = WAL;          -- read/write concurrency; persistent on the db file
+                PRAGMA synchronous = NORMAL;        -- fsync at WAL checkpoint, not every write
+                PRAGMA busy_timeout = 5000;         -- wait up to 5s for the write lock before SQLITE_BUSY
+                PRAGMA wal_autocheckpoint = 1000;   -- checkpoint every 1000 pages (~1MB WAL)
+                PRAGMA wal_checkpoint(TRUNCATE);    -- truncate any massive WAL left by a previous run
             ").await?;
             db
         }

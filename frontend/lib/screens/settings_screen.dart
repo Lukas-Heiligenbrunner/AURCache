@@ -39,18 +39,12 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  Future<void> _apply(
-    WidgetRef ref,
-    String key,
-    SettingsResult result, {
-    String? Function(String?)? toStored,
-  }) async {
+  Future<void> _apply(WidgetRef ref, String key, SettingsResult result) async {
     bool ok;
     if (result.action == SettingsAction.reset) {
       ok = await API.resetSetting(key);
     } else {
-      final stored = toStored != null ? toStored(result.value) : result.value;
-      ok = await API.patchSetting(key, stored ?? "");
+      ok = await API.patchSetting(key, result.value ?? "");
     }
     _showToast(ok);
     ref.invalidate(getSettingsProvider);
@@ -71,20 +65,19 @@ class SettingsScreen extends ConsumerWidget {
           : null,
       sections: [
         SettingsSection(
-          title: Text('General'),
+          title: const Text('General'),
           tiles: [
             SettingsItem(
               title: 'Version check interval',
               description:
                   'How often to check for new AUR/Git versions? (in seconds)',
               icon: Icons.update,
-              envOverwritten: settings.version_check_interval.env_forced,
-              isDefault: settings.version_check_interval.defaultt,
+              source: settings.version_check_interval.source,
               value: settings.version_check_interval.value.toString(),
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               validator: (v) {
-                if (v == null || v.isEmpty) return null;
+                if (v == null || v.isEmpty) return "Required";
                 final n = int.tryParse(v);
                 if (n == null) return "Must be a number";
                 if (n < 10) return "Mind rate limits";
@@ -98,8 +91,7 @@ class SettingsScreen extends ConsumerWidget {
                   'Cron expression (with seconds) to trigger auto-updates. Disable to turn off.',
               icon: Icons.schedule,
               isNullable: true,
-              envOverwritten: settings.auto_update_interval.env_forced,
-              isDefault: settings.auto_update_interval.defaultt,
+              source: settings.auto_update_interval.source,
               value: settings.auto_update_interval.value,
               validator: (v) {
                 if (v == null) return null;
@@ -111,7 +103,7 @@ class SettingsScreen extends ConsumerWidget {
           ],
         ),
         SettingsSection(
-          title: Text('Builder'),
+          title: const Text('Builder'),
           tiles: [
             SettingsTile.navigation(
               onPressed: (_) => context.go('/config-files'),
@@ -124,36 +116,35 @@ class SettingsScreen extends ConsumerWidget {
             ),
             SettingsItem(
               title: 'CPU Limit',
-              description: 'µCPUs to use for each build',
+              description: 'µCPUs to use for each build (0 = unlimited)',
               icon: Icons.speed,
-              envOverwritten: settings.cpu_limit.env_forced,
-              isDefault: settings.cpu_limit.defaultt,
+              source: settings.cpu_limit.source,
               value: settings.cpu_limit.value.toString(),
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               validator: (v) {
-                if (v == null || v.isEmpty) return null;
+                if (v == null || v.isEmpty) return "Required";
                 final n = int.tryParse(v);
                 if (n == null) return "Must be a number";
-                if (n < 1) return "Out of range";
                 return null;
               },
               onResult: (r) => _apply(ref, 'cpu_limit', r),
             ).asCustomSettingstile(),
             SettingsItem(
               title: 'Memory Limit',
-              description: 'Maximum memory each build is allowed to use',
+              description:
+                  'Maximum memory each build is allowed to use (-1 = unlimited)',
               icon: Icons.memory,
-              envOverwritten: settings.memory_limit.env_forced,
-              isDefault: settings.memory_limit.defaultt,
+              source: settings.memory_limit.source,
               value: settings.memory_limit.value.toString(),
               keyboardType: TextInputType.number,
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(r'-?\d*')),
+              ],
               validator: (v) {
-                if (v == null || v.isEmpty) return null;
+                if (v == null || v.isEmpty) return "Required";
                 final n = int.tryParse(v);
                 if (n == null) return "Must be a number";
-                if (n < 1) return "Out of range";
                 return null;
               },
               onResult: (r) => _apply(ref, 'memory_limit', r),
@@ -162,13 +153,12 @@ class SettingsScreen extends ConsumerWidget {
               title: 'Job concurrency',
               description: 'Maximum build jobs allowed in parallel',
               icon: Icons.device_hub,
-              envOverwritten: settings.max_concurrent_builds.env_forced,
-              isDefault: settings.max_concurrent_builds.defaultt,
+              source: settings.max_concurrent_builds.source,
               value: settings.max_concurrent_builds.value.toString(),
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               validator: (v) {
-                if (v == null || v.isEmpty) return null;
+                if (v == null || v.isEmpty) return "Required";
                 final n = int.tryParse(v);
                 if (n == null) return "Must be a number";
                 if (n < 1 || n > 2048) return "Out of range";
@@ -181,13 +171,12 @@ class SettingsScreen extends ConsumerWidget {
               description:
                   'Maximum amount of time a build is allowed to take (in seconds)',
               icon: Icons.timer,
-              envOverwritten: settings.job_timeout.env_forced,
-              isDefault: settings.job_timeout.defaultt,
+              source: settings.job_timeout.source,
               value: settings.job_timeout.value.toString(),
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               validator: (v) {
-                if (v == null || v.isEmpty) return null;
+                if (v == null || v.isEmpty) return "Required";
                 final n = int.tryParse(v);
                 if (n == null) return "Must be a number";
                 if (n < 1) return "Out of range";
@@ -198,15 +187,18 @@ class SettingsScreen extends ConsumerWidget {
           ],
         ),
         SettingsSection(
-          title: Text('Advanced Settings'),
+          title: const Text('Advanced Settings'),
           tiles: [
             SettingsItem(
               value: settings.builder_image.value,
               title: 'Builder Image',
               icon: Icons.image,
-              envOverwritten: settings.builder_image.env_forced,
-              isDefault: settings.builder_image.defaultt,
+              source: settings.builder_image.source,
               description: 'Use a custom builder image',
+              validator: (v) {
+                if (v == null || v.isEmpty) return "Required";
+                return null;
+              },
               onResult: (r) => _apply(ref, 'builder_image', r),
             ).asCustomSettingstile(),
           ],
@@ -218,13 +210,13 @@ class SettingsScreen extends ConsumerWidget {
   void _showToast(bool success) {
     if (success) {
       toastification.show(
-        title: Text('Settings saved!'),
+        title: const Text('Settings saved!'),
         autoCloseDuration: const Duration(seconds: 5),
         type: ToastificationType.success,
       );
     } else {
       toastification.show(
-        title: Text('Failed to save settings!'),
+        title: const Text('Failed to save settings!'),
         autoCloseDuration: const Duration(seconds: 5),
         type: ToastificationType.error,
       );

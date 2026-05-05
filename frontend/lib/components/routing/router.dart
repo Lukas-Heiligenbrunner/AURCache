@@ -72,6 +72,13 @@ final appRouter = GoRouter(
             return Packagesettingsscreen(pkgID: id);
           },
         ),
+        GoRoute(
+          path: '/package/:id/config-files',
+          builder: (context, state) {
+            final id = int.parse(state.pathParameters['id']!);
+            return ConfigFilesScreen(pkgid: id);
+          },
+        ),
       ],
     ),
   ],

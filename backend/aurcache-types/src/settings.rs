@@ -1,11 +1,26 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// Where a setting's resolved value came from in the lookup hierarchy.
+///
+/// Resolution order (highest precedence first): `Env` → `Package` → `Global` → `Default`.
+#[derive(ToSchema, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSource {
+    /// Forced by an environment variable.
+    Env,
+    /// Stored on the per-package settings row.
+    Package,
+    /// Stored on the global settings row.
+    Global,
+    /// No row stored — using the static built-in default.
+    Default,
+}
+
 #[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]
 pub struct SettingsEntry<T> {
     pub value: T,
-    pub env_forced: bool,
-    pub default: bool,
+    pub source: SettingSource,
 }
 
 #[derive(ToSchema, Deserialize, Serialize, Clone, Debug)]

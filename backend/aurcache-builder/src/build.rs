@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::{builds, packages};
 use aurcache_types::builder::BuildStates;
-use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
 use aurcache_utils::settings::general::SettingsTraits;
 use bollard::Docker;
 use bollard::query_parameters::{
@@ -82,10 +82,11 @@ impl Builder {
         )
         .await;
 
-        if !builder_image.default {
+        if builder_image.source != SettingSource::Default {
             info!(
-                "Build #{}: Builder Image overwritten by user to: {}",
+                "Build #{}: Builder Image resolved from {:?} to: {}",
                 self.build_model.id.get()?,
+                builder_image.source,
                 builder_image.value
             );
         }
