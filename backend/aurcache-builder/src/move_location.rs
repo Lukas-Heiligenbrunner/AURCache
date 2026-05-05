@@ -231,6 +231,13 @@ fn build_output_map(
         let name = a.file_name();
         let name = name.to_str().ok_or_else(|| anyhow!("Invalid filename"))?;
 
+        // Skip dotfiles — produced packages are never hidden, and we use a
+        // dotfile (.aurcache_pacman.conf) inside the build dir as a bind
+        // source for /etc/pacman.conf.
+        if name.starts_with('.') {
+            continue;
+        }
+
         let parsed = parse_arch_pkg(name)?;
         map.push((a, parsed));
     }

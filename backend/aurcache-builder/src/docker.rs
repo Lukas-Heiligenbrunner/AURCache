@@ -230,8 +230,9 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
         let build_cmd = match source_data {
             SourceData::Aur { .. } => {
+                // -Ga forces paru to clone from AUR even when a same-named package exists in a repo
                 format!(
-                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -G {name} && paru {build_flags} *",
+                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -Ga {name} && paru {build_flags} *",
                     container_build_dir = container_build_dir.display(),
                 )
             }

@@ -132,9 +132,10 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
 
   String? _sourceBadge(SingleSetting? entry) {
     if (entry == null) return null;
-    if (entry.envForced) return 'env-forced';
+    if (entry.envForced && !_isPackageScope) return 'env-forced';
     if (entry.isDefault) return 'default';
     if (_isPackageScope && entry.isInherited) return 'inherited from global';
+    if (_isPackageScope && entry.envForced) return 'inherited from env';
     return null;
   }
 
@@ -246,7 +247,9 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
               !entry.envForced &&
               !entry.isDefault &&
               !entry.isInherited);
-    final envForced = entry?.envForced ?? false;
+    // Env locks the editor only on the global page. On a pkg page a per-pkg
+    // override beats env, so the user can still write a value here.
+    final envLocking = (entry?.envForced ?? false) && !_isPackageScope;
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -254,7 +257,7 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(hint, style: Theme.of(context).textTheme.bodySmall),
-          if (envForced) ...[
+          if (envLocking) ...[
             const SizedBox(height: 6),
             const Text(
               'Forced by environment variable — read-only.',
@@ -265,7 +268,7 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
           Expanded(
             child: TextField(
               controller: controller,
-              enabled: !envForced,
+              enabled: !envLocking,
               onChanged: (_) => onDirty(),
               maxLines: null,
               expands: true,
@@ -297,7 +300,7 @@ class _ConfigFilesScreenState extends State<ConfigFilesScreen>
                 label: const Text('Reload'),
               ),
               FilledButton.icon(
-                onPressed: envForced ? null : () => _save(storageKey),
+                onPressed: envLocking ? null : () => _save(storageKey),
                 icon: const Icon(Icons.save),
                 label: const Text('Save'),
               ),

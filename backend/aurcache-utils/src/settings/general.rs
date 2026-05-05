@@ -94,17 +94,14 @@ where
         }
     };
 
-    // ENV variable takes precedence
-    if let Some(env_name) = setting.env_name
-        && let Ok(env_value) = std::env::var(env_name)
-    {
-        return SettingsEntry {
-            value: parse_or_default(&env_value, &format!("ENV {env_name}")),
-            source: SettingSource::Env,
-        };
-    }
+    // Resolution order, highest → lowest:
+    //   1. Per-package row  — explicit user intent for one package wins
+    //                         over the deployment-wide env baseline.
+    //   2. ENV variable     — admin's deploy-time override of the global default.
+    //   3. Global row       — UI-set baseline.
+    //   4. Static default.
 
-    // pkg-specific setting
+    // 1. Per-package row
     if let Some(pid) = pkg_id {
         if let Ok(Some(pkg_entry)) = settings::Entity::find()
             .filter(settings::Column::Key.eq(setting.key))
@@ -129,7 +126,17 @@ where
         }
     }
 
-    // global setting
+    // 2. ENV variable
+    if let Some(env_name) = setting.env_name
+        && let Ok(env_value) = std::env::var(env_name)
+    {
+        return SettingsEntry {
+            value: parse_or_default(&env_value, &format!("ENV {env_name}")),
+            source: SettingSource::Env,
+        };
+    }
+
+    // 3. Global row
     if let Ok(Some(global)) = settings::Entity::find()
         .filter(settings::Column::Key.eq(setting.key))
         .filter(settings::Column::PkgId.eq(GLOBAL_PKG_ID))
@@ -143,7 +150,7 @@ where
         };
     }
 
-    // fallback default -- unwrap fine here checked value with type before
+    // 4. Static default. Unwrap is safe — meta default is type-checked.
     SettingsEntry {
         value: T::parse_setting(setting.default)
             .map_err(|e| anyhow::anyhow!("Failed to parse setting {} {e}", setting.key))

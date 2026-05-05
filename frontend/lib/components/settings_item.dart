@@ -48,7 +48,7 @@ class SettingsItem extends StatelessWidget {
   final TextInputType keyboardType;
   final List<TextInputFormatter>? inputFormatters;
 
-  bool get _isEnvForced => source == SettingSource.env;
+  bool get _isEnvLocking => source == SettingSource.env && !isPackageScope;
 
   /// Whether this scope holds a stored override that "Reset" can clear. On
   /// the global page that means a global row exists; on a package page it
@@ -58,16 +58,19 @@ class SettingsItem extends StatelessWidget {
       : source == SettingSource.global;
 
   String? get _badgeLabel {
-    if (_isEnvForced) return null;
+    if (_isEnvLocking) return null; // rendered via the red banner instead
     if (source == SettingSource.defaultSrc) return "(default)";
     if (isPackageScope && source == SettingSource.global) return "(inherited)";
+    if (isPackageScope && source == SettingSource.env) {
+      return "(inherited from env)";
+    }
     return null;
   }
 
   @override
   Widget build(BuildContext context) {
     return SettingsTile.navigation(
-      enabled: !_isEnvForced,
+      enabled: !_isEnvLocking,
       leading: Icon(icon),
       title: Text(title),
       description: description != null ? Text(description!) : null,
@@ -82,7 +85,7 @@ class SettingsItem extends StatelessWidget {
   }
 
   Widget _buildValue() {
-    if (_isEnvForced) {
+    if (_isEnvLocking) {
       return Row(
         children: [
           const Text(
@@ -158,7 +161,7 @@ class SettingsItem extends StatelessWidget {
                       contentPadding: EdgeInsets.zero,
                       title: const Text("Enabled"),
                       value: enabled,
-                      onChanged: _isEnvForced
+                      onChanged: _isEnvLocking
                           ? null
                           : (v) {
                               setState(() => enabled = v);
@@ -167,7 +170,7 @@ class SettingsItem extends StatelessWidget {
 
                   TextField(
                     controller: controller,
-                    enabled: !_isEnvForced && (!isNullable || enabled),
+                    enabled: !_isEnvLocking && (!isNullable || enabled),
                     keyboardType: keyboardType,
                     inputFormatters: inputFormatters,
                     onChanged: (_) => setState(validate),
