@@ -1,3 +1,4 @@
+use std::env;
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -94,13 +95,29 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
     };
 
-    if std::fs::metadata(format!("{mirrorlist_path}/mirrorlist")).is_err() {
+    let mirrorlist_file = format!("{mirrorlist_path}/mirrorlist");
+
+    // Check if mirrorlist servers are provided via env var (semicolon-separated)
+    // Treat an empty var the same way as an unset var.
+    if let Ok(servers) = env::var("MIRRORLIST_SERVERS_X86_64")
+        && !servers.trim().is_empty()
+    {
+        info!("Using mirrorlist from MIRRORLIST_SERVERS_X86_64 env var");
+        let mirrorlist = servers
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("Server = {s}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        fs::write(&mirrorlist_file, mirrorlist).await?;
+        info!("Wrote mirrorlist to {mirrorlist_path}");
+    } else if std::fs::metadata(&mirrorlist_file).is_err() {
         info!("Perform initial load of pacman mirrorlist");
         match pacman_mirrors::get_status(Platform::X86_64).await {
             Ok(status) => {
                 let urls = status.urls;
                 let mirrorlist = urls.gen_mirrorlist(urls.0.clone())?;
-                fs::write(format!("{mirrorlist_path}/mirrorlist"), mirrorlist).await?;
+                fs::write(&mirrorlist_file, mirrorlist).await?;
                 info!("Wrote mirrorlist to {mirrorlist_path}");
             }
             Err(e) => {
