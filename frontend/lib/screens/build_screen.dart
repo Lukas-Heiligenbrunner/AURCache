@@ -88,6 +88,7 @@ class _BuildScreenState extends ConsumerState<BuildScreen> {
                     switchSuccessIcon(buildData.status),
                     color: switchSuccessColor(buildData.status),
                   ),
+                  tooltip: statusLabel(buildData.status),
                   onPressed: () {
                     context.replace("/build/${buildData.id}");
                   },

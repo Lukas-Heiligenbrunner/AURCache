@@ -38,3 +38,18 @@ extension DurationFormatter on Duration {
     }
   }
 }
+
+extension BuildDurationFormatter on Duration {
+  String readableBuildDuration() {
+    if (inDays > 0) {
+      return '${inDays}d ${inHours % 24}h';
+    } else if (inHours > 0) {
+      return '${inHours}h ${inMinutes % 60}m';
+    } else if (inMinutes > 0) {
+      final secs = inSeconds % 60;
+      return secs > 0 ? '${inMinutes}m ${secs}s' : '${inMinutes}m';
+    } else {
+      return '${inSeconds}s';
+    }
+  }
+}

@@ -1,37 +1,26 @@
 use crate::build::Builder;
-use crate::build_mode::{BuildMode, get_build_mode};
+use crate::build_mode::{BuildMode, get_build_mode, get_repo_config};
 use crate::logger::BuildLogger;
-use crate::makepkg_utils::{create_makepkg_config, read_pacman_config};
+use crate::makepkg_utils::{create_makepkg_config, create_pacman_config};
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::packages::SourceData;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::git::checkout::checkout_repo_ref;
 use aurcache_utils::settings::general::SettingsTraits;
 use bollard::container::LogOutput;
 use bollard::models::{
-    ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
-    MountTypeEnum, MountVolumeOptions,
+    ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, EndpointSettings, HostConfig,
+    Mount, MountTypeEnum, MountVolumeOptions, NetworkingConfig,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, CreateContainerOptions, UploadToContainerOptions,
 };
 use bollard::query_parameters::{CreateImageOptions, ListImagesOptions, RemoveImageOptions};
-use bollard::{Docker, body_try_stream};
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use futures::{StreamExt, TryFutureExt};
+use bollard::{Docker, body_full};
+use futures::StreamExt;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
-use tempfile::tempdir;
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
 use tracing::{debug, info, trace};
-
-/// git repo path inside builder container in git build mode
-static GIT_REPO_PATH: &str = "/tmp";
 
 impl Builder {
     pub async fn establish_docker_connection() -> anyhow::Result<Docker> {
@@ -48,13 +37,13 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
     /// repull docker image with specified arch
     /// returns image id hash
-    pub async fn repull_image(&self, image: &str, arch: String) -> anyhow::Result<()> {
+    pub async fn repull_image(&self, image: &str, platform: String) -> anyhow::Result<()> {
         self.logger.append(format!("Pulling image: {image}")).await;
         // repull image to make sure it's up to date
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
                 from_image: Some(image.to_string()),
-                platform: arch,
+                platform,
                 ..Default::default()
             }),
             None,
@@ -132,7 +121,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
     pub async fn create_build_container(
         &self,
-        arch: String,
+        platform: String,
         image_name: &str,
     ) -> anyhow::Result<ContainerCreateResponse> {
         let name = self.package_model.name.get()?;
@@ -143,8 +132,8 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             BuildMode::DinD(cfg) => cfg.build_path,
             BuildMode::Host(cfg) => cfg.build_artifact_dir_host,
         };
-        let container_pkgdest_dir = Path::new("/build");
-        let container_build_dir = container_pkgdest_dir.join("src");
+        let container_pkgdest_dir = Path::new(crate::commands::CONTAINER_PKGDEST_DIR);
+        let container_build_dir = Path::new(crate::commands::CONTAINER_BUILD_DIR);
         let mountpoints = vec![format!(
             "{host_build_dir}/{name}:{builder_root}",
             builder_root = container_pkgdest_dir.display()
@@ -152,104 +141,31 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let mut mounts = vec![];
 
-        // todo allow for custom mirrorlists for other archs
-        if arch == "linux/x86_64" {
-            // Mount only the mirrorlist file, not the entire directory
-            // This preserves other files in /etc/pacman.d (like gnupg keyring)
-            let archlinux_mirrorlist_path = "/etc/pacman.d/mirrorlist";
-            let mnt = match get_build_mode() {
-                BuildMode::DinD(cfg) => {
-                    let mirrorlist_path = format!("{}/mirrorlist", cfg.mirrorlist_path);
-
-                    Mount {
-                        target: Some(archlinux_mirrorlist_path.to_string()),
-                        source: Some(mirrorlist_path.clone()),
-                        typ: Some(MountTypeEnum::BIND),
-                        read_only: Some(false),
-                        ..Default::default()
-                    }
-                }
-                BuildMode::Host(cfg) => {
-                    let mirrorlist_path = format!("{}/mirrorlist", cfg.mirrorlist_path_host);
-                    if mirrorlist_path.starts_with('/') {
-                        Mount {
-                            target: Some(archlinux_mirrorlist_path.to_string()),
-                            source: Some(mirrorlist_path.clone()),
-                            typ: Some(MountTypeEnum::BIND),
-                            read_only: Some(false),
-                            ..Default::default()
-                        }
-                    } else {
-                        let (volume_name, subpath) = mirrorlist_path
-                            .split_once('/')
-                            .ok_or(anyhow!("Mirrorlist path not containing '/': Invalid"))?;
-
-                        Mount {
-                            target: Some(archlinux_mirrorlist_path.to_string()),
-                            source: Some(volume_name.to_string()),
-                            typ: Some(MountTypeEnum::VOLUME),
-                            read_only: Some(false),
-                            volume_options: Some(MountVolumeOptions {
-                                subpath: Some(format!("{subpath}/mirrorlist")),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }
-                    }
-                }
-            };
+        // Mount the mirrorlist into the builder container for x86_64 builds.
+        // Startup guarantees the file exists. Non-x86_64 builds skip this block
+        // because their mirrorlist would differ.
+        if let Some(mnt) = mirrorlist_mount(&platform)? {
             mounts.push(mnt);
         }
 
         let pkg_id = *self.package_model.id.get()?;
         let (makepkg_config, makepkg_config_path) =
-            create_makepkg_config(&self.db, pkg_id, container_pkgdest_dir).await?;
+            create_makepkg_config(Some((&self.db, pkg_id)), container_pkgdest_dir).await?;
 
-        // pacman.conf override: write to the per-build dir on the aurcache
-        // side, then bind-mount as /etc/pacman.conf for the docker daemon.
-        if let Some(pacman_config) = read_pacman_config(&self.db, pkg_id).await {
-            let aurcache_build_dir = match get_build_mode() {
-                BuildMode::DinD(cfg) => cfg.build_path,
-                BuildMode::Host(cfg) => cfg.build_artifact_dir_aurcache,
-            };
-            let aurcache_pacman_path = format!("{aurcache_build_dir}/{name}/.aurcache_pacman.conf");
-            std::fs::write(&aurcache_pacman_path, &pacman_config)
-                .map_err(|e| anyhow!("Failed to write pacman.conf override: {e}"))?;
+        let repo_config = get_repo_config(&self.docker).await?;
+        let pacman_config = create_pacman_config(&self.db, pkg_id, &repo_config.url).await;
 
-            let docker_pacman_path = format!("{host_build_dir}/{name}/.aurcache_pacman.conf");
-            mounts.push(Mount {
-                target: Some("/etc/pacman.conf".to_string()),
-                source: Some(docker_pacman_path),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
+        let source_data = self.package_model.source_data.get()?;
+        let pkgbase = self.package_model.name.get()?;
 
-        let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
-        let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
-        let build_cmd = match source_data {
-            SourceData::Aur { .. } => {
-                // -Ga forces paru to clone from AUR even when a same-named package exists in a repo
-                format!(
-                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -Ga {name} && paru {build_flags} *",
-                    container_build_dir = container_build_dir.display(),
-                )
-            }
-            SourceData::Git { .. } => {
-                format!(
-                    "sudo chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && paru {build_flags} ."
-                )
-            }
-            SourceData::Upload { .. } => {
-                todo!("unpack zip and store it in build container dir")
-            }
-        };
+        let build_cmd =
+            crate::commands::build_build_command(pkgbase, &build_flags, container_build_dir);
 
-        // Use a unique heredoc terminator so user config content cannot
-        // accidentally close the heredoc early.
-        let cmd = format!(
-            "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n{build_cmd}"
+        let cmd = crate::commands::wrap_with_makepkg_config(
+            &makepkg_config,
+            &makepkg_config_path,
+            &pacman_config,
+            &build_cmd,
         );
         info!("Build command: {build_cmd}");
 
@@ -282,14 +198,28 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             attach_stderr: Some(true),
             open_stdin: Some(false),
             user: Some("ab".to_string()),
-            cmd: Some(vec!["sh".to_string(), "-lec".to_string(), cmd]),
+            cmd: Some(vec![
+                "bash".to_string(),
+                "-leco".to_string(),
+                "pipefail".to_string(),
+                cmd,
+            ]),
             host_config: Some(HostConfig {
                 auto_remove: Some(auto_remove),
                 nano_cpus: Some(cpu_limit as i64),
                 memory_swap: Some(memory_limit),
                 binds: Some(mountpoints),
                 mounts: Some(mounts),
+                network_mode: repo_config.host_network.then(|| "host".to_string()),
                 ..Default::default()
+            }),
+            networking_config: repo_config.builder_network.as_deref().map(|network| {
+                NetworkingConfig {
+                    endpoints_config: Some(HashMap::from([(
+                        network.to_string(),
+                        EndpointSettings::default(),
+                    )])),
+                }
             }),
             ..Default::default()
         };
@@ -298,88 +228,55 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             .create_container(
                 Some(CreateContainerOptions {
                     name: Some(container_name),
-                    platform: arch,
+                    platform,
                 }),
                 conf,
             )
             .await?;
 
-        match source_data {
-            SourceData::Git {
-                url,
-                r#ref,
-                subfolder,
-            } => {
-                self.git_checkout_to_container(
-                    create_info.id.clone(),
-                    GIT_REPO_PATH.to_string(),
-                    url,
-                    r#ref,
-                    subfolder,
-                )
-                .await?;
-            }
-            SourceData::Upload { .. } => {
-                todo!("Unpack zip into build container")
-            }
-            _ => {}
-        }
+        // Upload the source archive to the build container.
+        // Docker's upload_to_container API expects a raw tar stream, so we
+        // decompress the gzipped archive before sending it.
+        let archive_bytes = self
+            .store
+            .archive_bytes(&self.client, source_data)
+            .await
+            .map_err(|e| anyhow!("Failed to get source archive: {e}"))?;
+
+        self.upload_source_archive(
+            create_info.id.clone(),
+            container_build_dir.to_string_lossy().as_ref(),
+            &archive_bytes,
+        )
+        .await?;
 
         Ok(create_info)
     }
 
-    /// Create a .tar.gz archive from a directory
-    async fn create_tar_gz(
-        src_dir: &Path,
-        dest_path: &Path,
-        subfolder: String,
-    ) -> anyhow::Result<()> {
-        let tar_gz = std::fs::File::create(dest_path)?;
-        let enc = GzEncoder::new(tar_gz, Compression::default());
-        let mut tar = tar::Builder::new(enc);
-        tar.append_dir_all(".", src_dir.join(subfolder))?;
-        tar.finish()?;
-        Ok(())
-    }
-
-    /// checkout a git repo into a docker container
-    async fn git_checkout_to_container(
+    /// Upload the source archive to the build container.
+    ///
+    /// Docker's `upload_to_container` auto-detects gzip compression, so we
+    /// send the raw `.tar.gz` bytes as-is.
+    async fn upload_source_archive(
         &self,
         container_id: String,
-        path: String,
-        git_repo: String,
-        git_ref: String,
-        git_subfolder: String,
+        container_build_dir: &str,
+        archive_bytes: &[u8],
     ) -> anyhow::Result<()> {
-        info!("Cloning repository {git_repo}...");
-
-        let dir = tempdir()?;
-        let repo_dir = dir.path().join("repo");
-
-        checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
-        info!("Checked out {:?}", git_ref);
-
-        // Create a tar.gz of the cloned repo
-        let tar_path = dir.path().join("repo.tar.gz");
-        debug!("Creating tar archive at {:?}", tar_path);
-        Self::create_tar_gz(&repo_dir, &tar_path, git_subfolder).await?;
-
         let options = Some(UploadToContainerOptions {
-            path,
+            path: container_build_dir.to_string(),
             copy_uidgid: Some("false".to_string()),
             ..Default::default()
         });
 
-        let file = File::open(tar_path)
-            .map_ok(ReaderStream::new)
-            .try_flatten_stream();
-
         self.docker
-            .upload_to_container(container_id.as_str(), options, body_try_stream(file))
-            .await
-            .expect("upload failed");
+            .upload_to_container(
+                container_id.as_str(),
+                options,
+                body_full(archive_bytes.to_vec().into()),
+            )
+            .await?;
 
-        _ = dir.close();
         Ok(())
     }
 
@@ -422,4 +319,50 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         }
         Ok(())
     }
+}
+
+/// Build the bollard [`Mount`] that binds the host mirrorlist into the builder
+/// container at `/etc/pacman.d/mirrorlist`.
+///
+/// Returns `None` for non-x86_64 architectures (their mirrorlist differs from
+/// the x86_64 one maintained by AURCache).
+///
+/// The source path comes from [`BuildMode::mirrorlist_source_path`]:
+/// - An absolute path → plain bind mount.
+/// - A relative path → treated as `volume_name/subpath` and expressed as a
+///   named-volume mount with a subpath, which is how DinD volumes are addressed.
+pub fn mirrorlist_mount(arch: &str) -> anyhow::Result<Option<Mount>> {
+    if arch != "linux/x86_64" {
+        return Ok(None);
+    }
+
+    const TARGET: &str = "/etc/pacman.d/mirrorlist";
+    let source = get_build_mode().mirrorlist_source_path();
+
+    let mnt = if source.starts_with('/') {
+        Mount {
+            target: Some(TARGET.to_string()),
+            source: Some(source),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(false),
+            ..Default::default()
+        }
+    } else {
+        let (volume_name, subpath) = source
+            .split_once('/')
+            .ok_or_else(|| anyhow!("Mirrorlist path not containing '/': Invalid"))?;
+        Mount {
+            target: Some(TARGET.to_string()),
+            source: Some(volume_name.to_string()),
+            typ: Some(MountTypeEnum::VOLUME),
+            read_only: Some(false),
+            volume_options: Some(MountVolumeOptions {
+                subpath: Some(subpath.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    };
+
+    Ok(Some(mnt))
 }

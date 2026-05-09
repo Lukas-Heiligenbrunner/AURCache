@@ -1,26 +1,38 @@
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
 use anyhow::{anyhow, bail};
+use aurcache_db::dependencies;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
+use aurcache_db::helpers::build_enqueue::promote_waiting_build;
+use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
-use aurcache_types::builder::BuildStates;
+use aurcache_types::builder::{Action, BuildStates};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
+
+use aurcache_deps::AurClient;
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::snapshot::SnapshotStore;
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
+use pacman_mirrors::platforms::Platform;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio::sync::broadcast::Sender;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
+/// RAII guard that removes the shared build directory on drop.
 struct BuildDirGuard {
     path: PathBuf,
     id: i32,
@@ -33,6 +45,7 @@ impl Drop for BuildDirGuard {
     }
 }
 
+/// Orchestrates a single build from container creation through post-build cleanup.
 pub struct Builder {
     pub(crate) db: DatabaseConnection,
     pub(crate) job_containers: Arc<Mutex<HashMap<i32, String>>>,
@@ -40,14 +53,21 @@ pub struct Builder {
     pub(crate) build_model: builds::ActiveModel,
     pub(crate) logger: BuildLogger,
     pub(crate) docker: Docker,
+    pub(crate) action_tx: Sender<Action>,
+    pub(crate) client: AurClient,
+    pub(crate) store: SnapshotStore,
 }
 
 impl Builder {
+    /// Create a new Builder, establishing a Docker connection and initialising the build logger.
     pub async fn new(
         db: DatabaseConnection,
         job_containers: Arc<Mutex<HashMap<i32, String>>>,
         package_model: packages::Model,
         build_model: builds::Model,
+        action_tx: Sender<Action>,
+        client: AurClient,
+        store: SnapshotStore,
     ) -> anyhow::Result<Self> {
         let logger = BuildLogger::new(build_model.id, db.clone());
         debug!("Build {}: Establish docker connection", build_model.id);
@@ -67,13 +87,17 @@ impl Builder {
             build_model: build_model.into_active_model(),
             logger,
             docker,
+            action_tx,
+            client,
+            store,
         })
     }
 
+    /// Run the full build lifecycle: prepare, containerise, wait, and move artefacts.
     pub async fn build(&mut self) -> anyhow::Result<()> {
         debug!(model = ?self.build_model);
         info!("Preparing build #{}", self.build_model.id.get()?);
-        let target_platform = self.prepare_build().await?;
+        self.prepare_build().await?;
 
         let builder_image: SettingsEntry<String> = ApplicationSettings::get(
             Setting::BuilderImage,
@@ -96,7 +120,8 @@ impl Builder {
             "Build #{}: Repull builder image",
             self.build_model.id.get()?
         );
-        self.repull_image(builder_image.as_str(), target_platform.clone())
+        let docker_platform = format!("linux/{}", self.build_model.platform.get()?);
+        self.repull_image(builder_image.as_str(), docker_platform.clone())
             .await?;
 
         info!(
@@ -108,7 +133,7 @@ impl Builder {
         let host_active_build_path = create_active_build_path(pkgname)?;
 
         let create_info = self
-            .create_build_container(target_platform, builder_image.as_str())
+            .create_build_container(docker_platform, builder_image.as_str())
             .await?;
         let id = create_info.id;
         debug!(
@@ -163,17 +188,44 @@ impl Builder {
         self.wait_container_exit(&id, job_timeout).await?;
         info!("Build #{id}: docker container exited successfully");
 
-        // move built tar.gz archives to host and repo-add
+        // Bail before touching the repo if the package was deleted during the build.
+        let pkg_id = *self.package_model.id.get()?;
+        if Packages::find_by_id(pkg_id).one(&self.db).await?.is_none() {
+            bail!("package was removed during build; skipping repo update");
+        }
+
+        // move built tar.gz archives to host and repo-add, and retrieve the version
+        // that makepkg actually built (may differ from the version recorded at enqueue time).
         info!(
             "Build {}: Move built packages to repo",
             self.build_model.id.get()?
         );
-        self.move_and_add_pkgs(host_active_build_path.clone())
+        let actual_version = self
+            .move_and_add_pkgs(host_active_build_path.clone())
             .await?;
+
+        // Reconcile the recorded version with what was actually built.
+        let expected_version = self.build_model.version.get()?.clone();
+        if actual_version != expected_version {
+            self.logger
+                .append(format!(
+                    "Warning: actual built version '{actual_version}' differs from expected \
+                     '{expected_version}'; updating build and package records\n"
+                ))
+                .await;
+            info!(
+                "Build {}: version mismatch — expected '{expected_version}', got '{actual_version}'",
+                self.build_model.id.get()?
+            );
+        }
+        // Always update to the version extracted from the package files: this is authoritative.
+        self.build_model.version = Set(actual_version.clone());
+        self.package_model.upstream_version = Set(Some(actual_version));
 
         Ok(())
     }
 
+    /// Wait for the build container to exit, handling timeouts and non-zero exit codes.
     async fn wait_container_exit(
         &self,
         container_id: &str,
@@ -235,6 +287,7 @@ impl Builder {
         }
     }
 
+    /// Record the build outcome in the database, trigger dependents on success.
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         let txn = self.db.begin().await?;
         self.build_model.end_time = Set(Some(
@@ -243,46 +296,189 @@ impl Builder {
 
         match result {
             Ok(()) => {
-                // update package success status
                 self.package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
                 self.package_model.out_of_date = Set(i32::from(false));
                 self.package_model = self.package_model.clone().save(&txn).await?;
-
                 self.build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
-
                 self.build_model = self.build_model.clone().save(&txn).await?;
-                // commit transaction before build logger requires db connection again
                 txn.commit().await?;
-
                 self.logger
                     .append("finished package build".to_string())
                     .await;
+                if let Err(e) = self.trigger_dependents().await {
+                    self.logger
+                        .append(format!("Failed to trigger dependents: {e}"))
+                        .await;
+                }
             }
             Err(e) => {
                 self.package_model.status = Set(BuildStates::FAILED_BUILD);
                 self.package_model = self.package_model.clone().save(&txn).await?;
-
                 self.build_model.status = Set(Some(BuildStates::FAILED_BUILD));
                 self.build_model = self.build_model.clone().save(&txn).await?;
                 txn.commit().await?;
-
                 self.logger
                     .append("failed to build package".to_string())
                     .await;
                 self.logger.append(e.to_string()).await;
+                tracing::error!("Build #{} failed: {e}", self.build_model.id.get()?);
             }
         }
 
-        // remove build from container map
+        // Remove from the active container map. The container may be absent if
+        // build() failed before the container was started — that is not an error.
         self.job_containers
             .lock()
             .await
-            .remove(self.build_model.id.get()?)
-            .ok_or(anyhow!("Failed to get job container"))?;
+            .remove(self.build_model.id.get()?);
         Ok(())
     }
 
-    pub async fn prepare_build(&mut self) -> anyhow::Result<String> {
+    /// After a successful build, check for packages that depend on this one
+    /// and trigger their builds if all their dependencies are satisfied.
+    async fn trigger_dependents(&self) -> anyhow::Result<()> {
+        let pkg_id = *self.package_model.id.get()?;
+        let platform = *self.build_model.platform.get()?;
+        let deps_by_dependent = self.load_dependencies_for_dependents_of(pkg_id).await?;
+        if deps_by_dependent.is_empty() {
+            return Ok(());
+        }
+
+        for (dependent_id, all_deps) in &deps_by_dependent {
+            if self
+                .dependencies_ready_for_dependent(all_deps, platform)
+                .await?
+            {
+                self.trigger_dependent_builds(*dependent_id, platform)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load all dependencies of every package that depends on the given package.
+    async fn load_dependencies_for_dependents_of(
+        &self,
+        pkg_id: i32,
+    ) -> anyhow::Result<HashMap<i32, Vec<dependencies::Model>>> {
+        use aurcache_db::prelude::Dependencies;
+
+        let dependent_ids: Vec<i32> = Dependencies::find()
+            .filter(dependencies::Column::DependeeId.eq(pkg_id))
+            .select_only()
+            .column(dependencies::Column::DependentId)
+            .into_tuple()
+            .all(&self.db)
+            .await?;
+
+        if dependent_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let deps = Dependencies::find()
+            .filter(dependencies::Column::DependentId.is_in(dependent_ids))
+            .all(&self.db)
+            .await?;
+
+        let mut deps_by_dependent: HashMap<i32, Vec<dependencies::Model>> = HashMap::new();
+        for dep in deps {
+            deps_by_dependent
+                .entry(dep.dependent_id)
+                .or_default()
+                .push(dep);
+        }
+        Ok(deps_by_dependent)
+    }
+
+    /// Check whether all dependencies of a dependent are satisfied (or will be soon).
+    async fn dependencies_ready_for_dependent(
+        &self,
+        all_deps: &[dependencies::Model],
+        platform: Platform,
+    ) -> anyhow::Result<bool> {
+        for dep in all_deps {
+            if !self
+                .is_dependency_ready(dep.dependee_id, platform, &dep.version_constraint)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Promote a dependent's waiting build to enqueued when all its deps are satisfied.
+    async fn trigger_dependent_builds(
+        &self,
+        dependent_id: i32,
+        platform: Platform,
+    ) -> anyhow::Result<()> {
+        let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await? else {
+            // Dependent no longer exists - maybe was removed by the user in the meantime? In that
+            // case nothing to do.
+            return Ok(());
+        };
+
+        if !pkg.platforms.trim().is_empty()
+            && !Platform::parse_many(&pkg.platforms).any(|r| r.is_ok_and(|p| p == platform))
+        {
+            // Dependent does not need the platform we just built. Nothing to do.
+            return Ok(());
+        }
+
+        // Only promote builds that are already in the WAITING_FOR_DEPS state.
+        let Some(promoted) = promote_waiting_build(&self.db, pkg.id, platform).await? else {
+            // We never asked for this package to be (re)built. Nothing to do.
+            return Ok(());
+        };
+
+        self.logger
+            .append(format!(
+                "Promoted build #{} for dependent '{}' on {} from waiting to enqueued",
+                promoted.id, pkg.name, platform
+            ))
+            .await;
+
+        let _ = self
+            .action_tx
+            .send(Action::Build(Box::from(pkg), Box::new(promoted)));
+        Ok(())
+    }
+
+    /// Check if a dependency has a successful build at a version that satisfies
+    /// the version constraint.
+    async fn is_dependency_ready(
+        &self,
+        dependee_id: i32,
+        platform: Platform,
+        constraint: &str,
+    ) -> anyhow::Result<bool> {
+        // If a previous successful build already satisfies the constraint, we're
+        // done regardless of any in-progress build.
+        let latest_success = Builds::find()
+            .select_only()
+            .column(builds::Column::Version)
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
+            .order_by(builds::Column::EndTime, Order::Desc)
+            .limit(1)
+            .into_tuple::<String>()
+            .one(&self.db)
+            .await?;
+
+        let Some(version) = latest_success else {
+            return Ok(false);
+        };
+
+        Ok(aurcache_utils::pkg::satisfies_constraint(
+            &version, constraint,
+        ))
+    }
+
+    /// Mark the build as active in the database.
+    pub async fn prepare_build(&mut self) -> anyhow::Result<()> {
         // set build status to building
         self.build_model.status = Set(Some(BuildStates::ACTIVE_BUILD));
         self.build_model.start_time = Set(Some(
@@ -294,7 +490,6 @@ impl Builder {
         self.package_model.status = Set(BuildStates::ACTIVE_BUILD);
         self.package_model = self.package_model.clone().save(&self.db).await?;
 
-        let target_platform = format!("linux/{}", self.build_model.platform.get()?);
-        Ok(target_platform)
+        Ok(())
     }
 }

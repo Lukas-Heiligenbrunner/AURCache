@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${1?Usage: $0 <package> [port] [timeout]}"
+: "${1?Usage: E2E_MODE=host|dind $0 <package> [port] [timeout]}"
 PACKAGE="$1"
 export AURCACHE_PORT="${2:-8080}"
 export AURCACHE_MIRROR_PORT=$((AURCACHE_PORT + 1))
@@ -10,13 +10,18 @@ BUILD_TIMEOUT="${3:-300}"
 # We take security very seriously
 AUTH_HEADER="Authorization: Basic $(echo -n 'admin:secret' | base64)"
 
+# Build mode: "dind" (default) uses an internal Podman inside a privileged
+# container; "host" mounts the host Docker socket instead.
+E2E_MODE="${E2E_MODE:-dind}"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.e2e.yaml"
+export AURCACHE_URL="http://localhost:$AURCACHE_PORT/api"
+export AURCACHE_TOKEN="${AURCACHE_TOKEN:-}"
 
 # A clean slate for each new test.
 export TEMP_DIR=$(mktemp -d)
-echo "Using temp dir $TEMP_DIR"
+echo "Using temp dir $TEMP_DIR (mode: $E2E_MODE)"
 
 # These are mounted by docker-compose
 BUILD_DIR="$TEMP_DIR/builds"
@@ -55,7 +60,7 @@ wait_for_service() {
 }
 
 dc() {
-    docker compose -f docker-compose.e2e.yaml "$@"
+    docker compose -f docker-compose.e2e.$E2E_MODE.yaml "$@"
 }
 
 # =============================================================================
@@ -97,11 +102,18 @@ start_docker_services() {
 }
 
 configure_aurcache_registry() {
+    # Only needed in DinD mode: aurcache runs Podman internally and the
+    # registry is reachable by its Docker Compose service name, not localhost.
+    if [ "$E2E_MODE" != "dind" ]; then
+        return
+    fi
     echo "=== Configuring AURCache registry ==="
-    echo '[[registry]]
-prefix = "localhost"
-location = "localhost"
-insecure = true' | docker exec -i aurcache-aurcache-1 bash -c "cat > /etc/containers/registries.conf.d/localhost.conf"
+    docker exec -i aurcache-aurcache-1 bash -c "cat > /etc/containers/registries.conf.d/registry.conf" << 'EOF'
+[[registry]]
+prefix = "registry:5000"
+location = "registry:5000"
+insecure = true
+EOF
 }
 
 prepare() {
@@ -120,9 +132,16 @@ request_package() {
     echo "=== Adding package: $PACKAGE ==="
     # We're starting from a fresh DB every time, so we know it'll be a new package.
     # If we reused the DB test after test we'd need to delete the package before adding it again.
-    RESPONSE=$(curl_api "/api/package" -X POST -d "{\"source\": {\"type\": \"aur\", \"name\": \"$PACKAGE\"}, \"platforms\": [\"x86_64\"]}")
+    if ! curl -sS --fail-with-body "http://localhost:$AURCACHE_PORT/api/package" \
+        -H "$AUTH_HEADER" \
+        -H "Content-Type: application/json" \
+        -X POST -d "{\"source\": {\"type\": \"aur\", \"name\": \"$PACKAGE\"}, \"platforms\": [\"x86_64\"]}"
+    then
+        echo "ERROR: Package request failed"
+        dc logs
+        exit 1
+    fi
 
-    # Hofstadter's law: It always takes longer than you expect, even when you take into account Hofstadter's law.
     echo "=== Waiting for build to complete (timeout: ${BUILD_TIMEOUT}s) ==="
     local START_TIME
     START_TIME=$(date +%s)

@@ -37,7 +37,7 @@ pub fn init_api(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
-            port: 8080,
+            port: aurcache_types::ports::AURCACHE_HTTP_PORT,
             secret_key: get_secret_key(),
             ..Default::default()
         };
@@ -126,7 +126,7 @@ pub fn init_repo() -> JoinHandle<()> {
     tokio::spawn(async {
         let config = Config {
             address: "0.0.0.0".parse().unwrap(),
-            port: 8081,
+            port: aurcache_types::ports::AURCACHE_MIRROR_PORT,
             secret_key: get_secret_key(),
             ..Default::default()
         };

@@ -1,4 +1,4 @@
-use aur_rs::Package;
+use aurcache_deps::Package;
 use rocket::serde::Serialize;
 use utoipa::ToSchema;
 

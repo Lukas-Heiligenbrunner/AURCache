@@ -6,19 +6,32 @@ use std::fmt::Display;
 use std::str::FromStr;
 use utoipa::ToSchema;
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "type")] // the JSON field that acts as the tag
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GitSourceSpec {
+    pub url: String,
+    pub r#ref: String,
+    pub subfolder: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema, DeriveValueType)]
+#[sea_orm(value_type = "String")]
+#[serde(tag = "type")]
 pub enum SourceData {
     #[serde(rename = "aur")]
     Aur { name: String },
     #[serde(rename = "git")]
     Git {
-        url: String,
-        r#ref: String,
-        subfolder: String,
+        #[serde(flatten)]
+        spec: GitSourceSpec,
     },
     #[serde(rename = "upload")]
     Upload { archive: Vec<u8> },
+}
+
+impl From<GitSourceSpec> for SourceData {
+    fn from(spec: GitSourceSpec) -> Self {
+        Self::Git { spec }
+    }
 }
 
 impl FromStr for SourceData {
@@ -27,6 +40,19 @@ impl FromStr for SourceData {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let value: Self = serde_json::from_str(s)?;
         Ok(value)
+    }
+}
+
+impl SourceData {
+    /// Unique cache key for this source.
+    pub fn cache_key(&self) -> String {
+        match self {
+            SourceData::Aur { name } => format!("aur:{name}"),
+            SourceData::Git { spec } => {
+                format!("git:{}:{}:{}", spec.url, spec.r#ref, spec.subfolder)
+            }
+            SourceData::Upload { .. } => "upload".to_string(),
+        }
     }
 }
 
@@ -61,6 +87,9 @@ pub enum SourceType {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    /// Canonical package identifier (this is the pkgbase).
+    ///
+    /// We track one row per pkgbase, so `name` stores the pkgbase value.
     pub name: String,
     pub status: i32,
     pub out_of_date: i32,
@@ -69,7 +98,11 @@ pub struct Model {
     pub build_flags: String,
     pub platforms: String,
     pub source_type: SourceType,
-    pub source_data: String,
+    #[schema(value_type = String)]
+    pub source_data: SourceData,
+    pub directly_requested: bool,
+    pub split_packages: Option<String>,
+    pub provides: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
@@ -78,6 +111,8 @@ impl ActiveModelBehavior for ActiveModel {}
 pub enum Relation {
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
+    #[sea_orm(has_many = "super::files::Entity")]
+    Files,
     #[sea_orm(
         belongs_to = "super::builds::Entity",
         from = "Column::LatestBuild",
@@ -86,18 +121,14 @@ pub enum Relation {
     LatestBuild,
 }
 
-impl Related<super::builds::Entity> for Entity {
+impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Builds.def()
+        Relation::Files.def()
     }
 }
 
-impl Related<super::files::Entity> for Entity {
+impl Related<super::builds::Entity> for Entity {
     fn to() -> RelationDef {
-        super::packages_files::Relation::Files.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(super::packages_files::Relation::Packages.def())
+        Relation::Builds.def()
     }
 }

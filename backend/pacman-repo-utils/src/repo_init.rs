@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail};
 use flate2::Compression;
-use flate2::read::GzEncoder;
+use flate2::write::GzEncoder;
 use std::fs;
 use std::fs::File;
 use std::os::unix::fs::symlink;
