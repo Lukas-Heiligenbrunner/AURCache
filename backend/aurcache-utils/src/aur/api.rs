@@ -25,9 +25,13 @@ pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
 }
 
 /// Retrieve AUR package information by its name.
-/// Returns `None` if the package is not found
+/// Returns `None` if the package is not found.
+/// The AUR RPC endpoint can be overridden via the `AUR_RPC_URL` env var.
 pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>> {
-    let request = Request::default();
+    let request = match std::env::var("AUR_RPC_URL") {
+        Ok(url) => aur_rs::Request { endpoint: url },
+        Err(_) => Request::default(),
+    };
     let mut response = (|| async { request.search_info_by_name(pkg_name).await })
         .retry(
             FibonacciBuilder::default()

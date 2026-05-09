@@ -9,7 +9,12 @@ serde = {workspace = true}
 serde_json = {workspace = true}
 sea-orm = {workspace = true}
 
+aurcache-deps = {path = "../aurcache-deps"}
 
 sea-orm-migration = {version = "1.1.20", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 # todo utoipa should be removed to couple db from api fully
 utoipa = { version = "5.4.0"}
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = "0.6"

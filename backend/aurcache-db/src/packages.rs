@@ -70,6 +70,10 @@ pub struct Model {
     pub platforms: String,
     pub source_type: SourceType,
     pub source_data: String,
+    pub pkgbase: String,
+    pub directly_requested: i32,
+    pub current_version: Option<String>,
+    pub split_packages: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
@@ -78,6 +82,8 @@ impl ActiveModelBehavior for ActiveModel {}
 pub enum Relation {
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
+    #[sea_orm(has_many = "super::files::Entity")]
+    Files,
     #[sea_orm(
         belongs_to = "super::builds::Entity",
         from = "Column::LatestBuild",
@@ -86,18 +92,14 @@ pub enum Relation {
     LatestBuild,
 }
 
-impl Related<super::builds::Entity> for Entity {
+impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Builds.def()
+        Relation::Files.def()
     }
 }
 
-impl Related<super::files::Entity> for Entity {
+impl Related<super::builds::Entity> for Entity {
     fn to() -> RelationDef {
-        super::packages_files::Relation::Files.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(super::packages_files::Relation::Packages.def())
+        Relation::Builds.def()
     }
 }

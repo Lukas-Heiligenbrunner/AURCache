@@ -3,8 +3,8 @@ use crate::aur::search;
 use crate::build::{build_output, cancel_build, delete_build, get_build, list_builds, rery_build};
 use crate::health::health;
 use crate::package::{
-    get_package, package_add_endpoint, package_del, package_list, package_update_endpoint,
-    package_update_entity_endpoint,
+    get_package, package_add_endpoint, package_del, package_list, package_remove_endpoint,
+    package_update_endpoint, package_update_entity_endpoint,
 };
 use crate::settings::{setting_get, setting_patch, setting_reset, settings};
 use crate::stats::{dashboard_graph_data, stats, user_info};
@@ -17,6 +17,7 @@ pub fn build_api() -> Vec<Route> {
         package_list,
         package_add_endpoint,
         package_del,
+        package_remove_endpoint,
         package_update_entity_endpoint,
         build_output,
         delete_build,

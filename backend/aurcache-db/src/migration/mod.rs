@@ -7,6 +7,8 @@ mod m20251015_230000_pkg_sources;
 mod m20251106_100000_build_version;
 mod m20251107_000000_build_flags_no_install;
 mod m20251204_160000_settings;
+pub mod m20260508_000000_dependency_resolution_combined;
+mod m20260508_000005_drop_packages_files;
 
 pub struct Migrator;
 
@@ -21,6 +23,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20251015_230000_pkg_sources::Migration),
             Box::new(m20251204_160000_settings::Migration),
             Box::new(m20251107_000000_build_flags_no_install::Migration),
+            Box::new(m20260508_000000_dependency_resolution_combined::Migration),
+            Box::new(m20260508_000005_drop_packages_files::Migration),
         ]
     }
 }

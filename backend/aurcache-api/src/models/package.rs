@@ -49,6 +49,7 @@ pub struct ExtendedPackageModel {
     // todo this should be renamed to "latest_upstream_version" or sth
     pub upstream_version: String,
     pub package_source: PackageSource,
+    pub split_packages: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]

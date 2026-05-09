@@ -2,6 +2,10 @@
 name = "aurcache-builder"
 edition = "2024"
 
+[[bin]]
+name = "test-builder"
+path = "src/bin/test-builder.rs"
+
 [dependencies]
 anyhow = {workspace = true}
 tracing = {workspace = true}

@@ -39,7 +39,7 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     let aur_names: Vec<&str> = packages
         .iter()
         .filter(|x| x.source_type == SourceType::Aur)
-        .map(|x| x.name.as_str())
+        .map(|x| x.pkgbase.as_str())
         .collect();
 
     let results = if aur_names.is_empty() {
@@ -80,9 +80,9 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
 
         let source_data = SourceData::from_str(package.source_data.as_str())?;
         match source_data {
-            SourceData::Aur { .. } => match results.iter().find(|x1| x1.name == package.name) {
+            SourceData::Aur { .. } => match results.iter().find(|x1| x1.package_base == package.pkgbase) {
                 None => {
-                    warn!("Couldn't find {} in AUR response", package.name);
+                    warn!("Couldn't find {} in AUR response", package.pkgbase);
                 }
                 Some(result) => {
                     package_model.upstream_version = Set(Option::from(result.version.clone()));

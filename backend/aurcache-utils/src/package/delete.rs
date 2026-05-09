@@ -1,10 +1,9 @@
 use crate::utils::remove_archive_file::try_remove_archive_file;
 use anyhow::anyhow;
-use aurcache_db::prelude::{Builds, Packages, PackagesFiles, Settings};
-use aurcache_db::{builds, files, packages_files, settings};
-use sea_orm::{ColumnTrait, QuerySelect, RelationTrait};
-use sea_orm::{DatabaseConnection, EntityTrait, ModelTrait, TransactionTrait};
-use sea_orm::{JoinType, QueryFilter};
+use aurcache_db::dependencies;
+use aurcache_db::prelude::{Builds, Dependencies, Files, Packages, Settings};
+use aurcache_db::{builds, files, settings};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, TransactionTrait};
 
 pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
     let txn = db.begin().await?;
@@ -13,6 +12,16 @@ pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
         .one(&txn)
         .await?
         .ok_or(anyhow!("id not found"))?;
+
+    // Remove dependency links (both where this pkg depends on others and where others depend on this)
+    Dependencies::delete_many()
+        .filter(dependencies::Column::DependentId.eq(pkg.id))
+        .exec(&txn)
+        .await?;
+    Dependencies::delete_many()
+        .filter(dependencies::Column::DependeeId.eq(pkg.id))
+        .exec(&txn)
+        .await?;
 
     // remove package db entry
     pkg.clone().delete(&txn).await?;
@@ -27,21 +36,13 @@ pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
     }
 
     // remove package files
-    let package_files: Vec<(packages_files::Model, Option<files::Model>)> = PackagesFiles::find()
-        .filter(packages_files::Column::PackageId.eq(pkg.id))
-        .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
-        .select_also(files::Entity)
+    let package_files: Vec<files::Model> = Files::find()
+        .filter(files::Column::PackageId.eq(pkg.id))
         .all(&txn)
         .await?;
 
-    for (pf, file) in package_files {
-        pf.delete(&txn).await?;
-
-        try_remove_archive_file(
-            file.ok_or(anyhow!("package id has no attached file"))?,
-            &txn,
-        )
-        .await?;
+    for file in package_files {
+        try_remove_archive_file(file, &txn).await?;
     }
 
     // delete corresponding settings entries

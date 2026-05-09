@@ -93,7 +93,7 @@ pub async fn package_update(
     let source_data = SourceData::from_str(pkg_model.source_data.as_str())?;
     let upstream_version = match source_data {
         SourceData::Aur { .. } => {
-            let pkg = get_package_info(pkg_model.name.as_str())
+            let pkg = get_package_info(pkg_model.pkgbase.as_str())
                 .await?
                 .ok_or(anyhow!("Package not found"))?;
             pkg.version

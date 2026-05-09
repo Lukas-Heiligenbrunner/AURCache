@@ -39,6 +39,7 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
                             db.clone(),
                             semaphore.clone(),
                             job_containers.clone(),
+                            tx.clone(),
                         )
                         .await;
                     }

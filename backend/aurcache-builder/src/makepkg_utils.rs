@@ -34,6 +34,18 @@ pub async fn create_makepkg_config(
     Ok((config, makepkg_config_path.to_string()))
 }
 
+/// Build a minimal makepkg.conf without a database connection.
+/// Suitable for the test-builder binary and other contexts where
+/// no DB is available.
+pub fn create_makepkg_config_minimal(pkgdest_dir_base: &Path) -> (String, String) {
+    let config = format!(
+        "MAKEFLAGS=-j$(nproc)\nPKGDEST={}\n",
+        pkgdest_dir_base.display()
+    );
+    let makepkg_config_path = "/var/ab/.config/pacman/makepkg.conf";
+    (config, makepkg_config_path.to_string())
+}
+
 /// Optional pacman.conf override. Returns `Some(content)` to overwrite
 /// `/etc/pacman.conf` inside the build container, or `None` to leave the
 /// builder image's default in place.

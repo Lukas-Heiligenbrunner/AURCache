@@ -16,15 +16,16 @@ use aurcache_types::builder::Action;
 use aurcache_utils::aur::api::get_package_info;
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::delete::package_delete;
+use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::update::package_update;
 use pacman_mirrors::platforms::Platform;
 use rocket::http::Status;
 use rocket::response::status::{BadRequest, Custom, NotFound};
 use rocket::serde::json::Json;
 use rocket::{State, delete, get, patch, post};
-use sea_orm::ActiveValue::Set;
+use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::Expr;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet, Order};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, Order};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::str::FromStr;
 use tokio::sync::broadcast::Sender;
@@ -36,6 +37,7 @@ use utoipa::OpenApi;
     package_update_entity_endpoint,
     package_update_endpoint,
     package_del,
+    package_remove_endpoint,
     package_list,
     get_package
 ))]
@@ -103,10 +105,13 @@ pub async fn package_update_entity_endpoint(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
+    let new_name = input.name.clone();
+
     // Start building the update operation
     let update_pkg = packages::ActiveModel {
         id: Set(id),
-        name: input.name.clone().map_or(NotSet, Set),
+        name: new_name.clone().map_or(NotSet, Set),
+        pkgbase: new_name.clone().map_or(NotSet, Set),
         status: input.status.map_or(NotSet, Set),
         out_of_date: input.out_of_date.map_or(NotSet, Set),
         upstream_version: NotSet,
@@ -118,6 +123,9 @@ pub async fn package_update_entity_endpoint(
         platforms: input.platforms.clone().map_or(NotSet, |v| Set(v.join(";"))),
         source_type: NotSet,
         source_data: NotSet,
+        directly_requested: NotSet,
+        current_version: NotSet,
+        split_packages: NotSet,
     };
 
     // Execute the update query
@@ -202,6 +210,46 @@ pub async fn package_del(
 
     al.add(
         PackageDeleteActivity { package: pkg.name },
+        ActivityType::RemovePackage,
+        a.username,
+    )
+    .await
+    .map_err(|e| BadRequest(e.to_string()))?;
+
+    Ok(())
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Remove direct request flag from package and live-check it"),
+    ),
+    params(
+            ("id", description = "Id of package")
+    )
+)]
+#[post("/package/<id>/remove")]
+pub async fn package_remove_endpoint(
+    db: &State<DatabaseConnection>,
+    id: i32,
+    a: Authenticated,
+    al: &State<ActivityLog>,
+) -> Result<(), BadRequest<String>> {
+    let db = db as &DatabaseConnection;
+
+    let pkg = Packages::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?
+        .ok_or(BadRequest("id not found".to_string()))?;
+
+    package_remove(db, id)
+        .await
+        .map_err(|e| BadRequest(e.to_string()))?;
+
+    al.add(
+        PackageDeleteActivity {
+            package: pkg.name,
+        },
         ActivityType::RemovePackage,
         a.username,
     )
@@ -306,7 +354,7 @@ pub async fn get_package(
 
     let (package_source, version) = match source_data {
         SourceData::Aur { .. } => {
-            let aur_info = get_package_info(&pkg.name)
+            let aur_info = get_package_info(&pkg.pkgbase)
                 .await
                 .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
@@ -323,7 +371,7 @@ pub async fn get_package(
 
                     (
                         PackageSource::Aur(AurPackage {
-                            name: pkg.name.clone(),
+                            name: pkg.pkgbase.clone(),
                             project_url: aur_info.url,
                             description: aur_info.description,
                             last_updated: aur_info.last_modified,
@@ -358,7 +406,7 @@ pub async fn get_package(
 
     let ext_pkg = ExtendedPackageModel {
         id: pkg.id,
-        name: pkg.name,
+        name: pkg.pkgbase,
         status: pkg.status,
         outofdate: pkg.out_of_date,
         latest_version,
@@ -371,6 +419,9 @@ pub async fn get_package(
                 .collect(),
         ),
         upstream_version: version,
+        split_packages: pkg
+            .split_packages
+            .map(|s| s.split(';').map(ToString::to_string).collect()),
     };
 
     Ok(Json(ext_pkg))
