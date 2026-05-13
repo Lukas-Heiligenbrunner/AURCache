@@ -16,7 +16,7 @@ pub async fn live_check(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<
         .ok_or(anyhow::anyhow!("Package id {pkg_id} not found"))?;
 
     // If directly requested by user, keep it
-    if pkg.directly_requested != 0 {
+    if pkg.directly_requested {
         return Ok(());
     }
 
@@ -57,7 +57,7 @@ pub async fn package_remove(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Res
         .ok_or(anyhow::anyhow!("Package id {pkg_id} not found"))?;
 
     let mut active: packages::ActiveModel = pkg.into();
-    active.directly_requested = Set(0);
+    active.directly_requested = Set(false);
     active.save(db).await?;
 
     live_check(db, pkg_id).await

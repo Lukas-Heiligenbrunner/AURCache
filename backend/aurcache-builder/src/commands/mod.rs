@@ -9,15 +9,9 @@ pub fn build_build_command(
 ) -> String {
     match source_data {
         SourceData::Aur { .. } => {
-            let base_url = std::env::var("AUR_RPC_URL")
-                .map(|u| {
-                    u.trim_end_matches('/')
-                        .trim_end_matches("/rpc/v5")
-                        .trim_end_matches('/')
-                        .to_string()
-                })
-                .unwrap_or_else(|_| "https://aur.archlinux.org".to_string());
-            let snapshot_url = format!("{base_url}/cgit/aur.git/snapshot/{pkgbase}.tar.gz");
+            let rpc_url = std::env::var("AUR_RPC_URL")
+                .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5".to_string());
+            let snapshot_url = aurcache_deps::snapshot_url(&rpc_url, pkgbase);
             format!(
                 "sudo pacman -Syu --noconfirm --noprogressbar --color never && \
                  mkdir -p {build_dir} && cd {build_dir} && \

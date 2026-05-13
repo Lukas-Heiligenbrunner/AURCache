@@ -383,6 +383,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "aurcache-db",
+ "aurcache-deps",
  "aurcache-types",
  "aurcache-utils",
  "bollard",

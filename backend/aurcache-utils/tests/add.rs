@@ -1,9 +1,8 @@
-use std::sync::{LazyLock, Mutex, MutexGuard};
-
 use aurcache_db::migration::Migrator;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
+use aurcache_deps::AurClient;
 use aurcache_types::builder::{Action, BuildStates};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
@@ -16,13 +15,50 @@ use wiremock::{
     matchers::{method, path, query_param},
 };
 
-use aurcache_utils::package::add::package_add;
+use aurcache_utils::package::add::package_add_with_client;
 
 // -----------------------------------------------------------------------
 // Test helpers
 // -----------------------------------------------------------------------
 
-static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+struct TestEnv {
+    db: DatabaseConnection,
+    _rx: tokio::sync::broadcast::Receiver<Action>,
+    server: MockServer,
+    client: AurClient,
+}
+
+async fn setup_env() -> TestEnv {
+    let server = MockServer::start().await;
+    let base_url = server.uri();
+
+    let client = AurClient::with_aur_url(format!("{base_url}/rpc/v5"));
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("failed to create in-memory DB");
+    Migrator::up(&db, None)
+        .await
+        .expect("failed to run migrations");
+
+    let (_, rx) = tokio::sync::broadcast::channel(100);
+
+    TestEnv {
+        db,
+        _rx: rx,
+        server,
+        client,
+    }
+}
+
+async fn mock_rpc_info(server: &MockServer, pkgbase: &str, result: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/rpc/v5/info"))
+        .and(query_param("arg[]", pkgbase))
+        .respond_with(ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![result])))
+        .mount(server)
+        .await;
+}
 
 fn rpc_deps_json(
     name: &str,
@@ -67,76 +103,10 @@ fn multiinfo_json(results: Vec<serde_json::Value>) -> serde_json::Value {
     })
 }
 
-struct EnvGuard {
-    _lock: MutexGuard<'static, ()>,
-    old_rpc: Option<String>,
-}
-
-impl EnvGuard {
-    fn new() -> Self {
-        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_rpc = std::env::var("AUR_RPC_URL").ok();
-        EnvGuard {
-            _lock: lock,
-            old_rpc,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.old_rpc {
-            Some(v) => unsafe { std::env::set_var("AUR_RPC_URL", v) },
-            None => unsafe { std::env::remove_var("AUR_RPC_URL") },
-        }
-    }
-}
-
-struct TestEnv {
-    db: DatabaseConnection,
-    _rx: tokio::sync::broadcast::Receiver<Action>,
-    server: MockServer,
-    _guard: EnvGuard,
-}
-
-async fn setup_env() -> TestEnv {
-    let server = MockServer::start().await;
-    let base_url = server.uri();
-
-    let guard = EnvGuard::new();
-    unsafe {
-        std::env::set_var("AUR_RPC_URL", format!("{base_url}/rpc/v5"));
-    }
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to create in-memory DB");
-    Migrator::up(&db, None)
-        .await
-        .expect("failed to run migrations");
-
-    let (_, rx) = tokio::sync::broadcast::channel(100);
-
-    TestEnv {
-        db,
-        _rx: rx,
-        server,
-        _guard: guard,
-    }
-}
-
-async fn mock_rpc_info(server: &MockServer, pkgbase: &str, result: serde_json::Value) {
-    Mock::given(method("GET"))
-        .and(path("/rpc/v5/info"))
-        .and(query_param("arg[]", pkgbase))
-        .respond_with(ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![result])))
-        .mount(server)
-        .await;
-}
-
 async fn add_pkg_via_rpc(env: &TestEnv, name: &str) -> anyhow::Result<String> {
     let (tx, _) = tokio::sync::broadcast::channel(100);
-    package_add(
+    package_add_with_client(
+        &env.client,
         &env.db,
         &tx,
         None,
@@ -173,7 +143,7 @@ async fn scenario_a_no_aur_deps() {
         .await
         .unwrap()
         .expect("package should exist");
-    assert_eq!(pkg.directly_requested, 1, "directly_requested should be 1");
+    assert!(pkg.directly_requested, "directly_requested should be true");
     assert_eq!(pkg.status, BuildStates::ENQUEUED_BUILD);
     assert_eq!(pkg.upstream_version, Some("1.0.0".to_string()));
 
@@ -209,8 +179,8 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("child package should exist");
-    assert_eq!(
-        child.directly_requested, 0,
+    assert!(
+        !child.directly_requested,
         "child is not directly requested"
     );
 
@@ -220,8 +190,8 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("parent package should exist");
-    assert_eq!(
-        parent.directly_requested, 1,
+    assert!(
+        parent.directly_requested,
         "parent should be directly requested"
     );
 
@@ -343,7 +313,7 @@ async fn scenario_d_make_dep_only() {
         .await
         .unwrap()
         .expect("make-env-pkg should exist");
-    assert_eq!(dep_pkg.directly_requested, 0);
+    assert!(!dep_pkg.directly_requested);
 
     let tool = Packages::find()
         .filter(packages::Column::Pkgbase.eq("build-tool"))
@@ -433,9 +403,9 @@ async fn scenario_e_shared_dep_no_duplicate() {
     assert_eq!(dep1.dependee_id, child.id);
     assert_eq!(dep2.dependee_id, child.id);
 
-    assert_eq!(parent1.directly_requested, 1);
-    assert_eq!(parent2.directly_requested, 1);
-    assert_eq!(child.directly_requested, 0);
+    assert!(parent1.directly_requested);
+    assert!(parent2.directly_requested);
+    assert!(!child.directly_requested);
 }
 
 #[tokio::test]
@@ -448,6 +418,13 @@ async fn scenario_f_system_deps_only() {
         rpc_deps_json("my-pkg", "my-pkg", &["glibc>=2.35"], &[], "1.0.0"),
     )
     .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rpc/v5/info"))
+        .and(query_param("arg[]", "glibc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![])))
+        .mount(&env.server)
+        .await;
 
     let result = add_pkg_via_rpc(&env, "my-pkg").await;
     assert!(
@@ -462,7 +439,7 @@ async fn scenario_f_system_deps_only() {
         .await
         .unwrap()
         .expect("package should exist");
-    assert_eq!(pkg.directly_requested, 1);
+    assert!(pkg.directly_requested);
     assert_eq!(pkg.status, BuildStates::ENQUEUED_BUILD);
 
     let dep_count = Dependencies::find().count(&env.db).await.unwrap();

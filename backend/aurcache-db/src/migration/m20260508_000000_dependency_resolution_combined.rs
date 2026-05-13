@@ -99,7 +99,7 @@ alter table packages
     add pkgbase TEXT;
 
 alter table packages
-    add directly_requested INTEGER not null default 1;
+    add directly_requested BOOLEAN not null default true;
 
 alter table packages
     add current_version TEXT;
@@ -171,7 +171,7 @@ ON public.packages (pkgbase);
         tracing::info!("Backfilling dependency entries for existing AUR packages...");
         let client = AurClient::new();
         if let Err(e) = backfill_dependencies(&client, db).await {
-            tracing::warn!("Dependency backfill failed (non-fatal): {e}");
+            tracing::error!("Dependency backfill failed (non-fatal): {e}");
         }
 
         Ok(())
@@ -280,7 +280,7 @@ async fn ensure_deps(
                 platforms: Set("x86_64".to_string()),
                 source_type: Set(packages::SourceType::Aur),
                 source_data: Set(format!(r#"{{"type":"aur","name":"{pkgbase}"}}"#)),
-                directly_requested: Set(0),
+                directly_requested: Set(false),
                 current_version: Set(None),
                 split_packages: Set(None),
                 ..Default::default()

@@ -33,7 +33,8 @@ struct InsertPackageParams<'a> {
     source_data_json: &'a str,
 }
 
-pub async fn package_add(
+pub async fn package_add_with_client(
+    client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
     platforms: Option<Vec<Platform>>,
@@ -66,7 +67,7 @@ pub async fn package_add(
 
     match source_data {
         SourceData::Aur { ref name } => {
-            add_aur_package(db, tx, &platforms, &platforms_str, &build_flags_str, name).await
+            add_aur_package(client, db, tx, &platforms, &platforms_str, &build_flags_str, name).await
         }
         SourceData::Git {
             ref r#ref,
@@ -74,6 +75,7 @@ pub async fn package_add(
             ref url,
         } => {
             add_git_package(
+                client,
                 db,
                 tx,
                 &platforms,
@@ -91,20 +93,28 @@ pub async fn package_add(
     }
 }
 
+pub async fn package_add(
+    db: &DatabaseConnection,
+    tx: &Sender<Action>,
+    platforms: Option<Vec<Platform>>,
+    build_flags: Option<Vec<String>>,
+    source_data: SourceData,
+) -> anyhow::Result<String> {
+    let client = aurcache_deps::AurClient::new();
+    package_add_with_client(&client, db, tx, platforms, build_flags, source_data).await
+}
+
 async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<()> {
-    if let Some(pkg) = Packages::find()
+    packages::Entity::update_many()
+        .col_expr(packages::Column::DirectlyRequested, sea_orm::sea_query::SimpleExpr::Value(sea_orm::Value::Bool(Some(true))))
         .filter(packages::Column::Pkgbase.eq(pkgbase))
-        .one(db)
-        .await?
-    {
-        let mut active: packages::ActiveModel = pkg.into();
-        active.directly_requested = Set(1);
-        active.save(db).await?;
-    }
+        .exec(db)
+        .await?;
     Ok(())
 }
 
 async fn add_aur_package(
+    client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
     platforms: &[Platform],
@@ -112,7 +122,6 @@ async fn add_aur_package(
     build_flags_str: &str,
     name: &str,
 ) -> anyhow::Result<String> {
-    let client = aurcache_deps::AurClient::new();
     let pkg_name = name.trim();
 
     let bases = client
@@ -189,7 +198,7 @@ fn add_aur_package_recursive<'a>(
             .iter()
             .chain(deps.make_depends.iter())
             .map(|d| {
-                let (name, constraint) = aurcache_deps::parse_dep(d);
+                let (name, constraint) = crate::pkg::parse_dep(d);
                 dep_constraints
                     .entry(name.to_string())
                     .or_insert(constraint.to_string());
@@ -228,13 +237,9 @@ async fn insert_package_with_deps(
         HashMap::new()
     } else {
         let dep_refs: Vec<&str> = params.dep_names.iter().map(|s| s.as_str()).collect();
-        match client.resolve_bases(&dep_refs).await {
-            Ok(bases) => bases,
-            Err(e) => {
-                tracing::warn!("Failed to resolve AUR deps for {}: {e}", params.pkgbase);
-                HashMap::new()
-            }
-        }
+        client.resolve_bases(&dep_refs).await.map_err(|e| {
+            anyhow!("Failed to resolve AUR dependencies for {}: {e}", params.pkgbase)
+        })?
     };
 
     let mut dep_pkgbases: Vec<String> = Vec::new();
@@ -275,23 +280,32 @@ async fn insert_package_with_deps(
         build_flags: Set(params.build_flags_str.to_string()),
         source_type: Set(params.source_type),
         source_data: Set(params.source_data_json.to_string()),
-        directly_requested: Set(0),
+        directly_requested: Set(false),
         split_packages: Set(split_packages_str),
         ..Default::default()
     };
     let saved = new_package.save(db).await?;
     added_order.push(params.pkgbase.to_string());
 
+    let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();
+    let dependees: HashMap<String, packages::Model> = Packages::find()
+        .filter(packages::Column::Pkgbase.is_in(pkgbase_strs))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|p| (p.pkgbase.clone(), p))
+        .collect();
+
+    let base_to_name: HashMap<&str, &str> = aur_dep_bases
+        .iter()
+        .map(|(name, base)| (base.as_str(), name.as_str()))
+        .collect();
+
     for dep_pkgbase in &dep_pkgbases {
-        if let Some(dependee) = Packages::find()
-            .filter(packages::Column::Pkgbase.eq(dep_pkgbase))
-            .one(db)
-            .await?
-        {
-            let constraint = aur_dep_bases
-                .iter()
-                .find(|(_, v)| *v == dep_pkgbase)
-                .and_then(|(name, _)| params.dep_constraints.get(name.as_str()))
+        if let Some(dependee) = dependees.get(dep_pkgbase.as_str()) {
+            let constraint = base_to_name
+                .get(dep_pkgbase.as_str())
+                .and_then(|name| params.dep_constraints.get(*name))
                 .cloned()
                 .unwrap_or_default();
 
@@ -311,6 +325,7 @@ async fn insert_package_with_deps(
 }
 
 async fn add_git_package(
+    client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
     platforms: &[Platform],
@@ -335,12 +350,14 @@ async fn add_git_package(
     let mut dep_names: Vec<String> = Vec::new();
     let mut pkgnames: Vec<String> = Vec::new();
 
+    let mut dep_set: HashSet<String> = HashSet::new();
+
     for pkg in sourceinfo.packages_for_architecture(SystemArchitecture::X86_64) {
         pkgnames.push(pkg.name.to_string());
         for dep in &pkg.dependencies {
             let s = dep.to_string();
             let (name, constraint) = crate::pkg::parse_dep(&s);
-            if !dep_names.contains(&name.to_string()) {
+            if dep_set.insert(name.to_string()) {
                 dep_names.push(name.to_string());
             }
             dep_constraints
@@ -350,7 +367,7 @@ async fn add_git_package(
         for dep in &pkg.make_dependencies {
             let s = dep.to_string();
             let (name, constraint) = crate::pkg::parse_dep(&s);
-            if !dep_names.contains(&name.to_string()) {
+            if dep_set.insert(name.to_string()) {
                 dep_names.push(name.to_string());
             }
             dep_constraints
@@ -370,7 +387,6 @@ async fn add_git_package(
         return Ok(pkgbase_name);
     }
 
-    let client = aurcache_deps::AurClient::new();
     let source_data_json = serde_json::to_string(&SourceData::Git {
         url: url.to_string(),
         r#ref: r#ref.to_string(),

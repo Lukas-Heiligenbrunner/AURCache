@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::time::Duration;
 
@@ -38,7 +38,15 @@ impl Default for AurClient {
     }
 }
 
+/// Build a snapshot download URL for an AUR package from the RPC URL.
+/// Strips `/rpc/v5` from the RPC URL to derive the base domain (if present).
+pub fn snapshot_url(rpc_url: &str, pkgbase: &str) -> String {
+    let base = rpc_url.trim_end_matches("/rpc/v5").trim_end_matches('/');
+    format!("{base}/cgit/aur.git/snapshot/{pkgbase}.tar.gz")
+}
+
 impl AurClient {
+    /// Construct a new client from the `AUR_RPC_URL` env var (or default).
     pub fn new() -> Self {
         let rpc_url = std::env::var("AUR_RPC_URL")
             .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5".to_string());
@@ -56,11 +64,7 @@ impl AurClient {
     }
 
     fn snapshot_url(&self, pkgbase: &str) -> String {
-        let base = self
-            .rpc_url
-            .trim_end_matches("/rpc/v5")
-            .trim_end_matches('/');
-        format!("{base}/cgit/aur.git/snapshot/{pkgbase}.tar.gz")
+        snapshot_url(&self.rpc_url, pkgbase)
     }
 
     fn rpc_info_url(&self, args: &[&str]) -> Result<Url, Error> {
@@ -149,7 +153,7 @@ struct PackageResponse {
 
 impl AurClient {
     pub async fn resolve_bases(&self, names: &[&str]) -> Result<HashMap<String, String>, Error> {
-        let packages = self.rpc_request(names).await?;
+        let packages = self.rpc_fetch(self.rpc_info_url(names)?).await?;
         Ok(packages
             .into_iter()
             .map(|pkg| (pkg.name, pkg.package_base))
@@ -259,14 +263,25 @@ impl AurClient {
         let mut depends = Vec::new();
         let mut make_depends = Vec::new();
         let mut pkgnames = Vec::new();
+        let mut seen_depends = HashSet::new();
+        let mut seen_make_depends = HashSet::new();
+        let mut seen_pkgnames = HashSet::new();
 
         for pkg in source_info.packages_for_architecture(SystemArchitecture::X86_64) {
-            dedup_push(&mut pkgnames, pkg.name.as_ref());
+            if seen_pkgnames.insert(pkg.name.to_string()) {
+                pkgnames.push(pkg.name.to_string());
+            }
             for dep in &pkg.dependencies {
-                dedup_push(&mut depends, &dep.to_string());
+                let s = dep.to_string();
+                if seen_depends.insert(s.clone()) {
+                    depends.push(s);
+                }
             }
             for dep in &pkg.make_dependencies {
-                dedup_push(&mut make_depends, &dep.to_string());
+                let s = dep.to_string();
+                if seen_make_depends.insert(s.clone()) {
+                    make_depends.push(s);
+                }
             }
         }
 
@@ -293,27 +308,30 @@ pub fn parse_dep(dep: &str) -> (&str, &str) {
     (dep, "")
 }
 
-fn dedup_push(vec: &mut Vec<String>, item: &str) {
-    if !vec.iter().any(|x| x == item) {
-        vec.push(item.to_string());
-    }
-}
-
 fn deps_from_packages(packages: &[Package]) -> PkgDeps {
     let mut depends = Vec::new();
     let mut make_depends = Vec::new();
     let mut pkgnames = Vec::new();
+    let mut seen_depends = HashSet::new();
+    let mut seen_make_depends = HashSet::new();
+    let mut seen_pkgnames = HashSet::new();
 
     for pkg in packages {
-        dedup_push(&mut pkgnames, &pkg.name);
+        if seen_pkgnames.insert(pkg.name.clone()) {
+            pkgnames.push(pkg.name.clone());
+        }
         if let Some(deps) = &pkg.depends {
             for d in deps {
-                dedup_push(&mut depends, d);
+                if seen_depends.insert(d.clone()) {
+                    depends.push(d.clone());
+                }
             }
         }
         if let Some(deps) = &pkg.make_depends {
             for d in deps {
-                dedup_push(&mut make_depends, d);
+                if seen_make_depends.insert(d.clone()) {
+                    make_depends.push(d.clone());
+                }
             }
         }
     }

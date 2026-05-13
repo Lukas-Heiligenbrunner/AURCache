@@ -79,7 +79,7 @@ async fn backfill_creates_dependency_links() {
         platforms: Set("x86_64".to_string()),
         source_type: Set(SourceType::Aur),
         source_data: Set(r#"{"type":"aur","name":"parent-pkg"}"#.to_string()),
-        directly_requested: Set(1),
+        directly_requested: Set(true),
         current_version: Set(None),
         split_packages: Set(None),
         ..Default::default()
@@ -98,9 +98,9 @@ async fn backfill_creates_dependency_links() {
         .await
         .unwrap()
         .expect("child-pkg should have been inserted by backfill");
-    assert_eq!(
-        child.directly_requested, 0,
-        "placeholder dep must have directly_requested=0"
+    assert!(
+        !child.directly_requested,
+        "placeholder dep must have directly_requested=false"
     );
 
     let parent = packages::Entity::find()
@@ -224,7 +224,7 @@ async fn backfill_multi_dep_package() {
         platforms: Set("x86_64".to_string()),
         source_type: Set(SourceType::Aur),
         source_data: Set(r#"{"type":"aur","name":"turso"}"#.to_string()),
-        directly_requested: Set(1),
+        directly_requested: Set(true),
         current_version: Set(None),
         split_packages: Set(None),
         ..Default::default()
@@ -244,7 +244,7 @@ async fn backfill_multi_dep_package() {
         .await
         .unwrap()
         .expect("libaegis should have been inserted by backfill");
-    assert_eq!(libaegis.directly_requested, 0);
+    assert!(!libaegis.directly_requested);
     assert_eq!(libaegis.status, 3);
 
     // simsimd inserted as placeholder dep
@@ -254,7 +254,7 @@ async fn backfill_multi_dep_package() {
         .await
         .unwrap()
         .expect("simsimd should have been inserted by backfill");
-    assert_eq!(simsimd.directly_requested, 0);
+    assert!(!simsimd.directly_requested);
     assert_eq!(simsimd.status, 3);
 
     // turso unchanged
@@ -264,7 +264,7 @@ async fn backfill_multi_dep_package() {
         .await
         .unwrap()
         .expect("turso should exist");
-    assert_eq!(turso.directly_requested, 1);
+    assert!(turso.directly_requested);
 
     // Dependency links: turso -> libaegis and turso -> simsimd
     let turso_to_libaegis = dependencies::Entity::find()

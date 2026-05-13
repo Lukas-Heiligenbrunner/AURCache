@@ -71,7 +71,7 @@ pub struct Model {
     pub source_type: SourceType,
     pub source_data: String,
     pub pkgbase: String,
-    pub directly_requested: i32,
+    pub directly_requested: bool,
     pub current_version: Option<String>,
     pub split_packages: Option<String>,
 }

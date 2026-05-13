@@ -335,16 +335,28 @@ impl Builder {
             .all(&self.db)
             .await?;
 
-        for link in dep_links {
-            let dependent_id = link.dependent_id;
+        if dep_links.is_empty() {
+            return Ok(());
+        }
 
-            let all_deps = Dependencies::find()
-                .filter(dependencies::Column::DependentId.eq(dependent_id))
-                .all(&self.db)
-                .await?;
+        let dependent_ids: Vec<i32> = dep_links.iter().map(|l| l.dependent_id).collect();
+        let mut deps_by_dependent: HashMap<i32, Vec<dependencies::Model>> = HashMap::new();
+        for dep in Dependencies::find()
+            .filter(dependencies::Column::DependentId.is_in(dependent_ids))
+            .all(&self.db)
+            .await?
+        {
+            deps_by_dependent.entry(dep.dependent_id).or_default().push(dep);
+        }
+
+        for link in &dep_links {
+            let dependent_id = link.dependent_id;
+            let Some(all_deps) = deps_by_dependent.get(&dependent_id) else {
+                continue;
+            };
 
             let mut all_satisfied = true;
-            for dep in &all_deps {
+            for dep in all_deps {
                 match self
                     .check_dep(dep.dependee_id, &dep.version_constraint)
                     .await?
@@ -416,7 +428,7 @@ impl Builder {
     /// the version constraint.
     async fn check_dep(&self, dependee_id: i32, constraint: &str) -> anyhow::Result<DepState> {
         // Self-referencing dep (shouldn't happen, but match original behavior)
-        if *self.package_model.id.get().unwrap_or(&0) == dependee_id {
+        if *self.package_model.id.get()? == dependee_id {
             return Ok(DepState::Satisfied);
         }
 

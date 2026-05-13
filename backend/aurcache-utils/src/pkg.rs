@@ -153,8 +153,7 @@ fn read_alpha(bytes: &[u8], start: usize) -> (&str, usize) {
     {
         i += 1;
     }
-    // SAFETY: valid UTF-8 since we're scanning ASCII bytes
-    let s = unsafe { std::str::from_utf8_unchecked(&bytes[start..i]) };
+    let s = std::str::from_utf8(&bytes[start..i]).unwrap();
     (s, i - start)
 }
 
