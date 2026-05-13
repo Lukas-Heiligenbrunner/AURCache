@@ -300,13 +300,14 @@ async fn insert_package_with_deps(
         split_packages: Set(split_packages_str),
         ..Default::default()
     };
-    let saved = new_package.save(db).await?;
     added_order.push(params.pkgbase.to_string());
+    let txn = db.begin().await?;
+    let saved = new_package.save(&txn).await?;
 
     let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();
     let dependees: HashMap<String, packages::Model> = Packages::find()
         .filter(packages::Column::Pkgbase.is_in(pkgbase_strs))
-        .all(db)
+        .all(&txn)
         .await?
         .into_iter()
         .map(|p| (p.pkgbase.clone(), p))
@@ -332,11 +333,12 @@ async fn insert_package_with_deps(
                 version_constraint: Set(constraint),
                 ..Default::default()
             }
-            .save(db)
+            .save(&txn)
             .await?;
         }
     }
 
+    txn.commit().await?;
     Ok(())
 }
 
@@ -489,12 +491,7 @@ async fn trigger_build_for_package(
 
         txn.commit().await?;
         let _ = tx.send(Action::Build(
-            Box::from(
-                Packages::find_by_id(pkg.id)
-                    .one(db)
-                    .await?
-                    .ok_or(anyhow!("Package not found"))?,
-            ),
+            Box::from(pkg.clone()),
             Box::from(new_build.try_into_model()?),
         ));
     }

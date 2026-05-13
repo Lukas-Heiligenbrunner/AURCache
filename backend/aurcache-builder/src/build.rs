@@ -325,6 +325,33 @@ impl Builder {
         Ok(())
     }
 
+    /// Create a build record and send it to the build queue.
+    async fn enqueue_build(
+        &self,
+        pkg: &packages::Model,
+        platform: &str,
+        version: &str,
+    ) -> anyhow::Result<builds::Model> {
+        let build = builds::ActiveModel {
+            pkg_id: Set(pkg.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::ENQUEUED_BUILD)),
+            platform: Set(platform.to_string()),
+            start_time: Set(Some(
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+            )),
+            version: Set(version.to_string()),
+            ..Default::default()
+        };
+        let saved = build.save(&self.db).await?;
+        let model = saved.try_into_model()?;
+        let _ = self.action_tx.send(Action::Build(
+            Box::from(pkg.clone()),
+            Box::new(model.clone()),
+        ));
+        Ok(model)
+    }
+
     /// After a successful build, check for packages that depend on this one
     /// and trigger their builds if all their dependencies are satisfied.
     async fn trigger_dependents(&self) -> anyhow::Result<()> {
@@ -411,12 +438,7 @@ impl Builder {
                                 ))
                                 .await;
                             let _ = self.action_tx.send(Action::Build(
-                                Box::from(
-                                    Packages::find_by_id(pkg.id)
-                                        .one(&self.db)
-                                        .await?
-                                        .ok_or(anyhow!("Package not found"))?,
-                                ),
+                                Box::from(pkg.clone()),
                                 Box::from(new_build.try_into_model()?),
                             ));
                         }
@@ -516,12 +538,7 @@ impl Builder {
                 ))
                 .await;
             let _ = self.action_tx.send(Action::Build(
-                Box::from(
-                    Packages::find_by_id(pkg.id)
-                        .one(&self.db)
-                        .await?
-                        .ok_or(anyhow!("Package not found"))?,
-                ),
+                Box::from(pkg.clone()),
                 Box::from(new_build.try_into_model()?),
             ));
         }
