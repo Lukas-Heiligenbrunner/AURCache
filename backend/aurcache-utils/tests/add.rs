@@ -24,24 +24,30 @@ use aurcache_utils::package::add::package_add;
 
 static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-fn aur_package_json(name: &str, version: &str) -> serde_json::Value {
+fn rpc_deps_json(
+    name: &str,
+    pkgbase: &str,
+    depends: &[&str],
+    make_depends: &[&str],
+    version: &str,
+) -> serde_json::Value {
     json!({
         "Name": name,
         "Version": version,
-        "PackageBase": name,
-        "Description": null,
-        "Maintainer": null,
-        "URL": null,
+        "PackageBase": pkgbase,
+        "PackageBaseID": 0,
+        "ID": 0,
         "NumVotes": 0,
         "Popularity": 0.0,
-        "OutOfDate": null,
-        "PackageBaseID": 0,
         "FirstSubmitted": 0,
         "LastModified": 0,
         "URLPath": null,
-        "ID": 0,
-        "Depends": null,
-        "MakeDepends": null,
+        "Description": null,
+        "Maintainer": null,
+        "URL": null,
+        "OutOfDate": null,
+        "Depends": depends,
+        "MakeDepends": make_depends,
         "OptDepends": null,
         "CheckDepends": null,
         "Conflicts": null,
@@ -49,21 +55,7 @@ fn aur_package_json(name: &str, version: &str) -> serde_json::Value {
         "Replaces": null,
         "Groups": null,
         "License": null,
-        "Keywords": null
-    })
-}
-
-fn rpc_deps_json(
-    name: &str,
-    pkgbase: &str,
-    depends: &[&str],
-    make_depends: &[&str],
-) -> serde_json::Value {
-    json!({
-        "Name": name,
-        "PackageBase": pkgbase,
-        "Depends": depends,
-        "MakeDepends": make_depends,
+        "Keywords": null,
     })
 }
 
@@ -84,7 +76,10 @@ impl EnvGuard {
     fn new() -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old_rpc = std::env::var("AUR_RPC_URL").ok();
-        EnvGuard { _lock: lock, old_rpc }
+        EnvGuard {
+            _lock: lock,
+            old_rpc,
+        }
     }
 }
 
@@ -109,7 +104,9 @@ async fn setup_env() -> TestEnv {
     let base_url = server.uri();
 
     let guard = EnvGuard::new();
-    unsafe { std::env::set_var("AUR_RPC_URL", format!("{base_url}/rpc/v5")); }
+    unsafe {
+        std::env::set_var("AUR_RPC_URL", format!("{base_url}/rpc/v5"));
+    }
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -133,19 +130,6 @@ async fn mock_rpc_info(server: &MockServer, pkgbase: &str, result: serde_json::V
         .and(path("/rpc/v5/info"))
         .and(query_param("arg[]", pkgbase))
         .respond_with(ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![result])))
-        .mount(server)
-        .await;
-}
-
-async fn mock_aur_version(server: &MockServer, name: &str, version: &str) {
-    Mock::given(method("GET"))
-        .and(path(format!("/rpc/v5/info/{name}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "version": 5,
-            "type": "multiinfo",
-            "resultcount": 1,
-            "results": [aur_package_json(name, version)],
-        })))
         .mount(server)
         .await;
 }
@@ -175,10 +159,9 @@ async fn scenario_a_no_aur_deps() {
     mock_rpc_info(
         &env.server,
         "no-deps-pkg",
-        rpc_deps_json("no-deps-pkg", "no-deps-pkg", &[], &[]),
+        rpc_deps_json("no-deps-pkg", "no-deps-pkg", &[], &[], "1.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "no-deps-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "no-deps-pkg").await;
     assert!(result.is_ok());
@@ -205,19 +188,16 @@ async fn scenario_b_one_aur_dep() {
     mock_rpc_info(
         &env.server,
         "parent-pkg",
-        rpc_deps_json("parent-pkg", "parent-pkg", &["child-pkg"], &[]),
+        rpc_deps_json("parent-pkg", "parent-pkg", &["child-pkg"], &[], "2.0.0"),
     )
     .await;
 
     mock_rpc_info(
         &env.server,
         "child-pkg",
-        rpc_deps_json("child-pkg", "child-pkg", &[], &[]),
+        rpc_deps_json("child-pkg", "child-pkg", &[], &[], "1.0.0"),
     )
     .await;
-
-    mock_aur_version(&env.server, "parent-pkg", "2.0.0").await;
-    mock_aur_version(&env.server, "child-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "parent-pkg").await;
     assert!(result.is_ok());
@@ -272,17 +252,15 @@ async fn scenario_c_cascade_after_dep_build() {
     mock_rpc_info(
         &env.server,
         "parent-pkg",
-        rpc_deps_json("parent-pkg", "parent-pkg", &["child-pkg"], &[]),
+        rpc_deps_json("parent-pkg", "parent-pkg", &["child-pkg"], &[], "2.0.0"),
     )
     .await;
     mock_rpc_info(
         &env.server,
         "child-pkg",
-        rpc_deps_json("child-pkg", "child-pkg", &[], &[]),
+        rpc_deps_json("child-pkg", "child-pkg", &[], &[], "1.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "parent-pkg", "2.0.0").await;
-    mock_aur_version(&env.server, "child-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "parent-pkg").await;
     assert!(result.is_ok());
@@ -345,17 +323,15 @@ async fn scenario_d_make_dep_only() {
     mock_rpc_info(
         &env.server,
         "build-tool",
-        rpc_deps_json("build-tool", "build-tool", &[], &["make-env-pkg"]),
+        rpc_deps_json("build-tool", "build-tool", &[], &["make-env-pkg"], "3.0.0"),
     )
     .await;
     mock_rpc_info(
         &env.server,
         "make-env-pkg",
-        rpc_deps_json("make-env-pkg", "make-env-pkg", &[], &[]),
+        rpc_deps_json("make-env-pkg", "make-env-pkg", &[], &[], "1.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "build-tool", "3.0.0").await;
-    mock_aur_version(&env.server, "make-env-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "build-tool").await;
     assert!(result.is_ok());
@@ -395,17 +371,15 @@ async fn scenario_e_shared_dep_no_duplicate() {
     mock_rpc_info(
         &env.server,
         "parent-1",
-        rpc_deps_json("parent-1", "parent-1", &["child"], &[]),
+        rpc_deps_json("parent-1", "parent-1", &["child"], &[], "1.0.0"),
     )
     .await;
     mock_rpc_info(
         &env.server,
         "child",
-        rpc_deps_json("child", "child", &[], &[]),
+        rpc_deps_json("child", "child", &[], &[], "1.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "parent-1", "1.0.0").await;
-    mock_aur_version(&env.server, "child", "1.0.0").await;
 
     let result1 = add_pkg_via_rpc(&env, "parent-1").await;
     assert!(result1.is_ok());
@@ -413,10 +387,9 @@ async fn scenario_e_shared_dep_no_duplicate() {
     mock_rpc_info(
         &env.server,
         "parent-2",
-        rpc_deps_json("parent-2", "parent-2", &["child"], &[]),
+        rpc_deps_json("parent-2", "parent-2", &["child"], &[], "2.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "parent-2", "2.0.0").await;
 
     let result2 = add_pkg_via_rpc(&env, "parent-2").await;
     assert!(result2.is_ok());
@@ -472,10 +445,9 @@ async fn scenario_f_system_deps_only() {
     mock_rpc_info(
         &env.server,
         "my-pkg",
-        rpc_deps_json("my-pkg", "my-pkg", &["glibc>=2.35"], &[]),
+        rpc_deps_json("my-pkg", "my-pkg", &["glibc>=2.35"], &[], "1.0.0"),
     )
     .await;
-    mock_aur_version(&env.server, "my-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "my-pkg").await;
     assert!(

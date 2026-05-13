@@ -27,7 +27,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub struct AurClient {
     http: Client,
-    aur_url: String,
+    rpc_url: String,
 }
 
 impl Default for AurClient {
@@ -38,31 +38,32 @@ impl Default for AurClient {
 
 impl AurClient {
     pub fn new() -> Self {
-        // AUR_RPC_URL includes /rpc/v5 (aur-rs convention), strip it since
-        // AurClient appends its own /rpc/v5/info path.
-        let aur_url = std::env::var("AUR_RPC_URL")
-            .map(|u| u.trim_end_matches('/').trim_end_matches("/rpc/v5").trim_end_matches('/').to_string())
-            .unwrap_or_else(|_| "https://aur.archlinux.org".to_string());
+        let rpc_url = std::env::var("AUR_RPC_URL")
+            .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5".to_string());
         Self {
             http: Client::new(),
-            aur_url,
+            rpc_url,
         }
     }
 
     pub fn with_aur_url(aur_url: impl Into<String>) -> Self {
         Self {
             http: Client::new(),
-            aur_url: aur_url.into(),
+            rpc_url: aur_url.into(),
         }
     }
 
     fn snapshot_url(&self, pkgbase: &str) -> String {
-        format!("{}/cgit/aur.git/snapshot/{}.tar.gz", self.aur_url, pkgbase)
+        let base = self
+            .rpc_url
+            .trim_end_matches("/rpc/v5")
+            .trim_end_matches('/');
+        format!("{base}/cgit/aur.git/snapshot/{pkgbase}.tar.gz")
     }
 
     fn rpc_info_url(&self, args: &[&str]) -> Result<Url, Error> {
-        let mut url = Url::parse(&format!("{}/rpc/v5/info", self.aur_url))
-            .map_err(|e| Error::Rpc(e.to_string()))?;
+        let mut url =
+            Url::parse(&format!("{}/info", self.rpc_url)).map_err(|e| Error::Rpc(e.to_string()))?;
         for arg in args {
             url.query_pairs_mut().append_pair("arg[]", arg);
         }
@@ -85,30 +86,69 @@ pub struct PkgDeps {
     pub pkgnames: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct PackageInfo {
+#[derive(Debug, Clone, Deserialize)]
+pub struct Package {
     #[serde(rename = "Name")]
-    name: String,
+    pub name: String,
+    #[serde(rename = "Version")]
+    pub version: String,
+    #[serde(rename = "Description")]
+    pub description: Option<String>,
+    #[serde(rename = "Maintainer")]
+    pub maintainer: Option<String>,
+    #[serde(rename = "URL")]
+    pub url: Option<String>,
+    #[serde(rename = "NumVotes")]
+    pub num_votes: u32,
+    #[serde(rename = "Popularity")]
+    pub popularity: f32,
+    #[serde(rename = "OutOfDate")]
+    pub out_of_date: Option<u32>,
     #[serde(rename = "PackageBase")]
-    package_base: String,
+    pub package_base: String,
+    #[serde(rename = "PackageBaseID")]
+    pub package_base_id: u32,
+    #[serde(rename = "FirstSubmitted")]
+    pub first_submitted: u32,
+    #[serde(rename = "LastModified")]
+    pub last_modified: u32,
+    #[serde(rename = "URLPath")]
+    pub url_path: Option<String>,
+    #[serde(rename = "ID")]
+    pub id: u32,
     #[serde(rename = "Depends", default)]
-    depends: Vec<String>,
+    pub depends: Option<Vec<String>>,
     #[serde(rename = "MakeDepends", default)]
-    make_depends: Vec<String>,
+    pub make_depends: Option<Vec<String>>,
+    #[serde(rename = "OptDepends", default)]
+    pub opt_depends: Option<Vec<String>>,
+    #[serde(rename = "CheckDepends", default)]
+    pub check_depends: Option<Vec<String>>,
+    #[serde(rename = "Conflicts", default)]
+    pub conflicts: Option<Vec<String>>,
+    #[serde(rename = "Provides", default)]
+    pub provides: Option<Vec<String>>,
+    #[serde(rename = "Replaces", default)]
+    pub replaces: Option<Vec<String>>,
+    #[serde(rename = "Groups", default)]
+    pub groups: Option<Vec<String>>,
+    #[serde(rename = "License", default)]
+    pub license: Option<Vec<String>>,
+    #[serde(rename = "Keywords", default)]
+    pub keywords: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
-struct InfoResponse {
+struct PackageResponse {
     #[serde(rename = "type")]
     response_type: String,
-    results: Vec<PackageInfo>,
+    results: Vec<Package>,
 }
 
 impl AurClient {
     pub async fn resolve_bases(&self, names: &[&str]) -> Result<HashMap<String, String>, Error> {
-        let response: InfoResponse = self.rpc_request(names).await?;
-        Ok(response
-            .results
+        let packages = self.rpc_request(names).await?;
+        Ok(packages
             .into_iter()
             .map(|pkg| (pkg.name, pkg.package_base))
             .collect())
@@ -121,23 +161,50 @@ impl AurClient {
         self.deps_of_srcinfo(pkgbase).await
     }
 
-    async fn rpc_request(&self, args: &[&str]) -> Result<InfoResponse, Error> {
-        let url = self.rpc_info_url(args)?;
+    pub async fn info_of(&self, name: &str) -> Result<Option<Package>, Error> {
+        let mut packages = self.rpc_request(&[name]).await?;
+        Ok(packages.pop())
+    }
+
+    pub async fn multi_info_of(&self, names: &[&str]) -> Result<Vec<Package>, Error> {
+        self.rpc_request(names).await
+    }
+
+    pub async fn search_by_name(&self, query: &str) -> Result<Vec<Package>, Error> {
+        let url = self.rpc_search_url(query)?;
+        self.rpc_fetch(url).await
+    }
+
+    fn rpc_search_url(&self, query: &str) -> Result<Url, Error> {
+        let mut url = Url::parse(&format!("{}/search", self.rpc_url))
+            .map_err(|e| Error::Rpc(e.to_string()))?;
+        url.query_pairs_mut().append_pair("by", "name-desc");
+        url.query_pairs_mut().append_pair("arg[]", query);
+        Ok(url)
+    }
+
+    async fn rpc_fetch(&self, url: Url) -> Result<Vec<Package>, Error> {
         let resp = self.http.get(url).send().await?;
         let text = resp.text().await?;
-        let response: InfoResponse =
+        let response: PackageResponse =
             serde_json::from_str(&text).map_err(|e| Error::Rpc(e.to_string()))?;
+        if response.response_type == "error" {
+            return Err(Error::Rpc("AUR RPC returned error".into()));
+        }
+        Ok(response.results)
+    }
 
-        if response.response_type == "error" || response.results.is_empty() {
+    async fn rpc_request(&self, args: &[&str]) -> Result<Vec<Package>, Error> {
+        let packages = self.rpc_fetch(self.rpc_info_url(args)?).await?;
+        if packages.is_empty() {
             return Err(Error::Rpc("package not found via RPC".into()));
         }
-
-        Ok(response)
+        Ok(packages)
     }
 
     async fn deps_of_rpc(&self, pkgbase: &str) -> Result<PkgDeps, Error> {
-        let response = self.rpc_request(&[pkgbase]).await?;
-        Ok(deps_from_packages(&response.results))
+        let packages = self.rpc_request(&[pkgbase]).await?;
+        Ok(deps_from_packages(&packages))
     }
 
     async fn deps_of_srcinfo(&self, pkgbase: &str) -> Result<PkgDeps, Error> {
@@ -204,18 +271,22 @@ fn dedup_push(vec: &mut Vec<String>, item: &str) {
     }
 }
 
-fn deps_from_packages(packages: &[PackageInfo]) -> PkgDeps {
+fn deps_from_packages(packages: &[Package]) -> PkgDeps {
     let mut depends = Vec::new();
     let mut make_depends = Vec::new();
     let mut pkgnames = Vec::new();
 
     for pkg in packages {
         dedup_push(&mut pkgnames, &pkg.name);
-        for d in &pkg.depends {
-            dedup_push(&mut depends, d);
+        if let Some(deps) = &pkg.depends {
+            for d in deps {
+                dedup_push(&mut depends, d);
+            }
         }
-        for d in &pkg.make_depends {
-            dedup_push(&mut make_depends, d);
+        if let Some(deps) = &pkg.make_depends {
+            for d in deps {
+                dedup_push(&mut make_depends, d);
+            }
         }
     }
 

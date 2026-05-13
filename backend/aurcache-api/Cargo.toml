@@ -11,8 +11,7 @@ itertools = {workspace = true}
 serde = { workspace = true }
 chrono = {workspace = true}
 
-# todo try to remove this dep from here, shouldn't be required
-aur-rs = {workspace = true}
+aurcache-deps = {path = "../aurcache-deps"}
 
 rocket = "0.5.1"
 rocket_oauth2 = "0.5.0"

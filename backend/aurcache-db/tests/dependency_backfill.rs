@@ -16,17 +16,41 @@ use wiremock::{
 async fn backfill_creates_dependency_links() {
     let mock_server = MockServer::start().await;
 
+    let make_pkg = |name: &str, deps: Vec<&str>| -> serde_json::Value {
+        serde_json::json!({
+            "Name": name,
+            "Version": "1.0-1",
+            "PackageBase": name,
+            "PackageBaseID": 0,
+            "ID": 0,
+            "NumVotes": 0,
+            "Popularity": 0.0,
+            "FirstSubmitted": 0,
+            "LastModified": 0,
+            "URLPath": null,
+            "Description": null,
+            "Maintainer": null,
+            "URL": null,
+            "OutOfDate": null,
+            "Depends": deps,
+            "MakeDepends": [],
+            "OptDepends": null,
+            "CheckDepends": null,
+            "Conflicts": null,
+            "Provides": null,
+            "Replaces": null,
+            "Groups": null,
+            "License": null,
+            "Keywords": null,
+        })
+    };
+
     Mock::given(method("GET"))
         .and(path("/rpc/v5/info"))
         .and(query_param("arg[]", "parent-pkg"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "type": "multiinfo",
-            "results": [{
-                "Name": "parent-pkg",
-                "PackageBase": "parent-pkg",
-                "Depends": ["child-pkg>=1.0"],
-                "MakeDepends": []
-            }]
+            "results": [make_pkg("parent-pkg", vec!["child-pkg>=1.0"])]
         })))
         .mount(&mock_server)
         .await;
@@ -36,12 +60,7 @@ async fn backfill_creates_dependency_links() {
         .and(query_param("arg[]", "child-pkg"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "type": "multiinfo",
-            "results": [{
-                "Name": "child-pkg",
-                "PackageBase": "child-pkg",
-                "Depends": [],
-                "MakeDepends": []
-            }]
+            "results": [make_pkg("child-pkg", vec![])]
         })))
         .mount(&mock_server)
         .await;
@@ -69,7 +88,8 @@ async fn backfill_creates_dependency_links() {
     .await
     .unwrap();
 
-    let client = AurClient::with_aur_url(mock_server.uri());
+    let rpc_url = format!("{}/rpc/v5", mock_server.uri());
+    let client = AurClient::with_aur_url(&rpc_url);
     backfill_dependencies(&client, &db).await.unwrap();
 
     let child = packages::Entity::find()
@@ -107,6 +127,35 @@ async fn backfill_creates_dependency_links() {
 async fn backfill_multi_dep_package() {
     let mock_server = MockServer::start().await;
 
+    let make_pkg = |name: &str, deps: Vec<&str>| -> serde_json::Value {
+        serde_json::json!({
+            "Name": name,
+            "Version": "1.0-1",
+            "PackageBase": name,
+            "PackageBaseID": 0,
+            "ID": 0,
+            "NumVotes": 0,
+            "Popularity": 0.0,
+            "FirstSubmitted": 0,
+            "LastModified": 0,
+            "URLPath": null,
+            "Description": null,
+            "Maintainer": null,
+            "URL": null,
+            "OutOfDate": null,
+            "Depends": deps,
+            "MakeDepends": [],
+            "OptDepends": null,
+            "CheckDepends": null,
+            "Conflicts": null,
+            "Provides": null,
+            "Replaces": null,
+            "Groups": null,
+            "License": null,
+            "Keywords": null,
+        })
+    };
+
     // Wiremock: first-match-wins. Register the most specific (batch) mock FIRST.
     // Batch resolve_bases(["libaegis", "simsimd"]) -> multiinfo with both
     Mock::given(method("GET"))
@@ -117,8 +166,8 @@ async fn backfill_multi_dep_package() {
             "type": "multiinfo",
             "resultcount": 2,
             "results": [
-                {"Name": "libaegis", "PackageBase": "libaegis", "Depends": [], "MakeDepends": []},
-                {"Name": "simsimd", "PackageBase": "simsimd", "Depends": [], "MakeDepends": []},
+                make_pkg("libaegis", vec![]),
+                make_pkg("simsimd", vec![]),
             ]
         })))
         .mount(&mock_server)
@@ -131,12 +180,7 @@ async fn backfill_multi_dep_package() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "type": "multiinfo",
             "resultcount": 1,
-            "results": [{
-                "Name": "turso",
-                "PackageBase": "turso",
-                "Depends": ["libaegis", "simsimd"],
-                "MakeDepends": []
-            }]
+            "results": [make_pkg("turso", vec!["libaegis", "simsimd"])]
         })))
         .mount(&mock_server)
         .await;
@@ -148,12 +192,7 @@ async fn backfill_multi_dep_package() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "type": "multiinfo",
             "resultcount": 1,
-            "results": [{
-                "Name": "libaegis",
-                "PackageBase": "libaegis",
-                "Depends": [],
-                "MakeDepends": []
-            }]
+            "results": [make_pkg("libaegis", vec![])]
         })))
         .mount(&mock_server)
         .await;
@@ -165,12 +204,7 @@ async fn backfill_multi_dep_package() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "type": "multiinfo",
             "resultcount": 1,
-            "results": [{
-                "Name": "simsimd",
-                "PackageBase": "simsimd",
-                "Depends": [],
-                "MakeDepends": []
-            }]
+            "results": [make_pkg("simsimd", vec![])]
         })))
         .mount(&mock_server)
         .await;
@@ -199,7 +233,8 @@ async fn backfill_multi_dep_package() {
     .await
     .unwrap();
 
-    let client = AurClient::with_aur_url(mock_server.uri());
+    let rpc_url = format!("{}/rpc/v5", mock_server.uri());
+    let client = AurClient::with_aur_url(&rpc_url);
     backfill_dependencies(&client, &db).await.unwrap();
 
     // libaegis inserted as placeholder dep

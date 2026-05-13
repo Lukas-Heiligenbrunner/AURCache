@@ -1,10 +1,10 @@
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::anyhow;
-use aur_rs::{Package, Request};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_deps::AurClient;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use aurcache_utils::git::checkout::checkout_repo_ref;
 use aurcache_utils::settings::general::SettingsTraits;
@@ -45,20 +45,11 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     let results = if aur_names.is_empty() {
         vec![]
     } else {
-        let request = match std::env::var("AUR_RPC_URL") {
-            Ok(url) => aur_rs::Request {
-                endpoint: url.trim_end_matches('/').to_string(),
-            },
-            Err(_) => Request::default(),
-        };
-        let response = request
-            .search_multi_info_by_names(aur_names.as_slice())
-            .await;
-
-        let results: Vec<Package> = response
+        let client = AurClient::new();
+        client
+            .multi_info_of(&aur_names)
+            .await
             .map_err(|_| anyhow!("couldn't download version update"))?
-            .results;
-        results
     };
 
     if results.len() != aur_names.len() {

@@ -1,52 +1,23 @@
 use anyhow::anyhow;
-use aur_rs::{Package, Request};
-use backon::{FibonacciBuilder, Retryable};
-use std::time::Duration;
-
-// https://wiki.archlinux.org/title/Aurweb_RPC_interface
-// API rate limit 4000 requests per day
+use aurcache_deps::AurClient;
 
 /// Query the AUR for packages matching the given query string.
-/// The AUR RPC endpoint can be overridden via the `AUR_BASE_URL` env var.
-pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
-    let request = match_aur_base_url();
-    let response = (|| async { request.search_package_by_name(query).await })
-        .retry(
-            FibonacciBuilder::default()
-                .with_min_delay(Duration::from_millis(500))
-                .with_max_times(4),
-        )
+pub async fn query_aur(query: &str) -> anyhow::Result<Vec<aurcache_deps::Package>> {
+    let client = AurClient::new();
+    let mut results = client
+        .search_by_name(query)
         .await
-        .map_err(|e| anyhow!("failed to get package: {e}"))?;
-
-    let mut response = response.results;
-    response.sort_by(|x, x1| x.popularity.partial_cmp(&x1.popularity).unwrap().reverse());
-
-    Ok(response)
+        .map_err(|e| anyhow!("failed to query AUR: {e}"))?;
+    results.sort_by(|x, x1| x.popularity.partial_cmp(&x1.popularity).unwrap().reverse());
+    Ok(results)
 }
 
 /// Retrieve AUR package information by its name.
 /// Returns `None` if the package is not found.
-/// The AUR RPC endpoint can be overridden via the `AUR_BASE_URL` env var.
-pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>> {
-    let request = match_aur_base_url();
-    let mut response = (|| async { request.search_info_by_name(pkg_name).await })
-        .retry(
-            FibonacciBuilder::default()
-                .with_min_delay(Duration::from_millis(500))
-                .with_max_times(4),
-        )
+pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<aurcache_deps::Package>> {
+    let client = AurClient::new();
+    client
+        .info_of(pkg_name)
         .await
-        .map_err(|e| anyhow!("failed to get package: {e}"))?;
-
-    Ok(response.results.pop())
-}
-
-fn match_aur_base_url() -> Request {
-    match std::env::var("AUR_RPC_URL") {
-        Ok(url) => aur_rs::Request {
-            endpoint: url.trim_end_matches('/').to_string(),
-        },
-        Err(_) => Request::default(),
-    }
+        .map_err(|e| anyhow!("failed to get package info: {e}"))
 }
