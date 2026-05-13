@@ -1,9 +1,10 @@
 use crate::package::delete::package_delete;
 use aurcache_db::dependencies;
-use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::packages;
+use aurcache_db::prelude::{Dependencies, Packages};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set,
 };
 
 /// Live-check a package: if it's not directly requested and nothing depends

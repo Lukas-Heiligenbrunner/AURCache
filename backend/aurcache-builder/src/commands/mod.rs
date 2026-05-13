@@ -9,9 +9,8 @@ pub fn build_build_command(
 ) -> String {
     match source_data {
         SourceData::Aur { .. } => {
-            let snapshot_url = format!(
-                "https://aur.archlinux.org/cgit/aur.git/snapshot/{pkgbase}.tar.gz"
-            );
+            let snapshot_url =
+                format!("https://aur.archlinux.org/cgit/aur.git/snapshot/{pkgbase}.tar.gz");
             format!(
                 "sudo pacman -Syu --noconfirm --noprogressbar --color never && \
                  mkdir -p {build_dir} && cd {build_dir} && \

@@ -6,13 +6,14 @@ use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_types::builder::{Action, BuildStates};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, Set,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use wiremock::{
-    matchers::{method, path, query_param},
     Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
 };
 
 use aurcache_utils::package::add::package_add;
@@ -52,7 +53,12 @@ fn aur_package_json(name: &str, version: &str) -> serde_json::Value {
     })
 }
 
-fn rpc_deps_json(name: &str, pkgbase: &str, depends: &[&str], make_depends: &[&str]) -> serde_json::Value {
+fn rpc_deps_json(
+    name: &str,
+    pkgbase: &str,
+    depends: &[&str],
+    make_depends: &[&str],
+) -> serde_json::Value {
     json!({
         "Name": name,
         "PackageBase": pkgbase,
@@ -139,9 +145,7 @@ async fn mock_rpc_info(server: &MockServer, pkgbase: &str, result: serde_json::V
     Mock::given(method("GET"))
         .and(path("/rpc/v5/info"))
         .and(query_param("arg[]", pkgbase))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            multiinfo_json(vec![result]),
-        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![result])))
         .mount(server)
         .await;
 }
@@ -159,10 +163,7 @@ async fn mock_aur_version(server: &MockServer, name: &str, version: &str) {
         .await;
 }
 
-async fn add_pkg_via_rpc(
-    env: &TestEnv,
-    name: &str,
-) -> anyhow::Result<String> {
+async fn add_pkg_via_rpc(env: &TestEnv, name: &str) -> anyhow::Result<String> {
     let (tx, _) = tokio::sync::broadcast::channel(100);
     package_add(
         &env.db,
@@ -241,7 +242,10 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("child package should exist");
-    assert_eq!(child.directly_requested, 0, "child is not directly requested");
+    assert_eq!(
+        child.directly_requested, 0,
+        "child is not directly requested"
+    );
 
     let parent = Packages::find()
         .filter(packages::Column::Pkgbase.eq("parent-pkg"))
@@ -249,7 +253,10 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("parent package should exist");
-    assert_eq!(parent.directly_requested, 1, "parent should be directly requested");
+    assert_eq!(
+        parent.directly_requested, 1,
+        "parent should be directly requested"
+    );
 
     let dep = Dependencies::find()
         .filter(dependencies::Column::DependentId.eq(parent.id))
@@ -265,7 +272,10 @@ async fn scenario_b_one_aur_dep() {
         .count(&env.db)
         .await
         .unwrap();
-    assert_eq!(parent_builds, 0, "parent should not have a build triggered yet");
+    assert_eq!(
+        parent_builds, 0,
+        "parent should not have a build triggered yet"
+    );
 }
 
 #[tokio::test]
@@ -385,7 +395,10 @@ async fn scenario_d_make_dep_only() {
         .await
         .unwrap()
         .expect("dependency row should exist");
-    assert_eq!(dep.dependee_id, dep_pkg.id, "build-tool should depend on make-env-pkg");
+    assert_eq!(
+        dep.dependee_id, dep_pkg.id,
+        "build-tool should depend on make-env-pkg"
+    );
 }
 
 #[tokio::test]
@@ -478,7 +491,10 @@ async fn scenario_f_system_deps_only() {
     mock_aur_version(&env.server, "my-pkg", "1.0.0").await;
 
     let result = add_pkg_via_rpc(&env, "my-pkg").await;
-    assert!(result.is_ok(), "add should succeed despite system-only deps: {result:?}");
+    assert!(
+        result.is_ok(),
+        "add should succeed despite system-only deps: {result:?}"
+    );
     assert_eq!(result.unwrap(), "my-pkg");
 
     let pkg = Packages::find()
@@ -490,9 +506,6 @@ async fn scenario_f_system_deps_only() {
     assert_eq!(pkg.directly_requested, 1);
     assert_eq!(pkg.status, BuildStates::ENQUEUED_BUILD);
 
-    let dep_count = Dependencies::find()
-        .count(&env.db)
-        .await
-        .unwrap();
+    let dep_count = Dependencies::find().count(&env.db).await.unwrap();
     assert_eq!(dep_count, 0, "no dependency rows for system packages");
 }

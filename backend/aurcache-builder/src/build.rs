@@ -5,14 +5,14 @@ use aurcache_db::dependencies;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, files, packages};
-use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use aurcache_types::builder::{Action, BuildStates};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
+use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
-use bollard::Docker;
 use futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
@@ -289,8 +289,9 @@ impl Builder {
                     }
                 } else {
                     self.logger
-                        .append("package was removed during build; cleaning up artifacts"
-                            .to_string())
+                        .append(
+                            "package was removed during build; cleaning up artifacts".to_string(),
+                        )
                         .await;
                     if let Err(e) = self.cleanup_orphaned_build_files().await {
                         self.logger
@@ -344,7 +345,10 @@ impl Builder {
 
             let mut all_satisfied = true;
             for dep in &all_deps {
-                match self.check_dep(dep.dependee_id, &dep.version_constraint).await? {
+                match self
+                    .check_dep(dep.dependee_id, &dep.version_constraint)
+                    .await?
+                {
                     DepState::Satisfied => continue,
                     DepState::NeedsRebuild => {
                         self.trigger_dep_rebuild(dep.dependee_id).await?;
@@ -370,8 +374,7 @@ impl Builder {
                             .or(pkg.upstream_version.clone())
                             .unwrap_or_default();
 
-                        let platform_strs: Vec<&str> =
-                            pkg.platforms.split(';').collect();
+                        let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
                         for platform in platform_strs {
                             let build = builds::ActiveModel {
                                 pkg_id: Set(pkg.id),
@@ -379,9 +382,7 @@ impl Builder {
                                 status: Set(Some(BuildStates::ENQUEUED_BUILD)),
                                 platform: Set(platform.to_string()),
                                 start_time: Set(Some(
-                                    SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)?
-                                        .as_secs() as i64,
+                                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
                                 )),
                                 version: Set(version.clone()),
                                 ..Default::default()
@@ -424,9 +425,7 @@ impl Builder {
         };
 
         // Already building or queued — not ready yet, don't trigger duplicate
-        if pkg.status == BuildStates::ACTIVE_BUILD
-            || pkg.status == BuildStates::ENQUEUED_BUILD
-        {
+        if pkg.status == BuildStates::ACTIVE_BUILD || pkg.status == BuildStates::ENQUEUED_BUILD {
             return Ok(DepState::NotReady);
         }
 
@@ -448,8 +447,7 @@ impl Builder {
         };
 
         let (version, _status) = build;
-        if constraint.is_empty()
-            || aurcache_utils::pkg::satisfies_constraint(&version, constraint)
+        if constraint.is_empty() || aurcache_utils::pkg::satisfies_constraint(&version, constraint)
         {
             Ok(DepState::Satisfied)
         } else {
@@ -465,9 +463,7 @@ impl Builder {
         };
 
         // Already building or queued — no duplicate
-        if pkg.status == BuildStates::ACTIVE_BUILD
-            || pkg.status == BuildStates::ENQUEUED_BUILD
-        {
+        if pkg.status == BuildStates::ACTIVE_BUILD || pkg.status == BuildStates::ENQUEUED_BUILD {
             self.logger
                 .append(format!(
                     "Dep '{}' is already building, skipping duplicate rebuild",
@@ -491,9 +487,7 @@ impl Builder {
                 status: Set(Some(BuildStates::ENQUEUED_BUILD)),
                 platform: Set(platform.to_string()),
                 start_time: Set(Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)?
-                        .as_secs() as i64,
+                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
                 )),
                 version: Set(version.clone()),
                 ..Default::default()

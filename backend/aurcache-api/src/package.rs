@@ -247,9 +247,7 @@ pub async fn package_remove_endpoint(
         .map_err(|e| BadRequest(e.to_string()))?;
 
     al.add(
-        PackageDeleteActivity {
-            package: pkg.name,
-        },
+        PackageDeleteActivity { package: pkg.name },
         ActivityType::RemovePackage,
         a.username,
     )

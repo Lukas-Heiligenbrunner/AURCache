@@ -64,9 +64,7 @@ impl Builder {
                             ))
                             .await;
                     } else {
-                        bail!(
-                            "File '{archive_name}' is already produced by another package"
-                        );
+                        bail!("File '{archive_name}' is already produced by another package");
                     }
                 }
             }

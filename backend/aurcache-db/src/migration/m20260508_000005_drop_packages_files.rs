@@ -12,26 +12,20 @@ impl MigrationTrait for Migration {
 
         match database_type() {
             DbBackend::Sqlite => {
-                db.execute_unprepared(
-                    "ALTER TABLE files ADD COLUMN package_id INTEGER;",
-                )
-                .await?;
+                db.execute_unprepared("ALTER TABLE files ADD COLUMN package_id INTEGER;")
+                    .await?;
 
                 db.execute_unprepared(
                     "UPDATE files SET package_id = (SELECT package_id FROM packages_files WHERE packages_files.file_id = files.id LIMIT 1);",
                 )
                 .await?;
 
-                db.execute_unprepared(
-                    "DROP TABLE IF EXISTS packages_files;",
-                )
-                .await?;
+                db.execute_unprepared("DROP TABLE IF EXISTS packages_files;")
+                    .await?;
             }
             DbBackend::Postgres => {
-                db.execute_unprepared(
-                    "ALTER TABLE public.files ADD COLUMN package_id INTEGER;",
-                )
-                .await?;
+                db.execute_unprepared("ALTER TABLE public.files ADD COLUMN package_id INTEGER;")
+                    .await?;
 
                 db.execute_unprepared(
                     "UPDATE public.files SET package_id = (SELECT package_id FROM public.packages_files WHERE packages_files.file_id = files.id LIMIT 1);",
@@ -43,10 +37,8 @@ impl MigrationTrait for Migration {
                 )
                 .await?;
 
-                db.execute_unprepared(
-                    "DROP TABLE IF EXISTS public.packages_files;",
-                )
-                .await?;
+                db.execute_unprepared("DROP TABLE IF EXISTS public.packages_files;")
+                    .await?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
@@ -59,16 +51,12 @@ impl MigrationTrait for Migration {
 
         match database_type() {
             DbBackend::Sqlite => {
-                db.execute_unprepared(
-                    "ALTER TABLE files DROP COLUMN package_id;",
-                )
-                .await?;
+                db.execute_unprepared("ALTER TABLE files DROP COLUMN package_id;")
+                    .await?;
             }
             DbBackend::Postgres => {
-                db.execute_unprepared(
-                    "ALTER TABLE public.files DROP COLUMN package_id;",
-                )
-                .await?;
+                db.execute_unprepared("ALTER TABLE public.files DROP COLUMN package_id;")
+                    .await?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }

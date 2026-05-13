@@ -62,7 +62,17 @@ pub async fn package_add(
             ref subfolder,
             ref url,
         } => {
-            add_git_package(db, tx, &platforms, &platforms_str, &build_flags_str, r#ref, subfolder, url).await
+            add_git_package(
+                db,
+                tx,
+                &platforms,
+                &platforms_str,
+                &build_flags_str,
+                r#ref,
+                subfolder,
+                url,
+            )
+            .await
         }
         SourceData::Upload { .. } => {
             todo!("upload")
@@ -239,16 +249,25 @@ async fn insert_package_with_deps(
     for dep_base in aur_dep_bases.values() {
         if !dep_pkgbases.contains(dep_base) {
             dep_pkgbases.push(dep_base.clone());
-            add_aur_package_recursive(client, db, dep_base, platforms_str, build_flags_str, visited, added_order)
-                .await?;
+            add_aur_package_recursive(
+                client,
+                db,
+                dep_base,
+                platforms_str,
+                build_flags_str,
+                visited,
+                added_order,
+            )
+            .await?;
         }
     }
 
-    let split_packages_str = if pkgnames.len() > 1 || pkgnames.first().map_or(true, |n| n != pkgbase) {
-        Some(pkgnames.join(";"))
-    } else {
-        None
-    };
+    let split_packages_str =
+        if pkgnames.len() > 1 || pkgnames.first().map_or(true, |n| n != pkgbase) {
+            Some(pkgnames.join(";"))
+        } else {
+            None
+        };
 
     let new_package = packages::ActiveModel {
         name: Set(pkgbase.to_string()),
@@ -331,7 +350,9 @@ async fn add_git_package(
             if !dep_names.contains(&name.to_string()) {
                 dep_names.push(name.to_string());
             }
-            dep_constraints.entry(name.to_string()).or_insert(constraint.to_string());
+            dep_constraints
+                .entry(name.to_string())
+                .or_insert(constraint.to_string());
         }
         for dep in &pkg.make_dependencies {
             let s = dep.to_string();
@@ -339,7 +360,9 @@ async fn add_git_package(
             if !dep_names.contains(&name.to_string()) {
                 dep_names.push(name.to_string());
             }
-            dep_constraints.entry(name.to_string()).or_insert(constraint.to_string());
+            dep_constraints
+                .entry(name.to_string())
+                .or_insert(constraint.to_string());
         }
     }
 
@@ -487,5 +510,3 @@ fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
-

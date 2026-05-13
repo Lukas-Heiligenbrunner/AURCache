@@ -3,7 +3,9 @@ use crate::helpers::dbtype::database_type;
 use crate::packages;
 use aurcache_deps::AurClient;
 use sea_orm::DbBackend;
-use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
+};
 use sea_orm_migration::prelude::*;
 use std::collections::HashSet;
 
@@ -219,7 +221,10 @@ DROP TABLE IF EXISTS dependencies;
 /// For each existing AUR package that has no rows in the `dependencies` table,
 /// query the AUR RPC for its dependencies, insert placeholder package records
 /// for any missing AUR deps (recursively), and create the dependency links.
-pub async fn backfill_dependencies(client: &AurClient, db: &impl ConnectionTrait) -> Result<(), DbErr> {
+pub async fn backfill_dependencies(
+    client: &AurClient,
+    db: &impl ConnectionTrait,
+) -> Result<(), DbErr> {
     let mut visited = HashSet::new();
 
     let all_pkgs = packages::Entity::find()
@@ -236,7 +241,7 @@ pub async fn backfill_dependencies(client: &AurClient, db: &impl ConnectionTrait
             continue;
         }
 
-            if let Err(e) = ensure_deps(client, db, &pkg.pkgbase, &mut visited).await {
+        if let Err(e) = ensure_deps(client, db, &pkg.pkgbase, &mut visited).await {
             tracing::warn!("Failed to process deps for {}: {e}", pkg.pkgbase);
         }
     }
@@ -408,7 +413,12 @@ mod tests {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
 
-        for col in &["pkgbase", "directly_requested", "current_version", "split_packages"] {
+        for col in &[
+            "pkgbase",
+            "directly_requested",
+            "current_version",
+            "split_packages",
+        ] {
             let sql = format!("SELECT {col} FROM packages LIMIT 0");
             db.execute_unprepared(&sql)
                 .await

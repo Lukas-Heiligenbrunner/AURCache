@@ -80,16 +80,18 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
 
         let source_data = SourceData::from_str(package.source_data.as_str())?;
         match source_data {
-            SourceData::Aur { .. } => match results.iter().find(|x1| x1.package_base == package.pkgbase) {
-                None => {
-                    warn!("Couldn't find {} in AUR response", package.pkgbase);
+            SourceData::Aur { .. } => {
+                match results.iter().find(|x1| x1.package_base == package.pkgbase) {
+                    None => {
+                        warn!("Couldn't find {} in AUR response", package.pkgbase);
+                    }
+                    Some(result) => {
+                        package_model.upstream_version = Set(Option::from(result.version.clone()));
+                        package_model.out_of_date =
+                            Set(i32::from(latest_version != Some(result.version.clone())));
+                    }
                 }
-                Some(result) => {
-                    package_model.upstream_version = Set(Option::from(result.version.clone()));
-                    package_model.out_of_date =
-                        Set(i32::from(latest_version != Some(result.version.clone())));
-                }
-            },
+            }
             SourceData::Git {
                 url,
                 subfolder,

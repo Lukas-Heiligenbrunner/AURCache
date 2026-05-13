@@ -52,9 +52,8 @@ impl AurClient {
     }
 
     fn rpc_info_url(&self, args: &[&str]) -> Result<Url, Error> {
-        let mut url =
-            Url::parse(&format!("{}/rpc/v5/info", self.aur_url))
-                .map_err(|e| Error::Rpc(e.to_string()))?;
+        let mut url = Url::parse(&format!("{}/rpc/v5/info", self.aur_url))
+            .map_err(|e| Error::Rpc(e.to_string()))?;
         for arg in args {
             url.query_pairs_mut().append_pair("arg[]", arg);
         }

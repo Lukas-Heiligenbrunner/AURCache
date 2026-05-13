@@ -3,7 +3,9 @@ use anyhow::anyhow;
 use aurcache_db::dependencies;
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages, Settings};
 use aurcache_db::{builds, files, settings};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, TransactionTrait};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, QueryFilter, TransactionTrait,
+};
 
 pub async fn package_delete(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
     let txn = db.begin().await?;

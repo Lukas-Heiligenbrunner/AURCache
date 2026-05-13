@@ -48,7 +48,10 @@ pub fn get_build_mode() -> BuildMode {
         };
 
         // Derive repo host path from BUILD_ARTIFACT_DIR: repo is at ../repo relative to builds
-        let build_parent = std::path::Path::new(&v).parent().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string());
+        let build_parent = std::path::Path::new(&v)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
         let repo_host_path = format!("{build_parent}/repo");
 
         // create config dir if not existing

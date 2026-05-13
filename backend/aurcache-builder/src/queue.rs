@@ -35,14 +35,21 @@ async fn start_build(
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
     action_tx: Sender<Action>,
 ) {
-    let mut builder =
-        match Builder::new(db.clone(), job_containers, package_model, build_model, action_tx).await {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while creating builder: {e}");
-                return;
-            }
-        };
+    let mut builder = match Builder::new(
+        db.clone(),
+        job_containers,
+        package_model,
+        build_model,
+        action_tx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while creating builder: {e}");
+            return;
+        }
+    };
     let result = builder.build().await;
     if let Err(e) = builder.post_build(result).await {
         error!(

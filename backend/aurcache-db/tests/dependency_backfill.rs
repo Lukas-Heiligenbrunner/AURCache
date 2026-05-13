@@ -5,13 +5,11 @@ use aurcache_db::{
     packages::{self, SourceType},
 };
 use aurcache_deps::AurClient;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, Set};
 use sea_orm_migration::MigratorTrait;
 use wiremock::{
-    matchers::{method, path, query_param},
     Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
 };
 
 #[tokio::test]
@@ -80,7 +78,10 @@ async fn backfill_creates_dependency_links() {
         .await
         .unwrap()
         .expect("child-pkg should have been inserted by backfill");
-    assert_eq!(child.directly_requested, 0, "placeholder dep must have directly_requested=0");
+    assert_eq!(
+        child.directly_requested, 0,
+        "placeholder dep must have directly_requested=0"
+    );
 
     let parent = packages::Entity::find()
         .filter(packages::Column::Pkgbase.eq("parent-pkg"))
@@ -95,7 +96,11 @@ async fn backfill_creates_dependency_links() {
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(links.len(), 1, "parent-pkg -> child-pkg dependency link must exist");
+    assert_eq!(
+        links.len(),
+        1,
+        "parent-pkg -> child-pkg dependency link must exist"
+    );
 }
 
 #[tokio::test]
@@ -233,7 +238,11 @@ async fn backfill_multi_dep_package() {
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(turso_to_libaegis.len(), 1, "turso -> libaegis dep link must exist");
+    assert_eq!(
+        turso_to_libaegis.len(),
+        1,
+        "turso -> libaegis dep link must exist"
+    );
 
     let turso_to_simsimd = dependencies::Entity::find()
         .filter(dependencies::Column::DependentId.eq(turso.id))
@@ -241,5 +250,9 @@ async fn backfill_multi_dep_package() {
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(turso_to_simsimd.len(), 1, "turso -> simsimd dep link must exist");
+    assert_eq!(
+        turso_to_simsimd.len(),
+        1,
+        "turso -> simsimd dep link must exist"
+    );
 }

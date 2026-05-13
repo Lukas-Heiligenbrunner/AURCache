@@ -143,7 +143,9 @@ fn read_number(bytes: &[u8], start: usize) -> (u64, usize) {
     let mut val: u64 = 0;
     let mut i = start;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
-        val = val.saturating_mul(10).saturating_add((bytes[i] - b'0') as u64);
+        val = val
+            .saturating_mul(10)
+            .saturating_add((bytes[i] - b'0') as u64);
         i += 1;
     }
     (val, i - start)
@@ -155,7 +157,13 @@ fn read_alpha(bytes: &[u8], start: usize) -> (&str, usize) {
         i += 1;
     }
     // Also include non-alphanumeric non-digit chars (except separators)
-    while i < bytes.len() && !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'.' && bytes[i] != b'-' && bytes[i] != b'_' && bytes[i] != b'~' {
+    while i < bytes.len()
+        && !bytes[i].is_ascii_alphanumeric()
+        && bytes[i] != b'.'
+        && bytes[i] != b'-'
+        && bytes[i] != b'_'
+        && bytes[i] != b'~'
+    {
         i += 1;
     }
     // SAFETY: valid UTF-8 since we're scanning ASCII bytes
