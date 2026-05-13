@@ -16,7 +16,7 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryIntoModel,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryIntoModel,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -408,7 +408,15 @@ impl Builder {
                 && let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await?
                 && pkg.status != BuildStates::SUCCESSFUL_BUILD
                 && pkg.status != BuildStates::ACTIVE_BUILD
-                && pkg.status != BuildStates::ENQUEUED_BUILD
+                && Builds::find()
+                    .filter(builds::Column::PkgId.eq(pkg.id))
+                    .filter(builds::Column::Status.is_in(vec![
+                        Some(BuildStates::ENQUEUED_BUILD),
+                        Some(BuildStates::ACTIVE_BUILD),
+                    ]))
+                    .count(&self.db)
+                    .await?
+                    == 0
             {
                 let version = pkg
                     .current_version
