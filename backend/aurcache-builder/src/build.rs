@@ -418,29 +418,13 @@ impl Builder {
 
                         let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
                         for platform in platform_strs {
-                            let build = builds::ActiveModel {
-                                pkg_id: Set(pkg.id),
-                                output: Set(None),
-                                status: Set(Some(BuildStates::ENQUEUED_BUILD)),
-                                platform: Set(platform.to_string()),
-                                start_time: Set(Some(
-                                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-                                )),
-                                version: Set(version.clone()),
-                                ..Default::default()
-                            };
-                            let new_build = build.save(&self.db).await?;
+                            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
                             self.logger
                                 .append(format!(
                                     "Triggered build #{} for dependent '{}'",
-                                    new_build.id.clone().unwrap(),
-                                    pkg.name
+                                    new_build.id, pkg.name
                                 ))
                                 .await;
-                            let _ = self.action_tx.send(Action::Build(
-                                Box::from(pkg.clone()),
-                                Box::from(new_build.try_into_model()?),
-                            ));
                         }
                     }
                 }
@@ -518,29 +502,13 @@ impl Builder {
 
         let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
         for platform in platform_strs {
-            let build = builds::ActiveModel {
-                pkg_id: Set(pkg.id),
-                output: Set(None),
-                status: Set(Some(BuildStates::ENQUEUED_BUILD)),
-                platform: Set(platform.to_string()),
-                start_time: Set(Some(
-                    SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-                )),
-                version: Set(version.clone()),
-                ..Default::default()
-            };
-            let new_build = build.save(&self.db).await?;
+            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
             self.logger
                 .append(format!(
                     "Triggered rebuild #{} for dep '{}' (version constraint)",
-                    new_build.id.clone().unwrap(),
-                    pkg.name
+                    new_build.id, pkg.name
                 ))
                 .await;
-            let _ = self.action_tx.send(Action::Build(
-                Box::from(pkg.clone()),
-                Box::from(new_build.try_into_model()?),
-            ));
         }
 
         Ok(())
