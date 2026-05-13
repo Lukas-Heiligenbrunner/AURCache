@@ -21,44 +21,13 @@ pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
     if constraint.is_empty() {
         return true;
     }
-
-    let (op, required_ver) = if let Some(stripped) = constraint.strip_prefix(">=") {
-        (">=", stripped)
-    } else if let Some(stripped) = constraint.strip_prefix("<=") {
-        ("<=", stripped)
-    } else if let Some(stripped) = constraint.strip_prefix("=") {
-        ("=", stripped)
-    } else if let Some(stripped) = constraint.strip_prefix(">") {
-        (">", stripped)
-    } else if let Some(stripped) = constraint.strip_prefix("<") {
-        ("<", stripped)
-    } else {
-        ("=", constraint)
+    let Ok(built) = alpm_types::Version::from_str(built_version) else {
+        return false;
     };
-
-    let required_ver = required_ver.trim();
-    if required_ver.is_empty() {
-        return true;
-    }
-
-    let built = match alpm_types::Version::from_str(built_version) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let Ok(req) = alpm_types::VersionRequirement::from_str(constraint) else {
+        return false;
     };
-    let required = match alpm_types::Version::from_str(required_ver) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let cmp = built.cmp(&required);
-    match op {
-        ">=" => cmp != Ordering::Less,
-        "<=" => cmp != Ordering::Greater,
-        "=" => cmp == Ordering::Equal,
-        ">" => cmp == Ordering::Greater,
-        "<" => cmp == Ordering::Less,
-        _ => true,
-    }
+    req.is_satisfied_by(&built)
 }
 
 #[cfg(test)]

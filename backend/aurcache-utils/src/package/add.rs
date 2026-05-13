@@ -276,10 +276,7 @@ async fn insert_package_with_deps(
     }
 
     let split_packages_str = if params.pkgnames.len() > 1
-        || params
-            .pkgnames
-            .first()
-            .is_none_or(|n| n != params.pkgbase)
+        || params.pkgnames.first().is_none_or(|n| n != params.pkgbase)
     {
         Some(serde_json::to_string(params.pkgnames)?)
     } else {
