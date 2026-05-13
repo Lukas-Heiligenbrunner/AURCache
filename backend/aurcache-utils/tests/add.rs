@@ -77,29 +77,19 @@ fn multiinfo_json(results: Vec<serde_json::Value>) -> serde_json::Value {
 
 struct EnvGuard {
     _lock: MutexGuard<'static, ()>,
-    old_base: Option<String>,
     old_rpc: Option<String>,
 }
 
 impl EnvGuard {
     fn new() -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_base = std::env::var("AUR_BASE_URL").ok();
         let old_rpc = std::env::var("AUR_RPC_URL").ok();
-        EnvGuard {
-            _lock: lock,
-            old_base,
-            old_rpc,
-        }
+        EnvGuard { _lock: lock, old_rpc }
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        match &self.old_base {
-            Some(v) => unsafe { std::env::set_var("AUR_BASE_URL", v) },
-            None => unsafe { std::env::remove_var("AUR_BASE_URL") },
-        }
         match &self.old_rpc {
             Some(v) => unsafe { std::env::set_var("AUR_RPC_URL", v) },
             None => unsafe { std::env::remove_var("AUR_RPC_URL") },
@@ -119,10 +109,7 @@ async fn setup_env() -> TestEnv {
     let base_url = server.uri();
 
     let guard = EnvGuard::new();
-    unsafe {
-        std::env::set_var("AUR_BASE_URL", &base_url);
-        std::env::set_var("AUR_RPC_URL", format!("{}/rpc/v5", base_url));
-    }
+    unsafe { std::env::set_var("AUR_RPC_URL", format!("{base_url}/rpc/v5")); }
 
     let db = Database::connect("sqlite::memory:")
         .await

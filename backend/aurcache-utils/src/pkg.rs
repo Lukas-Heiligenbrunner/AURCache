@@ -1,19 +1,6 @@
 use std::cmp::Ordering;
 
-/// Split a dependency string into (name, version_constraint).
-/// e.g. "glibc>=2.35" -> ("glibc", ">=2.35")
-/// e.g. "python" -> ("python", "")
-pub fn parse_dep(dep: &str) -> (&str, &str) {
-    let dep = dep.trim();
-    for &op in &[">=", "<=", "=", ">", "<"] {
-        if let Some(pos) = dep.find(op) {
-            let name = dep[..pos].trim();
-            let constraint = dep[pos..].trim();
-            return (name, constraint);
-        }
-    }
-    (dep, "")
-}
+pub use aurcache_deps::parse_dep;
 
 /// Pacman-style version comparison.
 /// Compares versions like "1.0-1", "2.0.3", "1:2.0".

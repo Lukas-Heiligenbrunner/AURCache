@@ -45,7 +45,12 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     let results = if aur_names.is_empty() {
         vec![]
     } else {
-        let request = Request::default();
+        let request = match std::env::var("AUR_RPC_URL") {
+            Ok(url) => aur_rs::Request {
+                endpoint: url.trim_end_matches('/').to_string(),
+            },
+            Err(_) => Request::default(),
+        };
         let response = request
             .search_multi_info_by_names(aur_names.as_slice())
             .await;

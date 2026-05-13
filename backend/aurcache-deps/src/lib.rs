@@ -30,9 +30,18 @@ pub struct AurClient {
     aur_url: String,
 }
 
+impl Default for AurClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AurClient {
     pub fn new() -> Self {
-        let aur_url = std::env::var("AUR_BASE_URL")
+        // AUR_RPC_URL includes /rpc/v5 (aur-rs convention), strip it since
+        // AurClient appends its own /rpc/v5/info path.
+        let aur_url = std::env::var("AUR_RPC_URL")
+            .map(|u| u.trim_end_matches('/').trim_end_matches("/rpc/v5").trim_end_matches('/').to_string())
             .unwrap_or_else(|_| "https://aur.archlinux.org".to_string());
         Self {
             http: Client::new(),
@@ -61,7 +70,7 @@ impl AurClient {
     }
 
     async fn fetch_snapshot_bytes(&self, pkgbase: &str) -> Result<Vec<u8>, Error> {
-        let response = self.http.get(&self.snapshot_url(pkgbase)).send().await?;
+        let response = self.http.get(self.snapshot_url(pkgbase)).send().await?;
         if !response.status().is_success() {
             return Err(Error::NotFound(pkgbase.into()));
         }
@@ -106,9 +115,8 @@ impl AurClient {
     }
 
     pub async fn deps_of(&self, pkgbase: &str) -> Result<PkgDeps, Error> {
-        match self.deps_of_rpc(pkgbase).await {
-            Ok(deps) => return Ok(deps),
-            Err(_) => {}
+        if let Ok(deps) = self.deps_of_rpc(pkgbase).await {
+            return Ok(deps);
         }
         self.deps_of_srcinfo(pkgbase).await
     }
@@ -158,7 +166,7 @@ impl AurClient {
         let mut pkgnames = Vec::new();
 
         for pkg in source_info.packages_for_architecture(SystemArchitecture::X86_64) {
-            dedup_push(&mut pkgnames, &pkg.name.to_string());
+            dedup_push(&mut pkgnames, pkg.name.as_ref());
             for dep in &pkg.dependencies {
                 dedup_push(&mut depends, &dep.to_string());
             }
@@ -173,6 +181,21 @@ impl AurClient {
             pkgnames,
         })
     }
+}
+
+/// Split a dependency string into (name, version_constraint).
+/// e.g. "glibc>=2.35" -> ("glibc", ">=2.35")
+/// e.g. "python" -> ("python", "")
+pub fn parse_dep(dep: &str) -> (&str, &str) {
+    let dep = dep.trim();
+    for &op in &[">=", "<=", "=", ">", "<"] {
+        if let Some(pos) = dep.find(op) {
+            let name = dep[..pos].trim();
+            let constraint = dep[pos..].trim();
+            return (name, constraint);
+        }
+    }
+    (dep, "")
 }
 
 fn dedup_push(vec: &mut Vec<String>, item: &str) {

@@ -182,7 +182,7 @@ fn add_aur_package_recursive<'a>(
             .iter()
             .chain(deps.make_depends.iter())
             .map(|d| {
-                let (name, constraint) = crate::pkg::parse_dep(d);
+                let (name, constraint) = aurcache_deps::parse_dep(d);
                 dep_constraints
                     .entry(name.to_string())
                     .or_insert(constraint.to_string());

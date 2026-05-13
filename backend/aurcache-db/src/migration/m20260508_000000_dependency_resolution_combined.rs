@@ -381,15 +381,7 @@ async fn ensure_deps(
     Ok(())
 }
 
-fn parse_dep(dep: &str) -> (&str, &str) {
-    let dep = dep.trim();
-    for &op in &[">=", "<=", "=", ">", "<"] {
-        if let Some(pos) = dep.find(op) {
-            return (&dep[..pos].trim(), dep[pos..].trim());
-        }
-    }
-    (dep, "")
-}
+use aurcache_deps::parse_dep;
 
 #[cfg(test)]
 mod tests {
