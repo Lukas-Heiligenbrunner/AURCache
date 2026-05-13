@@ -404,29 +404,27 @@ impl Builder {
                 }
             }
 
-            if all_satisfied {
-                if let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await? {
-                    if pkg.status != BuildStates::SUCCESSFUL_BUILD
-                        && pkg.status != BuildStates::ACTIVE_BUILD
-                        && pkg.status != BuildStates::ENQUEUED_BUILD
-                    {
-                        let version = pkg
-                            .current_version
-                            .clone()
-                            .or(pkg.upstream_version.clone())
-                            .unwrap_or_default();
+            if all_satisfied
+                && let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await?
+                && pkg.status != BuildStates::SUCCESSFUL_BUILD
+                && pkg.status != BuildStates::ACTIVE_BUILD
+                && pkg.status != BuildStates::ENQUEUED_BUILD
+            {
+                let version = pkg
+                    .current_version
+                    .clone()
+                    .or(pkg.upstream_version.clone())
+                    .unwrap_or_default();
 
-                        let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
-                        for platform in platform_strs {
-                            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
-                            self.logger
-                                .append(format!(
-                                    "Triggered build #{} for dependent '{}'",
-                                    new_build.id, pkg.name
-                                ))
-                                .await;
-                        }
-                    }
+                let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
+                for platform in platform_strs {
+                    let new_build = self.enqueue_build(&pkg, platform, &version).await?;
+                    self.logger
+                        .append(format!(
+                            "Triggered build #{} for dependent '{}'",
+                            new_build.id, pkg.name
+                        ))
+                        .await;
                 }
             }
         }

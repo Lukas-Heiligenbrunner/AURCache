@@ -258,7 +258,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let build_cmd = crate::commands::build_build_command(
             &source_data,
-            &pkgbase,
+            pkgbase,
             &build_flags,
             &container_build_dir,
         );

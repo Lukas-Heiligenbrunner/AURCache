@@ -159,7 +159,7 @@ async fn add_aur_package(
     let mut visited: HashSet<String> = HashSet::new();
 
     add_aur_package_recursive(
-        &client,
+        client,
         db,
         &pkgbase,
         platforms_str,
@@ -279,7 +279,7 @@ async fn insert_package_with_deps(
         || params
             .pkgnames
             .first()
-            .map_or(true, |n| n != params.pkgbase)
+            .is_none_or(|n| n != params.pkgbase)
     {
         Some(serde_json::to_string(params.pkgnames)?)
     } else {
@@ -342,6 +342,7 @@ async fn insert_package_with_deps(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn add_git_package(
     client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
@@ -415,7 +416,7 @@ async fn add_git_package(
         source_data_json: &source_data_json,
     };
 
-    insert_package_with_deps(&client, db, params, &mut visited, &mut added_order).await?;
+    insert_package_with_deps(client, db, params, &mut visited, &mut added_order).await?;
 
     set_directly_requested(db, &pkgbase_name).await?;
 

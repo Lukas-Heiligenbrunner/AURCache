@@ -22,16 +22,16 @@ pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
         return true;
     }
 
-    let (op, required_ver) = if constraint.starts_with(">=") {
-        (">=", &constraint[2..])
-    } else if constraint.starts_with("<=") {
-        ("<=", &constraint[2..])
-    } else if constraint.starts_with("=") {
-        ("=", &constraint[1..])
-    } else if constraint.starts_with(">") {
-        (">", &constraint[1..])
-    } else if constraint.starts_with("<") {
-        ("<", &constraint[1..])
+    let (op, required_ver) = if let Some(stripped) = constraint.strip_prefix(">=") {
+        (">=", stripped)
+    } else if let Some(stripped) = constraint.strip_prefix("<=") {
+        ("<=", stripped)
+    } else if let Some(stripped) = constraint.strip_prefix("=") {
+        ("=", stripped)
+    } else if let Some(stripped) = constraint.strip_prefix(">") {
+        (">", stripped)
+    } else if let Some(stripped) = constraint.strip_prefix("<") {
+        ("<", stripped)
     } else {
         ("=", constraint)
     };
