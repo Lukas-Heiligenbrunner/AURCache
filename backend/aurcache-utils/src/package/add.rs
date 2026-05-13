@@ -67,7 +67,16 @@ pub async fn package_add_with_client(
 
     match source_data {
         SourceData::Aur { ref name } => {
-            add_aur_package(client, db, tx, &platforms, &platforms_str, &build_flags_str, name).await
+            add_aur_package(
+                client,
+                db,
+                tx,
+                &platforms,
+                &platforms_str,
+                &build_flags_str,
+                name,
+            )
+            .await
         }
         SourceData::Git {
             ref r#ref,
@@ -106,7 +115,10 @@ pub async fn package_add(
 
 async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<()> {
     packages::Entity::update_many()
-        .col_expr(packages::Column::DirectlyRequested, sea_orm::sea_query::SimpleExpr::Value(sea_orm::Value::Bool(Some(true))))
+        .col_expr(
+            packages::Column::DirectlyRequested,
+            sea_orm::sea_query::SimpleExpr::Value(sea_orm::Value::Bool(Some(true))),
+        )
         .filter(packages::Column::Pkgbase.eq(pkgbase))
         .exec(db)
         .await?;
@@ -238,13 +250,17 @@ async fn insert_package_with_deps(
     } else {
         let dep_refs: Vec<&str> = params.dep_names.iter().map(|s| s.as_str()).collect();
         client.resolve_bases(&dep_refs).await.map_err(|e| {
-            anyhow!("Failed to resolve AUR dependencies for {}: {e}", params.pkgbase)
+            anyhow!(
+                "Failed to resolve AUR dependencies for {}: {e}",
+                params.pkgbase
+            )
         })?
     };
 
     let mut dep_pkgbases: Vec<String> = Vec::new();
+    let mut dep_pkgbases_seen: HashSet<String> = HashSet::new();
     for dep_base in aur_dep_bases.values() {
-        if !dep_pkgbases.contains(dep_base) {
+        if dep_pkgbases_seen.insert(dep_base.clone()) {
             dep_pkgbases.push(dep_base.clone());
             add_aur_package_recursive(
                 client,
@@ -265,7 +281,7 @@ async fn insert_package_with_deps(
             .first()
             .map_or(true, |n| n != params.pkgbase)
     {
-        Some(params.pkgnames.join(";"))
+        Some(serde_json::to_string(params.pkgnames)?)
     } else {
         None
     };
@@ -345,35 +361,24 @@ async fn add_git_package(
     let version = sourceinfo.base.version.to_string();
     let pkgbase_name = sourceinfo.base.name.to_string();
 
-    use alpm_types::SystemArchitecture;
+    let srcinfo_deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
+    let pkgnames = srcinfo_deps.pkgnames;
     let mut dep_constraints: HashMap<String, String> = HashMap::new();
     let mut dep_names: Vec<String> = Vec::new();
-    let mut pkgnames: Vec<String> = Vec::new();
-
     let mut dep_set: HashSet<String> = HashSet::new();
 
-    for pkg in sourceinfo.packages_for_architecture(SystemArchitecture::X86_64) {
-        pkgnames.push(pkg.name.to_string());
-        for dep in &pkg.dependencies {
-            let s = dep.to_string();
-            let (name, constraint) = crate::pkg::parse_dep(&s);
-            if dep_set.insert(name.to_string()) {
-                dep_names.push(name.to_string());
-            }
-            dep_constraints
-                .entry(name.to_string())
-                .or_insert(constraint.to_string());
+    for d in srcinfo_deps
+        .depends
+        .iter()
+        .chain(srcinfo_deps.make_depends.iter())
+    {
+        let (name, constraint) = crate::pkg::parse_dep(d);
+        if dep_set.insert(name.to_string()) {
+            dep_names.push(name.to_string());
         }
-        for dep in &pkg.make_dependencies {
-            let s = dep.to_string();
-            let (name, constraint) = crate::pkg::parse_dep(&s);
-            if dep_set.insert(name.to_string()) {
-                dep_names.push(name.to_string());
-            }
-            dep_constraints
-                .entry(name.to_string())
-                .or_insert(constraint.to_string());
-        }
+        dep_constraints
+            .entry(name.to_string())
+            .or_insert(constraint.to_string());
     }
 
     if Packages::find()

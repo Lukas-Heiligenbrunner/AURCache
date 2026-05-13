@@ -7,7 +7,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
 };
 use sea_orm_migration::prelude::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -95,26 +95,26 @@ ON packages (pkgbase);
             DbBackend::Postgres => {
                 db.execute_unprepared(
                     r"
-alter table packages
-    add pkgbase TEXT;
+ALTER TABLE public.packages
+    ADD pkgbase TEXT;
 
-alter table packages
-    add directly_requested BOOLEAN not null default true;
+ALTER TABLE public.packages
+    ADD directly_requested BOOLEAN NOT NULL DEFAULT true;
 
-alter table packages
-    add current_version TEXT;
+ALTER TABLE public.packages
+    ADD current_version TEXT;
 
-alter table packages
-    add split_packages TEXT;
+ALTER TABLE public.packages
+    ADD split_packages TEXT;
 
-CREATE TABLE IF NOT EXISTS dependencies (
+CREATE TABLE IF NOT EXISTS public.dependencies (
     id SERIAL PRIMARY KEY,
     dependent_id INTEGER NOT NULL,
     dependee_id INTEGER NOT NULL,
     platforms TEXT NOT NULL DEFAULT '',
     version_constraint TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (dependent_id) REFERENCES packages(id) ON DELETE CASCADE,
-    FOREIGN KEY (dependee_id) REFERENCES packages(id) ON DELETE CASCADE
+    FOREIGN KEY (dependent_id) REFERENCES public.packages(id) ON DELETE CASCADE,
+    FOREIGN KEY (dependee_id) REFERENCES public.packages(id) ON DELETE CASCADE
 );
 ",
                 )
@@ -203,11 +203,11 @@ DROP TABLE IF EXISTS dependencies;
                     .await?;
                 db.execute_unprepared(
                     r"
-ALTER TABLE packages DROP COLUMN pkgbase;
-ALTER TABLE packages DROP COLUMN directly_requested;
-ALTER TABLE packages DROP COLUMN current_version;
-ALTER TABLE packages DROP COLUMN split_packages;
-DROP TABLE IF EXISTS dependencies;
+ALTER TABLE public.packages DROP COLUMN pkgbase;
+ALTER TABLE public.packages DROP COLUMN directly_requested;
+ALTER TABLE public.packages DROP COLUMN current_version;
+ALTER TABLE public.packages DROP COLUMN split_packages;
+DROP TABLE IF EXISTS public.dependencies;
 ",
                 )
                 .await?;
@@ -311,13 +311,17 @@ async fn ensure_deps(
         }
     };
 
-    // 4. Parse dep names (strip version constraints)
+    // 4. Parse dep names, keeping version constraints
+    let mut dep_constraints: HashMap<String, String> = HashMap::new();
     let dep_names: Vec<String> = deps
         .depends
         .iter()
         .chain(deps.make_depends.iter())
         .map(|d| {
-            let (name, _) = parse_dep(d);
+            let (name, constraint) = parse_dep(d);
+            dep_constraints
+                .entry(name.to_string())
+                .or_insert(constraint.to_string());
             name.to_string()
         })
         .collect();
@@ -335,6 +339,19 @@ async fn ensure_deps(
             return Ok(());
         }
     };
+
+    // Build a map from pkgbase → constraint (use the first name that resolved to each base)
+    let base_to_constraint: HashMap<&str, &str> = aur_dep_bases
+        .iter()
+        .map(|(name, base)| {
+            (
+                base.as_str(),
+                dep_constraints
+                    .get(name.as_str())
+                    .map_or("", |s| s.as_str()),
+            )
+        })
+        .collect();
 
     // Collect unique AUR pkgbases
     let aur_pkgbases: Vec<&str> = {
@@ -365,11 +382,16 @@ async fn ensure_deps(
                 .await?;
 
             if existing.is_none() {
+                let constraint = base_to_constraint
+                    .get(dep_base)
+                    .copied()
+                    .unwrap_or("")
+                    .to_string();
                 dependencies::ActiveModel {
                     dependent_id: Set(pkg_id),
                     dependee_id: Set(dependee.id),
                     platforms: Set("x86_64".to_string()),
-                    version_constraint: Set("".to_string()),
+                    version_constraint: Set(constraint),
                     ..Default::default()
                 }
                 .save(db)

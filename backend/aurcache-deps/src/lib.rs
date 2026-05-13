@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::time::Duration;
 
 use alpm_srcinfo::SourceInfoV1;
@@ -16,14 +15,8 @@ pub enum Error {
     NotFound(String),
     #[error("AUR RPC error: {0}")]
     Rpc(String),
-    #[error(".SRCINFO not found in snapshot for {0}")]
-    MissingSrcinfo(String),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Srcinfo(#[from] alpm_srcinfo::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -63,10 +56,6 @@ impl AurClient {
         }
     }
 
-    fn snapshot_url(&self, pkgbase: &str) -> String {
-        snapshot_url(&self.rpc_url, pkgbase)
-    }
-
     fn rpc_info_url(&self, args: &[&str]) -> Result<Url, Error> {
         let mut url =
             Url::parse(&format!("{}/info", self.rpc_url)).map_err(|e| Error::Rpc(e.to_string()))?;
@@ -74,14 +63,6 @@ impl AurClient {
             url.query_pairs_mut().append_pair("arg[]", arg);
         }
         Ok(url)
-    }
-
-    async fn fetch_snapshot_bytes(&self, pkgbase: &str) -> Result<Vec<u8>, Error> {
-        let response = self.http.get(self.snapshot_url(pkgbase)).send().await?;
-        if !response.status().is_success() {
-            return Err(Error::NotFound(pkgbase.into()));
-        }
-        Ok(response.bytes().await?.to_vec())
     }
 }
 
@@ -161,10 +142,7 @@ impl AurClient {
     }
 
     pub async fn deps_of(&self, pkgbase: &str) -> Result<PkgDeps, Error> {
-        if let Ok(deps) = self.deps_of_rpc(pkgbase).await {
-            return Ok(deps);
-        }
-        self.deps_of_srcinfo(pkgbase).await
+        self.deps_of_rpc(pkgbase).await
     }
 
     pub async fn info_of(&self, name: &str) -> Result<Option<Package>, Error> {
@@ -238,58 +216,39 @@ impl AurClient {
         let packages = self.rpc_request(&[pkgbase]).await?;
         Ok(deps_from_packages(&packages))
     }
+}
 
-    async fn deps_of_srcinfo(&self, pkgbase: &str) -> Result<PkgDeps, Error> {
-        let bytes = self.fetch_snapshot_bytes(pkgbase).await?;
+/// Extract dependencies and sub-package names from a parsed .SRCINFO.
+pub fn deps_from_srcinfo(source_info: &SourceInfoV1) -> PkgDeps {
+    let mut depends = Vec::new();
+    let mut make_depends = Vec::new();
+    let mut pkgnames = Vec::new();
+    let mut seen_depends = HashSet::new();
+    let mut seen_make_depends = HashSet::new();
+    let mut seen_pkgnames = HashSet::new();
 
-        let decoder = flate2::read::GzDecoder::new(&bytes[..]);
-        let mut archive = tar::Archive::new(decoder);
-
-        let mut srcinfo_content = None;
-        for entry in archive.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?;
-            if path.ends_with(".SRCINFO") {
-                let mut content = String::new();
-                entry.read_to_string(&mut content)?;
-                srcinfo_content = Some(content);
-                break;
+    for pkg in source_info.packages_for_architecture(SystemArchitecture::X86_64) {
+        if seen_pkgnames.insert(pkg.name.to_string()) {
+            pkgnames.push(pkg.name.to_string());
+        }
+        for dep in &pkg.dependencies {
+            let s = dep.to_string();
+            if seen_depends.insert(s.clone()) {
+                depends.push(s);
             }
         }
-
-        let content = srcinfo_content.ok_or_else(|| Error::MissingSrcinfo(pkgbase.to_owned()))?;
-        let source_info = SourceInfoV1::from_string(&content)?;
-
-        let mut depends = Vec::new();
-        let mut make_depends = Vec::new();
-        let mut pkgnames = Vec::new();
-        let mut seen_depends = HashSet::new();
-        let mut seen_make_depends = HashSet::new();
-        let mut seen_pkgnames = HashSet::new();
-
-        for pkg in source_info.packages_for_architecture(SystemArchitecture::X86_64) {
-            if seen_pkgnames.insert(pkg.name.to_string()) {
-                pkgnames.push(pkg.name.to_string());
-            }
-            for dep in &pkg.dependencies {
-                let s = dep.to_string();
-                if seen_depends.insert(s.clone()) {
-                    depends.push(s);
-                }
-            }
-            for dep in &pkg.make_dependencies {
-                let s = dep.to_string();
-                if seen_make_depends.insert(s.clone()) {
-                    make_depends.push(s);
-                }
+        for dep in &pkg.make_dependencies {
+            let s = dep.to_string();
+            if seen_make_depends.insert(s.clone()) {
+                make_depends.push(s);
             }
         }
+    }
 
-        Ok(PkgDeps {
-            depends,
-            make_depends,
-            pkgnames,
-        })
+    PkgDeps {
+        depends,
+        make_depends,
+        pkgnames,
     }
 }
 

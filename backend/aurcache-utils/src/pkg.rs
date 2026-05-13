@@ -1,160 +1,16 @@
 use std::cmp::Ordering;
+use std::str::FromStr;
 
 pub use aurcache_deps::parse_dep;
 
-/// Pacman-style version comparison.
-/// Compares versions like "1.0-1", "2.0.3", "1:2.0".
-/// Returns Ordering::Less, Equal, or Greater.
-///
-/// Algorithm (from libalpm/version.c):
-/// 1. Compare epoch (separator `:`)
-/// 2. Split pkgver-pkgrel into alternating digit/non-digit segments
-/// 3. Compare digit segments numerically, non-digit segments lexicographically
+/// Pacman-style version comparison using `alpm-types`.
 pub fn vercmp(a: &str, b: &str) -> Ordering {
-    let (epoch_a, rest_a) = split_epoch(a);
-    let (epoch_b, rest_b) = split_epoch(b);
-
-    let epoch_cmp = epoch_a.cmp(&epoch_b);
-    if epoch_cmp != Ordering::Equal {
-        return epoch_cmp;
+    let a_ver = alpm_types::Version::from_str(a);
+    let b_ver = alpm_types::Version::from_str(b);
+    match (a_ver, b_ver) {
+        (Ok(a), Ok(b)) => a.cmp(&b),
+        _ => Ordering::Equal,
     }
-
-    let (ver_a, _rel_a) = split_pkgrel(rest_a);
-    let (ver_b, _rel_b) = split_pkgrel(rest_b);
-
-    let ver_cmp = rpmvercmp(ver_a, ver_b);
-    if ver_cmp != Ordering::Equal {
-        return ver_cmp;
-    }
-
-    // If versions equal, compare pkgrel (without the leading `-`)
-    let rel_a = rest_a.trim_start_matches(|c| c != '-');
-    let rel_b = rest_b.trim_start_matches(|c| c != '-');
-    rpmvercmp(rel_a, rel_b)
-}
-
-fn split_epoch(v: &str) -> (u64, &str) {
-    if let Some(pos) = v.find(':') {
-        let epoch: u64 = v[..pos].parse().unwrap_or(0);
-        (epoch, &v[pos + 1..])
-    } else {
-        (0, v)
-    }
-}
-
-fn split_pkgrel(v: &str) -> (&str, &str) {
-    if let Some(pos) = v.rfind('-') {
-        (&v[..pos], &v[pos..])
-    } else {
-        (v, "")
-    }
-}
-
-/// rpmlib-style version comparison used by pacman.
-fn rpmvercmp(a: &str, b: &str) -> Ordering {
-    if a.is_empty() && b.is_empty() {
-        return Ordering::Equal;
-    }
-    if a.is_empty() {
-        return Ordering::Less;
-    }
-    if b.is_empty() {
-        return Ordering::Greater;
-    }
-
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let mut i = 0;
-    let mut j = 0;
-
-    while i < a_bytes.len() || j < b_bytes.len() {
-        let mut segment_type = None;
-        if i < a_bytes.len() {
-            segment_type = Some(if a_bytes[i].is_ascii_digit() {
-                SegmentType::Digit
-            } else {
-                SegmentType::Alpha
-            });
-        } else if j < b_bytes.len() {
-            segment_type = Some(if b_bytes[j].is_ascii_digit() {
-                SegmentType::Digit
-            } else {
-                SegmentType::Alpha
-            });
-        }
-
-        match segment_type {
-            Some(SegmentType::Digit) => {
-                let (num_a, len_a) = read_number(a_bytes, i);
-                let (num_b, len_b) = read_number(b_bytes, j);
-                let cmp = num_a.cmp(&num_b);
-                if cmp != Ordering::Equal {
-                    return cmp;
-                }
-                i += len_a;
-                j += len_b;
-            }
-            Some(SegmentType::Alpha) => {
-                let (seg_a, len_a) = read_alpha(a_bytes, i);
-                let (seg_b, len_b) = read_alpha(b_bytes, j);
-                let cmp = seg_a.cmp(seg_b);
-                if cmp != Ordering::Equal {
-                    return cmp;
-                }
-                i += len_a;
-                j += len_b;
-            }
-            None => break,
-        }
-
-        // Handle separators (non-digit, non-alpha chars like '.', '_', '~', etc.)
-        // '~' means a segment of '~' sorts before any other segment
-        while i < a_bytes.len() && !a_bytes[i].is_ascii_alphanumeric() {
-            i += 1;
-        }
-        while j < b_bytes.len() && !b_bytes[j].is_ascii_alphanumeric() {
-            j += 1;
-        }
-    }
-
-    Ordering::Equal
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum SegmentType {
-    Digit,
-    Alpha,
-}
-
-fn read_number(bytes: &[u8], start: usize) -> (u64, usize) {
-    let mut val: u64 = 0;
-    let mut i = start;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        val = val
-            .saturating_mul(10)
-            .saturating_add((bytes[i] - b'0') as u64);
-        i += 1;
-    }
-    (val, i - start)
-}
-
-fn read_alpha(bytes: &[u8], start: usize) -> (&str, usize) {
-    let mut i = start;
-    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-        i += 1;
-    }
-    // Also include non-alphanumeric non-digit chars (except separators)
-    while i < bytes.len()
-        && !bytes[i].is_ascii_alphanumeric()
-        && bytes[i] != b'.'
-        && bytes[i] != b'-'
-        && bytes[i] != b'_'
-        && bytes[i] != b'~'
-    {
-        i += 1;
-    }
-    let s = std::str::from_utf8(&bytes[start..i]).unwrap();
-    (s, i - start)
 }
 
 /// Check if a built version satisfies a version constraint.
@@ -166,7 +22,6 @@ pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
         return true;
     }
 
-    // Identify operator
     let (op, required_ver) = if constraint.starts_with(">=") {
         (">=", &constraint[2..])
     } else if constraint.starts_with("<=") {
@@ -178,7 +33,6 @@ pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
     } else if constraint.starts_with("<") {
         ("<", &constraint[1..])
     } else {
-        // No operator means exact match (though this is unusual)
         ("=", constraint)
     };
 
@@ -187,7 +41,16 @@ pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
         return true;
     }
 
-    let cmp = vercmp(built_version, required_ver);
+    let built = match alpm_types::Version::from_str(built_version) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let required = match alpm_types::Version::from_str(required_ver) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let cmp = built.cmp(&required);
     match op {
         ">=" => cmp != Ordering::Less,
         "<=" => cmp != Ordering::Greater,

@@ -179,10 +179,7 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("child package should exist");
-    assert!(
-        !child.directly_requested,
-        "child is not directly requested"
-    );
+    assert!(!child.directly_requested, "child is not directly requested");
 
     let parent = Packages::find()
         .filter(packages::Column::Pkgbase.eq("parent-pkg"))

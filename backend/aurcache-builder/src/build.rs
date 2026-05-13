@@ -346,7 +346,10 @@ impl Builder {
             .all(&self.db)
             .await?
         {
-            deps_by_dependent.entry(dep.dependent_id).or_default().push(dep);
+            deps_by_dependent
+                .entry(dep.dependent_id)
+                .or_default()
+                .push(dep);
         }
 
         for link in &dep_links {

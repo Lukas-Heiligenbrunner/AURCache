@@ -419,7 +419,7 @@ pub async fn get_package(
         upstream_version: version,
         split_packages: pkg
             .split_packages
-            .map(|s| s.split(';').map(ToString::to_string).collect()),
+            .and_then(|s| serde_json::from_str(&s).ok()),
     };
 
     Ok(Json(ext_pkg))
