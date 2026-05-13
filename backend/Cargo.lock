@@ -420,6 +420,7 @@ version = "0.1.0"
 dependencies = [
  "alpm-srcinfo",
  "alpm-types",
+ "backon",
  "flate2",
  "reqwest",
  "serde",

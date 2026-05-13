@@ -1,4 +1,3 @@
-use crate::aur::api::get_package_info;
 use crate::git::checkout::checkout_repo_ref;
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
@@ -21,6 +20,18 @@ use tokio::sync::broadcast::Sender;
 type RecResult = std::result::Result<(), anyhow::Error>;
 type AddRecursiveFut<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = RecResult> + Send + 'a>>;
+
+struct InsertPackageParams<'a> {
+    pkgbase: &'a str,
+    version: &'a str,
+    platforms_str: &'a str,
+    build_flags_str: &'a str,
+    dep_names: &'a [String],
+    dep_constraints: &'a HashMap<String, String>,
+    pkgnames: &'a [String],
+    source_type: SourceType,
+    source_data_json: &'a str,
+}
 
 pub async fn package_add(
     db: &DatabaseConnection,
@@ -80,6 +91,19 @@ pub async fn package_add(
     }
 }
 
+async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<()> {
+    if let Some(pkg) = Packages::find()
+        .filter(packages::Column::Pkgbase.eq(pkgbase))
+        .one(db)
+        .await?
+    {
+        let mut active: packages::ActiveModel = pkg.into();
+        active.directly_requested = Set(1);
+        active.save(db).await?;
+    }
+    Ok(())
+}
+
 async fn add_aur_package(
     db: &DatabaseConnection,
     tx: &Sender<Action>,
@@ -91,7 +115,6 @@ async fn add_aur_package(
     let client = aurcache_deps::AurClient::new();
     let pkg_name = name.trim();
 
-    // Resolve base package name
     let bases = client
         .resolve_bases(&[pkg_name])
         .await
@@ -101,20 +124,16 @@ async fn add_aur_package(
         .ok_or(anyhow!("Package '{pkg_name}' not found in AUR"))?
         .clone();
 
-    // Check if base package already exists in DB
-    if let Some(existing) = Packages::find()
+    if Packages::find()
         .filter(packages::Column::Pkgbase.eq(&pkgbase))
         .one(db)
         .await?
+        .is_some()
     {
-        // Already exists - mark as directly requested
-        let mut active: packages::ActiveModel = existing.into();
-        active.directly_requested = Set(1);
-        active.save(db).await?;
+        set_directly_requested(db, &pkgbase).await?;
         return Ok(pkgbase);
     }
 
-    // Collect all packages in dependency order (DFS, leaves first)
     let mut added_order: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
 
@@ -129,20 +148,8 @@ async fn add_aur_package(
     )
     .await?;
 
-    // The base package was already added by the recursive call.
-    // Now mark it as directly requested.
-    if let Some(pkg) = Packages::find()
-        .filter(packages::Column::Pkgbase.eq(&pkgbase))
-        .one(db)
-        .await?
-    {
-        let mut active: packages::ActiveModel = pkg.into();
-        active.directly_requested = Set(1);
-        active.save(db).await?;
-    }
+    set_directly_requested(db, &pkgbase).await?;
 
-    // Trigger builds for leaf packages only (those with no AUR dependencies).
-    // Dependents will be triggered via cascade when their deps finish building.
     trigger_leaf_builds(db, tx, platforms, &added_order).await?;
 
     Ok(pkgbase)
@@ -171,8 +178,8 @@ fn add_aur_package_recursive<'a>(
             return Ok(());
         }
 
-        let deps = client
-            .deps_of(pkgbase)
+        let (version, deps) = client
+            .deps_of_with_version(pkgbase)
             .await
             .map_err(|e| anyhow!("Failed to get deps for {pkgbase}: {e}"))?;
 
@@ -190,56 +197,41 @@ fn add_aur_package_recursive<'a>(
             })
             .collect();
 
-        let pkg_info = get_package_info(pkgbase)
-            .await?
-            .ok_or(anyhow!("Package {pkgbase} not found in AUR"))?;
-
         let source_data_json = serde_json::to_string(&SourceData::Aur {
             name: pkgbase.to_string(),
         })?;
 
-        insert_package_with_deps(
-            client,
-            db,
+        let params = InsertPackageParams {
             pkgbase,
+            version: &version,
             platforms_str,
             build_flags_str,
-            dep_names,
-            dep_constraints,
-            deps.pkgnames,
-            pkg_info.version,
-            SourceType::Aur,
-            source_data_json,
-            visited,
-            added_order,
-        )
-        .await
+            dep_names: &dep_names,
+            dep_constraints: &dep_constraints,
+            pkgnames: &deps.pkgnames,
+            source_type: SourceType::Aur,
+            source_data_json: &source_data_json,
+        };
+
+        insert_package_with_deps(client, db, params, visited, added_order).await
     })
 }
 
 async fn insert_package_with_deps(
     client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
-    pkgbase: &str,
-    platforms_str: &str,
-    build_flags_str: &str,
-    dep_names: Vec<String>,
-    dep_constraints: HashMap<String, String>,
-    pkgnames: Vec<String>,
-    version: String,
-    source_type: SourceType,
-    source_data_json: String,
+    params: InsertPackageParams<'_>,
     visited: &mut HashSet<String>,
     added_order: &mut Vec<String>,
 ) -> anyhow::Result<()> {
-    let aur_dep_bases = if dep_names.is_empty() {
+    let aur_dep_bases = if params.dep_names.is_empty() {
         HashMap::new()
     } else {
-        let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
+        let dep_refs: Vec<&str> = params.dep_names.iter().map(|s| s.as_str()).collect();
         match client.resolve_bases(&dep_refs).await {
             Ok(bases) => bases,
             Err(e) => {
-                tracing::warn!("Failed to resolve AUR deps for {pkgbase}: {e}");
+                tracing::warn!("Failed to resolve AUR deps for {}: {e}", params.pkgbase);
                 HashMap::new()
             }
         }
@@ -253,8 +245,8 @@ async fn insert_package_with_deps(
                 client,
                 db,
                 dep_base,
-                platforms_str,
-                build_flags_str,
+                params.platforms_str,
+                params.build_flags_str,
                 visited,
                 added_order,
             )
@@ -262,29 +254,33 @@ async fn insert_package_with_deps(
         }
     }
 
-    let split_packages_str =
-        if pkgnames.len() > 1 || pkgnames.first().map_or(true, |n| n != pkgbase) {
-            Some(pkgnames.join(";"))
-        } else {
-            None
-        };
+    let split_packages_str = if params.pkgnames.len() > 1
+        || params
+            .pkgnames
+            .first()
+            .map_or(true, |n| n != params.pkgbase)
+    {
+        Some(params.pkgnames.join(";"))
+    } else {
+        None
+    };
 
     let new_package = packages::ActiveModel {
-        name: Set(pkgbase.to_string()),
-        pkgbase: Set(pkgbase.to_string()),
+        name: Set(params.pkgbase.to_string()),
+        pkgbase: Set(params.pkgbase.to_string()),
         status: Set(BuildStates::ENQUEUED_BUILD),
-        upstream_version: Set(Some(version.clone())),
-        current_version: Set(Some(version)),
-        platforms: Set(platforms_str.to_string()),
-        build_flags: Set(build_flags_str.to_string()),
-        source_type: Set(source_type),
-        source_data: Set(source_data_json),
+        upstream_version: Set(Some(params.version.to_string())),
+        current_version: Set(Some(params.version.to_string())),
+        platforms: Set(params.platforms_str.to_string()),
+        build_flags: Set(params.build_flags_str.to_string()),
+        source_type: Set(params.source_type),
+        source_data: Set(params.source_data_json.to_string()),
         directly_requested: Set(0),
         split_packages: Set(split_packages_str),
         ..Default::default()
     };
     let saved = new_package.save(db).await?;
-    added_order.push(pkgbase.to_string());
+    added_order.push(params.pkgbase.to_string());
 
     for dep_pkgbase in &dep_pkgbases {
         if let Some(dependee) = Packages::find()
@@ -295,14 +291,14 @@ async fn insert_package_with_deps(
             let constraint = aur_dep_bases
                 .iter()
                 .find(|(_, v)| *v == dep_pkgbase)
-                .and_then(|(name, _)| dep_constraints.get(name.as_str()))
+                .and_then(|(name, _)| params.dep_constraints.get(name.as_str()))
                 .cloned()
                 .unwrap_or_default();
 
             aurcache_db::dependencies::ActiveModel {
                 dependent_id: Set(saved.id.clone().unwrap()),
                 dependee_id: Set(dependee.id),
-                platforms: Set(platforms_str.to_string()),
+                platforms: Set(params.platforms_str.to_string()),
                 version_constraint: Set(constraint),
                 ..Default::default()
             }
@@ -335,15 +331,12 @@ async fn add_git_package(
     let pkgbase_name = sourceinfo.base.name.to_string();
 
     use alpm_types::SystemArchitecture;
-    let pkgnames: Vec<String> = sourceinfo
-        .packages_for_architecture(SystemArchitecture::X86_64)
-        .map(|p| p.name.to_string())
-        .collect();
-
-    // Extract dependency names and constraints from PKGBUILD
     let mut dep_constraints: HashMap<String, String> = HashMap::new();
     let mut dep_names: Vec<String> = Vec::new();
+    let mut pkgnames: Vec<String> = Vec::new();
+
     for pkg in sourceinfo.packages_for_architecture(SystemArchitecture::X86_64) {
+        pkgnames.push(pkg.name.to_string());
         for dep in &pkg.dependencies {
             let s = dep.to_string();
             let (name, constraint) = crate::pkg::parse_dep(&s);
@@ -366,14 +359,13 @@ async fn add_git_package(
         }
     }
 
-    if let Some(existing) = Packages::find()
+    if Packages::find()
         .filter(packages::Column::Pkgbase.eq(&pkgbase_name))
         .one(db)
         .await?
+        .is_some()
     {
-        let mut active: packages::ActiveModel = existing.into();
-        active.directly_requested = Set(1);
-        active.save(db).await?;
+        set_directly_requested(db, &pkgbase_name).await?;
         _ = dir.close();
         return Ok(pkgbase_name);
     }
@@ -388,42 +380,28 @@ async fn add_git_package(
     let mut added_order: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
 
-    insert_package_with_deps(
-        &client,
-        db,
-        &pkgbase_name,
+    let params = InsertPackageParams {
+        pkgbase: &pkgbase_name,
+        version: &version,
         platforms_str,
         build_flags_str,
-        dep_names,
-        dep_constraints,
-        pkgnames,
-        version.clone(),
-        SourceType::Git,
-        source_data_json,
-        &mut visited,
-        &mut added_order,
-    )
-    .await?;
+        dep_names: &dep_names,
+        dep_constraints: &dep_constraints,
+        pkgnames: &pkgnames,
+        source_type: SourceType::Git,
+        source_data_json: &source_data_json,
+    };
 
-    // Mark as directly requested
-    if let Some(pkg) = Packages::find()
-        .filter(packages::Column::Pkgbase.eq(&pkgbase_name))
-        .one(db)
-        .await?
-    {
-        let mut active: packages::ActiveModel = pkg.into();
-        active.directly_requested = Set(1);
-        active.save(db).await?;
-    }
+    insert_package_with_deps(&client, db, params, &mut visited, &mut added_order).await?;
 
-    // Trigger builds for leaf packages only
+    set_directly_requested(db, &pkgbase_name).await?;
+
     trigger_leaf_builds(db, tx, platforms, &added_order).await?;
 
     _ = dir.close();
     Ok(pkgbase_name)
 }
 
-/// Trigger builds only for leaf packages (those with no AUR dependencies).
 async fn trigger_leaf_builds(
     db: &DatabaseConnection,
     tx: &Sender<Action>,

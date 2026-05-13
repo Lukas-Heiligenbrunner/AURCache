@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 alpm-srcinfo = { workspace = true }
 alpm-types = "0.11.2"
+backon = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

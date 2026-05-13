@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::time::Duration;
 
 use alpm_srcinfo::SourceInfoV1;
 use alpm_types::SystemArchitecture;
+use backon::{FibonacciBuilder, Retryable};
 use reqwest::Client;
 use serde::Deserialize;
 use thiserror::Error;
@@ -184,7 +186,20 @@ impl AurClient {
     }
 
     async fn rpc_fetch(&self, url: Url) -> Result<Vec<Package>, Error> {
-        let resp = self.http.get(url).send().await?;
+        let http = self.http.clone();
+        let fetch = move || {
+            let http = http.clone();
+            let url = url.clone();
+            async move { http.get(url).send().await }
+        };
+        let resp = fetch
+            .retry(
+                FibonacciBuilder::default()
+                    .with_min_delay(Duration::from_millis(500))
+                    .with_max_times(3),
+            )
+            .await
+            .map_err(Error::Http)?;
         let text = resp.text().await?;
         let response: PackageResponse =
             serde_json::from_str(&text).map_err(|e| Error::Rpc(e.to_string()))?;
@@ -200,6 +215,19 @@ impl AurClient {
             return Err(Error::Rpc("package not found via RPC".into()));
         }
         Ok(packages)
+    }
+
+    /// Fetch package info and dependencies in a single RPC call.
+    /// Returns (version, PkgDeps).
+    pub async fn deps_of_with_version(&self, pkgbase: &str) -> Result<(String, PkgDeps), Error> {
+        let packages = self.rpc_request(&[pkgbase]).await?;
+        let pkg = packages
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::NotFound(pkgbase.to_string()))?;
+        let version = pkg.version.clone();
+        let deps = deps_from_packages(&[pkg]);
+        Ok((version, deps))
     }
 
     async fn deps_of_rpc(&self, pkgbase: &str) -> Result<PkgDeps, Error> {

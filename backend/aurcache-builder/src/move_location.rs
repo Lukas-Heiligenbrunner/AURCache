@@ -6,6 +6,7 @@ use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::prelude::{Dependencies, Files};
 use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
 use std::path::PathBuf;
@@ -32,73 +33,58 @@ impl Builder {
         let txn = self.db.begin().await?;
         let pkg_id = *self.package_model.id.get()?;
 
-        let mut new_file_ids: std::collections::HashMap<String, i32> =
-            std::collections::HashMap::new();
+        let mut new_file_ids: HashMap<String, i32> = HashMap::new();
 
         for (archive_path, parsed) in &build_pkgs {
             let archive_name = archive_path.file_name().to_str().unwrap().to_string();
             let platform = self.build_model.platform.get()?.clone();
             let pkg_path = format!("./repo/{platform}/{archive_name}");
 
-            // Check that no other package claims this file
-            if let Some(existing) = Files::find()
+            let existing = Files::find()
                 .filter(files::Column::Filename.eq(&archive_name))
                 .one(&txn)
-                .await?
-            {
+                .await?;
+
+            let file_id = if let Some(existing) = existing {
                 if existing.package_id != pkg_id {
-                    // The claimant package may have produced this file in an older build
-                    // (e.g. via paru which built deps inline) before dependency tracking
-                    // was introduced. If the claimant depends on us, transfer ownership.
                     let claimant_depends = Dependencies::find()
                         .filter(dependencies::Column::DependentId.eq(existing.package_id))
                         .filter(dependencies::Column::DependeeId.eq(pkg_id))
                         .one(&txn)
                         .await?;
 
-                    if claimant_depends.is_some() {
-                        self.logger
-                            .append(format!(
-                                "Transferring file '{archive_name}' from package {} (depends on this package)\n",
-                                existing.package_id
-                            ))
-                            .await;
-                    } else {
+                    if claimant_depends.is_none() {
                         bail!("File '{archive_name}' is already produced by another package");
                     }
+                    self.logger
+                        .append(format!(
+                            "Transferring file '{archive_name}' from package {} (depends on this package)\n",
+                            existing.package_id
+                        ))
+                        .await;
                 }
-            }
+
+                let mut active: files::ActiveModel = existing.into();
+                active.package_id = Set(pkg_id);
+                active.update(&txn).await?.id
+            } else {
+                files::ActiveModel {
+                    filename: Set(archive_name.clone()),
+                    platform: Set(platform.clone()),
+                    package_id: Set(pkg_id),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?
+                .id
+            };
+            new_file_ids.insert(parsed.name.clone(), file_id);
 
             self.logger
                 .append(format!("Move {} to repo directory\n", parsed.filename))
                 .await;
-
             fs::copy(archive_path.path(), &pkg_path)?;
             fs::remove_file(archive_path.path())?;
-
-            let file = match Files::find()
-                .filter(files::Column::Filename.eq(&archive_name))
-                .one(&txn)
-                .await?
-            {
-                None => {
-                    let file = files::ActiveModel {
-                        filename: Set(archive_name.clone()),
-                        platform: Set(platform.clone()),
-                        package_id: Set(pkg_id),
-                        ..Default::default()
-                    };
-                    file.insert(&txn).await?
-                }
-                Some(file) => {
-                    let mut active: files::ActiveModel = file.into();
-                    active.package_id = Set(pkg_id);
-                    active.update(&txn).await?
-                }
-            };
-
-            let file_id = file.id;
-            new_file_ids.insert(parsed.name.clone(), file_id);
 
             self.logger
                 .append(format!(
@@ -113,7 +99,6 @@ impl Builder {
             )?;
         }
 
-        // Remove any files this package owned that were NOT produced by the current build
         let stale = Files::find()
             .filter(files::Column::PackageId.eq(pkg_id))
             .all(&txn)
