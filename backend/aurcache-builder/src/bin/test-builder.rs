@@ -57,6 +57,7 @@ fn main() -> anyhow::Result<()> {
     let cmd = aurcache_builder::commands::wrap_with_makepkg_config(
         &makepkg_config,
         &makepkg_config_path,
+        "[options]\nDisableSandbox\nSigLevel = Never\n",
         &build_cmd,
     );
 

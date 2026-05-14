@@ -1,10 +1,8 @@
 use crate::build::Builder;
 use crate::build_mode::{BuildMode, get_build_mode};
 use crate::logger::BuildLogger;
-use crate::makepkg_utils::{create_makepkg_config, read_pacman_config};
+use crate::makepkg_utils::{create_makepkg_config, create_pacman_config};
 use anyhow::anyhow;
-
-const PACMAN_CONF_FILENAME: &str = ".aurcache_pacman.conf";
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::SourceData;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
@@ -223,39 +221,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(&self.db, pkg_id, container_pkgdest_dir).await?;
 
-        // Build the full pacman.conf: user-provided override (if any) plus
-        // the AURCache repo entry.  Write it on the host and bind-mount so
-        // user 'ab' doesn't need write access to /etc/pacman.conf at runtime.
-        let aurcache_build_dir = match get_build_mode() {
-            BuildMode::DinD(cfg) => cfg.build_path,
-            BuildMode::Host(cfg) => cfg.build_artifact_dir_aurcache,
-        };
-        let aurcache_pacman_path = format!("{aurcache_build_dir}/{name}/{PACMAN_CONF_FILENAME}");
-        let repo_conf_line =
-            format!("\n[repo]\nSigLevel = Never\nServer = file://{aurcache_repo_mount}/$arch\n");
-        let user_pacman_config = read_pacman_config(&self.db, pkg_id).await;
-        let pacman_content = match &user_pacman_config {
-            Some(user_conf) => format!(
-                "[options]\nDisableSandbox\nIgnorePkg = pacman\n{user_conf}{repo_conf_line}"
-            ),
-            None => format!(
-                "[options]\nDisableSandbox\nIgnorePkg = pacman\nSigLevel = Never\nHoldPkg = pacman glibc\nArchitecture = auto\n\n\
-                 [core]\nInclude = /etc/pacman.d/mirrorlist\n\n\
-                 [extra]\nInclude = /etc/pacman.d/mirrorlist\n\n\
-                 [multilib]\nInclude = /etc/pacman.d/mirrorlist\n\n\
-                 {repo_conf_line}"
-            ),
-        };
-        std::fs::write(&aurcache_pacman_path, &pacman_content)
-            .map_err(|e| anyhow!("Failed to write pacman.conf: {e}"))?;
-        let docker_pacman_path = format!("{host_build_dir}/{name}/{PACMAN_CONF_FILENAME}");
-        mounts.push(Mount {
-            target: Some("/etc/pacman.conf".to_string()),
-            source: Some(docker_pacman_path),
-            typ: Some(MountTypeEnum::BIND),
-            read_only: Some(true),
-            ..Default::default()
-        });
+        let pacman_config = create_pacman_config(&self.db, pkg_id, aurcache_repo_mount).await;
 
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
         let pkgbase = self.package_model.pkgbase.get()?;
@@ -270,6 +236,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         let cmd = crate::commands::wrap_with_makepkg_config(
             &makepkg_config,
             &makepkg_config_path,
+            &pacman_config,
             &build_cmd,
         );
         info!("Build command: {build_cmd}");
