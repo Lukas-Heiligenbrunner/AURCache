@@ -20,6 +20,37 @@ fn old_build_flag_defaults() -> Vec<&'static str> {
     ]
 }
 
+fn normalize_build_flags(build_flags: &str, new_build_flag_default: &str) -> String {
+    if old_build_flag_defaults().contains(&build_flags) {
+        return new_build_flag_default.to_string();
+    }
+
+    build_flags
+        .split(';')
+        .map(str::trim)
+        .filter(|flag| !flag.is_empty() && *flag != "-Syu" && *flag != "-Byu")
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+async fn normalize_build_flags_in_db(
+    db: &impl ConnectionTrait,
+    new_build_flag_default: &str,
+) -> Result<(), DbErr> {
+    for pkg in packages::Entity::find().all(db).await? {
+        let normalized = normalize_build_flags(&pkg.build_flags, new_build_flag_default);
+        if normalized == pkg.build_flags {
+            continue;
+        }
+
+        let mut active: packages::ActiveModel = pkg.into();
+        active.build_flags = Set(normalized);
+        active.save(db).await?;
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -80,17 +111,6 @@ ON packages (pkgbase);
 ",
                 )
                 .await?;
-
-                // Normalize build flags
-                for old in old_build_flag_defaults() {
-                    db.execute_unprepared(
-                        format!(
-                            r"UPDATE packages SET build_flags = '{new_build_flag_default}' WHERE build_flags = '{old}';"
-                        )
-                        .as_str(),
-                    )
-                    .await?;
-                }
             }
             DbBackend::Postgres => {
                 db.execute_unprepared(
@@ -153,20 +173,11 @@ ON public.packages (pkgbase);
 ",
                 )
                 .await?;
-
-                // Normalize build flags
-                for old in old_build_flag_defaults() {
-                    db.execute_unprepared(
-                        format!(
-                            r"UPDATE public.packages SET build_flags = '{new_build_flag_default}' WHERE build_flags = '{old}';"
-                        )
-                        .as_str(),
-                    )
-                    .await?;
-                }
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
+
+        normalize_build_flags_in_db(db, new_build_flag_default).await?;
 
         tracing::info!("Backfilling dependency entries for existing AUR packages...");
         let client = AurClient::new();
@@ -407,10 +418,33 @@ use aurcache_deps::parse_dep;
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_build_flags;
     use sea_orm::{ConnectionTrait, Database};
     use sea_orm_migration::MigratorTrait;
 
     use crate::migration::Migrator;
+
+    #[test]
+    fn normalize_build_flags_rewrites_legacy_default() {
+        assert_eq!(
+            normalize_build_flags(
+                "-Byu;--noconfirm;--noprogressbar;--color never",
+                "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck",
+            ),
+            "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck"
+        );
+    }
+
+    #[test]
+    fn normalize_build_flags_removes_legacy_tokens_anywhere() {
+        assert_eq!(
+            normalize_build_flags(
+                "--noconfirm;-Byu;--foo;-Syu;--noprogressbar",
+                "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck",
+            ),
+            "--noconfirm;--foo;--noprogressbar"
+        );
+    }
 
     #[tokio::test]
     async fn schema_creates_dependencies_table() {

@@ -6,7 +6,7 @@ use aurcache_types::builder::{Action, BuildStates};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, TransactionTrait, TryIntoModel,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, TryIntoModel,
 };
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,30 +44,23 @@ pub async fn trigger_leaf_builds(
     Ok(())
 }
 
-pub async fn enqueue_missing_dependency_leaf_builds(
+pub async fn enqueue_missing_buildable_packages(
     db: &DatabaseConnection,
     tx: &Sender<Action>,
 ) -> anyhow::Result<usize> {
-    let packages = Packages::find()
-        .filter(packages::Column::DirectlyRequested.eq(false))
-        .all(db)
-        .await?;
+    let packages = Packages::find().all(db).await?;
 
     let mut queued = 0;
     for pkg in packages {
-        let dep_count = Dependencies::find()
-            .filter(dependencies::Column::DependentId.eq(pkg.id))
-            .count(db)
-            .await?;
-        if dep_count != 0 {
-            continue;
-        }
-
         let build_count = Builds::find()
             .filter(builds::Column::PkgId.eq(pkg.id))
             .count(db)
             .await?;
         if build_count != 0 {
+            continue;
+        }
+
+        if !dependencies_satisfied(db, pkg.id).await? {
             continue;
         }
 
@@ -81,6 +74,38 @@ pub async fn enqueue_missing_dependency_leaf_builds(
     }
 
     Ok(queued)
+}
+
+async fn dependencies_satisfied(
+    db: &DatabaseConnection,
+    dependent_id: i32,
+) -> anyhow::Result<bool> {
+    let deps = Dependencies::find()
+        .filter(dependencies::Column::DependentId.eq(dependent_id))
+        .all(db)
+        .await?;
+
+    for dep in deps {
+        let Some((version,)) = Builds::find()
+            .select_only()
+            .column(builds::Column::Version)
+            .filter(builds::Column::PkgId.eq(dep.dependee_id))
+            .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
+            .order_by_desc(builds::Column::EndTime)
+            .order_by_desc(builds::Column::StartTime)
+            .into_tuple::<(String,)>()
+            .one(db)
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        if !crate::pkg::satisfies_constraint(&version, &dep.version_constraint) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 async fn trigger_build_for_package(

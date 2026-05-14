@@ -624,4 +624,424 @@ mod tests {
         assert_eq!(parent_after.status, BuildStates::ENQUEUED_BUILD);
         assert_eq!(parent_after.upstream_version.as_deref(), Some("2.0.0"));
     }
+
+    #[tokio::test]
+    async fn package_update_does_not_queue_non_leaf_dependency_builds() {
+        let server = MockServer::start().await;
+        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "parent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "parent",
+                    "parent",
+                    &["child>=2.0"],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "child"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "child",
+                    "child",
+                    &["grandchild>=2.0"],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "grandchild"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "grandchild",
+                    "grandchild",
+                    &[],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        let parent = packages::ActiveModel {
+            name: Set("parent".to_string()),
+            pkgbase: Set("parent".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"parent"}"#.to_string()),
+            directly_requested: Set(true),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let child = packages::ActiveModel {
+            name: Set("child".to_string()),
+            pkgbase: Set("child".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"child"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let grandchild = packages::ActiveModel {
+            name: Set("grandchild".to_string()),
+            pkgbase: Set("grandchild".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"grandchild"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(child.id),
+            platforms: Set("x86_64".to_string()),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(child.id),
+            dependee_id: Set(grandchild.id),
+            platforms: Set("x86_64".to_string()),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(child.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("1.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(grandchild.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("1.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let build_ids = package_update_with_client(&client, &db, parent.clone(), false, &tx)
+            .await
+            .unwrap();
+
+        assert!(
+            build_ids.is_empty(),
+            "parent should wait for transitive dependency rebuilds"
+        );
+
+        let parent_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(parent.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(parent_build_count, 0);
+
+        let child_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(child.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            child_build_count, 1,
+            "non-leaf dependency should not get a new build until its own dependencies are ready"
+        );
+
+        let grandchild_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(grandchild.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            grandchild_build_count, 2,
+            "leaf transitive dependency should be queued first"
+        );
+
+        let child_after = Packages::find_by_id(child.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child_after.status, BuildStates::ENQUEUED_BUILD);
+        assert_eq!(child_after.upstream_version.as_deref(), Some("2.0.0"));
+    }
+
+    #[tokio::test]
+    async fn force_rebuild_does_not_queue_non_leaf_dependency_builds() {
+        let server = MockServer::start().await;
+        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "parent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "parent",
+                    "parent",
+                    &["child>=2.0"],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "child"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "child",
+                    "child",
+                    &["grandchild>=2.0"],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "grandchild"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "grandchild",
+                    "grandchild",
+                    &[],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        let parent = packages::ActiveModel {
+            name: Set("parent".to_string()),
+            pkgbase: Set("parent".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"parent"}"#.to_string()),
+            directly_requested: Set(true),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let child = packages::ActiveModel {
+            name: Set("child".to_string()),
+            pkgbase: Set("child".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"child"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let grandchild = packages::ActiveModel {
+            name: Set("grandchild".to_string()),
+            pkgbase: Set("grandchild".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"grandchild"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(child.id),
+            platforms: Set("x86_64".to_string()),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(child.id),
+            dependee_id: Set(grandchild.id),
+            platforms: Set("x86_64".to_string()),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(child.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("1.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(grandchild.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("1.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let build_ids = package_update_with_client(&client, &db, parent.clone(), true, &tx)
+            .await
+            .unwrap();
+
+        assert!(
+            build_ids.is_empty(),
+            "forced rebuild should still wait for transitive dependency rebuilds"
+        );
+
+        let parent_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(parent.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(parent_build_count, 0);
+
+        let child_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(child.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            child_build_count, 1,
+            "forced rebuild must not enqueue a non-leaf dependency"
+        );
+
+        let grandchild_build_count = builds::Entity::find()
+            .filter(builds::Column::PkgId.eq(grandchild.id))
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            grandchild_build_count, 2,
+            "forced rebuild should enqueue only the leaf transitive dependency first"
+        );
+    }
 }

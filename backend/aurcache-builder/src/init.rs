@@ -2,7 +2,7 @@ use crate::cancel::cancel_build;
 use crate::queue::queue_package;
 use aurcache_types::builder::Action;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::package::enqueue::enqueue_missing_dependency_leaf_builds;
+use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
 use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -20,8 +20,8 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
         let job_containers: Arc<Mutex<HashMap<i32, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let mut rx = tx.subscribe();
 
-        if let Err(e) = enqueue_missing_dependency_leaf_builds(&db, &tx).await {
-            error!("Failed to enqueue missing dependency builds after migration: {e}");
+        if let Err(e) = enqueue_missing_buildable_packages(&db, &tx).await {
+            error!("Failed to enqueue buildable packages during startup: {e}");
         }
 
         loop {
