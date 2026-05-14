@@ -356,20 +356,41 @@ impl Builder {
     /// and trigger their builds if all their dependencies are satisfied.
     async fn trigger_dependents(&self) -> anyhow::Result<()> {
         let pkg_id = *self.package_model.id.get()?;
-
-        let dep_links = Dependencies::find()
-            .filter(dependencies::Column::DependeeId.eq(pkg_id))
-            .all(&self.db)
-            .await?;
-
+        let dep_links = self.load_dependent_links(pkg_id).await?;
         if dep_links.is_empty() {
             return Ok(());
         }
 
         let dependent_ids: Vec<i32> = dep_links.iter().map(|l| l.dependent_id).collect();
+        let deps_by_dependent = self.load_dependencies_by_dependent(&dependent_ids).await?;
+
+        for link in &dep_links {
+            let dependent_id = link.dependent_id;
+            let Some(all_deps) = deps_by_dependent.get(&dependent_id) else {
+                continue;
+            };
+
+            if self.dependencies_ready_for_dependent(all_deps).await? {
+                self.trigger_dependent_builds(dependent_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_dependent_links(&self, pkg_id: i32) -> anyhow::Result<Vec<dependencies::Model>> {
+        Ok(Dependencies::find()
+            .filter(dependencies::Column::DependeeId.eq(pkg_id))
+            .all(&self.db)
+            .await?)
+    }
+
+    async fn load_dependencies_by_dependent(
+        &self,
+        dependent_ids: &[i32],
+    ) -> anyhow::Result<HashMap<i32, Vec<dependencies::Model>>> {
         let mut deps_by_dependent: HashMap<i32, Vec<dependencies::Model>> = HashMap::new();
         for dep in Dependencies::find()
-            .filter(dependencies::Column::DependentId.is_in(dependent_ids))
+            .filter(dependencies::Column::DependentId.is_in(dependent_ids.to_vec()))
             .all(&self.db)
             .await?
         {
@@ -378,65 +399,70 @@ impl Builder {
                 .or_default()
                 .push(dep);
         }
+        Ok(deps_by_dependent)
+    }
 
-        for link in &dep_links {
-            let dependent_id = link.dependent_id;
-            let Some(all_deps) = deps_by_dependent.get(&dependent_id) else {
-                continue;
-            };
-
-            let mut all_satisfied = true;
-            for dep in all_deps {
-                match self
-                    .check_dep(dep.dependee_id, &dep.version_constraint)
-                    .await?
-                {
-                    DepState::Satisfied => continue,
-                    DepState::NeedsRebuild => {
-                        self.trigger_dep_rebuild(dep.dependee_id).await?;
-                        all_satisfied = false;
-                        break;
-                    }
-                    DepState::NotReady => {
-                        all_satisfied = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_satisfied
-                && let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await?
-                && pkg.status != BuildStates::SUCCESSFUL_BUILD
-                && pkg.status != BuildStates::ACTIVE_BUILD
-                && Builds::find()
-                    .filter(builds::Column::PkgId.eq(pkg.id))
-                    .filter(builds::Column::Status.is_in(vec![
-                        Some(BuildStates::ENQUEUED_BUILD),
-                        Some(BuildStates::ACTIVE_BUILD),
-                    ]))
-                    .count(&self.db)
-                    .await?
-                    == 0
+    async fn dependencies_ready_for_dependent(
+        &self,
+        all_deps: &[dependencies::Model],
+    ) -> anyhow::Result<bool> {
+        for dep in all_deps {
+            match self
+                .check_dep(dep.dependee_id, &dep.version_constraint)
+                .await?
             {
-                let version = pkg
-                    .current_version
-                    .clone()
-                    .or(pkg.upstream_version.clone())
-                    .unwrap_or_default();
-
-                let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
-                for platform in platform_strs {
-                    let new_build = self.enqueue_build(&pkg, platform, &version).await?;
-                    self.logger
-                        .append(format!(
-                            "Triggered build #{} for dependent '{}'",
-                            new_build.id, pkg.name
-                        ))
-                        .await;
+                DepState::Satisfied => continue,
+                DepState::NeedsRebuild => {
+                    self.trigger_dep_rebuild(dep.dependee_id).await?;
+                    return Ok(false);
                 }
+                DepState::NotReady => return Ok(false),
             }
         }
+
+        Ok(true)
+    }
+
+    async fn trigger_dependent_builds(&self, dependent_id: i32) -> anyhow::Result<()> {
+        let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await? else {
+            return Ok(());
+        };
+        if !self.should_enqueue_dependent(&pkg).await? {
+            return Ok(());
+        }
+
+        let version = pkg
+            .current_version
+            .clone()
+            .or(pkg.upstream_version.clone())
+            .unwrap_or_default();
+        for platform in pkg.platforms.split(';') {
+            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
+            self.logger
+                .append(format!(
+                    "Triggered build #{} for dependent '{}'",
+                    new_build.id, pkg.name
+                ))
+                .await;
+        }
         Ok(())
+    }
+
+    async fn should_enqueue_dependent(&self, pkg: &packages::Model) -> anyhow::Result<bool> {
+        if pkg.status == BuildStates::SUCCESSFUL_BUILD || pkg.status == BuildStates::ACTIVE_BUILD {
+            return Ok(false);
+        }
+
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(pkg.id))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+
+        Ok(queued_or_active == 0)
     }
 
     /// Check if a dependency has a successful build at a version that satisfies
