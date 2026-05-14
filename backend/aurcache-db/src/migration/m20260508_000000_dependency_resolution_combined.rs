@@ -1,6 +1,7 @@
 use crate::dependencies;
 use crate::helpers::dbtype::database_type;
 use crate::packages;
+use async_recursion::async_recursion;
 use aurcache_deps::AurClient;
 use sea_orm::DbBackend;
 use sea_orm::{
@@ -377,6 +378,7 @@ pub async fn backfill_dependencies(
 
 /// Recursively ensure that `pkgbase` and all its AUR dependencies exist in the
 /// `packages` table with proper links in the `dependencies` table.
+#[async_recursion]
 async fn ensure_deps(
     client: &AurClient,
     db: &impl ConnectionTrait,
@@ -491,7 +493,7 @@ async fn ensure_deps(
 
     // 6. Recursively process each AUR dep (this will ensure they exist in DB)
     for dep_base in &aur_pkgbases {
-        Box::pin(ensure_deps(client, db, dep_base, visited)).await?;
+        ensure_deps(client, db, dep_base, visited).await?;
     }
 
     // 7. Create dependency links from this package to each resolved AUR dep

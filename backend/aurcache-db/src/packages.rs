@@ -61,6 +61,10 @@ pub enum SourceType {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    /// Legacy/display package identifier.
+    ///
+    /// In the current dependency-aware model we track one row per pkgbase, so
+    /// `name` is intentionally kept equal to `pkgbase`.
     pub name: String,
     pub status: i32,
     pub out_of_date: i32,
@@ -70,6 +74,9 @@ pub struct Model {
     pub platforms: String,
     pub source_type: SourceType,
     pub source_data: String,
+    /// Canonical AUR package base for this row.
+    ///
+    /// Dependency resolution and split-package tracking are keyed by `pkgbase`.
     pub pkgbase: String,
     pub directly_requested: bool,
     pub current_version: Option<String>,

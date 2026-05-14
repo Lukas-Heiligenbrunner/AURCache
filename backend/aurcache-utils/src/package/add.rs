@@ -2,6 +2,7 @@ use crate::git::checkout::checkout_repo_ref;
 use crate::package::enqueue::trigger_leaf_builds;
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
+use async_recursion::async_recursion;
 use aurcache_db::packages;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
@@ -15,10 +16,6 @@ use sea_orm::{
 use std::collections::{HashMap, HashSet};
 use tempfile::tempdir;
 use tokio::sync::broadcast::Sender;
-
-type RecResult = std::result::Result<(), anyhow::Error>;
-type AddRecursiveFut<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = RecResult> + Send + 'a>>;
 
 struct AddContext {
     platforms: Vec<Platform>,
@@ -111,7 +108,7 @@ fn collect_dependency_requirements<'a>(
 
 async fn package_exists(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<bool> {
     Ok(Packages::find()
-        .filter(packages::Column::Pkgbase.eq(pkgbase))
+        .filter(packages::Column::Name.eq(pkgbase))
         .one(db)
         .await?
         .is_some())
@@ -257,7 +254,7 @@ async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyho
             packages::Column::DirectlyRequested,
             sea_orm::sea_query::SimpleExpr::Value(sea_orm::Value::Bool(Some(true))),
         )
-        .filter(packages::Column::Pkgbase.eq(pkgbase))
+        .filter(packages::Column::Name.eq(pkgbase))
         .exec(db)
         .await?;
     Ok(())
@@ -275,26 +272,25 @@ async fn add_aur_package(
     finalize_package_add(client, db, tx, context, package_spec).await
 }
 
-fn add_aur_package_recursive<'a>(
-    client: &'a aurcache_deps::AurClient,
-    db: &'a DatabaseConnection,
-    pkgbase: &'a str,
-    context: &'a AddContext,
-    visited: &'a mut HashSet<String>,
-    added_order: &'a mut Vec<String>,
-) -> AddRecursiveFut<'a> {
-    Box::pin(async move {
-        if !visited.insert(pkgbase.to_string()) {
-            return Ok(());
-        }
+#[async_recursion]
+async fn add_aur_package_recursive(
+    client: &aurcache_deps::AurClient,
+    db: &DatabaseConnection,
+    pkgbase: &str,
+    context: &AddContext,
+    visited: &mut HashSet<String>,
+    added_order: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if !visited.insert(pkgbase.to_string()) {
+        return Ok(());
+    }
 
-        if package_exists(db, pkgbase).await? {
-            return Ok(());
-        }
+    if package_exists(db, pkgbase).await? {
+        return Ok(());
+    }
 
-        let package_spec = resolve_aur_package_spec(client, pkgbase).await?;
-        insert_package_with_deps(client, db, package_spec, context, visited, added_order).await
-    })
+    let package_spec = resolve_aur_package_spec(client, pkgbase).await?;
+    insert_package_with_deps(client, db, package_spec, context, visited, added_order).await
 }
 
 pub(crate) async fn ensure_aur_package_exists_recursive(
@@ -363,8 +359,9 @@ async fn insert_package_with_deps(
     };
 
     let new_package = packages::ActiveModel {
+        // Store package bases in `name`; split package names are tracked
+        // separately via `split_packages`.
         name: Set(package_spec.pkgbase.clone()),
-        pkgbase: Set(package_spec.pkgbase.clone()),
         status: Set(BuildStates::ENQUEUED_BUILD),
         upstream_version: Set(Some(package_spec.version.clone())),
         current_version: Set(Some(package_spec.version.clone())),
@@ -400,11 +397,11 @@ async fn insert_package_with_deps(
 
     let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();
     let dependees: HashMap<String, packages::Model> = Packages::find()
-        .filter(packages::Column::Pkgbase.is_in(pkgbase_strs))
+        .filter(packages::Column::Name.is_in(pkgbase_strs))
         .all(&txn)
         .await?
         .into_iter()
-        .map(|p| (p.pkgbase.clone(), p))
+        .map(|p| (p.name.clone(), p))
         .collect();
 
     for dep_pkgbase in &dep_pkgbases {

@@ -15,7 +15,6 @@ use aurcache_db::{builds, dependencies, packages};
 use aurcache_types::builder::Action;
 use aurcache_utils::aur::api::get_package_info;
 use aurcache_utils::package::add::package_add;
-use aurcache_utils::package::delete::package_delete;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::update::package_update;
 use pacman_mirrors::platforms::Platform;
@@ -38,16 +37,15 @@ use utoipa::OpenApi;
     package_update_entity_endpoint,
     package_update_endpoint,
     package_del,
-    package_remove_endpoint,
     package_list,
     get_package
 ))]
 pub struct PackageApi;
 
-fn normalize_build_flags(build_flags: Option<Vec<String>>) -> Option<Vec<String>> {
+fn normalize_build_flags(build_flags: Option<&[String]>) -> Option<Vec<String>> {
     build_flags.map(|flags| {
         flags
-            .into_iter()
+            .iter()
             .map(|flag| flag.trim().to_string())
             .filter(|flag| !flag.is_empty())
             .collect()
@@ -81,7 +79,7 @@ pub async fn package_add_endpoint(
         db,
         tx,
         platforms,
-        normalize_build_flags(input.build_flags.clone()),
+        normalize_build_flags(input.build_flags.as_deref()),
         input.source.clone(),
     )
     .await
@@ -129,7 +127,7 @@ pub async fn package_update_entity_endpoint(
         latest_build: input.latest_build.map_or(NotSet, Set),
         build_flags: input
             .build_flags
-            .clone()
+            .as_deref()
             .and_then(|v| normalize_build_flags(Some(v)))
             .map_or(NotSet, |v| Set(v.join(";"))),
         platforms: input.platforms.clone().map_or(NotSet, |v| Set(v.join(";"))),
@@ -194,7 +192,7 @@ pub async fn package_update_endpoint(
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Delete package"),
+            (status = 200, description = "Remove direct request flag from package and live-check it"),
     ),
     params(
             ("id", description = "Id of package")
@@ -209,45 +207,7 @@ pub async fn package_del(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    // query this before deleting package!
-    let pkg = Packages::find_by_id(id)
-        .one(db)
-        .await
-        .map_err(|e| BadRequest(e.to_string()))?
-        .ok_or(BadRequest("id not found".to_string()))?;
-
-    package_delete(db, id)
-        .await
-        .map_err(|e| BadRequest(e.to_string()))?;
-
-    al.add(
-        PackageDeleteActivity { package: pkg.name },
-        ActivityType::RemovePackage,
-        a.username,
-    )
-    .await
-    .map_err(|e| BadRequest(e.to_string()))?;
-
-    Ok(())
-}
-
-#[utoipa::path(
-    responses(
-            (status = 200, description = "Remove direct request flag from package and live-check it"),
-    ),
-    params(
-            ("id", description = "Id of package")
-    )
-)]
-#[post("/package/<id>/remove")]
-pub async fn package_remove_endpoint(
-    db: &State<DatabaseConnection>,
-    id: i32,
-    a: Authenticated,
-    al: &State<ActivityLog>,
-) -> Result<(), BadRequest<String>> {
-    let db = db as &DatabaseConnection;
-
+    // query this before removing package ownership!
     let pkg = Packages::find_by_id(id)
         .one(db)
         .await
@@ -268,7 +228,6 @@ pub async fn package_remove_endpoint(
 
     Ok(())
 }
-
 #[utoipa::path(
     responses(
             (status = 200, description = "List of all packages", body = [SimplePackageModel]),

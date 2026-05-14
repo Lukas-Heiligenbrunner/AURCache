@@ -417,6 +417,7 @@ name = "aurcache-db"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-recursion",
  "aurcache-deps",
  "sea-orm",
  "sea-orm-migration",
