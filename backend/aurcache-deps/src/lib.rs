@@ -219,35 +219,22 @@ impl AurClient {
 
 /// Extract dependencies and sub-package names from a parsed .SRCINFO.
 pub fn deps_from_srcinfo(source_info: &SourceInfoV1) -> PkgDeps {
-    let mut depends = Vec::new();
-    let mut make_depends = Vec::new();
-    let mut pkgnames = Vec::new();
-    let mut seen_depends = HashSet::new();
-    let mut seen_make_depends = HashSet::new();
-    let mut seen_pkgnames = HashSet::new();
-
-    for pkg in source_info.packages_for_architecture(alpm_types::SystemArchitecture::X86_64) {
-        if seen_pkgnames.insert(pkg.name.to_string()) {
-            pkgnames.push(pkg.name.to_string());
-        }
-        for dep in &pkg.dependencies {
-            let s = dep.to_string();
-            if seen_depends.insert(s.clone()) {
-                depends.push(s);
-            }
-        }
-        for dep in &pkg.make_dependencies {
-            let s = dep.to_string();
-            if seen_make_depends.insert(s.clone()) {
-                make_depends.push(s);
-            }
-        }
-    }
+    let packages = source_info
+        .packages_for_architecture(alpm_types::SystemArchitecture::X86_64)
+        .collect::<Vec<_>>();
 
     PkgDeps {
-        depends,
-        make_depends,
-        pkgnames,
+        depends: collect_unique_strings(
+            packages
+                .iter()
+                .flat_map(|pkg| pkg.dependencies.iter().map(ToString::to_string)),
+        ),
+        make_depends: collect_unique_strings(
+            packages
+                .iter()
+                .flat_map(|pkg| pkg.make_dependencies.iter().map(ToString::to_string)),
+        ),
+        pkgnames: collect_unique_strings(packages.iter().map(|pkg| pkg.name.to_string())),
     }
 }
 
@@ -267,38 +254,30 @@ pub fn parse_dep(dep: &str) -> (&str, &str) {
 }
 
 fn deps_from_packages(packages: &[Package]) -> PkgDeps {
-    let mut depends = Vec::new();
-    let mut make_depends = Vec::new();
-    let mut pkgnames = Vec::new();
-    let mut seen_depends = HashSet::new();
-    let mut seen_make_depends = HashSet::new();
-    let mut seen_pkgnames = HashSet::new();
-
-    for pkg in packages {
-        if seen_pkgnames.insert(pkg.name.clone()) {
-            pkgnames.push(pkg.name.clone());
-        }
-        if let Some(deps) = &pkg.depends {
-            for d in deps {
-                if seen_depends.insert(d.clone()) {
-                    depends.push(d.clone());
-                }
-            }
-        }
-        if let Some(deps) = &pkg.make_depends {
-            for d in deps {
-                if seen_make_depends.insert(d.clone()) {
-                    make_depends.push(d.clone());
-                }
-            }
-        }
-    }
-
     PkgDeps {
-        depends,
-        make_depends,
-        pkgnames,
+        depends: collect_unique_strings(
+            packages
+                .iter()
+                .flat_map(|pkg| pkg.depends.iter().flatten().cloned()),
+        ),
+        make_depends: collect_unique_strings(
+            packages
+                .iter()
+                .flat_map(|pkg| pkg.make_depends.iter().flatten().cloned()),
+        ),
+        pkgnames: collect_unique_strings(packages.iter().map(|pkg| pkg.name.clone())),
     }
+}
+
+fn collect_unique_strings<I>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| seen.insert(value.clone()).then_some(value))
+        .collect()
 }
 
 #[cfg(test)]

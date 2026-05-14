@@ -4,6 +4,7 @@ use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_types::builder::{Action, BuildStates};
+use futures::future::try_join_all;
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
@@ -53,23 +54,18 @@ pub async fn enqueue_missing_buildable_packages(
 
     let mut queued = 0;
     for pkg in packages {
-        let platforms = parse_platforms(&pkg.platforms)?
-            .into_iter()
-            .filter_map(|platform| {
+        let ready_platforms = try_join_all(parse_platforms(&pkg.platforms)?.into_iter().map(
+            |platform| async move {
                 let platform_name = platform.to_string();
-                Some((platform, platform_name))
-            })
-            .collect::<Vec<_>>();
-        let mut ready_platforms = Vec::new();
-        for (platform, platform_name) in platforms {
-            if build_exists_for_platform(db, pkg.id, &platform_name).await? {
-                continue;
-            }
-            if !dependencies_satisfied(db, pkg.id, &platform_name).await? {
-                continue;
-            }
-            ready_platforms.push(platform);
-        }
+                let ready = !build_exists_for_platform(db, pkg.id, &platform_name).await?
+                    && dependencies_satisfied(db, pkg.id, &platform_name).await?;
+                Ok::<_, anyhow::Error>(ready.then_some(platform))
+            },
+        ))
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         if ready_platforms.is_empty() {
             continue;
         }

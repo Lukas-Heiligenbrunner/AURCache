@@ -484,6 +484,7 @@ dependencies = [
  "aurcache-db",
  "aurcache-deps",
  "aurcache-types",
+ "futures",
  "git2",
  "pacman-mirrors",
  "pacman-repo-utils",

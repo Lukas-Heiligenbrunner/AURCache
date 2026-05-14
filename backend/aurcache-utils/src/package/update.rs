@@ -9,6 +9,7 @@ use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_deps::{AurClient, PkgDeps};
 use aurcache_types::builder::{Action, BuildStates};
+use futures::future::try_join_all;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
@@ -132,21 +133,22 @@ pub async fn package_update_with_client(
         return Ok(vec![]);
     }
 
-    let mut build_ids = vec![];
     let pkg_model: packages::Model = pkg_active_model.try_into()?;
-    for platform in &update_context.ready_platforms {
-        let enqueue_result = update_platform(
-            platform,
-            pkg_model.clone(),
-            update_context.upstream_version.clone(),
-            db,
-            tx,
-        )
-        .await?;
-        build_ids.push(enqueue_result.build.id);
-    }
-
-    Ok(build_ids)
+    Ok(
+        try_join_all(update_context.ready_platforms.iter().map(|platform| {
+            update_platform(
+                platform,
+                pkg_model.clone(),
+                update_context.upstream_version.clone(),
+                db,
+                tx,
+            )
+        }))
+        .await?
+        .into_iter()
+        .map(|enqueue_result| enqueue_result.build.id)
+        .collect(),
+    )
 }
 
 struct UpdateContext {
@@ -215,23 +217,24 @@ async fn sync_aur_dependency_graph(
 
     sync_dependency_rows(db, pkg_model.id, &dep_constraints_by_pkgbase, &dep_packages).await?;
 
-    let mut ready_platforms = Vec::new();
-    for platform in &configured_platforms {
-        if dependencies_ready_for_platform(
-            client,
-            db,
-            tx,
-            platform,
-            &dep_constraints_by_pkgbase,
-            &dep_packages,
-        )
+    Ok(
+        try_join_all(configured_platforms.iter().map(|platform| async {
+            let ready = dependencies_ready_for_platform(
+                client,
+                db,
+                tx,
+                platform,
+                &dep_constraints_by_pkgbase,
+                &dep_packages,
+            )
+            .await?;
+            Ok::<_, anyhow::Error>(ready.then_some(platform.clone()))
+        }))
         .await?
-        {
-            ready_platforms.push(platform.clone());
-        }
-    }
-
-    Ok(ready_platforms)
+        .into_iter()
+        .flatten()
+        .collect(),
+    )
 }
 
 fn collect_dependency_constraints(deps: &PkgDeps) -> HashMap<String, String> {
