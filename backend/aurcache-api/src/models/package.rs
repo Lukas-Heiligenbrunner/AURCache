@@ -41,6 +41,7 @@ pub struct SimplePackageModel {
 pub struct ExtendedPackageModel {
     pub id: i32,
     pub name: String,
+    pub directly_requested: bool,
     pub status: i32,
     pub outofdate: i32,
     pub latest_version: Option<String>,
@@ -50,6 +51,15 @@ pub struct ExtendedPackageModel {
     pub upstream_version: String,
     pub package_source: PackageSource,
     pub split_packages: Option<Vec<String>>,
+    pub dependencies: Vec<PackageDependencyModel>,
+    pub dependents: Vec<PackageDependencyModel>,
+}
+
+#[derive(Deserialize, ToSchema, Serialize, Clone)]
+pub struct PackageDependencyModel {
+    pub id: i32,
+    pub name: String,
+    pub version_constraint: String,
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]

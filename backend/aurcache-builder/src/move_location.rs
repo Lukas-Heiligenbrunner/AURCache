@@ -47,13 +47,15 @@ impl Builder {
 
             let file_id = if let Some(existing) = existing {
                 if existing.package_id != pkg_id {
-                    let claimant_depends = Dependencies::find()
+                    // During dependency-resolution migration, files can move from a legacy owner
+                    // package to the newly created dependency package that should own them.
+                    let existing_owner_depends_on_new_owner = Dependencies::find()
                         .filter(dependencies::Column::DependentId.eq(existing.package_id))
                         .filter(dependencies::Column::DependeeId.eq(pkg_id))
                         .one(&txn)
                         .await?;
 
-                    if claimant_depends.is_none() {
+                    if existing_owner_depends_on_new_owner.is_none() {
                         bail!("File '{archive_name}' is already produced by another package");
                     }
                     self.logger

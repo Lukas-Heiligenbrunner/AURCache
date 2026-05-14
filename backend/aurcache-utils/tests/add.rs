@@ -4,9 +4,11 @@ use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_deps::AurClient;
 use aurcache_types::builder::{Action, BuildStates};
+use aurcache_utils::package::enqueue::enqueue_missing_dependency_leaf_builds;
+use aurcache_utils::pkg::satisfies_constraint;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, Set,
+    QueryFilter, Set, TryIntoModel,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::json;
@@ -441,4 +443,194 @@ async fn scenario_f_system_deps_only() {
 
     let dep_count = Dependencies::find().count(&env.db).await.unwrap();
     assert_eq!(dep_count, 0, "no dependency rows for system packages");
+}
+
+#[tokio::test]
+async fn scenario_g_split_package_constraints_are_merged_per_pkgbase() {
+    let env = setup_env().await;
+
+    mock_rpc_info(
+        &env.server,
+        "parent-pkg",
+        rpc_deps_json(
+            "parent-pkg",
+            "parent-pkg",
+            &["shared-base>=2.0", "shared-lib>=3.0"],
+            &[],
+            "1.0.0",
+        ),
+    )
+    .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rpc/v5/info"))
+        .and(query_param("arg[]", "shared-base"))
+        .and(query_param("arg[]", "shared-lib"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![
+                rpc_deps_json("shared-base", "shared-base", &[], &[], "3.0.0"),
+                rpc_deps_json("shared-lib", "shared-base", &[], &[], "3.0.0"),
+            ])),
+        )
+        .mount(&env.server)
+        .await;
+
+    mock_rpc_info(
+        &env.server,
+        "shared-base",
+        rpc_deps_json("shared-base", "shared-base", &[], &[], "3.0.0"),
+    )
+    .await;
+
+    let result = add_pkg_via_rpc(&env, "parent-pkg").await;
+    assert!(result.is_ok());
+
+    let parent = Packages::find()
+        .filter(packages::Column::Pkgbase.eq("parent-pkg"))
+        .one(&env.db)
+        .await
+        .unwrap()
+        .expect("parent package should exist");
+    let shared = Packages::find()
+        .filter(packages::Column::Pkgbase.eq("shared-base"))
+        .one(&env.db)
+        .await
+        .unwrap()
+        .expect("shared dependency package should exist");
+
+    let deps = Dependencies::find()
+        .filter(dependencies::Column::DependentId.eq(parent.id))
+        .filter(dependencies::Column::DependeeId.eq(shared.id))
+        .all(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        deps.len(),
+        1,
+        "split package deps should collapse to one row"
+    );
+
+    let constraint = &deps[0].version_constraint;
+    assert!(
+        satisfies_constraint("3.0.0", constraint),
+        "merged constraint should accept the stricter version"
+    );
+    assert!(
+        !satisfies_constraint("2.5.0", constraint),
+        "merged constraint should reject versions that only satisfy the weaker bound"
+    );
+}
+
+#[tokio::test]
+async fn scenario_h_queue_missing_leaf_dependency_builds_after_migration() {
+    let env = setup_env().await;
+    let (tx, _) = tokio::sync::broadcast::channel(100);
+
+    let root = packages::ActiveModel {
+        name: Set("root".to_string()),
+        pkgbase: Set("root".to_string()),
+        status: Set(BuildStates::SUCCESSFUL_BUILD),
+        out_of_date: Set(0),
+        upstream_version: Set(Some("1.0.0".to_string())),
+        latest_build: Set(None),
+        build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+        platforms: Set("x86_64".to_string()),
+        source_type: Set(packages::SourceType::Aur),
+        source_data: Set(r#"{"type":"aur","name":"root"}"#.to_string()),
+        directly_requested: Set(true),
+        current_version: Set(Some("1.0.0".to_string())),
+        split_packages: Set(None),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap()
+    .try_into_model()
+    .unwrap();
+
+    let mid = packages::ActiveModel {
+        name: Set("mid".to_string()),
+        pkgbase: Set("mid".to_string()),
+        status: Set(BuildStates::FAILED_BUILD),
+        out_of_date: Set(0),
+        upstream_version: Set(Some("1.0.0".to_string())),
+        latest_build: Set(None),
+        build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+        platforms: Set("x86_64".to_string()),
+        source_type: Set(packages::SourceType::Aur),
+        source_data: Set(r#"{"type":"aur","name":"mid"}"#.to_string()),
+        directly_requested: Set(false),
+        current_version: Set(None),
+        split_packages: Set(None),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap()
+    .try_into_model()
+    .unwrap();
+
+    let leaf = packages::ActiveModel {
+        name: Set("leaf".to_string()),
+        pkgbase: Set("leaf".to_string()),
+        status: Set(BuildStates::FAILED_BUILD),
+        out_of_date: Set(0),
+        upstream_version: Set(Some("1.0.0".to_string())),
+        latest_build: Set(None),
+        build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+        platforms: Set("x86_64".to_string()),
+        source_type: Set(packages::SourceType::Aur),
+        source_data: Set(r#"{"type":"aur","name":"leaf"}"#.to_string()),
+        directly_requested: Set(false),
+        current_version: Set(None),
+        split_packages: Set(None),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap()
+    .try_into_model()
+    .unwrap();
+
+    dependencies::ActiveModel {
+        dependent_id: Set(root.id),
+        dependee_id: Set(mid.id),
+        platforms: Set("x86_64".to_string()),
+        version_constraint: Set("".to_string()),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap();
+
+    dependencies::ActiveModel {
+        dependent_id: Set(mid.id),
+        dependee_id: Set(leaf.id),
+        platforms: Set("x86_64".to_string()),
+        version_constraint: Set("".to_string()),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap();
+
+    let queued = enqueue_missing_dependency_leaf_builds(&env.db, &tx)
+        .await
+        .unwrap();
+
+    assert_eq!(queued, 1, "only leaf dependency packages should be queued");
+
+    let leaf_builds = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(leaf.id))
+        .count(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(leaf_builds, 1, "leaf dependency should get a build");
+
+    let mid_builds = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(mid.id))
+        .count(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(mid_builds, 0, "non-leaf dependency should wait for cascade");
 }

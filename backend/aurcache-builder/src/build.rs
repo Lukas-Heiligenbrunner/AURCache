@@ -500,21 +500,29 @@ impl Builder {
             return Ok(());
         }
 
-        let version = pkg
-            .current_version
-            .clone()
-            .or(pkg.upstream_version.clone())
-            .unwrap_or_default();
-
-        let platform_strs: Vec<&str> = pkg.platforms.split(';').collect();
-        for platform in platform_strs {
-            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
+        let build_ids = aurcache_utils::package::update::package_update(
+            &self.db,
+            pkg.clone(),
+            true,
+            &self.action_tx,
+        )
+        .await?;
+        if build_ids.is_empty() {
             self.logger
                 .append(format!(
-                    "Triggered rebuild #{} for dep '{}' (version constraint)",
-                    new_build.id, pkg.name
+                    "Queued dependency '{}' for update before rebuilding dependent packages",
+                    pkg.name
                 ))
                 .await;
+        } else {
+            for build_id in build_ids {
+                self.logger
+                    .append(format!(
+                        "Triggered rebuild #{} for dep '{}' (version constraint)",
+                        build_id, pkg.name
+                    ))
+                    .await;
+            }
         }
 
         Ok(())

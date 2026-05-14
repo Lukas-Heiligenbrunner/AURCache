@@ -14,6 +14,7 @@ sealed class ExtendedPackage with _$ExtendedPackage {
   factory ExtendedPackage({
     required int id,
     required String name,
+    required bool directly_requested,
     required int status,
     // ignore: invalid_annotation_target
     @JsonKey(fromJson: _fromJson) required bool outofdate,
@@ -21,6 +22,8 @@ sealed class ExtendedPackage with _$ExtendedPackage {
     final String? latest_version,
     required List<String> selected_platforms,
     required List<String> selected_build_flags,
+    required List<PackageDependency> dependencies,
+    required List<PackageDependency> dependents,
     // ignore: invalid_annotation_target
     @JsonKey(toJson: _toString) required PackageSource package_source,
   }) = _ExtendedPackage;
@@ -31,11 +34,22 @@ sealed class ExtendedPackage with _$ExtendedPackage {
   factory ExtendedPackage.dummy() => ExtendedPackage(
     id: 42,
     name: "Dummy",
+    directly_requested: true,
     status: 0,
     outofdate: true,
     upstream_version: "1.0.0",
     selected_platforms: ["arm64"],
     selected_build_flags: ["-S", "--noconfirm", "--dummyflag"],
+    dependencies: [
+      PackageDependency(id: 7, name: "dummy-lib", version_constraint: ">=1.0"),
+    ],
+    dependents: [
+      PackageDependency(
+        id: 8,
+        name: "dummy-parent",
+        version_constraint: ">=1.0",
+      ),
+    ],
     package_source: PackageSource.git(
       GitPackage(
         git_ref: "master",
@@ -44,6 +58,18 @@ sealed class ExtendedPackage with _$ExtendedPackage {
       ),
     ),
   );
+}
+
+@freezed
+sealed class PackageDependency with _$PackageDependency {
+  const factory PackageDependency({
+    required int id,
+    required String name,
+    required String version_constraint,
+  }) = _PackageDependency;
+
+  factory PackageDependency.fromJson(Map<String, dynamic> json) =>
+      _$PackageDependencyFromJson(json);
 }
 
 @Freezed(unionKey: 'package_type', unionValueCase: FreezedUnionCase.pascal)

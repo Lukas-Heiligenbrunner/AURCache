@@ -15,19 +15,46 @@ pub fn vercmp(a: &str, b: &str) -> Ordering {
 
 /// Check if a built version satisfies a version constraint.
 /// `built_version` is the version string from a successful build.
-/// `constraint` is e.g. ">=2.0", "=1.5", "<3.0", or "" (unconstrained).
+/// `constraint` is e.g. ">=2.0", "=1.5", "<3.0", ">=2.0,<4.0", or "" (unconstrained).
 pub fn satisfies_constraint(built_version: &str, constraint: &str) -> bool {
-    let constraint = constraint.trim();
-    if constraint.is_empty() {
+    let constraints = split_constraints(constraint);
+    if constraints.is_empty() {
         return true;
     }
     let Ok(built) = alpm_types::Version::from_str(built_version) else {
         return false;
     };
-    let Ok(req) = alpm_types::VersionRequirement::from_str(constraint) else {
-        return false;
-    };
-    req.is_satisfied_by(&built)
+
+    constraints.into_iter().all(|constraint| {
+        let Ok(req) = alpm_types::VersionRequirement::from_str(constraint) else {
+            return false;
+        };
+        req.is_satisfied_by(&built)
+    })
+}
+
+/// Merge two version constraints into a single comma-separated requirement list.
+pub fn merge_version_constraints(existing: &str, new: &str) -> String {
+    let mut merged: Vec<String> = Vec::new();
+
+    for constraint in split_constraints(existing)
+        .into_iter()
+        .chain(split_constraints(new))
+    {
+        if !merged.iter().any(|seen| seen == constraint) {
+            merged.push(constraint.to_string());
+        }
+    }
+
+    merged.join(",")
+}
+
+fn split_constraints(constraint: &str) -> Vec<&str> {
+    constraint
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -102,5 +129,23 @@ mod tests {
         assert!(!satisfies_constraint("2.0", "<2.0"));
         assert!(satisfies_constraint("2.0", ""));
         assert!(satisfies_constraint("2.0", ">=1.0-2"));
+        assert!(satisfies_constraint("2.5", ">=2.0,<3.0"));
+        assert!(!satisfies_constraint("3.0", ">=2.0,<3.0"));
+    }
+
+    #[test]
+    fn test_merge_version_constraints() {
+        assert_eq!(merge_version_constraints("", ""), "");
+        assert_eq!(merge_version_constraints(">=1.0", ""), ">=1.0");
+        assert_eq!(merge_version_constraints("", ">=1.0"), ">=1.0");
+        assert_eq!(merge_version_constraints(">=1.0", ">=2.0"), ">=1.0,>=2.0");
+        assert_eq!(
+            merge_version_constraints(">=1.0,<4.0", "<=3.0"),
+            ">=1.0,<4.0,<=3.0"
+        );
+        assert_eq!(
+            merge_version_constraints(">=1.0", ">=1.0,<4.0"),
+            ">=1.0,<4.0"
+        );
     }
 }

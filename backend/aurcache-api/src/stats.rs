@@ -114,6 +114,15 @@ ORDER BY
     Ok(result)
 }
 
+async fn count_directly_requested_packages(db: &DatabaseConnection) -> anyhow::Result<u32> {
+    Packages::find()
+        .filter(aurcache_db::packages::Column::DirectlyRequested.eq(true))
+        .count(db)
+        .await?
+        .try_into()
+        .map_err(Into::into)
+}
+
 async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
     // Count total builds
     let total_builds: u32 = Builds::find().count(db).await?.try_into()?;
@@ -159,7 +168,7 @@ async fn get_stats(db: &DatabaseConnection) -> anyhow::Result<ListStats> {
         .unwrap();
 
     // Count total packages
-    let total_packages: u32 = Packages::find().count(db).await?.try_into()?;
+    let total_packages = count_directly_requested_packages(db).await?;
 
     #[derive(Debug, FromQueryResult)]
     struct LastBuildsStruct {
@@ -242,4 +251,63 @@ SELECT
         total_build_trend: build_trend,
         avg_build_time_trend: build_duration_trend,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_directly_requested_packages;
+    use aurcache_db::migration::Migrator;
+    use aurcache_db::packages;
+    use sea_orm::{ActiveModelTrait, Database, Set};
+    use sea_orm_migration::MigratorTrait;
+
+    #[tokio::test]
+    async fn stats_only_count_directly_requested_packages() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        packages::ActiveModel {
+            name: Set("top-level".to_string()),
+            pkgbase: Set("top-level".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"top-level"}"#.to_string()),
+            directly_requested: Set(true),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        packages::ActiveModel {
+            name: Set("transitive-dependency".to_string()),
+            pkgbase: Set("transitive-dependency".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"transitive-dependency"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let count = count_directly_requested_packages(&db).await.unwrap();
+
+        assert_eq!(count, 1);
+    }
 }

@@ -6,6 +6,7 @@ edition = "2024"
 git2 = "0.20.2"
 
 anyhow = {workspace = true}
+async-recursion = "1.1.1"
 sea-orm = {workspace = true}
 tokio = {workspace = true}
 tracing = {workspace = true}
