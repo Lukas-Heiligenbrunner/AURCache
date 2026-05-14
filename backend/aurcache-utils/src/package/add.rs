@@ -41,6 +41,14 @@ struct PackageInsertSpec {
     source_data_json: String,
 }
 
+fn normalize_build_flags(flags: Vec<String>) -> Vec<String> {
+    flags
+        .into_iter()
+        .map(|flag| flag.trim().to_string())
+        .filter(|flag| !flag.is_empty())
+        .collect()
+}
+
 fn build_add_context(
     platforms: Option<Vec<Platform>>,
     build_flags: Option<Vec<String>>,
@@ -59,16 +67,14 @@ fn build_add_context(
         .collect::<Vec<_>>()
         .join(";");
 
-    let build_flags_str = build_flags
-        .unwrap_or_else(|| {
-            vec![
-                "--noconfirm".to_string(),
-                "--noprogressbar".to_string(),
-                "--nocolor".to_string(),
-                "--skippgpcheck".to_string(),
-            ]
-        })
-        .join(";");
+    let build_flags_str = normalize_build_flags(build_flags.unwrap_or_else(|| {
+        vec![
+            "--noconfirm".to_string(),
+            "--noprogressbar".to_string(),
+            "--nocolor".to_string(),
+        ]
+    }))
+    .join(";");
 
     Ok(AddContext {
         platforms,

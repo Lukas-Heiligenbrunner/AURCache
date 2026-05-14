@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "aurcache-builder:test".to_string());
     let build_flags = std::env::args()
         .nth(3)
-        .unwrap_or_else(|| "-B --noconfirm --noprogressbar --color never --pgpfetch".to_string());
+        .unwrap_or_else(|| "--noconfirm --noprogressbar --nocolor".to_string());
 
     println!("=== Testing builder image: {builder_image} ===");
     println!("Building package: {package}");

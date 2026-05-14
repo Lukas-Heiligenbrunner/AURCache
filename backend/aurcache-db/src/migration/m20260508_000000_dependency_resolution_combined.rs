@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
+const MIGRATION_ADDED_DEFAULT: &str = "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck";
+
 fn old_build_flag_defaults() -> Vec<&'static str> {
     vec![
         "-Syu;--noconfirm;--noprogressbar;--color never",
@@ -22,6 +24,9 @@ fn old_build_flag_defaults() -> Vec<&'static str> {
 
 fn normalize_build_flags(build_flags: &str, new_build_flag_default: &str) -> String {
     if old_build_flag_defaults().contains(&build_flags) {
+        return new_build_flag_default.to_string();
+    }
+    if build_flags == MIGRATION_ADDED_DEFAULT {
         return new_build_flag_default.to_string();
     }
 
@@ -51,28 +56,119 @@ async fn normalize_build_flags_in_db(
     Ok(())
 }
 
+async fn add_column_if_missing(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    column: &str,
+    sql: &str,
+) -> Result<(), DbErr> {
+    if !manager.has_column(table, column).await? {
+        manager.get_connection().execute_unprepared(sql).await?;
+    }
+    Ok(())
+}
+
+async fn merge_files_package_links(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let db = manager.get_connection();
+
+    match database_type() {
+        DbBackend::Sqlite => {
+            add_column_if_missing(
+                manager,
+                "files",
+                "package_id",
+                "ALTER TABLE files ADD COLUMN package_id INTEGER;",
+            )
+            .await?;
+
+            if manager.has_table("packages_files").await? {
+                db.execute_unprepared(
+                    "UPDATE files
+                     SET package_id = COALESCE(
+                         package_id,
+                         (SELECT package_id
+                          FROM packages_files
+                          WHERE packages_files.file_id = files.id
+                          LIMIT 1)
+                     );",
+                )
+                .await?;
+                db.execute_unprepared("DROP TABLE IF EXISTS packages_files;")
+                    .await?;
+            }
+        }
+        DbBackend::Postgres => {
+            add_column_if_missing(
+                manager,
+                "files",
+                "package_id",
+                "ALTER TABLE public.files ADD COLUMN package_id INTEGER;",
+            )
+            .await?;
+
+            if manager.has_table("packages_files").await? {
+                db.execute_unprepared(
+                    "UPDATE public.files
+                     SET package_id = COALESCE(
+                         package_id,
+                         (SELECT package_id
+                          FROM public.packages_files
+                          WHERE packages_files.file_id = files.id
+                          LIMIT 1)
+                     );",
+                )
+                .await?;
+                db.execute_unprepared("DROP TABLE IF EXISTS public.packages_files;")
+                    .await?;
+            }
+
+            db.execute_unprepared("ALTER TABLE public.files ALTER COLUMN package_id SET NOT NULL;")
+                .await?;
+        }
+        _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        let new_build_flag_default = "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck";
+        let new_build_flag_default = "--noconfirm;--noprogressbar;--nocolor";
 
         match database_type() {
             DbBackend::Sqlite => {
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "pkgbase",
+                    "ALTER TABLE packages ADD pkgbase TEXT;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "directly_requested",
+                    "ALTER TABLE packages ADD directly_requested INTEGER NOT NULL DEFAULT 1;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "current_version",
+                    "ALTER TABLE packages ADD current_version TEXT;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "split_packages",
+                    "ALTER TABLE packages ADD split_packages TEXT;",
+                )
+                .await?;
                 db.execute_unprepared(
                     r"
-alter table packages
-    add pkgbase TEXT;
-
-alter table packages
-    add directly_requested INTEGER not null default 1;
-
-alter table packages
-    add current_version TEXT;
-
-alter table packages
-    add split_packages TEXT;
-
 CREATE TABLE IF NOT EXISTS dependencies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dependent_id INTEGER NOT NULL,
@@ -113,20 +209,36 @@ ON packages (pkgbase);
                 .await?;
             }
             DbBackend::Postgres => {
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "pkgbase",
+                    "ALTER TABLE public.packages ADD pkgbase TEXT;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "directly_requested",
+                    "ALTER TABLE public.packages ADD directly_requested BOOLEAN NOT NULL DEFAULT true;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "current_version",
+                    "ALTER TABLE public.packages ADD current_version TEXT;",
+                )
+                .await?;
+                add_column_if_missing(
+                    manager,
+                    "packages",
+                    "split_packages",
+                    "ALTER TABLE public.packages ADD split_packages TEXT;",
+                )
+                .await?;
                 db.execute_unprepared(
                     r"
-ALTER TABLE public.packages
-    ADD pkgbase TEXT;
-
-ALTER TABLE public.packages
-    ADD directly_requested BOOLEAN NOT NULL DEFAULT true;
-
-ALTER TABLE public.packages
-    ADD current_version TEXT;
-
-ALTER TABLE public.packages
-    ADD split_packages TEXT;
-
 CREATE TABLE IF NOT EXISTS public.dependencies (
     id SERIAL PRIMARY KEY,
     dependent_id INTEGER NOT NULL,
@@ -178,6 +290,7 @@ ON public.packages (pkgbase);
         }
 
         normalize_build_flags_in_db(db, new_build_flag_default).await?;
+        merge_files_package_links(manager).await?;
 
         tracing::info!("Backfilling dependency entries for existing AUR packages...");
         let client = AurClient::new();
@@ -200,6 +313,7 @@ ALTER TABLE packages DROP COLUMN pkgbase;
 ALTER TABLE packages DROP COLUMN directly_requested;
 ALTER TABLE packages DROP COLUMN current_version;
 ALTER TABLE packages DROP COLUMN split_packages;
+ALTER TABLE files DROP COLUMN package_id;
 DROP TABLE IF EXISTS dependencies;
 ",
                 )
@@ -218,6 +332,7 @@ ALTER TABLE public.packages DROP COLUMN pkgbase;
 ALTER TABLE public.packages DROP COLUMN directly_requested;
 ALTER TABLE public.packages DROP COLUMN current_version;
 ALTER TABLE public.packages DROP COLUMN split_packages;
+ALTER TABLE public.files DROP COLUMN package_id;
 DROP TABLE IF EXISTS public.dependencies;
 ",
                 )
@@ -287,7 +402,7 @@ async fn ensure_deps(
                 out_of_date: Set(0),
                 upstream_version: Set(None),
                 latest_build: Set(None),
-                build_flags: Set("--noconfirm;--noprogressbar;--nocolor;--skippgpcheck".to_string()),
+                build_flags: Set("--noconfirm;--noprogressbar;--nocolor".to_string()),
                 platforms: Set("x86_64".to_string()),
                 source_type: Set(packages::SourceType::Aur),
                 source_data: Set(format!(r#"{{"type":"aur","name":"{pkgbase}"}}"#)),
@@ -418,9 +533,9 @@ use aurcache_deps::parse_dep;
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_build_flags;
+    use super::{MIGRATION_ADDED_DEFAULT, Migration, normalize_build_flags};
     use sea_orm::{ConnectionTrait, Database};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 
     use crate::migration::Migrator;
 
@@ -429,9 +544,9 @@ mod tests {
         assert_eq!(
             normalize_build_flags(
                 "-Byu;--noconfirm;--noprogressbar;--color never",
-                "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck",
+                "--noconfirm;--noprogressbar;--nocolor",
             ),
-            "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck"
+            "--noconfirm;--noprogressbar;--nocolor"
         );
     }
 
@@ -439,10 +554,21 @@ mod tests {
     fn normalize_build_flags_removes_legacy_tokens_anywhere() {
         assert_eq!(
             normalize_build_flags(
-                "--noconfirm;-Byu;--foo;-Syu;--noprogressbar",
-                "--noconfirm;--noprogressbar;--nocolor;--skippgpcheck",
+                "--noconfirm;-Byu;--foo;-Syu;--skippgpcheck;--noprogressbar",
+                "--noconfirm;--noprogressbar;--nocolor",
             ),
-            "--noconfirm;--foo;--noprogressbar"
+            "--noconfirm;--foo;--skippgpcheck;--noprogressbar"
+        );
+    }
+
+    #[test]
+    fn normalize_build_flags_strips_migration_added_default_skip() {
+        assert_eq!(
+            normalize_build_flags(
+                MIGRATION_ADDED_DEFAULT,
+                "--noconfirm;--noprogressbar;--nocolor",
+            ),
+            "--noconfirm;--noprogressbar;--nocolor"
         );
     }
 
@@ -472,5 +598,18 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| panic!("column '{col}' should exist on packages"));
         }
+
+        db.execute_unprepared("SELECT package_id FROM files LIMIT 0")
+            .await
+            .expect("column 'package_id' should exist on files");
+    }
+
+    #[tokio::test]
+    async fn migration_is_idempotent_when_rerun() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        let manager = SchemaManager::new(&db);
+        Migration.up(&manager).await.unwrap();
     }
 }

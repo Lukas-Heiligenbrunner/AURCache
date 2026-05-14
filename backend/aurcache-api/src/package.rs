@@ -44,6 +44,16 @@ use utoipa::OpenApi;
 ))]
 pub struct PackageApi;
 
+fn normalize_build_flags(build_flags: Option<Vec<String>>) -> Option<Vec<String>> {
+    build_flags.map(|flags| {
+        flags
+            .into_iter()
+            .map(|flag| flag.trim().to_string())
+            .filter(|flag| !flag.is_empty())
+            .collect()
+    })
+}
+
 #[utoipa::path(
     responses(
             (status = 200, description = "Add new Package"),
@@ -71,7 +81,7 @@ pub async fn package_add_endpoint(
         db,
         tx,
         platforms,
-        input.build_flags.clone(),
+        normalize_build_flags(input.build_flags.clone()),
         input.source.clone(),
     )
     .await
@@ -120,6 +130,7 @@ pub async fn package_update_entity_endpoint(
         build_flags: input
             .build_flags
             .clone()
+            .and_then(|v| normalize_build_flags(Some(v)))
             .map_or(NotSet, |v| Set(v.join(";"))),
         platforms: input.platforms.clone().map_or(NotSet, |v| Set(v.join(";"))),
         source_type: NotSet,

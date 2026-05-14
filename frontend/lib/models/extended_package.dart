@@ -39,7 +39,7 @@ sealed class ExtendedPackage with _$ExtendedPackage {
     outofdate: true,
     upstream_version: "1.0.0",
     selected_platforms: ["arm64"],
-    selected_build_flags: ["-S", "--noconfirm", "--dummyflag"],
+    selected_build_flags: ["--noconfirm", "--noprogressbar"],
     dependencies: [
       PackageDependency(id: 7, name: "dummy-lib", version_constraint: ">=1.0"),
     ],
