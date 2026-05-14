@@ -201,7 +201,7 @@ async fn scenario_b_one_aur_dep() {
         .await
         .unwrap()
         .expect("dependency row should exist");
-    assert_eq!(dep.platforms, "x86_64");
+    assert_eq!(dep.version_constraint, "");
 
     let parent_builds = builds::Entity::find()
         .filter(builds::Column::PkgId.eq(parent.id))
@@ -595,7 +595,6 @@ async fn scenario_h_queue_missing_buildable_packages_after_migration() {
     dependencies::ActiveModel {
         dependent_id: Set(root.id),
         dependee_id: Set(mid.id),
-        platforms: Set("x86_64".to_string()),
         version_constraint: Set("".to_string()),
         ..Default::default()
     }
@@ -606,7 +605,6 @@ async fn scenario_h_queue_missing_buildable_packages_after_migration() {
     dependencies::ActiveModel {
         dependent_id: Set(mid.id),
         dependee_id: Set(leaf.id),
-        platforms: Set("x86_64".to_string()),
         version_constraint: Set("".to_string()),
         ..Default::default()
     }
@@ -709,7 +707,6 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
     dependencies::ActiveModel {
         dependent_id: Set(root.id),
         dependee_id: Set(mid.id),
-        platforms: Set("x86_64".to_string()),
         version_constraint: Set("".to_string()),
         ..Default::default()
     }
@@ -720,7 +717,6 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
     dependencies::ActiveModel {
         dependent_id: Set(mid.id),
         dependee_id: Set(leaf.id),
-        platforms: Set("x86_64".to_string()),
         version_constraint: Set(">=1.0".to_string()),
         ..Default::default()
     }
@@ -766,5 +762,107 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
     assert_eq!(
         mid_builds, 1,
         "non-leaf package should be queued when its deps are satisfied"
+    );
+}
+
+#[tokio::test]
+async fn scenario_j_queue_only_platforms_with_satisfied_dependencies() {
+    let env = setup_env().await;
+    let (tx, _) = tokio::sync::broadcast::channel(100);
+
+    let root = packages::ActiveModel {
+        name: Set("root".to_string()),
+        pkgbase: Set("root".to_string()),
+        status: Set(BuildStates::FAILED_BUILD),
+        out_of_date: Set(0),
+        upstream_version: Set(Some("1.0.0".to_string())),
+        latest_build: Set(None),
+        build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+        platforms: Set("x86_64;aarch64".to_string()),
+        source_type: Set(packages::SourceType::Aur),
+        source_data: Set(r#"{"type":"aur","name":"root"}"#.to_string()),
+        directly_requested: Set(true),
+        current_version: Set(None),
+        split_packages: Set(None),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap()
+    .try_into_model()
+    .unwrap();
+
+    let leaf = packages::ActiveModel {
+        name: Set("leaf".to_string()),
+        pkgbase: Set("leaf".to_string()),
+        status: Set(BuildStates::SUCCESSFUL_BUILD),
+        out_of_date: Set(0),
+        upstream_version: Set(Some("1.0.0".to_string())),
+        latest_build: Set(None),
+        build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+        platforms: Set("x86_64;aarch64".to_string()),
+        source_type: Set(packages::SourceType::Aur),
+        source_data: Set(r#"{"type":"aur","name":"leaf"}"#.to_string()),
+        directly_requested: Set(false),
+        current_version: Set(Some("1.0.0".to_string())),
+        split_packages: Set(None),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap()
+    .try_into_model()
+    .unwrap();
+
+    dependencies::ActiveModel {
+        dependent_id: Set(root.id),
+        dependee_id: Set(leaf.id),
+        version_constraint: Set(">=1.0".to_string()),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap();
+
+    builds::ActiveModel {
+        pkg_id: Set(leaf.id),
+        output: Set(None),
+        status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+        start_time: Set(Some(1)),
+        end_time: Set(Some(2)),
+        platform: Set("x86_64".to_string()),
+        version: Set("1.0.0".to_string()),
+        ..Default::default()
+    }
+    .save(&env.db)
+    .await
+    .unwrap();
+
+    let queued = enqueue_missing_buildable_packages(&env.db, &tx)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        queued, 2,
+        "startup should queue the ready dependent platform and any other ready leaf builds"
+    );
+
+    let root_x86_builds = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(root.id))
+        .filter(builds::Column::Platform.eq("x86_64"))
+        .count(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(root_x86_builds, 1, "x86_64 should be queued");
+
+    let root_aarch64_builds = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(root.id))
+        .filter(builds::Column::Platform.eq("aarch64"))
+        .count(&env.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        root_aarch64_builds, 0,
+        "aarch64 should wait until its dependency is built for that platform"
     );
 }

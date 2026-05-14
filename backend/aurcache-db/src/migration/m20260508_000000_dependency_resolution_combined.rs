@@ -132,6 +132,45 @@ async fn merge_files_package_links(manager: &SchemaManager<'_>) -> Result<(), Db
     Ok(())
 }
 
+async fn drop_dependency_platforms_if_present(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    if !manager.has_table("dependencies").await? || !manager.has_column("dependencies", "platforms").await? {
+        return Ok(());
+    }
+
+    let db = manager.get_connection();
+    match database_type() {
+        DbBackend::Sqlite => {
+            db.execute_unprepared(
+                r"
+ALTER TABLE dependencies RENAME TO dependencies_old;
+CREATE TABLE dependencies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dependent_id INTEGER NOT NULL,
+    dependee_id INTEGER NOT NULL,
+    version_constraint TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (dependent_id) REFERENCES packages(id) ON DELETE CASCADE,
+    FOREIGN KEY (dependee_id) REFERENCES packages(id) ON DELETE CASCADE
+);
+INSERT INTO dependencies (id, dependent_id, dependee_id, version_constraint)
+SELECT id, dependent_id, dependee_id, version_constraint
+FROM dependencies_old;
+DROP TABLE dependencies_old;
+",
+            )
+            .await?;
+        }
+        DbBackend::Postgres => {
+            db.execute_unprepared(
+                "ALTER TABLE public.dependencies DROP COLUMN IF EXISTS platforms;",
+            )
+            .await?;
+        }
+        _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -174,7 +213,6 @@ CREATE TABLE IF NOT EXISTS dependencies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dependent_id INTEGER NOT NULL,
     dependee_id INTEGER NOT NULL,
-    platforms TEXT NOT NULL DEFAULT '',
     version_constraint TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (dependent_id) REFERENCES packages(id) ON DELETE CASCADE,
     FOREIGN KEY (dependee_id) REFERENCES packages(id) ON DELETE CASCADE
@@ -244,7 +282,6 @@ CREATE TABLE IF NOT EXISTS public.dependencies (
     id SERIAL PRIMARY KEY,
     dependent_id INTEGER NOT NULL,
     dependee_id INTEGER NOT NULL,
-    platforms TEXT NOT NULL DEFAULT '',
     version_constraint TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (dependent_id) REFERENCES public.packages(id) ON DELETE CASCADE,
     FOREIGN KEY (dependee_id) REFERENCES public.packages(id) ON DELETE CASCADE
@@ -292,6 +329,7 @@ ON public.packages (pkgbase);
 
         normalize_build_flags_in_db(db, new_build_flag_default).await?;
         merge_files_package_links(manager).await?;
+        drop_dependency_platforms_if_present(manager).await?;
 
         tracing::info!("Backfilling dependency entries for existing AUR packages...");
         let client = AurClient::new();
@@ -518,7 +556,6 @@ async fn ensure_deps(
                 dependencies::ActiveModel {
                     dependent_id: Set(pkg_id),
                     dependee_id: Set(dependee.id),
-                    platforms: Set("x86_64".to_string()),
                     version_constraint: Set(constraint),
                     ..Default::default()
                 }
@@ -582,6 +619,15 @@ mod tests {
         db.execute_unprepared("SELECT * FROM dependencies LIMIT 0")
             .await
             .expect("dependencies table should exist");
+        db.execute_unprepared("SELECT version_constraint FROM dependencies LIMIT 0")
+            .await
+            .expect("version_constraint should exist on dependencies");
+        assert!(
+            db.execute_unprepared("SELECT platforms FROM dependencies LIMIT 0")
+                .await
+                .is_err(),
+            "dependencies.platforms should not exist"
+        );
     }
 
     #[tokio::test]

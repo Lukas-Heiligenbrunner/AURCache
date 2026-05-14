@@ -457,7 +457,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(parent.id),
             dependee_id: Set(child.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=2.0".to_string()),
             ..Default::default()
         }
@@ -532,7 +531,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(parent.id),
             dependee_id: Set(dependency.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }

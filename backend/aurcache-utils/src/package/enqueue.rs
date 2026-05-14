@@ -52,33 +52,55 @@ pub async fn enqueue_missing_buildable_packages(
 
     let mut queued = 0;
     for pkg in packages {
-        let build_count = Builds::find()
-            .filter(builds::Column::PkgId.eq(pkg.id))
-            .count(db)
-            .await?;
-        if build_count != 0 {
+        let platforms = parse_platforms(&pkg.platforms)?
+            .into_iter()
+            .filter_map(|platform| {
+                let platform_name = platform.to_string();
+                Some((platform, platform_name))
+            })
+            .collect::<Vec<_>>();
+        let mut ready_platforms = Vec::new();
+        for (platform, platform_name) in platforms {
+            if build_exists_for_platform(db, pkg.id, &platform_name).await? {
+                continue;
+            }
+            if !dependencies_satisfied(db, pkg.id, &platform_name).await? {
+                continue;
+            }
+            ready_platforms.push(platform);
+        }
+        if ready_platforms.is_empty() {
             continue;
         }
 
-        if !dependencies_satisfied(db, pkg.id).await? {
-            continue;
-        }
-
-        let platforms = parse_platforms(&pkg.platforms)?;
         let version = pkg
             .current_version
             .clone()
             .or(pkg.upstream_version.clone())
             .unwrap_or_default();
-        queued += trigger_build_for_package(db, tx, &platforms, pkg, version).await?;
+        queued += trigger_build_for_package(db, tx, &ready_platforms, pkg, version).await?;
     }
 
     Ok(queued)
 }
 
+async fn build_exists_for_platform(
+    db: &DatabaseConnection,
+    pkg_id: i32,
+    platform: &str,
+) -> anyhow::Result<bool> {
+    Ok(Builds::find()
+        .filter(builds::Column::PkgId.eq(pkg_id))
+        .filter(builds::Column::Platform.eq(platform))
+        .count(db)
+        .await?
+        != 0)
+}
+
 async fn dependencies_satisfied(
     db: &DatabaseConnection,
     dependent_id: i32,
+    platform: &str,
 ) -> anyhow::Result<bool> {
     let deps = Dependencies::find()
         .filter(dependencies::Column::DependentId.eq(dependent_id))
@@ -90,6 +112,7 @@ async fn dependencies_satisfied(
             .select_only()
             .column(builds::Column::Version)
             .filter(builds::Column::PkgId.eq(dep.dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
             .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
             .order_by_desc(builds::Column::EndTime)
             .order_by_desc(builds::Column::StartTime)

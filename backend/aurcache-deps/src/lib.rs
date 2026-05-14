@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use alpm_srcinfo::SourceInfoV1;
-use alpm_types::SystemArchitecture;
 use backon::{FibonacciBuilder, Retryable};
 use reqwest::Client;
 use serde::Deserialize;
@@ -227,7 +226,7 @@ pub fn deps_from_srcinfo(source_info: &SourceInfoV1) -> PkgDeps {
     let mut seen_make_depends = HashSet::new();
     let mut seen_pkgnames = HashSet::new();
 
-    for pkg in source_info.packages_for_architecture(SystemArchitecture::X86_64) {
+    for pkg in source_info.packages_for_architecture(alpm_types::SystemArchitecture::X86_64) {
         if seen_pkgnames.insert(pkg.name.to_string()) {
             pkgnames.push(pkg.name.to_string());
         }
@@ -299,5 +298,46 @@ fn deps_from_packages(packages: &[Package]) -> PkgDeps {
         depends,
         make_depends,
         pkgnames,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Package, deps_from_packages};
+
+    #[test]
+    fn deps_from_packages_collects_generic_dependencies() {
+        let pkg: Package = serde_json::from_value(serde_json::json!({
+            "Name": "parent",
+            "Version": "1.0.0",
+            "Description": null,
+            "Maintainer": null,
+            "URL": null,
+            "NumVotes": 0,
+            "Popularity": 0.0,
+            "OutOfDate": null,
+            "PackageBase": "parent",
+            "PackageBaseID": 0,
+            "FirstSubmitted": 0,
+            "LastModified": 0,
+            "URLPath": null,
+            "ID": 0,
+            "Depends": ["common-lib"],
+            "MakeDepends": ["build-tool"],
+            "OptDepends": null,
+            "CheckDepends": null,
+            "Conflicts": null,
+            "Provides": null,
+            "Replaces": null,
+            "Groups": null,
+            "License": null,
+            "Keywords": null
+        }))
+        .unwrap();
+
+        let deps = deps_from_packages(&[pkg]);
+
+        assert_eq!(deps.depends, vec!["common-lib".to_string()]);
+        assert_eq!(deps.make_depends, vec!["build-tool".to_string()]);
     }
 }

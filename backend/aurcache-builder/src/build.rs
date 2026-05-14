@@ -7,6 +7,7 @@ use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, files, packages};
 use aurcache_types::builder::{Action, BuildStates};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
+use aurcache_utils::platforms::platform_list_contains;
 use aurcache_utils::settings::general::SettingsTraits;
 use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
@@ -356,6 +357,7 @@ impl Builder {
     /// and trigger their builds if all their dependencies are satisfied.
     async fn trigger_dependents(&self) -> anyhow::Result<()> {
         let pkg_id = *self.package_model.id.get()?;
+        let platform = self.build_model.platform.get()?.clone();
         let dep_links = self.load_dependent_links(pkg_id).await?;
         if dep_links.is_empty() {
             return Ok(());
@@ -370,8 +372,11 @@ impl Builder {
                 continue;
             };
 
-            if self.dependencies_ready_for_dependent(all_deps).await? {
-                self.trigger_dependent_builds(dependent_id).await?;
+            if self
+                .dependencies_ready_for_dependent(all_deps, &platform)
+                .await?
+            {
+                self.trigger_dependent_builds(dependent_id, &platform).await?;
             }
         }
         Ok(())
@@ -405,15 +410,16 @@ impl Builder {
     async fn dependencies_ready_for_dependent(
         &self,
         all_deps: &[dependencies::Model],
+        platform: &str,
     ) -> anyhow::Result<bool> {
         for dep in all_deps {
             match self
-                .check_dep(dep.dependee_id, &dep.version_constraint)
+                .check_dep(dep.dependee_id, platform, &dep.version_constraint)
                 .await?
             {
                 DepState::Satisfied => continue,
                 DepState::NeedsRebuild => {
-                    self.trigger_dep_rebuild(dep.dependee_id).await?;
+                    self.trigger_dep_rebuild(dep.dependee_id, platform).await?;
                     return Ok(false);
                 }
                 DepState::NotReady => return Ok(false),
@@ -423,11 +429,15 @@ impl Builder {
         Ok(true)
     }
 
-    async fn trigger_dependent_builds(&self, dependent_id: i32) -> anyhow::Result<()> {
+    async fn trigger_dependent_builds(
+        &self,
+        dependent_id: i32,
+        platform: &str,
+    ) -> anyhow::Result<()> {
         let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await? else {
             return Ok(());
         };
-        if !self.should_enqueue_dependent(&pkg).await? {
+        if !self.should_enqueue_dependent(&pkg, platform).await? {
             return Ok(());
         }
 
@@ -436,25 +446,28 @@ impl Builder {
             .clone()
             .or(pkg.upstream_version.clone())
             .unwrap_or_default();
-        for platform in pkg.platforms.split(';') {
-            let new_build = self.enqueue_build(&pkg, platform, &version).await?;
-            self.logger
-                .append(format!(
-                    "Triggered build #{} for dependent '{}'",
-                    new_build.id, pkg.name
-                ))
-                .await;
-        }
+        let new_build = self.enqueue_build(&pkg, platform, &version).await?;
+        self.logger
+            .append(format!(
+                "Triggered build #{} for dependent '{}' on {}",
+                new_build.id, pkg.name, platform
+            ))
+            .await;
         Ok(())
     }
 
-    async fn should_enqueue_dependent(&self, pkg: &packages::Model) -> anyhow::Result<bool> {
-        if pkg.status == BuildStates::SUCCESSFUL_BUILD || pkg.status == BuildStates::ACTIVE_BUILD {
+    async fn should_enqueue_dependent(
+        &self,
+        pkg: &packages::Model,
+        platform: &str,
+    ) -> anyhow::Result<bool> {
+        if !platform_list_contains(&pkg.platforms, platform) {
             return Ok(false);
         }
 
         let queued_or_active = Builds::find()
             .filter(builds::Column::PkgId.eq(pkg.id))
+            .filter(builds::Column::Platform.eq(platform))
             .filter(builds::Column::Status.is_in(vec![
                 Some(BuildStates::ENQUEUED_BUILD),
                 Some(BuildStates::ACTIVE_BUILD),
@@ -467,18 +480,31 @@ impl Builder {
 
     /// Check if a dependency has a successful build at a version that satisfies
     /// the version constraint.
-    async fn check_dep(&self, dependee_id: i32, constraint: &str) -> anyhow::Result<DepState> {
+    async fn check_dep(
+        &self,
+        dependee_id: i32,
+        platform: &str,
+        constraint: &str,
+    ) -> anyhow::Result<DepState> {
         // Self-referencing dep (shouldn't happen, but match original behavior)
         if *self.package_model.id.get()? == dependee_id {
             return Ok(DepState::Satisfied);
         }
 
-        let Some(pkg) = Packages::find_by_id(dependee_id).one(&self.db).await? else {
+        let Some(_pkg) = Packages::find_by_id(dependee_id).one(&self.db).await? else {
             return Ok(DepState::NotReady);
         };
 
-        // Already building or queued — not ready yet, don't trigger duplicate
-        if pkg.status == BuildStates::ACTIVE_BUILD || pkg.status == BuildStates::ENQUEUED_BUILD {
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+        if queued_or_active > 0 {
             return Ok(DepState::NotReady);
         }
 
@@ -488,6 +514,7 @@ impl Builder {
             .column(builds::Column::Version)
             .column(builds::Column::Status)
             .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
             .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
             .order_by(builds::Column::EndTime, Order::Desc)
             .order_by(builds::Column::StartTime, Order::Desc)
@@ -510,17 +537,25 @@ impl Builder {
 
     /// Trigger a rebuild of a dependency whose version doesn't satisfy the constraint,
     /// unless it's already building.
-    async fn trigger_dep_rebuild(&self, dependee_id: i32) -> anyhow::Result<()> {
+    async fn trigger_dep_rebuild(&self, dependee_id: i32, platform: &str) -> anyhow::Result<()> {
         let Some(pkg) = Packages::find_by_id(dependee_id).one(&self.db).await? else {
             return Ok(());
         };
 
-        // Already building or queued — no duplicate
-        if pkg.status == BuildStates::ACTIVE_BUILD || pkg.status == BuildStates::ENQUEUED_BUILD {
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+        if queued_or_active > 0 {
             self.logger
                 .append(format!(
-                    "Dep '{}' is already building, skipping duplicate rebuild",
-                    pkg.name
+                    "Dep '{}' is already building on {}, skipping duplicate rebuild",
+                    pkg.name, platform
                 ))
                 .await;
             return Ok(());

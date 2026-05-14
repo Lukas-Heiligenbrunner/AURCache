@@ -116,11 +116,7 @@ async fn backfill_creates_dependency_links() {
         .all(&db)
         .await
         .unwrap();
-    assert_eq!(
-        links.len(),
-        1,
-        "parent-pkg -> child-pkg dependency link must exist"
-    );
+    assert_eq!(links.len(), 1, "parent-pkg -> child-pkg dependency link must exist");
 }
 
 #[tokio::test]

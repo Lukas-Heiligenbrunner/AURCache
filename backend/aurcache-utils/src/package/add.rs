@@ -23,11 +23,6 @@ struct AddContext {
     build_flags_str: String,
 }
 
-struct DependencyRequirements {
-    dep_names: Vec<String>,
-    dep_constraints: HashMap<String, String>,
-}
-
 struct PackageInsertSpec {
     pkgbase: String,
     version: String,
@@ -82,10 +77,9 @@ fn build_add_context(
 
 fn collect_dependency_requirements<'a>(
     deps: impl Iterator<Item = &'a String>,
-) -> DependencyRequirements {
+) -> (Vec<String>, HashMap<String, String>) {
     let mut dep_constraints: HashMap<String, String> = HashMap::new();
     let mut dep_names: Vec<String> = Vec::new();
-
     for dep in deps {
         let (name, constraint) = crate::pkg::parse_dep(dep);
         dep_constraints
@@ -99,16 +93,12 @@ fn collect_dependency_requirements<'a>(
             dep_names.push(name.to_string());
         }
     }
-
-    DependencyRequirements {
-        dep_names,
-        dep_constraints,
-    }
+    (dep_names, dep_constraints)
 }
 
 async fn package_exists(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<bool> {
     Ok(Packages::find()
-        .filter(packages::Column::Name.eq(pkgbase))
+        .filter(packages::Column::Pkgbase.eq(pkgbase))
         .one(db)
         .await?
         .is_some())
@@ -138,14 +128,14 @@ async fn resolve_aur_package_spec(
         .deps_of_with_version(pkgbase)
         .await
         .map_err(|e| anyhow!("Failed to get deps for {pkgbase}: {e}"))?;
-    let requirements =
+    let (dep_names, dep_constraints) =
         collect_dependency_requirements(deps.depends.iter().chain(deps.make_depends.iter()));
 
     Ok(PackageInsertSpec {
         pkgbase: pkgbase.to_string(),
         version,
-        dep_names: requirements.dep_names,
-        dep_constraints: requirements.dep_constraints,
+        dep_names,
+        dep_constraints,
         pkgnames: deps.pkgnames,
         source_type: SourceType::Aur,
         source_data_json: serde_json::to_string(&SourceData::Aur {
@@ -161,14 +151,14 @@ fn resolve_git_package_spec(
     subfolder: &str,
 ) -> anyhow::Result<PackageInsertSpec> {
     let deps = aurcache_deps::deps_from_srcinfo(sourceinfo);
-    let requirements =
+    let (dep_names, dep_constraints) =
         collect_dependency_requirements(deps.depends.iter().chain(deps.make_depends.iter()));
 
     Ok(PackageInsertSpec {
         pkgbase: sourceinfo.base.name.to_string(),
         version: sourceinfo.base.version.to_string(),
-        dep_names: requirements.dep_names,
-        dep_constraints: requirements.dep_constraints,
+        dep_names,
+        dep_constraints,
         pkgnames: deps.pkgnames,
         source_type: SourceType::Git,
         source_data_json: serde_json::to_string(&SourceData::Git {
@@ -254,7 +244,7 @@ async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyho
             packages::Column::DirectlyRequested,
             sea_orm::sea_query::SimpleExpr::Value(sea_orm::Value::Bool(Some(true))),
         )
-        .filter(packages::Column::Name.eq(pkgbase))
+        .filter(packages::Column::Pkgbase.eq(pkgbase))
         .exec(db)
         .await?;
     Ok(())
@@ -359,9 +349,10 @@ async fn insert_package_with_deps(
     };
 
     let new_package = packages::ActiveModel {
-        // Store package bases in `name`; split package names are tracked
-        // separately via `split_packages`.
+        // Keep `name` aligned with `pkgbase`: this codebase stores one row per
+        // package base, with split package names tracked separately.
         name: Set(package_spec.pkgbase.clone()),
+        pkgbase: Set(package_spec.pkgbase.clone()),
         status: Set(BuildStates::ENQUEUED_BUILD),
         upstream_version: Set(Some(package_spec.version.clone())),
         current_version: Set(Some(package_spec.version.clone())),
@@ -397,11 +388,11 @@ async fn insert_package_with_deps(
 
     let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();
     let dependees: HashMap<String, packages::Model> = Packages::find()
-        .filter(packages::Column::Name.is_in(pkgbase_strs))
+        .filter(packages::Column::Pkgbase.is_in(pkgbase_strs))
         .all(&txn)
         .await?
         .into_iter()
-        .map(|p| (p.name.clone(), p))
+        .map(|p| (p.pkgbase.clone(), p))
         .collect();
 
     for dep_pkgbase in &dep_pkgbases {
@@ -414,7 +405,6 @@ async fn insert_package_with_deps(
             aurcache_db::dependencies::ActiveModel {
                 dependent_id: Set(saved.id.clone().unwrap()),
                 dependee_id: Set(dependee.id),
-                platforms: Set(context.platforms_str.clone()),
                 version_constraint: Set(constraint),
                 ..Default::default()
             }
@@ -449,6 +439,7 @@ async fn add_git_package(
     _ = dir.close();
     result
 }
+
 
 fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {
     for platform in platforms {

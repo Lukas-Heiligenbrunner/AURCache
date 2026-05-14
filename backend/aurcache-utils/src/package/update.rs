@@ -82,11 +82,12 @@ pub async fn package_update_with_client(
                 .deps_of_with_version(pkg_model.pkgbase.as_str())
                 .await
                 .map_err(|e| anyhow!("Failed to resolve latest package metadata: {e}"))?;
-            let deps_ready = sync_aur_dependency_graph(client, db, &pkg_model, &deps, tx).await?;
+            let ready_platforms =
+                sync_aur_dependency_graph(client, db, &pkg_model, &deps, tx).await?;
             UpdateContext {
                 upstream_version,
                 split_packages: split_packages_json(&pkg_model.pkgbase, &deps.pkgnames)?,
-                deps_ready,
+                ready_platforms,
             }
         }
         packages::SourceData::Git { .. } => UpdateContext {
@@ -95,7 +96,7 @@ pub async fn package_update_with_client(
                 .clone()
                 .ok_or(anyhow!("No latest version in package"))?,
             split_packages: pkg_model.split_packages.clone(),
-            deps_ready: true,
+            ready_platforms: configured_platforms(&pkg_model.platforms),
         },
         packages::SourceData::Upload { .. } => {
             todo!("Get version from zip")
@@ -126,13 +127,13 @@ pub async fn package_update_with_client(
     let pkg_active_model = pkg_model_active.save(&txn).await?;
     txn.commit().await?;
 
-    if !update_context.deps_ready {
+    if update_context.ready_platforms.is_empty() {
         return Ok(vec![]);
     }
 
     let mut build_ids = vec![];
     let pkg_model: packages::Model = pkg_active_model.try_into()?;
-    for platform in pkg_model.platforms.clone().split(';') {
+    for platform in &update_context.ready_platforms {
         let build_id = update_platform(
             platform,
             pkg_model.clone(),
@@ -150,7 +151,7 @@ pub async fn package_update_with_client(
 struct UpdateContext {
     upstream_version: String,
     split_packages: Option<String>,
-    deps_ready: bool,
+    ready_platforms: Vec<String>,
 }
 
 async fn sync_aur_dependency_graph(
@@ -159,7 +160,8 @@ async fn sync_aur_dependency_graph(
     pkg_model: &packages::Model,
     deps: &PkgDeps,
     tx: &Sender<Action>,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Vec<String>> {
+    let configured_platforms = configured_platforms(&pkg_model.platforms);
     let dep_constraints = collect_dependency_constraints(deps);
     let dep_constraints_by_pkgbase =
         resolve_dependency_constraints_by_pkgbase(client, &dep_constraints)
@@ -188,12 +190,11 @@ async fn sync_aur_dependency_graph(
         sync_dependency_rows(
             db,
             pkg_model.id,
-            &pkg_model.platforms,
             &dep_constraints_by_pkgbase,
             &HashMap::new(),
         )
         .await?;
-        return Ok(true);
+        return Ok(configured_platforms);
     }
 
     let dep_packages = Packages::find()
@@ -214,45 +215,32 @@ async fn sync_aur_dependency_graph(
     sync_dependency_rows(
         db,
         pkg_model.id,
-        &pkg_model.platforms,
         &dep_constraints_by_pkgbase,
         &dep_packages,
     )
     .await?;
 
-    let mut deps_ready = true;
-    for (dep_pkgbase, constraint) in &dep_constraints_by_pkgbase {
-        let Some(dep_pkg) = dep_packages.get(dep_pkgbase) else {
-            deps_ready = false;
-            continue;
-        };
-
-        if dependency_satisfies_constraint(db, dep_pkg.id, constraint).await? {
-            continue;
+    let mut ready_platforms = Vec::new();
+    for platform in &configured_platforms {
+        if dependencies_ready_for_platform(
+            client,
+            db,
+            tx,
+            platform,
+            &dep_constraints_by_pkgbase,
+            &dep_packages,
+        )
+        .await?
+        {
+            ready_platforms.push(platform.clone());
         }
-
-        let has_pending_build = Builds::find()
-            .filter(builds::Column::PkgId.eq(dep_pkg.id))
-            .filter(builds::Column::Status.is_in(vec![
-                Some(BuildStates::ENQUEUED_BUILD),
-                Some(BuildStates::ACTIVE_BUILD),
-            ]))
-            .count(db)
-            .await?
-            > 0;
-
-        if !has_pending_build {
-            package_update_with_client(client, db, dep_pkg.clone(), true, tx).await?;
-        }
-        deps_ready = false;
     }
 
-    Ok(deps_ready)
+    Ok(ready_platforms)
 }
 
 fn collect_dependency_constraints(deps: &PkgDeps) -> HashMap<String, String> {
     let mut dep_constraints: HashMap<String, String> = HashMap::new();
-
     for dep in deps.depends.iter().chain(deps.make_depends.iter()) {
         let (name, constraint) = aurcache_deps::parse_dep(dep);
         dep_constraints
@@ -300,7 +288,6 @@ async fn resolve_dependency_constraints_by_pkgbase(
 async fn sync_dependency_rows(
     db: &DatabaseConnection,
     dependent_id: i32,
-    platforms: &str,
     dep_constraints_by_pkgbase: &HashMap<String, String>,
     dep_packages: &HashMap<String, packages::Model>,
 ) -> anyhow::Result<()> {
@@ -332,14 +319,12 @@ async fn sync_dependency_rows(
             .await?
         {
             let mut active: dependencies::ActiveModel = existing.into();
-            active.platforms = Set(platforms.to_string());
             active.version_constraint = Set(constraint.clone());
             active.save(&txn).await?;
         } else {
             dependencies::ActiveModel {
                 dependent_id: Set(dependent_id),
                 dependee_id: Set(dep_pkg.id),
-                platforms: Set(platforms.to_string()),
                 version_constraint: Set(constraint.clone()),
                 ..Default::default()
             }
@@ -355,12 +340,14 @@ async fn sync_dependency_rows(
 async fn dependency_satisfies_constraint(
     db: &DatabaseConnection,
     dependee_id: i32,
+    platform: &str,
     constraint: &str,
 ) -> anyhow::Result<bool> {
     let Some(build) = Builds::find()
         .select_only()
         .column(builds::Column::Version)
         .filter(builds::Column::PkgId.eq(dependee_id))
+        .filter(builds::Column::Platform.eq(platform))
         .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
         .order_by(builds::Column::EndTime, sea_orm::Order::Desc)
         .order_by(builds::Column::StartTime, sea_orm::Order::Desc)
@@ -372,6 +359,52 @@ async fn dependency_satisfies_constraint(
     };
 
     Ok(constraint.is_empty() || crate::pkg::satisfies_constraint(&build.0, constraint))
+}
+
+async fn dependencies_ready_for_platform(
+    client: &AurClient,
+    db: &DatabaseConnection,
+    tx: &Sender<Action>,
+    platform: &str,
+    dep_constraints_by_pkgbase: &HashMap<String, String>,
+    dep_packages: &HashMap<String, packages::Model>,
+) -> anyhow::Result<bool> {
+    for (dep_pkgbase, constraint) in dep_constraints_by_pkgbase {
+        let Some(dep_pkg) = dep_packages.get(dep_pkgbase) else {
+            return Ok(false);
+        };
+
+        if dependency_satisfies_constraint(db, dep_pkg.id, platform, constraint).await? {
+            continue;
+        }
+
+        let has_pending_build = Builds::find()
+            .filter(builds::Column::PkgId.eq(dep_pkg.id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(db)
+            .await?
+            > 0;
+
+        if !has_pending_build {
+            package_update_with_client(client, db, dep_pkg.clone(), true, tx).await?;
+        }
+
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn configured_platforms(platforms: &str) -> Vec<String> {
+    platforms
+        .split(';')
+        .filter(|platform| !platform.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn split_packages_json(pkgbase: &str, pkgnames: &[String]) -> anyhow::Result<Option<String>> {
@@ -559,7 +592,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(parent.id),
             dependee_id: Set(child.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }
@@ -747,7 +779,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(parent.id),
             dependee_id: Set(child.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }
@@ -758,7 +789,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(child.id),
             dependee_id: Set(grandchild.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }
@@ -961,7 +991,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(parent.id),
             dependee_id: Set(child.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }
@@ -972,7 +1001,6 @@ mod tests {
         dependencies::ActiveModel {
             dependent_id: Set(child.id),
             dependee_id: Set(grandchild.id),
-            platforms: Set("x86_64".to_string()),
             version_constraint: Set(">=1.0".to_string()),
             ..Default::default()
         }

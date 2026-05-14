@@ -9,7 +9,6 @@ pub struct Model {
     pub id: i32,
     pub dependent_id: i32,
     pub dependee_id: i32,
-    pub platforms: String,
     pub version_constraint: String,
 }
 
