@@ -4,13 +4,14 @@ use async_recursion::async_recursion;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_db::activities::ActivityType;
+use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_deps::{AurClient, PkgDeps};
 use aurcache_types::builder::{Action, BuildStates};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryIntoModel,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -134,7 +135,7 @@ pub async fn package_update_with_client(
     let mut build_ids = vec![];
     let pkg_model: packages::Model = pkg_active_model.try_into()?;
     for platform in &update_context.ready_platforms {
-        let build_id = update_platform(
+        let enqueue_result = update_platform(
             platform,
             pkg_model.clone(),
             update_context.upstream_version.clone(),
@@ -142,7 +143,7 @@ pub async fn package_update_with_client(
             tx,
         )
         .await?;
-        build_ids.push(build_id);
+        build_ids.push(enqueue_result.build.id);
     }
 
     Ok(build_ids)
@@ -212,13 +213,7 @@ async fn sync_aur_dependency_graph(
         .map(|pkg| (pkg.pkgbase.clone(), pkg))
         .collect::<HashMap<_, _>>();
 
-    sync_dependency_rows(
-        db,
-        pkg_model.id,
-        &dep_constraints_by_pkgbase,
-        &dep_packages,
-    )
-    .await?;
+    sync_dependency_rows(db, pkg_model.id, &dep_constraints_by_pkgbase, &dep_packages).await?;
 
     let mut ready_platforms = Vec::new();
     for platform in &configured_platforms {
@@ -422,27 +417,20 @@ pub async fn update_platform(
     new_version: String,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<aurcache_db::helpers::build_enqueue::EnqueueBuildResult> {
     let txn = db.begin().await?;
     let start_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-    let build = builds::ActiveModel {
-        pkg_id: Set(pkg.id),
-        output: Set(None),
-        status: Set(Some(BuildStates::ENQUEUED_BUILD)),
-        start_time: Set(Some(start_time)),
-        platform: Set(platform.to_string()),
-        version: Set(new_version),
-        ..Default::default()
-    };
-    let new_build = build.save(&txn).await?;
-    let build_id = new_build.id.clone().unwrap();
+    let enqueue_result =
+        enqueue_build_if_missing(&txn, pkg.id, platform, &new_version, start_time).await?;
     txn.commit().await?;
 
-    let _ = tx.send(Action::Build(
-        Box::from(pkg),
-        Box::from(new_build.try_into_model()?),
-    ));
-    Ok(build_id)
+    if enqueue_result.inserted {
+        let _ = tx.send(Action::Build(
+            Box::from(pkg),
+            Box::from(enqueue_result.build.clone()),
+        ));
+    }
+    Ok(enqueue_result)
 }
 
 #[cfg(test)]

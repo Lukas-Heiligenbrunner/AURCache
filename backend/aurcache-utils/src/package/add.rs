@@ -440,7 +440,6 @@ async fn add_git_package(
     result
 }
 
-
 fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {
     for platform in platforms {
         if !Platforms.into_iter().any(|p| p == *platform) {

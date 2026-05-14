@@ -242,9 +242,9 @@ pub async fn rery_build(
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
-    let new_buildid = update_platform(&platform, package, version, db, tx)
+    let enqueue_result = update_platform(&platform, package, version, db, tx)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
-    Ok(Json(new_buildid))
+    Ok(Json(enqueue_result.build.id))
 }

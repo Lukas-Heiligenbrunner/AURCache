@@ -1,12 +1,13 @@
 use anyhow::anyhow;
 use aurcache_db::dependencies;
+use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_types::builder::{Action, BuildStates};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait, TryIntoModel,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -142,35 +143,32 @@ async fn trigger_build_for_package(
 
     for platform in platforms {
         let txn = db.begin().await?;
-
-        let build = builds::ActiveModel {
-            pkg_id: Set(pkg.id),
-            output: Set(None),
-            status: Set(Some(BuildStates::ENQUEUED_BUILD)),
-            platform: Set(platform.to_string()),
-            start_time: Set(Some(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Duration must exist")
-                    .as_secs() as i64,
-            )),
-            version: Set(version.clone()),
-            ..Default::default()
-        };
-        let new_build = build.save(&txn).await?;
+        let enqueue_result = enqueue_build_if_missing(
+            &txn,
+            pkg.id,
+            &platform.to_string(),
+            &version,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Duration must exist")
+                .as_secs() as i64,
+        )
+        .await?;
 
         if *platform == Platform::X86_64 {
             let mut pkg_active: packages::ActiveModel = pkg.clone().into();
-            pkg_active.latest_build = Set(Some(new_build.id.clone().unwrap()));
+            pkg_active.latest_build = Set(Some(enqueue_result.build.id));
             pkg_active.save(&txn).await?;
         }
 
         txn.commit().await?;
-        let _ = tx.send(Action::Build(
-            Box::from(pkg.clone()),
-            Box::from(new_build.try_into_model()?),
-        ));
-        queued += 1;
+        if enqueue_result.inserted {
+            let _ = tx.send(Action::Build(
+                Box::from(pkg.clone()),
+                Box::from(enqueue_result.build),
+            ));
+            queued += 1;
+        }
     }
 
     Ok(queued)

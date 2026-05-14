@@ -3,6 +3,7 @@ use crate::path_utils::create_active_build_path;
 use anyhow::{anyhow, bail};
 use aurcache_db::dependencies;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
+use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, files, packages};
 use aurcache_types::builder::{Action, BuildStates};
@@ -17,7 +18,7 @@ use bollard::query_parameters::{
 use futures::StreamExt;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, TryIntoModel,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -332,25 +333,24 @@ impl Builder {
         pkg: &packages::Model,
         platform: &str,
         version: &str,
-    ) -> anyhow::Result<builds::Model> {
-        let build = builds::ActiveModel {
-            pkg_id: Set(pkg.id),
-            output: Set(None),
-            status: Set(Some(BuildStates::ENQUEUED_BUILD)),
-            platform: Set(platform.to_string()),
-            start_time: Set(Some(
-                SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
-            )),
-            version: Set(version.to_string()),
-            ..Default::default()
-        };
-        let saved = build.save(&self.db).await?;
-        let model = saved.try_into_model()?;
-        let _ = self.action_tx.send(Action::Build(
-            Box::from(pkg.clone()),
-            Box::new(model.clone()),
-        ));
-        Ok(model)
+    ) -> anyhow::Result<aurcache_db::helpers::build_enqueue::EnqueueBuildResult> {
+        let result = enqueue_build_if_missing(
+            &self.db,
+            pkg.id,
+            platform,
+            version,
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+        )
+        .await?;
+
+        if result.inserted {
+            let _ = self.action_tx.send(Action::Build(
+                Box::from(pkg.clone()),
+                Box::new(result.build.clone()),
+            ));
+        }
+
+        Ok(result)
     }
 
     /// After a successful build, check for packages that depend on this one
@@ -376,7 +376,8 @@ impl Builder {
                 .dependencies_ready_for_dependent(all_deps, &platform)
                 .await?
             {
-                self.trigger_dependent_builds(dependent_id, &platform).await?;
+                self.trigger_dependent_builds(dependent_id, &platform)
+                    .await?;
             }
         }
         Ok(())
@@ -446,13 +447,22 @@ impl Builder {
             .clone()
             .or(pkg.upstream_version.clone())
             .unwrap_or_default();
-        let new_build = self.enqueue_build(&pkg, platform, &version).await?;
-        self.logger
-            .append(format!(
-                "Triggered build #{} for dependent '{}' on {}",
-                new_build.id, pkg.name, platform
-            ))
-            .await;
+        let enqueue_result = self.enqueue_build(&pkg, platform, &version).await?;
+        if enqueue_result.inserted {
+            self.logger
+                .append(format!(
+                    "Triggered build #{} for dependent '{}' on {}",
+                    enqueue_result.build.id, pkg.name, platform
+                ))
+                .await;
+        } else {
+            self.logger
+                .append(format!(
+                    "Dependent '{}' already has build #{} pending on {}, skipping duplicate enqueue",
+                    pkg.name, enqueue_result.build.id, platform
+                ))
+                .await;
+        }
         Ok(())
     }
 

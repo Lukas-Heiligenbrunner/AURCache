@@ -133,7 +133,9 @@ async fn merge_files_package_links(manager: &SchemaManager<'_>) -> Result<(), Db
 }
 
 async fn drop_dependency_platforms_if_present(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    if !manager.has_table("dependencies").await? || !manager.has_column("dependencies", "platforms").await? {
+    if !manager.has_table("dependencies").await?
+        || !manager.has_column("dependencies", "platforms").await?
+    {
         return Ok(());
     }
 
