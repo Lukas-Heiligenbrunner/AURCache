@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
-import 'package:skeletonizer/skeletonizer.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/API.dart';
@@ -313,10 +312,13 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
       return const Text("none");
     }
 
+    final sortedPackages = [...packages]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
     return Wrap(
       spacing: 8,
       runSpacing: 8,
-      children: packages
+      children: sortedPackages
           .map((package) {
             final suffix = package.version_constraint.isEmpty
                 ? ''
