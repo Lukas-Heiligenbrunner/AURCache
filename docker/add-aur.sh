@@ -36,7 +36,7 @@ sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel multilib-devel git || echo "Nothing to do"
 git config --global --add safe.directory '*'
 
 # create the user

@@ -1,4 +1,6 @@
+use crate::git::checkout::checkout_repo_ref;
 use crate::package::add::ensure_aur_package_exists_recursive;
+use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_activitylog::activity_utils::ActivityLog;
@@ -15,8 +17,10 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::HashMap;
+use std::fs;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::tempdir;
 use tokio::sync::broadcast::Sender;
 use tracing::info;
 
@@ -84,22 +88,18 @@ pub async fn package_update_with_client(
                 .deps_of_with_version(pkg_model.pkgbase.as_str())
                 .await
                 .map_err(|e| anyhow!("Failed to resolve latest package metadata: {e}"))?;
-            let ready_platforms =
-                sync_aur_dependency_graph(client, db, &pkg_model, &deps, tx).await?;
+            let ready_platforms = sync_dependency_graph(client, db, &pkg_model, &deps, tx).await?;
             UpdateContext {
                 upstream_version,
                 split_packages: split_packages_json(&pkg_model.pkgbase, &deps.pkgnames)?,
                 ready_platforms,
             }
         }
-        packages::SourceData::Git { .. } => UpdateContext {
-            upstream_version: pkg_model
-                .upstream_version
-                .clone()
-                .ok_or(anyhow!("No latest version in package"))?,
-            split_packages: pkg_model.split_packages.clone(),
-            ready_platforms: configured_platforms(&pkg_model.platforms),
-        },
+        packages::SourceData::Git {
+            url,
+            subfolder,
+            r#ref,
+        } => git_update_context(client, db, &pkg_model, &url, &r#ref, &subfolder, tx).await?,
         packages::SourceData::Upload { .. } => {
             todo!("Get version from zip")
         }
@@ -157,7 +157,42 @@ struct UpdateContext {
     ready_platforms: Vec<String>,
 }
 
-async fn sync_aur_dependency_graph(
+async fn git_update_context(
+    client: &AurClient,
+    db: &DatabaseConnection,
+    pkg_model: &packages::Model,
+    url: &str,
+    r#ref: &str,
+    subfolder: &str,
+    tx: &Sender<Action>,
+) -> anyhow::Result<UpdateContext> {
+    let sourceinfo = load_git_sourceinfo(url, r#ref, subfolder)?;
+    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
+    let ready_platforms = sync_dependency_graph(client, db, pkg_model, &deps, tx).await?;
+
+    Ok(UpdateContext {
+        upstream_version: sourceinfo.base.version.to_string(),
+        split_packages: split_packages_json(&pkg_model.pkgbase, &deps.pkgnames)?,
+        ready_platforms,
+    })
+}
+
+fn load_git_sourceinfo(url: &str, r#ref: &str, subfolder: &str) -> anyhow::Result<SourceInfoV1> {
+    let dir = tempdir()?;
+    let repo_path = dir.path().join("repo");
+    checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
+    let package_dir = repo_path.join(subfolder);
+    let srcinfo_path = package_dir.join(".SRCINFO");
+    let sourceinfo = if srcinfo_path.exists() {
+        SourceInfoV1::from_string(&fs::read_to_string(srcinfo_path)?)?
+    } else {
+        SourceInfoV1::from_pkgbuild(package_dir.join("PKGBUILD").as_path())?
+    };
+    dir.close()?;
+    Ok(sourceinfo)
+}
+
+async fn sync_dependency_graph(
     client: &AurClient,
     db: &DatabaseConnection,
     pkg_model: &packages::Model,
@@ -444,12 +479,16 @@ mod tests {
     use aurcache_db::{builds, dependencies, packages};
     use aurcache_deps::AurClient;
     use aurcache_types::builder::{Action, BuildStates};
+    use git2::{Repository, Signature};
     use sea_orm::{
         ActiveModelTrait, ColumnTrait, Database, EntityTrait, PaginatorTrait, QueryFilter, Set,
         TryIntoModel,
     };
     use sea_orm_migration::MigratorTrait;
     use serde_json::json;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},
@@ -496,6 +535,67 @@ mod tests {
             "resultcount": results.len(),
             "results": results,
         })
+    }
+
+    fn git_pkgbuild(version: &str, depends: &[&str]) -> String {
+        let depends = depends
+            .iter()
+            .map(|dep| format!("'{dep}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "pkgname=git-parent\npkgver={version}\npkgrel=1\narch=('x86_64')\ndepends=({depends})\nsource=()\nsha256sums=()\npackage() {{\n  :\n}}\n"
+        )
+    }
+
+    fn git_srcinfo(version: &str, depends: &[&str]) -> String {
+        let depends = depends
+            .iter()
+            .map(|dep| format!("    depends = {dep}\n"))
+            .collect::<String>();
+        format!(
+            "pkgbase = git-parent\n    pkgver = {version}\n    pkgrel = 1\n    arch = x86_64\n{depends}\npkgname = git-parent\n"
+        )
+    }
+
+    fn commit_pkgbuild(repo: &Repository, message: &str, version: &str, depends: &[&str]) {
+        fs::write(
+            repo.workdir().unwrap().join("PKGBUILD"),
+            git_pkgbuild(version, depends),
+        )
+        .unwrap();
+        fs::write(
+            repo.workdir().unwrap().join(".SRCINFO"),
+            git_srcinfo(version, depends),
+        )
+        .unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("PKGBUILD")).unwrap();
+        index.add_path(Path::new(".SRCINFO")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+        let parents = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .map(|commit| vec![commit])
+            .unwrap_or_default();
+        let parent_refs = parents.iter().collect::<Vec<_>>();
+        repo.commit(
+            Some("refs/heads/main"),
+            &sig,
+            &sig,
+            message,
+            &tree,
+            &parent_refs,
+        )
+        .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        repo.checkout_head(None).unwrap();
     }
 
     #[tokio::test]
@@ -1062,5 +1162,170 @@ mod tests {
             grandchild_build_count, 2,
             "forced rebuild should enqueue only the leaf transitive dependency first"
         );
+    }
+
+    #[tokio::test]
+    async fn git_update_refreshes_dependency_rows() {
+        let server = MockServer::start().await;
+        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+
+        Mock::given(method("GET"))
+            .and(path("/rpc/v5/info"))
+            .and(query_param("arg[]", "new-dep"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(multiinfo_json(vec![rpc_deps_json(
+                    "new-dep",
+                    "new-dep",
+                    &[],
+                    &[],
+                    "2.0.0",
+                )])),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_pkgbuild(&repo, "initial", "1.0.0", &["old-dep>=1.0"]);
+
+        let parent = packages::ActiveModel {
+            name: Set("git-parent".to_string()),
+            pkgbase: Set("git-parent".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Git),
+            source_data: Set(serde_json::to_string(&packages::SourceData::Git {
+                url: dir.path().to_string_lossy().to_string(),
+                r#ref: "main".to_string(),
+                subfolder: ".".to_string(),
+            })
+            .unwrap()),
+            directly_requested: Set(true),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let old_dep = packages::ActiveModel {
+            name: Set("old-dep".to_string()),
+            pkgbase: Set("old-dep".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"old-dep"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("1.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let new_dep = packages::ActiveModel {
+            name: Set("new-dep".to_string()),
+            pkgbase: Set("new-dep".to_string()),
+            status: Set(BuildStates::SUCCESSFUL_BUILD),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("2.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm;--noprogressbar".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(r#"{"type":"aur","name":"new-dep"}"#.to_string()),
+            directly_requested: Set(false),
+            current_version: Set(Some("2.0.0".to_string())),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(old_dep.id),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(parent.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("1.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        builds::ActiveModel {
+            pkg_id: Set(new_dep.id),
+            output: Set(None),
+            status: Set(Some(BuildStates::SUCCESSFUL_BUILD)),
+            start_time: Set(Some(1)),
+            end_time: Set(Some(2)),
+            platform: Set("x86_64".to_string()),
+            version: Set("2.0.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        commit_pkgbuild(&repo, "updated", "2.0.0", &["new-dep>=2.0"]);
+
+        let build_ids = package_update_with_client(&client, &db, parent.clone(), false, &tx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            build_ids.len(),
+            1,
+            "parent should enqueue once deps are refreshed"
+        );
+
+        let deps = Dependencies::find()
+            .filter(dependencies::Column::DependentId.eq(parent.id))
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(deps.len(), 1, "stale git dependency rows should be removed");
+        assert_eq!(deps[0].dependee_id, new_dep.id);
+        assert_eq!(deps[0].version_constraint, ">=2.0");
+
+        let parent_after = Packages::find_by_id(parent.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent_after.upstream_version.as_deref(), Some("2.0.0-1"));
     }
 }
