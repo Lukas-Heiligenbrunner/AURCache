@@ -1,8 +1,8 @@
 use crate::models::authenticated::Authenticated;
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use crate::models::package::{
-    AurNotFoundPackage, AurPackage, ExtendedPackageModel, PackageDependencyModel,
-    PackageSource, SimplePackageModel,
+    AurNotFoundPackage, AurPackage, ExtendedPackageModel, PackageDependencyModel, PackageSource,
+    SimplePackageModel,
 };
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_add_activity::PackageAddActivity;
