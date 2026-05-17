@@ -25,7 +25,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
 use tracing::info;
 
-/// Updates all outdated packages in the database.
+/// Update every package currently marked as outdated.
+///
+/// Only packages whose latest build completed successfully are retriggered.
+/// Returns the build IDs enqueued across all updated packages.
 pub async fn package_update_all_outdated(
     db: &DatabaseConnection,
     tx: &Sender<Action>,
@@ -73,6 +76,9 @@ pub async fn package_update(
     package_update_with_client(&client, db, pkg_model, force, tx).await
 }
 
+/// Update a single package using a caller-provided AUR client.
+///
+/// Returns the build IDs that were enqueued for the package's ready platforms.
 pub async fn package_update_with_client(
     client: &AurClient,
     db: &DatabaseConnection,
@@ -457,7 +463,7 @@ fn configured_platforms(platforms: &str) -> Vec<String> {
         .collect()
 }
 
-/// Creates a build entry for a package on a specific platform.
+/// Create or reuse the pending build entry for a package on one platform.
 pub async fn update_platform(
     platform: &str,
     pkg: packages::Model,

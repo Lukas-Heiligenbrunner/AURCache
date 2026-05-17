@@ -163,6 +163,8 @@ fn build_output_map(
         let name = name.to_str().ok_or_else(|| anyhow!("Invalid filename"))?;
 
         if name.starts_with('.') {
+            // Produced packages are never hidden. We keep dotfiles in the build
+            // dir for helper mounts such as temporary pacman configuration.
             continue;
         }
 

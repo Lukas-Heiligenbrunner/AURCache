@@ -173,6 +173,8 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                         ..Default::default()
                     },
                     BuildMode::Host(_cfg) => {
+                        // Mount only the mirrorlist file so other files under
+                        // /etc/pacman.d/ inside the builder image stay intact.
                         if mirrorlist_source.starts_with('/') {
                             Mount {
                                 target: Some(archlinux_mirrorlist_path.to_string()),

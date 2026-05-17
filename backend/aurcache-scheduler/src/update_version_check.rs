@@ -88,6 +88,8 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
             }
             SourceData::Git { spec } => {
                 let sourceinfo = load_git_sourceinfo(&spec)?;
+                // This still only tracks the version in PKGBUILD/.SRCINFO; a ref
+                // moving without a version bump will not mark the package outdated.
                 let version = sourceinfo.base.version.to_string();
 
                 package_model.upstream_version = Set(Option::from(version.clone()));
