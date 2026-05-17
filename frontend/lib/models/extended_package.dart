@@ -52,8 +52,8 @@ sealed class ExtendedPackage with _$ExtendedPackage {
     ],
     package_source: PackageSource.git(
       GitPackage(
-        git_ref: "master",
-        git_url: "http://dummyur.org",
+        ref: "master",
+        url: "http://dummyur.org",
         subfolder: "dummyfolder",
       ),
     ),
@@ -118,8 +118,8 @@ sealed class AurPackage with _$AurPackage {
 @freezed
 sealed class GitPackage with _$GitPackage {
   const factory GitPackage({
-    required String git_url,
-    required String git_ref,
+    required String url,
+    required String ref,
     required String subfolder,
   }) = _GitPackage;
 

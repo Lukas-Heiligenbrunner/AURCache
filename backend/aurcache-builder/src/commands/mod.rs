@@ -115,9 +115,11 @@ mod tests {
     fn git_build_command_fetches_required_pgp_keys() {
         let cmd = build_build_command(
             &SourceData::Git {
-                url: "https://example.test/repo.git".to_string(),
-                r#ref: "main".to_string(),
-                subfolder: ".".to_string(),
+                spec: aurcache_db::packages::GitSourceSpec {
+                    url: "https://example.test/repo.git".to_string(),
+                    r#ref: "main".to_string(),
+                    subfolder: ".".to_string(),
+                },
             },
             "hello",
             "--noconfirm --noprogressbar --nocolor",

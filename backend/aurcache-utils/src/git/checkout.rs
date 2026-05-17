@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use aurcache_db::packages::GitSourceSpec;
 use git2::Repository;
 use std::path::PathBuf;
 
@@ -28,4 +29,9 @@ pub fn checkout_repo_ref(
         }
     }
     Ok(repo)
+}
+
+/// Checkout a shared git source spec into the given path.
+pub fn checkout_git_source(spec: &GitSourceSpec, path: PathBuf) -> anyhow::Result<Repository> {
+    checkout_repo_ref(spec.url.clone(), spec.r#ref.clone(), path)
 }

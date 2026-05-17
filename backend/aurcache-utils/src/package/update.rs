@@ -1,15 +1,15 @@
-use crate::git::checkout::checkout_repo_ref;
+use crate::git::sourceinfo::load_git_sourceinfo;
 use crate::package::add::{
     ensure_aur_package_exists_recursive, provides_json, resolve_dependency_resolutions,
     split_packages_json,
 };
-use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_db::activities::ActivityType;
 use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
+use aurcache_db::packages::GitSourceSpec;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_deps::{AurClient, DependencyResolution, PkgDeps};
@@ -20,10 +20,8 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tempfile::tempdir;
 use tokio::sync::broadcast::Sender;
 use tracing::info;
 
@@ -116,15 +114,8 @@ async fn package_update_with_client_inner(
                 ready_platforms,
             }
         }
-        packages::SourceData::Git {
-            url,
-            subfolder,
-            r#ref,
-        } => {
-            git_update_context(
-                client, db, &pkg_model, &url, &r#ref, &subfolder, tx, visited,
-            )
-            .await?
+        packages::SourceData::Git { spec } => {
+            git_update_context(client, db, &pkg_model, &spec, tx, visited).await?
         }
         packages::SourceData::Upload { .. } => {
             todo!("Get version from zip")
@@ -189,13 +180,11 @@ async fn git_update_context(
     client: &AurClient,
     db: &DatabaseConnection,
     pkg_model: &packages::Model,
-    url: &str,
-    r#ref: &str,
-    subfolder: &str,
+    source: &GitSourceSpec,
     tx: &Sender<Action>,
     visited: &mut HashSet<i32>,
 ) -> anyhow::Result<UpdateContext> {
-    let sourceinfo = load_git_sourceinfo(url, r#ref, subfolder)?;
+    let sourceinfo = load_git_sourceinfo(source)?;
     let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
     let ready_platforms = sync_dependency_graph(client, db, pkg_model, &deps, tx, visited).await?;
 
@@ -205,21 +194,6 @@ async fn git_update_context(
         provides: provides_json(&deps.provides)?,
         ready_platforms,
     })
-}
-
-fn load_git_sourceinfo(url: &str, r#ref: &str, subfolder: &str) -> anyhow::Result<SourceInfoV1> {
-    let dir = tempdir()?;
-    let repo_path = dir.path().join("repo");
-    checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
-    let package_dir = repo_path.join(subfolder);
-    let srcinfo_path = package_dir.join(".SRCINFO");
-    let sourceinfo = if srcinfo_path.exists() {
-        SourceInfoV1::from_string(&fs::read_to_string(srcinfo_path)?)?
-    } else {
-        SourceInfoV1::from_pkgbuild(package_dir.join("PKGBUILD").as_path())?
-    };
-    dir.close()?;
-    Ok(sourceinfo)
 }
 
 async fn sync_dependency_graph(
@@ -1263,9 +1237,11 @@ mod tests {
             platforms: Set("x86_64".to_string()),
             source_type: Set(packages::SourceType::Git),
             source_data: Set(serde_json::to_string(&packages::SourceData::Git {
-                url: dir.path().to_string_lossy().to_string(),
-                r#ref: "main".to_string(),
-                subfolder: ".".to_string(),
+                spec: packages::GitSourceSpec {
+                    url: dir.path().to_string_lossy().to_string(),
+                    r#ref: "main".to_string(),
+                    subfolder: ".".to_string(),
+                },
             })
             .unwrap()),
             directly_requested: Set(true),

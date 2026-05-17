@@ -1,4 +1,4 @@
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{GitSourceSpec, SourceData};
 use rocket::serde::{Deserialize, Serialize};
 use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
@@ -67,15 +67,8 @@ pub struct PackageDependencyModel {
 pub enum PackageSource {
     Aur(AurPackage),
     AurNotFound(AurNotFoundPackage),
-    Git(GitPackage),
+    Git(GitSourceSpec),
     Upload(UploadPackage),
-}
-
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
-pub struct GitPackage {
-    pub git_url: String,
-    pub git_ref: String,
-    pub subfolder: String,
 }
 
 // todo upload package

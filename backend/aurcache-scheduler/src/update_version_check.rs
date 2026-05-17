@@ -1,4 +1,3 @@
-use alpm_srcinfo::SourceInfoV1;
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
@@ -6,7 +5,7 @@ use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_deps::AurClient;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::git::sourceinfo::load_git_sourceinfo;
 use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
@@ -14,7 +13,6 @@ use sea_orm::{
 use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 use std::str::FromStr;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -88,26 +86,12 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                     }
                 }
             }
-            SourceData::Git {
-                url,
-                subfolder,
-                r#ref,
-            } => {
-                let dir = tempdir()?;
-                let repo_path = dir.path().join("repo");
-
-                checkout_repo_ref(url.clone(), r#ref.clone(), repo_path.clone())?;
-                // todo maybe check also if latest commit hash changed
-
-                let sourceinfo = SourceInfoV1::from_pkgbuild(
-                    repo_path.join(subfolder).join("PKGBUILD").as_path(),
-                )?;
+            SourceData::Git { spec } => {
+                let sourceinfo = load_git_sourceinfo(&spec)?;
                 let version = sourceinfo.base.version.to_string();
 
                 package_model.upstream_version = Set(Option::from(version.clone()));
                 package_model.out_of_date = Set(i32::from(latest_version != Some(version)));
-
-                _ = dir.close();
             }
             SourceData::Upload { .. } => {
                 // noop since update is only triggered by new upload

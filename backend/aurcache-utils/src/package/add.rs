@@ -1,10 +1,10 @@
-use crate::git::checkout::checkout_repo_ref;
+use crate::git::sourceinfo::load_git_sourceinfo;
 use crate::package::enqueue::trigger_leaf_builds;
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_db::packages;
-use aurcache_db::packages::{SourceData, SourceType};
+use aurcache_db::packages::{GitSourceSpec, SourceData, SourceType};
 use aurcache_db::prelude::Packages;
 use aurcache_deps::DependencyResolution;
 use aurcache_types::builder::{Action, BuildStates};
@@ -15,7 +15,6 @@ use sea_orm::{
     TransactionTrait,
 };
 use std::collections::{HashMap, HashSet};
-use tempfile::tempdir;
 use tokio::sync::broadcast::Sender;
 
 struct AddContext {
@@ -149,9 +148,7 @@ async fn resolve_aur_package_spec(
 
 fn resolve_git_package_spec(
     sourceinfo: &SourceInfoV1,
-    url: &str,
-    r#ref: &str,
-    subfolder: &str,
+    source: &GitSourceSpec,
 ) -> anyhow::Result<PackageInsertSpec> {
     let deps = aurcache_deps::deps_from_srcinfo(sourceinfo);
     let (dep_names, dep_constraints) =
@@ -165,11 +162,7 @@ fn resolve_git_package_spec(
         pkgnames: deps.pkgnames,
         provides: deps.provides,
         source_type: SourceType::Git,
-        source_data_json: serde_json::to_string(&SourceData::Git {
-            url: url.to_string(),
-            r#ref: r#ref.to_string(),
-            subfolder: subfolder.to_string(),
-        })?,
+        source_data_json: serde_json::to_string(&SourceData::from(source.clone()))?,
     })
 }
 
@@ -220,11 +213,7 @@ pub async fn package_add_with_client(
 
     match source_data {
         SourceData::Aur { ref name } => add_aur_package(client, db, tx, &context, name).await,
-        SourceData::Git {
-            ref r#ref,
-            ref subfolder,
-            ref url,
-        } => add_git_package(client, db, tx, &context, r#ref, subfolder, url).await,
+        SourceData::Git { ref spec } => add_git_package(client, db, tx, &context, spec).await,
         SourceData::Upload { .. } => {
             todo!("upload")
         }
@@ -545,27 +534,16 @@ fn parse_json_list(json: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn add_git_package(
     client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
     tx: &Sender<Action>,
     context: &AddContext,
-    r#ref: &str,
-    subfolder: &str,
-    url: &str,
+    source: &GitSourceSpec,
 ) -> anyhow::Result<String> {
-    let dir = tempdir()?;
-    let repo_path = dir.path().join("repo");
-
-    checkout_repo_ref(url.to_string(), r#ref.to_string(), repo_path.clone())?;
-
-    let sourceinfo =
-        SourceInfoV1::from_pkgbuild(repo_path.join(subfolder).join("PKGBUILD").as_path())?;
-    let package_spec = resolve_git_package_spec(&sourceinfo, url, r#ref, subfolder)?;
-    let result = finalize_package_add(client, db, tx, context, package_spec).await;
-    _ = dir.close();
-    result
+    let sourceinfo = load_git_sourceinfo(source)?;
+    let package_spec = resolve_git_package_spec(&sourceinfo, source)?;
+    finalize_package_add(client, db, tx, context, package_spec).await
 }
 
 fn check_platforms(platforms: &Vec<Platform>) -> anyhow::Result<()> {

@@ -83,7 +83,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                     git: (git) => IconButton(
                       onPressed: () async {
                         await launchUrl(
-                          Uri.parse(git.git_url),
+                          Uri.parse(git.url),
                           webOnlyWindowName: '_blank',
                         );
                       },
@@ -235,8 +235,8 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                 },
                 aurNotFound: (_) => [],
                 git: (git) => [
-                  _sideCard(title: "Git Repository", subtitle: git.git_url),
-                  _sideCard(title: "Git Ref", subtitle: git.git_ref),
+                  _sideCard(title: "Git Repository", subtitle: git.url),
+                  _sideCard(title: "Git Ref", subtitle: git.ref),
                   _sideCard(title: "Subfolder", subtitle: git.subfolder),
                 ],
                 upload: (upload) => {

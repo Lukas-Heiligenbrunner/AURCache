@@ -6,6 +6,13 @@ use std::fmt::Display;
 use std::str::FromStr;
 use utoipa::ToSchema;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct GitSourceSpec {
+    pub url: String,
+    pub r#ref: String,
+    pub subfolder: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type")] // the JSON field that acts as the tag
 pub enum SourceData {
@@ -13,12 +20,17 @@ pub enum SourceData {
     Aur { name: String },
     #[serde(rename = "git")]
     Git {
-        url: String,
-        r#ref: String,
-        subfolder: String,
+        #[serde(flatten)]
+        spec: GitSourceSpec,
     },
     #[serde(rename = "upload")]
     Upload { archive: Vec<u8> },
+}
+
+impl From<GitSourceSpec> for SourceData {
+    fn from(spec: GitSourceSpec) -> Self {
+        Self::Git { spec }
+    }
 }
 
 impl FromStr for SourceData {

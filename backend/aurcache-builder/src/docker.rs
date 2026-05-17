@@ -4,9 +4,9 @@ use crate::logger::BuildLogger;
 use crate::makepkg_utils::{create_makepkg_config, create_pacman_config};
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{GitSourceSpec, SourceData};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::git::checkout::checkout_git_source;
 use aurcache_utils::settings::general::SettingsTraits;
 use bollard::container::LogOutput;
 use bollard::models::{
@@ -295,17 +295,11 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             .await?;
 
         match source_data {
-            SourceData::Git {
-                url,
-                r#ref,
-                subfolder,
-            } => {
+            SourceData::Git { spec } => {
                 self.git_checkout_to_container(
                     create_info.id.clone(),
                     GIT_REPO_PATH.to_string(),
-                    url,
-                    r#ref,
-                    subfolder,
+                    &spec,
                 )
                 .await?;
             }
@@ -337,22 +331,20 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         &self,
         container_id: String,
         path: String,
-        git_repo: String,
-        git_ref: String,
-        git_subfolder: String,
+        git_source: &GitSourceSpec,
     ) -> anyhow::Result<()> {
-        info!("Cloning repository {git_repo}...");
+        info!("Cloning repository {}...", git_source.url);
 
         let dir = tempdir()?;
         let repo_dir = dir.path().join("repo");
 
-        checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
-        info!("Checked out {:?}", git_ref);
+        checkout_git_source(git_source, repo_dir.clone())?;
+        info!("Checked out {:?}", git_source.r#ref);
 
         // Create a tar.gz of the cloned repo
         let tar_path = dir.path().join("repo.tar.gz");
         debug!("Creating tar archive at {:?}", tar_path);
-        Self::create_tar_gz(&repo_dir, &tar_path, git_subfolder).await?;
+        Self::create_tar_gz(&repo_dir, &tar_path, git_source.subfolder.clone()).await?;
 
         let options = Some(UploadToContainerOptions {
             path,

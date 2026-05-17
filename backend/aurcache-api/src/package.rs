@@ -1,7 +1,7 @@
 use crate::models::authenticated::Authenticated;
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use crate::models::package::{
-    AurNotFoundPackage, AurPackage, ExtendedPackageModel, GitPackage, PackageDependencyModel,
+    AurNotFoundPackage, AurPackage, ExtendedPackageModel, PackageDependencyModel,
     PackageSource, SimplePackageModel,
 };
 use aurcache_activitylog::activity_utils::ActivityLog;
@@ -641,16 +641,8 @@ pub async fn get_package(
                 }
             }
         }
-        SourceData::Git {
-            subfolder,
-            url,
-            r#ref,
-        } => (
-            PackageSource::Git(GitPackage {
-                git_url: url,
-                git_ref: r#ref.clone(),
-                subfolder,
-            }),
+        SourceData::Git { spec } => (
+            PackageSource::Git(spec),
             // This versions actuality dpendes on the update-version-check interval
             pkg.upstream_version.unwrap_or(String::new()),
         ),
