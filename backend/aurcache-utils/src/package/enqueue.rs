@@ -180,9 +180,8 @@ async fn trigger_build_for_package(
 }
 
 fn parse_platforms(platforms: &str) -> anyhow::Result<Vec<Platform>> {
-    platforms
-        .split(';')
-        .filter(|platform| !platform.is_empty())
+    crate::platforms::split_platform_list(platforms)
+        .into_iter()
         .map(|platform| {
             Platform::from_str(platform)
                 .map_err(|_| anyhow!("Invalid platform '{platform}' for queued dependency build"))

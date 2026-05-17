@@ -287,12 +287,7 @@ fn collect_dependency_constraints(deps: &PkgDeps) -> HashMap<String, String> {
     let mut dep_constraints: HashMap<String, String> = HashMap::new();
     for dep in deps.depends.iter().chain(deps.make_depends.iter()) {
         let (name, constraint) = aurcache_deps::parse_dep(dep);
-        dep_constraints
-            .entry(name.to_string())
-            .and_modify(|existing| {
-                *existing = crate::pkg::merge_version_constraints(existing.as_str(), constraint);
-            })
-            .or_insert_with(|| constraint.to_string());
+        crate::pkg::merge_constraint_into(&mut dep_constraints, name, constraint);
     }
 
     dep_constraints
@@ -328,12 +323,11 @@ async fn resolve_dependency_constraints_by_pkgbase(
             .get(dep_name.as_str())
             .map_or("", String::as_str);
 
-        dep_constraints_by_pkgbase
-            .entry(dep_pkgbase)
-            .and_modify(|existing| {
-                *existing = crate::pkg::merge_version_constraints(existing.as_str(), constraint);
-            })
-            .or_insert_with(|| constraint.to_string());
+        crate::pkg::merge_constraint_into(
+            &mut dep_constraints_by_pkgbase,
+            &dep_pkgbase,
+            constraint,
+        );
     }
 
     Ok(dep_constraints_by_pkgbase)
@@ -456,9 +450,8 @@ async fn dependencies_ready_for_platform(
 }
 
 fn configured_platforms(platforms: &str) -> Vec<String> {
-    platforms
-        .split(';')
-        .filter(|platform| !platform.is_empty())
+    crate::platforms::split_platform_list(platforms)
+        .into_iter()
         .map(ToString::to_string)
         .collect()
 }

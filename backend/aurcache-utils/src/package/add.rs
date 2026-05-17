@@ -83,12 +83,7 @@ fn collect_dependency_requirements<'a>(
     let mut dep_names: Vec<String> = Vec::new();
     for dep in deps {
         let (name, constraint) = crate::pkg::parse_dep(dep);
-        dep_constraints
-            .entry(name.to_string())
-            .and_modify(|existing| {
-                *existing = crate::pkg::merge_version_constraints(existing.as_str(), constraint);
-            })
-            .or_insert_with(|| constraint.to_string());
+        crate::pkg::merge_constraint_into(&mut dep_constraints, name, constraint);
 
         if !dep_names.iter().any(|seen| seen == name) {
             dep_names.push(name.to_string());
@@ -415,12 +410,7 @@ async fn insert_package_with_deps(
             .get(dep_name)
             .map_or("", String::as_str);
 
-        dep_constraints_by_pkgbase
-            .entry(dep_pkgbase.to_string())
-            .and_modify(|existing| {
-                *existing = crate::pkg::merge_version_constraints(existing.as_str(), constraint);
-            })
-            .or_insert_with(|| constraint.to_string());
+        crate::pkg::merge_constraint_into(&mut dep_constraints_by_pkgbase, dep_pkgbase, constraint);
     }
 
     let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();

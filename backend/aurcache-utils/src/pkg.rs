@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 pub use aurcache_deps::parse_dep;
@@ -47,6 +48,20 @@ pub fn merge_version_constraints(existing: &str, new: &str) -> String {
     }
 
     merged.join(",")
+}
+
+/// Insert a dependency constraint into a map, merging it with any existing one.
+pub fn merge_constraint_into(
+    constraints: &mut HashMap<String, String>,
+    name: &str,
+    constraint: &str,
+) {
+    constraints
+        .entry(name.to_string())
+        .and_modify(|existing| {
+            *existing = merge_version_constraints(existing.as_str(), constraint);
+        })
+        .or_insert_with(|| constraint.to_string());
 }
 
 fn split_constraints(constraint: &str) -> Vec<&str> {
@@ -147,5 +162,14 @@ mod tests {
             merge_version_constraints(">=1.0", ">=1.0,<4.0"),
             ">=1.0,<4.0"
         );
+    }
+
+    #[test]
+    fn test_merge_constraint_into() {
+        let mut constraints = HashMap::new();
+        merge_constraint_into(&mut constraints, "glibc", ">=2.0");
+        merge_constraint_into(&mut constraints, "glibc", "<3.0");
+
+        assert_eq!(constraints.get("glibc"), Some(&">=2.0,<3.0".to_string()));
     }
 }

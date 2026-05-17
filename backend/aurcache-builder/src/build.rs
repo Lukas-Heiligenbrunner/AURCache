@@ -581,7 +581,7 @@ impl Builder {
         if build_ids.is_empty() {
             self.logger
                 .append(format!(
-                    "Queued dependency '{}' for update before rebuilding dependent packages",
+                    "Dependency '{}' was checked for update but no rebuild was enqueued yet",
                     pkg.name
                 ))
                 .await;
