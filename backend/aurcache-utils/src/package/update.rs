@@ -33,11 +33,9 @@ pub async fn package_update_all_outdated(
     db: &DatabaseConnection,
     tx: &Sender<Action>,
 ) -> anyhow::Result<Vec<i32>> {
-    let txn = db.begin().await?;
-
     let pkg_models: Vec<packages::Model> = Packages::find()
         .filter(packages::Column::OutOfDate.eq(1))
-        .all(&txn)
+        .all(db)
         .await?;
     let activity_log = ActivityLog::new(db.clone());
 

@@ -161,9 +161,18 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 BuildMode::Host(cfg) => format!("{}/mirrorlist", cfg.mirrorlist_path_host),
             };
 
-            if !mirrorlist_source.starts_with('/')
-                || std::path::Path::new(&mirrorlist_source).exists()
-            {
+            // In DinD mode the mirrorlist path lives inside the DinD volume, so
+            // we can't check host-filesystem existence; always mount.
+            // In Host mode, only mount if the file exists (absolute) or a volume
+            // reference is given (relative path).
+            let should_mount = match get_build_mode() {
+                BuildMode::DinD(_) => true,
+                BuildMode::Host(_) => {
+                    !mirrorlist_source.starts_with('/')
+                        || std::path::Path::new(&mirrorlist_source).exists()
+                }
+            };
+            if should_mount {
                 let mnt = match get_build_mode() {
                     BuildMode::DinD(_) => Mount {
                         target: Some(archlinux_mirrorlist_path.to_string()),

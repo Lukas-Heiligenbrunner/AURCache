@@ -121,7 +121,6 @@ async fn dependencies_satisfied(
             .filter(builds::Column::Platform.eq(platform))
             .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
             .order_by_desc(builds::Column::EndTime)
-            .order_by_desc(builds::Column::StartTime)
             .into_tuple::<(String,)>()
             .one(db)
             .await?
@@ -153,10 +152,7 @@ async fn trigger_build_for_package(
             pkg.id,
             &platform.to_string(),
             &version,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Duration must exist")
-                .as_secs() as i64,
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
         )
         .await?;
 

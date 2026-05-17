@@ -62,6 +62,8 @@ async fn normalize_build_flags_in_db(
     db: &impl ConnectionTrait,
     new_build_flag_default: &str,
 ) -> Result<(), DbErr> {
+    // SeaORM migration framework wraps each migration in a transaction, so the
+    // individual saves below are effectively atomic as a group.
     for pkg in packages::Entity::find().all(db).await? {
         let normalized = normalize_build_flags(&pkg.build_flags, new_build_flag_default);
         if normalized == pkg.build_flags {
