@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail};
 use aurcache_db::dependencies;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
-use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
+use aurcache_db::prelude::{Builds, Files, Packages};
 use aurcache_db::{builds, files, packages};
 use aurcache_types::builder::{Action, BuildStates};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
@@ -17,8 +17,9 @@ use bollard::query_parameters::{
 };
 use futures::StreamExt;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Order,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    TransactionTrait,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -256,9 +257,9 @@ impl Builder {
 
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
         let pkg_id = *self.package_model.id.get()?;
-        let pkg_exists = Packages::find_by_id(pkg_id).one(&self.db).await?.is_some();
 
         let txn = self.db.begin().await?;
+        let pkg_exists = Packages::find_by_id(pkg_id).one(&txn).await?.is_some();
         self.build_model.end_time = Set(Some(
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
         ));
@@ -358,48 +359,64 @@ impl Builder {
     async fn trigger_dependents(&self) -> anyhow::Result<()> {
         let pkg_id = *self.package_model.id.get()?;
         let platform = self.build_model.platform.get()?.clone();
-        let dep_links = self.load_dependent_links(pkg_id).await?;
-        if dep_links.is_empty() {
+        let deps_by_dependent = self.load_dependencies_for_dependents_of(pkg_id).await?;
+        if deps_by_dependent.is_empty() {
             return Ok(());
         }
 
-        let dependent_ids: Vec<i32> = dep_links.iter().map(|l| l.dependent_id).collect();
-        let deps_by_dependent = self.load_dependencies_by_dependent(&dependent_ids).await?;
-
-        for link in &dep_links {
-            let dependent_id = link.dependent_id;
-            let Some(all_deps) = deps_by_dependent.get(&dependent_id) else {
-                continue;
-            };
-
+        for (dependent_id, all_deps) in &deps_by_dependent {
             if self
                 .dependencies_ready_for_dependent(all_deps, &platform)
                 .await?
             {
-                self.trigger_dependent_builds(dependent_id, &platform)
+                self.trigger_dependent_builds(*dependent_id, &platform)
                     .await?;
             }
         }
         Ok(())
     }
 
-    async fn load_dependent_links(&self, pkg_id: i32) -> anyhow::Result<Vec<dependencies::Model>> {
-        Ok(Dependencies::find()
-            .filter(dependencies::Column::DependeeId.eq(pkg_id))
-            .all(&self.db)
-            .await?)
-    }
-
-    async fn load_dependencies_by_dependent(
+    async fn load_dependencies_for_dependents_of(
         &self,
-        dependent_ids: &[i32],
+        pkg_id: i32,
     ) -> anyhow::Result<HashMap<i32, Vec<dependencies::Model>>> {
+        let (sql, values) = match self.db.get_database_backend() {
+            DbBackend::Sqlite => (
+                "SELECT d.id, d.dependent_id, d.dependee_id, d.version_constraint
+                 FROM dependencies d
+                 WHERE d.dependent_id IN (
+                    SELECT DISTINCT dependent_id FROM dependencies WHERE dependee_id = ?
+                 );",
+                vec![pkg_id.into()],
+            ),
+            DbBackend::Postgres => (
+                "SELECT d.id, d.dependent_id, d.dependee_id, d.version_constraint
+                 FROM public.dependencies d
+                 WHERE d.dependent_id IN (
+                    SELECT DISTINCT dependent_id FROM public.dependencies WHERE dependee_id = $1
+                 );",
+                vec![pkg_id.into()],
+            ),
+            _ => return Err(anyhow!("Unsupported database backend")),
+        };
+
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                sql,
+                values,
+            ))
+            .await?;
+
         let mut deps_by_dependent: HashMap<i32, Vec<dependencies::Model>> = HashMap::new();
-        for dep in Dependencies::find()
-            .filter(dependencies::Column::DependentId.is_in(dependent_ids.to_vec()))
-            .all(&self.db)
-            .await?
-        {
+        for row in rows {
+            let dep = dependencies::Model {
+                id: row.try_get("", "id")?,
+                dependent_id: row.try_get("", "dependent_id")?,
+                dependee_id: row.try_get("", "dependee_id")?,
+                version_constraint: row.try_get("", "version_constraint")?,
+            };
             deps_by_dependent
                 .entry(dep.dependent_id)
                 .or_default()

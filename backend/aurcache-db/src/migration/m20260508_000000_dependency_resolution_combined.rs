@@ -5,7 +5,8 @@ use async_recursion::async_recursion;
 use aurcache_deps::{AurClient, DependencyResolution};
 use sea_orm::DbBackend;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait,
+    QueryFilter, Set,
 };
 use sea_orm_migration::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -87,6 +88,47 @@ async fn add_column_if_missing(
     if !manager.has_column(table, column).await? {
         manager.get_connection().execute_unprepared(sql).await?;
     }
+    Ok(())
+}
+
+async fn ensure_no_null_pkgbase(db: &impl ConnectionTrait) -> Result<(), DbErr> {
+    let null_count = packages::Entity::find()
+        .filter(packages::Column::Pkgbase.is_null())
+        .count(db)
+        .await?;
+    if null_count > 0 {
+        return Err(DbErr::Migration(format!(
+            "packages.pkgbase contains {null_count} NULL value(s); aborting migration"
+        )));
+    }
+    Ok(())
+}
+
+async fn create_sqlite_pkgbase_not_null_triggers(db: &impl ConnectionTrait) -> Result<(), DbErr> {
+    db.execute_unprepared(
+        r"
+CREATE TRIGGER IF NOT EXISTS trg_packages_pkgbase_not_null_insert
+BEFORE INSERT ON packages
+FOR EACH ROW
+WHEN NEW.pkgbase IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'packages.pkgbase must not be NULL');
+END;
+",
+    )
+    .await?;
+    db.execute_unprepared(
+        r"
+CREATE TRIGGER IF NOT EXISTS trg_packages_pkgbase_not_null_update
+BEFORE UPDATE OF pkgbase ON packages
+FOR EACH ROW
+WHEN NEW.pkgbase IS NULL
+BEGIN
+    SELECT RAISE(ABORT, 'packages.pkgbase must not be NULL');
+END;
+",
+    )
+    .await?;
     Ok(())
 }
 
@@ -268,7 +310,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_packages_pkgbase
 ON packages (pkgbase);
 ",
                 )
-                .await?;
+                .await
+                .map_err(|e| {
+                    DbErr::Migration(format!(
+                        "failed creating unique index idx_packages_pkgbase on SQLite; \
+                         likely duplicate pkgbase rows in packages: {e}"
+                    ))
+                })?;
+
+                ensure_no_null_pkgbase(db).await?;
+                create_sqlite_pkgbase_not_null_triggers(db).await?;
             }
             DbBackend::Postgres => {
                 add_column_if_missing(
@@ -345,7 +396,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_packages_pkgbase
 ON public.packages (pkgbase);
 ",
                 )
-                .await?;
+                .await
+                .map_err(|e| {
+                    DbErr::Migration(format!(
+                        "failed creating unique index idx_packages_pkgbase on Postgres; \
+                         likely duplicate pkgbase rows in packages: {e}"
+                    ))
+                })?;
             }
             _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
         }
@@ -369,6 +426,14 @@ ON public.packages (pkgbase);
             DbBackend::Sqlite => {
                 db.execute_unprepared("DROP INDEX IF EXISTS idx_packages_pkgbase;")
                     .await?;
+                db.execute_unprepared(
+                    "DROP TRIGGER IF EXISTS trg_packages_pkgbase_not_null_insert;",
+                )
+                .await?;
+                db.execute_unprepared(
+                    "DROP TRIGGER IF EXISTS trg_packages_pkgbase_not_null_update;",
+                )
+                .await?;
                 db.execute_unprepared(
                     r"
 ALTER TABLE packages DROP COLUMN pkgbase;
@@ -482,8 +547,16 @@ async fn ensure_deps(
                 tracing::warn!("Failed to insert placeholder for {pkgbase}: {e}");
                 e
             })?;
-            refresh_package_provides(db, saved.id.clone().unwrap(), pkgbase, client).await?;
-            saved.id.clone().unwrap()
+            let saved_id = match saved.id {
+                ActiveValue::Set(id) | ActiveValue::Unchanged(id) => id,
+                _ => {
+                    return Err(DbErr::Migration(format!(
+                        "placeholder package insert for {pkgbase} did not return an id"
+                    )));
+                }
+            };
+            refresh_package_provides(db, saved_id, pkgbase, client).await?;
+            saved_id
         }
     };
 
