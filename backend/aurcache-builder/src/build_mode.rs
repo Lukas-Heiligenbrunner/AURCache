@@ -53,6 +53,10 @@ pub fn get_build_mode() -> BuildMode {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| ".".to_string());
         let repo_host_path = format!("{build_parent}/repo");
+        assert!(
+            fs::metadata(&repo_host_path).is_ok(),
+            "Derived repo host path '{repo_host_path}' does not exist. BUILD_ARTIFACT_DIR must have a sibling repo/ directory."
+        );
 
         // create config dir if not existing
         create_config_dir(format!(

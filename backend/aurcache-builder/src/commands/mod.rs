@@ -1,6 +1,17 @@
 use aurcache_db::packages::SourceData;
 use std::path::Path;
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn shell_join_args(args: &str) -> String {
+    args.split_whitespace()
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn fetch_required_pgp_keys_cmd() -> &'static str {
     "pgp_keys=\"$(if [ -f .SRCINFO ]; then \
          sed -n 's/^[[:space:]]*validpgpkeys[[:space:]]*=[[:space:]]*//p' .SRCINFO; \
@@ -23,29 +34,36 @@ pub fn build_build_command(
     build_flags: &str,
     container_build_dir: &Path,
 ) -> String {
+    let build_dir = shell_quote(&container_build_dir.display().to_string());
+    let quoted_pkgbase = shell_quote(pkgbase);
+    let quoted_build_flags = shell_join_args(build_flags);
     match source_data {
         SourceData::Aur { .. } => {
             let rpc_url = std::env::var("AUR_RPC_URL")
                 .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5".to_string());
             let snapshot_url = aurcache_deps::snapshot_url(&rpc_url, pkgbase);
             format!(
-                "sudo pacman -Syu --noconfirm --noprogressbar --color never && \
+                "set -o pipefail && sudo pacman -Syu --noconfirm --noprogressbar --color never && \
                  mkdir -p {build_dir} && cd {build_dir} && \
-                 curl -sL '{snapshot_url}' | tar xz && \
+                 curl -fsSL {snapshot_url} | tar xz && \
                  cd {pkgbase} && \
                  {fetch_pgp_keys} && \
                  makepkg -s {build_flags}",
                 fetch_pgp_keys = fetch_required_pgp_keys_cmd(),
-                build_dir = container_build_dir.display(),
+                build_dir = build_dir,
+                snapshot_url = shell_quote(&snapshot_url),
+                pkgbase = quoted_pkgbase,
+                build_flags = quoted_build_flags,
             )
         }
         SourceData::Git { .. } => {
             let self_update = "pacman -Syu --noconfirm --noprogressbar --color never";
             format!(
-                "sudo chmod -R 1777 /tmp && {self_update} && cd /tmp && \
+                "sudo chmod -R 1777 /tmp && {self_update} && cd '/tmp' && \
                  {fetch_pgp_keys} && \
                  makepkg -s {build_flags}",
                 fetch_pgp_keys = fetch_required_pgp_keys_cmd(),
+                build_flags = quoted_build_flags,
             )
         }
         SourceData::Upload { .. } => {
@@ -61,9 +79,12 @@ pub fn wrap_with_makepkg_config(
     build_cmd: &str,
 ) -> String {
     format!(
-        "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n\
-         cat <<'__AURCACHE_PACMAN_EOF__' | sudo tee /etc/pacman.conf >/dev/null\n{pacman_config}\n__AURCACHE_PACMAN_EOF__\n\
-         {build_cmd}"
+        "printf '%s' {makepkg_config} > {makepkg_config_path}\n\
+         printf '%s' {pacman_config} | sudo tee /etc/pacman.conf >/dev/null\n\
+         {build_cmd}",
+        makepkg_config = shell_quote(makepkg_config),
+        makepkg_config_path = shell_quote(makepkg_config_path),
+        pacman_config = shell_quote(pacman_config),
     )
 }
 
@@ -86,7 +107,8 @@ mod tests {
 
         assert!(cmd.contains("validpgpkeys"));
         assert!(cmd.contains("gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys"));
-        assert!(cmd.contains("makepkg -s --noconfirm --noprogressbar --nocolor"));
+        assert!(cmd.contains("makepkg -s '--noconfirm' '--noprogressbar' '--nocolor'"));
+        assert!(cmd.contains("curl -fsSL"));
     }
 
     #[test]
@@ -102,7 +124,7 @@ mod tests {
             Path::new("/build/src"),
         );
 
-        assert!(cmd.contains("cd /tmp"));
+        assert!(cmd.contains("cd '/tmp'"));
         assert!(cmd.contains("validpgpkeys"));
         assert!(cmd.contains("gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys"));
     }

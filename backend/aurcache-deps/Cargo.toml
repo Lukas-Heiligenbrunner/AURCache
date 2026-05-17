@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alpm-compress = "0.1.3"
+alpm-repo-db = "0.1.2"
 alpm-srcinfo = { workspace = true }
 alpm-types = "0.11.2"
 backon = { workspace = true }

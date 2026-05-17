@@ -81,6 +81,7 @@ pub struct Model {
     pub directly_requested: bool,
     pub current_version: Option<String>,
     pub split_packages: Option<String>,
+    pub provides: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

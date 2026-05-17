@@ -13,6 +13,7 @@ use sea_orm::{
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast::Sender;
+use tracing::warn;
 
 pub async fn trigger_leaf_builds(
     db: &DatabaseConnection,
@@ -54,14 +55,22 @@ pub async fn enqueue_missing_buildable_packages(
 
     let mut queued = 0;
     for pkg in packages {
-        let ready_platforms = try_join_all(parse_platforms(&pkg.platforms)?.into_iter().map(
-            |platform| async move {
-                let platform_name = platform.to_string();
-                let ready = !build_exists_for_platform(db, pkg.id, &platform_name).await?
-                    && dependencies_satisfied(db, pkg.id, &platform_name).await?;
-                Ok::<_, anyhow::Error>(ready.then_some(platform))
-            },
-        ))
+        let platforms = match parse_platforms(&pkg.platforms) {
+            Ok(platforms) => platforms,
+            Err(error) => {
+                warn!(
+                    "Skipping package {} during startup enqueue because platforms are invalid: {error}",
+                    pkg.pkgbase
+                );
+                continue;
+            }
+        };
+        let ready_platforms = try_join_all(platforms.into_iter().map(|platform| async move {
+            let platform_name = platform.to_string();
+            let ready = !build_exists_for_platform(db, pkg.id, &platform_name).await?
+                && dependencies_satisfied(db, pkg.id, &platform_name).await?;
+            Ok::<_, anyhow::Error>(ready.then_some(platform))
+        }))
         .await?
         .into_iter()
         .flatten()

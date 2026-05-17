@@ -1,5 +1,8 @@
 use crate::git::checkout::checkout_repo_ref;
-use crate::package::add::ensure_aur_package_exists_recursive;
+use crate::package::add::{
+    ensure_aur_package_exists_recursive, provides_json, resolve_dependency_resolutions,
+    split_packages_json,
+};
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
@@ -9,14 +12,14 @@ use aurcache_db::activities::ActivityType;
 use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
-use aurcache_deps::{AurClient, PkgDeps};
+use aurcache_deps::{AurClient, DependencyResolution, PkgDeps};
 use aurcache_types::builder::{Action, BuildStates};
 use futures::future::try_join_all;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, ModelTrait, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,7 +75,6 @@ pub async fn package_update(
     package_update_with_client(&client, db, pkg_model, force, tx).await
 }
 
-#[async_recursion]
 pub async fn package_update_with_client(
     client: &AurClient,
     db: &DatabaseConnection,
@@ -80,6 +82,23 @@ pub async fn package_update_with_client(
     force: bool,
     tx: &Sender<Action>,
 ) -> anyhow::Result<Vec<i32>> {
+    let mut visited = HashSet::new();
+    package_update_with_client_inner(client, db, pkg_model, force, tx, &mut visited).await
+}
+
+#[async_recursion]
+async fn package_update_with_client_inner(
+    client: &AurClient,
+    db: &DatabaseConnection,
+    pkg_model: packages::Model,
+    force: bool,
+    tx: &Sender<Action>,
+    visited: &mut HashSet<i32>,
+) -> anyhow::Result<Vec<i32>> {
+    if !visited.insert(pkg_model.id) {
+        return Ok(vec![]);
+    }
+
     let source_data = packages::SourceData::from_str(pkg_model.source_data.as_str())?;
 
     let update_context = match source_data {
@@ -88,10 +107,12 @@ pub async fn package_update_with_client(
                 .deps_of_with_version(pkg_model.pkgbase.as_str())
                 .await
                 .map_err(|e| anyhow!("Failed to resolve latest package metadata: {e}"))?;
-            let ready_platforms = sync_dependency_graph(client, db, &pkg_model, &deps, tx).await?;
+            let ready_platforms =
+                sync_dependency_graph(client, db, &pkg_model, &deps, tx, visited).await?;
             UpdateContext {
                 upstream_version,
                 split_packages: split_packages_json(&pkg_model.pkgbase, &deps.pkgnames)?,
+                provides: provides_json(&deps.provides)?,
                 ready_platforms,
             }
         }
@@ -99,7 +120,12 @@ pub async fn package_update_with_client(
             url,
             subfolder,
             r#ref,
-        } => git_update_context(client, db, &pkg_model, &url, &r#ref, &subfolder, tx).await?,
+        } => {
+            git_update_context(
+                client, db, &pkg_model, &url, &r#ref, &subfolder, tx, visited,
+            )
+            .await?
+        }
         packages::SourceData::Upload { .. } => {
             todo!("Get version from zip")
         }
@@ -125,6 +151,7 @@ pub async fn package_update_with_client(
     pkg_model_active.status = Set(BuildStates::ENQUEUED_BUILD);
     pkg_model_active.upstream_version = Set(Some(update_context.upstream_version.clone()));
     pkg_model_active.split_packages = Set(update_context.split_packages.clone());
+    pkg_model_active.provides = Set(update_context.provides.clone());
     let txn = db.begin().await?;
     let pkg_active_model = pkg_model_active.save(&txn).await?;
     txn.commit().await?;
@@ -154,6 +181,7 @@ pub async fn package_update_with_client(
 struct UpdateContext {
     upstream_version: String,
     split_packages: Option<String>,
+    provides: Option<String>,
     ready_platforms: Vec<String>,
 }
 
@@ -165,14 +193,16 @@ async fn git_update_context(
     r#ref: &str,
     subfolder: &str,
     tx: &Sender<Action>,
+    visited: &mut HashSet<i32>,
 ) -> anyhow::Result<UpdateContext> {
     let sourceinfo = load_git_sourceinfo(url, r#ref, subfolder)?;
     let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
-    let ready_platforms = sync_dependency_graph(client, db, pkg_model, &deps, tx).await?;
+    let ready_platforms = sync_dependency_graph(client, db, pkg_model, &deps, tx, visited).await?;
 
     Ok(UpdateContext {
         upstream_version: sourceinfo.base.version.to_string(),
         split_packages: split_packages_json(&pkg_model.pkgbase, &deps.pkgnames)?,
+        provides: provides_json(&deps.provides)?,
         ready_platforms,
     })
 }
@@ -198,11 +228,12 @@ async fn sync_dependency_graph(
     pkg_model: &packages::Model,
     deps: &PkgDeps,
     tx: &Sender<Action>,
+    visited: &mut HashSet<i32>,
 ) -> anyhow::Result<Vec<String>> {
     let configured_platforms = configured_platforms(&pkg_model.platforms);
     let dep_constraints = collect_dependency_constraints(deps);
     let dep_constraints_by_pkgbase =
-        resolve_dependency_constraints_by_pkgbase(client, &dep_constraints)
+        resolve_dependency_constraints_by_pkgbase(client, db, &pkg_model.pkgbase, &dep_constraints)
             .await
             .map_err(|e| anyhow!("Failed to resolve AUR dependency bases: {e}"))?;
 
@@ -252,24 +283,24 @@ async fn sync_dependency_graph(
 
     sync_dependency_rows(db, pkg_model.id, &dep_constraints_by_pkgbase, &dep_packages).await?;
 
-    Ok(
-        try_join_all(configured_platforms.iter().map(|platform| async {
-            let ready = dependencies_ready_for_platform(
-                client,
-                db,
-                tx,
-                platform,
-                &dep_constraints_by_pkgbase,
-                &dep_packages,
-            )
-            .await?;
-            Ok::<_, anyhow::Error>(ready.then_some(platform.clone()))
-        }))
+    let mut ready_platforms = Vec::new();
+    for platform in &configured_platforms {
+        if dependencies_ready_for_platform(
+            client,
+            db,
+            tx,
+            platform,
+            &dep_constraints_by_pkgbase,
+            &dep_packages,
+            visited,
+        )
         .await?
-        .into_iter()
-        .flatten()
-        .collect(),
-    )
+        {
+            ready_platforms.push(platform.clone());
+        }
+    }
+
+    Ok(ready_platforms)
 }
 
 fn collect_dependency_constraints(deps: &PkgDeps) -> HashMap<String, String> {
@@ -289,20 +320,30 @@ fn collect_dependency_constraints(deps: &PkgDeps) -> HashMap<String, String> {
 
 async fn resolve_dependency_constraints_by_pkgbase(
     client: &AurClient,
+    db: &DatabaseConnection,
+    pkgbase: &str,
     dep_constraints: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, aurcache_deps::Error> {
     if dep_constraints.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let dep_names = dep_constraints
-        .keys()
-        .map(|name| name.as_str())
-        .collect::<Vec<_>>();
-    let aur_dep_bases = client.resolve_bases(&dep_names).await?;
+    let dep_names = dep_constraints.keys().cloned().collect::<Vec<_>>();
+    let resolved_deps = resolve_dependency_resolutions(client, db, &dep_names)
+        .await
+        .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?;
 
     let mut dep_constraints_by_pkgbase: HashMap<String, String> = HashMap::new();
-    for (dep_name, dep_pkgbase) in aur_dep_bases {
+    for (dep_name, resolution) in resolved_deps {
+        let dep_pkgbase = match resolution {
+            DependencyResolution::Official => continue,
+            DependencyResolution::Local { pkgbase } | DependencyResolution::Aur { pkgbase } => {
+                pkgbase
+            }
+        };
+        if dep_pkgbase == pkgbase {
+            continue;
+        }
         let constraint = dep_constraints
             .get(dep_name.as_str())
             .map_or("", String::as_str);
@@ -401,6 +442,7 @@ async fn dependencies_ready_for_platform(
     platform: &str,
     dep_constraints_by_pkgbase: &HashMap<String, String>,
     dep_packages: &HashMap<String, packages::Model>,
+    visited: &mut HashSet<i32>,
 ) -> anyhow::Result<bool> {
     for (dep_pkgbase, constraint) in dep_constraints_by_pkgbase {
         let Some(dep_pkg) = dep_packages.get(dep_pkgbase) else {
@@ -423,7 +465,8 @@ async fn dependencies_ready_for_platform(
             > 0;
 
         if !has_pending_build {
-            package_update_with_client(client, db, dep_pkg.clone(), true, tx).await?;
+            package_update_with_client_inner(client, db, dep_pkg.clone(), true, tx, visited)
+                .await?;
         }
 
         return Ok(false);
@@ -438,14 +481,6 @@ fn configured_platforms(platforms: &str) -> Vec<String> {
         .filter(|platform| !platform.is_empty())
         .map(ToString::to_string)
         .collect()
-}
-
-fn split_packages_json(pkgbase: &str, pkgnames: &[String]) -> anyhow::Result<Option<String>> {
-    if pkgnames.len() > 1 || pkgnames.first().is_some_and(|name| name != pkgbase) {
-        Ok(Some(serde_json::to_string(pkgnames)?))
-    } else {
-        Ok(None)
-    }
 }
 
 /// Creates a build entry for a package on a specific platform.
@@ -537,6 +572,16 @@ mod tests {
         })
     }
 
+    async fn mock_official_search_fallback(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/packages/search/json/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [],
+            })))
+            .mount(server)
+            .await;
+    }
+
     fn git_pkgbuild(version: &str, depends: &[&str]) -> String {
         let depends = depends
             .iter()
@@ -601,10 +646,14 @@ mod tests {
     #[tokio::test]
     async fn package_update_queues_dependency_builds_before_parent_when_constraints_tighten() {
         let server = MockServer::start().await;
-        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let client = AurClient::with_urls(
+            format!("{}/rpc/v5", server.uri()),
+            format!("{}/packages/search/json/", server.uri()),
+        );
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+        mock_official_search_fallback(&server).await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -751,10 +800,14 @@ mod tests {
     #[tokio::test]
     async fn package_update_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let client = AurClient::with_urls(
+            format!("{}/rpc/v5", server.uri()),
+            format!("{}/packages/search/json/", server.uri()),
+        );
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+        mock_official_search_fallback(&server).await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -963,10 +1016,14 @@ mod tests {
     #[tokio::test]
     async fn force_rebuild_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let client = AurClient::with_urls(
+            format!("{}/rpc/v5", server.uri()),
+            format!("{}/packages/search/json/", server.uri()),
+        );
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+        mock_official_search_fallback(&server).await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -1167,10 +1224,14 @@ mod tests {
     #[tokio::test]
     async fn git_update_refreshes_dependency_rows() {
         let server = MockServer::start().await;
-        let client = AurClient::with_aur_url(format!("{}/rpc/v5", server.uri()));
+        let client = AurClient::with_urls(
+            format!("{}/rpc/v5", server.uri()),
+            format!("{}/packages/search/json/", server.uri()),
+        );
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
+        mock_official_search_fallback(&server).await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))

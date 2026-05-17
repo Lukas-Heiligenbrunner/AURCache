@@ -2,13 +2,17 @@ use crate::dependencies;
 use crate::helpers::dbtype::database_type;
 use crate::packages;
 use async_recursion::async_recursion;
-use aurcache_deps::AurClient;
+use aurcache_deps::{AurClient, DependencyResolution};
 use sea_orm::DbBackend;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set,
 };
 use sea_orm_migration::prelude::*;
 use std::collections::{HashMap, HashSet};
+
+const ACTIVE_BUILD_STATUS: i32 = 0;
+const SUCCESSFUL_BUILD_STATUS: i32 = 1;
+const ENQUEUED_BUILD_STATUS: i32 = 3;
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -37,6 +41,21 @@ fn normalize_build_flags(build_flags: &str, new_build_flag_default: &str) -> Str
         .filter(|flag| !flag.is_empty() && *flag != "-Syu" && *flag != "-Byu")
         .collect::<Vec<_>>()
         .join(";")
+}
+
+fn merge_version_constraints(existing: &str, new: &str) -> String {
+    let mut merged = Vec::new();
+    for constraint in existing
+        .split(',')
+        .chain(new.split(','))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if !merged.iter().any(|seen| seen == constraint) {
+            merged.push(constraint.to_string());
+        }
+    }
+    merged.join(",")
 }
 
 async fn normalize_build_flags_in_db(
@@ -435,7 +454,10 @@ async fn ensure_deps(
         .one(db)
         .await?
     {
-        Some(pkg) => pkg.id,
+        Some(pkg) => {
+            refresh_package_provides(db, pkg.id, &pkg.pkgbase, client).await?;
+            pkg.id
+        }
         None => {
             let new_pkg = packages::ActiveModel {
                 name: Set(pkgbase.to_string()),
@@ -451,12 +473,14 @@ async fn ensure_deps(
                 directly_requested: Set(false),
                 current_version: Set(None),
                 split_packages: Set(None),
+                provides: Set(None),
                 ..Default::default()
             };
             let saved = new_pkg.save(db).await.map_err(|e| {
                 tracing::warn!("Failed to insert placeholder for {pkgbase}: {e}");
                 e
             })?;
+            refresh_package_provides(db, saved.id.clone().unwrap(), pkgbase, client).await?;
             saved.id.clone().unwrap()
         }
     };
@@ -489,7 +513,10 @@ async fn ensure_deps(
             let (name, constraint) = parse_dep(d);
             dep_constraints
                 .entry(name.to_string())
-                .or_insert(constraint.to_string());
+                .and_modify(|existing| {
+                    *existing = merge_version_constraints(existing, constraint);
+                })
+                .or_insert_with(|| constraint.to_string());
             name.to_string()
         })
         .collect();
@@ -499,35 +526,60 @@ async fn ensure_deps(
     }
 
     // 5. Batch-resolve which dep names are AUR packages
-    let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
-    let aur_dep_bases = match client.resolve_bases(&dep_refs).await {
+    let resolved_deps = match resolve_dependency_resolutions(client, db, &dep_names).await {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("resolve_bases failed for {pkgbase}: {e}");
+            tracing::warn!("dependency resolution failed for {pkgbase}: {e}");
             return Ok(());
         }
     };
 
-    // Build a map from pkgbase → constraint (use the first name that resolved to each base)
-    let base_to_constraint: HashMap<&str, &str> = aur_dep_bases
-        .iter()
-        .map(|(name, base)| {
-            (
-                base.as_str(),
-                dep_constraints
-                    .get(name.as_str())
-                    .map_or("", |s| s.as_str()),
-            )
-        })
-        .collect();
+    let mut base_to_constraint: HashMap<String, String> = HashMap::new();
+    for (name, resolution) in &resolved_deps {
+        let base = match resolution {
+            DependencyResolution::Official => continue,
+            DependencyResolution::Local { pkgbase } | DependencyResolution::Aur { pkgbase } => {
+                pkgbase
+            }
+        };
+        if base == pkgbase {
+            continue;
+        }
+        let constraint = dep_constraints
+            .get(name.as_str())
+            .map_or("", String::as_str);
+        base_to_constraint
+            .entry(base.clone())
+            .and_modify(|existing| {
+                *existing = merge_version_constraints(existing, constraint);
+            })
+            .or_insert_with(|| constraint.to_string());
+    }
+
+    let local_pkgbases: Vec<&str> = {
+        let mut seen = HashSet::new();
+        resolved_deps
+            .values()
+            .filter_map(|resolution| match resolution {
+                DependencyResolution::Local { pkgbase } => Some(pkgbase.as_str()),
+                DependencyResolution::Aur { .. } | DependencyResolution::Official => None,
+            })
+            .filter(|resolved_pkgbase| *resolved_pkgbase != pkgbase)
+            .filter(|pkgbase| seen.insert((*pkgbase).to_string()))
+            .collect()
+    };
 
     // Collect unique AUR pkgbases
     let aur_pkgbases: Vec<&str> = {
         let mut seen = HashSet::new();
-        aur_dep_bases
+        resolved_deps
             .values()
+            .filter_map(|resolution| match resolution {
+                DependencyResolution::Aur { pkgbase } => Some(pkgbase.as_str()),
+                DependencyResolution::Official | DependencyResolution::Local { .. } => None,
+            })
+            .filter(|resolved_pkgbase| *resolved_pkgbase != pkgbase)
             .filter(|b| seen.insert((*b).to_string()))
-            .map(|s| s.as_str())
             .collect()
     };
 
@@ -536,8 +588,8 @@ async fn ensure_deps(
         ensure_deps(client, db, dep_base, visited).await?;
     }
 
-    // 7. Create dependency links from this package to each resolved AUR dep
-    for dep_base in &aur_pkgbases {
+    // 7. Create dependency links from this package to each resolved local/AUR dep
+    for dep_base in local_pkgbases.iter().chain(aur_pkgbases.iter()) {
         if let Some(dependee) = packages::Entity::find()
             .filter(packages::Column::Pkgbase.eq(*dep_base))
             .one(db)
@@ -551,10 +603,9 @@ async fn ensure_deps(
 
             if existing.is_none() {
                 let constraint = base_to_constraint
-                    .get(dep_base)
-                    .copied()
-                    .unwrap_or("")
-                    .to_string();
+                    .get(*dep_base)
+                    .cloned()
+                    .unwrap_or_default();
                 dependencies::ActiveModel {
                     dependent_id: Set(pkg_id),
                     dependee_id: Set(dependee.id),
@@ -571,6 +622,121 @@ async fn ensure_deps(
 }
 
 use aurcache_deps::parse_dep;
+
+async fn refresh_package_provides(
+    db: &impl ConnectionTrait,
+    pkg_id: i32,
+    pkgbase: &str,
+    client: &AurClient,
+) -> Result<(), DbErr> {
+    let provides = match client.deps_of(pkgbase).await {
+        Ok(deps) => serialize_optional_list(&deps.provides)?,
+        Err(e) => {
+            tracing::warn!("deps_of failed for {pkgbase}: {e}");
+            return Ok(());
+        }
+    };
+
+    packages::ActiveModel {
+        id: Set(pkg_id),
+        provides: Set(provides),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
+    Ok(())
+}
+
+async fn resolve_dependency_resolutions(
+    client: &AurClient,
+    db: &impl ConnectionTrait,
+    dep_names: &[String],
+) -> Result<HashMap<String, DependencyResolution>, aurcache_deps::Error> {
+    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names)
+        .await
+        .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?;
+    let unresolved = dep_names
+        .iter()
+        .filter(|dep_name| !resolutions.contains_key(dep_name.as_str()))
+        .map(|dep_name| dep_name.as_str())
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        return Ok(resolutions);
+    }
+
+    resolutions.extend(client.resolve_dependencies(&unresolved).await?);
+    Ok(resolutions)
+}
+
+async fn resolve_local_dependency_resolutions(
+    db: &impl ConnectionTrait,
+    dep_names: &[String],
+) -> Result<HashMap<String, DependencyResolution>, DbErr> {
+    let local_packages = packages::Entity::find()
+        .filter(packages::Column::Status.is_in(vec![
+            ACTIVE_BUILD_STATUS,
+            SUCCESSFUL_BUILD_STATUS,
+            ENQUEUED_BUILD_STATUS,
+        ]))
+        .all(db)
+        .await?;
+
+    Ok(dep_names
+        .iter()
+        .filter_map(|dep_name| {
+            find_local_dependee_pkgbase(&local_packages, dep_name)
+                .map(|pkgbase| (dep_name.clone(), DependencyResolution::Local { pkgbase }))
+        })
+        .collect())
+}
+
+fn find_local_dependee_pkgbase(
+    local_packages: &[packages::Model],
+    dep_name: &str,
+) -> Option<String> {
+    local_packages
+        .iter()
+        .filter_map(|pkg| local_match_rank(pkg, dep_name).map(|rank| (rank, pkg.pkgbase.as_str())))
+        .min_by(|(left_rank, left_name), (right_rank, right_name)| {
+            left_rank.cmp(right_rank).then(left_name.cmp(right_name))
+        })
+        .map(|(_, pkgbase)| pkgbase.to_string())
+}
+
+fn local_match_rank(pkg: &packages::Model, dep_name: &str) -> Option<u8> {
+    if pkg.pkgbase == dep_name {
+        return Some(0);
+    }
+    if json_list_contains(pkg.split_packages.as_deref(), dep_name, false) {
+        return Some(1);
+    }
+    json_list_contains(pkg.provides.as_deref(), dep_name, true).then_some(2)
+}
+
+fn json_list_contains(json: Option<&str>, dep_name: &str, parse_relation: bool) -> bool {
+    parse_json_list(json).into_iter().any(|value| {
+        if parse_relation {
+            parse_dep(&value).0 == dep_name
+        } else {
+            value == dep_name
+        }
+    })
+}
+
+fn parse_json_list(json: Option<&str>) -> Vec<String> {
+    json.and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default()
+}
+
+fn serialize_optional_list(values: &[String]) -> Result<Option<String>, DbErr> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::to_string(values)
+        .map(Some)
+        .map_err(|e| DbErr::Migration(e.to_string()))
+}
 
 #[cfg(test)]
 mod tests {
@@ -642,6 +808,7 @@ mod tests {
             "directly_requested",
             "current_version",
             "split_packages",
+            "provides",
         ] {
             let sql = format!("SELECT {col} FROM packages LIMIT 0");
             db.execute_unprepared(&sql)

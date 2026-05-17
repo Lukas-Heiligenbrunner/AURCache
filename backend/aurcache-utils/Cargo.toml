@@ -26,5 +26,7 @@ pacman-repo-utils = {path = "../pacman-repo-utils"}
 aurcache-types = {path = "../aurcache-types"}
 
 [dev-dependencies]
+flate2 = { workspace = true }
+tar = { workspace = true }
 wiremock = "0.6"
 sea-orm-migration = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }

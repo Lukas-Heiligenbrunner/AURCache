@@ -87,6 +87,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "alpm-compress"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44004ac324b8ca17d8119f4ae5a2fd0c0a9307bfda003e76f282e78d95ba10f5"
+dependencies = [
+ "alpm-types",
+ "bzip2",
+ "flate2",
+ "fluent-i18n",
+ "liblzma",
+ "log",
+ "num_cpus",
+ "tar",
+ "thiserror 2.0.17",
+ "zstd",
+]
+
+[[package]]
 name = "alpm-parsers"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -111,6 +129,22 @@ dependencies = [
  "strum 0.28.0",
  "thiserror 2.0.17",
  "which",
+ "winnow",
+]
+
+[[package]]
+name = "alpm-repo-db"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c443284594c5de7f90c083bdfe0a8f8b9842199c5539a7e793fc77b87f19c1e8"
+dependencies = [
+ "alpm-common",
+ "alpm-parsers",
+ "alpm-types",
+ "fluent-i18n",
+ "serde",
+ "strum 0.28.0",
+ "thiserror 2.0.17",
  "winnow",
 ]
 
@@ -433,6 +467,8 @@ dependencies = [
 name = "aurcache-deps"
 version = "0.1.0"
 dependencies = [
+ "alpm-compress",
+ "alpm-repo-db",
  "alpm-srcinfo",
  "alpm-types",
  "backon",
@@ -484,6 +520,7 @@ dependencies = [
  "aurcache-db",
  "aurcache-deps",
  "aurcache-types",
+ "flate2",
  "futures",
  "git2",
  "pacman-mirrors",
@@ -492,6 +529,7 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
  "tracing",
@@ -744,6 +782,15 @@ name = "bytes"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+
+[[package]]
+name = "bzip2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
+dependencies = [
+ "libbz2-rs-sys",
+]
 
 [[package]]
 name = "cc"
@@ -2405,6 +2452,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
+
+[[package]]
 name = "libc"
 version = "0.2.185"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2421,6 +2474,27 @@ dependencies = [
  "libssh2-sys",
  "libz-sys",
  "openssl-sys",
+ "pkg-config",
+]
+
+[[package]]
+name = "liblzma"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6033b77c21d1f56deeae8014eb9fbe7bdf1765185a6c508b5ca82eeaed7f899"
+dependencies = [
+ "liblzma-sys",
+ "num_cpus",
+]
+
+[[package]]
+name = "liblzma-sys"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a60851d15cd8c5346eca4ab8babff585be2ae4bc8097c067291d3ffe2add3b6"
+dependencies = [
+ "cc",
+ "libc",
  "pkg-config",
 ]
 
@@ -2526,17 +2600,6 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
-
-[[package]]
-name = "lzma-sys"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fda04ab3764e6cde78b9974eec4f779acaba7c4e84b36eca3cf77c581b85d27"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
-]
 
 [[package]]
 name = "mac_address"
@@ -2860,11 +2923,11 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "flate2",
+ "liblzma",
  "md5",
  "sha2 0.11.0",
  "tar",
  "tracing",
- "xz2",
  "zstd",
 ]
 
@@ -5940,15 +6003,6 @@ checksum = "0d65cbf2f12c15564212d48f4e3dfb87923d25d611f2aed18f4cb23f0413d89e"
 dependencies = [
  "libc",
  "rustix",
-]
-
-[[package]]
-name = "xz2"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "388c44dc09d76f1536602ead6d325eb532f5c122f17782bd57fb47baeeb767e2"
-dependencies = [
- "lzma-sys",
 ]
 
 [[package]]

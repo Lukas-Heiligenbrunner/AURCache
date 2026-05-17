@@ -19,6 +19,9 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait>(
     version: &str,
     start_time: i64,
 ) -> Result<EnqueueBuildResult, DbErr> {
+    // This helper relies on the partial unique index created by
+    // m20260514_000000_build_enqueue_dedupe to guarantee there is at most one
+    // pending build row per `(pkg_id, platform)` across ACTIVE/ENQUEUED states.
     let (sql, values) = match db.get_database_backend() {
         DbBackend::Sqlite => (
             "INSERT INTO builds (pkg_id, status, start_time, platform, version)

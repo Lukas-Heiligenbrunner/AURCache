@@ -6,10 +6,24 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     Set,
 };
+use std::collections::HashSet;
 
 /// Live-check a package: if it's not directly requested and nothing depends
 /// on it, remove it and live-check its dependencies.
 pub async fn live_check(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<()> {
+    let mut visited = HashSet::new();
+    live_check_with_visited(db, pkg_id, &mut visited).await
+}
+
+async fn live_check_with_visited(
+    db: &DatabaseConnection,
+    pkg_id: i32,
+    visited: &mut HashSet<i32>,
+) -> anyhow::Result<()> {
+    if !visited.insert(pkg_id) {
+        return Ok(());
+    }
+
     let pkg = Packages::find_by_id(pkg_id)
         .one(db)
         .await?
@@ -43,7 +57,7 @@ pub async fn live_check(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<
 
     // Live-check each dependency
     for dep_id in my_deps {
-        Box::pin(live_check(db, dep_id)).await?;
+        Box::pin(live_check_with_visited(db, dep_id, visited)).await?;
     }
 
     Ok(())

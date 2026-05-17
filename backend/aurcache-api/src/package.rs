@@ -120,7 +120,7 @@ pub async fn package_update_entity_endpoint(
     let update_pkg = packages::ActiveModel {
         id: Set(id),
         name: new_name.clone().map_or(NotSet, Set),
-        pkgbase: new_name.clone().map_or(NotSet, Set),
+        pkgbase: NotSet,
         status: input.status.map_or(NotSet, Set),
         out_of_date: input.out_of_date.map_or(NotSet, Set),
         upstream_version: NotSet,
@@ -136,6 +136,7 @@ pub async fn package_update_entity_endpoint(
         directly_requested: NotSet,
         current_version: NotSet,
         split_packages: NotSet,
+        provides: NotSet,
     };
 
     // Execute the update query
@@ -292,11 +293,10 @@ async fn list_directly_requested_packages(
 async fn list_package_relations(
     db: &DatabaseConnection,
     pkg_id: i32,
-    dep_column: dependencies::Column,
-    pkg_column: dependencies::Column,
+    direction: RelationDirection,
 ) -> Result<Vec<PackageDependencyModel>, sea_orm::DbErr> {
     let dependency_links = Dependencies::find()
-        .filter(dep_column.eq(pkg_id))
+        .filter(direction.filter_column().eq(pkg_id))
         .order_by_asc(dependencies::Column::Id)
         .all(db)
         .await?;
@@ -310,11 +310,7 @@ async fn list_package_relations(
             packages::Column::Id.is_in(
                 dependency_links
                     .iter()
-                    .map(|dep| match pkg_column {
-                        dependencies::Column::DependentId => dep.dependent_id,
-                        dependencies::Column::DependeeId => dep.dependee_id,
-                        _ => unreachable!("package relation queries only support id columns"),
-                    })
+                    .map(|dep| direction.related_package_id(dep))
                     .collect::<Vec<_>>(),
             ),
         )
@@ -327,11 +323,7 @@ async fn list_package_relations(
     Ok(dependency_links
         .into_iter()
         .filter_map(|dep| {
-            let package_id = match pkg_column {
-                dependencies::Column::DependentId => dep.dependent_id,
-                dependencies::Column::DependeeId => dep.dependee_id,
-                _ => unreachable!("package relation queries only support id columns"),
-            };
+            let package_id = direction.related_package_id(&dep);
 
             dependees
                 .get(&package_id)
@@ -344,9 +336,31 @@ async fn list_package_relations(
         .collect())
 }
 
+#[derive(Copy, Clone)]
+enum RelationDirection {
+    Dependencies,
+    Dependents,
+}
+
+impl RelationDirection {
+    fn filter_column(self) -> dependencies::Column {
+        match self {
+            Self::Dependencies => dependencies::Column::DependentId,
+            Self::Dependents => dependencies::Column::DependeeId,
+        }
+    }
+
+    fn related_package_id(self, dep: &dependencies::Model) -> i32 {
+        match self {
+            Self::Dependencies => dep.dependee_id,
+            Self::Dependents => dep.dependent_id,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{list_directly_requested_packages, list_package_relations};
+    use super::{RelationDirection, list_directly_requested_packages, list_package_relations};
     use aurcache_db::migration::Migrator;
     use aurcache_db::{dependencies, packages};
     use sea_orm::{ActiveModelTrait, Database, Set, TryIntoModel};
@@ -464,14 +478,9 @@ mod tests {
         .await
         .unwrap();
 
-        let deps = list_package_relations(
-            &db,
-            parent.id,
-            dependencies::Column::DependentId,
-            dependencies::Column::DependeeId,
-        )
-        .await
-        .unwrap();
+        let deps = list_package_relations(&db, parent.id, RelationDirection::Dependencies)
+            .await
+            .unwrap();
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].id, child.id);
@@ -538,14 +547,9 @@ mod tests {
         .await
         .unwrap();
 
-        let dependents = list_package_relations(
-            &db,
-            dependency.id,
-            dependencies::Column::DependeeId,
-            dependencies::Column::DependentId,
-        )
-        .await
-        .unwrap();
+        let dependents = list_package_relations(&db, dependency.id, RelationDirection::Dependents)
+            .await
+            .unwrap();
 
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].id, parent.id);
@@ -593,22 +597,12 @@ pub async fn get_package(
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
     let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
-    let dependencies = list_package_relations(
-        db,
-        pkg.id,
-        dependencies::Column::DependentId,
-        dependencies::Column::DependeeId,
-    )
-    .await
-    .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
-    let dependents = list_package_relations(
-        db,
-        pkg.id,
-        dependencies::Column::DependeeId,
-        dependencies::Column::DependentId,
-    )
-    .await
-    .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+    let dependencies = list_package_relations(db, pkg.id, RelationDirection::Dependencies)
+        .await
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+    let dependents = list_package_relations(db, pkg.id, RelationDirection::Dependents)
+        .await
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
     let source_data = SourceData::from_str(pkg.source_data.as_str())
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;

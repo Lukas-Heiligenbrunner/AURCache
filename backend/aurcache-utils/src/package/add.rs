@@ -6,6 +6,7 @@ use async_recursion::async_recursion;
 use aurcache_db::packages;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
+use aurcache_deps::DependencyResolution;
 use aurcache_types::builder::{Action, BuildStates};
 use pacman_mirrors::platforms::{Platform, Platforms};
 use sea_orm::QueryFilter;
@@ -29,6 +30,7 @@ struct PackageInsertSpec {
     dep_names: Vec<String>,
     dep_constraints: HashMap<String, String>,
     pkgnames: Vec<String>,
+    provides: Vec<String>,
     source_type: SourceType,
     source_data_json: String,
 }
@@ -137,6 +139,7 @@ async fn resolve_aur_package_spec(
         dep_names,
         dep_constraints,
         pkgnames: deps.pkgnames,
+        provides: deps.provides,
         source_type: SourceType::Aur,
         source_data_json: serde_json::to_string(&SourceData::Aur {
             name: pkgbase.to_string(),
@@ -160,6 +163,7 @@ fn resolve_git_package_spec(
         dep_names,
         dep_constraints,
         pkgnames: deps.pkgnames,
+        provides: deps.provides,
         source_type: SourceType::Git,
         source_data_json: serde_json::to_string(&SourceData::Git {
             url: url.to_string(),
@@ -290,6 +294,8 @@ pub(crate) async fn ensure_aur_package_exists_recursive(
     platforms_str: &str,
     build_flags_str: &str,
 ) -> anyhow::Result<()> {
+    // This helper inserts dependency-only rows and relies on the caller to
+    // provide the platform/build flag strings that should be stored on them.
     let context = AddContext {
         platforms: vec![],
         platforms_str: platforms_str.to_string(),
@@ -308,6 +314,34 @@ pub(crate) async fn ensure_aur_package_exists_recursive(
     .await
 }
 
+pub(crate) async fn resolve_dependency_resolutions(
+    client: &aurcache_deps::AurClient,
+    db: &DatabaseConnection,
+    dep_names: &[String],
+) -> anyhow::Result<HashMap<String, DependencyResolution>> {
+    if dep_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names).await?;
+    let unresolved = dep_names
+        .iter()
+        .filter(|dep_name| !resolutions.contains_key(dep_name.as_str()))
+        .map(|dep_name| dep_name.as_str())
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        return Ok(resolutions);
+    }
+
+    resolutions.extend(
+        client
+            .resolve_dependencies(&unresolved)
+            .await
+            .map_err(|e| anyhow!("Failed to resolve dependencies: {e}"))?,
+    );
+    Ok(resolutions)
+}
+
 async fn insert_package_with_deps(
     client: &aurcache_deps::AurClient,
     db: &DatabaseConnection,
@@ -316,37 +350,42 @@ async fn insert_package_with_deps(
     visited: &mut HashSet<String>,
     added_order: &mut Vec<String>,
 ) -> anyhow::Result<()> {
-    let aur_dep_bases = if package_spec.dep_names.is_empty() {
+    let resolved_deps = if package_spec.dep_names.is_empty() {
         HashMap::new()
     } else {
-        let dep_refs: Vec<&str> = package_spec.dep_names.iter().map(|s| s.as_str()).collect();
-        client.resolve_bases(&dep_refs).await.map_err(|e| {
-            anyhow!(
-                "Failed to resolve AUR dependencies for {}: {e}",
-                package_spec.pkgbase
-            )
-        })?
+        resolve_dependency_resolutions(client, db, &package_spec.dep_names)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to resolve dependencies for {}: {e}",
+                    package_spec.pkgbase
+                )
+            })?
     };
 
     let mut dep_pkgbases: Vec<String> = Vec::new();
     let mut dep_pkgbases_seen: HashSet<String> = HashSet::new();
-    for dep_base in aur_dep_bases.values() {
+    for resolution in resolved_deps.values() {
+        let dep_base = match resolution {
+            DependencyResolution::Official => continue,
+            DependencyResolution::Local { pkgbase } | DependencyResolution::Aur { pkgbase } => {
+                pkgbase
+            }
+        };
+        if dep_base == &package_spec.pkgbase {
+            continue;
+        }
         if dep_pkgbases_seen.insert(dep_base.clone()) {
             dep_pkgbases.push(dep_base.clone());
-            add_aur_package_recursive(client, db, dep_base, context, visited, added_order).await?;
+            if matches!(resolution, DependencyResolution::Aur { .. }) {
+                add_aur_package_recursive(client, db, dep_base, context, visited, added_order)
+                    .await?;
+            }
         }
     }
 
-    let split_packages_str = if package_spec.pkgnames.len() > 1
-        || package_spec
-            .pkgnames
-            .first()
-            .is_none_or(|n| n != &package_spec.pkgbase)
-    {
-        Some(serde_json::to_string(&package_spec.pkgnames)?)
-    } else {
-        None
-    };
+    let split_packages_str = split_packages_json(&package_spec.pkgbase, &package_spec.pkgnames)?;
+    let provides_str = provides_json(&package_spec.provides)?;
 
     let new_package = packages::ActiveModel {
         // Keep `name` aligned with `pkgbase`: this codebase stores one row per
@@ -362,24 +401,33 @@ async fn insert_package_with_deps(
         source_data: Set(package_spec.source_data_json),
         directly_requested: Set(false),
         split_packages: Set(split_packages_str),
+        provides: Set(provides_str),
         ..Default::default()
     };
-    added_order.push(package_spec.pkgbase.clone());
     let txn = db.begin().await?;
     let saved = new_package.save(&txn).await?;
 
     let mut dep_constraints_by_pkgbase: HashMap<String, String> = HashMap::new();
     for dep_name in &package_spec.dep_names {
-        let Some(dep_pkgbase) = aur_dep_bases.get(dep_name) else {
+        let Some(resolution) = resolved_deps.get(dep_name) else {
             continue;
         };
+        let dep_pkgbase = match resolution {
+            DependencyResolution::Official => continue,
+            DependencyResolution::Local { pkgbase } | DependencyResolution::Aur { pkgbase } => {
+                pkgbase
+            }
+        };
+        if dep_pkgbase == &package_spec.pkgbase {
+            continue;
+        }
         let constraint = package_spec
             .dep_constraints
             .get(dep_name)
             .map_or("", String::as_str);
 
         dep_constraints_by_pkgbase
-            .entry(dep_pkgbase.clone())
+            .entry(dep_pkgbase.to_string())
             .and_modify(|existing| {
                 *existing = crate::pkg::merge_version_constraints(existing.as_str(), constraint);
             })
@@ -414,7 +462,87 @@ async fn insert_package_with_deps(
     }
 
     txn.commit().await?;
+    added_order.push(package_spec.pkgbase.clone());
     Ok(())
+}
+
+pub(crate) fn split_packages_json(
+    pkgbase: &str,
+    pkgnames: &[String],
+) -> anyhow::Result<Option<String>> {
+    if pkgnames.len() <= 1 && pkgnames.first().is_none_or(|name| name == pkgbase) {
+        return Ok(None);
+    }
+
+    Ok(Some(serde_json::to_string(pkgnames)?))
+}
+
+pub(crate) fn provides_json(provides: &[String]) -> anyhow::Result<Option<String>> {
+    if provides.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(serde_json::to_string(provides)?))
+}
+
+async fn resolve_local_dependency_resolutions(
+    db: &DatabaseConnection,
+    dep_names: &[String],
+) -> anyhow::Result<HashMap<String, DependencyResolution>> {
+    let local_packages = Packages::find()
+        .filter(packages::Column::Status.is_in(vec![
+            BuildStates::ENQUEUED_BUILD,
+            BuildStates::ACTIVE_BUILD,
+            BuildStates::SUCCESSFUL_BUILD,
+        ]))
+        .all(db)
+        .await?;
+
+    Ok(dep_names
+        .iter()
+        .filter_map(|dep_name| {
+            find_local_dependee_pkgbase(&local_packages, dep_name)
+                .map(|pkgbase| (dep_name.clone(), DependencyResolution::Local { pkgbase }))
+        })
+        .collect())
+}
+
+fn find_local_dependee_pkgbase(
+    local_packages: &[packages::Model],
+    dep_name: &str,
+) -> Option<String> {
+    local_packages
+        .iter()
+        .filter_map(|pkg| local_match_rank(pkg, dep_name).map(|rank| (rank, pkg.pkgbase.as_str())))
+        .min_by(|(left_rank, left_name), (right_rank, right_name)| {
+            left_rank.cmp(right_rank).then(left_name.cmp(right_name))
+        })
+        .map(|(_, pkgbase)| pkgbase.to_string())
+}
+
+fn local_match_rank(pkg: &packages::Model, dep_name: &str) -> Option<u8> {
+    if pkg.pkgbase == dep_name {
+        return Some(0);
+    }
+    if json_list_contains(pkg.split_packages.as_deref(), dep_name, false) {
+        return Some(1);
+    }
+    json_list_contains(pkg.provides.as_deref(), dep_name, true).then_some(2)
+}
+
+fn json_list_contains(json: Option<&str>, dep_name: &str, parse_relation: bool) -> bool {
+    parse_json_list(json).into_iter().any(|value| {
+        if parse_relation {
+            aurcache_deps::parse_dep(&value).0 == dep_name
+        } else {
+            value == dep_name
+        }
+    })
+}
+
+fn parse_json_list(json: Option<&str>) -> Vec<String> {
+    json.and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]

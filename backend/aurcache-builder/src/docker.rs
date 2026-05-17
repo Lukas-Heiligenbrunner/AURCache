@@ -161,7 +161,9 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                 BuildMode::Host(cfg) => format!("{}/mirrorlist", cfg.mirrorlist_path_host),
             };
 
-            if std::path::Path::new(&mirrorlist_source).exists() {
+            if !mirrorlist_source.starts_with('/')
+                || std::path::Path::new(&mirrorlist_source).exists()
+            {
                 let mnt = match get_build_mode() {
                     BuildMode::DinD(_) => Mount {
                         target: Some(archlinux_mirrorlist_path.to_string()),

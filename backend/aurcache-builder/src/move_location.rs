@@ -32,16 +32,17 @@ impl Builder {
         let build_pkgs = build_output_map(archive_paths)?;
         let txn = self.db.begin().await?;
         let pkg_id = *self.package_model.id.get()?;
+        let platform = self.build_model.platform.get()?.clone();
 
         let mut new_file_ids: HashMap<String, i32> = HashMap::new();
 
         for (archive_path, parsed) in &build_pkgs {
             let archive_name = archive_path.file_name().to_str().unwrap().to_string();
-            let platform = self.build_model.platform.get()?.clone();
             let pkg_path = format!("./repo/{platform}/{archive_name}");
 
             let existing = Files::find()
                 .filter(files::Column::Filename.eq(&archive_name))
+                .filter(files::Column::Platform.eq(&platform))
                 .one(&txn)
                 .await?;
 
@@ -103,6 +104,7 @@ impl Builder {
 
         let stale = Files::find()
             .filter(files::Column::PackageId.eq(pkg_id))
+            .filter(files::Column::Platform.eq(&platform))
             .all(&txn)
             .await?;
 
