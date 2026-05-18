@@ -1,12 +1,11 @@
-use alpm_srcinfo::SourceInfoV1;
 use anyhow::anyhow;
-use aur_rs::{Package, Request};
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
+use aurcache_deps::AurClient;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::git::sourceinfo::load_git_sourceinfo;
 use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
@@ -14,7 +13,6 @@ use sea_orm::{
 use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
 use std::str::FromStr;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -39,21 +37,17 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
     let aur_names: Vec<&str> = packages
         .iter()
         .filter(|x| x.source_type == SourceType::Aur)
-        .map(|x| x.name.as_str())
+        .map(|x| x.pkgbase.as_str())
         .collect();
 
     let results = if aur_names.is_empty() {
         vec![]
     } else {
-        let request = Request::default();
-        let response = request
-            .search_multi_info_by_names(aur_names.as_slice())
-            .await;
-
-        let results: Vec<Package> = response
+        let client = AurClient::new();
+        client
+            .multi_info_of(&aur_names)
+            .await
             .map_err(|_| anyhow!("couldn't download version update"))?
-            .results;
-        results
     };
 
     if results.len() != aur_names.len() {
@@ -80,36 +74,26 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
 
         let source_data = SourceData::from_str(package.source_data.as_str())?;
         match source_data {
-            SourceData::Aur { .. } => match results.iter().find(|x1| x1.name == package.name) {
-                None => {
-                    warn!("Couldn't find {} in AUR response", package.name);
+            SourceData::Aur { .. } => {
+                match results.iter().find(|x1| x1.package_base == package.pkgbase) {
+                    None => {
+                        warn!("Couldn't find {} in AUR response", package.pkgbase);
+                    }
+                    Some(result) => {
+                        package_model.upstream_version = Set(Option::from(result.version.clone()));
+                        package_model.out_of_date =
+                            Set(i32::from(latest_version != Some(result.version.clone())));
+                    }
                 }
-                Some(result) => {
-                    package_model.upstream_version = Set(Option::from(result.version.clone()));
-                    package_model.out_of_date =
-                        Set(i32::from(latest_version != Some(result.version.clone())));
-                }
-            },
-            SourceData::Git {
-                url,
-                subfolder,
-                r#ref,
-            } => {
-                let dir = tempdir()?;
-                let repo_path = dir.path().join("repo");
-
-                checkout_repo_ref(url.clone(), r#ref.clone(), repo_path.clone())?;
-                // todo maybe check also if latest commit hash changed
-
-                let sourceinfo = SourceInfoV1::from_pkgbuild(
-                    repo_path.join(subfolder).join("PKGBUILD").as_path(),
-                )?;
+            }
+            SourceData::Git { spec } => {
+                let sourceinfo = load_git_sourceinfo(&spec)?;
+                // This still only tracks the version in PKGBUILD/.SRCINFO; a ref
+                // moving without a version bump will not mark the package outdated.
                 let version = sourceinfo.base.version.to_string();
 
                 package_model.upstream_version = Set(Option::from(version.clone()));
                 package_model.out_of_date = Set(i32::from(latest_version != Some(version)));
-
-                _ = dir.close();
             }
             SourceData::Upload { .. } => {
                 // noop since update is only triggered by new upload

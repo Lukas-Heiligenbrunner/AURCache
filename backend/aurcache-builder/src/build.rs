@@ -1,23 +1,33 @@
 use crate::logger::BuildLogger;
 use crate::path_utils::create_active_build_path;
 use anyhow::{anyhow, bail};
+use aurcache_db::dependencies;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::{builds, packages};
-use aurcache_types::builder::BuildStates;
+use aurcache_db::helpers::build_enqueue::enqueue_build_if_missing;
+use aurcache_db::prelude::{Builds, Files, Packages};
+use aurcache_db::{builds, files, packages};
+use aurcache_types::builder::{Action, BuildStates};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingSource, SettingsEntry};
+use aurcache_utils::platforms::platform_list_contains;
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
 use bollard::Docker;
 use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, IntoActiveModel, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    IntoActiveModel, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    TransactionTrait,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio::sync::broadcast::Sender;
 use tokio::time::timeout;
 use tracing::{debug, info};
 
@@ -40,6 +50,14 @@ pub struct Builder {
     pub(crate) build_model: builds::ActiveModel,
     pub(crate) logger: BuildLogger,
     pub(crate) docker: Docker,
+    pub(crate) action_tx: Sender<Action>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepState {
+    Satisfied,
+    NeedsRebuild,
+    NotReady,
 }
 
 impl Builder {
@@ -48,6 +66,7 @@ impl Builder {
         job_containers: Arc<Mutex<HashMap<i32, String>>>,
         package_model: packages::Model,
         build_model: builds::Model,
+        action_tx: Sender<Action>,
     ) -> anyhow::Result<Self> {
         let logger = BuildLogger::new(build_model.id, db.clone());
         debug!("Build {}: Establish docker connection", build_model.id);
@@ -67,6 +86,7 @@ impl Builder {
             build_model: build_model.into_active_model(),
             logger,
             docker,
+            action_tx,
         })
     }
 
@@ -236,31 +256,58 @@ impl Builder {
     }
 
     pub async fn post_build(&mut self, result: anyhow::Result<()>) -> anyhow::Result<()> {
+        let pkg_id = *self.package_model.id.get()?;
+
         let txn = self.db.begin().await?;
+        let pkg_exists = Packages::find_by_id(pkg_id).one(&txn).await?.is_some();
         self.build_model.end_time = Set(Some(
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
         ));
 
         match result {
             Ok(()) => {
-                // update package success status
-                self.package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
-                self.package_model.out_of_date = Set(i32::from(false));
-                self.package_model = self.package_model.clone().save(&txn).await?;
+                if pkg_exists {
+                    self.package_model.status = Set(BuildStates::SUCCESSFUL_BUILD);
+                    self.package_model.out_of_date = Set(i32::from(false));
+                    if let Ok(version) = self.build_model.version.get() {
+                        self.package_model.current_version = Set(Some(version.clone()));
+                    }
+                    self.package_model = self.package_model.clone().save(&txn).await?;
+                }
 
                 self.build_model.status = Set(Some(BuildStates::SUCCESSFUL_BUILD));
 
                 self.build_model = self.build_model.clone().save(&txn).await?;
-                // commit transaction before build logger requires db connection again
                 txn.commit().await?;
 
-                self.logger
-                    .append("finished package build".to_string())
-                    .await;
+                if pkg_exists {
+                    self.logger
+                        .append("finished package build".to_string())
+                        .await;
+
+                    if let Err(e) = self.trigger_dependents().await {
+                        self.logger
+                            .append(format!("Failed to trigger dependents: {e}"))
+                            .await;
+                    }
+                } else {
+                    self.logger
+                        .append(
+                            "package was removed during build; cleaning up artifacts".to_string(),
+                        )
+                        .await;
+                    if let Err(e) = self.cleanup_orphaned_build_files().await {
+                        self.logger
+                            .append(format!("Failed to clean up orphaned files: {e}"))
+                            .await;
+                    }
+                }
             }
             Err(e) => {
-                self.package_model.status = Set(BuildStates::FAILED_BUILD);
-                self.package_model = self.package_model.clone().save(&txn).await?;
+                if pkg_exists {
+                    self.package_model.status = Set(BuildStates::FAILED_BUILD);
+                    self.package_model = self.package_model.clone().save(&txn).await?;
+                }
 
                 self.build_model.status = Set(Some(BuildStates::FAILED_BUILD));
                 self.build_model = self.build_model.clone().save(&txn).await?;
@@ -273,12 +320,329 @@ impl Builder {
             }
         }
 
-        // remove build from container map
         self.job_containers
             .lock()
             .await
             .remove(self.build_model.id.get()?)
             .ok_or(anyhow!("Failed to get job container"))?;
+        Ok(())
+    }
+
+    /// Create a build record and send it to the build queue.
+    async fn enqueue_build(
+        &self,
+        pkg: &packages::Model,
+        platform: &str,
+        version: &str,
+    ) -> anyhow::Result<aurcache_db::helpers::build_enqueue::EnqueueBuildResult> {
+        let result = enqueue_build_if_missing(
+            &self.db,
+            pkg.id,
+            platform,
+            version,
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64,
+        )
+        .await?;
+
+        if result.inserted {
+            let _ = self.action_tx.send(Action::Build(
+                Box::from(pkg.clone()),
+                Box::new(result.build.clone()),
+            ));
+        }
+
+        Ok(result)
+    }
+
+    /// After a successful build, check for packages that depend on this one
+    /// and trigger their builds if all their dependencies are satisfied.
+    async fn trigger_dependents(&self) -> anyhow::Result<()> {
+        let pkg_id = *self.package_model.id.get()?;
+        let platform = self.build_model.platform.get()?.clone();
+        let deps_by_dependent = self.load_dependencies_for_dependents_of(pkg_id).await?;
+        if deps_by_dependent.is_empty() {
+            return Ok(());
+        }
+
+        for (dependent_id, all_deps) in &deps_by_dependent {
+            if self
+                .dependencies_ready_for_dependent(all_deps, &platform)
+                .await?
+            {
+                self.trigger_dependent_builds(*dependent_id, &platform)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_dependencies_for_dependents_of(
+        &self,
+        pkg_id: i32,
+    ) -> anyhow::Result<HashMap<i32, Vec<dependencies::Model>>> {
+        let (sql, values) = match self.db.get_database_backend() {
+            DbBackend::Sqlite => (
+                "SELECT d.id, d.dependent_id, d.dependee_id, d.version_constraint
+                 FROM dependencies d
+                 WHERE d.dependent_id IN (
+                    SELECT DISTINCT dependent_id FROM dependencies WHERE dependee_id = ?
+                 );",
+                vec![pkg_id.into()],
+            ),
+            DbBackend::Postgres => (
+                "SELECT d.id, d.dependent_id, d.dependee_id, d.version_constraint
+                 FROM public.dependencies d
+                 WHERE d.dependent_id IN (
+                    SELECT DISTINCT dependent_id FROM public.dependencies WHERE dependee_id = $1
+                 );",
+                vec![pkg_id.into()],
+            ),
+            _ => return Err(anyhow!("Unsupported database backend")),
+        };
+
+        let rows = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                self.db.get_database_backend(),
+                sql,
+                values,
+            ))
+            .await?;
+
+        let mut deps_by_dependent: HashMap<i32, Vec<dependencies::Model>> = HashMap::new();
+        for row in rows {
+            let dep = dependencies::Model {
+                id: row.try_get("", "id")?,
+                dependent_id: row.try_get("", "dependent_id")?,
+                dependee_id: row.try_get("", "dependee_id")?,
+                version_constraint: row.try_get("", "version_constraint")?,
+            };
+            deps_by_dependent
+                .entry(dep.dependent_id)
+                .or_default()
+                .push(dep);
+        }
+        Ok(deps_by_dependent)
+    }
+
+    async fn dependencies_ready_for_dependent(
+        &self,
+        all_deps: &[dependencies::Model],
+        platform: &str,
+    ) -> anyhow::Result<bool> {
+        for dep in all_deps {
+            match self
+                .check_dep(dep.dependee_id, platform, &dep.version_constraint)
+                .await?
+            {
+                DepState::Satisfied => continue,
+                DepState::NeedsRebuild => {
+                    self.trigger_dep_rebuild(dep.dependee_id, platform).await?;
+                    return Ok(false);
+                }
+                DepState::NotReady => return Ok(false),
+            }
+        }
+
+        Ok(true)
+    }
+
+    async fn trigger_dependent_builds(
+        &self,
+        dependent_id: i32,
+        platform: &str,
+    ) -> anyhow::Result<()> {
+        let Some(pkg) = Packages::find_by_id(dependent_id).one(&self.db).await? else {
+            return Ok(());
+        };
+        if !self.should_enqueue_dependent(&pkg, platform).await? {
+            return Ok(());
+        }
+
+        let version = pkg
+            .current_version
+            .clone()
+            .or(pkg.upstream_version.clone())
+            .unwrap_or_default();
+        let enqueue_result = self.enqueue_build(&pkg, platform, &version).await?;
+        if enqueue_result.inserted {
+            self.logger
+                .append(format!(
+                    "Triggered build #{} for dependent '{}' on {}",
+                    enqueue_result.build.id, pkg.name, platform
+                ))
+                .await;
+        } else {
+            self.logger
+                .append(format!(
+                    "Dependent '{}' already has build #{} pending on {}, skipping duplicate enqueue",
+                    pkg.name, enqueue_result.build.id, platform
+                ))
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn should_enqueue_dependent(
+        &self,
+        pkg: &packages::Model,
+        platform: &str,
+    ) -> anyhow::Result<bool> {
+        if !platform_list_contains(&pkg.platforms, platform) {
+            return Ok(false);
+        }
+
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(pkg.id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+
+        Ok(queued_or_active == 0)
+    }
+
+    /// Check if a dependency has a successful build at a version that satisfies
+    /// the version constraint.
+    async fn check_dep(
+        &self,
+        dependee_id: i32,
+        platform: &str,
+        constraint: &str,
+    ) -> anyhow::Result<DepState> {
+        // Self-referencing dep (shouldn't happen, but match original behavior)
+        if *self.package_model.id.get()? == dependee_id {
+            return Ok(DepState::Satisfied);
+        }
+
+        let Some(_pkg) = Packages::find_by_id(dependee_id).one(&self.db).await? else {
+            return Ok(DepState::NotReady);
+        };
+
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+        if queued_or_active > 0 {
+            return Ok(DepState::NotReady);
+        }
+
+        // Get the latest successful build
+        let Some(build) = Builds::find()
+            .select_only()
+            .column(builds::Column::Version)
+            .column(builds::Column::Status)
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
+            .order_by(builds::Column::EndTime, Order::Desc)
+            .order_by(builds::Column::StartTime, Order::Desc)
+            .limit(1)
+            .into_tuple::<(String, Option<i32>)>()
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(DepState::NotReady);
+        };
+
+        let (version, _status) = build;
+        if constraint.is_empty() || aurcache_utils::pkg::satisfies_constraint(&version, constraint)
+        {
+            Ok(DepState::Satisfied)
+        } else {
+            Ok(DepState::NeedsRebuild)
+        }
+    }
+
+    /// Trigger a rebuild of a dependency whose version doesn't satisfy the constraint,
+    /// unless it's already building.
+    async fn trigger_dep_rebuild(&self, dependee_id: i32, platform: &str) -> anyhow::Result<()> {
+        let Some(pkg) = Packages::find_by_id(dependee_id).one(&self.db).await? else {
+            return Ok(());
+        };
+
+        let queued_or_active = Builds::find()
+            .filter(builds::Column::PkgId.eq(dependee_id))
+            .filter(builds::Column::Platform.eq(platform))
+            .filter(builds::Column::Status.is_in(vec![
+                Some(BuildStates::ENQUEUED_BUILD),
+                Some(BuildStates::ACTIVE_BUILD),
+            ]))
+            .count(&self.db)
+            .await?;
+        if queued_or_active > 0 {
+            self.logger
+                .append(format!(
+                    "Dep '{}' is already building on {}, skipping duplicate rebuild",
+                    pkg.name, platform
+                ))
+                .await;
+            return Ok(());
+        }
+
+        let build_ids = aurcache_utils::package::update::package_update(
+            &self.db,
+            pkg.clone(),
+            true,
+            &self.action_tx,
+        )
+        .await?;
+        if build_ids.is_empty() {
+            self.logger
+                .append(format!(
+                    "Dependency '{}' was checked for update but no rebuild was enqueued yet",
+                    pkg.name
+                ))
+                .await;
+        } else {
+            for build_id in build_ids {
+                self.logger
+                    .append(format!(
+                        "Triggered rebuild #{} for dep '{}' (version constraint)",
+                        build_id, pkg.name
+                    ))
+                    .await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Clean up package files that were placed into the repo by `move_and_add_pkgs`
+    /// when the package record was deleted during the build.
+    async fn cleanup_orphaned_build_files(&self) -> anyhow::Result<()> {
+        let pkg_id = *self.package_model.id.get()?;
+        let platform = self.build_model.platform.get()?.clone();
+
+        let orphaned: Vec<files::Model> = Files::find()
+            .filter(files::Column::PackageId.eq(pkg_id))
+            .filter(files::Column::Platform.eq(&platform))
+            .all(&self.db)
+            .await?;
+
+        if orphaned.is_empty() {
+            return Ok(());
+        }
+
+        let txn = self.db.begin().await?;
+        for file in orphaned {
+            self.logger
+                .append(format!(
+                    "Cleaning up orphaned build artifact: {}\n",
+                    file.filename
+                ))
+                .await;
+            try_remove_archive_file(file, &txn).await?;
+        }
+        txn.commit().await?;
         Ok(())
     }
 

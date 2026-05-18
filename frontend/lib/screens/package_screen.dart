@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
-import 'package:skeletonizer/skeletonizer.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../api/API.dart';
@@ -55,7 +54,21 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                 children: [
                   Container(
                     margin: const EdgeInsets.only(left: 15),
-                    child: Text(pkg.name, style: const TextStyle(fontSize: 32)),
+                    child: Row(
+                      children: [
+                        Text(pkg.name, style: const TextStyle(fontSize: 32)),
+                        if (!pkg.directly_requested) ...[
+                          const SizedBox(width: 10),
+                          Text(
+                            "(dependency)",
+                            style: TextStyle(
+                              fontSize: 18,
+                              color: Colors.white.withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                   pkg.package_source.maybeWhen(
                     aur: (aur) => IconButton(
@@ -70,7 +83,7 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                     git: (git) => IconButton(
                       onPressed: () async {
                         await launchUrl(
-                          Uri.parse(git.git_url),
+                          Uri.parse(git.url),
                           webOnlyWindowName: '_blank',
                         );
                       },
@@ -175,100 +188,149 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
         color: secondaryColor,
         padding: const EdgeInsets.all(defaultPadding),
         margin: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 5),
-            Text(
-              "Details for ${pkg.name}:",
-              style: const TextStyle(fontSize: 18),
-              textAlign: TextAlign.start,
-            ),
-            _sideCard(
-              title: "Latest Upstream version",
-              subtitle: pkg.upstream_version,
-            ),
-            ...pkg.package_source.when(
-              aur: (aur) {
-                final lastUpdated = DateTime.fromMillisecondsSinceEpoch(
-                  aur.last_updated * 1000,
-                );
-                final firstSubmitted = DateTime.fromMillisecondsSinceEpoch(
-                  aur.first_submitted * 1000,
-                );
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 5),
+              Text(
+                "Details for ${pkg.name}:",
+                style: const TextStyle(fontSize: 18),
+                textAlign: TextAlign.start,
+              ),
+              _sideCard(
+                title: "Latest Upstream version",
+                subtitle: pkg.upstream_version,
+              ),
+              ...pkg.package_source.when(
+                aur: (aur) {
+                  final lastUpdated = DateTime.fromMillisecondsSinceEpoch(
+                    aur.last_updated * 1000,
+                  );
+                  final firstSubmitted = DateTime.fromMillisecondsSinceEpoch(
+                    aur.first_submitted * 1000,
+                  );
 
-                return [
-                  _sideCard(
-                    title: "Last Updated",
-                    subtitle:
-                        "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
-                  ),
-                  _sideCard(
-                    title: "First submitted",
-                    subtitle:
-                        "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
-                  ),
-                  _sideCard(title: "Licenses", subtitle: aur.licenses ?? "-"),
-                  _sideCard(
-                    title: "Maintainer",
-                    subtitle: aur.maintainer ?? "-",
-                  ),
-                  _sideCard(
-                    title: "Flagged outdated",
-                    subtitle: aur.aur_flagged_outdated ? "yes" : "no",
-                  ),
-                ];
-              },
-              aurNotFound: (_) => [],
-              git: (git) => [
-                _sideCard(title: "Git Repository", subtitle: git.git_url),
-                _sideCard(title: "Git Ref", subtitle: git.git_ref),
-                _sideCard(title: "Subfolder", subtitle: git.subfolder),
-              ],
-              upload: (upload) => {
-                // todo upload type
-              },
-            ),
-            const Divider(),
-            const SizedBox(height: 5),
-            const Text(
-              "Selected build platforms:",
-              style: TextStyle(fontSize: 18),
-              textAlign: TextAlign.start,
-            ),
-            const SizedBox(height: 20),
-            Tags(
-              itemBuilder: (idx) => ItemTags(
-                index: idx,
-                title: pkg.selected_platforms[idx],
-                active: true,
-                activeColor: Colors.green,
-                pressEnabled: false,
+                  return [
+                    _sideCard(
+                      title: "Last Updated",
+                      subtitle:
+                          "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
+                    ),
+                    _sideCard(
+                      title: "First submitted",
+                      subtitle:
+                          "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
+                    ),
+                    _sideCard(title: "Licenses", subtitle: aur.licenses ?? "-"),
+                    _sideCard(
+                      title: "Maintainer",
+                      subtitle: aur.maintainer ?? "-",
+                    ),
+                    _sideCard(
+                      title: "Flagged outdated",
+                      subtitle: aur.aur_flagged_outdated ? "yes" : "no",
+                    ),
+                  ];
+                },
+                aurNotFound: (_) => [],
+                git: (git) => [
+                  _sideCard(title: "Git Repository", subtitle: git.url),
+                  _sideCard(title: "Git Ref", subtitle: git.ref),
+                  _sideCard(title: "Subfolder", subtitle: git.subfolder),
+                ],
+                upload: (upload) => {
+                  // todo upload type
+                },
               ),
-              itemCount: pkg.selected_platforms.length,
-            ),
-            const SizedBox(height: 15),
-            const Divider(),
-            const SizedBox(height: 5),
-            const Text(
-              "Build flags:",
-              style: TextStyle(fontSize: 18),
-              textAlign: TextAlign.start,
-            ),
-            const SizedBox(height: 20),
-            Tags(
-              itemBuilder: (idx) => ItemTags(
-                index: idx,
-                title: pkg.selected_build_flags[idx],
-                active: true,
-                activeColor: Colors.white38,
-                pressEnabled: false,
+              const Divider(),
+              const SizedBox(height: 5),
+              const Text(
+                "Dependencies:",
+                style: TextStyle(fontSize: 18),
+                textAlign: TextAlign.start,
               ),
-              itemCount: pkg.selected_build_flags.length,
-            ),
-          ],
+              const SizedBox(height: 12),
+              _buildPackageLinks(pkg.dependencies),
+              const SizedBox(height: 15),
+              const Divider(),
+              const SizedBox(height: 5),
+              const Text(
+                "Dependents:",
+                style: TextStyle(fontSize: 18),
+                textAlign: TextAlign.start,
+              ),
+              const SizedBox(height: 12),
+              _buildPackageLinks(pkg.dependents),
+              const SizedBox(height: 15),
+              const Divider(),
+              const SizedBox(height: 5),
+              const Text(
+                "Selected build platforms:",
+                style: TextStyle(fontSize: 18),
+                textAlign: TextAlign.start,
+              ),
+              const SizedBox(height: 20),
+              Tags(
+                itemBuilder: (idx) => ItemTags(
+                  index: idx,
+                  title: pkg.selected_platforms[idx],
+                  active: true,
+                  activeColor: Colors.green,
+                  pressEnabled: false,
+                ),
+                itemCount: pkg.selected_platforms.length,
+              ),
+              const SizedBox(height: 15),
+              const Divider(),
+              const SizedBox(height: 5),
+              const Text(
+                "Build flags:",
+                style: TextStyle(fontSize: 18),
+                textAlign: TextAlign.start,
+              ),
+              const SizedBox(height: 20),
+              Tags(
+                itemBuilder: (idx) => ItemTags(
+                  index: idx,
+                  title: pkg.selected_build_flags[idx],
+                  active: true,
+                  activeColor: Colors.white38,
+                  pressEnabled: false,
+                ),
+                itemCount: pkg.selected_build_flags.length,
+              ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _buildPackageLinks(List<PackageDependency> packages) {
+    if (packages.isEmpty) {
+      return const Text("none");
+    }
+
+    final sortedPackages = [...packages]
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: sortedPackages
+          .map((package) {
+            final suffix = package.version_constraint.isEmpty
+                ? ''
+                : ' ${package.version_constraint}';
+            return ActionChip(
+              label: Text('${package.name}$suffix'),
+              onPressed: () {
+                context.push("/package/${package.id}");
+              },
+            );
+          })
+          .toList(growable: false),
     );
   }
 

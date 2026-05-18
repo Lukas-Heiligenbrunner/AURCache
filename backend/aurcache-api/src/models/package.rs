@@ -1,4 +1,4 @@
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{GitSourceSpec, SourceData};
 use rocket::serde::{Deserialize, Serialize};
 use sea_orm::FromQueryResult;
 use utoipa::ToSchema;
@@ -41,6 +41,7 @@ pub struct SimplePackageModel {
 pub struct ExtendedPackageModel {
     pub id: i32,
     pub name: String,
+    pub directly_requested: bool,
     pub status: i32,
     pub outofdate: i32,
     pub latest_version: Option<String>,
@@ -49,6 +50,16 @@ pub struct ExtendedPackageModel {
     // todo this should be renamed to "latest_upstream_version" or sth
     pub upstream_version: String,
     pub package_source: PackageSource,
+    pub split_packages: Option<Vec<String>>,
+    pub dependencies: Vec<PackageDependencyModel>,
+    pub dependents: Vec<PackageDependencyModel>,
+}
+
+#[derive(Deserialize, ToSchema, Serialize, Clone)]
+pub struct PackageDependencyModel {
+    pub id: i32,
+    pub name: String,
+    pub version_constraint: String,
 }
 
 #[derive(Deserialize, ToSchema, Serialize, Clone)]
@@ -56,15 +67,8 @@ pub struct ExtendedPackageModel {
 pub enum PackageSource {
     Aur(AurPackage),
     AurNotFound(AurNotFoundPackage),
-    Git(GitPackage),
+    Git(GitSourceSpec),
     Upload(UploadPackage),
-}
-
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone)]
-pub struct GitPackage {
-    pub git_url: String,
-    pub git_ref: String,
-    pub subfolder: String,
 }
 
 // todo upload package

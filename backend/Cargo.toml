@@ -5,6 +5,7 @@ members = [
     "pacman-repo-utils",
     "aurcache",
     "aurcache-builder",
+    "aurcache-deps",
     "aurcache-db",
     "aurcache-api",
     "aurcache-activitylog",
@@ -23,7 +24,6 @@ backon = "1.6.0"
 serde_json = "1.0.149"
 sea-orm = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.14.0"
-aur-rs = "0.1.1"
 flate2 = "1.1.9"
 tar = "0.4.45"
 utoipa = { version = "5.4.0", features = ["rocket_extras"] }

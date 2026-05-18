@@ -6,6 +6,13 @@ use std::fmt::Display;
 use std::str::FromStr;
 use utoipa::ToSchema;
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct GitSourceSpec {
+    pub url: String,
+    pub r#ref: String,
+    pub subfolder: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type")] // the JSON field that acts as the tag
 pub enum SourceData {
@@ -13,12 +20,17 @@ pub enum SourceData {
     Aur { name: String },
     #[serde(rename = "git")]
     Git {
-        url: String,
-        r#ref: String,
-        subfolder: String,
+        #[serde(flatten)]
+        spec: GitSourceSpec,
     },
     #[serde(rename = "upload")]
     Upload { archive: Vec<u8> },
+}
+
+impl From<GitSourceSpec> for SourceData {
+    fn from(spec: GitSourceSpec) -> Self {
+        Self::Git { spec }
+    }
 }
 
 impl FromStr for SourceData {
@@ -61,6 +73,10 @@ pub enum SourceType {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    /// Legacy/display package identifier.
+    ///
+    /// In the current dependency-aware model we track one row per pkgbase, so
+    /// `name` is intentionally kept equal to `pkgbase`.
     pub name: String,
     pub status: i32,
     pub out_of_date: i32,
@@ -70,6 +86,14 @@ pub struct Model {
     pub platforms: String,
     pub source_type: SourceType,
     pub source_data: String,
+    /// Canonical AUR package base for this row.
+    ///
+    /// Dependency resolution and split-package tracking are keyed by `pkgbase`.
+    pub pkgbase: String,
+    pub directly_requested: bool,
+    pub current_version: Option<String>,
+    pub split_packages: Option<String>,
+    pub provides: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}
@@ -78,6 +102,8 @@ impl ActiveModelBehavior for ActiveModel {}
 pub enum Relation {
     #[sea_orm(has_many = "super::builds::Entity")]
     Builds,
+    #[sea_orm(has_many = "super::files::Entity")]
+    Files,
     #[sea_orm(
         belongs_to = "super::builds::Entity",
         from = "Column::LatestBuild",
@@ -86,18 +112,14 @@ pub enum Relation {
     LatestBuild,
 }
 
-impl Related<super::builds::Entity> for Entity {
+impl Related<super::files::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Builds.def()
+        Relation::Files.def()
     }
 }
 
-impl Related<super::files::Entity> for Entity {
+impl Related<super::builds::Entity> for Entity {
     fn to() -> RelationDef {
-        super::packages_files::Relation::Files.def()
-    }
-
-    fn via() -> Option<RelationDef> {
-        Some(super::packages_files::Relation::Packages.def())
+        Relation::Builds.def()
     }
 }

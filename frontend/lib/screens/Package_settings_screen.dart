@@ -122,7 +122,7 @@ class _Body extends StatelessWidget {
               child: _SectionContainer(
                 title: 'Build flags',
                 description:
-                    'Extra flags passed to paru when building this package.',
+                    'Extra flags passed to makepkg when building this package.',
                 child: BuildFlagSettings(
                   initialFlags: pkg.selected_build_flags,
                   onChanged: (next) => _patchPackage(buildFlags: next),

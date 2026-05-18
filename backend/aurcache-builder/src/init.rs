@@ -2,6 +2,7 @@ use crate::cancel::cancel_build;
 use crate::queue::queue_package;
 use aurcache_types::builder::Action;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
 use aurcache_utils::settings::general::SettingsTraits;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
+use tracing::error;
 
 #[must_use]
 pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
@@ -16,6 +18,11 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
         let mut concurrent_builds = get_max_concurrent_builds(&db).await;
         let semaphore = Arc::new(Semaphore::new(concurrent_builds));
         let job_containers: Arc<Mutex<HashMap<i32, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let mut rx = tx.subscribe();
+
+        if let Err(e) = enqueue_missing_buildable_packages(&db, &tx).await {
+            error!("Failed to enqueue buildable packages during startup: {e}");
+        }
 
         loop {
             // Adjust semaphore permits dynamically
@@ -29,7 +36,7 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
                 concurrent_builds = new_max;
             }
 
-            if let Ok(_result) = tx.subscribe().recv().await {
+            if let Ok(_result) = rx.recv().await {
                 match _result {
                     // add a package to parallel build
                     Action::Build(package_model, build_model) => {
@@ -39,6 +46,7 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
                             db.clone(),
                             semaphore.clone(),
                             job_containers.clone(),
+                            tx.clone(),
                         )
                         .await;
                     }

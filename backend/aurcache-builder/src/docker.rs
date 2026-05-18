@@ -1,12 +1,12 @@
 use crate::build::Builder;
 use crate::build_mode::{BuildMode, get_build_mode};
 use crate::logger::BuildLogger;
-use crate::makepkg_utils::{create_makepkg_config, read_pacman_config};
+use crate::makepkg_utils::{create_makepkg_config, create_pacman_config};
 use anyhow::anyhow;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::packages::SourceData;
+use aurcache_db::packages::{GitSourceSpec, SourceData};
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
-use aurcache_utils::git::checkout::checkout_repo_ref;
+use aurcache_utils::git::checkout::checkout_git_source;
 use aurcache_utils::settings::general::SettingsTraits;
 use bollard::container::LogOutput;
 use bollard::models::{
@@ -152,104 +152,105 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
 
         let mut mounts = vec![];
 
-        // todo allow for custom mirrorlists for other archs
+        // Mount a custom mirrorlist if one exists on the host.
+        // If absent, the builder image's default mirrorlist is used.
         if arch == "linux/x86_64" {
-            // Mount only the mirrorlist file, not the entire directory
-            // This preserves other files in /etc/pacman.d (like gnupg keyring)
             let archlinux_mirrorlist_path = "/etc/pacman.d/mirrorlist";
-            let mnt = match get_build_mode() {
-                BuildMode::DinD(cfg) => {
-                    let mirrorlist_path = format!("{}/mirrorlist", cfg.mirrorlist_path);
+            let mirrorlist_source = match get_build_mode() {
+                BuildMode::DinD(cfg) => format!("{}/mirrorlist", cfg.mirrorlist_path),
+                BuildMode::Host(cfg) => format!("{}/mirrorlist", cfg.mirrorlist_path_host),
+            };
 
-                    Mount {
+            // In DinD mode the mirrorlist path lives inside the DinD volume, so
+            // we can't check host-filesystem existence; always mount.
+            // In Host mode, only mount if the file exists (absolute) or a volume
+            // reference is given (relative path).
+            let should_mount = match get_build_mode() {
+                BuildMode::DinD(_) => true,
+                BuildMode::Host(_) => {
+                    !mirrorlist_source.starts_with('/')
+                        || std::path::Path::new(&mirrorlist_source).exists()
+                }
+            };
+            if should_mount {
+                let mnt = match get_build_mode() {
+                    BuildMode::DinD(_) => Mount {
                         target: Some(archlinux_mirrorlist_path.to_string()),
-                        source: Some(mirrorlist_path.clone()),
+                        source: Some(mirrorlist_source),
                         typ: Some(MountTypeEnum::BIND),
                         read_only: Some(false),
                         ..Default::default()
-                    }
-                }
-                BuildMode::Host(cfg) => {
-                    let mirrorlist_path = format!("{}/mirrorlist", cfg.mirrorlist_path_host);
-                    if mirrorlist_path.starts_with('/') {
-                        Mount {
-                            target: Some(archlinux_mirrorlist_path.to_string()),
-                            source: Some(mirrorlist_path.clone()),
-                            typ: Some(MountTypeEnum::BIND),
-                            read_only: Some(false),
-                            ..Default::default()
-                        }
-                    } else {
-                        let (volume_name, subpath) = mirrorlist_path
-                            .split_once('/')
-                            .ok_or(anyhow!("Mirrorlist path not containing '/': Invalid"))?;
-
-                        Mount {
-                            target: Some(archlinux_mirrorlist_path.to_string()),
-                            source: Some(volume_name.to_string()),
-                            typ: Some(MountTypeEnum::VOLUME),
-                            read_only: Some(false),
-                            volume_options: Some(MountVolumeOptions {
-                                subpath: Some(format!("{subpath}/mirrorlist")),
+                    },
+                    BuildMode::Host(_cfg) => {
+                        // Mount only the mirrorlist file so other files under
+                        // /etc/pacman.d/ inside the builder image stay intact.
+                        if mirrorlist_source.starts_with('/') {
+                            Mount {
+                                target: Some(archlinux_mirrorlist_path.to_string()),
+                                source: Some(mirrorlist_source),
+                                typ: Some(MountTypeEnum::BIND),
+                                read_only: Some(false),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
+                            }
+                        } else {
+                            let (volume_name, subpath) = mirrorlist_source
+                                .split_once('/')
+                                .ok_or(anyhow!("Mirrorlist path not containing '/': Invalid"))?;
+
+                            Mount {
+                                target: Some(archlinux_mirrorlist_path.to_string()),
+                                source: Some(volume_name.to_string()),
+                                typ: Some(MountTypeEnum::VOLUME),
+                                read_only: Some(false),
+                                volume_options: Some(MountVolumeOptions {
+                                    subpath: Some(format!("{subpath}/mirrorlist")),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }
                         }
                     }
-                }
-            };
-            mounts.push(mnt);
+                };
+                mounts.push(mnt);
+            }
         }
+
+        // Mount the AURCache repo into the builder container so makepkg -s
+        // can resolve dependencies that were previously built by AURCache.
+        let aurcache_repo_mount = "/aurcache-repo";
+        let repo_host_path = match get_build_mode() {
+            BuildMode::DinD(cfg) => cfg.repo_path,
+            BuildMode::Host(cfg) => cfg.repo_host_path,
+        };
+        mounts.push(Mount {
+            target: Some(aurcache_repo_mount.to_string()),
+            source: Some(repo_host_path.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(true),
+            ..Default::default()
+        });
 
         let pkg_id = *self.package_model.id.get()?;
         let (makepkg_config, makepkg_config_path) =
             create_makepkg_config(&self.db, pkg_id, container_pkgdest_dir).await?;
 
-        // pacman.conf override: write to the per-build dir on the aurcache
-        // side, then bind-mount as /etc/pacman.conf for the docker daemon.
-        if let Some(pacman_config) = read_pacman_config(&self.db, pkg_id).await {
-            let aurcache_build_dir = match get_build_mode() {
-                BuildMode::DinD(cfg) => cfg.build_path,
-                BuildMode::Host(cfg) => cfg.build_artifact_dir_aurcache,
-            };
-            let aurcache_pacman_path = format!("{aurcache_build_dir}/{name}/.aurcache_pacman.conf");
-            std::fs::write(&aurcache_pacman_path, &pacman_config)
-                .map_err(|e| anyhow!("Failed to write pacman.conf override: {e}"))?;
+        let pacman_config = create_pacman_config(&self.db, pkg_id, aurcache_repo_mount).await;
 
-            let docker_pacman_path = format!("{host_build_dir}/{name}/.aurcache_pacman.conf");
-            mounts.push(Mount {
-                target: Some("/etc/pacman.conf".to_string()),
-                source: Some(docker_pacman_path),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
-
-        let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
-        let build_cmd = match source_data {
-            SourceData::Aur { .. } => {
-                // -Ga forces paru to clone from AUR even when a same-named package exists in a repo
-                format!(
-                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -Ga {name} && paru {build_flags} *",
-                    container_build_dir = container_build_dir.display(),
-                )
-            }
-            SourceData::Git { .. } => {
-                format!(
-                    "sudo chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && paru {build_flags} ."
-                )
-            }
-            SourceData::Upload { .. } => {
-                todo!("unpack zip and store it in build container dir")
-            }
-        };
+        let pkgbase = self.package_model.pkgbase.get()?;
 
-        // Use a unique heredoc terminator so user config content cannot
-        // accidentally close the heredoc early.
-        let cmd = format!(
-            "cat <<'__AURCACHE_MAKEPKG_EOF__' > {makepkg_config_path}\n{makepkg_config}\n__AURCACHE_MAKEPKG_EOF__\n{build_cmd}"
+        let build_cmd = crate::commands::build_build_command(
+            &source_data,
+            pkgbase,
+            &build_flags,
+            &container_build_dir,
+        );
+
+        let cmd = crate::commands::wrap_with_makepkg_config(
+            &makepkg_config,
+            &makepkg_config_path,
+            &pacman_config,
+            &build_cmd,
         );
         info!("Build command: {build_cmd}");
 
@@ -305,17 +306,11 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             .await?;
 
         match source_data {
-            SourceData::Git {
-                url,
-                r#ref,
-                subfolder,
-            } => {
+            SourceData::Git { spec } => {
                 self.git_checkout_to_container(
                     create_info.id.clone(),
                     GIT_REPO_PATH.to_string(),
-                    url,
-                    r#ref,
-                    subfolder,
+                    &spec,
                 )
                 .await?;
             }
@@ -347,22 +342,20 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         &self,
         container_id: String,
         path: String,
-        git_repo: String,
-        git_ref: String,
-        git_subfolder: String,
+        git_source: &GitSourceSpec,
     ) -> anyhow::Result<()> {
-        info!("Cloning repository {git_repo}...");
+        info!("Cloning repository {}...", git_source.url);
 
         let dir = tempdir()?;
         let repo_dir = dir.path().join("repo");
 
-        checkout_repo_ref(git_repo, git_ref.clone(), repo_dir.clone())?;
-        info!("Checked out {:?}", git_ref);
+        checkout_git_source(git_source, repo_dir.clone())?;
+        info!("Checked out {:?}", git_source.r#ref);
 
         // Create a tar.gz of the cloned repo
         let tar_path = dir.path().join("repo.tar.gz");
         debug!("Creating tar archive at {:?}", tar_path);
-        Self::create_tar_gz(&repo_dir, &tar_path, git_subfolder).await?;
+        Self::create_tar_gz(&repo_dir, &tar_path, git_source.subfolder.clone()).await?;
 
         let options = Some(UploadToContainerOptions {
             path,
