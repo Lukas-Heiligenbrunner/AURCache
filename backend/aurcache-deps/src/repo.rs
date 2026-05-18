@@ -6,6 +6,7 @@ use std::time::SystemTime;
 use alpm_compress::tarball::TarballReader;
 use alpm_repo_db::desc::RepoDescFile;
 use backon::{FibonacciBuilder, Retryable};
+use tracing::warn;
 use url::Url;
 
 use crate::client::AurClient;
@@ -230,7 +231,18 @@ fn repo_archive_provides(archive_path: &Path, dep_name: &str) -> Result<bool, Er
 
         let content = String::from_utf8(entry.content().map_err(|e| Error::Rpc(e.to_string()))?)
             .map_err(|e| Error::Rpc(e.to_string()))?;
-        let desc = RepoDescFile::from_str(&content).map_err(|e| Error::Rpc(e.to_string()))?;
+        let desc = match RepoDescFile::from_str(&content) {
+            Ok(desc) => desc,
+            // Older desc files may not satisfy strict alpm-repo-db parsing.
+            // eg. Packager: Unknown Packager
+            Err(err) => {
+                warn!(
+                    "Skipping unparseable desc entry in {}: {err}",
+                    archive_path.display()
+                );
+                continue;
+            }
+        };
         if repo_desc_matches_dependency(&desc, dep_name) {
             return Ok(true);
         }
