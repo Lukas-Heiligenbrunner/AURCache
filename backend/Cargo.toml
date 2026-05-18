@@ -13,9 +13,9 @@ members = [
     "aurcache-types"]
 
 [workspace.dependencies]
-tokio = "1.52.1"
+tokio = "1.52.3"
 anyhow = "1.0.102"
-reqwest = "0.13.2"
+reqwest = "0.13.3"
 tracing = "0.1.44"
 chrono = "0.4.44"
 serde = "1.0.228"
@@ -26,7 +26,7 @@ itertools = "0.14.0"
 aur-rs = "0.1.1"
 flate2 = "1.1.9"
 tar = "0.4.45"
-utoipa = { version = "5.4.0", features = ["rocket_extras"] }
+utoipa = { version = "5.5.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
 alpm-srcinfo = "0.6.3"
 

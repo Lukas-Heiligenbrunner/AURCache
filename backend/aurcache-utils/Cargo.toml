@@ -3,7 +3,7 @@ name = "aurcache-utils"
 edition = "2024"
 
 [dependencies]
-git2 = "0.20.2"
+git2 = "0.20.4"
 
 anyhow = {workspace = true}
 sea-orm = {workspace = true}
