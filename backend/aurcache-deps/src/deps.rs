@@ -84,7 +84,22 @@ where
 mod tests {
     use crate::model::Package;
 
-    use super::deps_from_packages;
+    use super::{deps_from_packages, parse_dep};
+
+    #[test]
+    fn test_parse_dep_no_constraint() {
+        assert_eq!(parse_dep("glibc"), ("glibc", ""));
+        assert_eq!(parse_dep("  python  "), ("python", ""));
+    }
+
+    #[test]
+    fn test_parse_dep_with_constraint() {
+        assert_eq!(parse_dep("glibc>=2.35"), ("glibc", ">=2.35"));
+        assert_eq!(parse_dep("cmake<=3.20"), ("cmake", "<=3.20"));
+        assert_eq!(parse_dep("pkg=1.5"), ("pkg", "=1.5"));
+        assert_eq!(parse_dep("lib>2.0"), ("lib", ">2.0"));
+        assert_eq!(parse_dep("libfoo<3"), ("libfoo", "<3"));
+    }
 
     #[test]
     fn deps_from_packages_collects_generic_dependencies() {

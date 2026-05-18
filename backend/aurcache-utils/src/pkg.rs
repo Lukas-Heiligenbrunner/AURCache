@@ -77,21 +77,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_dep_no_constraint() {
-        assert_eq!(parse_dep("glibc"), ("glibc", ""));
-        assert_eq!(parse_dep("  python  "), ("python", ""));
-    }
-
-    #[test]
-    fn test_parse_dep_with_constraint() {
-        assert_eq!(parse_dep("glibc>=2.35"), ("glibc", ">=2.35"));
-        assert_eq!(parse_dep("cmake<=3.20"), ("cmake", "<=3.20"));
-        assert_eq!(parse_dep("pkg=1.5"), ("pkg", "=1.5"));
-        assert_eq!(parse_dep("lib>2.0"), ("lib", ">2.0"));
-        assert_eq!(parse_dep("libfoo<3"), ("libfoo", "<3"));
-    }
-
-    #[test]
     fn test_vercmp_equal() {
         assert_eq!(vercmp("1.0", "1.0"), Ordering::Equal);
         assert_eq!(vercmp("2.0.1", "2.0.1"), Ordering::Equal);
