@@ -5,6 +5,7 @@ use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, packages};
 use aurcache_deps::AurClient;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
+use aurcache_utils::pkg::vercmp;
 use aurcache_utils::settings::general::SettingsTraits;
 use aurcache_utils::snapshot::SnapshotStore;
 use sea_orm::{
@@ -90,8 +91,18 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                     }
                     Some(result) => {
                         package_model.upstream_version = Set(Option::from(result.version.clone()));
-                        package_model.out_of_date =
-                            Set(i32::from(latest_version != Some(result.version.clone())));
+                        // Only mark out of date when upstream is strictly newer than the
+                        // locally built version.  This prevents VCS packages (-git etc.)
+                        // from looping: the AUR-reported version is the one from when the
+                        // PKGBUILD was last touched, which may be *older* than what was
+                        // actually built from the live VCS source.
+                        let is_outdated = match &latest_version {
+                            None => true,
+                            Some(built) => {
+                                vercmp(&result.version, built) == std::cmp::Ordering::Greater
+                            }
+                        };
+                        package_model.out_of_date = Set(i32::from(is_outdated));
                     }
                 }
             }
@@ -105,7 +116,13 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                 let version = sourceinfo.base.version.to_string();
 
                 package_model.upstream_version = Set(Option::from(version.clone()));
-                package_model.out_of_date = Set(i32::from(latest_version != Some(version)));
+                // Same logic as for AUR packages: only mark out of date when the
+                // upstream PKGBUILD version is strictly newer than what was built.
+                let is_outdated = match &latest_version {
+                    None => true,
+                    Some(built) => vercmp(&version, built) == std::cmp::Ordering::Greater,
+                };
+                package_model.out_of_date = Set(i32::from(is_outdated));
             }
             SourceData::Upload { .. } => {
                 // noop since update is only triggered by new upload
