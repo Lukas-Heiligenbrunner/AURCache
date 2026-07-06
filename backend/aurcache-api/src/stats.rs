@@ -80,7 +80,7 @@ async fn get_graph_datapoints(db: &DatabaseConnection) -> anyhow::Result<Vec<Gra
 FROM
     builds
 WHERE
-    start_time >= strftime('%s', 'now', '-12 months')
+    start_time >= strftime('%s', 'now', 'start of month', '-11 months')
 GROUP BY
     year, month
 ORDER BY
@@ -94,7 +94,7 @@ ORDER BY
 FROM
     builds
 WHERE
-    start_time >= extract(epoch FROM now() - interval '12 months')
+    start_time >= EXTRACT(EPOCH FROM date_trunc('month', now()) - interval '11 months')
 GROUP BY
     year, month
 ORDER BY
