@@ -94,13 +94,11 @@ class _BuildLineChartState extends State<BuildLineChart> {
     int newMaxValue = maxValue;
 
     for (final p in graphdata) {
-      if (p.year == currentYear) {
-        final idx = 12 - currentMonth + p.month - 1;
-        spotData[idx] = spotData[idx].copyWith(y: p.count.toDouble());
-      } else {
-        final idx = p.month - currentMonth - 1;
-        spotData[idx] = spotData[idx].copyWith(y: p.count.toDouble());
-      }
+      final idx = p.year == currentYear
+          ? 12 - currentMonth + p.month - 1
+          : p.month - currentMonth - 1;
+      if (idx < 0 || idx >= spotData.length) continue;
+      spotData[idx] = spotData[idx].copyWith(y: p.count.toDouble());
 
       if (newMaxValue < p.count) {
         newMaxValue = p.count;
