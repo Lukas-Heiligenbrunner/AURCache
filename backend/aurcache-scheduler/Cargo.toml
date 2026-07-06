@@ -19,5 +19,5 @@ aurcache-db = {path = "../aurcache-db"}
 aurcache-utils = {path = "../aurcache-utils"}
 aurcache-types = {path = "../aurcache-types"}
 
-cron = "0.16.0"
+cron = "0.17.0"
 serde_json = {workspace = true}

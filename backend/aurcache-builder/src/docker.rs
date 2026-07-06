@@ -9,7 +9,7 @@ use aurcache_utils::settings::general::SettingsTraits;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, EndpointSettings, HostConfig,
-    Mount, MountTypeEnum, MountVolumeOptions, NetworkingConfig,
+    Mount, MountType, MountVolumeOptions, NetworkingConfig,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, CreateContainerOptions, UploadToContainerOptions,
@@ -343,7 +343,7 @@ pub fn mirrorlist_mount(arch: &str) -> anyhow::Result<Option<Mount>> {
         Mount {
             target: Some(TARGET.to_string()),
             source: Some(source),
-            typ: Some(MountTypeEnum::BIND),
+            typ: Some(MountType::BIND),
             read_only: Some(false),
             ..Default::default()
         }
@@ -354,7 +354,7 @@ pub fn mirrorlist_mount(arch: &str) -> anyhow::Result<Option<Mount>> {
         Mount {
             target: Some(TARGET.to_string()),
             source: Some(volume_name.to_string()),
-            typ: Some(MountTypeEnum::VOLUME),
+            typ: Some(MountType::VOLUME),
             read_only: Some(false),
             volume_options: Some(MountVolumeOptions {
                 subpath: Some(subpath.to_string()),

@@ -1,7 +1,17 @@
 ARG TARGET_ARCH=linux/amd64
 ARG LATEST_COMMIT_SHA=dev
+ARG FLUTTER_VERSION=3.44.1
 
-FROM --platform=linux/amd64 registry.gitlab.com/polycule_client/flutter-dockerimages:3.41.2-web AS frontend_builder
+FROM --platform=linux/amd64 debian:bookworm-slim AS frontend_builder
+ARG FLUTTER_VERSION
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl xz-utils unzip ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+      | tar -xJ -C /opt
+ENV PATH="/opt/flutter/bin:${PATH}"
+# Flutter refuses to run as root against a git dir it considers "dubious ownership"
+RUN git config --global --add safe.directory /opt/flutter \
+      && flutter config --no-analytics && flutter precache --web
 WORKDIR /app
 
 COPY frontend /app
@@ -11,7 +21,7 @@ RUN flutter pub get
 RUN flutter pub run build_runner build --delete-conflicting-outputs
 RUN flutter build web --release --wasm --dart-define APP_VERSION=$(grep '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
 
-FROM --platform=linux/amd64 rust:1.96.0 AS builder
+FROM --platform=linux/amd64 rust:1.96.1 AS builder
 ARG LATEST_COMMIT_SHA
 ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA}
 # Install necessary tools and dependencies

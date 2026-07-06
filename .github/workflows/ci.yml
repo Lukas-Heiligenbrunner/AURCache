@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: ./backend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Update local toolchain
         run: |
@@ -44,13 +44,13 @@ jobs:
       run:
         working-directory: ./frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.41.2
+          flutter-version: 3.44.1
 
       - name: Toolchain info
         run: flutter doctor
@@ -67,7 +67,7 @@ jobs:
   e2eTest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v5
