@@ -10,8 +10,8 @@ use aurcache_utils::git::checkout::checkout_repo_ref;
 use aurcache_utils::settings::general::SettingsTraits;
 use bollard::container::LogOutput;
 use bollard::models::{
-    ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount,
-    MountTypeEnum, MountVolumeOptions,
+    ContainerCreateBody, ContainerCreateResponse, CreateImageInfo, HostConfig, Mount, MountType,
+    MountVolumeOptions,
 };
 use bollard::query_parameters::{
     AttachContainerOptions, CreateContainerOptions, UploadToContainerOptions,
@@ -164,7 +164,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                     Mount {
                         target: Some(archlinux_mirrorlist_path.to_string()),
                         source: Some(mirrorlist_path.clone()),
-                        typ: Some(MountTypeEnum::BIND),
+                        typ: Some(MountType::BIND),
                         read_only: Some(false),
                         ..Default::default()
                     }
@@ -175,7 +175,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                         Mount {
                             target: Some(archlinux_mirrorlist_path.to_string()),
                             source: Some(mirrorlist_path.clone()),
-                            typ: Some(MountTypeEnum::BIND),
+                            typ: Some(MountType::BIND),
                             read_only: Some(false),
                             ..Default::default()
                         }
@@ -187,7 +187,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
                         Mount {
                             target: Some(archlinux_mirrorlist_path.to_string()),
                             source: Some(volume_name.to_string()),
-                            typ: Some(MountTypeEnum::VOLUME),
+                            typ: Some(MountType::VOLUME),
                             read_only: Some(false),
                             volume_options: Some(MountVolumeOptions {
                                 subpath: Some(format!("{subpath}/mirrorlist")),
@@ -220,7 +220,7 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
             mounts.push(Mount {
                 target: Some("/etc/pacman.conf".to_string()),
                 source: Some(docker_pacman_path),
-                typ: Some(MountTypeEnum::BIND),
+                typ: Some(MountType::BIND),
                 read_only: Some(true),
                 ..Default::default()
             });

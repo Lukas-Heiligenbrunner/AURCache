@@ -21,7 +21,11 @@ pub fn checkout_repo_ref(
 
         // If it's a branch or tag, make HEAD point to it
         if let Some(reference) = reference {
-            repo.set_head(reference.name().ok_or(anyhow!("Reference name invalid"))?)?;
+            repo.set_head(
+                reference
+                    .name()
+                    .map_err(|_| anyhow!("Reference name invalid"))?,
+            )?;
         } else {
             // Detached HEAD for a commit hash
             repo.set_head_detached(object.id())?;

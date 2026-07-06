@@ -11,4 +11,4 @@ serde_json = {workspace = true}
 aurcache-db = {path = "../aurcache-db"}
 
 # todo utoipa should be removed to couple db from api fully
-utoipa = { version = "5.4.0"}
+utoipa = { version = "5.5.0"}
