@@ -1,6 +1,7 @@
 import 'package:aurcache/models/activity.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import '../constants/color_constants.dart';
 
 class ActivityTable extends ConsumerWidget {
@@ -35,15 +36,7 @@ class ActivityTable extends ConsumerWidget {
   DataRow buildDataRow(Activity activity, BuildContext context, WidgetRef ref) {
     return DataRow(
       cells: [
-        DataCell(
-          Text(
-            '${activity.timestamp.day.toString().padLeft(2, '0')}.'
-            '${activity.timestamp.month.toString().padLeft(2, '0')}.'
-            '${activity.timestamp.year.toString()} '
-            '${activity.timestamp.hour.toString().padLeft(2, '0')}:'
-            '${activity.timestamp.minute.toString().padLeft(2, '0')}',
-          ),
-        ),
+        DataCell(Text(DateFormat.yMd().add_Hm().format(activity.timestamp))),
         DataCell(Text(activity.user ?? "You")),
         DataCell(Text(activity.text)),
       ],
