@@ -12,9 +12,9 @@ flate2 = {workspace = true}
 tar = {workspace = true}
 tempfile = {workspace = true}
 
-bollard = "0.21.0"
-futures = "0.3.32"
-tokio-util ={version = "0.7.18", features = ["io"]}
+bollard = "0.21.1"
+futures = "0.3.34"
+tokio-util ={version = "0.7.19", features = ["io"]}
 
 aurcache-db = {path = "../aurcache-db"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}
