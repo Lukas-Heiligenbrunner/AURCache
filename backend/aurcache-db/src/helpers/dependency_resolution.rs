@@ -15,6 +15,32 @@ const ACTIVE_BUILD_STATUS: i32 = 0;
 const SUCCESSFUL_BUILD_STATUS: i32 = 1;
 const ENQUEUED_BUILD_STATUS: i32 = 3;
 
+/// A package that can satisfy a dependency: either a row already in the
+/// database, or one an in-flight add has planned but not yet inserted.
+///
+/// Only these three fields are ever consulted when matching, so planned
+/// packages are represented directly rather than as `packages::Model`s with a
+/// placeholder id — a fake id would be a trap for the next reader.
+#[derive(Debug, Clone)]
+pub struct PackageCandidate {
+    /// The pkgbase, which is what a dependency ultimately resolves to.
+    pub name: String,
+    /// JSON array of split package names, as stored on `packages`.
+    pub split_packages: Option<String>,
+    /// JSON array of `provides` entries, as stored on `packages`.
+    pub provides: Option<String>,
+}
+
+impl From<&packages::Model> for PackageCandidate {
+    fn from(pkg: &packages::Model) -> Self {
+        Self {
+            name: pkg.name.clone(),
+            split_packages: pkg.split_packages.clone(),
+            provides: pkg.provides.clone(),
+        }
+    }
+}
+
 /// Resolve dependency names to their source (official / local repo / AUR).
 ///
 /// Local matches (already-tracked packages, their split packages or provides)
@@ -25,7 +51,23 @@ pub async fn resolve_dependency_resolutions<C: ConnectionTrait>(
     db: &C,
     dep_names: &[String],
 ) -> Result<HashMap<String, DependencyResolution>, aurcache_deps::Error> {
-    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names)
+    resolve_dependency_resolutions_with_planned(client, db, dep_names, &[]).await
+}
+
+/// As [`resolve_dependency_resolutions`], but also considering packages an
+/// in-flight add intends to insert.
+///
+/// An add resolves its whole dependency graph before writing anything, so a
+/// package planned earlier in the same add is not yet visible in the database
+/// — without this, a dependency satisfied by a sibling in the same add would
+/// be resolved again against the AUR and planned twice.
+pub async fn resolve_dependency_resolutions_with_planned<C: ConnectionTrait>(
+    client: &AurClient,
+    db: &C,
+    dep_names: &[String],
+    planned: &[PackageCandidate],
+) -> Result<HashMap<String, DependencyResolution>, aurcache_deps::Error> {
+    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names, planned)
         .await
         .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?;
     let unresolved = dep_names
@@ -44,15 +86,20 @@ pub async fn resolve_dependency_resolutions<C: ConnectionTrait>(
 async fn resolve_local_dependency_resolutions<C: ConnectionTrait>(
     db: &C,
     dep_names: &[String],
+    planned: &[PackageCandidate],
 ) -> Result<HashMap<String, DependencyResolution>, DbErr> {
-    let local_packages = packages::Entity::find()
-        .filter(packages::Column::Status.is_in(vec![
+    let mut local_packages: Vec<PackageCandidate> = packages::Entity::find()
+        .filter(packages::Column::Status.is_in([
             ACTIVE_BUILD_STATUS,
             SUCCESSFUL_BUILD_STATUS,
             ENQUEUED_BUILD_STATUS,
         ]))
         .all(db)
-        .await?;
+        .await?
+        .iter()
+        .map(PackageCandidate::from)
+        .collect();
+    local_packages.extend_from_slice(planned);
 
     Ok(dep_names
         .iter()
@@ -64,7 +111,7 @@ async fn resolve_local_dependency_resolutions<C: ConnectionTrait>(
 }
 
 fn find_local_dependee_pkgbase(
-    local_packages: &[packages::Model],
+    local_packages: &[PackageCandidate],
     dep_name: &str,
 ) -> Option<String> {
     local_packages
@@ -76,7 +123,7 @@ fn find_local_dependee_pkgbase(
         .map(|(_, pkgbase)| pkgbase.to_string())
 }
 
-fn local_match_rank(pkg: &packages::Model, dep_name: &str) -> Option<u8> {
+fn local_match_rank(pkg: &PackageCandidate, dep_name: &str) -> Option<u8> {
     if pkg.name == dep_name {
         return Some(0);
     }

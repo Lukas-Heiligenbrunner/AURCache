@@ -1380,3 +1380,100 @@ async fn scenario_j_queue_only_platforms_with_satisfied_dependencies() {
         "aarch64 root build should be WAITING_FOR_DEPS"
     );
 }
+
+/// A failing add must leave the database exactly as it found it.
+///
+/// Adding a package resolves a whole dependency graph, and resolution does
+/// network work that can fail at any point. Packages used to be committed one
+/// at a time as they resolved, so a failure part-way through left orphan rows
+/// behind — and because dependency resolution prefers an already-tracked
+/// package, those orphans went on to satisfy dependencies for *later* adds,
+/// silently binding them to a package that would never be built.
+///
+/// `good-dep` is declared before `broken-dep`, and the planner walks
+/// dependencies in declared order, so `good-dep` is fully resolved before the
+/// failure occurs.
+#[tokio::test]
+async fn a_failed_add_commits_nothing() {
+    let env = setup_env().await;
+
+    mock_rpc_info(
+        &env.server,
+        "parent-pkg",
+        rpc_deps_json(
+            "parent-pkg",
+            "parent-pkg",
+            &["good-dep", "broken-dep"],
+            &[],
+            "2.0.0",
+        ),
+    )
+    .await;
+    create_aur_git_repo(
+        env.aur_root.path(),
+        "parent-pkg",
+        "2.0.0",
+        &["good-dep", "broken-dep"],
+    );
+
+    mock_rpc_info(
+        &env.server,
+        "good-dep",
+        rpc_deps_json("good-dep", "good-dep", &[], &[], "1.0.0"),
+    )
+    .await;
+    create_aur_git_repo(env.aur_root.path(), "good-dep", "1.0.0", &[]);
+
+    // Resolves as an AUR package, but its sources cannot be fetched — the
+    // failure lands after `good-dep` has already been planned.
+    mock_rpc_info(
+        &env.server,
+        "broken-dep",
+        rpc_deps_json("broken-dep", "broken-dep", &[], &[], "1.0.0"),
+    )
+    .await;
+
+    // The batched `info` lookup sends both names in one request and only one
+    // mock matches it, so whichever name loses falls through to a provides
+    // search. Answer it for both so resolution succeeds either way.
+    for name in ["good-dep", "broken-dep"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/rpc/v5/search/{name}")))
+            .and(query_param("by", "provides"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "search",
+                "resultcount": 1,
+                "results": [rpc_deps_json(name, name, &[], &[], "1.0.0")]
+            })))
+            .mount(&env.server)
+            .await;
+    }
+
+    let result = add_pkg_via_rpc(&env, "parent-pkg").await;
+    let err = format!("{:?}", result.expect_err("add should fail"));
+    // Pin the failure point. Dependency resolution must have *succeeded* — it
+    // runs before anything is planned, so failing there would leave nothing
+    // behind for trivial reasons and this test would prove nothing. Getting
+    // past it means `good-dep` was planned before `broken-dep`'s sources
+    // failed, which is the situation that used to leave orphan rows.
+    assert!(
+        !err.contains("Failed to resolve dependencies"),
+        "add failed before planning anything, so this proves nothing: {err}"
+    );
+
+    let packages = Packages::find().all(&env.db).await.unwrap();
+    assert!(
+        packages.is_empty(),
+        "a failed add must leave no packages behind, found: {:?}",
+        packages.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+
+    let deps = Dependencies::find().all(&env.db).await.unwrap();
+    assert!(
+        deps.is_empty(),
+        "a failed add must leave no dependency rows"
+    );
+
+    let builds = builds::Entity::find().all(&env.db).await.unwrap();
+    assert!(builds.is_empty(), "a failed add must enqueue no builds");
+}

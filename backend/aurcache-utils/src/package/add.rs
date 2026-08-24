@@ -3,6 +3,8 @@ use crate::pkg::architectures_for_platforms;
 use crate::snapshot::SnapshotStore;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
+use aurcache_db::helpers::active_value_ext::ActiveValueExt;
+use aurcache_db::helpers::dependency_resolution::PackageCandidate;
 use aurcache_db::packages;
 use aurcache_db::packages::{SourceData, SourceType};
 use aurcache_db::prelude::Packages;
@@ -32,6 +34,57 @@ struct PackageInsertSpec {
     provides: Vec<String>,
     source_type: SourceType,
     source_data: SourceData,
+}
+
+/// A package an add intends to insert, with everything needed to write the row.
+struct PlannedPackage {
+    pkgbase: String,
+    version: String,
+    source_type: SourceType,
+    source_data: SourceData,
+    split_packages: Option<String>,
+    provides: Option<String>,
+    /// Only the package the user actually asked for; dependencies are not.
+    directly_requested: bool,
+}
+
+/// A dependency edge, held by *name* because planned packages have no id until
+/// the plan is persisted.
+struct PlannedEdge {
+    dependent: String,
+    dependee: String,
+    version_constraint: String,
+}
+
+/// Everything an add will write, resolved before anything is written.
+///
+/// Resolution walks the AUR and downloads repo databases, so doing it inside a
+/// transaction would hold a write lock across the network — on SQLite that
+/// blocks worker claims and build status updates for the duration. Planning
+/// first keeps the transaction short *and* makes the add atomic: a failure
+/// part-way through leaves nothing behind, where previously each package was
+/// committed as it was resolved and a later failure left orphan rows that went
+/// on to satisfy dependencies for subsequent adds.
+#[derive(Default)]
+struct AddPlan {
+    /// Dependency-first, so inserting in order satisfies edges as they appear.
+    packages: Vec<PlannedPackage>,
+    edges: Vec<PlannedEdge>,
+}
+
+impl AddPlan {
+    /// The planned packages as dependency-resolution candidates, so a package
+    /// planned earlier in this add can satisfy a later one.
+    fn candidates(&self) -> Vec<PackageCandidate> {
+        self.packages
+            .iter()
+            .map(|pkg| PackageCandidate {
+                name: pkg.pkgbase.clone(),
+                split_packages: pkg.split_packages.clone(),
+                provides: pkg.provides.clone(),
+            })
+            .collect()
+    }
 }
 
 struct DependencyRequirements {
@@ -169,26 +222,38 @@ async fn finalize_package_add(
         return Ok(package_spec.pkgbase);
     }
 
-    let mut added_order: Vec<String> = Vec::new();
     let mut visited: HashSet<String> = HashSet::from([package_spec.pkgbase.clone()]);
+    let mut plan = AddPlan::default();
+    let requested = package_spec.pkgbase.clone();
 
-    insert_package_with_deps(
+    plan_package_with_deps(
         client,
         store,
         db,
         package_spec,
         context,
         &mut visited,
-        &mut added_order,
+        &mut plan,
     )
     .await?;
 
+    // Only the package the user asked for is directly requested; everything
+    // else in the plan is a dependency pulled in on its behalf.
+    let Some(root) = plan
+        .packages
+        .iter_mut()
+        .find(|pkg| pkg.pkgbase == requested)
+    else {
+        return Err(anyhow!("Package add produced no inserted packages"));
+    };
+    root.directly_requested = true;
+
+    let added_order = persist_plan(db, context, plan).await?;
     let pkgbase = added_order
         .last()
         .cloned()
         .ok_or_else(|| anyhow!("Package add produced no inserted packages"))?;
 
-    set_directly_requested(db, &pkgbase).await?;
     trigger_initial_builds(db, tx, &context.platforms, &added_order).await?;
     Ok(pkgbase)
 }
@@ -271,15 +336,17 @@ async fn add_package_with_source(
 
 #[allow(clippy::double_must_use)]
 #[async_recursion]
-async fn add_dependency_recursive(
+async fn plan_dependency_recursive(
     client: &aurcache_deps::AurClient,
     store: &SnapshotStore,
     db: &DatabaseConnection,
     pkgbase: &str,
     context: &AddContext,
     visited: &mut HashSet<String>,
-    added_order: &mut Vec<String>,
+    plan: &mut AddPlan,
 ) -> anyhow::Result<()> {
+    // `visited` is the plan's name set: it already prevents planning the same
+    // pkgbase twice, so the plan needs no separate "already planned?" lookup.
     if !visited.insert(pkgbase.to_string()) {
         return Ok(());
     }
@@ -298,16 +365,7 @@ async fn add_dependency_recursive(
         &architectures_for_platforms(&context.platforms_str),
     )
     .await?;
-    insert_package_with_deps(
-        client,
-        store,
-        db,
-        package_spec,
-        context,
-        visited,
-        added_order,
-    )
-    .await
+    plan_package_with_deps(client, store, db, package_spec, context, visited, plan).await
 }
 
 pub(crate) async fn ensure_aur_package_exists_recursive(
@@ -326,17 +384,19 @@ pub(crate) async fn ensure_aur_package_exists_recursive(
         build_flags_str: build_flags_str.to_string(),
     };
     let mut visited = HashSet::new();
-    let mut added_order = Vec::new();
-    add_dependency_recursive(
+    let mut plan = AddPlan::default();
+    plan_dependency_recursive(
         client,
         store,
         db,
         pkgbase,
         &context,
         &mut visited,
-        &mut added_order,
+        &mut plan,
     )
-    .await
+    .await?;
+    persist_plan(db, &context, plan).await?;
+    Ok(())
 }
 
 pub(crate) async fn resolve_dependency_resolutions(
@@ -351,31 +411,48 @@ pub(crate) async fn resolve_dependency_resolutions(
     .map_err(|e| anyhow!("Failed to resolve dependencies: {e}"))
 }
 
-async fn insert_package_with_deps(
+/// Plan a package and, recursively, every AUR dependency it needs.
+///
+/// Writes nothing: results accumulate into `plan` so the whole graph can be
+/// persisted in one transaction afterwards.
+async fn plan_package_with_deps(
     client: &aurcache_deps::AurClient,
     store: &SnapshotStore,
     db: &DatabaseConnection,
     package_spec: PackageInsertSpec,
     context: &AddContext,
     visited: &mut HashSet<String>,
-    added_order: &mut Vec<String>,
+    plan: &mut AddPlan,
 ) -> anyhow::Result<()> {
     let resolved_deps = if package_spec.dep_names.is_empty() {
         HashMap::new()
     } else {
-        resolve_dependency_resolutions(client, db, &package_spec.dep_names)
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to resolve dependencies for {}: {e}",
-                    package_spec.pkgbase
-                )
-            })?
+        // Packages planned earlier in this add are not in the database yet, so
+        // they are offered as candidates alongside the rows that are.
+        aurcache_db::helpers::dependency_resolution::resolve_dependency_resolutions_with_planned(
+            client,
+            db,
+            &package_spec.dep_names,
+            &plan.candidates(),
+        )
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "Failed to resolve dependencies for {}: {e}",
+                package_spec.pkgbase
+            )
+        })?
     };
 
-    let mut dep_pkgbases: Vec<String> = Vec::new();
+    // Iterate the declared dependency order rather than the resolution map's:
+    // a HashMap's order varies per process, which would make the plan order —
+    // and therefore the order builds are enqueued in — differ between runs for
+    // identical input.
     let mut dep_pkgbases_seen: HashSet<String> = HashSet::new();
-    for resolution in resolved_deps.values() {
+    for dep_name in &package_spec.dep_names {
+        let Some(resolution) = resolved_deps.get(dep_name) else {
+            continue;
+        };
         let dep_base = match resolution {
             DependencyResolution::Official => continue,
             DependencyResolution::Local { pkgbase } | DependencyResolution::Aur { pkgbase } => {
@@ -385,43 +462,15 @@ async fn insert_package_with_deps(
         if dep_base == &package_spec.pkgbase {
             continue;
         }
-        if dep_pkgbases_seen.insert(dep_base.clone()) {
-            dep_pkgbases.push(dep_base.clone());
-            if matches!(resolution, DependencyResolution::Aur { .. }) {
-                add_dependency_recursive(
-                    client,
-                    store,
-                    db,
-                    dep_base,
-                    context,
-                    visited,
-                    added_order,
-                )
-                .await?;
-            }
+        if dep_pkgbases_seen.insert(dep_base.clone())
+            && matches!(resolution, DependencyResolution::Aur { .. })
+        {
+            plan_dependency_recursive(client, store, db, dep_base, context, visited, plan).await?;
         }
     }
 
-    let split_packages_str = split_packages_json(&package_spec.pkgbase, &package_spec.pkgnames)?;
-    let provides_str = provides_json(&package_spec.provides)?;
-
-    let new_package = packages::ActiveModel {
-        // `name` stores the pkgbase; this codebase keeps one row per package
-        // base and tracks split package names separately.
-        name: Set(package_spec.pkgbase.clone()),
-        status: Set(BuildStates::ENQUEUED_BUILD),
-        upstream_version: Set(Some(package_spec.version.clone())),
-        platforms: Set(context.platforms_str.clone()),
-        build_flags: Set(context.build_flags_str.clone()),
-        source_type: Set(package_spec.source_type),
-        source_data: Set(package_spec.source_data),
-        directly_requested: Set(false),
-        split_packages: Set(split_packages_str),
-        provides: Set(provides_str),
-        ..Default::default()
-    };
-    let txn = db.begin().await?;
-    let saved = new_package.save(&txn).await?;
+    let split_packages = split_packages_json(&package_spec.pkgbase, &package_spec.pkgnames)?;
+    let provides = provides_json(&package_spec.provides)?;
 
     let mut dep_constraints_by_pkgbase: HashMap<String, Option<crate::pkg::Constraint>> =
         HashMap::new();
@@ -451,38 +500,98 @@ async fn insert_package_with_deps(
         )?;
     }
 
-    let pkgbase_strs: Vec<&str> = dep_pkgbases.iter().map(|s| s.as_str()).collect();
-    let dependees: HashMap<String, packages::Model> = Packages::find()
-        .filter(packages::Column::Name.is_in(pkgbase_strs))
-        .all(&txn)
-        .await?
-        .into_iter()
-        .map(|p| (p.name.clone(), p))
+    for (dep_pkgbase, constraint) in dep_constraints_by_pkgbase {
+        plan.edges.push(PlannedEdge {
+            dependent: package_spec.pkgbase.clone(),
+            dependee: dep_pkgbase,
+            version_constraint: constraint.map(|c| c.to_string()).unwrap_or_default(),
+        });
+    }
+
+    // Pushed after its dependencies, keeping the plan dependency-first.
+    plan.packages.push(PlannedPackage {
+        pkgbase: package_spec.pkgbase,
+        version: package_spec.version,
+        source_type: package_spec.source_type,
+        source_data: package_spec.source_data,
+        split_packages,
+        provides,
+        directly_requested: false,
+    });
+    Ok(())
+}
+
+/// Write a planned add: every package and every edge, in one transaction.
+///
+/// Returns the inserted pkgbases in dependency-first order, for build
+/// enqueueing.
+async fn persist_plan(
+    db: &DatabaseConnection,
+    context: &AddContext,
+    plan: AddPlan,
+) -> anyhow::Result<Vec<String>> {
+    let AddPlan { packages, edges } = plan;
+    let txn = db.begin().await?;
+
+    let mut ids: HashMap<String, i32> = HashMap::new();
+    let mut added_order: Vec<String> = Vec::with_capacity(packages.len());
+    for pkg in packages {
+        let model = packages::ActiveModel {
+            // `name` stores the pkgbase; this codebase keeps one row per package
+            // base and tracks split package names separately.
+            name: Set(pkg.pkgbase.clone()),
+            status: Set(BuildStates::ENQUEUED_BUILD),
+            upstream_version: Set(Some(pkg.version)),
+            platforms: Set(context.platforms_str.clone()),
+            build_flags: Set(context.build_flags_str.clone()),
+            source_type: Set(pkg.source_type),
+            source_data: Set(pkg.source_data),
+            directly_requested: Set(pkg.directly_requested),
+            split_packages: Set(pkg.split_packages),
+            provides: Set(pkg.provides),
+            ..Default::default()
+        };
+        let saved = model.save(&txn).await?;
+        ids.insert(pkg.pkgbase.clone(), *saved.id.get()?);
+        added_order.push(pkg.pkgbase);
+    }
+
+    // Edges may point at packages that already existed; resolve those once.
+    let existing: Vec<&str> = edges
+        .iter()
+        .map(|edge| edge.dependee.as_str())
+        .filter(|name| !ids.contains_key(*name))
         .collect();
-
-    for dep_pkgbase in &dep_pkgbases {
-        if let Some(dependee) = dependees.get(dep_pkgbase.as_str()) {
-            let constraint = dep_constraints_by_pkgbase
-                .get(dep_pkgbase.as_str())
-                .cloned()
-                .flatten()
-                .map(|c| c.to_string())
-                .unwrap_or_default();
-
-            aurcache_db::dependencies::ActiveModel {
-                dependent_id: Set(saved.id.clone().unwrap()),
-                dependee_id: Set(dependee.id),
-                version_constraint: Set(constraint),
-                ..Default::default()
-            }
-            .save(&txn)
-            .await?;
+    if !existing.is_empty() {
+        for pkg in Packages::find()
+            .filter(packages::Column::Name.is_in(existing))
+            .all(&txn)
+            .await?
+        {
+            ids.insert(pkg.name, pkg.id);
         }
     }
 
+    for edge in edges {
+        // A dependee that is neither planned nor already present has nothing to
+        // link to; the dependent still builds against the official repos.
+        let (Some(dependent_id), Some(dependee_id)) =
+            (ids.get(&edge.dependent), ids.get(&edge.dependee))
+        else {
+            continue;
+        };
+        aurcache_db::dependencies::ActiveModel {
+            dependent_id: Set(*dependent_id),
+            dependee_id: Set(*dependee_id),
+            version_constraint: Set(edge.version_constraint),
+            ..Default::default()
+        }
+        .save(&txn)
+        .await?;
+    }
+
     txn.commit().await?;
-    added_order.push(package_spec.pkgbase.clone());
-    Ok(())
+    Ok(added_order)
 }
 
 pub(crate) fn split_packages_json(
