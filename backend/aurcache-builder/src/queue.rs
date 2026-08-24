@@ -24,10 +24,10 @@ pub(crate) async fn queue_package(
     semaphore: Arc<Semaphore>,
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
     action_tx: Sender<Action>,
+    store: Arc<SnapshotStore>,
 ) -> anyhow::Result<()> {
     let permits = Arc::clone(&semaphore);
     let client = AurClient::new();
-    let store = SnapshotStore::new();
 
     // spawn new thread for each pkg build
     tokio::spawn(async move {
@@ -53,7 +53,7 @@ async fn start_build(
     job_containers: Arc<Mutex<HashMap<i32, String>>>,
     action_tx: Sender<Action>,
     client: AurClient,
-    store: SnapshotStore,
+    store: Arc<SnapshotStore>,
 ) {
     let build_id = build_model.id;
     let mut builder = match Builder::new(

@@ -82,15 +82,3 @@ pub(crate) struct PackageResponse {
     pub(crate) error: Option<String>,
     pub(crate) results: Vec<Package>,
 }
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct OfficialPackage {
-    pub(crate) pkgname: String,
-    #[serde(default)]
-    pub(crate) provides: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct OfficialPackageResponse {
-    pub(crate) results: Vec<OfficialPackage>,
-}

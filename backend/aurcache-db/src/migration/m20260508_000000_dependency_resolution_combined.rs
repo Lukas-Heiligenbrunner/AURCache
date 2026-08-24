@@ -2,6 +2,7 @@ use crate::builds;
 use crate::dependencies;
 use crate::files;
 use crate::helpers::dbtype::database_type;
+use crate::helpers::dependency_resolution::resolve_dependency_resolutions;
 use crate::packages;
 use crate::settings;
 use async_recursion::async_recursion;
@@ -22,7 +23,6 @@ use tar::{Archive, Builder};
 
 const ACTIVE_BUILD_STATUS: i32 = 0;
 const FAILED_BUILD_STATUS: i32 = 2;
-const SUCCESSFUL_BUILD_STATUS: i32 = 1;
 const ENQUEUED_BUILD_STATUS: i32 = 3;
 const WAITING_FOR_DEPS_STATUS: i32 = 4;
 
@@ -571,6 +571,7 @@ pub async fn backfill_dependencies(
 
 /// Recursively ensure that `pkgbase` and all its AUR dependencies exist in the
 /// `packages` table with proper links in the `dependencies` table.
+#[allow(clippy::double_must_use)]
 #[async_recursion]
 async fn ensure_deps(
     client: &AurClient,
@@ -781,87 +782,6 @@ async fn refresh_package_provides(
     .update(db)
     .await?;
     Ok(())
-}
-
-async fn resolve_dependency_resolutions(
-    client: &AurClient,
-    db: &impl ConnectionTrait,
-    dep_names: &[String],
-) -> Result<HashMap<String, DependencyResolution>, aurcache_deps::Error> {
-    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names)
-        .await
-        .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?;
-    let unresolved = dep_names
-        .iter()
-        .filter(|dep_name| !resolutions.contains_key(dep_name.as_str()))
-        .map(|dep_name| dep_name.as_str())
-        .collect::<Vec<_>>();
-    if unresolved.is_empty() {
-        return Ok(resolutions);
-    }
-
-    resolutions.extend(client.resolve_dependencies(&unresolved).await?);
-    Ok(resolutions)
-}
-
-async fn resolve_local_dependency_resolutions(
-    db: &impl ConnectionTrait,
-    dep_names: &[String],
-) -> Result<HashMap<String, DependencyResolution>, DbErr> {
-    let local_packages = packages::Entity::find()
-        .filter(packages::Column::Status.is_in(vec![
-            ACTIVE_BUILD_STATUS,
-            SUCCESSFUL_BUILD_STATUS,
-            ENQUEUED_BUILD_STATUS,
-        ]))
-        .all(db)
-        .await?;
-
-    Ok(dep_names
-        .iter()
-        .filter_map(|dep_name| {
-            find_local_dependee_pkgbase(&local_packages, dep_name)
-                .map(|pkgbase| (dep_name.clone(), DependencyResolution::Local { pkgbase }))
-        })
-        .collect())
-}
-
-fn find_local_dependee_pkgbase(
-    local_packages: &[packages::Model],
-    dep_name: &str,
-) -> Option<String> {
-    local_packages
-        .iter()
-        .filter_map(|pkg| local_match_rank(pkg, dep_name).map(|rank| (rank, pkg.name.as_str())))
-        .min_by(|(left_rank, left_name), (right_rank, right_name)| {
-            left_rank.cmp(right_rank).then(left_name.cmp(right_name))
-        })
-        .map(|(_, pkgbase)| pkgbase.to_string())
-}
-
-fn local_match_rank(pkg: &packages::Model, dep_name: &str) -> Option<u8> {
-    if pkg.name == dep_name {
-        return Some(0);
-    }
-    if json_list_contains(pkg.split_packages.as_deref(), dep_name, false) {
-        return Some(1);
-    }
-    json_list_contains(pkg.provides.as_deref(), dep_name, true).then_some(2)
-}
-
-fn json_list_contains(json: Option<&str>, dep_name: &str, parse_relation: bool) -> bool {
-    parse_json_list(json).into_iter().any(|value| {
-        if parse_relation {
-            parse_dep(&value).0 == dep_name
-        } else {
-            value == dep_name
-        }
-    })
-}
-
-fn parse_json_list(json: Option<&str>) -> Vec<String> {
-    json.and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or_default()
 }
 
 fn serialize_optional_list(values: &[String]) -> Result<Option<String>, DbErr> {

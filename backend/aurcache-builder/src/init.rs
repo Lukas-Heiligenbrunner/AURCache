@@ -4,6 +4,7 @@ use aurcache_types::builder::Action;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::snapshot::SnapshotStore;
 use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,7 +14,11 @@ use tokio::task::JoinHandle;
 use tracing::error;
 
 #[must_use]
-pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandle<()> {
+pub fn init_build_queue(
+    db: DatabaseConnection,
+    tx: Sender<Action>,
+    store: Arc<SnapshotStore>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut concurrent_builds = get_max_concurrent_builds(&db).await;
         let semaphore = Arc::new(Semaphore::new(concurrent_builds));
@@ -47,6 +52,7 @@ pub fn init_build_queue(db: DatabaseConnection, tx: Sender<Action>) -> JoinHandl
                             semaphore.clone(),
                             job_containers.clone(),
                             tx.clone(),
+                            store.clone(),
                         )
                         .await;
                     }

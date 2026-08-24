@@ -62,6 +62,7 @@ async fn remove_orphaned_packages(db: &DatabaseConnection, exclude_id: i32) -> a
 /// Returns the build IDs enqueued across all updated packages.
 pub async fn package_update_all_outdated(
     db: &DatabaseConnection,
+    store: &SnapshotStore,
     tx: &Sender<Action>,
 ) -> anyhow::Result<Vec<i32>> {
     let pkg_models: Vec<packages::Model> = Packages::find()
@@ -69,11 +70,13 @@ pub async fn package_update_all_outdated(
         .all(db)
         .await?;
     let activity_log = ActivityLog::new(db.clone());
+    let client = AurClient::new();
 
     let mut ids_total = vec![];
     for pkg in &pkg_models {
         if pkg.status == BuildStates::SUCCESSFUL_BUILD {
-            let mut ids = package_update(db, pkg.to_owned(), false, tx).await?;
+            let results =
+                package_update_with_client(&client, store, db, pkg.to_owned(), false, tx).await?;
             activity_log
                 .add(
                     PackageUpdateActivity {
@@ -84,7 +87,12 @@ pub async fn package_update_all_outdated(
                     Some("Server".to_string()),
                 )
                 .await?;
-            ids_total.append(&mut ids);
+            ids_total.extend(
+                results
+                    .into_iter()
+                    .filter(|r| r.enqueued)
+                    .map(|r| r.build_id),
+            );
         } else {
             info!(
                 "Package auto update was not triggered for package {} because of prev. build status: {}",
@@ -108,30 +116,31 @@ pub async fn package_update_all_outdated(
 ///
 /// # Returns
 ///
-/// * `Ok(Vec<i32>)` - A vector of build IDs for the updated package.
+/// * `Ok(Vec<PlatformUpdateResult>)` - One entry per configured platform, describing the build
+///   that was enqueued/promoted or left waiting on dependencies.
 /// * `Err(anyhow::Error)` - If any error occurs during the update trigger.
 pub async fn package_update(
     db: &DatabaseConnection,
     pkg_model: packages::Model,
     force: bool,
     tx: &Sender<Action>,
-) -> anyhow::Result<Vec<i32>> {
+) -> anyhow::Result<Vec<PlatformUpdateResult>> {
     let client = AurClient::new();
-    let mut store = SnapshotStore::new();
-    package_update_with_client(&client, &mut store, db, pkg_model, force, tx).await
+    let store = SnapshotStore::new();
+    package_update_with_client(&client, &store, db, pkg_model, force, tx).await
 }
 
 /// Update a single package using a caller-provided AUR client.
 ///
-/// Returns the build IDs that were enqueued for the package's ready platforms.
+/// Returns one [`PlatformUpdateResult`] per configured platform.
 pub async fn package_update_with_client(
     client: &AurClient,
-    store: &mut SnapshotStore,
+    store: &SnapshotStore,
     db: &DatabaseConnection,
     pkg_model: packages::Model,
     force: bool,
     tx: &Sender<Action>,
-) -> anyhow::Result<Vec<i32>> {
+) -> anyhow::Result<Vec<PlatformUpdateResult>> {
     let mut visited = HashSet::new();
     let mut services = Services {
         client,
@@ -143,13 +152,14 @@ pub async fn package_update_with_client(
 }
 
 /// Recursively update a package and its dependencies, enqueuing builds for ready platforms.
+#[allow(clippy::double_must_use)]
 #[async_recursion]
 async fn package_update_with_client_inner(
     services: &mut Services<'_>,
     pkg_model: packages::Model,
     force: bool,
     visited: &mut HashSet<i32>,
-) -> anyhow::Result<Vec<i32>> {
+) -> anyhow::Result<Vec<PlatformUpdateResult>> {
     if !visited.insert(pkg_model.id) {
         return Ok(vec![]);
     }
@@ -183,7 +193,7 @@ async fn package_update_with_client_inner(
         );
     }
 
-    let (enqueued_ids, has_waiting) = enqueue_platform_builds(
+    let platform_results = enqueue_platform_builds(
         services,
         BuildRequest {
             pkg_model: &pkg_model,
@@ -194,9 +204,12 @@ async fn package_update_with_client_inner(
     )
     .await?;
 
+    let any_enqueued = platform_results.iter().any(|r| r.enqueued);
+    let has_waiting = platform_results.iter().any(|r| !r.enqueued);
+
     let pkgbase = sourceinfo.base.name.to_string();
     let mut pkg_model_active: packages::ActiveModel = pkg_model.clone().into();
-    let initial_status = if has_waiting && enqueued_ids.is_empty() {
+    let initial_status = if has_waiting && !any_enqueued {
         BuildStates::WAITING_FOR_DEPS
     } else {
         BuildStates::ENQUEUED_BUILD
@@ -209,7 +222,7 @@ async fn package_update_with_client_inner(
     pkg_model_active.save(&txn).await?;
     txn.commit().await?;
 
-    Ok(enqueued_ids)
+    Ok(platform_results)
 }
 
 /// A single dependency of the package being updated, with its constraint.
@@ -405,10 +418,7 @@ async fn sync_dependency_rows(
     dep_packages: &HashMap<String, packages::Model>,
 ) -> anyhow::Result<()> {
     let txn = db.begin().await?;
-    let desired_dependee_ids = dep_packages
-        .keys()
-        .filter_map(|pkgbase| dep_packages.get(pkgbase).map(|pkg| pkg.id))
-        .collect::<Vec<_>>();
+    let desired_dependee_ids = dep_packages.values().map(|pkg| pkg.id).collect::<Vec<_>>();
 
     for existing in Dependencies::find()
         .filter(dependencies::Column::DependentId.eq(dependent_id))
@@ -539,7 +549,7 @@ async fn dependencies_ready_for_platform(
 /// Shared service dependencies passed through the update pipeline.
 struct Services<'a> {
     client: &'a AurClient,
-    store: &'a mut SnapshotStore,
+    store: &'a SnapshotStore,
     db: &'a DatabaseConnection,
     tx: &'a Sender<Action>,
 }
@@ -551,18 +561,30 @@ struct BuildRequest<'a> {
     graph: &'a DependencyGraph,
 }
 
+/// Outcome of triggering an update for a single platform of a package.
+#[derive(Debug, Clone)]
+pub struct PlatformUpdateResult {
+    pub platform: Platform,
+    /// The build row created/reused for this platform. Present regardless of
+    /// whether the build was actually dispatched or is still waiting on a
+    /// dependency rebuild.
+    pub build_id: i32,
+    /// `true` if the build was enqueued/promoted and dispatched to the builder;
+    /// `false` if it was left `WAITING_FOR_DEPS` pending an unfinished
+    /// dependency rebuild.
+    pub enqueued: bool,
+}
+
 /// For each configured platform, check dep readiness and enqueue builds.
-/// Returns (enqueued_build_ids, has_waiting_platforms).
 async fn enqueue_platform_builds(
     services: &mut Services<'_>,
     request: BuildRequest<'_>,
     visited: &mut HashSet<i32>,
-) -> anyhow::Result<(Vec<i32>, bool)> {
+) -> anyhow::Result<Vec<PlatformUpdateResult>> {
     let configured_platforms =
         Platform::parse_many(&request.pkg_model.platforms).collect::<Result<Vec<_>, _>>()?;
 
-    let mut enqueued_ids = Vec::new();
-    let mut has_waiting = false;
+    let mut results = Vec::new();
 
     for platform in &configured_platforms {
         let ready =
@@ -577,14 +599,15 @@ async fn enqueue_platform_builds(
                 services.tx,
             )
             .await?;
-            if result.inserted {
-                enqueued_ids.push(result.build.id);
-            }
+            results.push(PlatformUpdateResult {
+                platform: *platform,
+                build_id: result.build.id,
+                enqueued: result.inserted,
+            });
         } else {
-            has_waiting = true;
             let txn = services.db.begin().await?;
             let start_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-            enqueue_build_if_missing(
+            let waiting = enqueue_build_if_missing(
                 &txn,
                 request.pkg_model.id,
                 *platform,
@@ -594,10 +617,15 @@ async fn enqueue_platform_builds(
             )
             .await?;
             txn.commit().await?;
+            results.push(PlatformUpdateResult {
+                platform: *platform,
+                build_id: waiting.build.id,
+                enqueued: false,
+            });
         }
     }
 
-    Ok((enqueued_ids, has_waiting))
+    Ok(results)
 }
 
 /// Create or reuse the pending build entry for a package on one platform.
@@ -662,7 +690,7 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
     use serde_json::json;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -727,40 +755,55 @@ mod tests {
         )
     }
 
-    fn make_snapshot_tar_gz(pkgbase: &str, srcinfo: &str) -> Vec<u8> {
-        let dir = tempfile::tempdir().unwrap();
-        let pkgbase_dir = dir.path().join(pkgbase);
-        std::fs::create_dir_all(&pkgbase_dir).unwrap();
-        std::fs::write(pkgbase_dir.join(".SRCINFO"), srcinfo).unwrap();
-        let mut tar_buf = Vec::new();
-        {
-            let enc = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::fast());
-            let mut tar = tar::Builder::new(enc);
-            tar.append_dir_all(pkgbase, &pkgbase_dir).unwrap();
-            tar.finish().unwrap();
-        }
-        tar_buf
-    }
+    /// Create a local bare-ish git repository at `aur_root/{pkgbase}.git`
+    /// containing a PKGBUILD + .SRCINFO, standing in for the real AUR git
+    /// remote (`https://aur.archlinux.org/{pkgbase}.git`) in tests. Returns
+    /// the repo's filesystem path, usable directly as a git remote URL.
+    fn create_aur_git_repo(
+        aur_root: &Path,
+        pkgbase: &str,
+        version: &str,
+        depends: &[&str],
+    ) -> PathBuf {
+        let repo_path = aur_root.join(format!("{pkgbase}.git"));
+        let repo = Repository::init(&repo_path).unwrap();
 
-    /// Mount a mock snapshot endpoint on the mock server.
-    async fn mock_snapshot(server: &MockServer, pkgbase: &str, version: &str, depends: &[&str]) {
         let srcinfo = make_srcinfo(pkgbase, version, depends);
-        let tar_gz = make_snapshot_tar_gz(pkgbase, &srcinfo);
-        Mock::given(method("GET"))
-            .and(path(format!("/cgit/aur.git/snapshot/{pkgbase}.tar.gz")))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(tar_gz))
-            .mount(server)
-            .await;
+        let depends_arr = depends
+            .iter()
+            .map(|dep| format!("'{dep}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let pkgbuild = format!(
+            "pkgname={pkgbase}\npkgver={version}\npkgrel=1\narch=('x86_64')\ndepends=({depends_arr})\nsource=()\nsha256sums=()\npackage() {{\n  :\n}}\n"
+        );
+
+        fs::write(repo_path.join("PKGBUILD"), pkgbuild).unwrap();
+        fs::write(repo_path.join(".SRCINFO"), srcinfo).unwrap();
+
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("PKGBUILD")).unwrap();
+        index.add_path(Path::new(".SRCINFO")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        repo_path
     }
 
-    async fn mock_official_search_fallback(server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path("/packages/search/json/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": [],
-            })))
-            .mount(server)
-            .await;
+    /// Build a `SnapshotStore` for tests: AUR sources resolve against local
+    /// git repos under `aur_root` instead of the real AUR, and checkouts are
+    /// kept under a fresh temp dir.
+    fn test_store(aur_root: &Path) -> (SnapshotStore, tempfile::TempDir) {
+        let checkout_dir = tempdir().unwrap();
+        let store = SnapshotStore::with_checkout_root_and_aur_base(
+            checkout_dir.path().to_path_buf(),
+            aur_root.to_string_lossy().to_string(),
+        );
+        (store, checkout_dir)
     }
 
     fn git_pkgbuild(version: &str, depends: &[&str]) -> String {
@@ -827,17 +870,14 @@ mod tests {
     #[tokio::test]
     async fn package_update_queues_dependency_builds_before_parent_when_constraints_tighten() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
-        mock_snapshot(&server, "parent", "2.0.0", &["child>=2.0"]).await;
-        mock_snapshot(&server, "child", "2.0.0", &[]).await;
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
+        create_aur_git_repo(aur_root.path(), "child", "2.0.0", &[]);
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -922,14 +962,13 @@ mod tests {
         .await
         .unwrap();
 
-        let mut store = SnapshotStore::new();
-        let build_ids =
-            package_update_with_client(&client, &mut store, &db, parent.clone(), false, &tx)
-                .await
-                .unwrap();
+        let (store, _checkout_dir) = test_store(aur_root.path());
+        let results = package_update_with_client(&client, &store, &db, parent.clone(), false, &tx)
+            .await
+            .unwrap();
 
         assert!(
-            build_ids.is_empty(),
+            results.iter().all(|r| !r.enqueued),
             "parent should wait for dependency rebuild"
         );
 
@@ -980,18 +1019,15 @@ mod tests {
     #[tokio::test]
     async fn package_update_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
-        mock_snapshot(&server, "parent", "2.0.0", &["child>=2.0"]).await;
-        mock_snapshot(&server, "child", "2.0.0", &["grandchild>=2.0"]).await;
-        mock_snapshot(&server, "grandchild", "2.0.0", &[]).await;
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
+        create_aur_git_repo(aur_root.path(), "child", "2.0.0", &["grandchild>=2.0"]);
+        create_aur_git_repo(aur_root.path(), "grandchild", "2.0.0", &[]);
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -1137,14 +1173,13 @@ mod tests {
         .await
         .unwrap();
 
-        let mut store = SnapshotStore::new();
-        let build_ids =
-            package_update_with_client(&client, &mut store, &db, parent.clone(), false, &tx)
-                .await
-                .unwrap();
+        let (store, _checkout_dir) = test_store(aur_root.path());
+        let results = package_update_with_client(&client, &store, &db, parent.clone(), false, &tx)
+            .await
+            .unwrap();
 
         assert!(
-            build_ids.is_empty(),
+            results.iter().all(|r| !r.enqueued),
             "parent should wait for transitive dependency rebuilds"
         );
 
@@ -1204,18 +1239,15 @@ mod tests {
     #[tokio::test]
     async fn force_rebuild_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
-        mock_snapshot(&server, "parent", "2.0.0", &["child>=2.0"]).await;
-        mock_snapshot(&server, "child", "2.0.0", &["grandchild>=2.0"]).await;
-        mock_snapshot(&server, "grandchild", "2.0.0", &[]).await;
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
+        create_aur_git_repo(aur_root.path(), "child", "2.0.0", &["grandchild>=2.0"]);
+        create_aur_git_repo(aur_root.path(), "grandchild", "2.0.0", &[]);
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -1361,14 +1393,13 @@ mod tests {
         .await
         .unwrap();
 
-        let mut store = SnapshotStore::new();
-        let build_ids =
-            package_update_with_client(&client, &mut store, &db, parent.clone(), true, &tx)
-                .await
-                .unwrap();
+        let (store, _checkout_dir) = test_store(aur_root.path());
+        let results = package_update_with_client(&client, &store, &db, parent.clone(), true, &tx)
+            .await
+            .unwrap();
 
         assert!(
-            build_ids.is_empty(),
+            results.iter().all(|r| !r.enqueued),
             "forced rebuild should still wait for transitive dependency rebuilds"
         );
 
@@ -1420,14 +1451,10 @@ mod tests {
     #[tokio::test]
     async fn git_update_refreshes_dependency_rows() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -1558,9 +1585,10 @@ mod tests {
 
         commit_pkgbuild(&repo, "updated", "2.0.0", &["new-dep>=2.0"]);
 
-        let mut store = SnapshotStore::new();
+        let checkout_dir = tempdir().unwrap();
+        let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
         let build_ids =
-            package_update_with_client(&client, &mut store, &db, parent.clone(), false, &tx)
+            package_update_with_client(&client, &store, &db, parent.clone(), false, &tx)
                 .await
                 .unwrap();
 
@@ -1590,16 +1618,13 @@ mod tests {
     #[tokio::test]
     async fn force_rebuild_after_failure_queues_new_build() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, mut rx) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
-        mock_snapshot(&server, "mypkg", "1.0.0", &[]).await;
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "mypkg", "1.0.0", &[]);
 
         // Simulate package that previously failed its first build.
         let pkg = packages::ActiveModel {
@@ -1642,11 +1667,10 @@ mod tests {
         // Drain any stale messages before the force-rebuild call.
         while rx.try_recv().is_ok() {}
 
-        let mut store = SnapshotStore::new();
-        let build_ids =
-            package_update_with_client(&client, &mut store, &db, pkg.clone(), true, &tx)
-                .await
-                .unwrap();
+        let (store, _checkout_dir) = test_store(aur_root.path());
+        let build_ids = package_update_with_client(&client, &store, &db, pkg.clone(), true, &tx)
+            .await
+            .unwrap();
 
         assert_eq!(
             build_ids.len(),
@@ -1684,17 +1708,14 @@ mod tests {
     #[tokio::test]
     async fn update_removes_orphaned_dependency_package() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(
-            format!("{}/rpc/v5", server.uri()),
-            format!("{}/packages/search/json/", server.uri()),
-        );
+        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
-        mock_official_search_fallback(&server).await;
 
         // A v2.0.0 no longer depends on B
-        mock_snapshot(&server, "parent", "2.0.0", &[]).await;
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &[]);
 
         // Insert parent (directly requested, with a successful build)
         let parent = packages::ActiveModel {
@@ -1768,8 +1789,8 @@ mod tests {
         .await
         .unwrap();
 
-        let mut store = SnapshotStore::new();
-        package_update_with_client(&client, &mut store, &db, parent.clone(), false, &tx)
+        let (store, _checkout_dir) = test_store(aur_root.path());
+        package_update_with_client(&client, &store, &db, parent.clone(), false, &tx)
             .await
             .unwrap();
 

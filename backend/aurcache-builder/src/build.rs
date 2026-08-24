@@ -55,7 +55,7 @@ pub struct Builder {
     pub(crate) docker: Docker,
     pub(crate) action_tx: Sender<Action>,
     pub(crate) client: AurClient,
-    pub(crate) store: SnapshotStore,
+    pub(crate) store: Arc<SnapshotStore>,
 }
 
 impl Builder {
@@ -67,7 +67,7 @@ impl Builder {
         build_model: builds::Model,
         action_tx: Sender<Action>,
         client: AurClient,
-        store: SnapshotStore,
+        store: Arc<SnapshotStore>,
     ) -> anyhow::Result<Self> {
         let logger = BuildLogger::new(build_model.id, db.clone());
         debug!("Build {}: Establish docker connection", build_model.id);

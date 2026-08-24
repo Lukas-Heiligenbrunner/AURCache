@@ -2,10 +2,12 @@ use aurcache_types::builder::Action;
 use aurcache_types::settings::{ApplicationSettings, Setting, SettingsEntry};
 use aurcache_utils::package::update::package_update_all_outdated;
 use aurcache_utils::settings::general::SettingsTraits;
+use aurcache_utils::snapshot::SnapshotStore;
 use chrono::Utc;
 use cron::Schedule;
 use sea_orm::DatabaseConnection;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::Sender;
 use tokio::task::JoinHandle;
@@ -14,6 +16,7 @@ use tracing::{info, warn};
 pub fn start_auto_update_job(
     db: DatabaseConnection,
     tx: Sender<Action>,
+    store: Arc<SnapshotStore>,
 ) -> anyhow::Result<JoinHandle<()>> {
     Ok(tokio::spawn(async move {
         loop {
@@ -48,7 +51,7 @@ pub fn start_auto_update_job(
                         tokio::time::sleep(duration).await;
 
                         info!("Executing scheduled job at: {}", Utc::now());
-                        if let Err(e) = package_update_all_outdated(&db, &tx).await {
+                        if let Err(e) = package_update_all_outdated(&db, &store, &tx).await {
                             warn!("Failed to trigger update of all outdated packages: {e}");
                         }
                     } else {

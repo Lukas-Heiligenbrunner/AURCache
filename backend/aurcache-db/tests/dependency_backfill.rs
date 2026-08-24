@@ -12,16 +12,6 @@ use wiremock::{
     matchers::{method, path, query_param},
 };
 
-async fn mock_official_search_fallback(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/packages/search/json/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "results": [],
-        })))
-        .mount(server)
-        .await;
-}
-
 #[tokio::test]
 async fn backfill_creates_dependency_links() {
     let mock_server = MockServer::start().await;
@@ -98,11 +88,7 @@ async fn backfill_creates_dependency_links() {
     .await
     .unwrap();
 
-    mock_official_search_fallback(&mock_server).await;
-    let client = AurClient::with_urls(
-        format!("{}/rpc/v5", mock_server.uri()),
-        format!("{}/packages/search/json/", mock_server.uri()),
-    );
+    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
     backfill_dependencies(&client, &db).await.unwrap();
 
     let child = packages::Entity::find()
@@ -246,11 +232,7 @@ async fn backfill_multi_dep_package() {
     .await
     .unwrap();
 
-    mock_official_search_fallback(&mock_server).await;
-    let client = AurClient::with_urls(
-        format!("{}/rpc/v5", mock_server.uri()),
-        format!("{}/packages/search/json/", mock_server.uri()),
-    );
+    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
     backfill_dependencies(&client, &db).await.unwrap();
 
     // libaegis inserted as placeholder dep
@@ -405,11 +387,7 @@ async fn backfill_resolves_provider_dependencies() {
     .await
     .unwrap();
 
-    mock_official_search_fallback(&mock_server).await;
-    let client = AurClient::with_urls(
-        format!("{}/rpc/v5", mock_server.uri()),
-        format!("{}/packages/search/json/", mock_server.uri()),
-    );
+    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
     backfill_dependencies(&client, &db).await.unwrap();
 
     let parent = packages::Entity::find()
@@ -554,11 +532,7 @@ async fn backfill_prefers_existing_local_provider() {
     .await
     .unwrap();
 
-    mock_official_search_fallback(&mock_server).await;
-    let client = AurClient::with_urls(
-        format!("{}/rpc/v5", mock_server.uri()),
-        format!("{}/packages/search/json/", mock_server.uri()),
-    );
+    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
     backfill_dependencies(&client, &db).await.unwrap();
 
     let parent = packages::Entity::find()

@@ -173,7 +173,15 @@ pub async fn package_update_endpoint(
 
     let pkg_update = package_update(db, pkg_model.clone(), input.force, tx)
         .await
-        .map(Json)
+        .map(|results| {
+            Json(
+                results
+                    .into_iter()
+                    .filter(|r| r.enqueued)
+                    .map(|r| r.build_id)
+                    .collect::<Vec<_>>(),
+            )
+        })
         .map_err(|e| BadRequest(e.to_string()))?;
 
     al.add(

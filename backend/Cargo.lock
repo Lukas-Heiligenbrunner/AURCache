@@ -356,6 +356,7 @@ dependencies = [
  "aurcache-db",
  "aurcache-scheduler",
  "aurcache-types",
+ "aurcache-utils",
  "dotenvy",
  "openssl",
  "pacman-mirrors",
@@ -459,11 +460,16 @@ dependencies = [
  "alpm-srcinfo",
  "alpm-types",
  "backon",
+ "flate2",
  "reqwest",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
  "thiserror 2.0.17",
+ "tokio",
  "url",
+ "wiremock",
 ]
 
 [[package]]
@@ -1750,6 +1756,9 @@ dependencies = [
  "libc",
  "libgit2-sys",
  "log",
+ "openssl-probe 0.1.6",
+ "openssl-sys",
+ "url",
 ]
 
 [[package]]
@@ -2458,6 +2467,7 @@ dependencies = [
  "cc",
  "libc",
  "libz-sys",
+ "openssl-sys",
  "pkg-config",
 ]
 

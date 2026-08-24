@@ -12,16 +12,20 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait, Order, QuerySelect,
 };
 use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 #[must_use]
-pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
+pub fn start_update_version_checking(
+    db: DatabaseConnection,
+    store: Arc<SnapshotStore>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             info!("performing aur version checks");
-            if let Err(e) = check_versions(db.clone()).await {
+            if let Err(e) = check_versions(db.clone(), &store).await {
                 error!("Failed to perform aur version check: {e}");
             }
 
@@ -32,10 +36,9 @@ pub fn start_update_version_checking(db: DatabaseConnection) -> JoinHandle<()> {
     })
 }
 
-async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
+async fn check_versions(db: DatabaseConnection, store: &SnapshotStore) -> anyhow::Result<()> {
     let packages = Packages::find().all(&db).await?;
     let client = AurClient::new();
-    let store = SnapshotStore::new();
     let aur_query_names: Vec<String> = packages
         .iter()
         .filter(|x| x.source_type == SourceType::Aur)
@@ -103,14 +106,45 @@ async fn check_versions(db: DatabaseConnection) -> anyhow::Result<()> {
                             }
                         };
                         package_model.out_of_date = Set(i32::from(is_outdated));
+
+                        // The AUR RPC `/info` response is a cheap way to know
+                        // whether the package has actually changed upstream
+                        // (via `version`/`last_modified`); only refresh the
+                        // (git-backed) snapshot cache -- which requires a
+                        // `git fetch` -- when it looks like something changed,
+                        // instead of unconditionally re-fetching every package
+                        // on every check.
+                        if is_outdated && let Err(e) = store.refresh(&client, &source_data).await {
+                            warn!("Failed to refresh snapshot cache for {}: {e}", package.name);
+                        }
                     }
                 }
             }
             SourceData::Git { .. } => {
-                let sourceinfo = store
-                    .sourceinfo(&client, &source_data)
-                    .await
-                    .map_err(|e| anyhow!("Failed to get sourceinfo: {e}"))?;
+                // No cheap upstream-metadata API for arbitrary git remotes,
+                // so always refresh: this is an incremental `git fetch`
+                // against the persistent checkout, not a full re-clone.
+                // A failure here must not abort version-checking for the
+                // remaining packages: one unreachable git remote would
+                // otherwise leave every package after it in this run without
+                // an updated out-of-date flag. It only means this package's
+                // own version tracking cannot be refreshed this round; a real
+                // problem with the source surfaces again, per-package, when
+                // its build runs. The AUR branch above already isolates
+                // failures this way.
+                if let Err(e) = store.refresh(&client, &source_data).await {
+                    warn!("Failed to refresh git source for {}: {e}", package.name);
+                    let _ = package_model.update(&db).await;
+                    continue;
+                }
+                let sourceinfo = match store.sourceinfo(&client, &source_data).await {
+                    Ok(sourceinfo) => sourceinfo,
+                    Err(e) => {
+                        warn!("Failed to get sourceinfo for {}: {e}", package.name);
+                        let _ = package_model.update(&db).await;
+                        continue;
+                    }
+                };
                 // This still only tracks the version in PKGBUILD/.SRCINFO; a ref
                 // moving without a version bump will not mark the package outdated.
                 let version = sourceinfo.base.version.to_string();
