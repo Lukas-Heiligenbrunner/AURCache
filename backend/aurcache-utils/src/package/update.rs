@@ -170,7 +170,10 @@ async fn package_update_with_client_inner(
         .await
         .map_err(|e| anyhow!("Failed to resolve source info: {e}"))?;
     let upstream_version = sourceinfo.base.version.to_string();
-    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
+    let deps = aurcache_deps::deps_from_srcinfo(
+        &sourceinfo,
+        &crate::pkg::architectures_for_platforms(&pkg_model.platforms),
+    );
 
     let graph = sync_dependency_graph(services, &pkg_model, &deps).await?;
 

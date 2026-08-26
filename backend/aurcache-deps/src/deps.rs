@@ -4,10 +4,37 @@ use alpm_srcinfo::SourceInfoV1;
 
 use crate::model::{Package, PkgDeps};
 
-/// Extract dependencies and sub-package names from a parsed .SRCINFO.
-pub fn deps_from_srcinfo(source_info: &SourceInfoV1) -> PkgDeps {
-    let packages = source_info
-        .packages_for_architecture(alpm_types::SystemArchitecture::X86_64)
+/// Extract dependencies and sub-package names from a parsed .SRCINFO, for the
+/// architectures the package is actually built for.
+///
+/// A PKGBUILD may declare `depends_aarch64` separately from `depends`, so the
+/// answer genuinely differs per architecture. This used to be hardcoded to
+/// x86_64, which meant a package built only for aarch64 had its dependency
+/// graph computed from an architecture it is never built on — missing what it
+/// needs and requiring what it does not.
+///
+/// The result is the union across `architectures`: the graph is stored once
+/// per package, not once per platform, so it has to cover every platform the
+/// package is built for. That over-requires when two architectures need
+/// different things, which is the safe direction — a dependency that is built
+/// but unused costs a build, where a missing one breaks the package.
+pub fn deps_from_srcinfo(
+    source_info: &SourceInfoV1,
+    architectures: &[alpm_types::SystemArchitecture],
+) -> PkgDeps {
+    // An empty platform list would otherwise yield no dependencies at all,
+    // which reads as "this package needs nothing" rather than as missing
+    // configuration.
+    let fallback = [alpm_types::SystemArchitecture::X86_64];
+    let architectures = if architectures.is_empty() {
+        &fallback[..]
+    } else {
+        architectures
+    };
+
+    let packages = architectures
+        .iter()
+        .flat_map(|arch| source_info.packages_for_architecture(arch.clone()))
         .collect::<Vec<_>>();
 
     PkgDeps {
@@ -135,5 +162,98 @@ mod tests {
 
         assert_eq!(deps.depends, vec!["common-lib".to_string()]);
         assert_eq!(deps.make_depends, vec!["build-tool".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    use super::deps_from_srcinfo;
+    use alpm_srcinfo::SourceInfoV1;
+    use alpm_types::SystemArchitecture;
+
+    /// A PKGBUILD that needs different things on different architectures.
+    fn srcinfo() -> SourceInfoV1 {
+        let raw = "\
+pkgbase = demo
+\tpkgdesc = demo package
+\tpkgver = 1.0
+\tpkgrel = 1
+\turl = https://example.com
+\tarch = x86_64
+\tarch = aarch64
+\tdepends = common-lib
+\tdepends_x86_64 = intel-only
+\tdepends_aarch64 = arm-only
+\tmakedepends = build-tool
+
+pkgname = demo
+";
+        SourceInfoV1::from_string(raw).expect("fixture should parse")
+    }
+
+    #[test]
+    fn only_the_requested_architectures_dependencies_are_returned() {
+        let info = srcinfo();
+
+        let x86 = deps_from_srcinfo(&info, &[SystemArchitecture::X86_64]);
+        assert!(x86.depends.contains(&"common-lib".to_string()));
+        assert!(x86.depends.contains(&"intel-only".to_string()));
+        assert!(
+            !x86.depends.contains(&"arm-only".to_string()),
+            "x86_64 must not require an aarch64-only dependency: {:?}",
+            x86.depends
+        );
+
+        // The case the hardcoded x86_64 got wrong: a package built only for
+        // aarch64 was described by an architecture it is never built on.
+        let arm = deps_from_srcinfo(&info, &[SystemArchitecture::Aarch64]);
+        assert!(
+            arm.depends.contains(&"arm-only".to_string()),
+            "{:?}",
+            arm.depends
+        );
+        assert!(
+            !arm.depends.contains(&"intel-only".to_string()),
+            "aarch64 must not require an x86_64-only dependency: {:?}",
+            arm.depends
+        );
+    }
+
+    /// The graph is stored once per package, so building for both platforms
+    /// has to require what either one needs.
+    #[test]
+    fn several_architectures_union_their_dependencies() {
+        let deps = deps_from_srcinfo(
+            &srcinfo(),
+            &[SystemArchitecture::X86_64, SystemArchitecture::Aarch64],
+        );
+
+        for expected in ["common-lib", "intel-only", "arm-only"] {
+            assert!(
+                deps.depends.contains(&expected.to_string()),
+                "missing {expected}: {:?}",
+                deps.depends
+            );
+        }
+        // Shared entries are listed once, not once per architecture.
+        assert_eq!(
+            deps.depends.iter().filter(|d| *d == "common-lib").count(),
+            1,
+            "{:?}",
+            deps.depends
+        );
+    }
+
+    /// No configured platform is missing configuration, not a package that
+    /// needs nothing — falling through to no dependencies at all would drop a
+    /// package's entire graph.
+    #[test]
+    fn no_architectures_falls_back_rather_than_returning_nothing() {
+        let deps = deps_from_srcinfo(&srcinfo(), &[]);
+        assert!(
+            deps.depends.contains(&"common-lib".to_string()),
+            "{:?}",
+            deps.depends
+        );
     }
 }

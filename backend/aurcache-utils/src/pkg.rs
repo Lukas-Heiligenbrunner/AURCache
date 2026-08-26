@@ -172,3 +172,65 @@ mod tests {
         );
     }
 }
+
+/// The alpm architectures a package's configured platforms correspond to.
+///
+/// `packages.platforms` is a semicolon-delimited list of this project's
+/// `Platform`; `.SRCINFO` is keyed by alpm's `SystemArchitecture`. Dependency
+/// extraction needs the second, so the two have to be bridged somewhere.
+///
+/// Unparseable entries are skipped rather than failing: a bad platform string
+/// should not stop a package's dependency graph from being computed for the
+/// platforms that *are* valid.
+#[must_use]
+pub fn architectures_for_platforms(platforms: &str) -> Vec<alpm_types::SystemArchitecture> {
+    use alpm_types::SystemArchitecture;
+    use pacman_mirrors::platforms::Platform;
+
+    Platform::parse_many(platforms)
+        .filter_map(Result::ok)
+        .map(|platform| match platform {
+            Platform::X86_64 => SystemArchitecture::X86_64,
+            Platform::Aarch64 => SystemArchitecture::Aarch64,
+            Platform::Armv7h => SystemArchitecture::Armv7h,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod architecture_tests {
+    use super::architectures_for_platforms;
+    use alpm_types::SystemArchitecture;
+
+    #[test]
+    fn each_platform_maps_to_its_alpm_architecture() {
+        assert_eq!(
+            architectures_for_platforms("x86_64;aarch64;armv7h"),
+            vec![
+                SystemArchitecture::X86_64,
+                SystemArchitecture::Aarch64,
+                SystemArchitecture::Armv7h,
+            ]
+        );
+    }
+
+    /// A package built only for aarch64 must not be described by x86_64's
+    /// dependency list, which is what the hardcoded architecture used to do.
+    #[test]
+    fn a_single_platform_does_not_pull_in_x86_64() {
+        assert_eq!(
+            architectures_for_platforms("aarch64"),
+            vec![SystemArchitecture::Aarch64]
+        );
+    }
+
+    /// One bad entry must not lose the good ones.
+    #[test]
+    fn unparseable_platforms_are_skipped() {
+        assert_eq!(
+            architectures_for_platforms("x86_64;sparc;aarch64"),
+            vec![SystemArchitecture::X86_64, SystemArchitecture::Aarch64]
+        );
+        assert!(architectures_for_platforms("").is_empty());
+    }
+}

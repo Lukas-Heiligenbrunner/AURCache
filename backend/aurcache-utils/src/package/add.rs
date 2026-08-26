@@ -1,4 +1,5 @@
 use crate::package::enqueue::trigger_initial_builds;
+use crate::pkg::architectures_for_platforms;
 use crate::snapshot::SnapshotStore;
 use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
@@ -131,9 +132,10 @@ async fn resolve_srcinfo_to_spec(
     store: &SnapshotStore,
     client: &aurcache_deps::AurClient,
     source_data: &SourceData,
+    architectures: &[alpm_types::SystemArchitecture],
 ) -> anyhow::Result<PackageInsertSpec> {
     let sourceinfo = store.sourceinfo(client, source_data).await?;
-    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo);
+    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo, architectures);
     let pkgbase = sourceinfo.base.name.to_string();
     let requirements =
         collect_dependency_requirements(deps.depends.iter().chain(deps.make_depends.iter()))?;
@@ -242,11 +244,23 @@ async fn add_package_with_source(
             let aur_data = SourceData::Aur {
                 name: pkgbase.clone(),
             };
-            let package_spec = resolve_srcinfo_to_spec(store, client, &aur_data).await?;
+            let package_spec = resolve_srcinfo_to_spec(
+                store,
+                client,
+                &aur_data,
+                &architectures_for_platforms(&context.platforms_str),
+            )
+            .await?;
             finalize_package_add(client, store, db, tx, context, package_spec).await
         }
         SourceData::Git { .. } => {
-            let package_spec = resolve_srcinfo_to_spec(store, client, &source_data).await?;
+            let package_spec = resolve_srcinfo_to_spec(
+                store,
+                client,
+                &source_data,
+                &architectures_for_platforms(&context.platforms_str),
+            )
+            .await?;
             finalize_package_add(client, store, db, tx, context, package_spec).await
         }
         SourceData::Upload { .. } => {
@@ -277,7 +291,13 @@ async fn add_dependency_recursive(
     let source_data = SourceData::Aur {
         name: pkgbase.to_string(),
     };
-    let package_spec = resolve_srcinfo_to_spec(store, client, &source_data).await?;
+    let package_spec = resolve_srcinfo_to_spec(
+        store,
+        client,
+        &source_data,
+        &architectures_for_platforms(&context.platforms_str),
+    )
+    .await?;
     insert_package_with_deps(
         client,
         store,
