@@ -14,14 +14,14 @@ members = [
     "aurcache-types"]
 
 [workspace.dependencies]
-tokio = "1.52.3"
-anyhow = "1.0.103"
+tokio = "1.53.1"
+anyhow = "1.0.104"
 reqwest = "0.13.4"
 tracing = "0.1.44"
 chrono = "0.4.45"
-serde = "1.0.228"
+serde = "1.0.229"
 backon = "1.6.0"
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 sea-orm = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.15.0"
 flate2 = "1.1.9"
