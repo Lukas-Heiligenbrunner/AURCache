@@ -1,10 +1,11 @@
-mod build;
+pub mod build;
 pub mod build_mode;
 mod cancel;
-mod docker;
+pub mod commands;
+pub mod docker;
 pub mod init;
 mod logger;
-mod makepkg_utils;
+pub mod makepkg_utils;
 mod move_location;
 mod path_utils;
 mod queue;

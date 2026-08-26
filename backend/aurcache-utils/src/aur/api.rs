@@ -1,41 +1,27 @@
 use anyhow::anyhow;
-use aur_rs::{Package, Request};
-use backon::{FibonacciBuilder, Retryable};
-use std::time::Duration;
+use aurcache_deps::AurClient;
+use std::sync::OnceLock;
 
-// https://wiki.archlinux.org/title/Aurweb_RPC_interface
-// API rate limit 4000 requests per day
+fn client() -> &'static AurClient {
+    static CLIENT: OnceLock<AurClient> = OnceLock::new();
+    CLIENT.get_or_init(AurClient::new)
+}
 
-/// Query the AUR for packages matching the given query string
-pub async fn query_aur(query: &str) -> anyhow::Result<Vec<Package>> {
-    let request = Request::default();
-    let response = (|| async { request.search_package_by_name(query).await })
-        .retry(
-            FibonacciBuilder::default()
-                .with_min_delay(Duration::from_millis(500))
-                .with_max_times(4),
-        )
+/// Query the AUR for packages matching the given query string.
+pub async fn query_aur(query: &str) -> anyhow::Result<Vec<aurcache_deps::Package>> {
+    let mut results = client()
+        .search_by_name(query)
         .await
-        .map_err(|e| anyhow!("failed to get package: {e}"))?;
-
-    let mut response = response.results;
-    response.sort_by(|x, x1| x.popularity.partial_cmp(&x1.popularity).unwrap().reverse());
-
-    Ok(response)
+        .map_err(|e| anyhow!("failed to query AUR: {e}"))?;
+    results.sort_by(|x, x1| x.popularity.partial_cmp(&x1.popularity).unwrap().reverse());
+    Ok(results)
 }
 
 /// Retrieve AUR package information by its name.
-/// Returns `None` if the package is not found
-pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<Package>> {
-    let request = Request::default();
-    let mut response = (|| async { request.search_info_by_name(pkg_name).await })
-        .retry(
-            FibonacciBuilder::default()
-                .with_min_delay(Duration::from_millis(500))
-                .with_max_times(4),
-        )
+/// Returns `None` if the package is not found.
+pub async fn get_package_info(pkg_name: &str) -> anyhow::Result<Option<aurcache_deps::Package>> {
+    client()
+        .info_of(pkg_name)
         .await
-        .map_err(|e| anyhow!("failed to get package: {e}"))?;
-
-    Ok(response.results.pop())
+        .map_err(|e| anyhow!("failed to get package info: {e}"))
 }

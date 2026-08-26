@@ -1,7 +1,10 @@
+use anyhow::anyhow;
+use sea_orm::DeriveValueType;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, DeriveValueType)]
+#[sea_orm(value_type = "String")]
 pub enum Platform {
     X86_64,
     Aarch64,
@@ -17,6 +20,18 @@ impl Platform {
             Platform::Aarch64 => "aarch64",
             Platform::Armv7h => "armv7h",
         }
+    }
+
+    /// Iterate over a semicolon-separated list of platform names.
+    ///
+    /// Each entry is trimmed, empty entries are skipped, and unknown platform
+    /// names produce an error in the returned `Result`.
+    pub fn parse_many(platforms: &str) -> impl Iterator<Item = anyhow::Result<Self>> + '_ {
+        platforms
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| Self::from_str(s).map_err(|_| anyhow!("Invalid platform '{s}'")))
     }
 }
 

@@ -99,6 +99,7 @@ class PackagesTable extends ConsumerWidget {
               switchSuccessIcon(package.status),
               color: switchSuccessColor(package.status),
             ),
+            tooltip: statusLabel(package.status),
             onPressed: null,
           ),
         ),

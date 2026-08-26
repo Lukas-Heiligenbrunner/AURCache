@@ -28,6 +28,7 @@ class _AddPackagePopupState extends ConsumerState<AddPackagePopup> {
   StepProgressController stepController = StepProgressController(totalSteps: 3);
   int currentStep = 0;
   int? selectedSource;
+  bool _isInstalling = false;
   String? selectedAurPkgname;
   final List<String> selectedArchs = ["x86_64"];
 
@@ -150,10 +151,14 @@ class _AddPackagePopupState extends ConsumerState<AddPackagePopup> {
             ),
             TextButton(
               onPressed:
-                  !(selectedSource == null ||
+                  !(_isInstalling ||
+                      selectedSource == null ||
                       (currentStep == 1 && selectedSource == 2))
                   ? () async {
                       if (currentStep == 2) {
+                        setState(() {
+                          _isInstalling = true;
+                        });
                         try {
                           if (selectedSource == 0) {
                             if (selectedAurPkgname != null) {
@@ -183,6 +188,10 @@ class _AddPackagePopupState extends ConsumerState<AddPackagePopup> {
                             autoCloseDuration: const Duration(seconds: 5),
                             type: ToastificationType.error,
                           );
+                        } finally {
+                          setState(() {
+                            _isInstalling = false;
+                          });
                         }
 
                         // invalidate all dashboard providers
@@ -201,7 +210,13 @@ class _AddPackagePopupState extends ConsumerState<AddPackagePopup> {
                       }
                     }
                   : null,
-              child: currentStep == 2
+              child: currentStep == 2 && _isInstalling
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : currentStep == 2
                   ? const Text('Install')
                   : const Text('Next'),
             ),

@@ -7,11 +7,11 @@ use crate::models::authenticated::Authenticated;
 use crate::models::builds::ListBuildsModel;
 use aurcache_db::prelude::Builds;
 use aurcache_db::{builds, packages};
-use aurcache_types::builder::{Action, BuildStates};
-use aurcache_utils::package::update::update_platform;
+use aurcache_types::builder::Action;
+use aurcache_utils::package::update::package_update;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, JoinType, ModelTrait, Order,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Set,
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, ModelTrait, Order, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait,
 };
 use tokio::sync::broadcast::Sender;
 use utoipa::OpenApi;
@@ -226,7 +226,6 @@ pub async fn rery_build(
     // Extract the platform and package ID
     let platform = old_build.platform;
     let pkg_id = old_build.pkg_id;
-    let version = old_build.version;
 
     // Fetch the package details
     let package = packages::Entity::find_by_id(pkg_id)
@@ -235,16 +234,22 @@ pub async fn rery_build(
         .map_err(|e| NotFound(e.to_string()))?
         .ok_or(NotFound("Package not found".to_string()))?;
 
-    let mut pacage_am: packages::ActiveModel = package.clone().into();
-    pacage_am.status = Set(BuildStates::ENQUEUED_BUILD);
-    pacage_am
-        .save(db)
+    // Route retries through the same path as "Force Rebuild": this re-fetches
+    // the .SRCINFO, resolves AUR dependencies again, and syncs the dependency
+    // graph before enqueuing builds, instead of blindly re-enqueuing the old
+    // build's stored version with a stale dependency graph.
+    let platform_results = package_update(db, package, true, tx)
         .await
         .map_err(|e| NotFound(e.to_string()))?;
 
-    let new_buildid = update_platform(&platform, package, version, db, tx)
-        .await
-        .map_err(|e| NotFound(e.to_string()))?;
+    // Pick out the build explicitly reported for the platform that was
+    // retried; it may have been enqueued/promoted or left waiting on a
+    // dependency rebuild, either way `package_update` already tells us its id.
+    let build_id = platform_results
+        .into_iter()
+        .find(|r| r.platform == platform)
+        .map(|r| r.build_id)
+        .ok_or(NotFound("No build was enqueued for retry".to_string()))?;
 
-    Ok(Json(new_buildid))
+    Ok(Json(build_id))
 }

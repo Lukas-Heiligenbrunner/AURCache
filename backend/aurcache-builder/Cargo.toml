@@ -2,6 +2,10 @@
 name = "aurcache-builder"
 edition = "2024"
 
+[[bin]]
+name = "test-builder"
+path = "src/bin/test-builder.rs"
+
 [dependencies]
 anyhow = {workspace = true}
 tracing = {workspace = true}
@@ -17,6 +21,8 @@ futures = "0.3.34"
 tokio-util ={version = "0.7.19", features = ["io"]}
 
 aurcache-db = {path = "../aurcache-db"}
+aurcache-deps = {path = "../aurcache-deps"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}
 aurcache-utils = {path = "../aurcache-utils"}
+pacman-mirrors = {path = "../pacman-mirrors"}
 aurcache-types = {path = "../aurcache-types"}
