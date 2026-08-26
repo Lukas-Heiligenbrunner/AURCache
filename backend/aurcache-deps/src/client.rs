@@ -6,6 +6,10 @@ use backon::{FibonacciBuilder, Retryable};
 use reqwest::Client;
 use url::Url;
 
+/// Ceiling for a generated RPC URL, under the server's 8 KiB request-line
+/// limit with room for the scheme, host and path already in the base.
+const MAX_RPC_URL_BYTES: usize = 7_600;
+
 use crate::deps::deps_from_packages;
 use crate::model::{DependencyResolution, Error, Package, PackageResponse, PkgDeps};
 use crate::repo::{default_official_mirrorlist_path, default_official_repo_cache_dir};
@@ -86,9 +90,59 @@ impl AurClient {
         Ok(url)
     }
 
+    /// Split an `/info` query across as many URLs as the length limit requires.
+    ///
+    /// The RPC takes one `arg[]` per package on a GET, and the server rejects a
+    /// request line over 8 KiB with `414 Request-URI Too Large` — measured:
+    /// 8185 bytes answers, 8313 does not. At roughly 25 bytes per package that
+    /// caps a single request near 300 packages, which a repository of any size
+    /// passes.
+    ///
+    /// Getting this wrong is not a partial failure: the version-check pass
+    /// propagates the error, so one oversized request stops *every* package
+    /// from being checked, on every pass, until the package count drops.
+    ///
+    /// Measured against the encoded URL rather than a package count, because
+    /// names are percent-encoded — `aewm++` is four bytes longer than it looks.
+    fn rpc_info_urls(&self, args: &[&str]) -> Result<Vec<Url>, Error> {
+        let base = format!("{}/info", self.rpc_url);
+        let mut urls = Vec::new();
+        let mut current = Url::parse(&base).map_err(|e| Error::Rpc(e.to_string()))?;
+        let mut in_current = 0usize;
+
+        for arg in args {
+            let mut candidate = current.clone();
+            candidate.query_pairs_mut().append_pair("arg[]", arg);
+
+            if in_current > 0 && candidate.as_str().len() > MAX_RPC_URL_BYTES {
+                urls.push(current);
+                current = Url::parse(&base).map_err(|e| Error::Rpc(e.to_string()))?;
+                current.query_pairs_mut().append_pair("arg[]", arg);
+                in_current = 1;
+            } else {
+                // A single argument that alone exceeds the budget still goes
+                // out on its own: a doomed request beats silently dropping the
+                // package from version checking.
+                current = candidate;
+                in_current += 1;
+            }
+        }
+
+        if in_current > 0 {
+            urls.push(current);
+        }
+        Ok(urls)
+    }
+
     /// Resolve a list of package names to their pkgbase names via the AUR RPC.
     pub async fn resolve_bases(&self, names: &[&str]) -> Result<HashMap<String, String>, Error> {
-        let packages = self.rpc_fetch(self.rpc_info_url(names)?).await?;
+        // Chunked for the same reason as `multi_info_of`: this is handed a
+        // whole dependency list, which for a large package can outgrow the
+        // server's URL limit.
+        let mut packages = Vec::new();
+        for url in self.rpc_info_urls(names)? {
+            packages.extend(self.rpc_fetch(url).await?);
+        }
         Ok(packages
             .into_iter()
             .map(|pkg| (pkg.name, pkg.package_base))
@@ -109,7 +163,18 @@ impl AurClient {
 
     /// Fetch metadata for multiple AUR packages in a single RPC call.
     pub async fn multi_info_of(&self, names: &[&str]) -> Result<Vec<Package>, Error> {
-        self.rpc_request(names).await
+        let mut packages = Vec::new();
+        for url in self.rpc_info_urls(names)? {
+            // An individual chunk returning nothing is fine — those packages
+            // are simply not in the AUR any more. Only a request that fails
+            // outright aborts.
+            packages.extend(self.rpc_fetch(url).await?);
+        }
+
+        if packages.is_empty() && !names.is_empty() {
+            return Err(Error::Rpc("package not found via RPC".into()));
+        }
+        Ok(packages)
     }
 
     /// Search AUR packages by name or description.
@@ -244,5 +309,79 @@ impl AurClient {
                 .then(left.name.cmp(&right.name))
         });
         Ok(packages.into_iter().next().map(|pkg| pkg.package_base))
+    }
+}
+
+#[cfg(test)]
+mod url_chunking_tests {
+    use super::{AurClient, MAX_RPC_URL_BYTES};
+
+    fn client() -> AurClient {
+        AurClient::with_urls("https://aur.archlinux.org/rpc/v5")
+    }
+
+    /// A handful of packages is one request, as before.
+    #[test]
+    fn a_small_query_is_a_single_request() {
+        let names = ["hello", "yay", "paru"];
+        let urls = client().rpc_info_urls(&names).expect("urls");
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].query_pairs().count(), 3);
+    }
+
+    /// The case that broke: a repository with enough packages to outgrow the
+    /// server's 8 KiB request line. Measured against the real service — 8185
+    /// bytes answers, 8313 returns 414.
+    #[test]
+    fn a_large_query_is_split_and_every_part_fits() {
+        let names: Vec<String> = (0..1000)
+            .map(|i| format!("some-package-name-{i}"))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let urls = client().rpc_info_urls(&refs).expect("urls");
+        assert!(urls.len() > 1, "1000 packages should not be one request");
+
+        for url in &urls {
+            assert!(
+                url.as_str().len() <= MAX_RPC_URL_BYTES,
+                "chunk of {} bytes exceeds the budget",
+                url.as_str().len()
+            );
+        }
+
+        // Every package is asked about exactly once — chunking must not drop
+        // or duplicate any, which would silently stop them being checked.
+        let asked: Vec<String> = urls
+            .iter()
+            .flat_map(|u| {
+                u.query_pairs()
+                    .map(|(_, v)| v.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(asked, names);
+    }
+
+    /// Names are percent-encoded, so a count-based split would misjudge the
+    /// length. 187 AUR packages contain `+`, which triples in the URL.
+    #[test]
+    fn encoded_names_are_measured_at_their_encoded_length() {
+        let names: Vec<String> = (0..1000).map(|i| format!("aewm++{i}+plus+name")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        for url in client().rpc_info_urls(&refs).expect("urls") {
+            assert!(
+                url.as_str().len() <= MAX_RPC_URL_BYTES,
+                "encoded chunk of {} bytes exceeds the budget",
+                url.as_str().len()
+            );
+        }
+    }
+
+    /// No packages means no requests, rather than one pointless empty query.
+    #[test]
+    fn an_empty_query_makes_no_requests() {
+        assert!(client().rpc_info_urls(&[]).expect("urls").is_empty());
     }
 }
