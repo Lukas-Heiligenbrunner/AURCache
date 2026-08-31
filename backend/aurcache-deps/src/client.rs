@@ -194,22 +194,45 @@ impl AurClient {
             return Ok(HashMap::new());
         }
 
-        let exact_aur_bases = self.resolve_bases(dep_names).await?;
+        // The repositories answer first, from disk, and only what they cannot
+        // answer is asked of the AUR.
+        //
+        // Order matters for cost, not for correctness: this used to resolve
+        // every name against the RPC up front and then discover most of them in
+        // the repositories a line later. Nearly every package depends on
+        // `glibc` and friends, so most of what went out was thrown away -- and
+        // a package whose dependencies are *all* in the repositories, which is
+        // the common case, now costs no RPC call at all rather than one.
         let mut resolutions = HashMap::new();
+        let mut unresolved: Vec<&str> = Vec::new();
         let mut seen = HashSet::new();
         for dep_name in dep_names {
             if !seen.insert(*dep_name) {
                 continue;
             }
 
+            // AURCache's own repository first, then core/extra/multilib: a
+            // package we build ourselves takes precedence over an official one
+            // of the same name, which is the point of building it.
             if self.local_repo_dependency_exists(dep_name)?
                 || self.official_dependency_exists(dep_name).await?
             {
                 resolutions.insert(dep_name.to_string(), DependencyResolution::Official);
-                continue;
+            } else {
+                unresolved.push(*dep_name);
             }
+        }
 
-            if let Some(pkgbase) = exact_aur_bases.get(*dep_name) {
+        if unresolved.is_empty() {
+            return Ok(resolutions);
+        }
+
+        // One request for every remaining name, not one per name: `resolve_bases`
+        // chunks by URL length, so this is a single call for any realistic
+        // dependency list.
+        let exact_aur_bases = self.resolve_bases(&unresolved).await?;
+        for dep_name in unresolved {
+            if let Some(pkgbase) = exact_aur_bases.get(dep_name) {
                 resolutions.insert(
                     dep_name.to_string(),
                     DependencyResolution::Aur {
@@ -219,6 +242,10 @@ impl AurClient {
                 continue;
             }
 
+            // Nothing provides it under its own name, so ask which package
+            // declares it in `provides`. One request per such name -- there is
+            // no bulk form of this query -- but they are rare by the time a
+            // name has survived every check above.
             if let Some(pkgbase) = self.provider_pkgbase(dep_name).await? {
                 resolutions.insert(dep_name.to_string(), DependencyResolution::Aur { pkgbase });
             }
