@@ -24,7 +24,7 @@ serde_json = "1.0.151"
 sea-orm = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.15.0"
 aur-rs = "0.1.1"
-flate2 = "1.1.9"
+flate2 = "1.1.10"
 tar = "0.4.46"
 utoipa = { version = "5.5.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
