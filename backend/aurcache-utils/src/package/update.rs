@@ -180,8 +180,15 @@ async fn package_update_with_client_inner(
     // With the update, it's possible some dependencies are no longer needed.
     remove_orphaned_packages(services.db, pkg_model.id).await?;
 
+    // Only a *successful* build makes a version "already built". Asking for the
+    // latest build of any outcome meant a failed attempt at the new version
+    // blocked every retry of it: upstream moves to 1.4.1-1, the build fails,
+    // the package stays flagged out of date, and pressing Update answers
+    // "already up to date (version 1.4.1-1)" about a version that is nowhere in
+    // the repository. Nothing could shift it but a forced build.
     let latest_build = Builds::find()
         .filter(builds::Column::PkgId.eq(pkg_model.id))
+        .filter(builds::Column::Status.eq(Some(BuildStates::SUCCESSFUL_BUILD)))
         .order_by_desc(builds::Column::StartTime)
         .one(services.db)
         .await?;
