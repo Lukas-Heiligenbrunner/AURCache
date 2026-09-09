@@ -1,0 +1,15 @@
+[package]
+name = "aurcache-sandbox"
+version = "0.1.0"
+edition = "2024"
+
+# Deliberately standalone: this is exec'd from a PATH shim in front of the
+# PKGBUILD parser, not linked into the server, so it stays auditable on its own
+# and has no dependency on anything it confines.
+
+[[bin]]
+name = "aurcache-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+landlock = "0.4"

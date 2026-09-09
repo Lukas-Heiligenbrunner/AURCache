@@ -12,8 +12,12 @@ if [ "$TARGET_ARCH" == "linux/arm64/v8" ]; then
     rustup target add aarch64-unknown-linux-gnu
     apt update -y && apt install -y gcc-aarch64-linux-gnu
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --target=aarch64-unknown-linux-gnu --features static
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --target=aarch64-unknown-linux-gnu -p aurcache-sandbox
     mv target/aarch64-unknown-linux-gnu/release/aurcache target/aurcache
+    mv target/aarch64-unknown-linux-gnu/release/aurcache-sandbox target/aurcache-sandbox
 else
   cargo build --release --features static
+  cargo build --release -p aurcache-sandbox
   mv target/release/aurcache target/aurcache
+  mv target/release/aurcache-sandbox target/aurcache-sandbox
 fi

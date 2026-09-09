@@ -41,8 +41,14 @@ FROM --platform=$TARGET_ARCH quay.io/podman/stable:v5.8.4
 COPY --from=builder --chmod=0755 /app/target/aurcache /usr/local/bin/aurcache
 COPY --chmod=0755 docker/entrypoint.sh /entrypoint.sh
 
-# add alpm-pkgbuild-bridge
-ADD --chmod=755 https://gitlab.archlinux.org/archlinux/alpm/alpm-pkgbuild-bridge/-/raw/main/alpm-pkgbuild-bridge.sh?ref_type=heads /usr/local/bin/alpm-pkgbuild-bridge
+# alpm-srcinfo parses a PKGBUILD by shelling out to this script, which parses
+# it by *sourcing* it -- so adding a package executes its PKGBUILD in the
+# server's own container. The real script is installed out of PATH and reached
+# only through a wrapper that confines it; see docker/bridge-wrapper.sh and
+# backend/aurcache-sandbox.
+ADD --chmod=755 https://gitlab.archlinux.org/archlinux/alpm/alpm-pkgbuild-bridge/-/raw/main/alpm-pkgbuild-bridge.sh?ref_type=heads /usr/local/libexec/alpm-pkgbuild-bridge
+COPY --from=builder --chmod=0755 /app/target/aurcache-sandbox /usr/local/bin/aurcache-sandbox
+COPY --chmod=0755 docker/bridge-wrapper.sh /usr/local/bin/alpm-pkgbuild-bridge
 
 WORKDIR /app
 CMD ["/entrypoint.sh"]

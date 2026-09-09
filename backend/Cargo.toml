@@ -11,6 +11,7 @@ members = [
     "aurcache-activitylog",
     "aurcache-utils",
     "aurcache-scheduler",
+    "aurcache-sandbox",
     "aurcache-types"]
 
 [workspace.dependencies]
