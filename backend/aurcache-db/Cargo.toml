@@ -20,5 +20,8 @@ sea-orm-migration = {version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgr
 utoipa = { version = "5.5.0"}
 
 [dev-dependencies]
+flate2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 wiremock = "0.6"

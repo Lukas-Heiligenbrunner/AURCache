@@ -42,17 +42,33 @@ fn write_repo_db(dir: &Path, pkg_name: &str, provides: &[&str]) {
     builder.finish().unwrap();
 }
 
-/// A client whose RPC points at `rpc_url`, with empty official-repo config so
-/// that check answers `false` without reaching the network.
+/// An official-repo cache that is present, readable and empty.
+///
+/// "The official repositories hold nothing" has to be said with real files:
+/// a cache that cannot be read fails the resolve rather than falling through
+/// to the AUR, which is what stops a mirror outage sending `git` there.
+fn write_empty_official_cache(cache_dir: &Path) {
+    fs::create_dir_all(cache_dir).unwrap();
+    for repo_name in ["core", "extra", "multilib"] {
+        let file = File::create(cache_dir.join(format!("{repo_name}.db.tar.gz"))).unwrap();
+        tar::Builder::new(GzEncoder::new(file, Compression::default()))
+            .finish()
+            .unwrap();
+    }
+}
+
+/// A client whose RPC points at `rpc_url` and whose official repositories are
+/// readable and hold nothing, so these tests are about the other sources.
 fn client_for(rpc_url: &str, repo_root: &Path, tmp: &Path) -> AurClient {
+    let cache_dir = tmp.join("official-cache");
+    write_empty_official_cache(&cache_dir);
     AurClient::with_urls_and_paths(
         rpc_url,
         repo_root,
-        // A mirrorlist that does not exist: `official_dependency_exists`
-        // swallows the error as "not found", which is what we want when the
-        // point of the test is the *local* repository.
+        // Never read: nothing in the cache is stale, so no download is
+        // attempted and no mirror is needed.
         tmp.join("no-such-mirrorlist"),
-        tmp.join("official-cache"),
+        cache_dir,
     )
 }
 
@@ -69,7 +85,7 @@ async fn a_dependency_in_the_local_repo_costs_no_rpc_call() {
     let server = MockServer::start().await;
 
     let client = client_for(&format!("{}/rpc/v5", server.uri()), &repo_root, tmp.path());
-    let resolved = client.resolve_dependencies(&["mydep"]).await.unwrap();
+    let resolved = client.local_repo_resolutions(&["mydep"]).unwrap();
 
     assert!(matches!(
         resolved.get("mydep"),
@@ -93,7 +109,7 @@ async fn a_provided_dependency_also_costs_no_rpc_call() {
 
     let server = MockServer::start().await;
     let client = client_for(&format!("{}/rpc/v5", server.uri()), &repo_root, tmp.path());
-    let resolved = client.resolve_dependencies(&["mydep"]).await.unwrap();
+    let resolved = client.local_repo_resolutions(&["mydep"]).unwrap();
 
     assert!(matches!(
         resolved.get("mydep"),
@@ -122,10 +138,14 @@ async fn only_the_unresolved_names_reach_the_aur() {
         .await;
 
     let client = client_for(&format!("{}/rpc/v5", server.uri()), &repo_root, tmp.path());
-    let resolved = client
-        .resolve_dependencies(&["known", "stranger"])
-        .await
+    let mut resolved = client
+        .local_repo_resolutions(&["known", "stranger"])
         .unwrap();
+    let unresolved: Vec<&str> = ["known", "stranger"]
+        .into_iter()
+        .filter(|name| !resolved.contains_key(*name))
+        .collect();
+    resolved.extend(client.aur_resolutions(&unresolved).await.unwrap());
 
     assert!(matches!(
         resolved.get("known"),
@@ -146,5 +166,32 @@ async fn only_the_unresolved_names_reach_the_aur() {
     assert!(
         !url.contains("known"),
         "a name the repository already answered was still sent to the AUR: {url}"
+    );
+}
+
+/// Reading the official databases is not allowed to fail quietly. A cache that
+/// cannot be read used to be indistinguishable from "the official repositories
+/// do not have it", which sent ordinary `core` names off to be built from the
+/// AUR -- and is how an instance ends up with `git-git` built for `git`.
+#[tokio::test]
+async fn an_unreadable_official_cache_fails_the_resolve() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("official-cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    // Present, fresh, and not a gzip stream.
+    for repo_name in ["core", "extra", "multilib"] {
+        fs::write(cache_dir.join(format!("{repo_name}.db.tar.gz")), b"garbage").unwrap();
+    }
+
+    let client = AurClient::with_urls_and_paths(
+        "http://unused.invalid/rpc/v5",
+        tmp.path().join("repo"),
+        tmp.path().join("no-such-mirrorlist"),
+        cache_dir,
+    );
+
+    assert!(
+        client.official_resolutions(&["glibc"]).await.is_err(),
+        "a corrupt repository database must not read as 'not found'"
     );
 }

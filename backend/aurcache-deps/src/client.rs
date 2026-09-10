@@ -186,52 +186,67 @@ impl AurClient {
     /// Resolve a list of dependency names to their sources (AUR, official, or local repo).
     ///
     /// Dependencies not found anywhere are omitted from the result map.
-    pub async fn resolve_dependencies(
+    /// Which of `dep_names` the official repositories publish.
+    ///
+    /// The first question asked about any dependency, and the cheapest: it is
+    /// answered from the cached `core`/`extra`/`multilib` databases on disk.
+    /// A name they hold is answered by a binary that already exists on every
+    /// mirror, so nothing else needs to be consulted and nothing is built.
+    pub async fn official_resolutions(
         &self,
         dep_names: &[&str],
     ) -> Result<HashMap<String, DependencyResolution>, Error> {
+        let mut resolutions = HashMap::new();
+        for dep_name in dedup(dep_names) {
+            if self.official_dependency_exists(dep_name).await? {
+                resolutions.insert(dep_name.to_string(), DependencyResolution::Official);
+            }
+        }
+        Ok(resolutions)
+    }
+
+    /// Which of `dep_names` AURCache's own repository already holds.
+    ///
+    /// Asked after the caller has checked what it tracks, not before: a
+    /// package with a row must resolve to that row, so the dependency edge is
+    /// recorded and its dependents are rebuilt when it changes. What reaches
+    /// this is an artifact whose package no longer has a row the caller counts
+    /// -- one whose last build failed, say -- and there `Official` is right,
+    /// because there is nothing to link to.
+    pub fn local_repo_resolutions(
+        &self,
+        dep_names: &[&str],
+    ) -> Result<HashMap<String, DependencyResolution>, Error> {
+        let mut resolutions = HashMap::new();
+        for dep_name in dedup(dep_names) {
+            if self.local_repo_dependency_exists(dep_name)? {
+                resolutions.insert(dep_name.to_string(), DependencyResolution::Official);
+            }
+        }
+        Ok(resolutions)
+    }
+
+    /// Which of `dep_names` the AUR can build, by exact name and then by
+    /// `provides`.
+    ///
+    /// The last question, and the only one that means adding a package. Asked
+    /// of the fewest names for that reason, and because it is the only one
+    /// that touches the network.
+    pub async fn aur_resolutions(
+        &self,
+        dep_names: &[&str],
+    ) -> Result<HashMap<String, DependencyResolution>, Error> {
+        let dep_names = dedup(dep_names);
         if dep_names.is_empty() {
             return Ok(HashMap::new());
         }
 
-        // The repositories answer first, from disk, and only what they cannot
-        // answer is asked of the AUR.
-        //
-        // Order matters for cost, not for correctness: this used to resolve
-        // every name against the RPC up front and then discover most of them in
-        // the repositories a line later. Nearly every package depends on
-        // `glibc` and friends, so most of what went out was thrown away -- and
-        // a package whose dependencies are *all* in the repositories, which is
-        // the common case, now costs no RPC call at all rather than one.
         let mut resolutions = HashMap::new();
-        let mut unresolved: Vec<&str> = Vec::new();
-        let mut seen = HashSet::new();
+
+        // One request for every name, not one per name: `resolve_bases` chunks
+        // by URL length, so this is a single call for any realistic list.
+        let exact_aur_bases = self.resolve_bases(&dep_names).await?;
         for dep_name in dep_names {
-            if !seen.insert(*dep_name) {
-                continue;
-            }
-
-            // AURCache's own repository first, then core/extra/multilib: a
-            // package we build ourselves takes precedence over an official one
-            // of the same name, which is the point of building it.
-            if self.local_repo_dependency_exists(dep_name)?
-                || self.official_dependency_exists(dep_name).await?
-            {
-                resolutions.insert(dep_name.to_string(), DependencyResolution::Official);
-            } else {
-                unresolved.push(*dep_name);
-            }
-        }
-
-        if unresolved.is_empty() {
-            return Ok(resolutions);
-        }
-
-        // One request for every remaining name, not one per name: `resolve_bases`
-        // chunks by URL length, so this is a single call for any realistic
-        // dependency list.
-        let exact_aur_bases = self.resolve_bases(&unresolved).await?;
-        for dep_name in unresolved {
             if let Some(pkgbase) = exact_aur_bases.get(dep_name) {
                 resolutions.insert(
                     dep_name.to_string(),
@@ -242,10 +257,10 @@ impl AurClient {
                 continue;
             }
 
-            // Nothing provides it under its own name, so ask which package
+            // Nothing carries it under its own name, so ask which package
             // declares it in `provides`. One request per such name -- there is
-            // no bulk form of this query -- but they are rare by the time a
-            // name has survived every check above.
+            // no bulk form -- but they are rare by the time a name has
+            // survived everything above.
             if let Some(pkgbase) = self.provider_pkgbase(dep_name).await? {
                 resolutions.insert(dep_name.to_string(), DependencyResolution::Aur { pkgbase });
             }
@@ -319,23 +334,160 @@ impl AurClient {
         Ok(bytes)
     }
 
+    /// Whether the official repositories hold `dep_name`.
+    ///
+    /// A failure to read them propagates rather than answering `false`.
+    /// Reporting "not in the official repositories" when the truth is "could
+    /// not ask" sends every ordinary `core`/`extra` name off to the AUR, where
+    /// a `provides` search can turn `git` into `git-git` and `glibc` into
+    /// something to build.
     pub(crate) async fn official_dependency_exists(&self, dep_name: &str) -> Result<bool, Error> {
-        Ok(self
-            .cached_official_dependency_exists(dep_name)
-            .await
-            .unwrap_or(false))
+        self.cached_official_dependency_exists(dep_name).await
     }
 
+    /// The AUR package to build for a name nothing else answers.
+    ///
+    /// Every result provides `dep_name` by construction -- the server filtered
+    /// on exactly that -- so there is nothing in the response to tell them
+    /// apart, and something has to choose. This used to be alphabetical order,
+    /// which is how an instance ends up building `git-git` for `git` and
+    /// `jpegli-git` for `libjpeg6`: both sort first among their providers, and
+    /// neither is what anyone meant.
+    ///
+    /// Three signals, in order:
+    ///
+    /// 1. **The name itself.** A package called `foo` is a better answer for
+    ///    `foo` than any package merely declaring it.
+    /// 2. **Not a VCS package.** `-git` and friends build whatever upstream's
+    ///    tip is at the time, so they are a poor way to satisfy someone else's
+    ///    dependency -- they rebuild endlessly and track no release. Someone
+    ///    who wants one adds it directly, which settles the name before this
+    ///    is ever reached.
+    /// 3. **Votes.** Cumulative, where `Popularity` decays: for `libjpeg6`,
+    ///    popularity puts `jpegli-git` (4 votes) ahead of `libjpeg6-turbo`
+    ///    (26), which is exactly backwards.
+    ///
+    /// Pkgbase breaks the remaining ties, so the answer is at least stable
+    /// across runs rather than dependent on the order the RPC returned.
     async fn provider_pkgbase(&self, dep_name: &str) -> Result<Option<String>, Error> {
-        let mut packages = self
+        let packages = self
             .rpc_fetch(self.rpc_search_url(dep_name, "provides")?)
             .await?;
-        packages.sort_by(|left, right| {
-            left.package_base
-                .cmp(&right.package_base)
-                .then(left.name.cmp(&right.name))
-        });
-        Ok(packages.into_iter().next().map(|pkg| pkg.package_base))
+        Ok(packages
+            .iter()
+            .min_by_key(|package| {
+                provider_rank(
+                    &package.name,
+                    &package.package_base,
+                    package.num_votes,
+                    dep_name,
+                )
+            })
+            .map(|package| package.package_base.clone()))
+    }
+}
+
+/// The names in order, without repeats: a pkgbase can name the same dependency
+/// in `depends` and `makedepends`, and its split packages multiply that again.
+fn dedup<'a>(dep_names: &[&'a str]) -> Vec<&'a str> {
+    let mut seen = HashSet::new();
+    dep_names
+        .iter()
+        .filter(|dep_name| seen.insert(**dep_name))
+        .copied()
+        .collect()
+}
+
+/// How good a candidate is at standing in for `dep_name`, lowest first. See
+/// [`AurClient::provider_pkgbase`].
+fn provider_rank<'a>(
+    name: &str,
+    pkgbase: &'a str,
+    votes: u32,
+    dep_name: &str,
+) -> (u8, u8, std::cmp::Reverse<u32>, &'a str) {
+    (
+        u8::from(name != dep_name),
+        u8::from(is_vcs_pkgbase(pkgbase)),
+        std::cmp::Reverse(votes),
+        pkgbase,
+    )
+}
+
+/// Whether a pkgbase names a package that builds from a moving upstream ref.
+fn is_vcs_pkgbase(pkgbase: &str) -> bool {
+    const VCS_SUFFIXES: [&str; 6] = ["-git", "-svn", "-hg", "-bzr", "-cvs", "-darcs"];
+    VCS_SUFFIXES.iter().any(|suffix| pkgbase.ends_with(suffix))
+}
+
+#[cfg(test)]
+mod provider_rank_tests {
+    use super::provider_rank;
+
+    /// Rank candidates the way `provider_pkgbase` does and name the winner.
+    fn best<'a>(dep_name: &str, candidates: &[(&'a str, &'a str, u32)]) -> &'a str {
+        candidates
+            .iter()
+            .min_by_key(|(name, pkgbase, votes)| provider_rank(name, pkgbase, *votes, dep_name))
+            .map(|(_, pkgbase, _)| *pkgbase)
+            .expect("a candidate")
+    }
+
+    /// Every provider of `git` in the AUR is a VCS package, and `git-git` wins
+    /// on alphabetical order alone. (In practice the repositories answer `git`
+    /// long before this is reached -- this is about which one is chosen when
+    /// nothing else can answer.)
+    #[test]
+    fn votes_break_the_tie_that_alphabetical_order_got_wrong() {
+        let winner = best(
+            "git",
+            &[
+                ("git-git", "git-git", 3),
+                ("git-gl", "git-gl", 2),
+                ("git-wd40", "git-wd40", 12),
+            ],
+        );
+        assert_eq!(winner, "git-wd40");
+    }
+
+    /// Real `libjpeg6` providers, with their votes. Alphabetical order picks
+    /// `jpegli-git`; so does `Popularity`, which is why votes decide.
+    #[test]
+    fn a_release_package_beats_a_vcs_one_that_sorts_first() {
+        let winner = best(
+            "libjpeg6",
+            &[
+                ("jpegli-git", "jpegli-git", 4),
+                ("libjpeg6-turbo", "libjpeg6-turbo", 26),
+                ("libjpeg6-turbo-bin", "libjpeg6-turbo-bin", 2),
+            ],
+        );
+        assert_eq!(winner, "libjpeg6-turbo");
+    }
+
+    /// A VCS package loses even to a much less popular release package: the
+    /// objection to it is that it tracks no release, not that it is unloved.
+    #[test]
+    fn a_vcs_package_loses_on_kind_not_on_votes() {
+        let winner = best(
+            "thing",
+            &[
+                ("thing-git", "thing-git", 500),
+                ("thing-stable", "thing-stable", 1),
+            ],
+        );
+        assert_eq!(winner, "thing-stable");
+    }
+
+    /// Carrying the name outright still comes first, VCS or not: a dependency
+    /// on `foo-git` means `foo-git`.
+    #[test]
+    fn the_package_named_for_the_dependency_wins_outright() {
+        let winner = best(
+            "foo-git",
+            &[("other", "other", 900), ("foo-git", "foo-git", 0)],
+        );
+        assert_eq!(winner, "foo-git");
     }
 }
 

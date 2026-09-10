@@ -4,13 +4,62 @@ use aurcache_db::{
     migration::Migrator,
     packages::{self, SourceData, SourceType},
 };
-use aurcache_deps::AurClient;
+use aurcache_deps::{AurClient, DependencyResolution};
 use sea_orm::{ActiveModelTrait, ColumnTrait, Database, EntityTrait, QueryFilter, Set};
 use sea_orm_migration::MigratorTrait;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, query_param},
 };
+
+/// A client whose official repositories are readable and hold `published`.
+///
+/// Present-and-empty is how a test says "the repositories hold nothing":
+/// a cache that cannot be read fails the resolve rather than falling through
+/// to the AUR, which is what keeps a mirror outage from sending `git` there.
+fn client_with_official(rpc_url: String, published: &[&str]) -> (tempfile::TempDir, AurClient) {
+    use std::io::Write as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = tmp.path().join("official-cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    for repo_name in ["core", "extra", "multilib"] {
+        let file = std::fs::File::create(cache_dir.join(format!("{repo_name}.db.tar.gz"))).unwrap();
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            file,
+            flate2::Compression::default(),
+        ));
+        // Only `extra` carries them; which repository holds a name is not
+        // something resolution distinguishes.
+        if repo_name == "extra" {
+            for pkg_name in published {
+                let desc = format!("%NAME%\n{pkg_name}\n\n%VERSION%\n1.0-1\n\n");
+                let mut header = tar::Header::new_gnu();
+                header.set_path(format!("{pkg_name}-1.0-1/desc")).unwrap();
+                header.set_size(desc.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append(&header, desc.as_bytes()).unwrap();
+            }
+        }
+        builder
+            .into_inner()
+            .unwrap()
+            .finish()
+            .unwrap()
+            .flush()
+            .unwrap();
+    }
+
+    let client = AurClient::with_urls_and_paths(
+        rpc_url,
+        tmp.path().join("no-repository"),
+        // Never read: nothing in the cache is stale.
+        tmp.path().join("no-such-mirrorlist"),
+        cache_dir,
+    );
+    (tmp, client)
+}
 
 #[tokio::test]
 async fn backfill_creates_dependency_links() {
@@ -88,7 +137,7 @@ async fn backfill_creates_dependency_links() {
     .await
     .unwrap();
 
-    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
+    let (_official, client) = client_with_official(format!("{}/rpc/v5", mock_server.uri()), &[]);
     backfill_dependencies(&client, &db).await.unwrap();
 
     let child = packages::Entity::find()
@@ -232,7 +281,7 @@ async fn backfill_multi_dep_package() {
     .await
     .unwrap();
 
-    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
+    let (_official, client) = client_with_official(format!("{}/rpc/v5", mock_server.uri()), &[]);
     backfill_dependencies(&client, &db).await.unwrap();
 
     // libaegis inserted as placeholder dep
@@ -387,7 +436,7 @@ async fn backfill_resolves_provider_dependencies() {
     .await
     .unwrap();
 
-    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
+    let (_official, client) = client_with_official(format!("{}/rpc/v5", mock_server.uri()), &[]);
     backfill_dependencies(&client, &db).await.unwrap();
 
     let parent = packages::Entity::find()
@@ -532,7 +581,7 @@ async fn backfill_prefers_existing_local_provider() {
     .await
     .unwrap();
 
-    let client = AurClient::with_urls(format!("{}/rpc/v5", mock_server.uri()));
+    let (_official, client) = client_with_official(format!("{}/rpc/v5", mock_server.uri()), &[]);
     backfill_dependencies(&client, &db).await.unwrap();
 
     let parent = packages::Entity::find()
@@ -559,5 +608,57 @@ async fn backfill_prefers_existing_local_provider() {
     assert!(
         aur_provider.is_none(),
         "local providers should prevent AUR inserts"
+    );
+}
+
+/// The bug this order exists to prevent.
+///
+/// `git-git` declares `provides=('git')`, and the `git` in `extra` carries the
+/// name. Resolving a name to a package is what makes that package tracked, so
+/// an instance that resolved `git` to `git-git` once -- which took only a
+/// moment where the official databases could not be read -- kept resolving it
+/// that way afterwards, for every package added since. Reported as
+/// `lib32-libidn11` depending on `git-git`.
+#[tokio::test]
+async fn the_official_repositories_beat_a_tracked_package_that_provides_the_name() {
+    let mock_server = MockServer::start().await;
+    let (_official, client) =
+        client_with_official(format!("{}/rpc/v5", mock_server.uri()), &["git"]);
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&db, None).await.unwrap();
+
+    packages::ActiveModel {
+        name: Set("git-git".to_string()),
+        status: Set(1),
+        provides: Set(Some(r#"["git"]"#.to_string())),
+        platforms: Set("x86_64".to_string()),
+        build_flags: Set(String::new()),
+        source_type: Set(SourceType::Aur),
+        source_data: Set(SourceData::Aur {
+            name: "git-git".to_string(),
+        }),
+        ..Default::default()
+    }
+    .save(&db)
+    .await
+    .unwrap();
+
+    let resolved = aurcache_db::helpers::dependency_resolution::resolve_dependency_resolutions(
+        &client,
+        &db,
+        &["git".to_string()],
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(resolved.get("git"), Some(DependencyResolution::Official)),
+        "a tracked provider captured a name the repositories carry: {:?}",
+        resolved.get("git")
+    );
+    assert!(
+        mock_server.received_requests().await.unwrap().is_empty(),
+        "the AUR was asked about a name the repositories hold"
     );
 }

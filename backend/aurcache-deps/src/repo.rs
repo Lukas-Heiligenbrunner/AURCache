@@ -67,8 +67,29 @@ impl AurClient {
         any_archive_provides(archives, dep_name)
     }
 
+    /// Bring the cached official databases up to date, downloading only the
+    /// ones that have aged out.
+    ///
+    /// The mirrorlist is read only if something actually needs downloading. It
+    /// is written by the mirror-ranking scheduler, so on a fresh instance it
+    /// may not exist yet -- and a resolution that could have been answered
+    /// entirely from a warm cache should not fail because of that.
     async fn refresh_official_repo_cache_if_needed(&self) -> Result<(), Error> {
         fs::create_dir_all(&self.official_repo_cache_dir).map_err(|e| Error::Rpc(e.to_string()))?;
+
+        let mut stale = Vec::new();
+        for repo_name in OFFICIAL_REPO_NAMES {
+            let archive_path = self
+                .official_repo_cache_dir
+                .join(cache_file_name(repo_name));
+            if cache_is_stale(&archive_path)? {
+                stale.push((*repo_name, archive_path));
+            }
+        }
+        if stale.is_empty() {
+            return Ok(());
+        }
+
         let mirrors = mirror_servers(&self.official_mirrorlist_path)?;
         if mirrors.is_empty() {
             return Err(Error::Rpc(
@@ -76,13 +97,7 @@ impl AurClient {
             ));
         }
 
-        for repo_name in OFFICIAL_REPO_NAMES {
-            let archive_path = self
-                .official_repo_cache_dir
-                .join(cache_file_name(repo_name));
-            if !cache_is_stale(&archive_path)? {
-                continue;
-            }
+        for (repo_name, archive_path) in stale {
             self.download_official_repo_db(&mirrors, repo_name, &archive_path)
                 .await?;
         }

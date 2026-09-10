@@ -877,10 +877,40 @@ mod tests {
         repo.checkout_head(None).unwrap();
     }
 
+    /// A client whose official repositories are present, readable and empty.
+    ///
+    /// Resolution asks them about every dependency, and a cache it cannot read
+    /// is an error rather than an empty answer -- that is what stops a mirror
+    /// outage from sending `git` to the AUR. A test that wants the
+    /// repositories to hold nothing therefore has to say so.
+    fn client_with_empty_official_repos(rpc_url: String) -> (AurClient, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        for repo in ["core", "extra", "multilib"] {
+            let mut archive = Vec::new();
+            {
+                let encoder =
+                    flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+                let mut builder = tar::Builder::new(encoder);
+                builder.finish().unwrap();
+                builder.into_inner().unwrap().finish().unwrap();
+            }
+            std::fs::write(dir.path().join(format!("{repo}.db.tar.gz")), &archive).unwrap();
+        }
+        let client = AurClient::with_urls_and_paths(
+            rpc_url,
+            dir.path().join("no-repository"),
+            // Never read: nothing in the cache is stale.
+            dir.path().join("no-mirrorlist"),
+            dir.path().to_path_buf(),
+        );
+        (client, dir)
+    }
+
     #[tokio::test]
     async fn package_update_queues_dependency_builds_before_parent_when_constraints_tighten() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
@@ -1029,7 +1059,8 @@ mod tests {
     #[tokio::test]
     async fn package_update_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
@@ -1249,7 +1280,8 @@ mod tests {
     #[tokio::test]
     async fn force_rebuild_does_not_queue_non_leaf_dependency_builds() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
@@ -1461,7 +1493,8 @@ mod tests {
     #[tokio::test]
     async fn git_update_refreshes_dependency_rows() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);
@@ -1628,7 +1661,8 @@ mod tests {
     #[tokio::test]
     async fn force_rebuild_after_failure_queues_new_build() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, mut rx) = tokio::sync::broadcast::channel::<Action>(100);
@@ -1718,7 +1752,8 @@ mod tests {
     #[tokio::test]
     async fn update_removes_orphaned_dependency_package() {
         let server = MockServer::start().await;
-        let client = AurClient::with_urls(format!("{}/rpc/v5", server.uri()));
+        let (client, _official) =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri()));
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
         let (tx, _) = tokio::sync::broadcast::channel::<Action>(100);

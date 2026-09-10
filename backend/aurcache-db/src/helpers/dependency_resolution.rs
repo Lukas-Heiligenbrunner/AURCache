@@ -67,20 +67,65 @@ pub async fn resolve_dependency_resolutions_with_planned<C: ConnectionTrait>(
     dep_names: &[String],
     planned: &[PackageCandidate],
 ) -> Result<HashMap<String, DependencyResolution>, aurcache_deps::Error> {
-    let mut resolutions = resolve_local_dependency_resolutions(db, dep_names, planned)
-        .await
-        .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?;
-    let unresolved = dep_names
-        .iter()
-        .filter(|dep_name| !resolutions.contains_key(dep_name.as_str()))
-        .map(|dep_name| dep_name.as_str())
-        .collect::<Vec<_>>();
-    if unresolved.is_empty() {
-        return Ok(resolutions);
+    // The order is the whole rule, and it does not depend on how a candidate
+    // claims the name:
+    //
+    //   1. the official repositories -- a binary that already exists
+    //      everywhere;
+    //   2. what AURCache tracks, which it will build;
+    //   3. its own repository, for an artifact no tracked row claims;
+    //   4. the AUR, which means adding something new.
+    //
+    // The first boundary is the one that matters. `git-git` declares
+    // `provides=('git')`, so with the tracked packages asked first, one
+    // instance that resolved `git` to `git-git` kept resolving it that way for
+    // every package added afterwards -- resolving a name to a package is what
+    // makes that package tracked, so a single bad answer became permanent.
+    // Reported as `lib32-libidn11` depending on `git-git`.
+    //
+    // The second boundary is why the repository comes after the rows rather
+    // than with the official databases: a package AURCache tracks *and* has
+    // built is in its own repository, and resolving it there would record no
+    // dependency edge, so nothing would rebuild its dependents when it changes.
+    let mut resolutions = client.official_resolutions(&as_strs(dep_names)).await?;
+
+    let untracked = unanswered(dep_names, &resolutions);
+    if !untracked.is_empty() {
+        let owned: Vec<String> = untracked.iter().map(|name| (*name).to_string()).collect();
+        resolutions.extend(
+            resolve_local_dependency_resolutions(db, &owned, planned)
+                .await
+                .map_err(|e| aurcache_deps::Error::Rpc(e.to_string()))?,
+        );
     }
 
-    resolutions.extend(client.resolve_dependencies(&unresolved).await?);
+    let unbuilt = unanswered(dep_names, &resolutions);
+    if !unbuilt.is_empty() {
+        resolutions.extend(client.local_repo_resolutions(&unbuilt)?);
+    }
+
+    let unresolved = unanswered(dep_names, &resolutions);
+    if !unresolved.is_empty() {
+        resolutions.extend(client.aur_resolutions(&unresolved).await?);
+    }
+
     Ok(resolutions)
+}
+
+fn as_strs(dep_names: &[String]) -> Vec<&str> {
+    dep_names.iter().map(String::as_str).collect()
+}
+
+/// The names no pass has answered yet.
+fn unanswered<'a>(
+    dep_names: &'a [String],
+    resolutions: &HashMap<String, DependencyResolution>,
+) -> Vec<&'a str> {
+    dep_names
+        .iter()
+        .map(String::as_str)
+        .filter(|dep_name| !resolutions.contains_key(*dep_name))
+        .collect()
 }
 
 async fn resolve_local_dependency_resolutions<C: ConnectionTrait>(
