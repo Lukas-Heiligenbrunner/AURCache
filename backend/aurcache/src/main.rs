@@ -7,8 +7,10 @@ use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
 use aurcache_types::builder::Action;
+use aurcache_utils::snapshot::SnapshotStore;
 use dotenvy::dotenv;
 use std::env;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -26,9 +28,15 @@ async fn main() {
 
     let _ = post_startup_tasks(&db).await;
 
-    let build_queue_handle = init_build_queue(db.clone(), tx.clone());
-    let version_check_handle = start_update_version_checking(db.clone());
-    if let Err(e) = start_auto_update_job(db.clone(), tx.clone()) {
+    // A single, long-lived `SnapshotStore` is shared across the build queue,
+    // version-check loop, and auto-update job. Its persistent on-disk git
+    // checkouts and `refresh()` incremental-fetch model make this safe: repeat
+    // requests reuse the same checkout instead of re-cloning/re-downloading.
+    let store = Arc::new(SnapshotStore::new());
+
+    let build_queue_handle = init_build_queue(db.clone(), tx.clone(), store.clone());
+    let version_check_handle = start_update_version_checking(db.clone(), store.clone());
+    if let Err(e) = start_auto_update_job(db.clone(), tx.clone(), store.clone()) {
         warn!("auto_update job not properly configured: {e}");
     }
 

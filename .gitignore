@@ -11,3 +11,6 @@ target/
 
 
 *.env
+
+# Persistent on-disk git checkout cache for SnapshotStore (AURCACHE_SOURCE_CACHE_PATH)
+source_cache/

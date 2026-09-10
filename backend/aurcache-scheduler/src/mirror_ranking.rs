@@ -22,6 +22,20 @@ pub fn start_mirror_rank_job(
     let schedule = Schedule::from_str(cron_str.as_str())?;
 
     Ok(tokio::spawn(async move {
+        // The scheduled job normally only runs on its cron cadence (e.g.
+        // weekly), which would leave dependency resolution against the
+        // official repos broken until then on a fresh install. If no
+        // mirrorlist exists yet, rank one immediately so official-repo
+        // lookups (used to distinguish AUR deps from `pacman`/`glibc`/etc.)
+        // work right away.
+        if !mirrorlist_exists() {
+            info!("No mirrorlist found yet; ranking one immediately at startup");
+            match update_mirrorlist().await {
+                Ok(()) => info!("Initial mirror ranking finished"),
+                Err(e) => warn!("Initial mirror ranking failed: {e}"),
+            }
+        }
+
         let mut upcoming = schedule.upcoming(Utc);
         loop {
             // Get the next occurrence from now
@@ -80,4 +94,14 @@ async fn update_mirrorlist() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Returns `true` if a `mirrorlist` file is already present at the path the
+/// scheduled job would write to.
+fn mirrorlist_exists() -> bool {
+    let mirrorlist_path = match get_build_mode() {
+        BuildMode::DinD(cfg) => cfg.mirrorlist_path,
+        BuildMode::Host(cfg) => cfg.mirrorlist_path_aurcache,
+    };
+    std::path::Path::new(&format!("{mirrorlist_path}/mirrorlist")).exists()
 }

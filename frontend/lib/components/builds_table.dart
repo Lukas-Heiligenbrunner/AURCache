@@ -6,6 +6,7 @@ import 'package:skeletonizer/skeletonizer.dart';
 import '../constants/color_constants.dart';
 import '../models/build.dart';
 import '../utils/package_color.dart';
+import '../utils/time_formatter.dart';
 
 class BuildsTable extends StatelessWidget {
   const BuildsTable({super.key, required this.data});
@@ -28,6 +29,8 @@ class BuildsTable extends StatelessWidget {
           DataColumn(label: Skeleton.keep(child: Text("Build ID"))),
         if (context.desktop)
           DataColumn(label: Skeleton.keep(child: Text("Date"))),
+        if (context.desktop)
+          DataColumn(label: Skeleton.keep(child: Text("Duration"))),
         DataColumn(label: Skeleton.keep(child: Text("Package Name"))),
         DataColumn(label: Skeleton.keep(child: Text("Version"))),
         if (context.desktop)
@@ -48,6 +51,8 @@ class BuildsTable extends StatelessWidget {
               '${build.start_time.day.toString().padLeft(2, '0')}.${build.start_time.month.toString().padLeft(2, '0')}.${build.start_time.year.toString()}',
             ),
           ),
+        if (context.desktop)
+          DataCell(Text(build.duration.readableBuildDuration())),
         DataCell(
           Text(build.pkg_name),
           onTap: context.mobile
@@ -62,6 +67,7 @@ class BuildsTable extends StatelessWidget {
               switchSuccessIcon(build.status),
               color: switchSuccessColor(build.status),
             ),
+            tooltip: statusLabel(build.status),
             onPressed: () {
               context.push("/build/${build.id}");
             },

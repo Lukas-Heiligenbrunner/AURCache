@@ -2,7 +2,7 @@
 
 pub use super::activities::Entity as Activities;
 pub use super::builds::Entity as Builds;
+pub use super::dependencies::Entity as Dependencies;
 pub use super::files::Entity as Files;
 pub use super::packages::Entity as Packages;
-pub use super::packages_files::Entity as PackagesFiles;
 pub use super::settings::Entity as Settings;

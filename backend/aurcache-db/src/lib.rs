@@ -4,10 +4,10 @@ pub mod prelude;
 
 pub mod activities;
 pub mod builds;
+pub mod dependencies;
 pub mod files;
 pub mod helpers;
 pub mod init;
 pub mod migration;
 pub mod packages;
-pub mod packages_files;
 pub mod settings;

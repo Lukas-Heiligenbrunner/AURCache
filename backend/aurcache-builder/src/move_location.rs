@@ -1,16 +1,12 @@
 use crate::build::Builder;
-use crate::logger::BuildLogger;
 use anyhow::{anyhow, bail};
+use aurcache_db::dependencies;
+use aurcache_db::files;
 use aurcache_db::helpers::active_value_ext::ActiveValueExt;
-use aurcache_db::prelude::{Files, PackagesFiles};
-use aurcache_db::{files, packages_files};
+use aurcache_db::prelude::{Dependencies, Files};
 use aurcache_utils::utils::remove_archive_file::try_remove_archive_file;
-use sea_orm::ColumnTrait;
-use sea_orm::ModelTrait;
-use sea_orm::PaginatorTrait;
-use sea_orm::QueryFilter;
-use sea_orm::QuerySelect;
-use sea_orm::{ActiveModelTrait, EntityTrait, JoinType, RelationTrait, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::DirEntry;
 use std::path::PathBuf;
@@ -20,7 +16,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 struct ParsedPkg {
     name: String,
-    #[allow(unused)]
     version: String,
     #[allow(unused)]
     arch: String,
@@ -29,168 +24,167 @@ struct ParsedPkg {
 }
 
 impl Builder {
-    /// move built files from build container to host and add them to the repo
-    pub(crate) async fn move_and_add_pkgs(&self, host_build_path: PathBuf) -> anyhow::Result<()> {
+    /// Move built files from the build container to the host and add them to the repo.
+    ///
+    /// Returns the version string extracted from the built package filenames (e.g. `"1.2.3-1"`).
+    /// This is the version *actually produced by makepkg* and may differ from the version stored
+    /// in `builds.version` at enqueue time (which comes from the AUR RPC).
+    pub(crate) async fn move_and_add_pkgs(
+        &self,
+        host_build_path: PathBuf,
+    ) -> anyhow::Result<String> {
         let archive_paths = fs::read_dir(host_build_path.clone())?.collect::<Vec<_>>();
         if archive_paths.is_empty() {
             bail!("No files found in build directory");
         }
 
         let build_pkgs = build_output_map(archive_paths)?;
-        let txn = self.db.begin().await?;
+        let pkg_id = *self.package_model.id.get()?;
+        let platform = self.build_model.platform.get()?;
 
-        // ADD NEW FILES FIRST
-        let mut new_file_ids = std::collections::HashMap::new();
+        // Extract the version from the first built package.  All split packages of the same
+        // pkgbase share the same pkgver-pkgrel, so any one of them is representative.
+        let actual_version = build_pkgs
+            .first()
+            .map(|(_, parsed)| parsed.version.clone())
+            .ok_or_else(|| anyhow!("No packages found in build output"))?;
 
-        for (archive_path, parsed) in &build_pkgs {
-            let archive_name = archive_path.file_name().to_str().unwrap().to_string();
+        // PHASE 1: resolve file ownership in a short read transaction so we
+        // don't hold a DB connection during the long file-copy / repo_add phase.
+        struct FileInfo {
+            archive_name: String,
+            pkg_path: String,
+            parsed_name: String,
+            existing_id: Option<i32>,
+            existing_package_id: Option<i32>,
+        }
 
-            let pkg_path = format!(
-                "./repo/{}/{}",
-                self.build_model.platform.get()?,
-                archive_name
-            );
+        let mut file_infos: Vec<FileInfo> = Vec::new();
+        {
+            let txn = self.db.begin().await?;
+            for (archive_path, parsed) in &build_pkgs {
+                let archive_name = archive_path.file_name().to_str().unwrap().to_string();
+                let pkg_path = format!("./repo/{platform}/{archive_name}");
+
+                let existing = Files::find()
+                    .filter(files::Column::Filename.eq(&archive_name))
+                    .filter(files::Column::Platform.eq(*platform))
+                    .one(&txn)
+                    .await?;
+
+                if let Some(ref ex) = existing
+                    && ex.package_id != pkg_id
+                {
+                    let existing_owner_depends_on_new_owner = Dependencies::find()
+                        .filter(dependencies::Column::DependentId.eq(ex.package_id))
+                        .filter(dependencies::Column::DependeeId.eq(pkg_id))
+                        .one(&txn)
+                        .await?;
+
+                    if existing_owner_depends_on_new_owner.is_none() {
+                        bail!("File '{archive_name}' is already produced by another package");
+                    }
+                    self.logger
+                            .append(format!(
+                                "Transferring file '{archive_name}' from package {} (depends on this package)\n",
+                                ex.package_id
+                            ))
+                            .await;
+                }
+
+                file_infos.push(FileInfo {
+                    archive_name,
+                    pkg_path,
+                    parsed_name: parsed.name.clone(),
+                    existing_id: existing.as_ref().map(|e| e.id),
+                    existing_package_id: existing.as_ref().map(|e| e.package_id),
+                });
+            }
+            txn.commit().await?;
+        }
+
+        // PHASE 2: copy files and update the pacman repo — no DB connection held.
+        for fi in &file_infos {
+            let archive_path = build_pkgs
+                .iter()
+                .find(|(de, _)| de.file_name().to_str().unwrap() == fi.archive_name)
+                .map(|(de, _)| de.path())
+                .expect("archive path must exist");
 
             self.logger
-                .append(format!("Move {} to repo directory\n", parsed.filename))
+                .append(format!("Move {} to repo directory\n", fi.archive_name))
                 .await;
-
-            fs::copy(archive_path.path(), &pkg_path)?;
-            fs::remove_file(archive_path.path())?;
-
-            // reuse file if it already exists
-            let file = match Files::find()
-                .filter(files::Column::Filename.eq(archive_name.clone()))
-                .one(&txn)
-                .await?
-            {
-                None => {
-                    let file = files::ActiveModel {
-                        filename: Set(archive_name.clone()),
-                        platform: Set(self.build_model.platform.get()?.clone()),
-                        ..Default::default()
-                    };
-                    file.save(&txn).await?
-                }
-                Some(file) => files::ActiveModel::from(file),
-            };
-
-            PackagesFiles::insert(packages_files::ActiveModel {
-                file_id: file.id.clone(),
-                package_id: Set(*self.package_model.id.get()?),
-                ..Default::default()
-            })
-            .exec(&txn)
-            .await?;
-
-            let new_file_id = file.id.clone().unwrap();
-            new_file_ids.insert(parsed.name.clone(), new_file_id);
+            fs::copy(&archive_path, &fi.pkg_path)?;
+            fs::remove_file(&archive_path)?;
 
             self.logger
                 .append(format!(
                     "Add {} to repo.db.tar.gz and repo.files.tar.gz\n",
-                    parsed.filename
+                    fi.archive_name
                 ))
                 .await;
             pacman_repo_utils::repo_add::repo_add(
-                &pkg_path,
-                format!("./repo/{}/repo.db.tar.gz", self.build_model.platform.get()?),
-                format!(
-                    "./repo/{}/repo.files.tar.gz",
-                    self.build_model.platform.get()?
-                ),
+                &fi.pkg_path,
+                format!("./repo/{platform}/repo.db.tar.gz"),
+                format!("./repo/{platform}/repo.files.tar.gz"),
             )?;
-
-            // handle other package depending on an older version of this new package
-            let older_versions = Files::find()
-                .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
-                .filter(files::Column::Filename.starts_with(format!("{}-", parsed.name)))
-                .filter(files::Column::Id.ne(new_file_id))
-                .all(&txn)
-                .await?;
-            for old_v in older_versions {
-                if let Ok(old_p) = parse_arch_pkg(&old_v.filename)
-                    && old_p.name == parsed.name
-                {
-                    // repoint OTHER packages to this new version
-                    repoint_dependents(
-                        &txn,
-                        &self.logger,
-                        old_v.id,
-                        new_file_id,
-                        *self.package_model.id.get()?,
-                    )
-                    .await?;
-
-                    // remove the link between our current package and the OLD version
-                    packages_files::Entity::delete_many()
-                        .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
-                        .filter(packages_files::Column::FileId.eq(old_v.id))
-                        .exec(&txn)
-                        .await?;
-
-                    // if no one else is using the old version, delete it from DB and Disk
-                    let usage_count = PackagesFiles::find()
-                        .filter(packages_files::Column::FileId.eq(old_v.id))
-                        .count(&txn)
-                        .await?;
-
-                    if usage_count == 0 {
-                        self.logger
-                            .append(format!(
-                                "Removing orphaned old version: {}\n",
-                                old_v.filename
-                            ))
-                            .await;
-                        try_remove_archive_file(old_v, &txn).await?;
-                    }
-                }
-            }
         }
 
-        // handle dropped subpackages
-        // fetch old associations NOW to ensure we see what's left after the name-based cleanup
-        let remaining_old_files: Vec<(packages_files::Model, Option<files::Model>)> =
-            PackagesFiles::find()
-                .filter(packages_files::Column::PackageId.eq(*self.package_model.id.get()?))
-                .filter(files::Column::Platform.eq(self.build_model.platform.get()?))
-                .join(JoinType::LeftJoin, packages_files::Relation::Files.def())
-                .select_also(files::Entity)
+        // PHASE 3: write the file records and remove stale entries in one short
+        // transaction now that all filesystem work is done.
+        let mut new_file_ids: HashMap<String, i32> = HashMap::new();
+        {
+            let txn = self.db.begin().await?;
+
+            for fi in &file_infos {
+                let file_id = if let Some(existing_id) = fi.existing_id {
+                    if fi.existing_package_id != Some(pkg_id) {
+                        // Transfer ownership to the current package.
+                        let active = files::ActiveModel {
+                            id: Set(existing_id),
+                            package_id: Set(pkg_id),
+                            ..Default::default()
+                        };
+                        active.update(&txn).await?.id
+                    } else {
+                        existing_id
+                    }
+                } else {
+                    files::ActiveModel {
+                        filename: Set(fi.archive_name.clone()),
+                        platform: Set(*platform),
+                        package_id: Set(pkg_id),
+                        ..Default::default()
+                    }
+                    .insert(&txn)
+                    .await?
+                    .id
+                };
+                new_file_ids.insert(fi.parsed_name.clone(), file_id);
+            }
+
+            let stale = Files::find()
+                .filter(files::Column::PackageId.eq(pkg_id))
+                .filter(files::Column::Platform.eq(*platform))
                 .all(&txn)
                 .await?;
 
-        for (pkg_file, file) in remaining_old_files {
-            let Some(file) = file else { continue };
-
-            // If this file was NOT one of the ones we just built, it means the
-            // PKGBUILD no longer produces this sub-package.
-            if !new_file_ids.values().any(|&id| id == file.id) {
-                let dependents =
-                    dependent_packages(&txn, file.id, *self.package_model.id.get()?).await?;
-
-                if dependents.is_empty() {
+            for file in stale {
+                if !new_file_ids.values().any(|&id| id == file.id) {
                     self.logger
                         .append(format!("Removing dropped sub-package: {}\n", file.filename))
                         .await;
-                    pkg_file.delete(&txn).await?;
                     try_remove_archive_file(file, &txn).await?;
-                } else {
-                    self.logger
-                        .append(format!(
-                            "Keeping dropped sub-package {} (other dependents exist)\n",
-                            file.filename
-                        ))
-                        .await;
-                    pkg_file.delete(&txn).await?;
                 }
             }
+
+            txn.commit().await?;
         }
 
-        txn.commit().await?;
         self.logger
             .append("Successfully updated repo and cleaned up old files\n".to_string())
             .await;
-        Ok(())
+        Ok(actual_version)
     }
 }
 
@@ -231,10 +225,9 @@ fn build_output_map(
         let name = a.file_name();
         let name = name.to_str().ok_or_else(|| anyhow!("Invalid filename"))?;
 
-        // Skip dotfiles — produced packages are never hidden, and we use a
-        // dotfile (.aurcache_pacman.conf) inside the build dir as a bind
-        // source for /etc/pacman.conf.
         if name.starts_with('.') {
+            // Produced packages are never hidden. We keep dotfiles in the build
+            // dir for helper mounts such as temporary pacman configuration.
             continue;
         }
 
@@ -243,40 +236,4 @@ fn build_output_map(
     }
 
     Ok(map)
-}
-
-async fn dependent_packages(
-    txn: &sea_orm::DatabaseTransaction,
-    file_id: i32,
-    current_pkg_id: i32,
-) -> anyhow::Result<Vec<packages_files::Model>> {
-    Ok(PackagesFiles::find()
-        .filter(packages_files::Column::FileId.eq(file_id))
-        .filter(packages_files::Column::PackageId.ne(current_pkg_id))
-        .all(txn)
-        .await?)
-}
-
-async fn repoint_dependents(
-    txn: &sea_orm::DatabaseTransaction,
-    logger: &BuildLogger,
-    old_file_id: i32,
-    new_file_id: i32,
-    current_pkg_id: i32,
-) -> anyhow::Result<()> {
-    let deps = dependent_packages(txn, old_file_id, current_pkg_id).await?;
-    logger
-        .append(format!(
-            "Repointing {} dependents to updated package\n",
-            deps.len()
-        ))
-        .await;
-
-    for dep in deps {
-        let mut active = packages_files::ActiveModel::from(dep);
-        active.file_id = Set(new_file_id);
-        active.update(txn).await?;
-    }
-
-    Ok(())
 }

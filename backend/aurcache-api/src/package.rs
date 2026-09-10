@@ -1,7 +1,7 @@
 use crate::models::authenticated::Authenticated;
 use crate::models::package::{AddPackage, PackagePatchModel, UpdatePackage};
 use crate::models::package::{
-    AurNotFoundPackage, AurPackage, ExtendedPackageModel, GitPackage, PackageSource,
+    AurNotFoundPackage, AurPackage, ExtendedPackageModel, PackageDependencyModel, PackageSource,
     SimplePackageModel,
 };
 use aurcache_activitylog::activity_utils::ActivityLog;
@@ -10,22 +10,22 @@ use aurcache_activitylog::package_delete_activity::PackageDeleteActivity;
 use aurcache_activitylog::package_update_activity::PackageUpdateActivity;
 use aurcache_db::activities::ActivityType;
 use aurcache_db::packages::SourceData;
-use aurcache_db::prelude::{Builds, Packages};
-use aurcache_db::{builds, packages};
+use aurcache_db::prelude::{Builds, Dependencies, Packages};
+use aurcache_db::{builds, dependencies, packages};
 use aurcache_types::builder::Action;
 use aurcache_utils::aur::api::get_package_info;
 use aurcache_utils::package::add::package_add;
-use aurcache_utils::package::delete::package_delete;
+use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::update::package_update;
 use pacman_mirrors::platforms::Platform;
 use rocket::http::Status;
 use rocket::response::status::{BadRequest, Custom, NotFound};
 use rocket::serde::json::Json;
 use rocket::{State, delete, get, patch, post};
-use sea_orm::ActiveValue::Set;
+use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::Expr;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, NotSet, Order};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, JoinType, Order};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, RelationTrait};
 use std::str::FromStr;
 use tokio::sync::broadcast::Sender;
 use utoipa::OpenApi;
@@ -40,6 +40,16 @@ use utoipa::OpenApi;
     get_package
 ))]
 pub struct PackageApi;
+
+fn normalize_build_flags(build_flags: Option<&[String]>) -> Option<Vec<String>> {
+    build_flags.map(|flags| {
+        flags
+            .iter()
+            .map(|flag| flag.trim().to_string())
+            .filter(|flag| !flag.is_empty())
+            .collect()
+    })
+}
 
 #[utoipa::path(
     responses(
@@ -68,7 +78,7 @@ pub async fn package_add_endpoint(
         db,
         tx,
         platforms,
-        input.build_flags.clone(),
+        normalize_build_flags(input.build_flags.as_deref()),
         input.source.clone(),
     )
     .await
@@ -103,21 +113,28 @@ pub async fn package_update_entity_endpoint(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
+    // We cannot move things out of Json<T>, but we can move it out of T.
+    let input = input.into_inner();
+
     // Start building the update operation
     let update_pkg = packages::ActiveModel {
         id: Set(id),
-        name: input.name.clone().map_or(NotSet, Set),
+        name: input.name.map_or(NotSet, Set),
         status: input.status.map_or(NotSet, Set),
         out_of_date: input.out_of_date.map_or(NotSet, Set),
         upstream_version: NotSet,
         latest_build: input.latest_build.map_or(NotSet, Set),
         build_flags: input
             .build_flags
-            .clone()
+            .as_deref()
+            .and_then(|v| normalize_build_flags(Some(v)))
             .map_or(NotSet, |v| Set(v.join(";"))),
-        platforms: input.platforms.clone().map_or(NotSet, |v| Set(v.join(";"))),
+        platforms: input.platforms.map_or(NotSet, |v| Set(v.join(";"))),
         source_type: NotSet,
         source_data: NotSet,
+        directly_requested: NotSet,
+        split_packages: NotSet,
+        provides: NotSet,
     };
 
     // Execute the update query
@@ -156,7 +173,15 @@ pub async fn package_update_endpoint(
 
     let pkg_update = package_update(db, pkg_model.clone(), input.force, tx)
         .await
-        .map(Json)
+        .map(|results| {
+            Json(
+                results
+                    .into_iter()
+                    .filter(|r| r.enqueued)
+                    .map(|r| r.build_id)
+                    .collect::<Vec<_>>(),
+            )
+        })
         .map_err(|e| BadRequest(e.to_string()))?;
 
     al.add(
@@ -174,7 +199,7 @@ pub async fn package_update_endpoint(
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Delete package"),
+            (status = 200, description = "Remove direct request flag from package and live-check it"),
     ),
     params(
             ("id", description = "Id of package")
@@ -189,14 +214,14 @@ pub async fn package_del(
 ) -> Result<(), BadRequest<String>> {
     let db = db as &DatabaseConnection;
 
-    // query this before deleting package!
+    // query this before removing package ownership!
     let pkg = Packages::find_by_id(id)
         .one(db)
         .await
         .map_err(|e| BadRequest(e.to_string()))?
         .ok_or(BadRequest("id not found".to_string()))?;
 
-    package_delete(db, id)
+    package_remove(db, id)
         .await
         .map_err(|e| BadRequest(e.to_string()))?;
 
@@ -210,7 +235,6 @@ pub async fn package_del(
 
     Ok(())
 }
-
 #[utoipa::path(
     responses(
             (status = 200, description = "List of all packages", body = [SimplePackageModel]),
@@ -229,6 +253,17 @@ pub async fn package_list(
 ) -> Result<Json<Vec<SimplePackageModel>>, NotFound<String>> {
     let db = db as &DatabaseConnection;
 
+    list_directly_requested_packages(db, limit, page)
+        .await
+        .map(Json)
+        .map_err(|e| NotFound(e.to_string()))
+}
+
+async fn list_directly_requested_packages(
+    db: &DatabaseConnection,
+    limit: Option<u64>,
+    page: Option<u64>,
+) -> Result<Vec<SimplePackageModel>, sea_orm::DbErr> {
     // correlated subquery: picks the version from builds for the package ordered by most
     // recent timestamp (end_time preferred, fallback to start_time)
     let latest_version_subquery = "(SELECT version \
@@ -244,6 +279,7 @@ pub async fn package_list(
         .column(packages::Column::Status)
         .column_as(packages::Column::OutOfDate, "outofdate")
         .column_as(packages::Column::UpstreamVersion, "upstream_version")
+        .filter(packages::Column::DirectlyRequested.eq(true))
         // wrap the correlated subquery in COALESCE -> fallback to empty string
         .column_as(
             Expr::cust(format!("COALESCE({latest_version_subquery}, '')")),
@@ -255,10 +291,245 @@ pub async fn package_list(
         .offset(page.zip(limit).map(|(page, limit)| page * limit))
         .into_model::<SimplePackageModel>()
         .all(db)
-        .await
-        .map_err(|e| NotFound(e.to_string()))?;
+        .await?;
 
-    Ok(Json(all))
+    Ok(all)
+}
+
+async fn list_package_relations(
+    db: &DatabaseConnection,
+    pkg_id: i32,
+    direction: RelationDirection,
+) -> Result<Vec<PackageDependencyModel>, sea_orm::DbErr> {
+    let (filter_col, relation) = match direction {
+        RelationDirection::Dependencies => (
+            dependencies::Column::DependentId,
+            dependencies::Relation::Dependee.def(),
+        ),
+        RelationDirection::Dependents => (
+            dependencies::Column::DependeeId,
+            dependencies::Relation::Dependent.def(),
+        ),
+    };
+
+    Dependencies::find()
+        .select_only()
+        .column_as(packages::Column::Id, "id")
+        .column_as(packages::Column::Name, "name")
+        .column(dependencies::Column::VersionConstraint)
+        .join(JoinType::InnerJoin, relation)
+        .filter(filter_col.eq(pkg_id))
+        .order_by_asc(dependencies::Column::Id)
+        .into_model::<PackageDependencyModel>()
+        .all(db)
+        .await
+}
+
+#[derive(Copy, Clone)]
+enum RelationDirection {
+    Dependencies,
+    Dependents,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RelationDirection, list_directly_requested_packages, list_package_relations};
+    use aurcache_db::migration::Migrator;
+    use aurcache_db::packages::SourceData;
+    use aurcache_db::{dependencies, packages};
+    use sea_orm::{ActiveModelTrait, Database, Set, TryIntoModel};
+    use sea_orm_migration::MigratorTrait;
+
+    #[tokio::test]
+    async fn package_list_only_returns_directly_requested_packages() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        packages::ActiveModel {
+            name: Set("visible-package".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "visible-package".into(),
+            }),
+            directly_requested: Set(true),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        packages::ActiveModel {
+            name: Set("hidden-dependency".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "hidden-dependency".into(),
+            }),
+            directly_requested: Set(false),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let packages = list_directly_requested_packages(&db, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "visible-package");
+    }
+
+    #[tokio::test]
+    async fn package_dependencies_include_link_targets() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        let parent = packages::ActiveModel {
+            name: Set("parent".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "parent".into(),
+            }),
+            directly_requested: Set(true),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let child = packages::ActiveModel {
+            name: Set("child".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("2.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "child".into(),
+            }),
+            directly_requested: Set(false),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(child.id),
+            version_constraint: Set(">=2.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let deps = list_package_relations(&db, parent.id, RelationDirection::Dependencies)
+            .await
+            .unwrap();
+
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].id, child.id);
+        assert_eq!(deps[0].name, "child");
+        assert_eq!(deps[0].version_constraint, ">=2.0");
+    }
+
+    #[tokio::test]
+    async fn package_dependents_include_reverse_link_targets() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        let dependency = packages::ActiveModel {
+            name: Set("dependency".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("1.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "dependency".into(),
+            }),
+            directly_requested: Set(false),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        let parent = packages::ActiveModel {
+            name: Set("parent".to_string()),
+            status: Set(1),
+            out_of_date: Set(0),
+            upstream_version: Set(Some("2.0.0".to_string())),
+            latest_build: Set(None),
+            build_flags: Set("--noconfirm".to_string()),
+            platforms: Set("x86_64".to_string()),
+            source_type: Set(packages::SourceType::Aur),
+            source_data: Set(SourceData::Aur {
+                name: "parent".into(),
+            }),
+            directly_requested: Set(true),
+            split_packages: Set(None),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap()
+        .try_into_model()
+        .unwrap();
+
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(dependency.id),
+            version_constraint: Set(">=1.0".to_string()),
+            ..Default::default()
+        }
+        .save(&db)
+        .await
+        .unwrap();
+
+        let dependents = list_package_relations(&db, dependency.id, RelationDirection::Dependents)
+            .await
+            .unwrap();
+
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0].id, parent.id);
+        assert_eq!(dependents[0].name, "parent");
+        assert_eq!(dependents[0].version_constraint, ">=1.0");
+    }
 }
 
 #[utoipa::path(
@@ -300,13 +571,28 @@ pub async fn get_package(
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
     let latest_version: Option<String> = latest_version_row.map(|(v,)| v);
-
-    let source_data = SourceData::from_str(pkg.source_data.as_str())
+    let dependencies = list_package_relations(db, pkg.id, RelationDirection::Dependencies)
+        .await
         .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+    let dependents = list_package_relations(db, pkg.id, RelationDirection::Dependents)
+        .await
+        .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
+
+    let source_data = pkg.source_data;
 
     let (package_source, version) = match source_data {
         SourceData::Aur { .. } => {
-            let aur_info = get_package_info(&pkg.name)
+            let query_name = pkg
+                .split_packages
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .and_then(|names| {
+                    let first = names.first()?;
+                    (names.len() > 1 || first != &pkg.name).then(|| first.clone())
+                })
+                .unwrap_or(pkg.name.clone());
+
+            let aur_info = get_package_info(&query_name)
                 .await
                 .map_err(|e| Custom(Status::InternalServerError, e.to_string()))?;
 
@@ -316,10 +602,7 @@ pub async fn get_package(
                     pkg.upstream_version.unwrap_or_default(),
                 ),
                 Some(aur_info) => {
-                    let aur_url = format!(
-                        "https://aur.archlinux.org/packages/{}",
-                        aur_info.package_base
-                    );
+                    let aur_url = format!("https://aur.archlinux.org/pkgbase/{}", pkg.name);
 
                     (
                         PackageSource::Aur(AurPackage {
@@ -338,16 +621,8 @@ pub async fn get_package(
                 }
             }
         }
-        SourceData::Git {
-            subfolder,
-            url,
-            r#ref,
-        } => (
-            PackageSource::Git(GitPackage {
-                git_url: url,
-                git_ref: r#ref.clone(),
-                subfolder,
-            }),
+        SourceData::Git { spec } => (
+            PackageSource::Git(spec),
             // This versions actuality dpendes on the update-version-check interval
             pkg.upstream_version.unwrap_or(String::new()),
         ),
@@ -359,6 +634,7 @@ pub async fn get_package(
     let ext_pkg = ExtendedPackageModel {
         id: pkg.id,
         name: pkg.name,
+        directly_requested: pkg.directly_requested,
         status: pkg.status,
         outofdate: pkg.out_of_date,
         latest_version,
@@ -371,6 +647,11 @@ pub async fn get_package(
                 .collect(),
         ),
         upstream_version: version,
+        split_packages: pkg
+            .split_packages
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        dependencies,
+        dependents,
     };
 
     Ok(Json(ext_pkg))

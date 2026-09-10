@@ -27,7 +27,18 @@ jobs:
         run: |
           cargo --version --verbose
           rustc --version
-          cargo clippy --version          
+          cargo clippy --version
+
+      # `alpm-srcinfo` shells out to this script to parse a PKGBUILD; it is not
+      # bundled in the crate, which resolves it from $PATH at runtime. Without
+      # it, every test that parses a PKGBUILD rather than a shipped .SRCINFO
+      # fails. The runtime image installs it the same way - see docker/Dockerfile.
+      - name: Install alpm-pkgbuild-bridge
+        run: |
+          curl -sSLf -o "$RUNNER_TEMP/alpm-pkgbuild-bridge" \
+            "https://gitlab.archlinux.org/archlinux/alpm/alpm-pkgbuild-bridge/-/raw/main/alpm-pkgbuild-bridge.sh?ref_type=heads"
+          sudo install -m 755 "$RUNNER_TEMP/alpm-pkgbuild-bridge" /usr/local/bin/alpm-pkgbuild-bridge
+          command -v alpm-pkgbuild-bridge
 
       - name: Lint
         run: |

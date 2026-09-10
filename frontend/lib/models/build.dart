@@ -40,4 +40,6 @@ class Build {
 
   static dynamic _fromJson(int? value) =>
       value != null ? DateTime.fromMillisecondsSinceEpoch(value * 1000) : null;
+
+  Duration get duration => (end_time ?? DateTime.now()).difference(start_time);
 }

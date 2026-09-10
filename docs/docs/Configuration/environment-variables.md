@@ -41,6 +41,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | VERSION_CHECK_INTERVAL | Integer       | Interval in seconds for checking package versions                     | 3600    |
 | AUTO_UPDATE_SCHEDULE   | String (CRON) | Auto update schedule in cronjob syntax with seconds (null to disable) | null    |
 | BUILD_ARTIFACT_DIR     | String        | pkg share directory between aurcache container and build containers   | null    |
+| AURCACHE_REPO_URL      | String        | HTTP URL at which builder containers can reach the AURCache file server. Auto-detected at runtime via the Docker bridge gateway if unset. Override when auto-detection is wrong. Example: `http://aurcache:8080` | auto |
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
 | MAX_CONCURRENT_BUILDS  | Integer       | Max concurrent builds                                                 | 1       |
 | CPU_LIMIT              | Integer       | CPU limit of build container in milli CPUs                            | 0       |

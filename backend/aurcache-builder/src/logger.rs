@@ -1,7 +1,4 @@
-use anyhow::anyhow;
-use aurcache_db::builds;
-use aurcache_db::prelude::Builds;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
@@ -65,26 +62,24 @@ impl BuildLogger {
 
         let combined_text = buffer.join("");
 
-        let txn = db.begin().await?;
-        let mut build: builds::ActiveModel = Builds::find_by_id(build_id)
-            .one(&txn)
-            .await?
-            .ok_or(anyhow!("build not found"))?
-            .into();
+        // Append directly in SQL to avoid reading the entire output column first.
+        // This turns the previous O(n²) read-modify-write into a single O(1) UPDATE
+        // regardless of how large the accumulated output is.
+        let stmt = match db.get_database_backend() {
+            DbBackend::Postgres => Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE builds SET output = COALESCE(output, '') || $1 WHERE id = $2",
+                vec![combined_text.into(), build_id.into()],
+            ),
+            backend => Statement::from_sql_and_values(
+                backend,
+                "UPDATE builds SET output = COALESCE(output, '') || ? WHERE id = ?",
+                vec![combined_text.into(), build_id.into()],
+            ),
+        };
+        db.execute(stmt).await?;
 
-        match build.output.unwrap() {
-            None => {
-                build.output = Set(Some(combined_text));
-            }
-            Some(s) => {
-                build.output = Set(Some(format!("{s}{combined_text}")));
-            }
-        }
-
-        build.update(&txn).await?;
-        txn.commit().await?;
-
-        // clear buffer in end in case of db error
+        // clear buffer at end in case of db error
         // buffer is locked until end of scope
         buffer.clear();
         debug!("Log buffer flushed!");

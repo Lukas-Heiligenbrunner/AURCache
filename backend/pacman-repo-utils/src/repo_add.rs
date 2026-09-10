@@ -3,13 +3,13 @@ use anyhow::{anyhow, bail};
 use crate::pkginfo::parser::Pkginfo;
 use crate::repo_database::db::add_to_db_file;
 use crate::repo_database::desc::Desc;
+use liblzma::bufread::XzDecoder;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 use tar::Archive;
 use tracing::{debug, error, warn};
-use xz2::read::XzDecoder;
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 pub fn repo_add(pkgfile: &str, db_archive: String, files_archive: String) -> anyhow::Result<()> {
