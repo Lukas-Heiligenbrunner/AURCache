@@ -122,7 +122,12 @@ start_docker_services() {
     sleep 2
 
     log "=== Building and pushing builder image ==="
-    docker buildx build --platform linux/amd64 --build-arg TARGETARCH=amd64 --build-arg TARGETPLATFORM=linux/amd64 --build-arg TARGETVARIANT= -q -t localhost:5000/aurcache-builder:test -f docker/builder.Dockerfile --push .
+    # Built with --load and pushed separately, rather than pushed straight from
+    # BuildKit: the buildx builder runs in a container of its own, where
+    # localhost:5000 is its own loopback rather than the registry above. The
+    # daemon, which does the push here, shares the host's network.
+    docker buildx build --platform linux/amd64 --build-arg TARGETARCH=amd64 --build-arg TARGETPLATFORM=linux/amd64 --build-arg TARGETVARIANT= -q -t localhost:5000/aurcache-builder:test -f docker/builder.Dockerfile --load .
+    docker push -q localhost:5000/aurcache-builder:test
 
     log "=== Building and starting AURCache ==="
     dc build -q aurcache && dc up -d aurcache
