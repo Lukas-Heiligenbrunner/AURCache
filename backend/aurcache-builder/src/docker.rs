@@ -227,18 +227,31 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         }
 
         let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
+        // Import PGP keys listed in validpgpkeys before building.
+        // Keys are read from .SRCINFO (or `makepkg --printsrcinfo` if missing) instead of
+        // sourcing the PKGBUILD directly.
+        // Tries multiple keyservers as fallback; never fails the build if import fails
+        // (--pgpfetch will still attempt to fetch during build as a secondary attempt).
+        let import_pgp_keys = |pkgbuild_dir: &str| {
+            format!(
+                r#"(bash -c 'cd {pkgbuild_dir} || exit 0; if [ -f .SRCINFO ]; then cat .SRCINFO; else makepkg --printsrcinfo 2>/dev/null; fi | sed -n "s/^[[:space:]]*validpgpkeys[[:space:]]*=[[:space:]]*//p" | while IFS= read -r k; do [ -n "$k" ] || continue; gpg --batch --list-keys "$k" >/dev/null 2>&1 && continue; gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" 2>/dev/null || gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" 2>/dev/null || gpg --batch --keyserver hkp://pgp.mit.edu --recv-keys "$k" 2>/dev/null || echo "Warning: failed to import PGP key $k"; done' || true)"#
+            )
+        };
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
         let build_cmd = match source_data {
             SourceData::Aur { .. } => {
                 // -Ga forces paru to clone from AUR even when a same-named package exists in a repo
+                let import_keys =
+                    import_pgp_keys(&format!("{}/{name}", container_build_dir.display()));
                 format!(
-                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -Ga {name} && paru {build_flags} *",
+                    "mkdir -p {container_build_dir} && cd {container_build_dir} && {self_update} && paru -Ga {name} && {import_keys} && paru {build_flags} *",
                     container_build_dir = container_build_dir.display(),
                 )
             }
             SourceData::Git { .. } => {
+                let import_keys = import_pgp_keys(GIT_REPO_PATH);
                 format!(
-                    "sudo chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && paru {build_flags} ."
+                    "sudo chmod -R 1777 {GIT_REPO_PATH} && {self_update} && cd {GIT_REPO_PATH} && {import_keys} && paru {build_flags} ."
                 )
             }
             SourceData::Upload { .. } => {
