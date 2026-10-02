@@ -227,12 +227,14 @@ and check also if the 'DOCKER_HOST=unix:///var/run/user/1000/podman/podman.sock'
         }
 
         let self_update = "paru -Syu --noconfirm --noprogressbar --color never";
-        // Import PGP keys listed in validpgpkeys from PKGBUILD before building.
+        // Import PGP keys listed in validpgpkeys before building.
+        // Keys are read from .SRCINFO (or `makepkg --printsrcinfo` if missing) instead of
+        // sourcing the PKGBUILD directly.
         // Tries multiple keyservers as fallback; never fails the build if import fails
         // (--pgpfetch will still attempt to fetch during build as a secondary attempt).
         let import_pgp_keys = |pkgbuild_dir: &str| {
             format!(
-                r#"(bash -c 'cd {pkgbuild_dir} && source PKGBUILD 2>/dev/null; for k in "${{validpgpkeys[@]:-}}"; do [ -z "$k" ] && continue; gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" 2>/dev/null || gpg --keyserver hkps://keys.openpgp.org --recv-keys "$k" 2>/dev/null || gpg --keyserver hkp://pgp.mit.edu --recv-keys "$k" 2>/dev/null || echo "Warning: failed to import PGP key $k"; done' || true)"#
+                r#"(bash -c 'cd {pkgbuild_dir} || exit 0; if [ -f .SRCINFO ]; then cat .SRCINFO; else makepkg --printsrcinfo 2>/dev/null; fi | sed -n "s/^[[:space:]]*validpgpkeys[[:space:]]*=[[:space:]]*//p" | while IFS= read -r k; do [ -n "$k" ] || continue; gpg --batch --list-keys "$k" >/dev/null 2>&1 && continue; gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys "$k" 2>/dev/null || gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys "$k" 2>/dev/null || gpg --batch --keyserver hkp://pgp.mit.edu --recv-keys "$k" 2>/dev/null || echo "Warning: failed to import PGP key $k"; done' || true)"#
             )
         };
         let source_data = SourceData::from_str(self.package_model.source_data.get()?)?;
