@@ -5,10 +5,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:intl/date_symbol_data_local.dart';
+import 'package:intl/intl.dart';
 import 'package:toastification/toastification.dart';
 import 'constants/color_constants.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
   if (kIsWeb) {
     if (bool.fromEnvironment('dart.tool.dart2wasm')) {
       print("You are using the WASM build of Flutter");
@@ -18,6 +22,12 @@ void main() {
       );
     }
   }
+
+  // Pick up the browser/system locale so date/number formattings are right
+  final platformLocale = WidgetsBinding.instance.platformDispatcher.locale
+      .toLanguageTag();
+  await initializeDateFormatting(platformLocale, null);
+  Intl.defaultLocale = platformLocale;
 
   GoRouter.optionURLReflectsImperativeAPIs = true;
   runApp(

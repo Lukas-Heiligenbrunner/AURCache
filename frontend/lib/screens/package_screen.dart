@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tags_x/flutter_tags_x.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 import 'package:skeletonizer/skeletonizer.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -200,13 +201,11 @@ class _PackageScreenState extends ConsumerState<PackageScreen> {
                 return [
                   _sideCard(
                     title: "Last Updated",
-                    subtitle:
-                        "${lastUpdated.year}-${lastUpdated.month.toString().padLeft(2, '0')}-${lastUpdated.day.toString().padLeft(2, '0')}",
+                    subtitle: DateFormat.yMd().format(lastUpdated),
                   ),
                   _sideCard(
                     title: "First submitted",
-                    subtitle:
-                        "${firstSubmitted.year}-${firstSubmitted.month.toString().padLeft(2, '0')}-${firstSubmitted.day.toString().padLeft(2, '0')}",
+                    subtitle: DateFormat.yMd().format(firstSubmitted),
                   ),
                   _sideCard(title: "Licenses", subtitle: aur.licenses ?? "-"),
                   _sideCard(
