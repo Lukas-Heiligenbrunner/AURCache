@@ -5,7 +5,7 @@ use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
 use aurcache_db::migration::Migrator;
 use aurcache_db::prelude::{Builds, Files, Packages};
-use aurcache_utils::publish::{interrupted, publish_build};
+use aurcache_utils::publish::{interrupted, publish_build, publish_with_recovery};
 use aurcache_utils::repository::Repository;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, EntityTrait};
 use sea_orm_migration::MigratorTrait;
@@ -394,4 +394,132 @@ async fn recovery_promotes_dependents_when_success_was_already_recorded() {
     assert_eq!(status(&db, 2).await, BuildState::Enqueued);
     assert!(!repo.staging_dir(1).exists());
     assert!(interrupted(&db, &repo).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_background_publication_finishes_after_the_sweep_recovers_its_files() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::sync::Arc::new(Repository::new(tmp.path()));
+    package(&db, 1, "hello").await;
+    package(&db, 2, "dependent").await;
+    publishing_build(&db, 1, 1).await;
+    publishing_build(&db, 2, 2).await;
+    db.execute_unprepared(&format!(
+        "UPDATE builds SET status = {} WHERE id = 2",
+        BuildState::WaitingForDeps.as_i32()
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared("INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) VALUES (2, 1, '')").await.unwrap();
+    stage(&repo, 1, "hello", "1.0-1");
+    let blocked = tmp.path().join("x86_64").join(filename("hello", "1.0-1"));
+    std::fs::create_dir_all(&blocked).unwrap();
+
+    let mut publishing = {
+        let (db, repo) = (db.clone(), std::sync::Arc::clone(&repo));
+        tokio::spawn(async move {
+            publish_with_recovery(&db, &repo, &ActivityLog::discarding(), 1).await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if db
+                .query_one_raw(sea_orm::Statement::from_string(
+                    db.get_database_backend(),
+                    "SELECT id FROM repository_updates",
+                ))
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The task remains alive after the failed rename, awaiting its retry.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut publishing)
+            .await
+            .is_err()
+    );
+    assert_eq!(status(&db, 1).await, BuildState::Publishing);
+    assert!(
+        db.query_one_raw(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT id FROM repository_updates"
+        ))
+        .await
+        .unwrap()
+        .is_some()
+    );
+    std::fs::remove_dir(&blocked).unwrap();
+    repo.sweep(&db, std::time::Duration::from_secs(3600))
+        .await
+        .unwrap();
+    assert!(blocked.is_file());
+    assert!(!listed(tmp.path()).is_empty());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), publishing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    assert_eq!(status(&db, 2).await, BuildState::Enqueued);
+    assert!(!repo.staging_dir(1).exists());
+}
+
+#[tokio::test]
+async fn a_background_publication_retries_failed_dependent_promotion() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::sync::Arc::new(Repository::new(tmp.path()));
+    package(&db, 1, "hello").await;
+    package(&db, 2, "dependent").await;
+    publishing_build(&db, 1, 1).await;
+    publishing_build(&db, 2, 2).await;
+    db.execute_unprepared(&format!(
+        "UPDATE builds SET status = {} WHERE id = 2",
+        BuildState::WaitingForDeps.as_i32()
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared("INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) VALUES (2, 1, '')").await.unwrap();
+    db.execute_unprepared("CREATE TRIGGER reject_promotion BEFORE UPDATE OF status ON builds WHEN OLD.id = 2 BEGIN SELECT RAISE(ABORT, 'promotion failed'); END").await.unwrap();
+    stage(&repo, 1, "hello", "1.0-1");
+
+    let mut publishing = {
+        let (db, repo) = (db.clone(), std::sync::Arc::clone(&repo));
+        tokio::spawn(async move {
+            publish_with_recovery(&db, &repo, &ActivityLog::discarding(), 1).await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while status(&db, 1).await != BuildState::Successful {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut publishing)
+            .await
+            .is_err()
+    );
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    assert_eq!(status(&db, 2).await, BuildState::WaitingForDeps);
+    assert!(repo.staging_dir(1).is_dir());
+
+    db.execute_unprepared("DROP TRIGGER reject_promotion")
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), publishing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status(&db, 2).await, BuildState::Enqueued);
+    assert!(!repo.staging_dir(1).exists());
 }

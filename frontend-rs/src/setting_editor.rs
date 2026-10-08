@@ -65,6 +65,7 @@ impl SettingEdit {
 pub struct EditorDraft {
     pub value: Option<String>,
     stored: Option<String>,
+    reset_revision: u64,
 }
 impl EditorDraft {
     pub fn text(&self) -> String {
@@ -86,9 +87,10 @@ impl EditorDraft {
         match change {
             SettingChange::Set(value) => self.stored = Some(value.clone()),
             SettingChange::Reset => {
-                // Keep the displayed value while refetching. An unchanged
-                // inherited value may not produce a reactive prop change.
                 self.stored.clone_from(submitted);
+                // A reset can leave the effective server value unchanged.
+                // Reseed even then, while preserving edits made in flight.
+                self.reset_revision = self.reset_revision.wrapping_add(1);
             }
         }
     }
@@ -96,11 +98,15 @@ impl EditorDraft {
 
 pub fn use_editor_draft(loaded: Option<String>) -> Signal<EditorDraft> {
     let mut draft = use_signal(EditorDraft::default);
-    use_effect(use_reactive(&loaded, move |loaded| {
-        if let Some(value) = loaded {
-            draft.with_mut(|draft| draft.seed(value));
-        }
-    }));
+    let reset_revision = draft.read().reset_revision;
+    use_effect(use_reactive(
+        &(loaded, reset_revision),
+        move |(loaded, _)| {
+            if let Some(value) = loaded {
+                draft.with_mut(|draft| draft.seed(value));
+            }
+        },
+    ));
     draft
 }
 
@@ -200,5 +206,64 @@ mod tests {
         draft.accept(&SettingChange::Reset, &submitted);
         draft.seed("inherited".into());
         assert_eq!(draft.text(), "new edit");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod reset_tests {
+        use super::*;
+
+        thread_local! {
+            static RESET_DRAFT: std::cell::RefCell<Option<Signal<EditorDraft>>> = const {
+                std::cell::RefCell::new(None)
+            };
+        }
+
+        fn reset_harness() -> Element {
+            let draft = use_editor_draft(Some("inherited".into()));
+            RESET_DRAFT.with(|slot| *slot.borrow_mut() = Some(draft));
+            rsx! { span { "{draft().text()}" } }
+        }
+
+        async fn flush_effects(dom: &mut VirtualDom) {
+            for _ in 0..5 {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(2), dom.wait_for_work())
+                        .await;
+                dom.render_immediate(&mut dioxus_core::NoOpMutations);
+            }
+        }
+
+        #[tokio::test]
+        async fn reset_reseeds_an_unchanged_inherited_value_and_preserves_new_edits() {
+            let mut dom = VirtualDom::new(reset_harness);
+            dom.rebuild_in_place();
+            flush_effects(&mut dom).await;
+            let mut draft = RESET_DRAFT.with(|slot| slot.borrow().unwrap());
+            assert_eq!(draft.peek().text(), "inherited");
+
+            dom.in_runtime(|| draft.with_mut(|draft| draft.edit("unsaved edit".into())));
+            flush_effects(&mut dom).await;
+            dom.in_runtime(|| {
+                draft.with_mut(|draft| {
+                    let submitted = draft.value.clone();
+                    draft.accept(&SettingChange::Reset, &submitted);
+                });
+            });
+            flush_effects(&mut dom).await;
+            assert_eq!(draft.peek().text(), "inherited");
+            assert!(!draft.peek().is_dirty());
+
+            dom.in_runtime(|| {
+                draft.with_mut(|draft| {
+                    draft.edit("submitted".into());
+                    let submitted = draft.value.clone();
+                    draft.edit("typed during reset".into());
+                    draft.accept(&SettingChange::Reset, &submitted);
+                });
+            });
+            flush_effects(&mut dom).await;
+            assert_eq!(draft.peek().text(), "typed during reset");
+            assert!(draft.peek().is_dirty());
+        }
     }
 }

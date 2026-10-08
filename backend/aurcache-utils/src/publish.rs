@@ -5,8 +5,8 @@
 //! [`accept_for_publishing`](crate::worker_complete::accept_for_publishing)).
 //! Everything after that is the server's -- reading the packages, updating
 //! the databases, recording the result -- and nothing the worker could do again
-//! would help with any of it, so a failure here fails the build rather than
-//! asking the worker for anything.
+//! would help with any of it. Invalid artifacts fail the build; recoverable
+//! finalization and dependent-promotion failures are retried by the server.
 
 use crate::build_logger::append_build_output;
 use crate::repository::{PublishedFile, Repository, Update};
@@ -26,40 +26,70 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
-/// Publish build `build_id`, which must be `PUBLISHING`, from its staging
-/// directory; or fail it.
-///
-/// Never returns an error: whatever goes wrong ends as a failed build with the
-/// reason in its log, and the staging directory is removed either way. A build
-/// that is not `PUBLISHING` (published already, or its package deleted) is left
-/// alone.
-pub async fn publish_build(
+/// Whether publication has settled or still has recoverable work to finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    Finished,
+    Retry,
+}
+
+/// Publish in the background until filesystem finalization and dependent
+/// promotion finish. Keep one task per build through recoverable failures;
+/// restarting the server resumes it from the same durable staging directory.
+pub async fn publish_with_recovery(
     db: &DatabaseConnection,
     repo: &Repository,
     activity: &ActivityLog,
     build_id: i32,
 ) {
+    loop {
+        // Recover before describing the uploaded archives again: a blocked
+        // rename should not repeatedly read a potentially huge package.
+        match repo.recover(db).await {
+            Ok(()) => {
+                if publish_build(db, repo, activity, build_id).await == PublicationOutcome::Finished
+                {
+                    return;
+                }
+            }
+            Err(error) => warn!("publication of build #{build_id} needs recovery: {error:#}"),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Attempt to publish a build from staging, or resume its dependent promotion.
+///
+/// Invalid artifacts fail the build. Recoverable errors retain staging and
+/// return `Retry`; production callers use [`publish_with_recovery`].
+pub async fn publish_build(
+    db: &DatabaseConnection,
+    repo: &Repository,
+    activity: &ActivityLog,
+    build_id: i32,
+) -> PublicationOutcome {
     let build = match Builds::find_by_id(build_id).one(db).await {
         Ok(Some(build)) => build,
         Ok(None) => {
             let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
-            return;
+            return PublicationOutcome::Finished;
         }
         Err(e) => {
             error!("could not load build #{build_id} for publication: {e}");
-            return;
+            return PublicationOutcome::Retry;
         }
     };
     if !matches!(
         build.status,
         BuildState::Publishing | BuildState::Successful
     ) {
-        return;
+        return PublicationOutcome::Finished;
     }
     if build.status == BuildState::Successful && !repo.staging_dir(build_id).is_dir() {
-        return;
+        return PublicationOutcome::Finished;
     }
     let pkgbase = Packages::find_by_id(build.pkg_id)
         .one(db)
@@ -127,7 +157,7 @@ pub async fn publish_build(
                             error: e.to_string(),
                         });
                     }
-                    return;
+                    return PublicationOutcome::Retry;
                 }
             }
         }
@@ -136,7 +166,7 @@ pub async fn publish_build(
                 .is_some() =>
         {
             warn!("publication of build #{build_id} needs recovery: {e:#}");
-            return;
+            return PublicationOutcome::Retry;
         }
         Err(e) => {
             warn!("publishing build #{build_id} failed: {e:#}");
@@ -168,11 +198,12 @@ pub async fn publish_build(
                         error: e.to_string(),
                     });
                 }
-                return;
+                return PublicationOutcome::Retry;
             }
         }
     }
     let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+    PublicationOutcome::Finished
 }
 
 /// Append to a build's log; a line that does not land is recorded where

@@ -207,9 +207,10 @@ defect this frontend has had was of that kind.
   keeps two changes from each dropping the other's entry. Uploads are staged under the repository root
   (`staging_dir`), so publishing is a rename on one filesystem.
 - A worker's successful completion is accepted at once: the build goes `ACTIVE` -> `PUBLISHING`, the
-  lease ends, and `aurcache_utils::publish::publish_build` puts it in the repository in the background.
+  lease ends, and `aurcache_utils::publish::publish_with_recovery` puts it in the repository in the background.
   Failures before the SQL commit fail the build; finalization failures preserve `PUBLISHING` and
-  staging for recovery. A restart resumes `PUBLISHING` builds and successful builds whose staging
+  staging for recovery. The background task retries finalization and dependent promotion until they
+  finish. A restart resumes `PUBLISHING` builds and successful builds whose staging
   directory still records pending dependent promotion. Lease policing (the
   heartbeat, the reaper, revoking a worker, claim capacity) only looks at `ACTIVE`, which is why
   publishing is a state of its own.

@@ -32,7 +32,7 @@ use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, workers};
 use aurcache_utils::build_logger::append_build_output;
 use aurcache_utils::job_config::{JobConfig, build_job_config, mirrorlist_dir, mirrorlist_for};
-use aurcache_utils::publish::publish_build;
+use aurcache_utils::publish::publish_with_recovery;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::settings;
 use aurcache_utils::snapshot::SnapshotStore;
@@ -784,7 +784,7 @@ pub async fn job_artifact(
 /// A success is accepted and answered at once: the artifacts are all uploaded,
 /// so the worker's part is done, and the build moves to `PUBLISHING` while the
 /// server puts it in the repository in the background (see
-/// [`publish_build`]). Nothing that can go wrong from there is the worker's to
+/// [`publish_with_recovery`]). Nothing that can go wrong from there is the worker's to
 /// fix. A failure is terminal.
 #[post("/worker/jobs/<build_id>/complete", data = "<input>")]
 pub async fn complete_job(
@@ -939,7 +939,9 @@ async fn complete_job_inner(
             });
         }
         let (db, repo, activity) = (db.clone(), Arc::clone(repo), activity.clone());
-        tokio::spawn(async move { publish_build(&db, &repo, &activity, build_id).await });
+        tokio::spawn(async move {
+            publish_with_recovery(&db, &repo, &activity, build_id).await;
+        });
         return Ok(());
     }
 

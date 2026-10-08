@@ -232,7 +232,9 @@ pub async fn resume_publishing(
         info!("resuming publication of build #{build_id}");
         let (db, repo) = (db.clone(), Arc::clone(repo));
         let activity = activity.clone();
-        tokio::spawn(async move { publish::publish_build(&db, &repo, &activity, build_id).await });
+        tokio::spawn(async move {
+            publish::publish_with_recovery(&db, &repo, &activity, build_id).await;
+        });
     }
 }
 
