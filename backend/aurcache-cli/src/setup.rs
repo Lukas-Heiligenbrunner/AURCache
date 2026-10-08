@@ -51,27 +51,12 @@ impl DockerRun {
     #[must_use]
     pub fn command_line(&self) -> String {
         let mut parts = vec!["docker".to_string()];
-        parts.extend(self.args.iter().map(|arg| shell_quote(arg)));
+        parts.extend(self.args.iter().map(|arg| quote_argument(arg)));
         parts.join(" ")
     }
 }
 
-/// Quote an argument for a POSIX shell, if it needs it.
-///
-/// Only for display. The real invocation passes the vector straight to
-/// `docker`, so nothing here can change what actually runs.
-#[must_use]
-pub fn shell_quote(arg: &str) -> String {
-    let safe = !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_=:./,@+".contains(c));
-    if safe {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', r"'\''"))
-    }
-}
+use aurcache_common::shell::quote_argument;
 
 /// What the server container needs: three ports, three volumes for state that
 /// must survive a restart, and the enrollment directory that lets a local
@@ -327,7 +312,7 @@ pub fn execute(run: &DockerRun) -> Result<()> {
 mod tests {
     use super::{
         DockerRun, ENROLL_VOLUME, NETWORK, WorkerRunSpec, is_local_host, local_worker_env,
-        remote_worker_env, server_run, shell_quote, worker_run,
+        quote_argument, remote_worker_env, server_run, worker_run,
     };
     use crate::compose::WorkerEnv;
 
@@ -510,13 +495,13 @@ mod tests {
 
     #[test]
     fn the_printed_command_quotes_only_what_needs_it() {
-        assert_eq!(shell_quote("--privileged"), "--privileged");
+        assert_eq!(quote_argument("--privileged"), "--privileged");
         assert_eq!(
-            shell_quote("AURCACHE_URL=https://h:8083"),
+            quote_argument("AURCACHE_URL=https://h:8083"),
             "AURCACHE_URL=https://h:8083"
         );
-        assert_eq!(shell_quote("a b"), "'a b'");
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+        assert_eq!(quote_argument("a b"), "'a b'");
+        assert_eq!(quote_argument("it's"), "'it'\"'\"'s'");
     }
 
     #[test]

@@ -207,28 +207,42 @@ async fn count_packages(db: &DatabaseConnection, requested: bool) -> anyhow::Res
     Ok(count)
 }
 
+/// SQL counterpart of elapsed_between: unknown for missing, reversed or
+/// overflowing endpoints. CASE guards arithmetic that PostgreSQL would reject.
+fn build_elapsed_seconds_expr() -> sea_orm::sea_query::SimpleExpr {
+    let start = Expr::col(builds::Column::StartTime);
+    let end = Expr::col(builds::Column::EndTime);
+    let difference = end.clone().sub(start.clone());
+    let checked = Expr::case(start.clone().gte(0), difference.clone())
+        .case(end.clone().lte(start.clone().add(i64::MAX)), difference)
+        .finally(Expr::val(None::<i64>));
+    Expr::case(end.gte(start), checked)
+        .finally(Expr::val(None::<i64>))
+        .into()
+}
+
 /// Average duration of a successful build, in seconds.
 ///
-/// Missing or unrepresentable averages read as `0`.
-async fn avg_build_time(db: &DatabaseConnection) -> anyhow::Result<u32> {
+/// Missing averages are unknown; reversed or overflowing intervals are excluded.
+async fn avg_build_time(db: &DatabaseConnection) -> anyhow::Result<Option<u64>> {
     let average: Option<Option<f64>> = Builds::find()
         .select_only()
         // Cast because Postgres averages integers into `numeric`.
         .column_as(
-            Expr::from(Func::avg(
-                Expr::col(builds::Column::EndTime).sub(Expr::col(builds::Column::StartTime)),
-            ))
-            .cast_as(Alias::new("DOUBLE PRECISION")),
+            Expr::from(Func::avg(build_elapsed_seconds_expr()))
+                .cast_as(Alias::new("DOUBLE PRECISION")),
             "avg_build_time",
         )
         .filter(builds::Column::EndTime.is_not_null())
+        .filter(Expr::col(builds::Column::EndTime).gte(Expr::col(builds::Column::StartTime)))
         .filter(builds::Column::Status.eq(BuildState::Successful))
         .into_tuple()
         .one(db)
         .await?;
-    // An aggregate without `GROUP BY` always returns a row, and its average
-    // is NULL over no rows: an empty table reads as 0, not as a failed page.
-    Ok(average.flatten().map_or(0, |avg| avg as u32))
+    Ok(average
+        .flatten()
+        .filter(|avg| avg.is_finite() && *avg >= 0.0)
+        .map(|avg| avg as u64))
 }
 
 /// Change over the last 30 days relative to the 30 days before it, as a
@@ -272,10 +286,8 @@ async fn window_stats(
         // A build that has not ended has a NULL difference, which `AVG`
         // leaves out. Cast because Postgres averages integers into `numeric`.
         .column_as(
-            Expr::from(Func::avg(
-                Expr::col(builds::Column::EndTime).sub(Expr::col(builds::Column::StartTime)),
-            ))
-            .cast_as(Alias::new("DOUBLE PRECISION")),
+            Expr::from(Func::avg(build_elapsed_seconds_expr()))
+                .cast_as(Alias::new("DOUBLE PRECISION")),
             "avg_duration",
         )
         .filter(builds::Column::StartTime.gte(from));
@@ -612,7 +624,7 @@ struct LongestRow {
 
 async fn longest_builds(db: &DatabaseConnection) -> anyhow::Result<Vec<LongBuild>> {
     let since = aurcache_db::helpers::time::now_secs() - LONGEST_WINDOW_DAYS * 24 * 60 * 60;
-    let duration = Expr::col(builds::Column::EndTime).sub(Expr::col(builds::Column::StartTime));
+    let duration = build_elapsed_seconds_expr();
     let rows: Vec<LongestRow> = Builds::find()
         .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
         .select_only()
@@ -631,6 +643,7 @@ async fn longest_builds(db: &DatabaseConnection) -> anyhow::Result<Vec<LongBuild
         .filter(builds::Column::Status.eq(BuildState::Successful))
         .filter(builds::Column::StartTime.gte(since))
         .filter(builds::Column::EndTime.is_not_null())
+        .filter(duration.clone().is_not_null())
         .order_by(duration, Order::Desc)
         .limit(DASHBOARD_LIMIT)
         .into_model::<LongestRow>()
@@ -654,12 +667,10 @@ async fn longest_builds(db: &DatabaseConnection) -> anyhow::Result<Vec<LongBuild
                     .into_tuple::<(Option<i64>, Option<i64>)>()
                     .one(db)
                     .await?;
-                match prev {
-                    Some((Some(prev_start), Some(prev_end))) => {
-                        Some(Ord::max(prev_end.saturating_sub(prev_start), 0))
-                    }
-                    _ => None,
-                }
+                prev.and_then(|(start, end)| {
+                    aurcache_common::api::builds::elapsed_between(start, end)
+                })
+                .map(|duration| duration.as_secs())
             }
             None => None,
         };
@@ -760,14 +771,122 @@ mod tests {
     async fn the_average_build_time_is_over_successful_builds() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&db, None).await.unwrap();
-        assert_eq!(avg_build_time(&db).await.unwrap(), 0);
+        assert_eq!(avg_build_time(&db).await.unwrap(), None);
 
         let pkg = insert_package(&db, "hello", false, true).await;
         insert_build(&db, pkg, 1, BuildState::Successful, Some(0), Some(100)).await;
         insert_build(&db, pkg, 2, BuildState::Successful, Some(0), Some(200)).await;
         insert_build(&db, pkg, 3, BuildState::Failed, Some(0), Some(9000)).await;
         insert_build(&db, pkg, 4, BuildState::Successful, Some(0), None).await;
-        assert_eq!(avg_build_time(&db).await.unwrap(), 150);
+        insert_build(&db, pkg, 5, BuildState::Successful, Some(20), Some(10)).await;
+        insert_build(&db, pkg, 6, BuildState::Successful, Some(i64::MIN), Some(0)).await;
+        insert_build(
+            &db,
+            pkg,
+            7,
+            BuildState::Successful,
+            Some(i64::MIN),
+            Some(i64::MAX),
+        )
+        .await;
+        assert_eq!(avg_build_time(&db).await.unwrap(), Some(150));
+        builds::Entity::delete_many().exec(&db).await.unwrap();
+        insert_build(&db, pkg, 8, BuildState::Successful, Some(0), Some(0)).await;
+        assert_eq!(avg_build_time(&db).await.unwrap(), Some(0));
+    }
+
+    /// Run against an empty disposable PostgreSQL database, supplied through
+    /// AURCACHE_TEST_POSTGRES_URL. Exercises the backend-specific arithmetic,
+    /// locking and journal SQL that SQLite tests cannot check.
+    #[tokio::test]
+    #[ignore = "requires an empty disposable PostgreSQL database"]
+    async fn postgres_elapsed_queue_and_repository_journal() {
+        use aurcache_common::build_state::BuildTrigger;
+        use aurcache_db::helpers::build_enqueue::{
+            Pending, demote_enqueued_build, enqueue_build_if_missing, promote_waiting_build,
+        };
+        use sea_orm::ConnectionTrait;
+
+        let url = std::env::var("AURCACHE_TEST_POSTGRES_URL").expect("test PostgreSQL URL");
+        let db = Database::connect(url).await.unwrap();
+        assert_eq!(db.get_database_backend(), sea_orm::DbBackend::Postgres);
+        Migrator::up(&db, None).await.unwrap();
+        assert_eq!(avg_build_time(&db).await.unwrap(), None);
+        let pkg = insert_package(&db, "postgres-review", false, true).await;
+        for (number, start, end) in [
+            (1, 0, 100),
+            (2, 20, 10),
+            (3, i64::MIN, 0),
+            (4, i64::MIN, i64::MAX),
+            (5, 0, 0),
+            (6, 100, 50),
+        ] {
+            insert_build(
+                &db,
+                pkg,
+                number,
+                BuildState::Successful,
+                Some(start),
+                Some(end),
+            )
+            .await;
+        }
+        assert_eq!(avg_build_time(&db).await.unwrap(), Some(50));
+        assert_eq!(
+            super::window_stats(&db, i64::MIN, None)
+                .await
+                .unwrap()
+                .avg_duration,
+            Some(50.0)
+        );
+
+        let pending = enqueue_build_if_missing(
+            &db,
+            pkg,
+            Platform::X86_64,
+            "1",
+            0,
+            Pending::Enqueued,
+            BuildTrigger::User,
+        )
+        .await
+        .unwrap();
+        demote_enqueued_build(&db, pkg, Platform::X86_64)
+            .await
+            .unwrap();
+        promote_waiting_build(&db, pkg, Platform::X86_64)
+            .await
+            .unwrap();
+        assert_eq!(
+            aurcache_db::prelude::Builds::find_by_id(pending.build.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::Enqueued
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = aurcache_utils::repository::Repository::new(tmp.path());
+        repo.begin(&db)
+            .await
+            .unwrap()
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
+        db.execute_unprepared(
+            r#"INSERT INTO repository_updates (id, plan) VALUES (1, '{"moves":[],"retired":[]}')"#,
+        )
+        .await
+        .unwrap();
+        repo.recover(&db).await.unwrap();
+        repo.begin(&db)
+            .await
+            .unwrap()
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1062,6 +1181,16 @@ mod tests {
         )
         .await;
 
+        // Invalid intervals never compete with real durations in this ranking.
+        insert_build(
+            &db,
+            pkg_id,
+            4,
+            BuildState::Successful,
+            Some(now),
+            Some(i64::MIN),
+        )
+        .await;
         let longest = longest_builds(&db).await.unwrap();
         assert_eq!(longest.len(), 3);
         // Ordered by duration DESC: 120, 60, 30. The 1000-second build is

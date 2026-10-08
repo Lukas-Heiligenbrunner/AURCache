@@ -83,14 +83,11 @@ fn in_repo_on<'a>(builds: &'a [Build], platform: &str) -> Option<&'a Build> {
 ///
 /// Only successful builds count. A failure's duration measures how quickly
 /// something broke, which is a different quantity and usually much shorter.
-fn typical_duration(builds: &[Build]) -> Option<i64> {
-    let mut durations: Vec<i64> = builds
+fn typical_duration(builds: &[Build]) -> Option<std::time::Duration> {
+    let mut durations: Vec<std::time::Duration> = builds
         .iter()
         .filter(|b| succeeded(b))
-        .filter_map(|b| match (b.start_time, b.end_time) {
-            (Some(start), Some(end)) if end >= start => Some(end - start),
-            _ => None,
-        })
+        .filter_map(Build::elapsed)
         .collect();
 
     if durations.is_empty() {
@@ -128,7 +125,11 @@ async fn load(pkgbase: String) -> Result<PackagePage, LoadError> {
     // not threads.
     let (package, builds) = futures_util::future::join(
         client.get_package(&pkgbase),
-        client.list_builds(Some(&pkgbase), Some(BUILD_SAMPLE), None),
+        client.list_builds(&aurcache_client::BuildQuery {
+            pkgbase: Some(pkgbase.clone()),
+            limit: Some(BUILD_SAMPLE),
+            ..Default::default()
+        }),
     )
     .await;
 
@@ -443,7 +444,7 @@ fn BuildSummary(pkgbase: String, builds: Vec<Build>) -> Element {
                     }
                     if let Some(typical) = typical {
                         span { class: "text-sm opacity-60",
-                            "typically {format_duration(Some(0), Some(typical))}"
+                            "typically {format_duration(Some(typical))}"
                         }
                     }
                 }
@@ -492,7 +493,7 @@ fn BuildRow(label: String, entry: Build, now: i64) -> Element {
             div { class: "flex-1" }
             span { class: "text-sm opacity-60", RelativeDate { ts: entry.start_time, now } }
             span { class: "font-mono text-sm opacity-60 w-16 text-right",
-                {format_duration(entry.start_time, entry.end_time)}
+                {format_duration(entry.elapsed())}
             }
         }
     }
@@ -1144,6 +1145,12 @@ fn SourceCard(pkg: ExtendedPackage) -> Element {
 
 #[component]
 fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>) -> Element {
+    let entry = use_resource(use_reactive(&pkg.name, move |pkgbase| async move {
+        client()?
+            .settings(Some(&pkgbase))
+            .await
+            .map_err(|error| error.to_string())
+    }));
     rsx! {
         div { class: "card bg-base-100 shadow-xl",
             div { class: "card-body",
@@ -1167,8 +1174,8 @@ fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>) -> Elemen
                         .collect(),
                     on_changed,
                 }
-                PersistBuildDirField { pkgbase: pkg.name.clone() }
-                ArtifactSizeField { pkgbase: pkg.name.clone() }
+                PersistBuildDirField { key: "persist-{pkg.name}", pkgbase: pkg.name.clone(), entry }
+                ArtifactSizeField { key: "artifact-{pkg.name}", pkgbase: pkg.name.clone(), entry }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
                 // row of its own saying so beside it.
@@ -1201,94 +1208,53 @@ fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>) -> Elemen
 /// settings are fetched separately, and folding one of them into the package
 /// payload would make every package request carry it.
 #[component]
-fn PersistBuildDirField(pkgbase: String) -> Element {
-    let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
-
-    // Held separately from the loaded entry so the checkbox can flip on click
-    // rather than after the round-trip; the entry's re-read on save re-syncs it.
-    let mut value = use_signal(|| false);
-
-    let mut entry = use_resource(use_reactive(&pkgbase, move |pkgbase| async move {
-        client()?
-            .settings(Some(&pkgbase))
-            .await
-            .map_err(|e| e.to_string())
-    }));
-
-    // Whether the user has touched the toggle: a slow first load must not
-    // overwrite a choice already made, so the resolve only seeds an
-    // untouched control. Reset clears it so the re-read reseeds.
-    let mut touched = use_signal(|| false);
-    use_effect(move || {
-        // `peek` borrows through a guard; `*` sees through it.
-        if !*touched.peek()
-            && let Some(Ok(settings)) = entry.read().as_ref()
-        {
-            value.set(settings.persistent_builddir.value);
-        }
-    });
-
-    // One pkgbase clone per handler: both are `move` closures, and each needs
-    // its own copy to hand the async block.
-    let set_pkgbase = pkgbase.clone();
-
+fn PersistBuildDirField(
+    pkgbase: String,
+    mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
+) -> Element {
+    use crate::setting_editor::{
+        MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
+    };
+    let controller = use_setting_mutations();
+    let busy = controller.busy;
+    let error = move || (controller.status)().and_then(Result::err);
+    let loaded = entry
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|settings| settings.persistent_builddir.value.to_string());
+    let mut draft = use_editor_draft(loaded);
+    let scope = SettingScope::Package(pkgbase);
+    let save_scope = scope.clone();
     let set = move |enabled: bool| {
-        let pkgbase = set_pkgbase.clone();
+        let scope = save_scope.clone();
         async move {
-            if busy() {
-                return;
-            }
-            busy.set(true);
-            error.set(None);
-            let outcome = match client() {
-                Ok(client) => client
-                    .patch_setting(
-                        Some(&pkgbase),
-                        Setting::PersistentBuilddir.meta().key,
-                        if enabled { "true" } else { "false" },
-                    )
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            busy.set(false);
-            match outcome {
-                Ok(()) => {
-                    value.set(enabled);
-                    // Re-read so the row shows the value's new *source* as well
-                    // as its value.
-                    entry.restart();
-                }
-                Err(e) => error.set(Some(e)),
+            let value = enabled.to_string();
+            draft.with_mut(|draft| draft.edit(value.clone()));
+            if controller
+                .apply(
+                    &scope,
+                    SettingEdit::set(Setting::PersistentBuilddir, value).editing(draft),
+                )
+                .await
+                == MutationOutcome::Applied
+            {
+                entry.restart();
             }
         }
     };
-
     let reset = move |_| {
-        let pkgbase = pkgbase.clone();
+        let scope = scope.clone();
         async move {
-            if busy() {
-                return;
-            }
-            busy.set(true);
-            error.set(None);
-            let outcome = match client() {
-                Ok(client) => client
-                    .reset_setting(Some(&pkgbase), Setting::PersistentBuilddir.meta().key)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            busy.set(false);
-            match outcome {
-                // Back to inherited: the re-read is the new truth, so let it
-                // seed the toggle again.
-                Ok(()) => {
-                    touched.set(false);
-                    entry.restart();
-                }
-                Err(e) => error.set(Some(e)),
+            if controller
+                .apply(
+                    &scope,
+                    SettingEdit::reset(Setting::PersistentBuilddir).editing(draft),
+                )
+                .await
+                == MutationOutcome::Applied
+            {
+                entry.restart();
             }
         }
     };
@@ -1313,9 +1279,8 @@ fn PersistBuildDirField(pkgbase: String) -> Element {
                                     r#type: "checkbox",
                                     class: "toggle toggle-primary",
                                     disabled: locked || busy(),
-                                    checked: value(),
+                                    checked: draft().text() == "true",
                                     onchange: move |e: FormEvent| {
-                                        touched.set(true);
                                         set(e.checked())
                                     },
                                 }
@@ -1351,81 +1316,52 @@ fn PersistBuildDirField(pkgbase: String) -> Element {
 /// all. Shown as the size it is written in (`20G`), with where the value comes
 /// from; typing a new one offers Save, and a package override offers Reset.
 #[component]
-fn ArtifactSizeField(pkgbase: String) -> Element {
-    let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
-    // What is in the box. `None` until the setting has loaded, so a load does
-    // not overwrite something already typed.
-    let mut draft = use_signal(|| Option::<String>::None);
-
-    let mut entry = use_resource(use_reactive(&pkgbase, move |pkgbase| async move {
-        client()?
-            .settings(Some(&pkgbase))
-            .await
-            .map_err(|e| e.to_string())
-    }));
-
-    use_effect(move || {
-        // Seed only: a refetch (after save, after reset) landing mid-edit
-        // must not overwrite what is being typed. `None` means nothing has
-        // been typed or seeded yet; save and reset both leave the last shown
-        // value in place.
-        if draft.peek().is_none()
-            && let Some(Ok(settings)) = entry.read().as_ref()
-        {
-            draft.set(Some(aurcache_common::units::format_size(
-                settings.max_artifact_size.value,
-            )));
-        }
-    });
-
-    let save_pkgbase = pkgbase.clone();
+fn ArtifactSizeField(
+    pkgbase: String,
+    mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
+) -> Element {
+    use crate::setting_editor::{
+        MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
+    };
+    let controller = use_setting_mutations();
+    let busy = controller.busy;
+    let error = move || (controller.status)().and_then(Result::err);
+    let loaded = entry
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|settings| aurcache_common::units::format_size(settings.max_artifact_size.value));
+    let mut draft = use_editor_draft(loaded);
+    let scope = SettingScope::Package(pkgbase);
+    let save_scope = scope.clone();
     let save = move |_| {
-        let pkgbase = save_pkgbase.clone();
+        let scope = save_scope.clone();
         async move {
-            let Some(value) = draft() else { return };
-            busy.set(true);
-            error.set(None);
-            let outcome = match client() {
-                Ok(client) => client
-                    .patch_setting(
-                        Some(&pkgbase),
-                        Setting::MaxArtifactSize.meta().key,
-                        value.trim(),
-                    )
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            busy.set(false);
-            match outcome {
-                Ok(()) => entry.restart(),
-                Err(e) => error.set(Some(e)),
+            let value = draft().text().trim().to_owned();
+            if controller
+                .apply(
+                    &scope,
+                    SettingEdit::set(Setting::MaxArtifactSize, value).editing(draft),
+                )
+                .await
+                == MutationOutcome::Applied
+            {
+                entry.restart();
             }
         }
     };
-
     let reset = move |_| {
-        let pkgbase = pkgbase.clone();
+        let scope = scope.clone();
         async move {
-            busy.set(true);
-            error.set(None);
-            let outcome = match client() {
-                Ok(client) => client
-                    .reset_setting(Some(&pkgbase), Setting::MaxArtifactSize.meta().key)
-                    .await
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
-            };
-            busy.set(false);
-            match outcome {
-                // Back to inherited: drop the draft so the re-read reseeds
-                // the box instead of leaving the discarded override in it.
-                Ok(()) => {
-                    draft.set(None);
-                    entry.restart();
-                }
-                Err(e) => error.set(Some(e)),
+            if controller
+                .apply(
+                    &scope,
+                    SettingEdit::reset(Setting::MaxArtifactSize).editing(draft),
+                )
+                .await
+                == MutationOutcome::Applied
+            {
+                entry.restart();
             }
         }
     };
@@ -1445,7 +1381,7 @@ fn ArtifactSizeField(pkgbase: String) -> Element {
                         // No lock for an environment variable: a package's own
                         // value outranks it (Package -> Env -> Global -> Default),
                         // so an override here still applies.
-                        let changed = draft().is_some_and(|d| d.trim() != current);
+                        let changed = draft().text().trim() != current;
                         rsx! {
                             div { class: "flex items-center gap-2 flex-wrap",
                                 input {
@@ -1453,8 +1389,8 @@ fn ArtifactSizeField(pkgbase: String) -> Element {
                                     class: "input input-bordered input-xs w-24 font-mono",
                                     placeholder: "20G",
                                     disabled: busy(),
-                                    value: draft().unwrap_or_default(),
-                                    oninput: move |e| draft.set(Some(e.value())),
+                                    value: draft().text(),
+                                    oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
                                 }
                                 span {
                                     class: "badge badge-ghost badge-sm",
@@ -1906,7 +1842,10 @@ mod tests {
             sample(2, "x86_64", BuildState::Successful, Some(0), Some(70)),
             sample(3, "x86_64", BuildState::Successful, Some(0), Some(2400)),
         ];
-        assert_eq!(typical_duration(&builds), Some(70));
+        assert_eq!(
+            typical_duration(&builds),
+            Some(std::time::Duration::from_secs(70))
+        );
     }
 
     /// A failure measures how fast something broke, not how long a build takes.
@@ -1917,7 +1856,10 @@ mod tests {
             sample(2, "x86_64", BuildState::Failed, Some(0), Some(5)),
             sample(3, "x86_64", BuildState::Failed, Some(0), Some(5)),
         ];
-        assert_eq!(typical_duration(&builds), Some(600));
+        assert_eq!(
+            typical_duration(&builds),
+            Some(std::time::Duration::from_secs(600))
+        );
     }
 
     /// An unfinished or never-run build contributes no duration, and a package

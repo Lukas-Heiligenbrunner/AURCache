@@ -41,11 +41,24 @@ pub async fn publish_build(
     activity: &ActivityLog,
     build_id: i32,
 ) {
-    let Ok(Some(build)) = Builds::find_by_id(build_id).one(db).await else {
-        let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
-        return;
+    let build = match Builds::find_by_id(build_id).one(db).await {
+        Ok(Some(build)) => build,
+        Ok(None) => {
+            let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+            return;
+        }
+        Err(e) => {
+            error!("could not load build #{build_id} for publication: {e}");
+            return;
+        }
     };
-    if build.status != BuildState::Publishing {
+    if !matches!(
+        build.status,
+        BuildState::Publishing | BuildState::Successful
+    ) {
+        return;
+    }
+    if build.status == BuildState::Successful && !repo.staging_dir(build_id).is_dir() {
         return;
     }
     let pkgbase = Packages::find_by_id(build.pkg_id)
@@ -55,7 +68,22 @@ pub async fn publish_build(
         .flatten()
         .map(|pkg| pkg.name);
 
-    match publish(db, repo, &build).await {
+    let publication = if build.status == BuildState::Successful {
+        Files::find()
+            .filter(files::Column::PackageId.eq(build.pkg_id))
+            .filter(files::Column::Platform.eq(build.platform))
+            .all(db)
+            .await
+            .map(|files| Published {
+                packages: files.len(),
+            })
+            .map_err(|error| {
+                anyhow::Error::new(crate::repository::FinalizationPending(error.into()))
+            })
+    } else {
+        publish(db, repo, &build).await
+    };
+    match publication {
         Ok(published) => {
             info!(
                 "published build #{build_id}: {} package(s)",
@@ -99,8 +127,16 @@ pub async fn publish_build(
                             error: e.to_string(),
                         });
                     }
+                    return;
                 }
             }
+        }
+        Err(e)
+            if e.downcast_ref::<crate::repository::FinalizationPending>()
+                .is_some() =>
+        {
+            warn!("publication of build #{build_id} needs recovery: {e:#}");
+            return;
         }
         Err(e) => {
             warn!("publishing build #{build_id} failed: {e:#}");
@@ -132,6 +168,7 @@ pub async fn publish_build(
                         error: e.to_string(),
                     });
                 }
+                return;
             }
         }
     }
@@ -176,6 +213,7 @@ struct Upload {
 }
 
 /// One published file, as its `files` row will hold it.
+#[derive(Clone)]
 struct FileRow {
     filename: String,
     /// The `files` row it already has, if any.
@@ -184,6 +222,7 @@ struct FileRow {
 }
 
 /// What the database is told, decided under the repository lock.
+#[derive(Clone)]
 struct Plan {
     rows: Vec<FileRow>,
     /// This package's files on this platform that the build no longer
@@ -224,7 +263,7 @@ async fn publish(
     }
     let version = parse_arch_pkg(&described[0].filename)?.version;
 
-    let mut update = repo.begin().await;
+    let mut update = repo.begin(db).await?;
     let plan = plan(&update, db, &pkg, platform, &described, version).await?;
     for file in &plan.stale {
         update.retire(file)?;
@@ -233,9 +272,28 @@ async fn publish(
         update.add(platform, staged.path, staged.entry);
     }
     update
-        .commit(|| record(db, build.id, &pkg, platform, &plan))
+        .commit(db, |txn| {
+            let pkg = pkg.clone();
+            let plan = plan.clone();
+            let build_id = build.id;
+            Box::pin(async move { record(txn, build_id, &pkg, platform, &plan).await })
+        })
         .await?;
 
+    let finished = async {
+        let txn = db.begin().await?;
+        Builds::update_many()
+            .col_expr(builds::Column::Status, BuildState::Successful.into())
+            .filter(builds::Column::Id.eq(build.id))
+            .filter(builds::Column::Status.eq(BuildState::Publishing))
+            .exec(&txn)
+            .await?;
+        refresh_package_status(&txn, build.pkg_id).await?;
+        txn.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    finished.map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error)))?;
     Ok(Published { packages })
 }
 
@@ -263,7 +321,10 @@ async fn read_staging(
             continue;
         }
         let filename = entry.file_name().to_string_lossy().into_owned();
-        if filename.starts_with('.') || filename.ends_with(".sig") {
+        if filename.starts_with('.')
+            || filename.ends_with(".sig")
+            || filename.ends_with(".publishing")
+        {
             continue;
         }
         if is_debug_artifact(&expected, &filename) {
@@ -370,21 +431,19 @@ async fn plan(
 /// Conditioned on the build still being `PUBLISHING`, so a build cancelled or
 /// deleted meanwhile is never recorded as published.
 async fn record(
-    db: &DatabaseConnection,
+    txn: &sea_orm::DatabaseTransaction,
     build_id: i32,
     pkg: &packages::Model,
     platform: Platform,
     plan: &Plan,
 ) -> anyhow::Result<()> {
-    let txn = db.begin().await?;
     let marked = Builds::update_many()
-        .col_expr(builds::Column::Status, BuildState::Successful.into())
         .col_expr(builds::Column::Version, plan.version.clone().into())
         .col_expr(builds::Column::Size, Some(plan.total_size).into())
         .col_expr(builds::Column::EndTime, Some(now_secs()).into())
         .filter(builds::Column::Id.eq(build_id))
         .filter(builds::Column::Status.eq(BuildState::Publishing))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     if marked.rows_affected == 0 {
         bail!("build #{build_id} is no longer being published");
@@ -406,7 +465,7 @@ async fn record(
         })
         .collect();
     if !new_rows.is_empty() {
-        files::Entity::insert_many(new_rows).exec(&txn).await?;
+        files::Entity::insert_many(new_rows).exec(txn).await?;
     }
     for row in &plan.rows {
         if let Some(id) = row.existing {
@@ -416,14 +475,14 @@ async fn record(
                 size: Set(Some(row.size)),
                 ..Default::default()
             }
-            .update(&txn)
+            .update(txn)
             .await?;
         }
     }
     if !plan.stale.is_empty() {
         Files::delete_many()
             .filter(files::Column::Id.is_in(plan.stale.iter().map(PublishedFile::id)))
-            .exec(&txn)
+            .exec(txn)
             .await?;
     }
 
@@ -434,10 +493,9 @@ async fn record(
             Some(plan.version.clone()).into(),
         )
         .filter(packages::Column::Id.eq(pkg.id))
-        .exec(&txn)
+        .exec(txn)
         .await?;
-    refresh_package_status(&txn, pkg.id).await?;
-    txn.commit().await?;
+    refresh_package_status(txn, pkg.id).await?;
     Ok(())
 }
 
@@ -464,14 +522,34 @@ async fn fail(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Result<
 /// Nothing public happened to them yet -- the database transaction is what
 /// moves a build out of `PUBLISHING` -- so publishing them again from their
 /// staging directories is safe.
-pub async fn interrupted(db: &DatabaseConnection) -> anyhow::Result<Vec<i32>> {
-    Ok(Builds::find()
+pub async fn interrupted(db: &DatabaseConnection, repo: &Repository) -> anyhow::Result<Vec<i32>> {
+    let mut interrupted: Vec<i32> = Builds::find()
         .select_only()
         .column(builds::Column::Id)
         .filter(builds::Column::Status.eq(BuildState::Publishing))
         .into_tuple()
         .all(db)
-        .await?)
+        .await?;
+    // Successful builds with staging still present may have crashed before
+    // promoting their dependents. Replaying that step is idempotent.
+    let mut staging = match tokio::fs::read_dir(repo.root().join(".staging")).await {
+        Ok(staging) => staging,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(interrupted),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = staging.next_entry().await? {
+        let Ok(id) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if let Some(build) = Builds::find_by_id(id).one(db).await?
+            && build.status == BuildState::Successful
+        {
+            interrupted.push(id);
+        }
+    }
+    interrupted.sort_unstable();
+    interrupted.dedup();
+    Ok(interrupted)
 }
 
 /// The package names a build of `pkg` may produce: its pkgbase plus any
@@ -496,9 +574,8 @@ struct ParsedPkg {
 ///
 /// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version `2.12.1-1`.
 fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
-    let base = filename
-        .split(".pkg.")
-        .next()
+    let (base, _) = filename
+        .rsplit_once(".pkg.tar.")
         .ok_or_else(|| anyhow!("Invalid pkg filename: {filename}"))?;
 
     let parts: Vec<&str> = base.split('-').collect();
@@ -531,7 +608,10 @@ fn validate_artifact_names(expected: &[String], filenames: &[String]) -> anyhow:
         bail!("no expected package names to validate against");
     }
     for filename in filenames {
-        if filename.starts_with('.') || filename.ends_with(".sig") {
+        if filename.starts_with('.')
+            || filename.ends_with(".sig")
+            || filename.ends_with(".publishing")
+        {
             continue;
         }
         if !filename.contains(".pkg.tar") {
@@ -587,6 +667,13 @@ mod tests {
         let p = parse_arch_pkg("my-cool-pkg-1.0.0-2-aarch64.pkg.tar.zst").unwrap();
         assert_eq!(p.name, "my-cool-pkg");
         assert_eq!(p.version, "1.0.0-2");
+    }
+
+    #[test]
+    fn a_package_name_can_contain_the_archive_delimiter() {
+        let p = parse_arch_pkg("my.pkg.tar.tool-1.0-1-x86_64.pkg.tar.zst").unwrap();
+        assert_eq!(p.name, "my.pkg.tar.tool");
+        assert_eq!(p.version, "1.0-1");
     }
 
     #[test]

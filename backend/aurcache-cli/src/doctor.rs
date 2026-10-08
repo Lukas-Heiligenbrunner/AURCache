@@ -294,7 +294,13 @@ pub async fn run_doctor(client: &AurCacheClient, format: OutputFormat) -> Result
         )),
     }
 
-    match client.list_builds(None, Some(QUEUE_SAMPLE), None).await {
+    match client
+        .list_builds(&aurcache_client::BuildQuery {
+            limit: Some(QUEUE_SAMPLE),
+            ..Default::default()
+        })
+        .await
+    {
         Ok(builds) => checks.push(check_queue(&builds)),
         Err(e) => checks.push(Check::warn(
             "queue",

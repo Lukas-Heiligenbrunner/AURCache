@@ -264,6 +264,7 @@ pub async fn refresh_package_status<C: ConnectionTrait>(db: &C, pkg_id: i32) -> 
     let Some(configured) = packages::Entity::find_by_id(pkg_id)
         .select_only()
         .column(packages::Column::Platforms)
+        .lock_exclusive()
         .into_tuple::<Option<Platforms>>()
         .one(db)
         .await?

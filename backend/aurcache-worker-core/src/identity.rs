@@ -35,7 +35,7 @@ impl Identity {
             KeyPair::from_pem(&pem).context("parsing persisted worker key")?
         } else {
             let key = KeyPair::generate().context("generating worker key")?;
-            aurcache_ca::write_private(&key_path, &key.serialize_pem())?;
+            aurcache_common::fs::write_private(&key_path, key.serialize_pem().as_bytes())?;
             key
         };
 

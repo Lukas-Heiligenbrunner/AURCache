@@ -44,7 +44,7 @@ pub(crate) async fn render_builds_list(
         None => None,
     };
     let builds = client
-        .list_builds_matching(&BuildQuery {
+        .list_builds(&BuildQuery {
             pkgbase: args.pkgbase,
             worker,
             states: args.status,
@@ -480,7 +480,10 @@ pub(crate) async fn list_watched_builds(
     package: Option<&str>,
 ) -> Result<Vec<Build>> {
     Ok(client
-        .list_builds(None, Some(100), None)
+        .list_builds(&aurcache_client::BuildQuery {
+            limit: Some(100),
+            ..Default::default()
+        })
         .await?
         .into_iter()
         .filter(|b| package.is_none_or(|name| b.pkg_name == name))

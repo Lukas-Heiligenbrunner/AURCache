@@ -58,7 +58,7 @@ pub enum Discard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheEntry {
     pub pkgbase: String,
-    pub size: u64,
+    pub size: Option<u64>,
     pub last_used: SystemTime,
 }
 
@@ -221,8 +221,11 @@ impl Cache {
         if !tree.is_dir() || self.entry_size(&tree).is_some() {
             return;
         }
-        let size = measure_tree(&tree);
-        self.write_size_stamp(platform, pkgbase, size);
+        if let Some(size) = measure_tree(&tree) {
+            self.write_size_stamp(platform, pkgbase, size);
+        } else {
+            let _ = std::fs::remove_file(self.size_stamp(platform, pkgbase));
+        }
     }
 
     fn write_size_stamp(&self, platform: &str, pkgbase: &str, size: u64) {
@@ -299,21 +302,26 @@ impl Cache {
         // into it, which makes it a serviceable "last used" -- and a tree whose
         // package was deleted simply stops being touched, so it drifts to the
         // front on its own.
-        let mut trees: Vec<(std::time::SystemTime, PathBuf, u64)> = std::fs::read_dir(&root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| !is_set_aside(&e.file_name()))
-            .filter_map(|e| {
-                let modified = e.metadata().ok()?.modified().ok()?;
-                let path = e.path();
-                let size = self.stamped_size(platform, &path);
-                Some((modified, path, size))
-            })
-            .collect();
+        let mut trees: Vec<(std::time::SystemTime, PathBuf, Option<u64>)> =
+            std::fs::read_dir(&root)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| !is_set_aside(&e.file_name()))
+                .filter_map(|e| {
+                    let modified = e.metadata().ok()?.modified().ok()?;
+                    let path = e.path();
+                    let size = self.stamped_size(platform, &path);
+                    Some((modified, path, size))
+                })
+                .collect();
         trees.sort_by_key(|(modified, _, _)| *modified);
 
-        let mut total: u64 = trees.iter().map(|(_, _, size)| size).sum();
+        let mut total = trees
+            .iter()
+            .filter_map(|(_, _, size)| *size)
+            .fold(0_u64, u64::saturating_add);
+        let mut unknown = trees.iter().filter(|(_, _, size)| size.is_none()).count();
 
         // A set: tested per tree below, which is quadratic over the slice.
         let in_use: std::collections::HashSet<&str> = in_use.iter().map(String::as_str).collect();
@@ -321,7 +329,7 @@ impl Cache {
         // free space cannot change while this loop merely looks.
         let mut short_of_free = min_free > 0 && free_bytes(&root).is_some_and(|f| f < min_free);
         for (_, path, size) in trees {
-            let over_budget = max_bytes > 0 && total > max_bytes;
+            let over_budget = max_bytes > 0 && (unknown > 0 || total > max_bytes);
             if !over_budget && !short_of_free {
                 return;
             }
@@ -336,13 +344,17 @@ impl Cache {
             }
             match self.remove_entry(&path) {
                 Ok(()) => {
-                    total = total.saturating_sub(size);
+                    if let Some(size) = size {
+                        total = total.saturating_sub(size);
+                    } else {
+                        unknown -= 1;
+                    }
                     short_of_free = min_free > 0 && free_bytes(&root).is_some_and(|f| f < min_free);
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                         let _ = std::fs::remove_file(self.size_stamp(platform, name));
                     }
                     tracing::info!(
-                        "reclaimed persistent build tree {} ({size} bytes)",
+                        "reclaimed persistent build tree {} ({size:?} bytes)",
                         path.display()
                     );
                 }
@@ -354,9 +366,9 @@ impl Cache {
     /// A tree's recorded size, measuring and stamping it if no stamp is there.
     /// Tolerates a stamp carrying more than one field, from the brief time a
     /// rebuild cost was recorded alongside.
-    fn stamped_size(&self, platform: &str, tree: &Path) -> u64 {
+    fn stamped_size(&self, platform: &str, tree: &Path) -> Option<u64> {
         if let Some(size) = self.entry_size(tree) {
-            return size;
+            return Some(size);
         }
         let Some(name) = tree.file_name().and_then(|n| n.to_str()) else {
             return measure_tree(tree);
@@ -364,10 +376,12 @@ impl Cache {
         if let Ok(text) = std::fs::read_to_string(self.size_stamp(platform, name))
             && let Some(Ok(size)) = text.split_whitespace().next().map(str::parse)
         {
-            return size;
+            return Some(size);
         }
         let size = measure_tree(tree);
-        self.write_size_stamp(platform, name, size);
+        if let Some(size) = size {
+            self.write_size_stamp(platform, name, size);
+        }
         size
     }
 
@@ -856,9 +870,7 @@ impl Cache {
             }
             let pkgbase = ent.file_name().to_string_lossy().into_owned();
             let path = ent.path();
-            let size = self
-                .entry_size(&path)
-                .unwrap_or_else(|| aurcache_common::fs::dir_size(&path));
+            let size = self.entry_size(&path).or_else(|| measure_tree(&path));
             let last_used = ent
                 .metadata()
                 .and_then(|m| m.modified())
@@ -1080,7 +1092,7 @@ fn scan_pkgcache(dir: &Path) -> Vec<CacheEntry> {
         let Ok(md) = ent.metadata() else { continue };
         entries.push(CacheEntry {
             pkgbase: name,
-            size: md.len(),
+            size: Some(md.len()),
             last_used: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         });
     }
@@ -1132,16 +1144,24 @@ pub fn plan_eviction(
 
     // Size-based eviction: drop LRU survivors until within budget.
     if max_size > 0 {
-        let mut total: u64 = kept.iter().map(|e| e.size).sum();
+        let mut total = kept
+            .iter()
+            .filter_map(|e| e.size)
+            .fold(0_u64, u64::saturating_add);
+        let mut unknown = kept.iter().filter(|e| e.size.is_none()).count();
         // Oldest first.
         kept.sort_by_key(|e| e.last_used);
         for e in kept {
-            if total <= max_size {
+            if unknown == 0 && total <= max_size {
                 break;
             }
             if !in_use.contains(e.pkgbase.as_str()) {
                 evict.push(e.pkgbase.clone());
-                total = total.saturating_sub(e.size);
+                if let Some(size) = e.size {
+                    total = total.saturating_sub(size);
+                } else {
+                    unknown -= 1;
+                }
             }
         }
     }
@@ -1160,16 +1180,37 @@ mod tests {
     }
 
     #[test]
+    fn unknown_sizes_cannot_hide_an_over_budget_cache() {
+        let entries = vec![
+            CacheEntry {
+                pkgbase: "active".into(),
+                size: None,
+                last_used: t(100),
+            },
+            CacheEntry {
+                pkgbase: "idle".into(),
+                size: Some(10),
+                last_used: t(50),
+            },
+        ];
+        assert_eq!(
+            plan_eviction(&entries, 100, Duration::ZERO, now(), &["active".into()]),
+            ["idle"]
+        );
+        assert!(plan_eviction(&entries, 0, Duration::ZERO, now(), &[]).is_empty());
+    }
+
+    #[test]
     fn evicts_aged_entries() {
         let entries = vec![
             CacheEntry {
                 pkgbase: "old".into(),
-                size: 10,
+                size: Some(10),
                 last_used: t(100),
             },
             CacheEntry {
                 pkgbase: "fresh".into(),
-                size: 10,
+                size: Some(10),
                 last_used: t(1),
             },
         ];
@@ -1182,17 +1223,17 @@ mod tests {
         let entries = vec![
             CacheEntry {
                 pkgbase: "a".into(),
-                size: 100,
+                size: Some(100),
                 last_used: t(30),
             },
             CacheEntry {
                 pkgbase: "b".into(),
-                size: 100,
+                size: Some(100),
                 last_used: t(20),
             },
             CacheEntry {
                 pkgbase: "c".into(),
-                size: 100,
+                size: Some(100),
                 last_used: t(10),
             },
         ];
@@ -1205,7 +1246,7 @@ mod tests {
     fn never_evicts_in_use() {
         let entries = vec![CacheEntry {
             pkgbase: "busy".into(),
-            size: 1000,
+            size: Some(1000),
             last_used: t(999),
         }];
         let evict = plan_eviction(
@@ -1222,7 +1263,7 @@ mod tests {
     fn disabled_budgets_evict_nothing() {
         let entries = vec![CacheEntry {
             pkgbase: "a".into(),
-            size: 10_000,
+            size: Some(10_000),
             last_used: t(10_000),
         }];
         assert!(plan_eviction(&entries, 0, Duration::ZERO, now(), &[]).is_empty());
@@ -1572,7 +1613,7 @@ mod pkgcache_tests {
         std::fs::create_dir_all(tree.join("deep")).unwrap();
         write(&tree.join("deep").join("blob"), 4096);
 
-        assert_eq!(c.stamped_size("x86_64", &tree), 4096);
+        assert_eq!(c.stamped_size("x86_64", &tree), Some(4096));
         // And it is stamped, so the walk happens once -- beside the tree, which
         // the build user owns, not inside it.
         assert_eq!(
@@ -1594,25 +1635,19 @@ mod pkgcache_tests {
         write(&tree.join("pkg").join("blob"), 4096);
         write(&tree.join("readable"), 100);
         assert_eq!(
-            dir_size(&tree),
-            TreeSize {
-                bytes: 4196,
-                complete: true
-            }
+            aurcache_common::fs::measure_directory(&tree),
+            aurcache_common::fs::DirectoryMeasurement::Complete { bytes: 4196 }
         );
 
         std::fs::set_permissions(tree.join("pkg"), std::fs::Permissions::from_mode(0o111)).unwrap();
         let unreadable = std::fs::read_dir(tree.join("pkg")).is_err();
-        let measured = dir_size(&tree);
+        let measured = aurcache_common::fs::measure_directory(&tree);
         std::fs::set_permissions(tree.join("pkg"), std::fs::Permissions::from_mode(0o755)).unwrap();
         // Root reads everything, so the case only exists for a normal user.
         if unreadable {
             assert_eq!(
                 measured,
-                TreeSize {
-                    bytes: 100,
-                    complete: false
-                }
+                aurcache_common::fs::DirectoryMeasurement::Incomplete { known_bytes: 100 }
             );
         }
     }
@@ -1978,58 +2013,12 @@ fn free_bytes(path: &Path) -> Option<u64> {
     (rc == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
-/// Bytes under `path`, measured as whoever can read all of it.
-///
-/// A build tree is the build user's, and not all of it is readable to the
-/// worker: makepkg leaves `pkg/` mode 111, and that is 128G of unreal-engine's
-/// 333G. Walked as the worker, such a tree silently measured as a fraction of
-/// itself and never counted against the budget. So a walk that could not see
-/// everything is redone with `sudo du`, as the chroot operations already use
-/// sudo; where that is not available either, the partial figure is the best
-/// there is.
-fn measure_tree(path: &Path) -> u64 {
-    let measured = dir_size(path);
-    if measured.complete {
-        return measured.bytes;
-    }
-    privileged_du(path).unwrap_or(measured.bytes)
-}
-
-/// What [`dir_size`] could count.
-#[derive(Debug, PartialEq, Eq)]
-struct TreeSize {
-    bytes: u64,
-    /// Every directory and entry could be read, so `bytes` is the whole tree.
-    complete: bool,
-}
-
-/// Bytes occupied under `path`, following no symlinks.
-fn dir_size(path: &Path) -> TreeSize {
-    let mut total = 0;
-    let mut complete = true;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            complete = false;
-            continue;
-        };
-        for entry in read {
-            let Ok(meta) = entry.and_then(|e| e.metadata().map(|m| (e.path(), m))) else {
-                complete = false;
-                continue;
-            };
-            let (path, meta) = meta;
-            if meta.is_dir() {
-                stack.push(path);
-            } else if meta.is_file() {
-                total += meta.len();
-            }
-        }
-    }
-    TreeSize {
-        bytes: total,
-        complete,
-    }
+/// Measure a tree completely, using the existing privileged fallback if needed.
+/// No partial result is written to a stamp or reported as a known total.
+fn measure_tree(path: &Path) -> Option<u64> {
+    aurcache_common::fs::measure_directory(path)
+        .total()
+        .or_else(|| privileged_du(path))
 }
 
 /// `du` as root, for a tree the worker cannot read all of.

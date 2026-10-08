@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 use tar::Archive;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 use zstd::stream::read::Decoder as ZstdDecoder;
 
 /// What one package contributes to a repository's databases.
@@ -50,21 +50,16 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
 
     let pkgpath = pkgfile.display();
     for entry in archive.entries()? {
-        match entry {
-            Ok(entry) => {
-                if let Ok(path) = entry.path() {
-                    let name = path.display().to_string();
-                    if !name.starts_with('.') {
-                        files.push(name);
-                    }
+        let entry = entry?;
+        let path = entry.path()?;
+        let name = path.display().to_string();
+        if !name.starts_with('.') {
+            files.push(name);
+        }
 
-                    if path == Path::new(".PKGINFO") {
-                        debug!("Found .PKGINFO file in '{pkgpath}'.");
-                        pkginfo.parse(entry)?;
-                    }
-                }
-            }
-            Err(e) => warn!("Error reading entry: {e:?}"),
+        if path == Path::new(".PKGINFO") {
+            debug!("Found .PKGINFO file in '{pkgpath}'.");
+            pkginfo.parse(entry)?;
         }
     }
 
@@ -135,6 +130,31 @@ fn calc_checksums(path: &Path) -> anyhow::Result<Checksums> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_corrupt_member_after_valid_metadata_is_rejected() {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let content = b"pkgname = demo\npkgver = 1.0-1\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, ".PKGINFO", &content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        // Replace the end marker with an invalid tar header after .PKGINFO.
+        bytes.truncate(bytes.len() - 1024);
+        bytes.extend_from_slice(&[b'x'; 512]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("demo-1.0-1-x86_64.pkg.tar.zst");
+        fs::write(&path, zstd::stream::encode_all(&bytes[..], 0).unwrap()).unwrap();
+
+        assert!(describe_package(&path).is_err());
+    }
 
     /// The streamed checksums are the checksums of the whole file, across
     /// buffer boundaries.

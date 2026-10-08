@@ -58,21 +58,7 @@ pub fn save_config(config: &ClientConfig) -> Result<()> {
 /// Write `contents` readable by this user alone: the config holds the API
 /// token. Created that way rather than chmod'ed after, and an existing file's
 /// mode is tightened too -- one written before this was world-readable.
-fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut open = fs::OpenOptions::new();
-    open.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        open.mode(0o600);
-        let mut file = open.open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(contents)
-    }
-    #[cfg(not(unix))]
-    open.open(path)?.write_all(contents)
-}
+use aurcache_common::fs::write_private;
 
 pub fn resolve_runtime_config(
     cli_url: Option<String>,

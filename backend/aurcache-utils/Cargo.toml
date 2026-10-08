@@ -17,7 +17,6 @@ git2 = { version = "0.21.0", features = ["https", "vendored-openssl"] }
 anyhow = {workspace = true}
 jiff = {workspace = true}
 async-recursion = "1.1.1"
-futures = "0.3.32"
 sea-orm = {workspace = true}
 tokio = {workspace = true}
 tracing = {workspace = true}

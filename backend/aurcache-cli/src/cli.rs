@@ -626,6 +626,7 @@ pub(crate) enum BuildsCommand {
     /// Get one build.
     Get {
         /// Build reference, e.g. `hello/3`.
+        #[arg(value_parser = BuildRef::parse_id)]
         build: BuildRef,
     },
     /// Fetch build output.
@@ -633,6 +634,7 @@ pub(crate) enum BuildsCommand {
     /// Retry a build.
     Retry {
         /// Build reference, e.g. `hello/3`.
+        #[arg(value_parser = BuildRef::parse_id)]
         build: BuildRef,
         #[command(flatten)]
         wait: WaitOpts,
@@ -640,11 +642,13 @@ pub(crate) enum BuildsCommand {
     /// Cancel a build.
     Cancel {
         /// Build reference, e.g. `hello/3`.
+        #[arg(value_parser = BuildRef::parse_id)]
         build: BuildRef,
     },
     /// Delete a build.
     Delete {
         /// Build reference, e.g. `hello/3`.
+        #[arg(value_parser = BuildRef::parse_id)]
         build: BuildRef,
     },
     /// Follow builds until they finish, reporting progress.
@@ -678,6 +682,7 @@ pub(crate) struct WatchArgs {
     /// triggered says so here; `--wait` on the triggering command does it for
     /// you, and cannot miss the builds the trigger created.
     #[arg(long = "build")]
+    #[arg(value_parser = BuildRef::parse_id)]
     pub(crate) builds: Vec<BuildRef>,
 }
 
@@ -745,6 +750,7 @@ pub(crate) struct ListBuildsArgs {
 /// Fetch one build's log output, bounded to server-sized pages.
 pub(crate) struct BuildOutputArgs {
     /// Build reference, e.g. `hello/3`.
+    #[arg(value_parser = BuildRef::parse_id)]
     pub(crate) build: BuildRef,
 
     /// Skip this many bytes of log before printing.
@@ -881,44 +887,15 @@ pub(crate) fn parse_key_val(input: &str) -> Result<(String, String), String> {
 /// way the UI and the URLs write it. The separator is `/` because a pkgbase
 /// cannot contain one — and because `#` would have to be quoted in most
 /// shells, and `:` already means an epoch in a version.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct BuildRef {
-    pub(crate) pkgbase: String,
-    pub(crate) number: i32,
-}
-
-impl std::str::FromStr for BuildRef {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        // Split on the last `/`: everything before it is the pkgbase.
-        let (pkgbase, number) = value
-            .rsplit_once('/')
-            .ok_or_else(|| format!("expected <pkgbase>/<number>, got {value:?}"))?;
-        if pkgbase.is_empty() {
-            return Err(format!("missing package name in {value:?}"));
-        }
-        let number = number
-            .parse::<i32>()
-            .map_err(|_| format!("{number:?} is not a build number"))?;
-        if number < 1 {
-            return Err("build numbers start at 1".to_string());
-        }
-        Ok(Self {
-            pkgbase: pkgbase.to_string(),
-            number,
-        })
-    }
-}
+pub(crate) use aurcache_client::BuildRef;
 
 #[cfg(test)]
 mod build_ref_tests {
     use super::BuildRef;
-    use std::str::FromStr;
 
     #[test]
     fn a_reference_is_a_package_and_a_number() {
-        let parsed = BuildRef::from_str("hello/3").expect("parses");
+        let parsed = BuildRef::parse_id("hello/3").expect("parses");
         assert_eq!(parsed.pkgbase, "hello");
         assert_eq!(parsed.number, 3);
     }
@@ -933,7 +910,7 @@ mod build_ref_tests {
             ("python-3.11/7", "python-3.11"),
             ("1337/2", "1337"),
         ] {
-            let parsed = BuildRef::from_str(input).expect(input);
+            let parsed = BuildRef::parse_id(input).expect(input);
             assert_eq!(parsed.pkgbase, pkgbase, "{input}");
         }
     }
@@ -942,13 +919,13 @@ mod build_ref_tests {
     /// would resolve to a different build than the caller intended.
     #[test]
     fn a_bare_number_is_rejected() {
-        assert!(BuildRef::from_str("417").is_err());
-        assert!(BuildRef::from_str("hello").is_err());
-        assert!(BuildRef::from_str("/3").is_err());
-        assert!(BuildRef::from_str("hello/").is_err());
-        assert!(BuildRef::from_str("hello/x").is_err());
+        assert!(BuildRef::parse_id("417").is_err());
+        assert!(BuildRef::parse_id("hello").is_err());
+        assert!(BuildRef::parse_id("/3").is_err());
+        assert!(BuildRef::parse_id("hello/").is_err());
+        assert!(BuildRef::parse_id("hello/x").is_err());
         // Numbering starts at 1, so 0 is not a build.
-        assert!(BuildRef::from_str("hello/0").is_err());
+        assert!(BuildRef::parse_id("hello/0").is_err());
     }
 }
 

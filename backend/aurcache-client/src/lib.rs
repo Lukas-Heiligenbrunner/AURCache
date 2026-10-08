@@ -269,20 +269,15 @@ impl AurCacheClient {
             .await
     }
 
-    /// Lists packages.
-    ///
-    /// Only the directly requested ones unless `dependencies` is set, which
-    /// adds the packages that are present only because something needs them.
-    pub async fn list_packages(
-        &self,
-        limit: Option<u64>,
-        page: Option<u64>,
-        dependencies: bool,
-    ) -> Result<Vec<SimplePackage>> {
+    /// List packages using pagination and an explicit dependency selection.
+    pub async fn list_packages(&self, query: &PackageQuery) -> Result<Vec<SimplePackage>> {
         let query = Query::default()
-            .opt("limit", limit)
-            .opt("page", page)
-            .opt("dependencies", dependencies.then_some(true));
+            .opt("limit", query.limit)
+            .opt("page", query.page)
+            .opt(
+                "dependencies",
+                (query.dependencies == DependencySelection::Include).then_some(true),
+            );
         self.request_json::<Vec<SimplePackage>, Value>(
             Method::GET,
             "/packages/list",
@@ -407,23 +402,8 @@ impl AurCacheClient {
     }
 
     /// Lists builds, newest first, optionally of one package only.
-    pub async fn list_builds(
-        &self,
-        pkgbase: Option<&str>,
-        limit: Option<u64>,
-        page: Option<u64>,
-    ) -> Result<Vec<Build>> {
-        self.list_builds_matching(&BuildQuery {
-            pkgbase: pkgbase.map(str::to_string),
-            limit,
-            page,
-            ..BuildQuery::default()
-        })
-        .await
-    }
-
     /// Lists builds, newest first, narrowed by `query`.
-    pub async fn list_builds_matching(&self, query: &BuildQuery) -> Result<Vec<Build>> {
+    pub async fn list_builds(&self, query: &BuildQuery) -> Result<Vec<Build>> {
         let states = (!query.states.is_empty()).then(|| {
             query
                 .states
@@ -1092,7 +1072,7 @@ fn endpoint_url(base_url: &str, path: &str) -> String {
     }
 }
 
-/// Which builds [`AurCacheClient::list_builds_matching`] returns. Every field
+/// Which builds [`AurCacheClient::list_builds`] returns. Every field
 /// left unset matches everything.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuildQuery {
@@ -1232,6 +1212,22 @@ fn normalize_full_body(body: &str) -> String {
 fn looks_like_html(body: &str) -> bool {
     let lower = body.trim_start().to_ascii_lowercase();
     lower.starts_with("<!doctype html") || lower.starts_with("<html")
+}
+
+/// Which packages to include in a listing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DependencySelection {
+    #[default]
+    RequestedOnly,
+    Include,
+}
+
+/// Package listing filters and pagination.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PackageQuery {
+    pub limit: Option<u64>,
+    pub page: Option<u64>,
+    pub dependencies: DependencySelection,
 }
 
 #[cfg(test)]

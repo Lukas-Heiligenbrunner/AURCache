@@ -3,6 +3,7 @@ use crate::helpers::builds::refresh_package_status;
 use crate::prelude::Builds;
 use aurcache_common::build_state::{BuildState, BuildTrigger};
 use pacman_mirrors::platforms::Platform;
+use sea_orm::TransactionSession;
 use sea_orm::sea_query::{Expr, ExprTrait, Func, OnConflict, Query};
 use sea_orm::{ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter};
 
@@ -73,7 +74,7 @@ fn next_build_number_expr(pkg_id: i32) -> Expr {
 ///
 /// If a pending build already exists the insert is skipped ([`Queued::Existing`]) and the
 /// existing row is returned, regardless of its status.
-pub async fn enqueue_build_if_missing<C: ConnectionTrait>(
+pub async fn enqueue_build_if_missing<C: ConnectionTrait + sea_orm::TransactionTrait>(
     db: &C,
     pkg_id: i32,
     platform: Platform,
@@ -84,67 +85,75 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait>(
     // column, so every creation path has to say.
     trigger: BuildTrigger,
 ) -> Result<EnqueueBuildResult, DbErr> {
-    // Two conflicts can stop this insert, and they mean opposite things.
-    //
-    // `(pkg_id, platform)` means a pending build already exists — the intended
-    // outcome, and the row we then return.
-    //
-    // `(pkg_id, number)` means another insert for the same package took this
-    // number between our subquery and our write. Nothing is wrong with *this*
-    // build; it simply needs the next number. Without the retry that race
-    // surfaces as "Missing pending build row", because `DO NOTHING` swallowed
-    // an insert that should have happened.
-    for _ in 0..NUMBER_RACE_ATTEMPTS {
-        // Read inside the statement rather than in a separate query, so the
-        // window a competing insert can land in is as small as the database
-        // allows.
-        let next_number = next_build_number_expr(pkg_id);
+    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    let result: Result<_, DbErr> = async {
+        let db = &txn;
+        // Two conflicts can stop this insert, and they mean opposite things.
+        //
+        // `(pkg_id, platform)` means a pending build already exists — the intended
+        // outcome, and the row we then return.
+        //
+        // `(pkg_id, number)` means another insert for the same package took this
+        // number between our subquery and our write. Nothing is wrong with *this*
+        // build; it simply needs the next number. Without the retry that race
+        // surfaces as "Missing pending build row", because `DO NOTHING` swallowed
+        // an insert that should have happened.
+        for _ in 0..NUMBER_RACE_ATTEMPTS {
+            // Read inside the statement rather than in a separate query, so the
+            // window a competing insert can land in is as small as the database
+            // allows.
+            let next_number = next_build_number_expr(pkg_id);
 
-        let insert = Query::insert()
-            .into_table(builds::Entity)
-            .columns([
-                builds::Column::PkgId,
-                builds::Column::Status,
-                builds::Column::StartTime,
-                builds::Column::Platform,
-                builds::Column::Version,
-                builds::Column::Number,
-                builds::Column::Trigger,
-            ])
-            .values([
-                pkg_id.into(),
-                pending.state().into(),
-                start_time.into(),
-                platform.into(),
-                version.to_owned().into(),
-                next_number,
-                trigger.as_i32().into(),
-            ])
-            .map_err(|e| DbErr::Custom(e.to_string()))?
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
-            .to_owned();
+            let insert = Query::insert()
+                .into_table(builds::Entity)
+                .columns([
+                    builds::Column::PkgId,
+                    builds::Column::Status,
+                    builds::Column::StartTime,
+                    builds::Column::Platform,
+                    builds::Column::Version,
+                    builds::Column::Number,
+                    builds::Column::Trigger,
+                ])
+                .values([
+                    pkg_id.into(),
+                    pending.state().into(),
+                    start_time.into(),
+                    platform.into(),
+                    version.to_owned().into(),
+                    next_number,
+                    trigger.as_i32().into(),
+                ])
+                .map_err(|e| DbErr::Custom(e.to_string()))?
+                .on_conflict(OnConflict::new().do_nothing().to_owned())
+                .to_owned();
 
-        let result = db.execute(&insert).await?;
+            let result = db.execute(&insert).await?;
 
-        let existing = crate::helpers::builds::pending_build(db, pkg_id, platform).await?;
+            let existing = crate::helpers::builds::pending_build(db, pkg_id, platform).await?;
 
-        if let Some(build) = existing {
-            let queued = if result.rows_affected() == 1 {
-                refresh_package_status(db, pkg_id).await?;
-                Queued::Inserted
-            } else {
-                Queued::Existing
-            };
-            return Ok(EnqueueBuildResult { build, queued });
+            if let Some(build) = existing {
+                let queued = if result.rows_affected() == 1 {
+                    refresh_package_status(db, pkg_id).await?;
+                    Queued::Inserted
+                } else {
+                    Queued::Existing
+                };
+                return Ok(EnqueueBuildResult { build, queued });
+            }
+            // Nothing inserted and nothing pending: the number was taken. Try again
+            // with a freshly read maximum.
         }
-        // Nothing inserted and nothing pending: the number was taken. Try again
-        // with a freshly read maximum.
-    }
 
-    Err(DbErr::Custom(format!(
-        "Could not assign a build number for package {pkg_id} on platform {platform} \
+        Err(DbErr::Custom(format!(
+            "Could not assign a build number for package {pkg_id} on platform {platform} \
          after {NUMBER_RACE_ATTEMPTS} attempts"
-    )))
+        )))
+    }
+    .await;
+    let result = result?;
+    txn.commit().await?;
+    Ok(result)
 }
 
 /// Promote an existing `WAITING_FOR_DEPS` build to `ENQUEUED` so that it can be started.
@@ -155,35 +164,43 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait>(
 /// The write is pinned to `status = WAITING_FOR_DEPS`, like
 /// [`demote_enqueued_build`]: a cancel landing between the read and the write
 /// would otherwise be overwritten, putting a cancelled build back in the queue.
-pub async fn promote_waiting_build<C: ConnectionTrait>(
+pub async fn promote_waiting_build<C: ConnectionTrait + sea_orm::TransactionTrait>(
     db: &C,
     pkg_id: i32,
     platform: Platform,
 ) -> Result<Option<builds::Model>, DbErr> {
-    let Some(build) = Builds::find()
-        .filter(builds::Column::PkgId.eq(pkg_id))
-        .filter(builds::Column::Platform.eq(platform.as_str()))
-        .filter(builds::Column::Status.eq(BuildState::WaitingForDeps))
-        .one(db)
-        .await?
-    else {
-        return Ok(None);
-    };
+    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    let result: Result<_, DbErr> = async {
+        let db = &txn;
+        let Some(build) = Builds::find()
+            .filter(builds::Column::PkgId.eq(pkg_id))
+            .filter(builds::Column::Platform.eq(platform.as_str()))
+            .filter(builds::Column::Status.eq(BuildState::WaitingForDeps))
+            .one(db)
+            .await?
+        else {
+            return Ok(None);
+        };
 
-    let res = Builds::update_many()
-        .col_expr(builds::Column::Status, Expr::value(BuildState::Enqueued))
-        .filter(builds::Column::Id.eq(build.id))
-        .filter(builds::Column::Status.eq(BuildState::WaitingForDeps))
-        .exec(db)
-        .await?;
-    if res.rows_affected == 0 {
-        return Ok(None);
+        let res = Builds::update_many()
+            .col_expr(builds::Column::Status, Expr::value(BuildState::Enqueued))
+            .filter(builds::Column::Id.eq(build.id))
+            .filter(builds::Column::Status.eq(BuildState::WaitingForDeps))
+            .exec(db)
+            .await?;
+        if res.rows_affected == 0 {
+            return Ok(None);
+        }
+        refresh_package_status(db, pkg_id).await?;
+        Ok(Some(builds::Model {
+            status: BuildState::Enqueued,
+            ..build
+        }))
     }
-    refresh_package_status(db, pkg_id).await?;
-    Ok(Some(builds::Model {
-        status: BuildState::Enqueued,
-        ..build
-    }))
+    .await;
+    let result = result?;
+    txn.commit().await?;
+    Ok(result)
 }
 
 /// Put an `ENQUEUED` build back to `WAITING_FOR_DEPS`, because something it
@@ -200,29 +217,37 @@ pub async fn promote_waiting_build<C: ConnectionTrait>(
 /// between a read and a write -- and demoting it then would take a build a
 /// worker is already running and put it back in the queue. Pinning the update to
 /// `status = ENQUEUED` makes that a no-op instead.
-pub async fn demote_enqueued_build<C: ConnectionTrait>(
+pub async fn demote_enqueued_build<C: ConnectionTrait + sea_orm::TransactionTrait>(
     db: &C,
     pkg_id: i32,
     platform: Platform,
 ) -> Result<Demotion, DbErr> {
-    let res = Builds::update_many()
-        .col_expr(
-            builds::Column::Status,
-            Expr::value(BuildState::WaitingForDeps),
-        )
-        .filter(builds::Column::PkgId.eq(pkg_id))
-        .filter(builds::Column::Platform.eq(platform.as_str()))
-        .filter(builds::Column::Status.eq(BuildState::Enqueued))
-        .exec(db)
-        .await?;
-    if res.rows_affected > 0 {
-        refresh_package_status(db, pkg_id).await?;
+    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    let result: Result<_, DbErr> = async {
+        let db = &txn;
+        let res = Builds::update_many()
+            .col_expr(
+                builds::Column::Status,
+                Expr::value(BuildState::WaitingForDeps),
+            )
+            .filter(builds::Column::PkgId.eq(pkg_id))
+            .filter(builds::Column::Platform.eq(platform.as_str()))
+            .filter(builds::Column::Status.eq(BuildState::Enqueued))
+            .exec(db)
+            .await?;
+        if res.rows_affected > 0 {
+            refresh_package_status(db, pkg_id).await?;
+        }
+        Ok(if res.rows_affected > 0 {
+            Demotion::Demoted
+        } else {
+            Demotion::Unchanged
+        })
     }
-    Ok(if res.rows_affected > 0 {
-        Demotion::Demoted
-    } else {
-        Demotion::Unchanged
-    })
+    .await;
+    let result = result?;
+    txn.commit().await?;
+    Ok(result)
 }
 
 /// What [`demote_enqueued_build`] did.
@@ -257,5 +282,89 @@ mod build_number_tests {
                 "{backend:?} left an unsubstituted placeholder: {sql}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    #[tokio::test]
+    async fn a_failed_package_refresh_rolls_back_each_queue_mutation() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        crate::migration::Migrator::up(&db, None).await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO packages (id, name, platforms) VALUES (1, 'hello', 'x86_64')",
+        )
+        .await
+        .unwrap();
+        db.execute_unprepared("CREATE TRIGGER refuse_status BEFORE UPDATE OF status ON packages BEGIN SELECT RAISE(ABORT, 'status failure'); END").await.unwrap();
+        assert!(
+            enqueue_build_if_missing(
+                &db,
+                1,
+                Platform::X86_64,
+                "1-1",
+                100,
+                Pending::WaitingForDeps,
+                BuildTrigger::User
+            )
+            .await
+            .is_err()
+        );
+        assert!(Builds::find().one(&db).await.unwrap().is_none());
+        db.execute_unprepared("DROP TRIGGER refuse_status")
+            .await
+            .unwrap();
+        let build = enqueue_build_if_missing(
+            &db,
+            1,
+            Platform::X86_64,
+            "1-1",
+            100,
+            Pending::WaitingForDeps,
+            BuildTrigger::User,
+        )
+        .await
+        .unwrap()
+        .build;
+        db.execute_unprepared("CREATE TRIGGER refuse_status BEFORE UPDATE OF status ON packages BEGIN SELECT RAISE(ABORT, 'status failure'); END").await.unwrap();
+        assert!(
+            promote_waiting_build(&db, 1, Platform::X86_64)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Builds::find_by_id(build.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::WaitingForDeps
+        );
+        db.execute_unprepared("DROP TRIGGER refuse_status")
+            .await
+            .unwrap();
+        promote_waiting_build(&db, 1, Platform::X86_64)
+            .await
+            .unwrap();
+        db.execute_unprepared("CREATE TRIGGER refuse_status BEFORE UPDATE OF status ON packages BEGIN SELECT RAISE(ABORT, 'status failure'); END").await.unwrap();
+        assert!(
+            demote_enqueued_build(&db, 1, Platform::X86_64)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Builds::find_by_id(build.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::Enqueued
+        );
     }
 }

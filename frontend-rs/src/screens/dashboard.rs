@@ -2,7 +2,7 @@
 
 use super::logs::EntryText;
 use crate::dates::AbsoluteDate;
-use crate::format::{format_secs, format_size};
+use crate::format::{format_duration, format_size};
 use crate::listing::{SortDir, SortKey, ViewParams};
 use crate::routes::Route;
 use crate::status::{BuildStatusBadge, StatusBadge};
@@ -586,10 +586,10 @@ fn LongestBuildsCard(builds: Option<Vec<LongBuild>>) -> Element {
                                 "{item.build.platform}"
                             }
                             span { class: "opacity-60",
-                                "{crate::format::format_duration(item.build.start_time, item.build.end_time)}"
+                                "{crate::format::format_duration(item.build.elapsed())}"
                             }
                             if let Some(previous) = item.previous_secs {
-                                span { class: "opacity-60", ", was {format_duration_secs_raw(previous)}" }
+                                span { class: "opacity-60", ", was {format_duration(Some(std::time::Duration::from_secs(previous)))}" }
                             }
                         }
                         span { class: "ml-auto text-sm opacity-60 shrink-0",
@@ -600,11 +600,6 @@ fn LongestBuildsCard(builds: Option<Vec<LongBuild>>) -> Element {
             }
         }
     }
-}
-
-/// A raw second count as a duration, never negative.
-fn format_duration_secs_raw(secs: i64) -> String {
-    u32::try_from(secs).map_or_else(|_| "—".to_string(), format_secs)
 }
 
 /// The two columns of cards the dashboard stacks below the chart.
@@ -690,7 +685,7 @@ fn StatTiles(stats: ListStats) -> Element {
             }
             StatTile {
                 label: "Average build",
-                value: format_secs(stats.avg_build_time),
+                value: format_duration(stats.avg_build_time.map(std::time::Duration::from_secs)),
             }
             StatTile {
                 label: "Repository",
@@ -858,7 +853,7 @@ mod tests {
                     recent_builds: 4,
                     recent_successful: 1,
                     recent_failed: 3,
-                    avg_build_time: 90,
+                    avg_build_time: Some(90),
                     repo_size: Some(3 * 1024 * 1024 * 1024),
                     requested_packages: 12,
                     dependency_packages: 4,

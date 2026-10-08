@@ -118,7 +118,7 @@ impl Hierarchy {
     /// removing one really removes it rather than leaving the previous value
     /// in place.
     pub fn apply_total(&self, limits: &BuildLimits) -> Result<()> {
-        write_limits(&self.builds, limits, true)
+        write_limits(&self.builds, limits, UnsetLimit::Reset)
     }
 
     /// How many times the total memory limit has been reached, from
@@ -151,7 +151,7 @@ impl Hierarchy {
         }
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let cgroup = BuildCgroup { dir };
-        write_limits(&cgroup.dir, limits, false)?;
+        write_limits(&cgroup.dir, limits, UnsetLimit::Preserve)?;
         Ok(cgroup)
     }
 }
@@ -230,14 +230,14 @@ pub struct BuildCgroup {
 /// and the container nspawn keeps in it, or every build under `builds/` -- is
 /// bound by them.
 ///
-/// `reset_unset` writes `max` for a limit that is not configured. A build's
+/// `UnsetLimit::Reset` writes `max` for a limit that is not configured. A build's
 /// cgroup is new, where every file already says `max`, so it has nothing to
 /// reset; `builds/` outlives the worker process and would otherwise keep a
 /// limit from a previous run's configuration.
-fn write_limits(dir: &Path, limits: &BuildLimits, reset_unset: bool) -> Result<()> {
+fn write_limits(dir: &Path, limits: &BuildLimits, unset: UnsetLimit) -> Result<()> {
     let value = |limit: Option<String>| match limit {
         Some(v) => Some(v),
-        None if reset_unset => Some("max".to_string()),
+        None if unset == UnsetLimit::Reset => Some("max".to_string()),
         None => None,
     };
     if let Some(v) = value(limits.memory_max.map(|b| b.to_string())) {
@@ -270,13 +270,20 @@ fn write_limits(dir: &Path, limits: &BuildLimits, reset_unset: bool) -> Result<(
         })?,
         // Only where the file exists: without a CPU limit anywhere the
         // controller is not enabled, and there is no `cpu.max` to reset.
-        None if reset_unset && dir.join("cpu.max").exists() => {
+        None if unset == UnsetLimit::Reset && dir.join("cpu.max").exists() => {
             fs::write(dir.join("cpu.max"), format!("max {CPU_PERIOD_US}"))
                 .with_context(|| format!("resetting cpu.max in {}", dir.display()))?;
         }
         None => {}
     }
     Ok(())
+}
+
+/// What to do with a limit omitted from the new configuration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnsetLimit {
+    Preserve,
+    Reset,
 }
 
 /// Which limit an OOM kill in a build came from.
@@ -505,7 +512,7 @@ mod tests {
                 swap_max: Some(0),
                 cpus: Some(6.0),
             },
-            false,
+            UnsetLimit::Preserve,
         )
         .unwrap();
         assert_eq!(
@@ -522,7 +529,12 @@ mod tests {
         );
         // No limit, no file: the kernel's `max` stays in place.
         let unlimited = tempfile::tempdir().unwrap();
-        write_limits(unlimited.path(), &BuildLimits::default(), false).unwrap();
+        write_limits(
+            unlimited.path(),
+            &BuildLimits::default(),
+            UnsetLimit::Preserve,
+        )
+        .unwrap();
         assert!(!unlimited.path().join("memory.max").exists());
     }
 
@@ -535,7 +547,7 @@ mod tests {
         fs::write(tmp.path().join("memory.swap.max"), "0").unwrap();
         fs::write(tmp.path().join("cpu.max"), "200000 100000").unwrap();
 
-        write_limits(tmp.path(), &BuildLimits::default(), true).unwrap();
+        write_limits(tmp.path(), &BuildLimits::default(), UnsetLimit::Reset).unwrap();
 
         assert_eq!(
             fs::read_to_string(tmp.path().join("memory.max")).unwrap(),
@@ -551,7 +563,7 @@ mod tests {
         );
         // No cpu controller, no file: nothing is created where there was none.
         let bare = tempfile::tempdir().unwrap();
-        write_limits(bare.path(), &BuildLimits::default(), true).unwrap();
+        write_limits(bare.path(), &BuildLimits::default(), UnsetLimit::Reset).unwrap();
         assert!(!bare.path().join("cpu.max").exists());
     }
 

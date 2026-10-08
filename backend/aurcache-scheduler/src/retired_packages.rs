@@ -33,7 +33,10 @@ fn interval(grace: Duration) -> Duration {
 }
 
 /// Spawn the sweep loop.
-pub fn start_retired_package_sweep(repo: Arc<Repository>) -> JoinHandle<()> {
+pub fn start_retired_package_sweep(
+    db: sea_orm::DatabaseConnection,
+    repo: Arc<Repository>,
+) -> JoinHandle<()> {
     let grace = grace();
     let interval = interval(grace);
     tokio::spawn(async move {
@@ -44,7 +47,7 @@ pub fn start_retired_package_sweep(repo: Arc<Repository>) -> JoinHandle<()> {
         );
         loop {
             tokio::time::sleep(interval).await;
-            match repo.sweep(grace).await {
+            match repo.sweep(&db, grace).await {
                 Ok(0) => {}
                 // What went is recorded by the sweep itself, by name.
                 Ok(deleted) => info!("deleted {deleted} retired package file(s)"),

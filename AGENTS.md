@@ -194,18 +194,23 @@ defect this frontend has had was of that kind.
   bytes" are different answers, and the UI renders the first as a dash. Totals over several such values
   are all-or-nothing — a sum of only the known parts reads as a wrong number rather than as missing data.
 - Every change to the pacman repository goes through `aurcache_utils::repository::Repository` (one
-  instance, in `Services`): `repo.begin()` takes its lock, the caller records additions and
-  retirements, and `commit(|| transaction)` writes the new `repo.db`/`repo.files` beside the old, runs
-  the database transaction (retried on failure), and only then moves staged files in and renames the
-  databases over. Private and risky first, the transaction next, renames last: a failure before the
-  commit leaves the repository untouched. A retired file leaves `repo.db` at once but stays on disk,
+  instance, in `Services`): `repo.begin(&db)` takes its lock and recovers a pending update, the caller
+  records additions and retirements, and `commit(&db, |txn| ...)` writes the new `repo.db`/`repo.files`
+  beside the old, commits the caller's SQL changes and a recovery plan together (retried on failure),
+  and only then moves staged files in and renames the databases over. The callback participates in
+  that transaction; it never commits its own. Finalization errors retain the plan, and startup,
+  the next update and `Repository::sweep` replay it before doing any more repository work. Blocking
+  filesystem tasks retain the lock even when their awaiting future is cancelled. Private and risky
+  first, the transaction next, renames last: a failure before the commit leaves the repository untouched. A retired file leaves `repo.db` at once but stays on disk,
   for clients holding an older `repo.db`, until `Repository::sweep` finds it unlisted for
   `RETIRED_PACKAGE_GRACE`; the sweep judges by `repo.db`, never by the `files` table. Never write `repo.db` or a repository file any other way -- the lock is what
   keeps two changes from each dropping the other's entry. Uploads are staged under the repository root
   (`staging_dir`), so publishing is a rename on one filesystem.
 - A worker's successful completion is accepted at once: the build goes `ACTIVE` -> `PUBLISHING`, the
   lease ends, and `aurcache_utils::publish::publish_build` puts it in the repository in the background.
-  Publishing failures fail the build; a restart resumes builds left `PUBLISHING`. Lease policing (the
+  Failures before the SQL commit fail the build; finalization failures preserve `PUBLISHING` and
+  staging for recovery. A restart resumes `PUBLISHING` builds and successful builds whose staging
+  directory still records pending dependent promotion. Lease policing (the
   heartbeat, the reaper, revoking a worker, claim capacity) only looks at `ACTIVE`, which is why
   publishing is a state of its own.
 - Removing a package goes through `aurcache_utils::package::delete::package_delete`, never row by row.

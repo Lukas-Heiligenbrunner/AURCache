@@ -11,7 +11,6 @@
 //! back to whatever the image ships.
 
 use crate::listing::ListHeader;
-use crate::screens::settings::is_stored;
 use aurcache_client::SettingSource;
 use dioxus::prelude::*;
 
@@ -78,73 +77,6 @@ pub fn ConfigFileTabs(pkgbase: Option<String>) -> Element {
     }
 }
 
-/// Whether *this* scope holds the value, as opposed to inheriting it.
-///
-/// Not the same question as [`is_stored`] once there is a package involved: a
-/// package row inherits a `Global` value, so a globally stored file is stored
-/// but not overridden here, and offering to "reset" it from the package page
-/// would clear nothing.
-fn overridden(source: SettingSource, scoped: bool) -> bool {
-    if scoped {
-        source == SettingSource::Package
-    } else {
-        is_stored(source)
-    }
-}
-
-/// Write one config file: `Some` stores, `None` resets to inherited.
-/// Split out of [`ConfigFileEditor`] so both buttons can share it; see the
-/// `save` binding there for why it is not a closure.
-#[allow(clippy::too_many_arguments)]
-async fn run_save(
-    mut busy: Signal<bool>,
-    mut status: Signal<Option<(String, bool)>>,
-    mut stored: Signal<String>,
-    mut reload: Signal<u32>,
-    scoped: bool,
-    setting: String,
-    pkgbase: Option<String>,
-    value: Option<String>,
-) {
-    busy.set(true);
-    status.set(None);
-    let outcome = match crate::api::client() {
-        Err(e) => Err(e),
-        Ok(client) => match &value {
-            Some(value) => {
-                client
-                    .patch_setting(pkgbase.as_deref(), &setting, value)
-                    .await
-            }
-            None => client.reset_setting(pkgbase.as_deref(), &setting).await,
-        }
-        .map_err(|e| e.to_string()),
-    };
-    busy.set(false);
-    match outcome {
-        Ok(()) => {
-            status.set(Some((
-                match (&value, scoped) {
-                    (Some(_), _) => "Saved.".to_string(),
-                    (None, true) => "Reset to the server-wide file.".to_string(),
-                    (None, false) => "Reset to the builder's own copy.".to_string(),
-                },
-                true,
-            )));
-            // The box already shows what was just saved, so it stays clean
-            // through the re-read below — and anything typed during the
-            // flight stays dirty, correctly. A reset leaves both alone: the
-            // box still matches, so it counts as clean and the re-read
-            // reseeds the inherited file.
-            if let Some(value) = value {
-                stored.set(value);
-            }
-            reload += 1;
-        }
-        Err(e) => status.set(Some((e, false))),
-    }
-}
-
 /// One file: what it currently is, and a way to change it.
 ///
 /// `pkgbase` picks the scope. In the package scope the file is an override:
@@ -174,43 +106,48 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
         }
     });
 
-    let mut draft = use_signal(String::new);
-    let mut stored = use_signal(String::new);
-    let mut source = use_signal(|| SettingSource::Default);
-    let busy = use_signal(|| false);
-    let status = use_signal(|| Option::<(String, bool)>::None);
-
-    // Seed the editor once the value arrives, and again after each save — but
-    // only while clean. A refetch landing mid-edit today overwrites
-    // in-progress typing; with the gate, typing wins and the refetch only
-    // refreshes the source badge. After a save or reset the box matches what
-    // was just written, so it counts as clean and the re-read still lands.
-    use_effect(move || {
-        if let Some(Ok(response)) = &*loaded.read_unchecked() {
-            source.set(response.source);
-            // `peek` borrows through a guard, so compare through it.
-            if draft.peek().as_str() == stored.peek().as_str() {
-                draft.set(response.value.clone());
-                stored.set(response.value.clone());
-            }
-        }
+    use crate::setting_editor::{
+        MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
+    };
+    let scope = SettingScope::from(pkgbase);
+    let controller = use_setting_mutations();
+    let busy = controller.busy;
+    let status = controller.status;
+    let initial = loaded
+        .read()
+        .as_ref()
+        .and_then(|value| value.as_ref().ok())
+        .map(|response| response.value.clone());
+    let mut draft = use_editor_draft(initial);
+    let source = use_memo(move || {
+        loaded
+            .read()
+            .as_ref()
+            .and_then(|value| value.as_ref().ok())
+            .map_or(SettingSource::Default, |response| response.source)
     });
-
-    let dirty = draft() != stored();
+    let dirty = draft().is_dirty();
     let reset_title = if scoped {
         "Discard this package's copy and use the server-wide file"
     } else {
         "Discard the stored file and use the builder's own copy"
     };
-
-    // Owns its own scope pair, cloned per call, so both buttons can share it
-    // without either moving the props out. The signals are all `Copy`.
-    let save_props = (setting, pkgbase);
+    let setting = aurcache_client::Setting::from_key(&setting).expect("config file setting");
+    let save_scope = scope.clone();
     let save = move |value: Option<String>| {
-        let (setting, pkgbase) = save_props.clone();
-        run_save(
-            busy, status, stored, reload, scoped, setting, pkgbase, value,
-        )
+        let scope = save_scope.clone();
+        async move {
+            let edit = value
+                .map_or_else(
+                    || SettingEdit::reset(setting),
+                    |value| SettingEdit::set(setting, value),
+                )
+                .editing(draft);
+            if controller.apply(&scope, edit).await == MutationOutcome::Applied {
+                let mut reload = reload;
+                reload += 1;
+            }
+        }
     };
 
     rsx! {
@@ -230,7 +167,7 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
                         // Says which copy is on screen. Without it an unset
                         // file and a stored one that happens to match the
                         // image's are indistinguishable.
-                        if overridden(source(), scoped) {
+                        if scope.is_overridden(source()) {
                             span { class: "badge badge-outline badge-sm",
                                 if scoped { "package override" } else { "stored" }
                             }
@@ -243,7 +180,7 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
                             span { class: "badge badge-info badge-sm", "unsaved" }
                         }
                         div { class: "flex-1" }
-                        if overridden(source(), scoped) {
+                        if scope.is_overridden(source()) {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 disabled: busy(),
@@ -260,7 +197,7 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
                         button {
                             class: "btn btn-primary btn-sm",
                             disabled: !dirty || busy(),
-                            onclick: move |_| save(Some(draft())),
+                            onclick: move |_| save(Some(draft().text())),
                             if busy() {
                                 span { class: "loading loading-spinner loading-xs" }
                             }
@@ -268,18 +205,22 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
                         }
                     }
 
-                    if let Some((message, ok)) = status() {
-                        div {
-                            class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
-                            span { "{message}" }
+                    if let Some(feedback) = status() {
+                        match feedback {
+                            Ok(message) => rsx! {
+                                div { class: "alert alert-success text-sm", span { "{message}" } }
+                            },
+                            Err(message) => rsx! {
+                                div { class: "alert alert-error text-sm", span { "{message}" } }
+                            },
                         }
                     }
 
                     textarea {
                         class: "textarea textarea-bordered font-mono text-xs w-full h-[60vh] leading-snug",
                         spellcheck: "false",
-                        value: "{draft}",
-                        oninput: move |e| draft.set(e.value()),
+                        value: draft().text(),
+                        oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
                     }
                 },
             }

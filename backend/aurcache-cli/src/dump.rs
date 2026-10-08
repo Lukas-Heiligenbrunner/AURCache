@@ -162,14 +162,10 @@ pub(crate) async fn dump_command(
 
 /// Write the archive, owner-only when it carries secrets.
 pub(crate) fn write_dump_file(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
-    use std::io::Write;
-    let mut open = std::fs::OpenOptions::new();
-    open.write(true).create(true).truncate(true);
-    #[cfg(unix)]
     if private {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.mode(0o600);
+        aurcache_common::fs::write_private(path, bytes)?;
+    } else {
+        std::fs::write(path, bytes)?;
     }
-    open.open(path)?.write_all(bytes)?;
     Ok(())
 }

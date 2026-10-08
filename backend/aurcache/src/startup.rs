@@ -221,7 +221,7 @@ pub async fn resume_publishing(
     repo: &Arc<Repository>,
     activity: &ActivityLog,
 ) {
-    let interrupted = match publish::interrupted(db).await {
+    let interrupted = match publish::interrupted(db, repo).await {
         Ok(ids) => ids,
         Err(e) => {
             warn!("could not look for builds a restart interrupted while publishing: {e}");

@@ -22,6 +22,7 @@ use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::report_warning;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -61,7 +62,7 @@ pub struct Chroots {
     /// change is logged once rather than at every poll.
     short_of_room: AtomicBool,
     /// Builds holding a lease now: a pool is only made again with none.
-    active: AtomicUsize,
+    active: Arc<AtomicUsize>,
     /// Whether the worker is draining to make an oversized pool again, so
     /// that is logged once.
     draining: AtomicBool,
@@ -87,7 +88,7 @@ impl Chroots {
             interval: AtomicU64::new(interval.as_secs()),
             keep_failed: std::sync::Mutex::new(keep_failed),
             short_of_room: AtomicBool::new(false),
-            active: AtomicUsize::new(0),
+            active: Arc::new(AtomicUsize::new(0)),
             draining: AtomicBool::new(false),
         }
     }
@@ -450,25 +451,19 @@ impl Chroots {
         // Counted before the lease is taken, under the read lock: a pool is
         // only made again with the write lock and no build counted, so it can
         // never go while a lease is being taken from it.
-        self.active.fetch_add(1, Ordering::SeqCst);
+        let active = ActiveLease::new(Arc::clone(&self.active));
         // Expired failures go before a new build's volumes come in, and kept
         // failures and the retired base go before a build that would not fit.
         pool.expire_kept(self.keep_failed()).await;
         if let Some(limit) = limit {
             pool.reclaim_room(limit).await;
         }
-        let volumes = pool.lease(build_id, limit).await;
-        let volumes = match volumes {
-            Ok(volumes) => volumes,
-            Err(e) => {
-                self.active.fetch_sub(1, Ordering::SeqCst);
-                return Err(e);
-            }
-        };
+        let volumes = pool.lease(build_id, limit).await?;
         let lease = Lease {
             dir: pool.path().to_path_buf(),
             volumes,
             limit,
+            _active: active,
         };
         // The guard goes before `release`, which takes the lock again: with a
         // writer queued in between, a second read would wait on it for good.
@@ -521,7 +516,6 @@ impl Chroots {
             // only made again once no lease is held. The sweep would find it.
             None => drop(lease.volumes),
         }
-        self.active.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// Keep a failed build's chroot for `keep_for` instead of deleting it, for
@@ -546,7 +540,6 @@ impl Chroots {
                 Err(anyhow::anyhow!("the storage pool is not open"))
             }
         };
-        self.active.fetch_sub(1, Ordering::SeqCst);
         if let Err(e) = &kept {
             tracing::warn!("could not keep a failed build's chroot; deleted it instead ({e:#})");
         }
@@ -653,6 +646,23 @@ pub struct Lease {
     dir: PathBuf,
     volumes: BuildVolumes,
     limit: Option<u64>,
+    _active: ActiveLease,
+}
+
+/// Keep a lease counted through acquisition, use and asynchronous cleanup.
+struct ActiveLease(Arc<AtomicUsize>);
+
+impl ActiveLease {
+    fn new(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::SeqCst);
+        Self(active)
+    }
+}
+
+impl Drop for ActiveLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Lease {
@@ -697,6 +707,25 @@ impl Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_lease_holder_releases_its_count() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let (started, holding) = tokio::sync::oneshot::channel();
+        let task = {
+            let active = Arc::clone(&active);
+            tokio::spawn(async move {
+                let _lease = ActiveLease::new(active);
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+        };
+        holding.await.unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
 
     /// A worker that has just started refreshes whatever the interval says --
     /// it may have been down for a week -- and an interval of zero keeps the

@@ -5,16 +5,14 @@
 
 use std::path::Path;
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
+use aurcache_common::shell::quote_argument;
 
 fn shell_join_args(args: &[String]) -> String {
     // Quoted whole: each element is already one argv entry, and splitting on
     // whitespace mangles exactly the flags that need quoting most (a value
     // containing a space becomes two shell words with a new meaning).
     args.iter()
-        .map(|a| shell_quote(a))
+        .map(|a| quote_argument(a))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -59,9 +57,9 @@ pub fn build_build_command(
     build_dir: &Path,
     makepkg_conf: &str,
 ) -> String {
-    let build_dir = shell_quote(&build_dir.display().to_string());
-    let conf = shell_quote(makepkg_conf);
-    let quoted_pkgbase = shell_quote(pkgbase);
+    let build_dir = quote_argument(&build_dir.display().to_string());
+    let conf = quote_argument(makepkg_conf);
+    let quoted_pkgbase = quote_argument(pkgbase);
     let quoted_build_flags = shell_join_args(build_flags);
 
     let self_update = "sudo pacman -Syu --noconfirm --noprogressbar --color never";
@@ -106,9 +104,9 @@ pub fn wrap_with_config(
          printf '%s' {makepkg_config} >> {makepkg_config_path}\n\
          printf '%s' {pacman_config} | sudo tee /etc/pacman.conf >/dev/null\n\
          {build_cmd}",
-        makepkg_config = shell_quote(makepkg_config),
-        makepkg_config_path = shell_quote(makepkg_config_path),
-        pacman_config = shell_quote(pacman_config),
+        makepkg_config = quote_argument(makepkg_config),
+        makepkg_config_path = quote_argument(makepkg_config_path),
+        pacman_config = quote_argument(pacman_config),
     )
 }
 
@@ -131,8 +129,8 @@ mod tests {
 
         assert!(cmd.contains("validpgpkeys"));
         assert!(cmd.contains("gpg --batch --keyserver hkps://keyserver.ubuntu.com --recv-keys"));
-        assert!(cmd.contains("makepkg --config '/output/makepkg.conf' -s '--noconfirm'"));
-        assert!(cmd.contains("cd '/output/src'/'hello'"));
+        assert!(cmd.contains("makepkg --config /output/makepkg.conf -s --noconfirm"));
+        assert!(cmd.contains("cd /output/src/hello"));
         assert!(cmd.contains("sudo chmod -R a+w ."));
         assert!(cmd.contains("BUILDDIR=$(mktemp -d)"));
     }
@@ -150,7 +148,7 @@ mod tests {
             "x`id`y",
             "back\\slash",
         ] {
-            let quoted = shell_quote(hostile);
+            let quoted = quote_argument(hostile);
             let out = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(format!("printf %s {quoted}"))
@@ -192,7 +190,7 @@ mod tests {
         // one config file, so the server's settings alone would lose PKGEXT.
         assert!(conf.contains("source /etc/makepkg.conf"));
         let sourced = conf.find("source /etc/makepkg.conf").unwrap();
-        let overrides = conf.find("printf '%s' 'MK'").unwrap();
+        let overrides = conf.find("printf '%s' MK").unwrap();
         assert!(
             sourced < overrides,
             "defaults must be sourced before overrides"

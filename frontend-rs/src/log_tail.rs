@@ -38,9 +38,9 @@ pub fn log_tail_cap(width: Option<f64>, coarse_pointer: bool) -> usize {
 }
 
 /// Append `chunk` (already UTF-8 aligned) to `window`, then drain whole leading
-/// lines until `window.len() <= cap`. Returns whether anything was drained —
-/// that is what makes the window a "true tail", which the Copy button and the
-/// footer readout key off.
+/// lines until `window.len() <= cap`. Returns the number of bytes discarded;
+/// discarding any bytes makes the window a "true tail", which the Copy button
+/// and the footer readout key off.
 ///
 /// - If a chunk is larger than `cap`, the window is trimmed immediately after
 ///   appending.
@@ -49,10 +49,10 @@ pub fn log_tail_cap(width: Option<f64>, coarse_pointer: bool) -> usize {
 /// - The one-line fallback (a single line longer than `cap`) byte-trims from the
 ///   front to a character boundary, so the remaining window is always UTF-8
 ///   valid even though the cut may land a byte or two shy of the cap.
-pub fn append_capped(window: &mut String, chunk: &str, cap: usize) -> bool {
+pub fn append_capped(window: &mut String, chunk: &str, cap: usize) -> usize {
     window.push_str(chunk);
     if window.len() <= cap {
-        return false;
+        return 0;
     }
     // One drain, not one per line: each `drain(..)` memmoves the whole tail,
     // so trimming a window of short lines line-by-line is quadratic in the
@@ -62,23 +62,22 @@ pub fn append_capped(window: &mut String, chunk: &str, cap: usize) -> bool {
     // (`match_indices` only yields char boundaries, and '\n' is ASCII, so
     // the cut is always safe to drain.)
     let excess = window.len() - cap;
-    if let Some((nl, _)) = window.match_indices('\n').find(|(i, _)| i + 1 >= excess) {
-        window.drain(..nl + 1);
+    let cut = if let Some((nl, _)) = window.match_indices('\n').find(|(i, _)| i + 1 >= excess) {
+        nl + 1
     } else {
         // One unbreakable line longer than the cap: trim bytes from the
         // front. `drain` demands a char boundary, and the first boundary
-        // at or past `target` cuts the smallest whole-character window
+        // at or past `excess` cuts the smallest whole-character window
         // that fits the cap — it stays within budget and never leaves a
         // sliced character at the window's start.
-        let target = window.len().saturating_sub(cap);
-        let cut = window
+        window
             .char_indices()
             .map(|(i, _)| i)
-            .find(|i| *i >= target)
-            .unwrap_or(window.len());
-        window.drain(..cut);
-    }
-    true
+            .find(|i| *i >= excess)
+            .unwrap_or(window.len())
+    };
+    window.drain(..cut);
+    cut
 }
 
 /// Whether the primary pointer is coarse (touch screen), the second half of the
@@ -155,8 +154,8 @@ mod tests {
     fn append_capped_trims_whole_lines() {
         let mut w = String::new();
         // Cap is 12, content is 29 bytes (3 lines) — well over the cap.
-        let trimmed = append_capped(&mut w, "line one\nline two\nline three\n", 12);
-        assert!(trimmed); // over the cap, so the window is a true tail
+        let discarded_bytes = append_capped(&mut w, "line one\nline two\nline three\n", 12);
+        assert_eq!(discarded_bytes, "line one\nline two\n".len());
         assert!(w.len() <= 12);
         // The drain happens on '\n' boundaries, so what remains is a full
         // trailing line, not a fragment.
@@ -166,8 +165,8 @@ mod tests {
     #[test]
     fn append_capped_reports_no_trim_when_within_cap() {
         let mut w = String::new();
-        let trimmed = append_capped(&mut w, "whole window\n", 100);
-        assert!(!trimmed); // an untrimmed window is not a tail
+        let discarded_bytes = append_capped(&mut w, "whole window\n", 100);
+        assert_eq!(discarded_bytes, 0); // an untrimmed window is not a tail
         assert_eq!(w, "whole window\n");
     }
 
@@ -175,8 +174,8 @@ mod tests {
     fn append_capped_bytes_trims_single_long_line() {
         let mut w = String::new();
         let long = "A".repeat(50);
-        let trimmed = append_capped(&mut w, &long, 20);
-        assert!(trimmed);
+        let discarded_bytes = append_capped(&mut w, &long, 20);
+        assert_eq!(discarded_bytes, 30);
         assert!(w.len() <= 20);
         assert!(w.chars().all(|c| c == 'A'));
     }
@@ -198,12 +197,12 @@ mod tests {
         // Many short lines at once: one drain must leave whole trailing
         // lines within the cap, not fragments.
         let chunk: String = (0..100).map(|i| format!("line {i:03}\n")).collect();
-        assert!(append_capped(&mut w, &chunk, 100));
+        assert!(append_capped(&mut w, &chunk, 100) > 0);
         assert!(w.len() <= 100);
         assert!(w.ends_with('\n'));
         assert!(w.starts_with("line "));
         // And appending again keeps it bounded with whole lines.
-        assert!(append_capped(&mut w, "tail line here\n", 100));
+        assert!(append_capped(&mut w, "tail line here\n", 100) > 0);
         assert!(w.len() <= 100);
         assert!(w.ends_with("tail line here\n"));
     }
@@ -211,11 +210,11 @@ mod tests {
     #[test]
     fn append_capped_zero_cap_trims_everything() {
         let mut w = "keep\n".to_string();
-        let trimmed = append_capped(&mut w, "new", 0);
+        let discarded_bytes = append_capped(&mut w, "new", 0);
         // With cap 0, every append results in the window being drained back to
         // empty or near-empty. The chunk "new" is 3 bytes > 0, so the byte-trim
         // drains it all; the result is empty.
-        assert!(trimmed);
+        assert_eq!(discarded_bytes, "keep\nnew".len());
         assert!(w.is_empty());
     }
 
@@ -230,5 +229,84 @@ mod tests {
         let mut single = "just one long line".to_string();
         drop_leading_partial_line(&mut single);
         assert_eq!(single, "just one long line");
+    }
+}
+
+/// Byte position in a UTF-8 log, independent of the displayed window length.
+#[derive(Debug, Default)]
+pub struct LogCursor {
+    pub next_offset: u64,
+}
+
+/// Whether a metadata refresh requires a new display window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WindowPosition {
+    Continue,
+    Restart { offset: u64 },
+}
+
+/// What appending a fetched page did to the display window.
+pub struct WindowChange {
+    pub is_tail: bool,
+}
+
+impl LogCursor {
+    /// Reposition for a truncated log or a backlog larger than the window.
+    pub fn position(&mut self, size: Option<u64>, cap: u64) -> WindowPosition {
+        let offset = if size.is_some_and(|size| size < self.next_offset) {
+            Some(0)
+        } else {
+            catch_up_offset(self.next_offset, size, cap)
+        };
+        match offset {
+            Some(offset) => {
+                self.next_offset = offset;
+                WindowPosition::Restart { offset }
+            }
+            None => WindowPosition::Continue,
+        }
+    }
+
+    /// Append a raw page and advance only past complete UTF-8 code points.
+    pub fn append_page(&mut self, window: &mut String, page: &[u8], cap: usize) -> WindowChange {
+        let alignment = aurcache_common::api::build_log::align(page);
+        let end = page.len() - alignment.back_drop;
+        let first_tail = self.next_offset > 0 && window.is_empty();
+        let chunk = String::from_utf8_lossy(&page[alignment.front_skip..end]);
+        let discarded = append_capped(window, &chunk, cap);
+        if first_tail {
+            drop_leading_partial_line(window);
+        }
+        self.next_offset = self.next_offset.saturating_add(end as u64);
+        WindowChange {
+            is_tail: discarded > 0 || first_tail,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    #[test]
+    fn incomplete_utf8_is_retried_and_a_shrinking_log_restarts() {
+        let mut cursor = LogCursor::default();
+        let mut text = String::new();
+        cursor.append_page(&mut text, &[b'a', 0xc3], 16);
+        assert_eq!(cursor.next_offset, 1);
+        cursor.append_page(&mut text, &[0xc3, 0xa9], 16);
+        assert_eq!(cursor.next_offset, 3);
+        assert_eq!(text, "aé");
+        assert_eq!(
+            cursor.position(Some(1), 16),
+            WindowPosition::Restart { offset: 0 }
+        );
+    }
+    #[test]
+    fn resuming_after_a_backlog_opens_at_its_tail() {
+        let mut cursor = LogCursor { next_offset: 10 };
+        assert_eq!(
+            cursor.position(Some(100), 20),
+            WindowPosition::Restart { offset: 80 }
+        );
     }
 }

@@ -25,7 +25,7 @@ pub fn extract_source(archive: &[u8], dest: &Path) -> Result<PathBuf> {
 }
 
 /// Find built package artifacts (`*.pkg.tar.*`, excluding detached `.sig`
-/// signatures and hidden files) in a build directory.
+/// signatures, unfinished `.part` files and hidden files) in a build directory.
 #[must_use]
 pub fn discover_artifacts(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -60,6 +60,7 @@ pub fn is_artifact(name: &str) -> bool {
     !name.starts_with('.')
         && name.contains(".pkg.tar")
         && !name.ends_with(".sig")
+        && !name.ends_with(".part")
         && name.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | ':' | '~' | '@')
         })
@@ -119,6 +120,7 @@ mod tests {
         for name in [
             "hello-1.0-1-x86_64.pkg.tar.zst",
             "hello-1.0-1-x86_64.pkg.tar.zst.sig",
+            "hello-1.0-1-x86_64.pkg.tar.zst.part",
             "PKGBUILD",
             ".hidden.pkg.tar.zst",
         ] {

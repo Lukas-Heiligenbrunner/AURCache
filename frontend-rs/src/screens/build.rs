@@ -4,26 +4,12 @@ use crate::api::LoadError;
 use crate::dates::{AbsoluteDate, absolute, use_date_style};
 use crate::format::{format_bytes, format_duration, now_secs};
 use crate::listing::ViewParams;
-use crate::log_tail::{
-    append_capped, catch_up_offset, coarse_pointer, drop_leading_partial_line, log_tail_cap,
-};
 use crate::routes::Route;
 use crate::shell::{CheckIcon, CopyIcon, DownloadIcon, WarnIcon};
 use crate::status::BuildStatusBadge;
-use aurcache_common::api::build_log::{Alignment, align};
-use aurcache_common::api::builds::{DiskUsage, KeptBuild};
+use aurcache_common::api::builds::DiskUsage;
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
-
-/// Whether the build has stopped changing, so the poll loop can stop with it.
-///
-/// Only `Successful` and `Failed` settle. Testing for "not `Active`" instead
-/// counted *enqueued* and *waiting for deps* as over, which showed a freshly
-/// queued build as finished and stopped the page updating when it later
-/// started.
-fn settled(status: BuildState) -> bool {
-    !status.is_in_progress()
-}
 
 /// Whether the build page is still waiting on something, so its header keeps
 /// re-fetching briskly rather than falling back to the idle cadence.
@@ -33,11 +19,14 @@ fn settled(status: BuildState) -> bool {
 /// its lookup re-runs — without this a finished build read "successful" below
 /// a header that still said "building". Nothing fetched yet counts as idle,
 /// the same as elsewhere: the initial load is already in flight.
-fn build_page_busy(build_status: Option<BuildState>, package_status: Option<BuildState>) -> bool {
+fn is_build_page_busy(
+    build_status: Option<BuildState>,
+    package_status: Option<BuildState>,
+) -> bool {
     [build_status, package_status]
         .into_iter()
         .flatten()
-        .any(|status| !settled(status))
+        .any(BuildState::is_in_progress)
 }
 
 /// What the log area says while it has no text, given whether the poll loop
@@ -52,7 +41,7 @@ fn build_page_busy(build_status: Option<BuildState>, package_status: Option<Buil
 fn empty_log_placeholder(finished: bool, status: Option<BuildState>) -> &'static str {
     if finished {
         "no log for this build"
-    } else if status.is_some_and(settled) {
+    } else if status.is_some_and(|status| !status.is_in_progress()) {
         "loading log…"
     } else {
         "waiting for output…"
@@ -65,12 +54,12 @@ mod tests {
 
     #[test]
     fn only_terminal_states_settle() {
-        assert!(settled(BuildState::Successful));
-        assert!(settled(BuildState::Failed));
-        assert!(!settled(BuildState::Active));
+        assert!(!BuildState::Successful.is_in_progress());
+        assert!(!BuildState::Failed.is_in_progress());
+        assert!(BuildState::Active.is_in_progress());
         // The regression: queued is not finished.
-        assert!(!settled(BuildState::Enqueued));
-        assert!(!settled(BuildState::WaitingForDeps));
+        assert!(BuildState::Enqueued.is_in_progress());
+        assert!(BuildState::WaitingForDeps.is_in_progress());
     }
 
     /// The header stays live while either side is still moving: the bug was a
@@ -80,13 +69,13 @@ mod tests {
     fn the_header_stays_busy_while_either_side_is_still_moving() {
         let active = Some(BuildState::Active);
         let successful = Some(BuildState::Successful);
-        assert!(build_page_busy(active, active));
-        assert!(build_page_busy(successful, active));
-        assert!(build_page_busy(active, successful));
-        assert!(!build_page_busy(successful, successful));
+        assert!(is_build_page_busy(active, active));
+        assert!(is_build_page_busy(successful, active));
+        assert!(is_build_page_busy(active, successful));
+        assert!(!is_build_page_busy(successful, successful));
         // Nothing fetched yet: the initial load is already in flight, so
         // there is nothing extra to hurry along.
-        assert!(!build_page_busy(None, None));
+        assert!(!is_build_page_busy(None, None));
     }
 
     #[test]
@@ -329,7 +318,7 @@ pub fn Build(pkgbase: String, number: i32) -> Element {
         Some(Ok(Some(p))) => Some(p.status),
         _ => None,
     };
-    let busy = build_page_busy(build_status, package_status);
+    let busy = is_build_page_busy(build_status, package_status);
     crate::poll::use_poll(build, busy);
     crate::poll::use_poll(package, busy);
 
@@ -365,7 +354,7 @@ pub fn Build(pkgbase: String, number: i32) -> Element {
             }
             // Not asked for a build that is not there; see the redirect above.
             if !matches!(&*build.read_unchecked(), Some(Err(LoadError::NotFound))) {
-                BuildLog { pkgbase, number }
+                BuildLog { key: "{pkgbase}/{number}", pkgbase, number }
             }
         }
     }
@@ -382,238 +371,36 @@ pub fn Build(pkgbase: String, number: i32) -> Element {
 // ---------------------------------------------------------------------------
 
 /// How often to ask for more output while a build is running.
-const POLL_INTERVAL_MS: u32 = 3_000;
 
 #[component]
 pub fn BuildLog(pkgbase: String, number: i32) -> Element {
-    // One string, one text node. Per-line elements would only earn their keep
-    // for per-line features — ANSI colour, line numbers, deep links — and a
-    // build emits thousands of lines, so the browser would lay out thousands
-    // of elements and the VirtualDom would walk them on every poll.
-    let log = use_signal(String::new);
-    // How large the log is, from the detail route. As with any "not known" the
-    // answer is `None`, not zero: no log file and a zero-byte log are different.
-    let log_size = use_signal(|| None::<i64>);
-    // Whether the window is a true tail — the initial frame was placed near the
-    // end or a leading line was drained to stay in budget. A tail restates what
-    // Copy does and how the footer reads; an untrimmed head view is the whole
-    // log.
-    let tail = use_signal(|| false);
-    let finished = use_signal(|| false);
-    // The build's real state, not just "is it over". "Not building" also covers
-    // *enqueued* and *waiting for deps*, and collapsing those into a boolean is
-    // what told someone their freshly queued build had already finished.
-    let status = use_signal(|| None::<BuildState>);
-    // Filled from the same poll that decides when the log stops, so a build
-    // claimed while this page is open names its worker without a reload.
-    let worker_name = use_signal(|| None::<String>);
-    // When it started and, once it has, when it stopped. A build that is not
-    // even queued has no start, and an ended build always has an end.
-    let start_time = use_signal(|| None::<i64>);
-    let end_time = use_signal(|| None::<i64>);
-    // What the build used on its worker's disk, once it has ended and the
-    // worker reported it.
-    let disk_usage = use_signal(|| None::<DiskUsage>);
-    // The failed chroot the worker kept for inspection, when it kept one.
-    let kept = use_signal(|| None::<KeptBuild>);
-    // How the keep's "until" reads: absolute dates are the viewer's choice.
+    let crate::build_log::BuildLogController {
+        log,
+        log_size,
+        tail,
+        finished,
+        status,
+        worker_name,
+        start_time,
+        end_time,
+        disk_usage,
+        kept,
+        error,
+        mut following,
+        cap,
+    } = crate::build_log::use_build_log(aurcache_client::BuildRef {
+        pkgbase: pkgbase.clone(),
+        number,
+    });
+    let cap = move || cap;
     let date_style = use_date_style();
-    let error = use_signal(|| Option::<String>::None);
-    // True for a couple of seconds after a successful copy, so the button
-    // swaps its icon and label to say the log is now on the clipboard.
     let copied = use_signal(|| false);
-    // "Follow" pins the view to the bottom as output arrives; switching it off
-    // is what lets someone read back through a long log while it is still
-    // being written.
-    let mut following = use_signal(|| true);
-    // A Stop in flight, so the button shows "Stop…" and cannot double-fire.
     let canceling = use_signal(|| false);
-    // The Stop dialog is open. Stopping throws away a build that may be hours
-    // in, and the button sits beside Copy and Follow, so it asks first.
     let mut confirming_stop = use_signal(|| false);
-    // The tail budget, read once on mount: `window.inner_width()` and
-    // `(pointer: coarse)` decide phone (4 MiB) versus desktop (16 MiB).
-    let cap = use_memo(|| {
-        log_tail_cap(
-            web_sys::window()
-                .and_then(|w| w.inner_width().ok())
-                .and_then(|w| w.as_f64()),
-            coarse_pointer(),
-        )
-    });
-    // The stop handler moves these; taken before the poll loop below moves the
-    // originals, so the button does not borrow what the loop owns.
-    let (pkgbase_for_stop, number_for_stop) = (pkgbase.clone(), number);
-    // The poll loop is the component's only other `pkgbase` consumer, and it
-    // runs for the life of the screen, so it takes its own copy and the rsx
-    // below keeps the original for the header and the copy/download buttons.
-    let pkgbase_for_poll = pkgbase.clone();
-    // And the kept-build command takes one more: the original is moved into
-    // the copy/download buttons above where the command renders.
+    let pkgbase_for_stop = pkgbase.clone();
+    let number_for_stop = number;
     let pkgbase_for_keep = pkgbase.clone();
-    // Counted once per page that lands, not on every render: the window can be
-    // 16 MiB of text, and the header re-renders on every status poll.
     let line_count = use_memo(move || log.read().lines().count());
-    use_future(move || {
-        let (mut log, mut log_size, mut tail) = (log, log_size, tail);
-        let (mut worker_name, mut status, mut start_time, mut end_time) =
-            (worker_name, status, start_time, end_time);
-        let mut disk_usage = disk_usage;
-        let mut kept = kept;
-        let (mut finished, mut error, following) = (finished, error, following);
-        let cap = cap();
-        let pkgbase = pkgbase_for_poll.clone();
-        let number = number;
-        async move {
-            let client = match crate::api::client() {
-                Ok(c) => c,
-                Err(e) => {
-                    error.set(Some(e));
-                    return;
-                }
-            };
-
-            // The fetch position is private to the poll loop: nothing outside
-            // it reads or writes it, and the loop is its only owner. `align`'s
-            // back_drop makes it byte-precise — it advances by raw bytes read,
-            // never by the length of the decoded text.
-            let mut next_offset: u64 = 0;
-
-            loop {
-                // No fetch while hidden: a log page sitting in a background
-                // tab should not emit two requests per interval, same rule as
-                // `use_poll`. The sleep at the loop's end keeps ticking so
-                // the return is noticed, at most one interval late.
-                if crate::poll::hidden() {
-                    gloo_timers::future::TimeoutFuture::new(POLL_INTERVAL_MS).await;
-                    continue;
-                }
-
-                // The build's state first, each cycle: status, worker, start
-                // and end times, and — from the detail route only — the log's
-                // size. The output fetch is gated on this, so a hiccup on the
-                // header route never fetches without bounds.
-                let build = match client.get_build(&pkgbase, number).await {
-                    Ok(build) => {
-                        worker_name.set(build.worker_name.clone());
-                        status.set(Some(build.status));
-                        start_time.set(build.start_time);
-                        end_time.set(build.end_time);
-                        disk_usage.set(build.disk_usage);
-                        kept.set(build.kept.clone());
-                        log_size.set(build.log_size);
-                        // A successful poll clears a previous failure: the
-                        // banner should describe now, not the worst moment so
-                        // far.
-                        if error.peek().is_some() {
-                            error.set(None);
-                        }
-                        Some(build)
-                    }
-                    Err(e) => {
-                        error.set(Some(e.to_string()));
-                        None
-                    }
-                };
-
-                // Terminal check after the output fetch below (this cycle's
-                // page arrives before the loop returns), so the last lines are
-                // never missed. Only a *settled* build stops the loop.
-                // `is_in_progress` answers exactly this and keeps the queued
-                // states on the right side of it; testing for `Active` alone
-                // treated an enqueued build as over, so the page announced
-                // "finished" and never updated again when the build started.
-                let settled_now = build.as_ref().is_some_and(|b| settled(b.status));
-
-                // Output, gated on the header above. Frozen while not following
-                // so the view cannot jump under a scroll position — the header
-                // still polls, keeping status and times live. A build that
-                // settles this cycle gets its final page regardless, then the
-                // loop returns, so the last lines are never missed.
-                if let Some(build) = build.filter(|_| following() || settled_now) {
-                    // A log more than a window ahead of where this got to opens
-                    // at its *end*, not at the next page: on the first frame,
-                    // so a finished log shows its last lines rather than the
-                    // first 4 MiB of a multi-GiB file, and after Follow was off
-                    // while the build kept writing, so a build that settles
-                    // then still shows how it ended. The window starts over,
-                    // and the leading partial line that `size − cap` can land
-                    // on is stripped below, after `align`.
-                    let size = build.log_size.and_then(|s| u64::try_from(s).ok());
-                    if let Some(offset) = catch_up_offset(next_offset, size, cap as u64) {
-                        next_offset = offset;
-                        log.set(String::new());
-                        tail.set(true);
-                    }
-
-                    // One bounded page per poll: the window never holds
-                    // more than the cap, and the server never reads more
-                    // than the cap's worth either.
-                    let requested = next_offset;
-                    match client
-                        .build_output_page(&pkgbase, number, Some(requested), Some(cap as u64))
-                        .await
-                    {
-                        Ok(page) => {
-                            if error.peek().is_some() {
-                                error.set(None);
-                            }
-                            if !page.is_empty() {
-                                let Alignment {
-                                    front_skip,
-                                    back_drop,
-                                } = align(&page);
-                                // A page that aligns to nothing — the log
-                                // ended mid-codepoint and it is all tail —
-                                // cannot advance `next_offset`, so it is
-                                // EOF; nothing is appended.
-                                let slice = &page[front_skip..page.len() - back_drop];
-                                if !slice.is_empty() {
-                                    let chunk = String::from_utf8_lossy(slice);
-                                    // First real frame at a tail offset:
-                                    // the view opens mid-line, so the
-                                    // partial leading line is dropped once
-                                    // to start at a line boundary.
-                                    let first_tail_frame = requested > 0 && log.read().is_empty();
-                                    let trimmed =
-                                        log.with_mut(|text| append_capped(text, &chunk, cap));
-                                    if trimmed || first_tail_frame {
-                                        tail.set(true);
-                                    }
-                                    if first_tail_frame {
-                                        log.with_mut(drop_leading_partial_line);
-                                    }
-                                }
-                                // Advance by what was actually read — raw
-                                // bytes minus the incomplete trailing
-                                // codepoint — never by the length of the
-                                // decoded text.
-                                next_offset = requested + (page.len() - back_drop) as u64;
-                            }
-                        }
-                        Err(e) => {
-                            // Report and keep polling. Returning here
-                            // abandoned the log for the life of the page,
-                            // so one timeout on a slow connection meant a
-                            // running build stopped updating until it was
-                            // reloaded by hand.
-                            error.set(Some(e.to_string()));
-                        }
-                    }
-                }
-
-                // Only now, with the final page in: setting this as soon as the
-                // header said settled announced "no log for this build" for as
-                // long as a large log took to arrive.
-                if settled_now {
-                    finished.set(true);
-                    return;
-                }
-
-                gloo_timers::future::TimeoutFuture::new(POLL_INTERVAL_MS).await;
-            }
-        }
-    });
 
     // Keep the view pinned to the newest output while "Follow" is on.
     //
@@ -668,9 +455,9 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
                             span { class: "whitespace-nowrap", "Started " }
                             AbsoluteDate { ts: Some(start) }
                             if end_time().is_none() {
-                                {format!("· {} so far", format_duration(Some(start), Some(now_secs())))}
+                                {format!("· {} so far", format_duration(aurcache_common::api::builds::elapsed_between(Some(start), Some(now_secs()))))}
                             } else {
-                                {format!("· took {}", format_duration(Some(start), end_time()))}
+                                {format!("· took {}", format_duration(aurcache_common::api::builds::elapsed_between(Some(start), end_time())))}
                             }
                         }
                     }
@@ -700,7 +487,7 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
                     // page opens. Not
                     // one being published: it has already been built, and the
                     // server would refuse.
-                    if status().is_some_and(|s| !settled(s) && s != BuildState::Publishing) {
+                    if status().is_some_and(|s| s.is_in_progress() && s != BuildState::Publishing) {
                         button {
                             disabled: canceling(),
                             class: "btn btn-xs btn-error btn-outline",

@@ -122,7 +122,12 @@ pub(crate) fn print_stats(stats: &ListStats) {
     println!("recent_builds: {}", stats.recent_builds);
     println!("recent_successful: {}", stats.recent_successful);
     println!("recent_failed: {}", stats.recent_failed);
-    println!("avg_build_time_seconds: {}", stats.avg_build_time);
+    println!(
+        "avg_build_time_seconds: {}",
+        stats
+            .avg_build_time
+            .map_or_else(|| "unknown".to_string(), |seconds| seconds.to_string())
+    );
     println!(
         "repo_size_bytes: {}",
         stats

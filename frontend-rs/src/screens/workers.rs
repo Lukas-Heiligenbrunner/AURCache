@@ -49,7 +49,10 @@ pub fn Workers() -> Element {
     let known_packages = use_resource(move || async move {
         let _ = reload();
         crate::api::client()?
-            .list_packages(None, None, true)
+            .list_packages(&aurcache_client::PackageQuery {
+                dependencies: aurcache_client::DependencySelection::Include,
+                ..Default::default()
+            })
             .await
             .map(|pkgs| pkgs.into_iter().map(|p| p.name).collect::<HashSet<_>>())
             .map_err(|e| e.to_string())

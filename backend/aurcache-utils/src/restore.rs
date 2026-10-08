@@ -38,9 +38,7 @@ use aurcache_db::prelude::Packages;
 use aurcache_db::{packages, settings};
 use flate2::read::GzDecoder;
 use sea_orm::ActiveValue::Set;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tokio::sync::mpsc::Sender;
 
 use crate::package::add::{provides_json, split_packages_json};
@@ -50,7 +48,7 @@ use crate::snapshot::SnapshotStore;
 use aurcache_activitylog::events::{Event, RestoreStep};
 
 /// A dump that has been read and checked, ready to apply.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LoadedDump {
     pub manifest: DumpManifest,
     pub packages: DumpPackages,
@@ -489,11 +487,11 @@ fn write_secrets(
         return Ok(false);
     }
 
-    std::fs::create_dir_all(ca_dir)?;
-    // The certificate first: a reader that finds a key without a certificate
-    // has half a CA, and this narrows that window to a single write.
-    std::fs::write(aurcache_ca::cert_path(ca_dir), &secrets.ca_cert_pem)?;
-    aurcache_ca::write_private(&aurcache_ca::key_path(ca_dir), &secrets.ca_key_pem)?;
+    aurcache_ca::Ca::restore(
+        ca_dir,
+        secrets.ca_cert_pem.clone(),
+        secrets.ca_key_pem.clone(),
+    )?;
     Ok(true)
 }
 
@@ -541,13 +539,19 @@ pub async fn write_rows(
 
     // A clear retires every published artifact with its rows, and only if the
     // transaction below commits; the sweep deletes the files later.
-    let mut update = repo.begin().await;
+    let mut update = repo.begin(db).await?;
     if options.clear {
         for file in update.all_published_files(db).await? {
             update.retire(&file)?;
         }
     }
-    let applied = update.commit(|| write_rows_txn(db, dump, options)).await?;
+    let applied = update
+        .commit(db, |txn| {
+            let dump = dump.clone();
+            let options = options.clone();
+            Box::pin(async move { write_rows_txn(txn, &dump, &options).await })
+        })
+        .await?;
 
     // `--clear` removes every package, so every build log goes with them.
     if options.clear {
@@ -558,11 +562,10 @@ pub async fn write_rows(
 
 /// The transaction [`write_rows`] commits: run again whole if it fails.
 async fn write_rows_txn(
-    db: &DatabaseConnection,
+    txn: &sea_orm::DatabaseTransaction,
     dump: &LoadedDump,
     options: &RestoreOptions,
 ) -> anyhow::Result<Applied> {
-    let txn = db.begin().await?;
     let mut entries = Vec::new();
     let mut touched = Vec::new();
     let mut ids = BTreeMap::new();
@@ -572,13 +575,13 @@ async fn write_rows_txn(
     // leave an empty instance -- the one outcome worse than either keeping the
     // old state or taking the new one.
     if options.clear {
-        clear_existing(&txn).await?;
+        clear_existing(txn).await?;
     }
 
     for (pkgbase, package) in &dump.packages {
         let existing = Packages::find()
             .filter(packages::Column::Name.eq(pkgbase))
-            .one(&txn)
+            .one(txn)
             .await?;
         let patch = dump.patches.get(pkgbase).cloned();
 
@@ -591,7 +594,7 @@ async fn write_rows_txn(
                 let id = row.id;
                 let mut active: packages::ActiveModel = row.into();
                 apply_config(&mut active, package, patch);
-                active.update(&txn).await?;
+                active.update(txn).await?;
                 ids.insert(pkgbase.clone(), id);
                 touched.push(pkgbase.clone());
                 RestoreOutcome::Overwritten
@@ -605,7 +608,7 @@ async fn write_rows_txn(
                 if decision == PatchDecision::Adopt {
                     let mut active: packages::ActiveModel = row.into();
                     active.patch = Set(patch);
-                    active.update(&txn).await?;
+                    active.update(txn).await?;
                     // A patch changes what the source resolves to, so its
                     // `provides`, split names and dependencies all have to be
                     // read again.
@@ -616,7 +619,7 @@ async fn write_rows_txn(
                 }
             }
             (None, _) => {
-                let id = insert_row(&txn, pkgbase, package, patch).await?;
+                let id = insert_row(txn, pkgbase, package, patch).await?;
                 ids.insert(pkgbase.clone(), id);
                 touched.push(pkgbase.clone());
                 RestoreOutcome::Imported
@@ -628,10 +631,9 @@ async fn write_rows_txn(
         });
     }
 
-    write_settings(&txn, dump, &ids).await?;
-    write_workers(&txn, dump, options).await?;
-    write_tokens(&txn, dump, options).await?;
-    txn.commit().await?;
+    write_settings(txn, dump, &ids).await?;
+    write_workers(txn, dump, options).await?;
+    write_tokens(txn, dump, options).await?;
     Ok(Applied { entries, touched })
 }
 

@@ -111,6 +111,23 @@ async fn status(db: &DatabaseConnection, build_id: i32) -> BuildState {
 }
 
 #[tokio::test]
+async fn a_database_error_preserves_staging_for_recovery() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    let staged = stage(&repo, 1, "hello", "1.0-1");
+    let original = std::fs::read(&staged).unwrap();
+    db.clone().close().await.unwrap();
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(std::fs::read(&staged).unwrap(), original);
+    assert!(listed(tmp.path()).is_empty());
+}
+
+#[tokio::test]
 async fn a_published_build_is_in_the_repository_and_recorded() {
     let db = db().await;
     let tmp = tempfile::tempdir().unwrap();
@@ -176,7 +193,7 @@ async fn a_new_version_replaces_the_old_one() {
 
     let old = tmp.path().join("x86_64").join(filename("hello", "1.0-1"));
     assert!(old.exists(), "retired, not yet swept");
-    repo.sweep(std::time::Duration::ZERO).await.unwrap();
+    repo.sweep(&db, std::time::Duration::ZERO).await.unwrap();
     assert!(!old.exists());
     assert!(
         tmp.path()
@@ -284,13 +301,13 @@ async fn an_interrupted_publication_is_resumed_from_staging() {
     publishing_build(&db, 1, 1).await;
     stage(&repo, 1, "hello", "1.0-1");
 
-    assert_eq!(interrupted(&db).await.unwrap(), [1]);
-    for build_id in interrupted(&db).await.unwrap() {
+    assert_eq!(interrupted(&db, &repo).await.unwrap(), [1]);
+    for build_id in interrupted(&db, &repo).await.unwrap() {
         publish_build(&db, &repo, &ActivityLog::discarding(), build_id).await;
     }
 
     assert_eq!(status(&db, 1).await, BuildState::Successful);
-    assert!(interrupted(&db).await.unwrap().is_empty());
+    assert!(interrupted(&db, &repo).await.unwrap().is_empty());
     assert_eq!(listed(tmp.path()), ["hello-1.0-1"]);
 }
 
@@ -316,4 +333,65 @@ async fn a_build_not_publishing_is_left_alone() {
     assert_eq!(status(&db, 1).await, BuildState::Failed);
     assert!(staged.exists());
     assert!(listed(tmp.path()).is_empty());
+}
+
+#[tokio::test]
+async fn failed_dependent_promotion_preserves_staging_until_retry() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "hello").await;
+    package(&db, 2, "dependent").await;
+    publishing_build(&db, 1, 1).await;
+    publishing_build(&db, 2, 2).await;
+    db.execute_unprepared(&format!(
+        "UPDATE builds SET status = {} WHERE id = 2",
+        BuildState::WaitingForDeps.as_i32()
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared("INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) VALUES (2, 1, '')").await.unwrap();
+    db.execute_unprepared("CREATE TRIGGER reject_promotion BEFORE UPDATE OF status ON builds WHEN OLD.id = 2 BEGIN SELECT RAISE(ABORT, 'promotion failed'); END").await.unwrap();
+    stage(&repo, 1, "hello", "1.0-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    assert_eq!(status(&db, 2).await, BuildState::WaitingForDeps);
+    assert!(repo.staging_dir(1).is_dir());
+    assert_eq!(interrupted(&db, &repo).await.unwrap(), [1]);
+
+    db.execute_unprepared("DROP TRIGGER reject_promotion")
+        .await
+        .unwrap();
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+    assert_eq!(status(&db, 2).await, BuildState::Enqueued);
+    assert!(!repo.staging_dir(1).exists());
+}
+
+#[tokio::test]
+async fn recovery_promotes_dependents_when_success_was_already_recorded() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "hello", "1.0-1");
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+    package(&db, 2, "dependent").await;
+    publishing_build(&db, 2, 2).await;
+    db.execute_unprepared(&format!(
+        "UPDATE builds SET status = {} WHERE id = 2",
+        BuildState::WaitingForDeps.as_i32()
+    ))
+    .await
+    .unwrap();
+    db.execute_unprepared("INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) VALUES (2, 1, '')").await.unwrap();
+    // This is the durable state after recording success but before notifying
+    // dependents and removing the upload directory.
+    stage(&repo, 1, "hello", "1.0-1");
+    assert_eq!(interrupted(&db, &repo).await.unwrap(), [1]);
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+    assert_eq!(status(&db, 2).await, BuildState::Enqueued);
+    assert!(!repo.staging_dir(1).exists());
+    assert!(interrupted(&db, &repo).await.unwrap().is_empty());
 }

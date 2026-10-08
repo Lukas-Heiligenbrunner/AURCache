@@ -49,19 +49,6 @@ jobs:
           echo "AURCACHE_PKGBUILD_BRIDGE=/usr/local/bin/alpm-pkgbuild-bridge" >> "$GITHUB_ENV"
           echo "AURCACHE_SANDBOX=$PWD/target/debug/aurcache-sandbox" >> "$GITHUB_ENV"
 
-      # `aurcache-api`'s `static` feature embeds the built web UI via
-      # `#[derive(RustEmbed)] #[folder = "web"]`, which fails to compile unless
-      # that directory exists. Only the Docker build populates it, so without a
-      # placeholder the whole `embed` module is invisible to clippy. An empty
-      # directory is enough for the derive.
-      - name: Create placeholder web assets
-        run: |
-          mkdir -p aurcache-api/web
-          # Not just an empty directory: the app-shell fallback tests ask the
-          # handler for index.html, and RustEmbed bakes in whatever is here at
-          # compile time.
-          echo '<!doctype html><title>AURCache</title>' > aurcache-api/web/index.html
-
       - name: Lint
         run: |
           cargo fmt -- --check

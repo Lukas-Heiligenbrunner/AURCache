@@ -7,6 +7,9 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }

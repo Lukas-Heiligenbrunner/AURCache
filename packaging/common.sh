@@ -1,10 +1,9 @@
+# shellcheck shell=bash
 # Shared PKGBUILD helpers: how to build this repo's Rust binaries for $CARCH.
 #
 # Sourced by both PKGBUILDs rather than duplicated, so the two cannot disagree
 # about targets, flags or where the output lands.
 
-# The Rust target triple for the architecture makepkg is building for.
-#
 # Arch has no cross-compilation feature -- no `--target`, nothing in devtools --
 # but `CARCH` is a plain shell variable makepkg sources and uses for the package
 # name, so setting it and cross-compiling inside build() produces a correctly
@@ -23,6 +22,7 @@ _aurcache_is_native() {
     return 1
 }
 
+# The Rust target triple for the architecture makepkg is building for.
 _aurcache_rust_target() {
     case "$CARCH" in
         x86_64) printf 'x86_64-unknown-linux-gnu' ;;

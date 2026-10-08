@@ -1022,25 +1022,27 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
     .unwrap();
 
     let ca_dir = tempfile::tempdir().unwrap();
-    std::fs::write(ca_dir.path().join("ca-cert.pem"), "CERT").unwrap();
-    std::fs::write(ca_dir.path().join("ca-key.pem"), "KEY").unwrap();
+    let ca = aurcache_ca::Ca::load_or_create(ca_dir.path()).unwrap();
 
     let dump = build_dump(&source, "test", Some(ca_dir.path()))
         .await
         .unwrap();
     assert!(dump.manifest.includes_secrets);
     let secrets = dump.secrets.clone().unwrap();
-    assert_eq!(secrets.ca_key_pem, "KEY");
+    assert_eq!(secrets.ca_key_pem, ca.private_key_pem());
     assert_eq!(secrets.tokens.len(), 1);
     // The certificate travels only in this mode.
     assert!(dump.workers[0].signed_cert.is_some());
 
     let files = archive_files(&write_archive(&dump).unwrap());
-    assert_eq!(files.get("ca-key.pem").map(String::as_str), Some("KEY"));
+    assert_eq!(
+        files.get("ca-key.pem").map(String::as_str),
+        Some(ca.private_key_pem())
+    );
 
     // And it round-trips through the reader, which is what a restore does.
     let loaded = load_dump(&write_archive(&dump).unwrap()).unwrap();
-    assert_eq!(loaded.secrets.unwrap().ca_key_pem, "KEY");
+    assert_eq!(loaded.secrets.unwrap().ca_key_pem, ca.private_key_pem());
 }
 
 /// Ignoring secrets is the default on the way back in, too. Replacing a CA
@@ -1051,8 +1053,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
     let source = db().await;
     package(&source, "hello", true, None).await;
     let src_ca = tempfile::tempdir().unwrap();
-    std::fs::write(src_ca.path().join("ca-cert.pem"), "DUMP-CERT").unwrap();
-    std::fs::write(src_ca.path().join("ca-key.pem"), "DUMP-KEY").unwrap();
+    aurcache_ca::Ca::load_or_create(src_ca.path()).unwrap();
     let bytes = write_archive(
         &build_dump(&source, "test", Some(src_ca.path()))
             .await
@@ -1119,8 +1120,8 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
     .await
     .unwrap();
     let src_ca = tempfile::tempdir().unwrap();
-    std::fs::write(src_ca.path().join("ca-cert.pem"), "DUMP-CERT").unwrap();
-    std::fs::write(src_ca.path().join("ca-key.pem"), "DUMP-KEY").unwrap();
+    aurcache_ca::Ca::load_or_create(src_ca.path()).unwrap();
+    let source_key = std::fs::read_to_string(aurcache_ca::key_path(src_ca.path())).unwrap();
     let bytes = write_archive(
         &build_dump(&source, "test", Some(src_ca.path()))
             .await
@@ -1162,7 +1163,7 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
     .await;
 
     let key_path = target_ca.path().join("ca-key.pem");
-    assert_eq!(std::fs::read_to_string(&key_path).unwrap(), "DUMP-KEY");
+    assert_eq!(std::fs::read_to_string(&key_path).unwrap(), source_key);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

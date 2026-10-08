@@ -218,7 +218,7 @@ fn the_migration_is_recorded_under_its_own_name() {
 async fn going_back_to_0_5_is_refused() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     Migrator::up(&db, None).await.unwrap();
-    assert!(Migrator::down(&db, Some(1)).await.is_err());
+    assert!(Migrator::down(&db, None).await.is_err());
 }
 
 /// A new instance has nothing to backfill, so nothing is queued.

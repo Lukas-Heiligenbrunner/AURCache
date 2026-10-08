@@ -30,7 +30,10 @@ const WIDE_ONLY: &str = "hidden md:table-cell";
 /// dependency closure is usually the larger part of one.
 async fn load_packages() -> Result<Vec<SimplePackage>, String> {
     client()?
-        .list_packages(None, None, true)
+        .list_packages(&aurcache_client::PackageQuery {
+            dependencies: aurcache_client::DependencySelection::Include,
+            ..Default::default()
+        })
         .await
         .map_err(|e| e.to_string())
 }

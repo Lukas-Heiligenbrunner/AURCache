@@ -10,6 +10,10 @@
 use crate::dates::{Clock, DateOrder, DateParts, DateStyle, render};
 use crate::listing::ListHeader;
 use crate::routes::Route;
+use crate::setting_editor::{
+    EditorDraft, MutationOutcome, SettingEdit, SettingScope, use_editor_draft,
+    use_setting_mutations,
+};
 use aurcache_client::{ApplicationSettings, SchedulePreview, Setting, SettingSource, Timezone};
 use dioxus::prelude::*;
 
@@ -30,40 +34,11 @@ pub fn Settings() -> Element {
         client.server_info().await.ok()?.timezone
     });
 
-    // One banner for the whole page rather than one per row: a save either
-    // worked or it did not, and the row already shows the value that resulted.
-    let mut status = use_signal(|| Option::<(String, bool)>::None);
-
-    // Every write goes through here so the page always re-reads afterwards.
-    // A setting's stored value is not always the value that comes back — the
-    // server parses and normalises it, and an environment variable outranks it
-    // entirely — so echoing the input locally would show a value the server
-    // does not hold.
-    let save = move |(setting, value): (Setting, Option<String>)| async move {
-        let key = setting.meta().key;
-        let client = match crate::api::client() {
-            Ok(client) => client,
-            Err(e) => {
-                status.set(Some((e, false)));
-                return;
-            }
-        };
-        let result = match &value {
-            Some(value) => client.patch_setting(None, key, value).await,
-            None => client.reset_setting(None, key).await,
-        };
-        match result {
-            Ok(()) => {
-                status.set(Some((
-                    match value {
-                        Some(_) => format!("Saved {key}."),
-                        None => format!("Reset {key} to its default."),
-                    },
-                    true,
-                )));
-                settings.restart();
-            }
-            Err(e) => status.set(Some((format!("Could not save {key}: {e}"), false))),
+    let controller = use_setting_mutations();
+    let status = controller.status;
+    let save = move |edit: SettingEdit| async move {
+        if controller.apply(&SettingScope::Global, edit).await == MutationOutcome::Applied {
+            settings.restart();
         }
     };
 
@@ -71,10 +46,10 @@ pub fn Settings() -> Element {
         div { class: "space-y-4",
             ListHeader { title: "Settings" }
 
-            if let Some((message, ok)) = status() {
+            if let Some(feedback) = status() {
                 div {
-                    class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
-                    span { "{message}" }
+                    class: if feedback.is_ok() { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
+                    span { "{feedback.as_ref().unwrap_or_else(|error| error)}" }
                 }
             }
 
@@ -84,6 +59,7 @@ pub fn Settings() -> Element {
                     div { class: "alert alert-error", span { "Could not load settings: {e}" } }
                 },
                 Some(Ok(loaded)) => rsx! {
+                    fieldset { disabled: (controller.busy)(),
                     SettingsSections {
                         settings: loaded.clone(),
                         schedule_zone: schedule_zone(
@@ -91,6 +67,7 @@ pub fn Settings() -> Element {
                             &crate::dates::viewer_timezone(),
                         ),
                         save,
+                    }
                     }
                 },
             }
@@ -102,7 +79,7 @@ pub fn Settings() -> Element {
 fn SettingsSections(
     settings: ApplicationSettings,
     schedule_zone: ScheduleZone,
-    save: EventHandler<(Setting, Option<String>)>,
+    save: EventHandler<SettingEdit>,
 ) -> Element {
     rsx! {
         // Two columns once there is genuinely room. A single column of settings
@@ -380,19 +357,13 @@ fn SettingRow(
     value: String,
     source: SettingSource,
     editor: Editor,
-    save: EventHandler<(Setting, Option<String>)>,
+    save: EventHandler<SettingEdit>,
 ) -> Element {
     // An environment variable wins over anything stored, so an editable field
     // would accept a change that has no effect.
     let locked = source == SettingSource::Env;
-    let mut draft = use_signal(|| value.clone());
-
-    // The row re-renders with a fresh value after every save, and the draft has
-    // to follow it — otherwise a value the server normalised (or refused) keeps
-    // showing the text that was typed.
-    use_effect(use_reactive(&value, move |value| draft.set(value)));
-
-    let dirty = draft() != value;
+    let draft = use_editor_draft(Some(value.clone()));
+    let dirty = draft().is_dirty();
 
     rsx! {
         RowShell { setting, label, description, warning, source, stacked: editor.is_stacked(),
@@ -403,9 +374,12 @@ fn SettingRow(
                             r#type: "checkbox",
                             class: "toggle toggle-primary",
                             disabled: locked,
-                            checked: value == "true",
+                            checked: draft().value.as_deref().map_or(value == "true", |value| value == "true"),
                             onchange: move |e: FormEvent| {
-                                save.call((setting, Some(e.checked().to_string())));
+                                let value = e.checked().to_string();
+                                let mut draft = draft;
+                                draft.with_mut(|draft| draft.edit(value.clone()));
+                                save.call(SettingEdit::set(setting, value).editing(draft));
                             },
                         }
                     },
@@ -415,7 +389,7 @@ fn SettingRow(
                     Editor::Schedule { placeholder } => rsx! {
                         div { class: "flex flex-col gap-1",
                             TextField { setting, draft, placeholder, wide: false, locked, save }
-                            ScheduleRuns { setting, value: draft() }
+                            ScheduleRuns { setting, value: draft().text() }
                         }
                     },
                 };
@@ -427,11 +401,11 @@ fn SettingRow(
                     if dirty && !locked {
                         button {
                             class: "btn btn-primary btn-sm",
-                            onclick: move |_| save.call((setting, Some(draft()))),
+                            onclick: move |_| save.call(SettingEdit::set(setting, draft().text()).editing(draft)),
                             "Save"
                         }
                     }
-                    ResetSlot { setting, source, save }
+                    ResetSlot { setting, source, save, draft: Some(draft) }
                 }
             }
         }
@@ -442,11 +416,11 @@ fn SettingRow(
 #[component]
 fn TextField(
     setting: Setting,
-    draft: Signal<String>,
+    draft: Signal<EditorDraft>,
     placeholder: String,
     wide: bool,
     locked: bool,
-    save: EventHandler<(Setting, Option<String>)>,
+    save: EventHandler<SettingEdit>,
 ) -> Element {
     rsx! {
         input {
@@ -454,11 +428,11 @@ fn TextField(
             class: "input input-bordered input-sm max-w-full font-mono text-xs {text_width(wide)}",
             disabled: locked,
             placeholder: "{placeholder}",
-            value: "{draft}",
-            oninput: move |e| draft.set(e.value()),
+            value: draft().text(),
+            oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
             onkeydown: move |e: KeyboardEvent| {
                 if e.key() == Key::Enter {
-                    save.call((setting, Some(draft())));
+                    save.call(SettingEdit::set(setting, draft().text()).editing(draft));
                 }
             },
         }
@@ -525,7 +499,8 @@ fn schedule_note(preview: &SchedulePreview, date: impl Fn(i64) -> String) -> Sch
 fn ResetSlot(
     setting: Setting,
     source: SettingSource,
-    save: EventHandler<(Setting, Option<String>)>,
+    save: EventHandler<SettingEdit>,
+    #[props(default)] draft: Option<Signal<EditorDraft>>,
 ) -> Element {
     rsx! {
         div { class: "w-16 shrink-0 flex justify-end",
@@ -533,7 +508,7 @@ fn ResetSlot(
                 button {
                     class: "btn btn-ghost btn-sm",
                     title: "Discard the stored value and go back to the default",
-                    onclick: move |_| save.call((setting, None)),
+                    onclick: move |_| save.call(SettingEdit { setting, change: crate::setting_editor::SettingChange::Reset, draft }),
                     "Reset"
                 }
             }
@@ -556,7 +531,7 @@ fn ResetSlot(
 fn DateFormatRows(
     value: String,
     source: SettingSource,
-    save: EventHandler<(Setting, Option<String>)>,
+    save: EventHandler<SettingEdit>,
 ) -> Element {
     let locked = source == SettingSource::Env;
     let style = DateStyle::from_id(&value);
@@ -588,7 +563,7 @@ fn DateFormatRows(
                         .into_iter()
                         .find(|o| o.id() == e.value())
                         .unwrap_or(DateOrder::Ymd);
-                    save.call((Setting::DateFormat, Some(DateStyle { order, ..style }.id())));
+                    save.call(SettingEdit::set(Setting::DateFormat, DateStyle { order, ..style }.id()));
                 },
                 for order in DateOrder::ALL {
                     option {
@@ -614,7 +589,7 @@ fn DateFormatRows(
                         .into_iter()
                         .find(|c| c.id() == e.value())
                         .unwrap_or(Clock::H24);
-                    save.call((Setting::DateFormat, Some(DateStyle { clock, ..style }.id())));
+                    save.call(SettingEdit::set(Setting::DateFormat, DateStyle { clock, ..style }.id()));
                 },
                 for clock in Clock::ALL {
                     option {
@@ -639,7 +614,7 @@ fn DateFormatRows(
                 checked: style.pad,
                 onchange: move |e: FormEvent| {
                     let pad = e.checked();
-                    save.call((Setting::DateFormat, Some(DateStyle { pad, ..style }.id())));
+                    save.call(SettingEdit::set(Setting::DateFormat, DateStyle { pad, ..style }.id()));
                 },
             }
         }
@@ -655,7 +630,7 @@ fn DateFormatRows(
                 button {
                     class: "btn btn-ghost btn-sm",
                     title: "Discard the stored date format and go back to the default",
-                    onclick: move |_| save.call((Setting::DateFormat, None)),
+                    onclick: move |_| save.call(SettingEdit::reset(Setting::DateFormat)),
                     "Reset"
                 }
             }

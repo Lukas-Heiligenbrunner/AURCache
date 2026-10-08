@@ -20,7 +20,7 @@ pub struct ListStats {
     pub recent_successful: u32,
     pub recent_failed: u32,
 
-    pub avg_build_time: u32,
+    pub avg_build_time: Option<u64>,
     /// Bytes of every artifact in the repository; `None` while any of them
     /// has no recorded size.
     pub repo_size: Option<i64>,
@@ -127,5 +127,5 @@ pub struct QueueSlice {
 #[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct LongBuild {
     pub build: BuildSummary,
-    pub previous_secs: Option<i64>,
+    pub previous_secs: Option<u64>,
 }

@@ -13,6 +13,7 @@
 #![allow(clippy::useless_format)]
 
 mod api;
+mod build_log;
 mod clipboard;
 mod dates;
 mod format;
@@ -24,6 +25,7 @@ mod poll;
 mod progress;
 mod routes;
 mod screens;
+mod setting_editor;
 mod shell;
 mod source_editor;
 mod status;

@@ -29,7 +29,10 @@ async fn load(pkgbase: String) -> Result<Vec<Build>, String> {
         // which is literal in a path but decodes to a space in a query value.
         // No limit: the page is paged in the browser, and a capped fetch
         // would have silently ended a long history at 100.
-        .list_builds(Some(&pkgbase), None, None)
+        .list_builds(&aurcache_client::BuildQuery {
+            pkgbase: Some(pkgbase.clone()),
+            ..Default::default()
+        })
         .await
         .map_err(|e| e.to_string())
 }
@@ -167,7 +170,7 @@ pub fn PackageBuilds(pkgbase: String) -> Element {
                                                 DateOnly { ts: build.start_time }
                                             }
                                             td { class: "{WIDE_ONLY} font-mono text-sm opacity-70",
-                                                {format_duration(build.start_time, build.end_time)}
+                                                {format_duration(build.elapsed())}
                                             }
                                             td { class: "{WIDE_ONLY} text-sm opacity-70", "{build.platform}" }
                                             td { class: "{WIDE_ONLY} text-sm opacity-70",

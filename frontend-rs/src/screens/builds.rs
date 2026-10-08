@@ -23,7 +23,7 @@ const WIDE_ONLY: &str = "hidden md:table-cell";
 /// build list only grows.
 async fn load_builds() -> Result<Vec<Build>, String> {
     client()?
-        .list_builds(None, None, None)
+        .list_builds(&aurcache_client::BuildQuery::default())
         .await
         .map_err(|e| e.to_string())
 }
@@ -176,7 +176,7 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                                                 DateOnly { ts: build.start_time }
                                             }
                                             td { class: "{WIDE_ONLY} font-mono text-sm opacity-70",
-                                                {format_duration(build.start_time, build.end_time)}
+                                                {format_duration(build.elapsed())}
                                             }
                                             td { class: "{WIDE_ONLY} text-sm opacity-70", "{build.platform}" }
                                             td { class: "{WIDE_ONLY} text-sm opacity-70",

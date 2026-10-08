@@ -429,18 +429,6 @@ fn build_id(build: &Build) -> String {
     }
 }
 
-/// How long a build ran, in the same units as its timestamps.
-///
-/// `None` for a build that has not ended: it has no duration to speak of, and
-/// sorting treats that the way it treats an unrecorded size or peak -- grouped
-/// at one end rather than among the finished builds.
-fn duration(build: &Build) -> Option<i64> {
-    build
-        .start_time
-        .zip(build.end_time)
-        .map(|(start, end)| end - start)
-}
-
 pub fn sort_builds(builds: &mut [Build], sort: Sort) {
     // The string-keyed columns lower once per row rather than once per
     // comparison. The cached keys mirror the old comparator arm for arm --
@@ -498,8 +486,9 @@ pub fn sort_builds(builds: &mut [Build], sort: Sort) {
             // sorts before `Some`, which under the descending order a Duration
             // column opens in puts the unfinished builds last, after the
             // longest — the interesting end first.
-            SortKey::Duration => duration(a)
-                .cmp(&duration(b))
+            SortKey::Duration => a
+                .elapsed()
+                .cmp(&b.elapsed())
                 // Ties are ordered newest first for a stable readout.
                 .then(b.number.cmp(&a.number)),
             // As with size, unrecorded peaks group at one end: `None` under

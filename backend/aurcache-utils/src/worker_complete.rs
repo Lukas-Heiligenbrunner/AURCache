@@ -228,7 +228,7 @@ pub async fn complete_failure<C: ConnectionTrait + TransactionTrait>(
 /// all satisfied from `WAITING_FOR_DEPS` to `ENQUEUED` so a worker can claim it.
 ///
 /// Returns the builds it promoted, for the caller to log.
-pub async fn trigger_dependents<C: ConnectionTrait>(
+pub async fn trigger_dependents<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     pkg_id: i32,
     platform: Platform,
@@ -265,7 +265,7 @@ pub async fn trigger_dependents<C: ConnectionTrait>(
 /// running, and the queue has nothing left to say about them.
 ///
 /// Returns the ids of the builds it let start, for the caller to log.
-pub async fn resync_pending_builds<C: ConnectionTrait>(
+pub async fn resync_pending_builds<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     pkg_id: i32,
 ) -> Result<Vec<i32>, DbErr> {
@@ -337,7 +337,7 @@ async fn load_dependencies_for_dependents_of<C: ConnectionTrait>(
     Ok(map)
 }
 
-async fn promote_dependent<C: ConnectionTrait>(
+async fn promote_dependent<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     dependent_id: i32,
     platform: Platform,

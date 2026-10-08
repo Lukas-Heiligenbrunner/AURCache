@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::Context;
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR,
@@ -111,14 +110,10 @@ async fn build_secrets(
     db: &DatabaseConnection,
     ca_dir: &std::path::Path,
 ) -> anyhow::Result<DumpSecrets> {
-    // Async reads: this runs on the API executor, and blocking it on the
-    // filesystem stalls every request sharing the thread.
-    let ca_cert_pem = tokio::fs::read_to_string(aurcache_ca::cert_path(ca_dir))
-        .await
-        .with_context(|| format!("reading the CA certificate from {}", ca_dir.display()))?;
-    let ca_key_pem = tokio::fs::read_to_string(aurcache_ca::key_path(ca_dir))
-        .await
-        .with_context(|| format!("reading the CA key from {}", ca_dir.display()))?;
+    let ca_dir = ca_dir.to_path_buf();
+    let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
+    let ca_cert_pem = ca.ca_cert_pem().to_owned();
+    let ca_key_pem = ca.private_key_pem().to_owned();
 
     let tokens = ApiTokens::find()
         .order_by_asc(api_tokens::Column::Username)

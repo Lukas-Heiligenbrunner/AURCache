@@ -10,7 +10,7 @@
 use anyhow::{Context, anyhow};
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose,
+    KeyPair, KeyUsagePurpose, PublicKeyData,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ pub fn key_path(dir: &Path) -> PathBuf {
 }
 
 /// A loaded (or freshly created) internal CA: its certificate and private key.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Ca {
     cert_pem: String,
     key_pem: String,
@@ -54,29 +55,93 @@ pub struct SignedWorkerCert {
 }
 
 impl Ca {
-    /// Load the CA from `dir`, creating and persisting a new one if absent.
+    /// Load a validated CA, creating one only when no identity exists.
     ///
-    /// Idempotent: a second call returns the same CA. Key material is written
-    /// with `0600` permissions on Unix.
+    /// `ca-identity.json` is the atomic source of truth. The PEM files are
+    /// repaired from it on startup, including after interrupted installation.
+    /// Legacy PEM pairs are imported only when both files exist and match.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir).context("creating CA directory")?;
-        let cert_path = cert_path(dir);
-        let key_path = key_path(dir);
-
-        if cert_path.exists() && key_path.exists() {
-            let cert_pem = std::fs::read_to_string(&cert_path).context("reading CA cert")?;
-            let key_pem = std::fs::read_to_string(&key_path).context("reading CA key")?;
-            // Validate that the material parses before trusting it.
-            KeyPair::from_pem(&key_pem).context("parsing persisted CA key")?;
-            return Ok(Self { cert_pem, key_pem });
-        }
-
-        let ca = Self::generate_ca()?;
-        write_private(&key_path, &ca.key_pem)?;
-        std::fs::write(&cert_path, &ca.cert_pem).context("writing CA cert")?;
-        tracing::info!("Generated new AURCache internal CA at {}", dir.display());
-
+        let ca = Self::read_identity(dir)?.map_or_else(Self::generate_ca, Ok)?;
+        ca.persist(dir)?;
         Ok(ca)
+    }
+
+    /// Read a validated identity without creating, rotating or repairing files.
+    pub fn load(dir: &Path) -> anyhow::Result<Self> {
+        Self::read_identity(dir)?.ok_or_else(|| anyhow!("no CA identity at {}", dir.display()))
+    }
+
+    fn read_identity(dir: &Path) -> anyhow::Result<Option<Self>> {
+        let ca = match std::fs::read(dir.join("ca-identity.json")) {
+            Ok(bytes) => serde_json::from_slice::<Self>(&bytes).context("reading CA identity")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match (
+                    std::fs::read_to_string(cert_path(dir)),
+                    std::fs::read_to_string(key_path(dir)),
+                ) {
+                    (Ok(cert_pem), Ok(key_pem)) => Self { cert_pem, key_pem },
+                    (Err(cert), Err(key))
+                        if cert.kind() == std::io::ErrorKind::NotFound
+                            && key.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        return Ok(None);
+                    }
+                    _ => anyhow::bail!(
+                        "incomplete or unreadable CA identity; restore its certificate and key together"
+                    ),
+                }
+            }
+            Err(error) => return Err(error).context("reading CA identity"),
+        };
+        ca.validate()?;
+        Ok(Some(ca))
+    }
+
+    /// Install a restored certificate and key after validating their pairing.
+    pub fn restore(dir: &Path, cert_pem: String, key_pem: String) -> anyhow::Result<Self> {
+        let ca = Self { cert_pem, key_pem };
+        ca.validate()?;
+        std::fs::create_dir_all(dir)?;
+        ca.persist(dir)?;
+        Ok(ca)
+    }
+
+    /// Explicitly replace the CA, invalidating certificates issued by the old CA.
+    pub fn rotate(dir: &Path) -> anyhow::Result<Self> {
+        let ca = Self::generate_ca()?;
+        std::fs::create_dir_all(dir)?;
+        ca.persist(dir)?;
+        Ok(ca)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        use x509_parser::prelude::FromDer;
+        let key = KeyPair::from_pem(&self.key_pem).context("parsing persisted CA key")?;
+        let (_, pem) = x509_parser::pem::parse_x509_pem(self.cert_pem.as_bytes())
+            .map_err(|error| anyhow!("parsing persisted CA certificate: {error}"))?;
+        if pem.label != "CERTIFICATE" {
+            anyhow::bail!("expected a CA certificate");
+        }
+        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&pem.contents)
+            .map_err(|error| anyhow!("parsing persisted CA certificate: {error}"))?;
+        if cert.public_key().raw != key.subject_public_key_info() {
+            anyhow::bail!("CA certificate and private key do not match");
+        }
+        if !cert.is_ca() {
+            anyhow::bail!("persisted certificate is not a CA");
+        }
+        Ok(())
+    }
+
+    fn persist(&self, dir: &Path) -> anyhow::Result<()> {
+        use aurcache_common::fs::write_private;
+        // One atomic replacement commits the pair. Any later failure can be
+        // repaired from this record without rotating the identity.
+        write_private(&dir.join("ca-identity.json"), &serde_json::to_vec(self)?)?;
+        write_private(&key_path(dir), self.key_pem.as_bytes())?;
+        write_private(&cert_path(dir), self.cert_pem.as_bytes())?;
+        Ok(())
     }
 
     fn generate_ca() -> anyhow::Result<Self> {
@@ -100,6 +165,12 @@ impl Ca {
     #[must_use]
     pub fn ca_cert_pem(&self) -> &str {
         &self.cert_pem
+    }
+
+    /// PEM of the private key, for an explicitly requested credential backup.
+    #[must_use]
+    pub fn private_key_pem(&self) -> &str {
+        &self.key_pem
     }
 
     /// Whether this CA issued `cert_pem`.
@@ -241,33 +312,6 @@ pub fn fingerprint_from_spki_der(spki_der: &[u8]) -> String {
     sha256_hex(spki_der)
 }
 
-/// Write key material readable only by its owner.
-///
-/// The mode is set as the file is created, so there is no moment at which
-/// the key is on disk and readable by anyone else.
-pub fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("creating {}", path.display()))?;
-        // An existing file keeps its mode through `open`.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restricting {}", path.display()))?;
-        file.write_all(contents.as_bytes())
-            .with_context(|| format!("writing {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +442,50 @@ mod tests {
         let b = ca.sign_worker_csr(&make_csr(), 365).unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
         assert_ne!(a.cert_pem, b.cert_pem);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_partial_invalid_and_mismatched_identities_are_rejected() {
+        let ca = Ca::generate_ca().unwrap();
+        let other = Ca::generate_ca().unwrap();
+        for (cert, key) in [
+            (Some(ca.cert_pem.as_str()), None),
+            (None, Some(ca.key_pem.as_str())),
+            (Some("garbage"), Some(ca.key_pem.as_str())),
+            (Some(ca.cert_pem.as_str()), Some(other.key_pem.as_str())),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(cert) = cert {
+                std::fs::write(cert_path(dir.path()), cert).unwrap();
+            }
+            if let Some(key) = key {
+                std::fs::write(key_path(dir.path()), key).unwrap();
+            }
+            assert!(Ca::load_or_create(dir.path()).is_err());
+            assert!(!dir.path().join("ca-identity.json").exists());
+        }
+    }
+
+    #[test]
+    fn interrupted_pem_installation_recovers_the_same_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = Ca::load_or_create(dir.path()).unwrap();
+        std::fs::remove_file(key_path(dir.path())).unwrap();
+        std::fs::write(cert_path(dir.path()), "interrupted").unwrap();
+        let reloaded = Ca::load_or_create(dir.path()).unwrap();
+        assert_eq!(ca.cert_pem, reloaded.cert_pem);
+        assert_eq!(
+            std::fs::read_to_string(key_path(dir.path())).unwrap(),
+            ca.key_pem
+        );
+        assert_eq!(
+            std::fs::read_to_string(cert_path(dir.path())).unwrap(),
+            ca.cert_pem
+        );
     }
 }

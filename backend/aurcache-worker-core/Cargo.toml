@@ -20,7 +20,7 @@ percent-encoding = "2.3"
 tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
 aurcache-common = { path = "../aurcache-common" }
-# Fingerprints and private-key writes, shared with the server so the two
+# Fingerprints, shared with the server so the two
 # cannot compute an identity differently.
 aurcache-ca = { path = "../aurcache-ca" }
 # `O_NOFOLLOW`, for opening what a build produced.

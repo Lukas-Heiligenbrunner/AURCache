@@ -71,11 +71,6 @@ done
 [[ $packages == all ]] && packages=$ALL_PACKAGES
 require_packaging_submodules $packages
 
-# The version the PKGBUILDs declare. Read rather than repeated, so a release
-# bump does not leave this script building a tarball nothing will unpack.
-PKGVER="$(awk -F= '/^pkgver=/ {print $2; exit}' "$REPO_ROOT/packaging/aurcache-worker/PKGBUILD")"
-readonly PKGVER
-
 if [[ -z $outdir ]]; then
     outdir=$(mktemp -d -t aurcache-packages-XXXXXX)
     echo "==> building in $outdir"
@@ -86,6 +81,9 @@ built=()
 for pkg in $packages; do
     src="$REPO_ROOT/packaging/$pkg"
     [[ -d $src ]] || { echo "error: no such package: $pkg" >&2; exit 2; }
+
+    # Each AUR submodule owns its version and the source archive name it needs.
+    PKGVER="$(awk -F= '/^pkgver=/ {print $2; exit}' "$src/PKGBUILD")"
 
     # A copy per package: makepkg writes src/, pkg/ and the tarball beside the
     # PKGBUILD, and doing that inside the repository dirties the tree.

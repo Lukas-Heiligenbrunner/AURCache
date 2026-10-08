@@ -558,7 +558,10 @@ fn EntitySearch(about: Signal<Option<EntityRef>>) -> Element {
             return (Vec::new(), Vec::new());
         };
         let (packages, workers) = futures_util::future::join(
-            client.list_packages(None, None, true),
+            client.list_packages(&aurcache_client::PackageQuery {
+                dependencies: aurcache_client::DependencySelection::Include,
+                ..Default::default()
+            }),
             client.list_workers(),
         )
         .await;

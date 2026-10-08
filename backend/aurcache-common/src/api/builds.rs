@@ -120,3 +120,38 @@ pub struct BuildSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_reason: Option<WaitingReason>,
 }
+
+impl BuildSummary {
+    /// The measured runtime, absent for unfinished or invalid timestamp pairs.
+    #[must_use]
+    pub fn elapsed(&self) -> Option<std::time::Duration> {
+        elapsed_between(self.start_time, self.end_time)
+    }
+}
+
+/// Measure a nonnegative interval between recorded Unix timestamps.
+#[must_use]
+pub fn elapsed_between(start: Option<i64>, end: Option<i64>) -> Option<std::time::Duration> {
+    let seconds = end?.checked_sub(start?)?;
+    Some(std::time::Duration::from_secs(u64::try_from(seconds).ok()?))
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::*;
+    #[test]
+    fn missing_reversed_and_overflowing_intervals_are_unknown() {
+        assert_eq!(elapsed_between(None, Some(10)), None);
+        assert_eq!(elapsed_between(Some(10), None), None);
+        assert_eq!(elapsed_between(Some(10), Some(9)), None);
+        assert_eq!(elapsed_between(Some(i64::MIN), Some(i64::MAX)), None);
+        assert_eq!(
+            elapsed_between(Some(10), Some(10)),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            elapsed_between(Some(10), Some(11)),
+            Some(std::time::Duration::from_secs(1))
+        );
+    }
+}

@@ -83,7 +83,7 @@ pub(crate) async fn wait_for_drain(
         .with_context(|| format!("no worker {id}"))?;
     let mut last = None;
     loop {
-        let mut running = client.list_builds_matching(&query).await?;
+        let mut running = client.list_builds(&query).await?;
         running
             .retain(|b| b.status == BuildState::Active && b.worker_name.as_deref() == Some(&name));
         if running.is_empty() {

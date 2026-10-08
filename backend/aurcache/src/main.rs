@@ -95,6 +95,9 @@ async fn main() {
     // changes to it from interleaving: the worker protocol publishing builds,
     // package removals and restores all go through this one.
     let repo = Arc::new(Repository::new(REPO_ROOT).with_log(activity.clone()));
+    repo.recover(&db)
+        .await
+        .expect("recovering committed repository update");
     if let Err(e) = repo.init() {
         tracing::error!("Failed to initialize the pacman repository: {e:#}");
     }
@@ -170,7 +173,7 @@ async fn main() {
 
     // Delete package files the repository stopped listing, once clients with
     // an older repo.db have had time to fetch them.
-    let retired_sweep_handle = start_retired_package_sweep(Arc::clone(&repo));
+    let retired_sweep_handle = start_retired_package_sweep(db.clone(), Arc::clone(&repo));
 
     // Keep the log from growing for ever. Nothing has ever pruned it, and it
     // now records restarts and failures as well as what people did.

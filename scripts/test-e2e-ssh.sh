@@ -197,7 +197,6 @@ fi
 
 # ---- The marker proves the SSH fetch actually happened ---------------------
 log "=== Verifying the payload reached the package ==="
-net="$(dc ps --format '{{.Name}}' aurcache | head -1)"
 found="$(docker run --rm --network "aurcache_aurcache_network" archlinux:latest bash -c "
   set -e
   printf '[repo]\nSigLevel = Never\nServer = http://aurcache:8081/\$arch\n' >> /etc/pacman.conf

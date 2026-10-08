@@ -6,29 +6,17 @@ pub fn now_secs() -> i64 {
     (js_sys::Date::now() / 1000.0) as i64
 }
 
-/// How long a build took, from its two timestamps.
-///
-/// `None` for either end means the build has not finished (or never started),
-/// which is not a zero-length build — so it reads as unknown rather than `0s`.
-/// Validates the endpoints, then the one ladder in [`format_secs`] renders it.
-pub fn format_duration(start: Option<i64>, end: Option<i64>) -> String {
-    let (Some(start), Some(end)) = (start, end) else {
+/// Render a known runtime in the largest useful unit; a dash means unknown.
+pub fn format_duration(duration: Option<std::time::Duration>) -> String {
+    let Some(duration) = duration else {
         return "—".to_string();
     };
-    let secs = end - start;
-    if secs < 0 {
-        // A worker with a skewed clock can report an end before the start.
-        // Showing a negative duration is worse than admitting it is unknown.
-        return "—".to_string();
+    let secs = duration.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
     }
-    // Zero stays `0s`, not [`format_secs`]' "—": a measured instant build is
-    // known, where a zero average means no builds to average.
-    if secs == 0 {
-        return "0s".to_string();
-    }
-    // Saturating: only a >136-year build overflows `u32`, and that formats as
-    // a very large hour count rather than wrapping to seconds.
-    format_secs(u32::try_from(secs).unwrap_or(u32::MAX))
 }
 
 /// A byte count, at the largest unit that leaves a number worth reading.
@@ -61,17 +49,6 @@ pub fn format_size(bytes: Option<i64>) -> String {
         .map_or_else(|| "—".to_string(), format_bytes)
 }
 
-/// A span of seconds, for a duration that is already a number rather than two
-/// timestamps — an average, say.
-pub fn format_secs(secs: u32) -> String {
-    match secs {
-        0 => "—".to_string(),
-        1..=59 => format!("{secs}s"),
-        60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
-        _ => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
-    }
-}
-
 /// How long ago something happened, relative to `now`.
 ///
 /// Relative rather than absolute because it avoids a timezone and locale
@@ -80,7 +57,7 @@ pub fn format_age(ts: Option<i64>, now: i64) -> String {
     let Some(ts) = ts else {
         return "—".to_string();
     };
-    let secs = now - ts;
+    let secs = now.saturating_sub(ts);
     if secs < 0 {
         // Clock skew again: a build stamped in the future.
         return "just now".to_string();
@@ -95,7 +72,7 @@ pub fn format_age(ts: Option<i64>, now: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, format_secs};
+    use super::format_bytes;
 
     #[test]
     fn bytes_climb_to_the_largest_readable_unit() {
@@ -113,38 +90,99 @@ mod tests {
 
     /// Zero is "no builds have finished", not "they took no time".
     #[test]
-    fn an_average_of_zero_reads_as_unknown() {
-        assert_eq!(format_secs(0), "—");
-        assert_eq!(format_secs(45), "45s");
-        assert_eq!(format_secs(90), "1m 30s");
-        assert_eq!(format_secs(3700), "1h 1m");
+    fn zero_is_measured_and_unknown_is_explicit() {
+        assert_eq!(format_duration(None), "—");
+        assert_eq!(format_duration(Some(std::time::Duration::ZERO)), "0s");
+        assert_eq!(
+            format_duration(Some(std::time::Duration::from_secs(45))),
+            "45s"
+        );
+        assert_eq!(
+            format_duration(Some(std::time::Duration::from_secs(90))),
+            "1m 30s"
+        );
+        assert_eq!(
+            format_duration(Some(std::time::Duration::from_secs(3700))),
+            "1h 1m"
+        );
     }
 
     use super::*;
 
     #[test]
     fn durations_read_in_the_largest_useful_unit() {
-        assert_eq!(format_duration(Some(0), Some(43)), "43s");
-        assert_eq!(format_duration(Some(0), Some(123)), "2m 3s");
-        assert_eq!(format_duration(Some(100), Some(100)), "0s");
-        assert_eq!(format_duration(Some(0), Some(3600)), "1h 0m");
-        assert_eq!(format_duration(Some(0), Some(7860)), "2h 11m");
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(0),
+                Some(43)
+            )),
+            "43s"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(0),
+                Some(123)
+            )),
+            "2m 3s"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(100),
+                Some(100)
+            )),
+            "0s"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(0),
+                Some(3600)
+            )),
+            "1h 0m"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(0),
+                Some(7860)
+            )),
+            "2h 11m"
+        );
     }
 
     /// A running build has a start but no end. That is unknown, not zero — a
     /// build in progress must not read as having taken no time.
     #[test]
     fn an_unfinished_build_has_no_duration() {
-        assert_eq!(format_duration(Some(100), None), "—");
-        assert_eq!(format_duration(None, None), "—");
-        assert_eq!(format_duration(None, Some(100)), "—");
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(100),
+                None
+            )),
+            "—"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(None, None)),
+            "—"
+        );
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                None,
+                Some(100)
+            )),
+            "—"
+        );
     }
 
     /// Builds are timed by whichever worker ran them, so the two ends can come
     /// from different clocks. A negative duration is nonsense to display.
     #[test]
     fn a_backwards_timestamp_pair_is_not_shown_as_negative() {
-        assert_eq!(format_duration(Some(500), Some(100)), "—");
+        assert_eq!(
+            format_duration(aurcache_common::api::builds::elapsed_between(
+                Some(500),
+                Some(100)
+            )),
+            "—"
+        );
     }
 
     #[test]

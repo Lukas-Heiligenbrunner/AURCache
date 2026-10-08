@@ -7,7 +7,7 @@ use aurcache_db::prelude::{Builds, Dependencies, Files, PackageVcsSources, Packa
 use aurcache_db::{builds, dependencies, files, package_vcs_sources, packages, settings};
 use sea_orm::{
     ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
-    QuerySelect, TransactionTrait,
+    QuerySelect,
 };
 use tracing::warn;
 
@@ -35,7 +35,7 @@ pub async fn package_delete(
         return Ok(());
     }
 
-    let mut update = repo.begin().await;
+    let mut update = repo.begin(db).await?;
     let doomed: Vec<packages::Model> = Packages::find()
         .filter(packages::Column::Id.is_in(pkg_ids.iter().copied()))
         .all(db)
@@ -47,7 +47,12 @@ pub async fn package_delete(
     for file in update.published_files_of(db, &ids).await? {
         update.retire(&file)?;
     }
-    let doomed = update.commit(|| delete_rows(db, &doomed)).await?;
+    let doomed = update
+        .commit(db, |txn| {
+            let doomed = doomed.clone();
+            Box::pin(async move { delete_rows(txn, &doomed).await })
+        })
+        .await?;
 
     // Stored outside the database and not part of the repository, so after the
     // rows are gone: a stray directory is only wasted bytes.
@@ -118,11 +123,9 @@ async fn refuse_if_needed<C: ConnectionTrait>(
 /// those rows -- but every child is deleted explicitly anyway, so nothing here
 /// depends on the connection having `foreign_keys` on.
 async fn delete_rows(
-    db: &DatabaseConnection,
+    txn: &sea_orm::DatabaseTransaction,
     doomed: &[packages::Model],
 ) -> anyhow::Result<Vec<packages::Model>> {
-    let txn = db.begin().await?;
-
     // Locked before the dependents are counted: on Postgres a new dependency
     // row referencing one of these then waits for this transaction and fails on
     // the missing package, instead of being inserted after the check and
@@ -133,18 +136,18 @@ async fn delete_rows(
         .column(packages::Column::Id)
         .lock_exclusive()
         .into_tuple()
-        .all(&txn)
+        .all(txn)
         .await?;
 
-    refuse_if_needed(&txn, doomed, &ids).await?;
+    refuse_if_needed(txn, doomed, &ids).await?;
 
     Files::delete_many()
         .filter(files::Column::PackageId.is_in(ids.iter().copied()))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     Builds::delete_many()
         .filter(builds::Column::PkgId.is_in(ids.iter().copied()))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     // Both ends: what these packages needed, and the links among themselves.
     // Nothing outside the set points at them, as checked above.
@@ -154,22 +157,21 @@ async fn delete_rows(
                 .add(dependencies::Column::DependentId.is_in(ids.iter().copied()))
                 .add(dependencies::Column::DependeeId.is_in(ids.iter().copied())),
         )
-        .exec(&txn)
+        .exec(txn)
         .await?;
     Settings::delete_many()
         .filter(settings::Column::PkgId.is_in(ids.iter().copied()))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     PackageVcsSources::delete_many()
         .filter(package_vcs_sources::Column::PackageId.is_in(ids.iter().copied()))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     Packages::delete_many()
         .filter(packages::Column::Id.is_in(ids.iter().copied()))
-        .exec(&txn)
+        .exec(txn)
         .await?;
 
-    txn.commit().await?;
     Ok(doomed
         .iter()
         .filter(|pkg| ids.contains(&pkg.id))

@@ -254,6 +254,7 @@ async fn interactions() {
 
     filtering_narrows_the_list_and_updates_the_url(&session).await;
     a_stored_config_file_is_loaded_into_the_editor(&session).await;
+    settings_preserve_edits_in_flight_and_reject_double_submission(&session).await;
     a_linked_search_arrives_applied(&session).await;
     a_linked_status_filter_arrives_applied(&session).await;
     one_queued_package_can_be_taken_back(&session).await;
@@ -1441,4 +1442,87 @@ async fn following_a_dependency_loads_that_package(session: &Session) {
         "url did not follow the click: {}",
         session.url().await
     );
+}
+
+/// Delayed writes must not clobber newer text or fire twice; a failed reset
+/// must preserve the override and its draft.
+async fn settings_preserve_edits_in_flight_and_reject_double_submission(session: &Session) {
+    let original = session.value_of("textarea").await;
+    let submitted = format!("{original}\n# submitted by the interaction test");
+    let edited = format!("{submitted}\n# typed while saving");
+    assert!(
+        session
+            .eval::<bool>(
+                r#"
+        window.__originalSettingFetch = window.fetch.bind(window);
+        window.__settingWrites = 0;
+        window.__failSettingReset = false;
+        window.fetch = async (request, options) => {
+            const method = options?.method || request.method || 'GET';
+            if (method.toUpperCase() === 'DELETE' && window.__failSettingReset) {
+                const response = new Response('reset failed', {status: 500});
+                // A fetched response has a URL; reqwest requires it on wasm.
+                Object.defineProperty(response, 'url', {value: request.url || request});
+                return response;
+            }
+            const response = await window.__originalSettingFetch(request, options);
+            if (method === 'PATCH') {
+                window.__settingWrites += 1;
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+            return response;
+        };
+        return true;
+    "#
+                .to_string()
+            )
+            .await
+    );
+    session.type_into("textarea", &submitted).await;
+    assert!(session.eval::<bool>(r#"
+        const save = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Save');
+        save.click(); save.click(); return true;
+    "#.to_string()).await);
+    session.type_into("textarea", &edited).await;
+    session
+        .wait_until("the delayed save", |text| text.contains("Saved."))
+        .await;
+    assert_eq!(session.value_of("textarea").await, edited);
+    assert_eq!(
+        session
+            .eval::<i64>("return window.__settingWrites;".to_string())
+            .await,
+        1
+    );
+    assert!(session.text().await.contains("unsaved"));
+
+    // The successful save triggers a refetch, briefly disabling/remounting
+    // controls. Wait for the editable stored file before exercising reset.
+    session
+        .wait_for_script(
+            "the reset control after refetch",
+            r#"
+        return [...document.querySelectorAll('button')]
+            .some(button => button.textContent.trim() === 'Reset' && !button.disabled);
+    "#
+            .to_string(),
+        )
+        .await;
+    session
+        .eval::<bool>("window.__failSettingReset = true; return true;".to_string())
+        .await;
+    session.click_labelled("button", "Reset").await;
+    session
+        .wait_until("the failed reset", |text| text.contains("reset failed"))
+        .await;
+    assert_eq!(session.value_of("textarea").await, edited);
+    assert!(session.text().await.contains("stored"));
+    session
+        .eval::<bool>("window.fetch = window.__originalSettingFetch; return true;".to_string())
+        .await;
+    session.type_into("textarea", &original).await;
+    session.click_labelled("button", "Save").await;
+    session
+        .wait_until("restoring the seeded file", |text| text.contains("Saved."))
+        .await;
 }

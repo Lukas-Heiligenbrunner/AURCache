@@ -10,13 +10,17 @@ use aurcache_db::files;
 use aurcache_db::prelude::Files;
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::PackageEntry;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    QueryFilter, Statement, TransactionTrait,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{error, warn};
+use tracing::warn;
 
 pub use aurcache_common::fs::REPO_ROOT;
 
@@ -44,7 +48,7 @@ const COMMIT_ATTEMPTS: u32 = 3;
 /// when renaming its own result in, however atomic the rename.
 pub struct Repository {
     root: PathBuf,
-    lock: tokio::sync::Mutex<()>,
+    lock: Arc<tokio::sync::Mutex<()>>,
     /// Numbers each update, so a [`PublishedFile`] can say which one read it.
     updates: AtomicU64,
     /// When each retired file stopped being listed, as far as this process
@@ -66,7 +70,7 @@ pub struct Repository {
 /// before the lock, or by an earlier change, could be out of date -- another
 /// package may have claimed the file since -- and acting on it would retire that
 /// package's file.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PublishedFile {
     update: u64,
     row: files::Model,
@@ -186,7 +190,7 @@ pub struct Update<'a> {
     /// and are written by its uploads without the lock; every other table; and
     /// anything outside this process -- it is an in-process mutex, so a second
     /// server on the same repository, or a hand edit, is not serialized.
-    _lock: tokio::sync::MutexGuard<'a, ()>,
+    _lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
     /// What the change adds and retires, applied by [`Update::commit`].
     changes: Changes,
 }
@@ -282,68 +286,85 @@ impl Update<'_> {
     /// Make the recorded changes, with `commit` -- the caller's database
     /// transaction -- as the decision point:
     ///
-    /// 1. The new databases are written beside the current ones.
-    /// 2. `commit` runs, and is tried again if it fails.
-    /// 3. Only once it has succeeded: staged files are moved in and the new
-    ///    databases renamed over the old. Retired files stay for the sweep.
-    ///
-    /// What can fail and is private comes first, then the riskiest public step,
-    /// and last the renames. A failure before step 3 leaves the repository
-    /// exactly as it was and is returned. Step 3 is past the point of no return
-    /// -- the database already says it happened -- so its failures are logged
-    /// rather than returned.
-    pub async fn commit<T, F, Fut>(mut self, mut commit: F) -> anyhow::Result<T>
+    /// Prepare replacements privately, commit the caller's changes and the
+    /// recovery plan in one SQL transaction, then finalize the filesystem.
+    /// A post-commit error leaves the plan for recovery before the next update.
+    pub async fn commit<T, F>(mut self, db: &DatabaseConnection, mut commit: F) -> anyhow::Result<T>
     where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = anyhow::Result<T>>,
+        F: for<'txn> FnMut(
+            &'txn DatabaseTransaction,
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = anyhow::Result<T>> + Send + 'txn>,
+        >,
+        T: Send,
     {
-        // `self`, and with it the lock, lives until this function returns:
-        // every step below is part of the one serialized change.
-        let root = self.repo.root();
-        let changes = self.take_changes();
-
-        if let Some(addition) = changes.add.iter().find(|a| !a.staged.starts_with(root)) {
+        let root = self.repo.root().to_path_buf();
+        let changes = Arc::new(self.take_changes());
+        if let Some(addition) = changes.add.iter().find(|a| !a.staged.starts_with(&root)) {
             anyhow::bail!(
-                "{} is not staged under the repository at {}",
+                "{} is not staged under {}",
                 addition.staged.display(),
                 root.display()
             );
         }
-
-        let changes = Arc::new(changes);
-        let prepared = {
-            let root = root.to_path_buf();
+        let plan = {
+            let root = root.clone();
             let changes = Arc::clone(&changes);
-            tokio::task::spawn_blocking(move || prepare(&root, &changes)).await??
+            let lock = Arc::clone(&self._lock);
+            tokio::task::spawn_blocking(move || {
+                let _lock = lock;
+                let prepared = prepare(&root, &changes)?;
+                Finalization::prepare(&root, &changes, &prepared)
+            })
+            .await??
         };
-
+        let serialized = match serde_json::to_string(&plan) {
+            Ok(serialized) => serialized,
+            Err(error) => {
+                plan.discard();
+                return Err(error.into());
+            }
+        };
         let mut attempt = 1;
         let committed = loop {
-            match commit().await {
+            let result = async {
+                let txn = db.begin().await?;
+                let done = commit(&txn).await?;
+                txn.execute_raw(Statement::from_sql_and_values(
+                    txn.get_database_backend(),
+                    "INSERT INTO repository_updates (id, plan) VALUES (1, $1)",
+                    [serialized.clone().into()],
+                ))
+                .await?;
+                txn.commit()
+                    .await
+                    .map_err(|error| anyhow::Error::new(FinalizationPending(error.into())))?;
+                Ok::<_, anyhow::Error>(done)
+            }
+            .await;
+            match result {
                 Ok(done) => break done,
-                Err(e) if attempt < COMMIT_ATTEMPTS => {
+                Err(error) if error.downcast_ref::<FinalizationPending>().is_some() => {
+                    return Err(error);
+                }
+                Err(error) if attempt < COMMIT_ATTEMPTS => {
                     self.repo.log.emit(Event::RepoCommitRetried {
                         attempt,
-                        error: format!("{e:#}"),
+                        error: format!("{error:#}"),
                     });
                     tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
                     attempt += 1;
                 }
-                Err(e) => {
-                    for p in &prepared {
-                        p.discard();
-                    }
-                    return Err(e);
+                Err(error) => {
+                    plan.discard();
+                    return Err(error);
                 }
             }
         };
-
-        let root = root.to_path_buf();
-        let log = self.repo.log.clone();
-        match tokio::task::spawn_blocking(move || publish(&root, &changes, &prepared, &log)).await {
-            Ok(retired) => self.repo.note_retired(retired, Instant::now()),
-            Err(e) => error!("publishing a committed repository update panicked: {e}"),
-        }
+        self.repo
+            .finalize(db, plan, Arc::clone(&self._lock))
+            .await
+            .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
         Ok(committed)
     }
 }
@@ -368,7 +389,7 @@ impl Repository {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            lock: tokio::sync::Mutex::new(()),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
             updates: AtomicU64::new(0),
             retired: std::sync::Mutex::new(HashMap::new()),
             log: ActivityLog::discarding(),
@@ -428,14 +449,63 @@ impl Repository {
     /// update, so every decision about what to change is made with no other
     /// change able to interleave. Dropping it without committing changes
     /// nothing.
-    pub async fn begin(&self) -> Update<'_> {
-        let lock = self.lock.lock().await;
-        Update {
+    pub async fn begin(&self, db: &DatabaseConnection) -> anyhow::Result<Update<'_>> {
+        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        self.recover_locked(db, Arc::clone(&lock)).await?;
+        Ok(Update {
             repo: self,
             id: self.updates.fetch_add(1, Ordering::Relaxed),
             _lock: lock,
             changes: Changes::default(),
+        })
+    }
+
+    /// Finish a previously committed update before accepting more repository work.
+    pub async fn recover(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
+        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        self.recover_locked(db, lock).await
+    }
+
+    async fn recover_locked(
+        &self,
+        db: &DatabaseConnection,
+        lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> anyhow::Result<()> {
+        if let Some(row) = db
+            .query_one_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT plan FROM repository_updates WHERE id = 1",
+            ))
+            .await?
+        {
+            let plan: Finalization = serde_json::from_str(&row.try_get::<String>("", "plan")?)?;
+            self.finalize(db, plan, lock)
+                .await
+                .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
         }
+        Ok(())
+    }
+
+    async fn finalize(
+        &self,
+        db: &DatabaseConnection,
+        plan: Finalization,
+        lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> anyhow::Result<()> {
+        let log = self.log.clone();
+        let task_lock = Arc::clone(&lock);
+        let retired = tokio::task::spawn_blocking(move || {
+            let _lock = task_lock;
+            plan.finish(&log)
+        })
+        .await??;
+        db.execute_raw(Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM repository_updates WHERE id = 1",
+        ))
+        .await?;
+        self.note_retired(retired, Instant::now());
+        Ok(())
     }
 
     /// Delete the retired package files -- present in a platform directory, not
@@ -452,20 +522,30 @@ impl Repository {
     /// Takes the repository lock: deciding what to delete from what is listed
     /// is a change like any other, and an update in flight may be about to list
     /// a file this would otherwise see as unlisted.
-    pub async fn sweep(&self, grace: Duration) -> anyhow::Result<usize> {
-        self.sweep_at(Instant::now(), grace).await
+    pub async fn sweep(&self, db: &DatabaseConnection, grace: Duration) -> anyhow::Result<usize> {
+        self.sweep_at(db, Instant::now(), grace).await
     }
 
-    async fn sweep_at(&self, now: Instant, grace: Duration) -> anyhow::Result<usize> {
-        let _lock = self.lock.lock().await;
+    async fn sweep_at(
+        &self,
+        db: &DatabaseConnection,
+        now: Instant,
+        grace: Duration,
+    ) -> anyhow::Result<usize> {
+        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        self.recover_locked(db, Arc::clone(&lock)).await?;
         let root = self.root.clone();
         let known = std::mem::take(&mut *self.retired_times());
         let log = self.log.clone();
+        let task_lock = Arc::clone(&lock);
         let Swept {
             still_retired,
             deleted,
-        } = tokio::task::spawn_blocking(move || sweep_retired(&root, known, now, grace, &log))
-            .await?;
+        } = tokio::task::spawn_blocking(move || {
+            let _lock = task_lock;
+            sweep_retired(&root, known, now, grace, &log)
+        })
+        .await?;
         *self.retired_times() = still_retired;
         if !deleted.is_empty() {
             self.log.emit(Event::RepoSwept {
@@ -546,44 +626,130 @@ fn prepare(root: &Path, changes: &Changes) -> anyhow::Result<Vec<Prepared>> {
     Ok(prepared)
 }
 
-/// Step 3: make a committed update visible, and return the files it retired.
-///
-/// Package files first, so everything the new databases list exists before
-/// they do; the databases next. Retired files are left where they are.
-fn publish(
-    root: &Path,
-    changes: &Changes,
-    prepared: &[Prepared],
-    log: &ActivityLog,
-) -> Vec<PathBuf> {
-    let mut added: HashSet<(Platform, &str)> = HashSet::new();
-    for addition in &changes.add {
-        let dir = Repository::platform_dir(root, addition.platform);
-        let filename = addition.entry.filename.as_str();
-        added.insert((addition.platform, filename));
-        rename_logged(log, &addition.staged, &dir.join(filename));
-        let staged_sig = with_suffix(&addition.staged, ".sig");
-        if staged_sig.exists() {
-            rename_logged(log, &staged_sig, &dir.join(format!("{filename}.sig")));
-        }
-    }
-    for p in prepared {
-        rename_logged(log, &p.db_next, &p.db);
-        rename_logged(log, &p.files_next, &p.files);
-    }
-    let mut retired = Vec::new();
-    for Retirement { platform, filename } in &changes.retire {
-        // A rebuild at the same version replaces the file it retires: the new
-        // one is already in place, and listed, under that name.
-        if added.contains(&(*platform, filename.as_str())) {
-            continue;
-        }
-        let path = Repository::platform_dir(root, *platform).join(filename);
-        retired.push(with_suffix(&path, ".sig"));
-        retired.push(path);
-    }
-    retired
+/// A durable filesystem plan, recorded in the same transaction as its SQL changes.
+#[derive(Serialize, Deserialize)]
+struct Finalization {
+    moves: Vec<FileMove>,
+    retired: Vec<PathBuf>,
 }
+
+#[derive(Serialize, Deserialize)]
+struct FileMove {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+impl Finalization {
+    fn prepare(root: &Path, changes: &Changes, prepared: &[Prepared]) -> anyhow::Result<Self> {
+        let mut plan = Self {
+            moves: Vec::new(),
+            retired: Vec::new(),
+        };
+        let result = (|| {
+            let mut added = HashSet::new();
+            for addition in &changes.add {
+                let filename = addition.entry.filename.as_str();
+                let dir = Repository::platform_dir(root, addition.platform);
+                added.insert((addition.platform, filename));
+                // Preserve uploads until publication (including dependent promotion)
+                // finishes. Recovery can then safely retry a still-PUBLISHING build.
+                for source in [
+                    addition.staged.clone(),
+                    with_suffix(&addition.staged, ".sig"),
+                ] {
+                    if source != addition.staged && !source.exists() {
+                        continue;
+                    }
+                    let pending = with_suffix(&source, ".publishing");
+                    if pending.exists() {
+                        std::fs::remove_file(&pending)?;
+                    }
+                    std::fs::hard_link(&source, &pending)?;
+                    let destination = if source == addition.staged {
+                        dir.join(filename)
+                    } else {
+                        dir.join(format!("{filename}.sig"))
+                    };
+                    plan.moves.push(FileMove {
+                        source: pending.clone(),
+                        destination,
+                    });
+                    std::fs::File::open(&pending)?.sync_all()?;
+                    std::fs::File::open(pending.parent().expect("staged sibling"))?.sync_all()?;
+                }
+            }
+            for p in prepared {
+                for (source, destination) in [(&p.db_next, &p.db), (&p.files_next, &p.files)] {
+                    std::fs::File::open(source)?.sync_all()?;
+                    std::fs::File::open(source.parent().expect("database sibling"))?.sync_all()?;
+                    plan.moves.push(FileMove {
+                        source: source.clone(),
+                        destination: destination.clone(),
+                    });
+                }
+            }
+            for Retirement { platform, filename } in &changes.retire {
+                if added.contains(&(*platform, filename.as_str())) {
+                    continue;
+                }
+                let path = Repository::platform_dir(root, *platform).join(filename);
+                plan.retired.push(with_suffix(&path, ".sig"));
+                plan.retired.push(path);
+            }
+            Ok::<_, anyhow::Error>(())
+        })();
+        if let Err(error) = result {
+            plan.discard();
+            for p in prepared {
+                p.discard();
+            }
+            return Err(error);
+        }
+        Ok(plan)
+    }
+
+    /// Remove replacements that have never been committed to SQL.
+    fn discard(&self) {
+        for movement in &self.moves {
+            let _ = std::fs::remove_file(&movement.source);
+        }
+    }
+
+    fn finish(self, log: &ActivityLog) -> anyhow::Result<Vec<PathBuf>> {
+        for movement in &self.moves {
+            match std::fs::rename(&movement.source, &movement.destination) {
+                Ok(()) => {}
+                // A restart replays the whole plan, including moves already done.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && !movement.source.exists()
+                        && movement.destination.is_file() => {}
+                Err(error) => {
+                    log.emit(Event::RepoFileFailed {
+                        action: FileAction::Move,
+                        path: movement.source.display().to_string(),
+                        error: error.to_string(),
+                    });
+                    return Err(error.into());
+                }
+            }
+            if let Some(parent) = movement.destination.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        Ok(self.retired)
+    }
+}
+
+/// SQL has committed; the filesystem plan must be replayed before any new update.
+#[derive(Debug)]
+pub struct FinalizationPending(pub(crate) anyhow::Error);
+impl std::fmt::Display for FinalizationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "repository finalization pending: {:#}", self.0)
+    }
+}
+impl std::error::Error for FinalizationPending {}
 
 /// Whether a name in a platform directory is a package file or a package's
 /// detached signature -- the only things a sweep ever considers.
@@ -662,16 +828,6 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn rename_logged(log: &ActivityLog, from: &Path, to: &Path) {
-    if let Err(e) = std::fs::rename(from, to) {
-        log.emit(Event::RepoFileFailed {
-            path: to.display().to_string(),
-            action: FileAction::Move,
-            error: format!("from {}: {e}", from.display()),
-        });
-    }
-}
-
 /// Remove a retired file, returning whether it went -- one already gone did
 /// not, and is nothing to report either.
 fn remove_logged(log: &ActivityLog, path: &Path) -> bool {
@@ -691,6 +847,15 @@ fn remove_logged(log: &ActivityLog, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    async fn test_db() -> sea_orm::DatabaseConnection {
+        use sea_orm_migration::MigratorTrait;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        aurcache_db::migration::Migrator::up(&db, None)
+            .await
+            .unwrap();
+        db
+    }
+
     /// The archive names are spelled out as constants, so they are checked
     /// against the name they derive from.
     #[test]
@@ -789,12 +954,13 @@ mod tests {
     async fn a_file_read_by_another_update_cannot_be_retired() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
+        let db = test_db().await;
         let stale = {
-            let update = repo.begin().await;
+            let update = repo.begin(&db).await.unwrap();
             published(&update, &filename("foo", "1.0-1"))
         };
 
-        let mut update = repo.begin().await;
+        let mut update = repo.begin(&db).await.unwrap();
         assert!(update.retire(&stale).is_err());
         let fresh = published(&update, &filename("foo", "1.0-1"));
         assert!(update.retire(&fresh).is_ok());
@@ -806,7 +972,8 @@ mod tests {
         add: Vec<(PathBuf, PackageEntry)>,
         remove: &[String],
     ) -> anyhow::Result<()> {
-        let mut update = repo.begin().await;
+        let db = test_db().await;
+        let mut update = repo.begin(&db).await.unwrap();
         for (staged, entry) in add {
             update.add(Platform::X86_64, staged, entry);
         }
@@ -814,7 +981,7 @@ mod tests {
             let file = published(&update, filename);
             update.retire(&file).unwrap();
         }
-        update.commit(|| async { Ok(()) }).await
+        update.commit(&db, |_| Box::pin(async { Ok(()) })).await
     }
 
     #[tokio::test]
@@ -827,7 +994,10 @@ mod tests {
             .unwrap();
         assert_eq!(listed(&repo), ["foo-1.0-1"]);
         assert!(platform_file(&repo, "foo", "1.0-1").exists());
-        assert!(!staged.exists(), "the staged file is moved, not copied");
+        assert!(
+            staged.exists(),
+            "uploads survive until publication is acknowledged"
+        );
 
         let (staged, entry) = stage(&repo, 2, "foo", "1.1-1").await;
         apply(&repo, vec![(staged, entry)], &[filename("foo", "1.0-1")])
@@ -871,11 +1041,14 @@ mod tests {
         let old = platform_file(&repo, "foo", "1.0-1");
         let grace = Duration::from_secs(3600);
 
-        assert_eq!(repo.sweep(grace).await.unwrap(), 0);
+        assert_eq!(repo.sweep(&test_db().await, grace).await.unwrap(), 0);
         assert!(old.exists() && with_suffix(&old, ".sig").exists());
 
         let later = Instant::now() + grace;
-        assert_eq!(repo.sweep_at(later, grace).await.unwrap(), 2);
+        assert_eq!(
+            repo.sweep_at(&test_db().await, later, grace).await.unwrap(),
+            2
+        );
         assert!(!old.exists());
         assert!(!with_suffix(&old, ".sig").exists());
         assert!(platform_file(&repo, "foo", "1.1-1").exists());
@@ -893,11 +1066,17 @@ mod tests {
         let restarted = Repository::new(tmp.path());
         let old = platform_file(&restarted, "foo", "1.0-1");
         // Long after the retirement, but the first this process has seen of it.
-        assert_eq!(restarted.sweep(grace).await.unwrap(), 0);
+        assert_eq!(restarted.sweep(&test_db().await, grace).await.unwrap(), 0);
         assert!(old.exists());
 
         let later = Instant::now() + grace;
-        assert_eq!(restarted.sweep_at(later, grace).await.unwrap(), 2);
+        assert_eq!(
+            restarted
+                .sweep_at(&test_db().await, later, grace)
+                .await
+                .unwrap(),
+            2
+        );
         assert!(!old.exists());
     }
 
@@ -912,7 +1091,7 @@ mod tests {
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
 
         let later = Instant::now() + Duration::from_secs(7200);
-        repo.sweep_at(later, Duration::from_secs(3600))
+        repo.sweep_at(&test_db().await, later, Duration::from_secs(3600))
             .await
             .unwrap();
 
@@ -936,7 +1115,7 @@ mod tests {
 
         let later = Instant::now() + Duration::from_secs(7200);
         assert_eq!(
-            repo.sweep_at(later, Duration::from_secs(3600))
+            repo.sweep_at(&test_db().await, later, Duration::from_secs(3600))
                 .await
                 .unwrap(),
             2,
@@ -955,20 +1134,21 @@ mod tests {
     async fn a_failed_commit_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
+        let db = test_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
         let db_before = std::fs::read(repo.root().join("x86_64").join(DB_ARCHIVE)).unwrap();
 
         let (staged, entry) = stage(&repo, 2, "bar", "1.0-1").await;
         let attempts = AtomicU32::new(0);
-        let mut update = repo.begin().await;
+        let mut update = repo.begin(&db).await.unwrap();
         update.add(Platform::X86_64, staged.clone(), entry);
         let foo = published(&update, &filename("foo", "1.0-1"));
         update.retire(&foo).unwrap();
         let failed: anyhow::Result<()> = update
-            .commit(|| async {
+            .commit(&db, |_| {
                 attempts.fetch_add(1, Ordering::SeqCst);
-                anyhow::bail!("the database said no")
+                Box::pin(async { anyhow::bail!("the database said no") })
             })
             .await;
 
@@ -1000,17 +1180,21 @@ mod tests {
     async fn a_commit_that_fails_once_is_retried() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
+        let db = test_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         let commits = AtomicU32::new(0);
 
-        let mut update = repo.begin().await;
+        let mut update = repo.begin(&db).await.unwrap();
         update.add(Platform::X86_64, staged, entry);
         update
-            .commit(|| async {
-                if commits.fetch_add(1, Ordering::SeqCst) == 0 {
-                    anyhow::bail!("busy");
-                }
-                Ok(())
+            .commit(&db, |_| {
+                let busy = commits.fetch_add(1, Ordering::SeqCst) == 0;
+                Box::pin(async move {
+                    if busy {
+                        anyhow::bail!("busy");
+                    }
+                    Ok(())
+                })
             })
             .await
             .unwrap();
@@ -1025,9 +1209,10 @@ mod tests {
     async fn an_update_dropped_uncommitted_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
+        let db = test_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         {
-            let mut update = repo.begin().await;
+            let mut update = repo.begin(&db).await.unwrap();
             update.add(Platform::X86_64, staged.clone(), entry.clone());
         }
         assert!(staged.exists());
@@ -1064,19 +1249,23 @@ mod tests {
     async fn concurrent_updates_do_not_lose_each_other() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Arc::new(Repository::new(tmp.path()));
+        let db = test_db().await;
         let (foo_staged, foo) = stage(&repo, 1, "foo", "1.0-1").await;
         let (bar_staged, bar) = stage(&repo, 2, "bar", "1.0-1").await;
 
         let slow = {
             let repo = Arc::clone(&repo);
+            let db = db.clone();
             async move {
-                let mut update = repo.begin().await;
+                let mut update = repo.begin(&db).await.unwrap();
                 update.add(Platform::X86_64, foo_staged, foo);
                 // Long enough for the other update to be waiting on it.
                 update
-                    .commit(|| async {
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        Ok(())
+                    .commit(&db, |_| {
+                        Box::pin(async {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            Ok(())
+                        })
                     })
                     .await
             }
@@ -1093,5 +1282,121 @@ mod tests {
         b.unwrap();
 
         assert_eq!(listed(&repo), ["bar-1.0-1", "foo-1.0-1"]);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_keeps_the_lock_until_blocking_preparation_ends() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Arc::new(Repository::new(tmp.path()));
+        let db = test_db().await;
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        let archive = repo.root().join("x86_64").join(DB_ARCHIVE);
+        let original = std::fs::read(&archive).unwrap();
+        std::fs::remove_file(&archive).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&archive)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        // Reading the current database now blocks on this FIFO, so cancellation
+        // occurs inside the real filesystem preparation, not a test-only hook.
+        let (started, reading) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let fifo = archive.clone();
+        let contents = original.clone();
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(fifo).unwrap();
+            let _ = started.send(());
+            let _ = released.recv_timeout(Duration::from_secs(5));
+            file.write_all(&contents).unwrap();
+        });
+        let (staged, entry) = stage(&repo, 2, "bar", "1.0-1").await;
+        let publishing = {
+            let repo = Arc::clone(&repo);
+            let db = db.clone();
+            tokio::spawn(async move {
+                let mut update = repo.begin(&db).await.unwrap();
+                update.add(Platform::X86_64, staged, entry);
+                update.commit(&db, |_| Box::pin(async { Ok(()) })).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(5), reading)
+            .await
+            .unwrap()
+            .unwrap();
+        publishing.abort();
+        assert!(publishing.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), repo.begin(&db))
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(5), repo.begin(&db))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(update);
+        std::fs::remove_file(&archive).unwrap();
+        std::fs::write(&archive, original).unwrap();
+        assert_eq!(listed(&repo), ["foo-1.0-1"]);
+        assert!(!platform_file(&repo, "bar", "1.0-1").exists());
+    }
+
+    #[tokio::test]
+    async fn each_failed_move_is_durable_and_replayable_after_restart() {
+        for blocked_name in [
+            filename("foo", "1.0-1"),
+            DB_ARCHIVE.to_string(),
+            FILES_ARCHIVE.to_string(),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let db = test_db().await;
+            let repo = Repository::new(tmp.path());
+            let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+            let blocked = tmp.path().join("x86_64").join(&blocked_name);
+            let mut update = repo.begin(&db).await.unwrap();
+            update.add(Platform::X86_64, staged.clone(), entry);
+            let error = update
+                .commit(&db, |_| {
+                    let blocked = blocked.clone();
+                    Box::pin(async move {
+                        if blocked.exists() {
+                            std::fs::remove_file(&blocked)?;
+                        }
+                        std::fs::create_dir(&blocked)?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<FinalizationPending>().is_some());
+            assert!(staged.exists());
+            let restarted = Repository::new(tmp.path());
+            assert!(restarted.begin(&db).await.is_err());
+            assert!(restarted.sweep(&db, Duration::ZERO).await.is_err());
+            std::fs::remove_dir(&blocked).unwrap();
+            restarted.recover(&db).await.unwrap();
+            restarted.recover(&db).await.unwrap();
+            assert_eq!(listed(&restarted), ["foo-1.0-1"]);
+            assert!(platform_file(&restarted, "foo", "1.0-1").is_file());
+            assert!(tmp.path().join("x86_64").join(FILES_ARCHIVE).is_file());
+            assert!(
+                db.query_one_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    "SELECT id FROM repository_updates"
+                ))
+                .await
+                .unwrap()
+                .is_none()
+            );
+        }
     }
 }

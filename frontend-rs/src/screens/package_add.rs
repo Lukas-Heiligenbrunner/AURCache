@@ -358,7 +358,10 @@ fn AddPackageDialog(q: String) -> Element {
     // that question gets answered before it is asked.
     let existing = use_resource(|| async move {
         crate::api::client()?
-            .list_packages(None, None, false)
+            .list_packages(&aurcache_client::PackageQuery {
+                dependencies: aurcache_client::DependencySelection::RequestedOnly,
+                ..Default::default()
+            })
             .await
             .map_err(|e| e.to_string())
     });

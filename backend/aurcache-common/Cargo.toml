@@ -9,7 +9,6 @@ workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-anyhow = { workspace = true }
 utoipa = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 # Only for working out when a schedule runs (`clock`). Default features off:

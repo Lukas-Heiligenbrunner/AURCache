@@ -195,25 +195,38 @@ impl FromStr for WorkerRef {
     }
 }
 
-impl FromStr for BuildRef {
-    type Err = String;
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let id = expect_ns(raw, NS_BUILD)?;
-        // From the right: a pkgbase cannot contain `/`, so the last one is the
-        // separator even if a future id shape grows more of them.
-        let (pkgbase, number) = id
+impl BuildRef {
+    /// Parse a CLI or URL identity (`pkgbase/number`) without an entity namespace.
+    pub fn parse_id(raw: &str) -> Result<Self, String> {
+        let (pkgbase, number) = raw
             .rsplit_once('/')
-            .ok_or_else(|| format!("{raw:?} is missing a build number"))?;
-        let number: i32 = number
-            .parse()
-            .map_err(|_| format!("{raw:?} does not end in a build number"))?;
+            .ok_or_else(|| format!("expected <pkgbase>/<number>, got {raw:?}"))?;
         if pkgbase.is_empty() {
             return Err(format!("{raw:?} names no package"));
         }
+        let number: i32 = number
+            .parse()
+            .map_err(|_| format!("{raw:?} does not end in a build number"))?;
+        if number < 1 {
+            return Err("build numbers start at 1".to_string());
+        }
         Ok(Self {
-            pkgbase: pkgbase.to_string(),
+            pkgbase: pkgbase.to_owned(),
             number,
         })
+    }
+
+    /// Format a CLI or URL identity without the activity-log namespace.
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.pkgbase, self.number)
+    }
+}
+
+impl FromStr for BuildRef {
+    type Err = String;
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse_id(expect_ns(raw, NS_BUILD)?)
     }
 }
 

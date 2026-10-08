@@ -45,7 +45,15 @@ pub(crate) async fn render_packages_list(
     args: ListPackagesArgs,
 ) -> Result<()> {
     let packages = client
-        .list_packages(args.limit, args.page, args.all)
+        .list_packages(&aurcache_client::PackageQuery {
+            limit: args.limit,
+            page: args.page,
+            dependencies: if args.all {
+                aurcache_client::DependencySelection::Include
+            } else {
+                aurcache_client::DependencySelection::RequestedOnly
+            },
+        })
         .await?;
     if args.quiet {
         let names = packages

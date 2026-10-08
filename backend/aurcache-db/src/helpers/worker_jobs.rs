@@ -305,94 +305,104 @@ pub fn is_live(last_seen: Option<i64>, now: i64, liveness_timeout: i64) -> bool 
 ///
 /// The final transition is a conditional `UPDATE ... WHERE status = ENQUEUED`,
 /// so two workers racing for the same build see exactly one `rows_affected == 1`.
-pub async fn claim_job<C: ConnectionTrait>(
+pub async fn claim_job<C: ConnectionTrait + sea_orm::TransactionTrait>(
     db: &C,
     worker_id: i32,
     lease_ttl_secs: i64,
     spill_delay_secs: i64,
     liveness_timeout_secs: i64,
 ) -> Result<Option<builds::Model>, DbErr> {
-    let fleet = Fleet::load(db).await?;
-    // Not approved (or vanished mid-request): nothing is claimable. Paused:
-    // nothing new, by the operator's request -- which is the whole of pause.
-    let Some(me) = fleet.worker(worker_id).filter(|me| !me.paused) else {
-        return Ok(None);
-    };
-
-    let candidates: Vec<QueuedBuild> = QueuedBuild::queued(db).await?;
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-
-    // Packages this worker already has in flight. `ACTIVE` alone: a build that
-    // has moved on to `PUBLISHING` has ended its lease, and its worker has
-    // finished with the sources — the same predicate the rest of lease policing
-    // uses.
-    let busy_pkgs: HashSet<i32> = Builds::find()
-        .select_only()
-        .column(builds::Column::PkgId)
-        .filter(builds::Column::Status.eq(BuildState::Active))
-        .filter(builds::Column::WorkerId.eq(worker_id))
-        .into_tuple::<i32>()
-        .all(db)
-        .await?
-        .into_iter()
-        .collect();
-
-    let names = package_names(db, &candidates).await?;
-
-    let now = now_secs();
-    let mut ranked: Vec<ClaimRank> = Vec::new();
-    for build in &candidates {
-        let Some(pkg) = names.get(&build.pkg_id) else {
-            continue;
+    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    let result: Result<_, DbErr> = async {
+        let db = &txn;
+        let fleet = Fleet::load(db).await?;
+        // Not approved (or vanished mid-request): nothing is claimable. Paused:
+        // nothing new, by the operator's request -- which is the whole of pause.
+        let Some(me) = fleet.worker(worker_id).filter(|me| !me.paused) else {
+            return Ok(None);
         };
-        // Leave it queued rather than parking it here: another worker has its
-        // own `SRCDEST` and can take it now.
-        if busy_pkgs.contains(&build.pkg_id) {
-            continue;
-        }
-        let platform = build.platform.as_str();
-        if !fleet.capable(me, platform, pkg) {
-            continue;
-        }
-        let age = now - build.start_time.unwrap_or(now);
-        if age < spill_delay_secs && fleet.blocked(me, platform, pkg, now, liveness_timeout_secs) {
-            continue;
-        }
-        ranked.push(ClaimRank {
-            not_affine: !fleet.affine(me.id, pkg),
-            emulated: !me.native.iter().any(|a| a == platform),
-            queued_at: build.start_time.unwrap_or(0),
-            id: build.id,
-        });
-    }
-    ranked.sort_unstable();
 
-    for ClaimRank { id, .. } in ranked {
-        let res = Builds::update_many()
-            .col_expr(builds::Column::Status, BuildState::Active.into())
-            .col_expr(builds::Column::WorkerId, worker_id.into())
-            .col_expr(
-                builds::Column::LeaseExpiresAt,
-                (now + lease_ttl_secs).into(),
-            )
-            .col_expr(builds::Column::StartTime, now.into())
-            .filter(builds::Column::Id.eq(id))
-            .filter(builds::Column::Status.eq(BuildState::Enqueued))
-            .exec(db)
-            .await?;
-        if res.rows_affected == 1 {
-            // Only after the claim above has actually won: that update is the
-            // compare-and-swap deciding which worker gets the build, so doing
-            // this first would announce a build that another worker took.
-            if let Some(pkg_id) = candidates.iter().find(|b| b.id == id).map(|b| b.pkg_id) {
-                refresh_package_status(db, pkg_id).await?;
-            }
-            return Builds::find_by_id(id).one(db).await;
+        let candidates: Vec<QueuedBuild> = QueuedBuild::queued(db).await?;
+        if candidates.is_empty() {
+            return Ok(None);
         }
+
+        // Packages this worker already has in flight. `ACTIVE` alone: a build that
+        // has moved on to `PUBLISHING` has ended its lease, and its worker has
+        // finished with the sources — the same predicate the rest of lease policing
+        // uses.
+        let busy_pkgs: HashSet<i32> = Builds::find()
+            .select_only()
+            .column(builds::Column::PkgId)
+            .filter(builds::Column::Status.eq(BuildState::Active))
+            .filter(builds::Column::WorkerId.eq(worker_id))
+            .into_tuple::<i32>()
+            .all(db)
+            .await?
+            .into_iter()
+            .collect();
+
+        let names = package_names(db, &candidates).await?;
+
+        let now = now_secs();
+        let mut ranked: Vec<ClaimRank> = Vec::new();
+        for build in &candidates {
+            let Some(pkg) = names.get(&build.pkg_id) else {
+                continue;
+            };
+            // Leave it queued rather than parking it here: another worker has its
+            // own `SRCDEST` and can take it now.
+            if busy_pkgs.contains(&build.pkg_id) {
+                continue;
+            }
+            let platform = build.platform.as_str();
+            if !fleet.capable(me, platform, pkg) {
+                continue;
+            }
+            let age = now - build.start_time.unwrap_or(now);
+            if age < spill_delay_secs
+                && fleet.blocked(me, platform, pkg, now, liveness_timeout_secs)
+            {
+                continue;
+            }
+            ranked.push(ClaimRank {
+                not_affine: !fleet.affine(me.id, pkg),
+                emulated: !me.native.iter().any(|a| a == platform),
+                queued_at: build.start_time.unwrap_or(0),
+                id: build.id,
+            });
+        }
+        ranked.sort_unstable();
+
+        for ClaimRank { id, .. } in ranked {
+            let res = Builds::update_many()
+                .col_expr(builds::Column::Status, BuildState::Active.into())
+                .col_expr(builds::Column::WorkerId, worker_id.into())
+                .col_expr(
+                    builds::Column::LeaseExpiresAt,
+                    (now + lease_ttl_secs).into(),
+                )
+                .col_expr(builds::Column::StartTime, now.into())
+                .filter(builds::Column::Id.eq(id))
+                .filter(builds::Column::Status.eq(BuildState::Enqueued))
+                .exec(db)
+                .await?;
+            if res.rows_affected == 1 {
+                // Only after the claim above has actually won: that update is the
+                // compare-and-swap deciding which worker gets the build, so doing
+                // this first would announce a build that another worker took.
+                if let Some(pkg_id) = candidates.iter().find(|b| b.id == id).map(|b| b.pkg_id) {
+                    refresh_package_status(db, pkg_id).await?;
+                }
+                return Builds::find_by_id(id).one(db).await;
+            }
+        }
+        Ok(None)
     }
-    Ok(None)
+    .await;
+    let result = result?;
+    txn.commit().await?;
+    Ok(result)
 }
 
 /// Result of processing a heartbeat: builds that were reconciled away from the
@@ -1083,6 +1093,26 @@ mod tests {
     /// one the packages list renders. It used to be written on enqueue and
     /// again on completion, with nothing in between -- so for the whole
     /// duration of a build the package claimed to be waiting for it to start.
+    #[tokio::test]
+    async fn a_failed_package_refresh_rolls_back_the_claim() {
+        let db = setup().await;
+        worker(
+            &db,
+            W {
+                id: 1,
+                ..W::default()
+            },
+        )
+        .await;
+        enqueue(&db, 1, "x86_64", 100).await;
+        db.execute_unprepared("CREATE TRIGGER reject_status BEFORE UPDATE OF status ON packages BEGIN SELECT RAISE(ABORT, 'status failed'); END").await.unwrap();
+        assert!(claim_job(&db, 1, LEASE, SPILL, LIVENESS).await.is_err());
+        let build = Builds::find_by_id(1).one(&db).await.unwrap().unwrap();
+        assert_eq!(build.status, BuildState::Enqueued);
+        assert_eq!(build.worker_id, None);
+        assert_eq!(build.lease_expires_at, None);
+    }
+
     #[tokio::test]
     async fn claiming_a_build_marks_its_package_as_building() {
         let db = setup().await;
