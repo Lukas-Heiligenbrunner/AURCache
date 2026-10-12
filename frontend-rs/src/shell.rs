@@ -11,7 +11,8 @@ use dioxus::prelude::*;
 
 /// Where the docs and the source live. Rendered as real links rather than
 /// click handlers so they behave like links — middle-click, copy address.
-const DOCS_URL: &str = "https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction";
+const DOCS_URL: &str =
+    "https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction";
 const GITHUB_URL: &str = "https://github.com/Lukas-Heiligenbrunner/AURCache";
 
 /// Checkbox id the drawer toggle and its labels agree on.
