@@ -66,6 +66,9 @@ RUN --mount=type=cache,target=/opt/cargo-cache,id=cargo-downloads-root \
 # coupling the script exists to remove.
 COPY backend/ /app/backend/
 COPY frontend-rs /app/frontend-rs/
+# The logo the build script embeds beside the frontend, from the same relative
+# place (`../../assets`).
+COPY assets/icons/icon.svg /app/assets/icons/icon.svg
 WORKDIR /app/backend
 
 # Which architecture to cross-compile for. `TARGETPLATFORM` is what buildx sets

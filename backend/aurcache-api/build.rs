@@ -53,10 +53,16 @@ fn main() {
     for path in ["src", "Cargo.toml", "Cargo.lock", "index.html"] {
         println!("cargo:rerun-if-changed={}", frontend.join(path).display());
     }
+    let logo = manifest.join("../../assets/icons/icon.svg");
+    println!("cargo:rerun-if-changed={}", logo.display());
 
     build_wasm(&frontend);
     bindgen(&frontend);
     install(&frontend.join("dist"), &web);
+    // The project logo, shared with the README and the docs rather than
+    // copied into the frontend: the sidebar shows it and the page uses it as
+    // its favicon, both as `/icon.svg`.
+    std::fs::copy(&logo, web.join("icon.svg")).expect("copy the logo");
 }
 
 /// Compile the frontend crate to wasm.

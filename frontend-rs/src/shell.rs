@@ -321,20 +321,12 @@ fn Icon(path: &'static str) -> Element {
     }
 }
 
-/// The app logo: a package glyph, drawn inline so no asset pipeline is needed.
+/// The project logo, which the server embeds beside the bundle (see
+/// `aurcache-api`'s build script).
 #[component]
 fn LogoIcon() -> Element {
     rsx! {
-        svg {
-            class: "h-11 w-11 shrink-0 text-primary",
-            view_box: "0 0 24 24",
-            fill: "none",
-            stroke: "currentColor",
-            stroke_width: "1.5",
-            stroke_linecap: "round",
-            stroke_linejoin: "round",
-            path { d: "M21 8v8l-9 4-9-4V8l9-4 9 4Zm-18 0 9 4 9-4M12 12v8" }
-        }
+        img { class: "h-11 w-auto shrink-0", src: "/icon.svg", alt: "" }
     }
 }
 
