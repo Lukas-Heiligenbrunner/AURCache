@@ -6,5 +6,6 @@ pub mod dependency_resolution;
 pub mod files;
 pub mod operations;
 pub mod time;
+pub mod txn;
 pub mod worker_jobs;
 pub mod worker_store;

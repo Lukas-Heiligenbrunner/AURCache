@@ -169,7 +169,8 @@ pub async fn promote_waiting_build<C: ConnectionTrait + sea_orm::TransactionTrai
     pkg_id: i32,
     platform: Platform,
 ) -> Result<Option<builds::Model>, DbErr> {
-    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    // It reads the waiting build before promoting it.
+    let txn = crate::helpers::txn::begin_write(db).await?;
     let result: Result<_, DbErr> = async {
         let db = &txn;
         let Some(build) = Builds::find()

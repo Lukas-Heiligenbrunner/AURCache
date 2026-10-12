@@ -12,7 +12,7 @@ use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::PackageEntry;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    QueryFilter, Statement, TransactionTrait,
+    QueryFilter, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -330,15 +330,21 @@ impl Update<'_> {
             let result = async {
                 let txn = db.begin().await?;
                 let done = commit(&txn).await?;
-                txn.execute_raw(Statement::from_sql_and_values(
-                    txn.get_database_backend(),
-                    "INSERT INTO repository_updates (id, plan) VALUES (1, $1)",
-                    [serialized.clone().into()],
-                ))
-                .await?;
-                txn.commit()
-                    .await
-                    .map_err(|error| anyhow::Error::new(FinalizationPending(error.into())))?;
+                txn.execute(&plan_row::insert(&serialized)).await?;
+                if let Err(error) = txn.commit().await {
+                    // A failed COMMIT usually committed nothing (SQLite busy),
+                    // but a connection lost after sending it may have committed
+                    // everything. The plan row tells the two apart; when even
+                    // that cannot be read, assume the worst and keep the plan.
+                    return match plan_row::read(db).await {
+                        Ok(Some(recorded)) if recorded == serialized => Ok(done),
+                        Ok(_) => Err(error.into()),
+                        Err(read) => Err(anyhow::Error::new(FinalizationPending(
+                            anyhow::Error::new(error)
+                                .context(format!("and the plan could not be read back: {read}")),
+                        ))),
+                    };
+                }
                 Ok::<_, anyhow::Error>(done)
             }
             .await;
@@ -366,6 +372,53 @@ impl Update<'_> {
             .await
             .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
         Ok(committed)
+    }
+}
+
+/// The one row of `repository_updates`: the plan of an update whose SQL has
+/// committed and whose files may not all be in place yet.
+mod plan_row {
+    use sea_orm::sea_query::{
+        Alias, DeleteStatement, Expr, ExprTrait, InsertStatement, Query, SelectStatement,
+    };
+    use sea_orm::{ConnectionTrait, DbErr};
+
+    /// There is at most one plan at a time, so it always has this id.
+    const ID: i32 = 1;
+
+    fn table() -> Alias {
+        Alias::new("repository_updates")
+    }
+
+    pub(super) fn insert(plan: &str) -> InsertStatement {
+        Query::insert()
+            .into_table(table())
+            .columns([Alias::new("id"), Alias::new("plan")])
+            .values_panic([ID.into(), plan.into()])
+            .to_owned()
+    }
+
+    fn select() -> SelectStatement {
+        Query::select()
+            .column(Alias::new("plan"))
+            .from(table())
+            .and_where(Expr::col(Alias::new("id")).eq(ID))
+            .to_owned()
+    }
+
+    pub(super) fn delete() -> DeleteStatement {
+        Query::delete()
+            .from_table(table())
+            .and_where(Expr::col(Alias::new("id")).eq(ID))
+            .to_owned()
+    }
+
+    /// The recorded plan, serialized, if there is one.
+    pub(super) async fn read<C: ConnectionTrait>(db: &C) -> Result<Option<String>, DbErr> {
+        db.query_one(&select())
+            .await?
+            .map(|row| row.try_get::<String>("", "plan"))
+            .transpose()
     }
 }
 
@@ -432,7 +485,13 @@ impl Repository {
     /// deployments mount the repository as a volume of its own.
     #[must_use]
     pub fn staging_dir(&self, build_id: i32) -> PathBuf {
-        self.root.join(STAGING_DIR).join(build_id.to_string())
+        self.staging_root().join(build_id.to_string())
+    }
+
+    /// The directory every build's [`Repository::staging_dir`] is in.
+    #[must_use]
+    pub fn staging_root(&self) -> PathBuf {
+        self.root.join(STAGING_DIR)
     }
 
     /// Read a staged package into its database entry. The slow part of
@@ -471,14 +530,8 @@ impl Repository {
         db: &DatabaseConnection,
         lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
     ) -> anyhow::Result<()> {
-        if let Some(row) = db
-            .query_one_raw(Statement::from_string(
-                db.get_database_backend(),
-                "SELECT plan FROM repository_updates WHERE id = 1",
-            ))
-            .await?
-        {
-            let plan: Finalization = serde_json::from_str(&row.try_get::<String>("", "plan")?)?;
+        if let Some(serialized) = plan_row::read(db).await? {
+            let plan: Finalization = serde_json::from_str(&serialized)?;
             self.finalize(db, plan, lock)
                 .await
                 .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
@@ -499,11 +552,7 @@ impl Repository {
             plan.finish(&log)
         })
         .await??;
-        db.execute_raw(Statement::from_string(
-            db.get_database_backend(),
-            "DELETE FROM repository_updates WHERE id = 1",
-        ))
-        .await?;
+        db.execute(&plan_row::delete()).await?;
         self.note_retired(retired, Instant::now());
         Ok(())
     }
@@ -664,7 +713,7 @@ impl Finalization {
                     if pending.exists() {
                         std::fs::remove_file(&pending)?;
                     }
-                    std::fs::hard_link(&source, &pending)?;
+                    link_or_copy(&source, &pending)?;
                     let destination = if source == addition.staged {
                         dir.join(filename)
                     } else {
@@ -724,6 +773,21 @@ impl Finalization {
                     if error.kind() == std::io::ErrorKind::NotFound
                         && !movement.source.exists()
                         && movement.destination.is_file() => {}
+                // Not done, and never can be: what was to be moved is gone
+                // (staging cleared by hand, a volume reset). Retrying would
+                // block every later update for good, so the move is reported
+                // and skipped; the build that produced it has to run again.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && !movement.source.exists() =>
+                {
+                    log.emit(Event::RepoFileFailed {
+                        action: FileAction::Move,
+                        path: movement.source.display().to_string(),
+                        error: format!("{error}; skipped, the file is gone"),
+                    });
+                    continue;
+                }
                 Err(error) => {
                     log.emit(Event::RepoFileFailed {
                         action: FileAction::Move,
@@ -822,6 +886,22 @@ fn sweep_retired(
     swept
 }
 
+/// A second name for `source` at `destination`, or a copy of it where the
+/// filesystem has no hard links (SMB, some FUSE mounts): slower and twice the
+/// space for a while, but publishing still works there.
+fn link_or_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(source, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            warn!(
+                "could not hard-link {} ({error}); copying it instead",
+                source.display()
+            );
+            std::fs::copy(source, destination).map(|_| ())
+        }
+    }
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
@@ -868,6 +948,7 @@ mod tests {
     }
 
     use super::*;
+    use sea_orm::Statement;
     use std::io::Read;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -1398,5 +1479,38 @@ mod tests {
                 .is_none()
             );
         }
+    }
+
+    /// A committed plan whose staged file was lost before it could be moved
+    /// cannot ever finish; it must not block the repository for good.
+    #[tokio::test]
+    async fn a_plan_whose_staged_file_is_gone_does_not_block_the_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = test_db().await;
+        let repo = Repository::new(tmp.path());
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        let blocked = platform_file(&repo, "foo", "1.0-1");
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, staged, entry);
+        let error = update
+            .commit(&db, |_| {
+                let blocked = blocked.clone();
+                Box::pin(async move {
+                    std::fs::create_dir(&blocked)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<FinalizationPending>().is_some());
+
+        // The staging area is cleared by hand while the plan waits.
+        std::fs::remove_dir(&blocked).unwrap();
+        std::fs::remove_dir_all(repo.staging_root()).unwrap();
+
+        let restarted = Repository::new(tmp.path());
+        restarted.recover(&db).await.unwrap();
+        assert!(restarted.begin(&db).await.is_ok());
+        assert!(plan_row::read(&db).await.unwrap().is_none());
     }
 }

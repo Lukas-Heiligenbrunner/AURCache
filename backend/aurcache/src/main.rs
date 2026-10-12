@@ -95,9 +95,11 @@ async fn main() {
     // changes to it from interleaving: the worker protocol publishing builds,
     // package removals and restores all go through this one.
     let repo = Arc::new(Repository::new(REPO_ROOT).with_log(activity.clone()));
-    repo.recover(&db)
-        .await
-        .expect("recovering committed repository update");
+    // Not fatal: a server that will not start cannot say what is wrong, and the
+    // next repository update and every publication retry recover again.
+    if let Err(e) = repo.recover(&db).await {
+        tracing::error!("Could not finish the last repository update: {e:#}");
+    }
     if let Err(e) = repo.init() {
         tracing::error!("Failed to initialize the pacman repository: {e:#}");
     }

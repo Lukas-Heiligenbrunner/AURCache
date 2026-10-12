@@ -312,7 +312,8 @@ pub async fn claim_job<C: ConnectionTrait + sea_orm::TransactionTrait>(
     spill_delay_secs: i64,
     liveness_timeout_secs: i64,
 ) -> Result<Option<builds::Model>, DbErr> {
-    let txn = sea_orm::TransactionTrait::begin(db).await?;
+    // It reads the fleet and the queue before the claim writes.
+    let txn = crate::helpers::txn::begin_write(db).await?;
     let result: Result<_, DbErr> = async {
         let db = &txn;
         let fleet = Fleet::load(db).await?;

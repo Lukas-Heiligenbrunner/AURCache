@@ -329,9 +329,17 @@ impl Cache {
         // free space cannot change while this loop merely looks.
         let mut short_of_free = min_free > 0 && free_bytes(&root).is_some_and(|f| f < min_free);
         for (_, path, size) in trees {
-            let over_budget = max_bytes > 0 && (unknown > 0 || total > max_bytes);
-            if !over_budget && !short_of_free {
+            let over_budget = max_bytes > 0 && total > max_bytes;
+            if !over_budget && !short_of_free && (max_bytes == 0 || unknown == 0) {
                 return;
+            }
+            // A tree that could not be measured cannot be counted against the
+            // budget, so it is reclaimed on its own account -- the only way to
+            // bring the cache back to one that can be counted. It is no reason
+            // to reclaim the trees that can: they go only when over budget.
+            let unmeasured = max_bytes > 0 && size.is_none();
+            if !over_budget && !short_of_free && !unmeasured {
+                continue;
             }
             // A tree a build is using is worth keeping even when it is itself
             // what breaches the budget: deleting it fails that build.
@@ -1155,6 +1163,11 @@ pub fn plan_eviction(
             if unknown == 0 && total <= max_size {
                 break;
             }
+            // An unmeasured entry goes on its own account; it does not push
+            // the measured ones out (see `reclaim_builddirs`).
+            if e.size.is_some() && total <= max_size {
+                continue;
+            }
             if !in_use.contains(e.pkgbase.as_str()) {
                 evict.push(e.pkgbase.clone());
                 if let Some(size) = e.size {
@@ -1180,7 +1193,28 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sizes_cannot_hide_an_over_budget_cache() {
+    fn an_unmeasured_entry_is_evicted_on_its_own_account() {
+        let entries = vec![
+            CacheEntry {
+                pkgbase: "unmeasured".into(),
+                size: None,
+                last_used: t(100),
+            },
+            CacheEntry {
+                pkgbase: "idle".into(),
+                size: Some(10),
+                last_used: t(50),
+            },
+        ];
+        assert_eq!(
+            plan_eviction(&entries, 100, Duration::ZERO, now(), &[]),
+            ["unmeasured"]
+        );
+        assert!(plan_eviction(&entries, 0, Duration::ZERO, now(), &[]).is_empty());
+    }
+
+    #[test]
+    fn an_unmeasured_entry_in_use_does_not_push_out_the_rest() {
         let entries = vec![
             CacheEntry {
                 pkgbase: "active".into(),
@@ -1193,11 +1227,7 @@ mod tests {
                 last_used: t(50),
             },
         ];
-        assert_eq!(
-            plan_eviction(&entries, 100, Duration::ZERO, now(), &["active".into()]),
-            ["idle"]
-        );
-        assert!(plan_eviction(&entries, 0, Duration::ZERO, now(), &[]).is_empty());
+        assert!(plan_eviction(&entries, 100, Duration::ZERO, now(), &["active".into()]).is_empty());
     }
 
     #[test]

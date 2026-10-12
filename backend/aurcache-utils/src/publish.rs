@@ -99,42 +99,48 @@ pub async fn publish_build(
         .map(|pkg| pkg.name);
 
     let publication = if build.status == BuildState::Successful {
-        Files::find()
-            .filter(files::Column::PackageId.eq(build.pkg_id))
-            .filter(files::Column::Platform.eq(build.platform))
-            .all(db)
+        Ok(Publication::Earlier)
+    } else if recorded(&build) {
+        // An earlier attempt committed the files and the repository; only
+        // the status did not follow. Reading every archive again would redo
+        // all of that for nothing.
+        settle(db, &build)
             .await
-            .map(|files| Published {
-                packages: files.len(),
-            })
-            .map_err(|error| {
-                anyhow::Error::new(crate::repository::FinalizationPending(error.into()))
-            })
+            .map(|()| Publication::Now { packages: None })
     } else {
-        publish(db, repo, &build).await
+        publish(db, repo, &build)
+            .await
+            .map(|packages| Publication::Now {
+                packages: Some(packages),
+            })
     };
     match publication {
-        Ok(published) => {
-            info!(
-                "published build #{build_id}: {} package(s)",
-                published.packages
-            );
-            log(
-                Some(activity),
-                pkgbase.as_deref(),
-                build.number,
-                "Published to the repository\n",
-            )
-            .await;
+        Ok(publication) => {
             let published = pkgbase.as_ref().map(|pkgbase| BuildRef {
                 pkgbase: pkgbase.clone(),
                 number: build.number,
             });
-            if let Some(published) = &published {
-                activity.emit(Event::BuildPublished {
-                    build: published.clone(),
-                    version: Some(build.version.clone()).filter(|v| !v.is_empty()),
-                });
+            // Announced once, by the call that published it: a retry to
+            // promote dependents, or a resume after a restart, has nothing new
+            // to say.
+            if let Publication::Now { packages } = publication {
+                match packages {
+                    Some(packages) => info!("published build #{build_id}: {packages} package(s)"),
+                    None => info!("published build #{build_id}"),
+                }
+                log(
+                    Some(activity),
+                    pkgbase.as_deref(),
+                    build.number,
+                    "Published to the repository\n",
+                )
+                .await;
+                if let Some(published) = &published {
+                    activity.emit(Event::BuildPublished {
+                        build: published.clone(),
+                        version: Some(build.version.clone()).filter(|v| !v.is_empty()),
+                    });
+                }
             }
             match crate::worker_complete::trigger_dependents(db, build.pkg_id, build.platform).await
             {
@@ -225,8 +231,13 @@ async fn log(activity: Option<&ActivityLog>, pkgbase: Option<&str>, number: i32,
     }
 }
 
-struct Published {
-    packages: usize,
+/// What a call to [`publish_build`] did about the build's place in the
+/// repository.
+enum Publication {
+    /// Published by this call; `packages` when it also knows how many.
+    Now { packages: Option<usize> },
+    /// Published by an earlier call, which leaves promoting its dependents.
+    Earlier,
 }
 
 /// A staged package, read and named.
@@ -267,7 +278,7 @@ async fn publish(
     db: &DatabaseConnection,
     repo: &Repository,
     build: &builds::Model,
-) -> anyhow::Result<Published> {
+) -> anyhow::Result<usize> {
     let pkg = Packages::find_by_id(build.pkg_id)
         .one(db)
         .await?
@@ -311,6 +322,23 @@ async fn publish(
         })
         .await?;
 
+    settle(db, build).await?;
+    Ok(packages)
+}
+
+/// Whether the build's files and repository changes are already committed:
+/// [`record`] sets its size in that transaction, and nothing else does.
+fn recorded(build: &builds::Model) -> bool {
+    build.size.is_some()
+}
+
+/// `PUBLISHING` -> `SUCCESSFUL`, once the build is in the repository.
+///
+/// Its own transaction, after the repository's: a build is successful when
+/// its files can be downloaded, which is only once the update is finalized.
+/// A failure here leaves the build `PUBLISHING` but [`recorded`], and the
+/// retry comes straight back here.
+async fn settle(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Result<()> {
     let finished = async {
         let txn = db.begin().await?;
         Builds::update_many()
@@ -324,8 +352,7 @@ async fn publish(
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    finished.map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error)))?;
-    Ok(Published { packages })
+    finished.map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error)))
 }
 
 /// The staged files that are to be published, by filename.
@@ -563,7 +590,7 @@ pub async fn interrupted(db: &DatabaseConnection, repo: &Repository) -> anyhow::
         .await?;
     // Successful builds with staging still present may have crashed before
     // promoting their dependents. Replaying that step is idempotent.
-    let mut staging = match tokio::fs::read_dir(repo.root().join(".staging")).await {
+    let mut staging = match tokio::fs::read_dir(repo.staging_root()).await {
         Ok(staging) => staging,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(interrupted),
         Err(error) => return Err(error.into()),

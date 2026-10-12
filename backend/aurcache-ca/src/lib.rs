@@ -57,9 +57,10 @@ pub struct SignedWorkerCert {
 impl Ca {
     /// Load a validated CA, creating one only when no identity exists.
     ///
-    /// `ca-identity.json` is the atomic source of truth. The PEM files are
-    /// repaired from it on startup, including after interrupted installation.
-    /// Legacy PEM pairs are imported only when both files exist and match.
+    /// The PEM files are the CA, as an operator sees and installs it; a valid
+    /// pair there is used as it is. `ca-identity.json` is a copy written after
+    /// them, so a pair left half-written -- by an interrupted install or a
+    /// rotation -- is repaired from it rather than rotating the identity.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir).context("creating CA directory")?;
         let ca = Self::read_identity(dir)?.map_or_else(Self::generate_ca, Ok)?;
@@ -73,26 +74,48 @@ impl Ca {
     }
 
     fn read_identity(dir: &Path) -> anyhow::Result<Option<Self>> {
-        let ca = match std::fs::read(dir.join("ca-identity.json")) {
-            Ok(bytes) => serde_json::from_slice::<Self>(&bytes).context("reading CA identity")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match (
-                    std::fs::read_to_string(cert_path(dir)),
-                    std::fs::read_to_string(key_path(dir)),
-                ) {
-                    (Ok(cert_pem), Ok(key_pem)) => Self { cert_pem, key_pem },
-                    (Err(cert), Err(key))
-                        if cert.kind() == std::io::ErrorKind::NotFound
-                            && key.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        return Ok(None);
+        let recorded = match std::fs::read(dir.join("ca-identity.json")) {
+            Ok(bytes) => {
+                Some(serde_json::from_slice::<Self>(&bytes).context("reading CA identity")?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("reading CA identity"),
+        };
+        let pems = (
+            std::fs::read_to_string(cert_path(dir)),
+            std::fs::read_to_string(key_path(dir)),
+        );
+        let installed = match pems {
+            (Ok(cert_pem), Ok(key_pem)) => {
+                let ca = Self { cert_pem, key_pem };
+                match ca.validate() {
+                    Ok(()) => Some(ca),
+                    Err(error) if recorded.is_some() => {
+                        tracing::warn!("CA files are not a valid pair ({error:#}); restoring them");
+                        None
                     }
-                    _ => anyhow::bail!(
-                        "incomplete or unreadable CA identity; restore its certificate and key together"
-                    ),
+                    Err(error) => return Err(error),
                 }
             }
-            Err(error) => return Err(error).context("reading CA identity"),
+            (Err(cert), Err(key))
+                if cert.kind() == std::io::ErrorKind::NotFound
+                    && key.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            _ if recorded.is_some() => None,
+            _ => anyhow::bail!(
+                "incomplete or unreadable CA identity; restore its certificate and key together"
+            ),
+        };
+        let ca = match (installed, recorded) {
+            (Some(installed), Some(recorded)) if installed.cert_pem != recorded.cert_pem => {
+                tracing::info!("Using the CA installed in {}", dir.display());
+                installed
+            }
+            (Some(installed), _) => installed,
+            (None, Some(recorded)) => recorded,
+            (None, None) => return Ok(None),
         };
         ca.validate()?;
         Ok(Some(ca))
@@ -136,11 +159,12 @@ impl Ca {
 
     fn persist(&self, dir: &Path) -> anyhow::Result<()> {
         use aurcache_common::fs::write_private;
-        // One atomic replacement commits the pair. Any later failure can be
-        // repaired from this record without rotating the identity.
-        write_private(&dir.join("ca-identity.json"), &serde_json::to_vec(self)?)?;
+        // The pair first, the copy last. Interrupted between the two PEMs, the
+        // pair does not match and the copy -- still the previous identity --
+        // repairs it. Interrupted after both, the new pair is valid and wins.
         write_private(&key_path(dir), self.key_pem.as_bytes())?;
         write_private(&cert_path(dir), self.cert_pem.as_bytes())?;
+        write_private(&dir.join("ca-identity.json"), &serde_json::to_vec(self)?)?;
         Ok(())
     }
 
@@ -469,6 +493,23 @@ mod persistence_tests {
             assert!(Ca::load_or_create(dir.path()).is_err());
             assert!(!dir.path().join("ca-identity.json").exists());
         }
+    }
+
+    #[test]
+    fn a_ca_installed_by_replacing_its_files_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        Ca::load_or_create(dir.path()).unwrap();
+        let installed = Ca::generate_ca().unwrap();
+        std::fs::write(cert_path(dir.path()), &installed.cert_pem).unwrap();
+        std::fs::write(key_path(dir.path()), &installed.key_pem).unwrap();
+
+        let reloaded = Ca::load_or_create(dir.path()).unwrap();
+        assert_eq!(reloaded.cert_pem, installed.cert_pem);
+        assert_eq!(
+            std::fs::read_to_string(cert_path(dir.path())).unwrap(),
+            installed.cert_pem
+        );
+        assert_eq!(Ca::load(dir.path()).unwrap().cert_pem, installed.cert_pem);
     }
 
     #[test]
