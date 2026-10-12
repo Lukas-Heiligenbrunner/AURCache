@@ -26,7 +26,7 @@ services:
   aurcache:
     # Backend only. The `aurcache` image (without `-server`) is the hybrid
     # compatibility image, which bundles its own worker — do not use it here.
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     # Prefer a published image; uncomment to build locally instead:
     # build:
     #   context: ..
@@ -98,7 +98,7 @@ services:
     restart: unless-stopped
 
   builder:
-    image: ghcr.io/gyscos/aurcache-worker:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
     # Prefer a published image; uncomment to build locally instead:
     # build:
     #   context: ..
@@ -154,7 +154,7 @@ services:
   aarch64-builder:
     # Same multi-arch image as the native builder; `platform` selects the
     # arm64 variant from the manifest list. There is no `-arm64` tag.
-    image: ghcr.io/gyscos/aurcache-worker:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
     profiles: ["arm"]
     platform: linux/arm64
     build:

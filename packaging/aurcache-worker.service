@@ -1,6 +1,6 @@
 [Unit]
 Description=AURCache remote build worker
-Documentation=https://github.com/gyscos/AURCache
+Documentation=https://github.com/Lukas-Heiligenbrunner/AURCache
 After=network-online.target
 Wants=network-online.target
 

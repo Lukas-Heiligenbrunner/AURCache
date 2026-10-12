@@ -120,7 +120,7 @@ pub struct WorkerConfigUpdate {
 #[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct WorkerJoinInfo {
     /// Container image a worker runs, e.g.
-    /// `ghcr.io/gyscos/aurcache-worker:latest`. Overridable with
+    /// `ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest`. Overridable with
     /// the `AURCACHE_WORKER_IMAGE` environment variable for private registries
     /// or pinned tags.
     pub image: String,

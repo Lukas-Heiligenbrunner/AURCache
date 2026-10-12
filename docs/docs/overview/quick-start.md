@@ -10,7 +10,7 @@ workers**, which build packages and upload the results. The bundled compose file
 starts one of each on a single host.
 
 ```bash
-curl -O https://raw.githubusercontent.com/gyscos/AURCache/main/compose/docker-compose.yaml
+curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/compose/docker-compose.yaml
 docker compose up -d
 ```
 
@@ -31,7 +31,7 @@ anything you intend to keep:
 ```yaml
 services:
   aurcache:
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     ports:
       - "8080:8080"   # Web UI + API (plain HTTP; front with a reverse proxy for TLS)
       # No 8081 here: the `repo` service below publishes nginx on that host
@@ -55,7 +55,7 @@ services:
     restart: unless-stopped
 
   builder:
-    image: ghcr.io/gyscos/aurcache-worker:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
     depends_on:
       - aurcache
     environment:
@@ -79,7 +79,7 @@ services:
     # sendfile while Rocket's builtin handler streams 4 KiB chunks through
     # userspace. Mounts the repository read-only; the server remains the only
     # writer. Fetch the conf from the repo next to the compose file:
-    # curl -O https://raw.githubusercontent.com/gyscos/AURCache/main/docker/repo-nginx.conf
+    # curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/docker/repo-nginx.conf
     image: nginx:alpine
     ports:
       - "8081:80"   # Pacman repository (plain HTTP, for `pacman -Sy`)

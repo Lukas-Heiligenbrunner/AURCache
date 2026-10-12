@@ -8,12 +8,12 @@ name: Build and Push Docker Images
 on:
   push:
     branches:
-      - main
+      - master
     tags:
       - '*'
   pull_request_target:
     branches:
-      - main
+      - master
 
 permissions:
   contents: read
@@ -63,7 +63,7 @@ jobs:
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request_target" ]]; then
             echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          elif [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
             echo "tag=git" >> $GITHUB_OUTPUT
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT

@@ -19,7 +19,7 @@
 # runs this tree's code without building it. `up -d --build` always ignores
 # the registry and compiles locally, which is the path that needs no
 # registry access. Set AURCACHE_REGISTRY to point the `image:` tags below at
-# another registry (default: ghcr.io/gyscos).
+# another registry (default: ghcr.io/lukas-heiligenbrunner).
 #
 # Web UI / API : http://localhost:8080
 #
@@ -43,7 +43,7 @@ services:
   aurcache:
     # Prebuilt equivalent of the `build:` below; `pull` fetches it, `--build`
     # recompiles and re-tags this same name.
-    image: ${AURCACHE_REGISTRY:-ghcr.io/gyscos}/aurcache-server:latest
+    image: ${AURCACHE_REGISTRY:-ghcr.io/lukas-heiligenbrunner}/aurcache-server:latest
     build:
       context: ..
       dockerfile: docker/server.Dockerfile
@@ -108,7 +108,7 @@ services:
   demo-worker:
     # Prebuilt equivalent of the `build:` below; `pull` fetches it, `--build`
     # recompiles and re-tags this same name.
-    image: ${AURCACHE_REGISTRY:-ghcr.io/gyscos}/aurcache-demo-worker:latest
+    image: ${AURCACHE_REGISTRY:-ghcr.io/lukas-heiligenbrunner}/aurcache-demo-worker:latest
     build:
       context: ..
       dockerfile: docker/demo-worker.Dockerfile

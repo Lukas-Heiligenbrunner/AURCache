@@ -61,7 +61,7 @@ A few things worth knowing before you rely on it:
 services:
   aurcache:
     restart: unless-stopped
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     ports:
       - "9091:8080"
       - "9090:8081"

@@ -14,7 +14,7 @@ sidebar_position: 1
 | `aurcache-builder` | Spawned per build by the hybrid image's legacy builder. Not used by the split setup. |
 
 Each is published as `:latest`, `:<version>` for a release tag, and the server
-also as `:git` for the current main branch.
+also as `:git` for the current master branch.
 
 The worker image is multi-arch: the same tag serves `linux/amd64`,
 `linux/arm64` and `linux/arm/v7`, and a foreign-architecture worker is the same

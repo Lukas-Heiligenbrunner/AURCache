@@ -29,7 +29,7 @@
 
 services:
   builder:
-    image: ghcr.io/gyscos/aurcache-worker:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
     environment:
       - RUST_LOG=info
       # Public URL of the AURCache server's worker protocol port (HTTPS + mutual TLS).

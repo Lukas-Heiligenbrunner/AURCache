@@ -15,8 +15,8 @@ use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_MIRROR_PORT, AURCACHE_
 use clap::ValueEnum;
 use std::fmt::Write as _;
 
-pub const SERVER_IMAGE: &str = "ghcr.io/gyscos/aurcache-server:latest";
-pub const WORKER_IMAGE: &str = "ghcr.io/gyscos/aurcache-worker:latest";
+pub const SERVER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-server:latest";
+pub const WORKER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest";
 
 /// Static file server for the pacman repository. nginx serves archives with
 /// sendfile where Rocket streams them through userspace in 4 KiB chunks.

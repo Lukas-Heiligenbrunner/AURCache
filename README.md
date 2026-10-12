@@ -1,20 +1,20 @@
 <p align="center">
-    <a href="https://gyscos.github.io/AURCache/">
+    <a href="https://lukas-heiligenbrunner.github.io/AURCache/">
         <img src="assets/icons/icon.svg" width="200"></a><!-- </a> being on the same line as the <img> tag is intentional! -->
     <br>
     <br>
-    <a href="https://github.com/gyscos/aurcache/releases">
-        <img src="https://img.shields.io/github/v/release/gyscos/aurcache?style=flat&labelColor=1C2C2E&color=C96329&logo=GitHub&logoColor=white"></a>
-    <a href="https://github.com/gyscos/AURCache/pkgs/container/aurcache">
-        <img src="https://ghcr-badge.egpl.dev/gyscos/aurcache/tags?color=%23c26632&ignore=latest&n=3&label=Tags&trim="></a>
-    <a href="https://github.com/gyscos/AURCache/pkgs/container/aurcache">
-        <img src="https://ghcr-badge.egpl.dev/gyscos/aurcache/size?color=%23c26632&tag=latest&label=Size&trim="></a>
+    <a href="https://github.com/Lukas-Heiligenbrunner/aurcache/releases">
+        <img src="https://img.shields.io/github/v/release/lukas-heiligenbrunner/aurcache?style=flat&labelColor=1C2C2E&color=C96329&logo=GitHub&logoColor=white"></a>
+    <a href="https://github.com/Lukas-Heiligenbrunner/AURCache/pkgs/container/aurcache">
+        <img src="https://ghcr-badge.egpl.dev/lukas-heiligenbrunner/aurcache/tags?color=%23c26632&ignore=latest&n=3&label=Tags&trim="></a>
+    <a href="https://github.com/Lukas-Heiligenbrunner/AURCache/pkgs/container/aurcache">
+        <img src="https://ghcr-badge.egpl.dev/lukas-heiligenbrunner/aurcache/size?color=%23c26632&tag=latest&label=Size&trim="></a>
     <br>
 </p>
 
 <h4 align="center">
-  <a href="https://gyscos.github.io/AURCache/docs/overview/introduction">Documentation</a> |
-  <a href="https://gyscos.github.io/AURCache/">Website</a>
+  <a href="https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/introduction">Documentation</a> |
+  <a href="https://lukas-heiligenbrunner.github.io/AURCache/">Website</a>
 </h4>
 
 # AURCache
@@ -29,7 +29,7 @@ Bring up the server plus a local build worker with a single command — no edits
 no secrets, no approval clicks:
 
 ```bash
-curl -O https://raw.githubusercontent.com/gyscos/AURCache/main/compose/docker-compose.yaml
+curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/compose/docker-compose.yaml
 docker compose up -d
 ```
 
@@ -45,14 +45,14 @@ hardware or a foreign architecture (e.g. aarch64), see
 Already running AURCache as a single container? It keeps working — the
 `aurcache` image now bundles a build worker for exactly that case. It is
 deprecated, so migrate to the split setup when convenient; see
-[Backward compatibility](https://gyscos.github.io/AURCache/docs/setup/docker#backward-compatibility-the-hybrid-image).
+[Backward compatibility](https://lukas-heiligenbrunner.github.io/AURCache/docs/setup/docker#backward-compatibility-the-hybrid-image).
 
 ## CLI client
 
 Install it from the git repo:
 
 ```bash
-cargo install --git https://github.com/gyscos/AURCache aurcache-cli
+cargo install --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
 ```
 
 A typed CLI for the HTTP API (installed as `aurcli`). It authenticates with an API token via `Authorization: Bearer <token>`; generate one on the settings page of the web UI.

@@ -401,7 +401,7 @@ These are set on the AURCache server, not the worker.
 | Variable | Type | Description | Default |
 |---|---|---|---|
 | `AURCACHE_WORKER_PORT` | Integer | Port for the worker protocol listener | 8083 |
-| `AURCACHE_WORKER_IMAGE` | String | Worker image named in the copy-and-run command the **Workers** page shows when no worker exists yet | `ghcr.io/gyscos/aurcache-worker:latest` |
+| `AURCACHE_WORKER_IMAGE` | String | Worker image named in the copy-and-run command the **Workers** page shows when no worker exists yet | `ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest` |
 | `WORKER_SPILL_DELAY` | Duration | How long before priority stops holding a job back | `60s` |
 | `WORKER_LIVENESS_TIMEOUT` | Duration | How long before a quiet worker stops counting as available | `60s` |
 | `MAX_ATTEMPTS` | Integer | Requeues before a build is failed for good | 3 |

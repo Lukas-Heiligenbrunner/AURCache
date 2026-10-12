@@ -38,7 +38,7 @@ Use `MIRRORLIST_SERVERS_X86_64` with semicolon-separated mirror URLs:
 ```yaml
 services:
   aurcache:
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     environment:
       - MIRRORLIST_SERVERS_X86_64=https://mirror.rackspace.com/archlinux/$$repo/os/$$arch;https://mirrors.kernel.org/archlinux/$$repo/os/$$arch
     # ... rest of config
@@ -58,7 +58,7 @@ Ranking stands down on its own while a mirrorlist is mounted, rather than overwr
 ```ỳaml
 services:
   aurcache:
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     ports:
       - "8080:8080" # Frontend
       - "8081:8081" # Repository
@@ -100,7 +100,7 @@ networks:
 ```yaml
 services:
   aurcache:
-    image: ghcr.io/gyscos/aurcache-server:latest
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
     ports:
       - "8080:8080" # Frontend
       - "8081:8081" # Repository

@@ -41,7 +41,7 @@ pub struct Config {
 }
 
 /// The default builder image, matching the pre-worker default.
-const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/gyscos/aurcache-builder:latest";
+const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
 impl Config {
     /// Build a [`Config`] from the process environment.

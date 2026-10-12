@@ -9,7 +9,7 @@ directory either way.
 
 | File | Purpose |
 |---|---|
-| `docker-compose.yaml` | Bundled single-host setup (the turnkey default): server + one local build worker that auto-enrolls through a shared volume. From a checkout: `docker compose -f compose/docker-compose.yaml up -d`. Standalone: `curl -O https://raw.githubusercontent.com/gyscos/AURCache/main/compose/docker-compose.yaml && docker compose up -d`. |
+| `docker-compose.yaml` | Bundled single-host setup (the turnkey default): server + one local build worker that auto-enrolls through a shared volume. From a checkout: `docker compose -f compose/docker-compose.yaml up -d`. Standalone: `curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/compose/docker-compose.yaml && docker compose up -d`. |
 | `docker-compose.remote-worker.yaml` | Worker for separate hardware or a foreign architecture (e.g. aarch64). No shared enroll volume, so trust is established explicitly (CA pin, pre-approved fingerprint, token, or UI approval). |
 
 ## Local development

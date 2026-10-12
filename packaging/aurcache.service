@@ -1,6 +1,6 @@
 [Unit]
 Description=AURCache build server and pacman repository
-Documentation=https://github.com/gyscos/AURCache
+Documentation=https://github.com/Lukas-Heiligenbrunner/AURCache
 After=network-online.target
 Wants=network-online.target
 

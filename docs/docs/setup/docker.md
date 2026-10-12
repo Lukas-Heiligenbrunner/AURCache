@@ -18,11 +18,11 @@ See [Docker images](./artifacts/docker-images.md) for the images and tags.
 
 ## Single host
 
-The bundled [`docker-compose.yaml`](https://github.com/gyscos/AURCache/blob/main/compose/docker-compose.yaml)
+The bundled [`docker-compose.yaml`](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/compose/docker-compose.yaml)
 starts a server plus one local worker and needs no edits:
 
 ```bash
-curl -O https://raw.githubusercontent.com/gyscos/AURCache/main/compose/docker-compose.yaml
+curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/compose/docker-compose.yaml
 docker compose up -d
 ```
 
@@ -118,7 +118,7 @@ so concurrency buys builds at once, not faster builds.
 
 Workers on separate hardware, or on a foreign architecture, are covered in
 [Build Workers](../workers/split-chroot.md) and
-[`docker-compose.remote-worker.yaml`](https://github.com/gyscos/AURCache/blob/main/compose/docker-compose.remote-worker.yaml).
+[`docker-compose.remote-worker.yaml`](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/compose/docker-compose.remote-worker.yaml).
 
 If you still run AURCache as one container, see the [hybrid compatibility
 image](../workers/hybrid.md).

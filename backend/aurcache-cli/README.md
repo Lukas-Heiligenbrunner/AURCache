@@ -4,7 +4,7 @@ A typed CLI for the AURCache HTTP API. The package is `aurcache-cli`; the
 binary it installs is `aurcli`:
 
 ```bash
-cargo install --git https://github.com/gyscos/AURCache aurcache-cli
+cargo install --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
 ```
 
 ## Configuration
@@ -71,4 +71,4 @@ calls an API path with no dedicated subcommand. `--format json` makes the
 typed commands machine-readable.
 
 The full walkthrough lives in the
-[quick-start](https://gyscos.github.io/AURCache/docs/overview/quick-start).
+[quick-start](https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/quick-start).

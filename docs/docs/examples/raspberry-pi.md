@@ -45,7 +45,7 @@ docker compose -f compose/docker-compose.remote-worker.yaml up -d
 ```
 
 after editing three things in that file (see
-[its header](https://github.com/gyscos/AURCache/blob/main/compose/docker-compose.remote-worker.yaml)):
+[its header](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/compose/docker-compose.remote-worker.yaml)):
 
 1. `AURCACHE_URL=https://<pi>:8083` — the Pi's worker-protocol port.
 2. `AURCACHE_SERVER_CA_FINGERPRINT` — pin the server's CA, read from the
@@ -84,7 +84,7 @@ shared `enroll` volume like the bundled setup's builder:
 
 ```yaml
 builder:
-  image: ghcr.io/gyscos/aurcache-worker:latest
+  image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
   environment:
     - AURCACHE_URL=https://aurcache:8083
     - AURCACHE_ENROLLMENT_DIR=/enroll
