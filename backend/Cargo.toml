@@ -55,17 +55,17 @@ inefficient_to_string = "warn"
 cloned_instead_of_copied = "warn"
 
 [workspace.dependencies]
-tokio = "1.52.3"
-anyhow = "1.0.103"
-reqwest = "0.13.4"
+tokio = "1.53.1"
+anyhow = "1.0.104"
+reqwest = "0.13.5"
 tracing = "0.1.44"
 jiff = "0.2.35"
-serde = "1.0.228"
+serde = "1.0.229"
 backon = "1.6.0"
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 subtle = "2.6"
 sea-orm = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
-flate2 = "1.1.9"
+flate2 = "1.1.10"
 tar = "0.4.46"
 utoipa = { version = "5.5.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
