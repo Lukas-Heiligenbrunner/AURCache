@@ -20,8 +20,12 @@ use crate::pkgbuild::fix_source_urls;
 /// sources: `https://aur.archlinux.org/{pkgbase}.git`, ref `HEAD`, no
 /// subfolder. The AUR RPC (`AurClient`) is only used for metadata/dependency
 /// resolution, not for fetching sources.
+///
+/// `AUR_GIT_URL` points it elsewhere, as `AUR_RPC_URL` does the RPC: a local
+/// mirror, or the repositories `scripts/showcase/restore.py` serves so a
+/// restored instance reads its sources without the network.
 fn default_aur_git_base_url() -> String {
-    "https://aur.archlinux.org".to_string()
+    std::env::var("AUR_GIT_URL").unwrap_or_else(|_| "https://aur.archlinux.org".to_string())
 }
 
 /// Git's per-checkout metadata directory, excluded from source archives.

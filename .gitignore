@@ -38,3 +38,4 @@ rustc-ice-*.txt
 /.ignore
 /.mcp.json
 /opencode.json
+__pycache__/
