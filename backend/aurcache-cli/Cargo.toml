@@ -19,8 +19,8 @@ jiff = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-clap = { version = "4.5.51", features = ["derive", "env"] }
-clap_complete = "4.5"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+clap_complete = "4.6"
 dialoguer = "0.12.0"
 dirs = "7.0"
 getrandom = "0.4"
@@ -28,4 +28,4 @@ unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
-yaml-rust2 = "0.12.0"
+yaml-rust2 = "0.13.0"

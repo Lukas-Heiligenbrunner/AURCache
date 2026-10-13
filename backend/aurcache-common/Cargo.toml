@@ -13,10 +13,10 @@ utoipa = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 # Only for working out when a schedule runs (`clock`). Default features off:
 # the server's own jiff brings the time zone database.
-jiff = { version = "0.2.35", default-features = false, features = ["std"], optional = true }
+jiff = { version = "0.2.38", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
-jiff = "0.2.35"
+jiff = "0.2.38"
 tempfile = { workspace = true }
 
 [features]

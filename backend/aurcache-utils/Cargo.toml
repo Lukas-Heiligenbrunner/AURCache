@@ -16,7 +16,7 @@ git2 = { version = "0.21.0", features = ["https", "vendored-openssl"] }
 
 anyhow = {workspace = true}
 jiff = {workspace = true}
-async-recursion = "1.1.1"
+async-recursion = "1.2.0"
 sea-orm = {workspace = true}
 tokio = {workspace = true}
 tracing = {workspace = true}
@@ -31,7 +31,7 @@ diffy = {workspace = true}
 lru = "0.18"
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_with = "3.11.0"
+serde_with = "3.24.0"
 
 aurcache-ca = {path = "../aurcache-ca"}
 aurcache-db = {path = "../aurcache-db"}

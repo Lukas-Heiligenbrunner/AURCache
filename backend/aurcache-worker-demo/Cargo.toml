@@ -20,7 +20,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = { workspace = true }
-zstd = "0.13.3"
+zstd = "0.14.2"
 tempfile = { workspace = true }
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }

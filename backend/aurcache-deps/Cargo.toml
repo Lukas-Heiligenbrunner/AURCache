@@ -8,7 +8,7 @@ workspace = true
 
 [dependencies]
 aurcache-common = { path = "../aurcache-common" }
-alpm-compress = "0.1.3"
+alpm-compress = "0.1.4"
 alpm-srcinfo = { workspace = true }
 alpm-types = "0.12.0"
 backon = { workspace = true }
