@@ -1487,6 +1487,27 @@ license=('MIT')
         SourceInfoV1::from_string(&fix_source_urls(&content)).unwrap()
     }
 
+    /// A versioned dependency on a library name, as paru's `.SRCINFO` has.
+    ///
+    /// alpm-types 0.12 (with alpm-srcinfo 0.6.4) reads `libalpm.so>=14` as a
+    /// malformed soname and rejects the whole file, so paru -- among the AUR's
+    /// most popular packages -- could not be added or updated. The alpm crates
+    /// are held at the release before for that; this is what tells whether a
+    /// newer one can be taken.
+    #[test]
+    fn a_versioned_dependency_on_a_library_name_parses() {
+        let srcinfo = "pkgbase = paru\n\
+                       \tpkgver = 2.1.0\n\
+                       \tpkgrel = 2\n\
+                       \tarch = x86_64\n\
+                       \tdepends = pacman\n\
+                       \tdepends = libalpm.so>=14\n\
+                       \n\
+                       pkgname = paru\n";
+        let parsed = SourceInfoV1::from_string(srcinfo);
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
     #[test]
     fn apply_patch_to_archive_regenerates_srcinfo_from_patched_pkgbuild() {
         if !pkgbuild_bridge_available() {

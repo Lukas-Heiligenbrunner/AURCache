@@ -69,8 +69,11 @@ flate2 = "1.1.10"
 tar = "0.4.46"
 utoipa = { version = "6.0.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
-alpm-srcinfo = "0.6.4"
-alpm-pkgbuild = "0.2.5"
+# Held at the release before 2026-10-02: alpm-types 0.12 rejects `libalpm.so>=14`,
+# which paru depends on. See `a_versioned_dependency_on_a_library_name_parses`
+# in aurcache-utils before moving these on.
+alpm-srcinfo = "=0.6.3"
+alpm-pkgbuild = "=0.2.4"
 diffy = "0.5"
 
 [profile.release]
