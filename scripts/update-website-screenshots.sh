@@ -5,9 +5,9 @@
 # Restores the showcase snapshot (scripts/showcase/: about two hundred popular
 # AUR packages and a year of history), serves it with this tree's server, and
 # screenshots the dashboard, a package page, a build log and a narrow mobile
-# viewport with a headless browser, over docs/static/img/. Run it whenever the
-# UI has visibly changed and the front page still shows the old one; it takes
-# as long as an incremental server build plus a few seconds.
+# viewport with a headless browser, in light and dark, over docs/static/img/.
+# Run it whenever the UI has visibly changed and the front page still shows the
+# old one; it takes as long as an incremental server build plus a few seconds.
 #
 #   ./scripts/update-website-screenshots.sh
 #   ./scripts/update-website-screenshots.sh --keep   # leave the server running
@@ -75,26 +75,32 @@ latest=$(sqlite3 "$INSTANCE/db/db.sqlite" \
      WHERE p.name = '$SHOT_PKG' AND b.status = 1")
 [ -n "$latest" ] || fail "the snapshot has no successful build of $SHOT_PKG; pick another SHOT_PKG"
 
+# Each screenshot twice, light and dark: the UI follows the system's scheme
+# unless told otherwise, and the website and README show whichever matches the
+# reader's (`<name>.png`, `<name>-dark.png`). Set explicitly both ways rather
+# than trusting the headless default.
 shot() {
-    local url="$1" out="$2" width="$3" height="$4"
-    "$CHROME" --headless --no-sandbox --disable-gpu --hide-scrollbars \
-        --user-data-dir="$SHOTS_DIR/chrome" \
-        --window-size="$width,$height" --virtual-time-budget=15000 \
-        --screenshot="$out" "$url" 2>/dev/null | tail -n 1
+    local url="$1" name="$2" width="$3" height="$4" scheme suffix
+    for scheme in light dark; do
+        if [ "$scheme" = dark ]; then suffix=-dark; else suffix=; fi
+        "$CHROME" --headless --no-sandbox --disable-gpu --hide-scrollbars \
+            --user-data-dir="$SHOTS_DIR/chrome-$scheme" \
+            --blink-settings=preferredColorScheme=$([ "$scheme" = dark ] && echo 0 || echo 1) \
+            --window-size="$width,$height" --virtual-time-budget=15000 \
+            --screenshot="$SHOTS_DIR/$name$suffix.png" "$url" 2>/dev/null | tail -n 1
+    done
 }
 
 log "Screenshotting the dashboard"
-shot "$BASE/" "$SHOTS_DIR/screenshot1.png" 2560 1440
+shot "$BASE/" screenshot1 2560 1440
 log "Screenshotting the $SHOT_PKG package page"
-shot "$BASE/package/$SHOT_PKG" "$SHOTS_DIR/screenshot2.png" 2560 1440
+shot "$BASE/package/$SHOT_PKG" screenshot2 2560 1440
 log "Screenshotting the $SHOT_PKG #$latest build log"
-shot "$BASE/package/$SHOT_PKG/build/$latest" "$SHOTS_DIR/screenshot3.png" 2560 1440
+shot "$BASE/package/$SHOT_PKG/build/$latest" screenshot3 2560 1440
 log "Screenshotting a mobile viewport"
-shot "$BASE/" "$SHOTS_DIR/screenshot_mobile1.png" 390 844
+shot "$BASE/" screenshot_mobile1 390 844
 
 log "Updating docs/static/img/"
-for f in screenshot1 screenshot2 screenshot3 screenshot_mobile1; do
-    cp "$SHOTS_DIR/$f.png" "$PROJECT_DIR/docs/static/img/$f.png"
-done
+cp "$SHOTS_DIR"/*.png "$PROJECT_DIR/docs/static/img/"
 ( cd "$PROJECT_DIR" && git status --short docs/static/img/ )
 log "Done"
