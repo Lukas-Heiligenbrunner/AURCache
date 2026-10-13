@@ -22,3 +22,4 @@ AURCache, on the worker's own page, and reach it without a restart. Everything
 else (its identity, its paths, what a build may reach) stays on the machine.
 See the [split chroot worker](./split-chroot.md) for the full reference and
 [Managing workers](./managing.md) for day-to-day operation.
+To write a worker of your own, see the [worker protocol](./protocol.md).

@@ -346,20 +346,27 @@ the day a breaking change is needed.
 
 ## Order
 
-1. Component versions: `version` per binary crate, all at `0.6.0`;
-   worker-core takes it as a parameter; `assemble_version` matches component
-   tags. This fixes the `0.1.0` report on its own.
-2. Negotiation at registration, held in memory; registration before any
+Before the upstream merge leaves draft, because protocol 1 freezes with it:
+
+1. Negotiation at registration, held in memory; registration before any
    work; the `426` and `428` answers and the worker's handling of them.
-3. The pre-freeze review and the protocol docs, including the OpenAPI
-   additions.
+   **Done.**
+2. The protocol docs: the job routes in `WorkerApi`'s OpenAPI paths (a test
+   keeps every protocol route there) and `docs/docs/workers/protocol.md`.
+   **Done.** The message-by-message reading of section 2 has not been done as
+   a pass of its own; whatever it would have found costs protocol 2 once v1
+   ships.
+
+With the first release after the merge, since nothing depends on them before
+one is cut:
+
+3. Component versions: `version` per binary crate, all at `0.6.0`;
+   worker-core takes it as a parameter; `assemble_version` matches component
+   tags. Until then every worker reports worker-core's `0.1.0`, which is only
+   what the Workers page shows.
 4. Tags, PKGBUILD sources, split image workflows, `release.sh` and the AUR
    workflow, with its environment and key. The upstream maintainer has to
-   agree to the tag scheme, and possibly create the environment, so this
-   lands with or right after the merge.
-
-Steps 1-3 go on `upstream-merge` before the PR leaves draft. Step 2 is in
-place.
+   agree to the tag scheme, and possibly create the environment.
 
 ## Open questions
 

@@ -231,6 +231,14 @@ impl<'r> FromRequest<'r> for WorkerAuth {
     register_status,
     get_ca,
     get_ca_fingerprint,
+    claim_job,
+    job_source,
+    job_logs,
+    worker_log,
+    job_artifact,
+    complete_job,
+    heartbeat,
+    job_status,
     list_workers,
     worker_config,
     update_worker_config,
@@ -517,6 +525,12 @@ pub enum Claim {
 /// every *other* worker declared, so those values must come from one
 /// consistent source. The row is refreshed on every re-registration, which
 /// happens on each worker boot.
+#[utoipa::path(post, path = "/worker/jobs/claim", request_body = ClaimRequest, responses(
+    (status = 200, description = "A job; its lease starts now and is renewed by heartbeats", body = JobDescriptor),
+    (status = 204, description = "Nothing for this worker; ask again later"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[post("/worker/jobs/claim", data = "<claim>")]
 pub async fn claim_job(
     db: &State<DatabaseConnection>,
@@ -628,6 +642,12 @@ async fn build_descriptor(
 }
 
 /// Stream the (server-patched) source archive for a claimed job.
+#[utoipa::path(get, path = "/worker/jobs/{build_id}/source", responses(
+    (status = 200, description = "The package's sources as a gzipped tarball, with the server's patches applied", content_type = "application/gzip"),
+    (status = 404, description = "No such build"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[get("/worker/jobs/<build_id>/source")]
 pub async fn job_source(
     db: &State<DatabaseConnection>,
@@ -665,6 +685,15 @@ async fn build_pkgbase(db: &DatabaseConnection, pkg_id: i32) -> Result<String, A
 }
 
 /// Append build log output.
+#[utoipa::path(post, path = "/worker/jobs/{build_id}/logs",
+    request_body(content = String, description = "Build output to append, as UTF-8 text", content_type = "text/plain"),
+    responses(
+        (status = 200, description = "Appended"),
+        (status = 400, description = "Not text, or the build's log is full"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+    ),
+)]
 #[post("/worker/jobs/<build_id>/logs", data = "<data>")]
 pub async fn job_logs(
     db: &State<DatabaseConnection>,
@@ -704,6 +733,11 @@ pub async fn job_logs(
 /// `Severity::Info` is not expected on this channel and is filed as a warning
 /// rather than refused, so an older or misconfigured worker cannot fail a
 /// build over what is, at worst, a noisy log line.
+#[utoipa::path(post, path = "/worker/log", request_body = WorkerLogReport, responses(
+    (status = 200, description = "Recorded in the activity log, under this worker"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[post("/worker/log", data = "<input>")]
 pub async fn worker_log(
     db: &State<DatabaseConnection>,
@@ -773,6 +807,16 @@ impl<'r> FromRequest<'r> for DeclaredLength {
 /// package file can be multi-gigabyte, and `into_bytes` would hold it all in
 /// RAM, which is what made the previous upload path stall and time out under
 /// memory pressure.
+#[utoipa::path(post, path = "/worker/jobs/{build_id}/artifacts/{filename}",
+    request_body(content = Vec<u8>, description = "One built package file, streamed; send Content-Length when known so an oversized one is refused before any of it is sent", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Staged; published with the rest when the build completes"),
+        (status = 400, description = "Not an acceptable artifact name"),
+        (status = 413, description = "Larger than this build may produce; the body says which limit"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+    ),
+)]
 #[post("/worker/jobs/<build_id>/artifacts/<filename>", data = "<data>")]
 pub async fn job_artifact(
     db: &State<DatabaseConnection>,
@@ -851,6 +895,12 @@ pub async fn job_artifact(
 /// server puts it in the repository in the background (see
 /// [`publish_with_recovery`]). Nothing that can go wrong from there is the worker's to
 /// fix. A failure is terminal.
+#[utoipa::path(post, path = "/worker/jobs/{build_id}/complete", request_body = CompleteReport, responses(
+    (status = 200, description = "Accepted, or a repeat of a report already accepted; either way the worker is done with the build"),
+    (status = 404, description = "No such build"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[post("/worker/jobs/<build_id>/complete", data = "<input>")]
 pub async fn complete_job(
     db: &State<DatabaseConnection>,
@@ -1041,6 +1091,11 @@ async fn complete_job_inner(
 /// (abandoned, or cancelled by an operator). The abort list rides this same
 /// answer rather than a second poll, so a cancelled or lost build is stopped on
 /// the worker's next heartbeat.
+#[utoipa::path(post, path = "/worker/heartbeat", request_body = Heartbeat, responses(
+    (status = 200, description = "Leases renewed for the builds listed; the answer names builds to stop and carries new settings", body = HeartbeatResponse),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[post("/worker/heartbeat", data = "<input>")]
 pub async fn heartbeat(
     db: &State<DatabaseConnection>,
@@ -1165,6 +1220,12 @@ async fn snapshot_for(
 /// the one case where answering would leak a job descriptor the reporter never
 /// had. Without row reuse that refusal is unreachable in practice, and 404 does
 /// the rest of the withholding.
+#[utoipa::path(get, path = "/worker/jobs/{build_id}/status", responses(
+    (status = 200, description = "Whether the worker should stop this build", body = JobStatus),
+    (status = 404, description = "No such build"),
+    (status = 403, description = "Not an approved worker, or not the worker that holds this build"),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[get("/worker/jobs/<build_id>/status")]
 pub async fn job_status(
     db: &State<DatabaseConnection>,
@@ -1710,6 +1771,32 @@ mod repo_template_tests {
         assert!(t.contains(&format!(
             "Server = https://{REPO_HOST_PLACEHOLDER}:8081/$arch"
         )));
+    }
+}
+
+#[cfg(test)]
+mod protocol_docs_tests {
+    use super::{WorkerApi, worker_protocol_routes};
+    use utoipa::OpenApi as _;
+
+    /// Every route a worker calls is in the API documentation, which is the
+    /// reference for a worker written somewhere else.
+    #[test]
+    fn every_protocol_route_is_documented() {
+        let spec = WorkerApi::openapi();
+        for route in worker_protocol_routes() {
+            let path = route.uri.path().replace('<', "{").replace('>', "}");
+            let item = spec.paths.paths.get(&path);
+            let documented = item.is_some_and(|item| match route.method.as_str() {
+                "GET" => item.get.is_some(),
+                "POST" => item.post.is_some(),
+                "PUT" => item.put.is_some(),
+                "PATCH" => item.patch.is_some(),
+                "DELETE" => item.delete.is_some(),
+                _ => false,
+            });
+            assert!(documented, "{} {path} is not documented", route.method);
+        }
     }
 }
 
