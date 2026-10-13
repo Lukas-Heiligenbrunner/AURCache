@@ -1508,6 +1508,25 @@ license=('MIT')
         assert!(parsed.is_ok(), "{:?}", parsed.err());
     }
 
+    /// A provision whose name continues past `.so`, as librtmp0's does.
+    ///
+    /// The same alpm-types 0.12 fault as above: `librtmp.so` reads as a soname
+    /// and the `.0` after it is left over, so the package name it actually is
+    /// never gets tried.
+    #[test]
+    fn a_provision_named_after_a_versioned_library_parses() {
+        let srcinfo = "pkgbase = librtmp0\n\
+                       \tpkgver = 2.6\n\
+                       \tpkgrel = 1\n\
+                       \tarch = x86_64\n\
+                       \tdepends = gnutls\n\
+                       \tprovides = librtmp.so.0\n\
+                       \n\
+                       pkgname = librtmp0\n";
+        let parsed = SourceInfoV1::from_string(srcinfo);
+        assert!(parsed.is_ok(), "{:?}", parsed.err());
+    }
+
     #[test]
     fn apply_patch_to_archive_regenerates_srcinfo_from_patched_pkgbuild() {
         if !pkgbuild_bridge_available() {
