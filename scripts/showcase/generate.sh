@@ -20,9 +20,15 @@
 # branch per pkgbase, ~160k of them) fetched recently enough that the AUR's
 # current versions are in it.
 #
+# One package is built for real, in the e2e stack (a server and a privileged
+# chroot worker, as scripts/test-e2e.sh runs): the one the website's
+# screenshots show, so the build log on the front page is a genuine one. Its
+# latest build takes that build's log, duration, size, memory and disk use.
+#
 # Env: AUR_GIT (default ~/fetched/aur), N (packages to add, default 200),
 # MIN_VOTES (default 50: the AUR's popularity score alone ranks some
 # throwaway uploads above real packages), MONTHS (history depth, default 12),
+# REAL_PKG (the package built for real, default arch-update; empty for none),
 # SHOWCASE_WORKDIR (where the instance is assembled; default under
 # ~/.cache, kept afterwards for inspection).
 set -euo pipefail
@@ -36,13 +42,14 @@ AUR_GIT="${AUR_GIT:-$HOME/fetched/aur}"
 N="${N:-200}"
 MIN_VOTES="${MIN_VOTES:-50}"
 MONTHS="${MONTHS:-12}"
+REAL_PKG="${REAL_PKG-arch-update}"
 WORKDIR="${SHOWCASE_WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/aurcache/showcase}"
 API="http://localhost:8080/api"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
-for tool in cargo jq curl sqlite3 zstd python3; do
+for tool in cargo jq curl sqlite3 zstd python3 docker; do
     command -v "$tool" >/dev/null || fail "'$tool' is required"
 done
 git -C "$AUR_GIT" rev-parse --git-dir >/dev/null 2>&1 \
@@ -71,6 +78,36 @@ log "Building the server, the demo worker, the CLI and the sandbox"
 log "Assembling the instance in $WORKDIR"
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR/enroll" "$WORKDIR/worker"
+
+if [ -n "$REAL_PKG" ]; then
+    # Before anything else here: the stack takes the same fixed ports.
+    log "Building $REAL_PKG for real in the e2e stack"
+    e2e() { docker compose -f "$PROJECT_DIR/compose/docker-compose.e2e.yaml" "$@"; }
+    e2e build --quiet
+    e2e down -v --remove-orphans -t 10 >/dev/null 2>&1 || true
+    e2e up -d --quiet-pull 2>/dev/null
+    for _ in $(seq 1 120); do
+        approved=$(curl -fsS "$API/workers" 2>/dev/null \
+            | jq '[.[] | select(.status == "approved")] | length' 2>/dev/null || echo 0)
+        [ "${approved:-0}" -ge 1 ] && break
+        sleep 2
+    done
+    [ "${approved:-0}" -ge 1 ] || { e2e down -v -t 10; fail "no worker came up in the e2e stack"; }
+    real="$WORKDIR/real/$REAL_PKG"
+    mkdir -p "$real"
+    if ! AURCACHE_URL="$API" "$TARGET/aurcli" pkg add --platform x86_64 --wait \
+            --wait-timeout 3600 "$REAL_PKG" > "$real/add.log" 2>&1; then
+        e2e down -v -t 10
+        fail "$REAL_PKG did not build in the e2e stack; see $real/add.log"
+    fi
+    number=$(AURCACHE_URL="$API" "$TARGET/aurcli" --format json builds list --package "$REAL_PKG" \
+        | jq -r 'map(select(.status == 1)) | max_by(.number) | .number')
+    AURCACHE_URL="$API" "$TARGET/aurcli" --format json builds get "$REAL_PKG/$number" > "$real/build.json"
+    AURCACHE_URL="$API" "$TARGET/aurcli" builds output "$REAL_PKG/$number" > "$real/output.log"
+    curl -fsS "$API/package/$REAL_PKG" > "$real/package.json"
+    e2e down -v --remove-orphans -t 10 >/dev/null 2>&1
+    log "  built $REAL_PKG #$number in $(jq '.end_time - .start_time' "$real/build.json")s"
+fi
 
 # A package whose .SRCINFO does not parse is read from its PKGBUILD instead,
 # through the sandbox and the bridge; set up the way CI does, so this works
@@ -179,7 +216,8 @@ done
 stop
 
 log "Writing the history"
-python3 "$SCRIPT_DIR/history.py" --instance "$WORKDIR" --aur-git "$AUR_GIT" --months "$MONTHS"
+python3 "$SCRIPT_DIR/history.py" --instance "$WORKDIR" --aur-git "$AUR_GIT" --months "$MONTHS" \
+    --real "$WORKDIR/real"
 date +%s > "$WORKDIR/taken-at"
 
 log "Saving the snapshot to $SNAPSHOT_DIR"

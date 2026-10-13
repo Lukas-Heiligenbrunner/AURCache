@@ -34,6 +34,7 @@ import sqlite3
 import subprocess
 import time
 import zlib
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -424,6 +425,46 @@ def write_log(path: Path, pkg: Package, build: Build, crates: list[str]) -> None
     save(path, out)
 
 
+@dataclass
+class RealBuild:
+    """A build that actually ran (generate.sh's e2e step), as the API
+    reported it, which stands in for a package's latest build."""
+    start: int
+    duration: int
+    size: int | None
+    peak_memory: int | None
+    disk: dict
+    files: dict[str, int]
+    log: str
+
+
+def load_real(root: Path) -> dict[str, RealBuild]:
+    out = {}
+    for d in sorted(root.iterdir()) if root.is_dir() else []:
+        build = json.loads((d / "build.json").read_text())
+        package = json.loads((d / "package.json").read_text())
+        out[d.name] = RealBuild(
+            start=build["start_time"], duration=build["end_time"] - build["start_time"],
+            size=build.get("size"), peak_memory=build.get("peak_memory"),
+            disk=build.get("disk_usage") or {},
+            files={f["filename"]: f["size"] for f in package.get("files", []) if f.get("size")},
+            log=(d / "output.log").read_text())
+    return out
+
+
+MAKEPKG_DATE = re.compile(r"\((\w{3} \w{3} +\d{1,2} \d\d:\d\d:\d\d \d{4})\)")
+
+
+def real_log(real: RealBuild, start: int) -> str:
+    """The real log, its makepkg dates turned into placeholders moved to
+    when this build happened instead."""
+    def placeholder(m: re.Match) -> str:
+        when = datetime.strptime(" ".join(m.group(1).split()), "%a %b %d %H:%M:%S %Y")
+        t = int(when.replace(tzinfo=timezone.utc).timestamp())
+        return f"({stamp(t - real.start + start)})"
+    return MAKEPKG_DATE.sub(placeholder, real.log)
+
+
 def save(path: Path, lines: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
@@ -515,6 +556,7 @@ def main() -> None:
     ap.add_argument("--instance", type=Path, required=True)
     ap.add_argument("--aur-git", type=Path, required=True)
     ap.add_argument("--months", type=int, default=12)
+    ap.add_argument("--real", type=Path, help="builds that actually ran, from generate.sh")
     args = ap.parse_args()
 
     inst = args.instance
@@ -559,9 +601,17 @@ def main() -> None:
             pkg.added_at = added_at(pkg, histories[pkg.name], window_start, now)
         plan(pkg, histories[pkg.name], now)
 
+    # A package built for real takes that build's duration for its latest.
+    reals = load_real(args.real) if args.real else {}
+    for pkg in packages:
+        if pkg.name in reals:
+            current = [b for b in pkg.builds if b.status == SUCCESSFUL][-1]
+            current.end = current.start + reals[pkg.name].duration
+
     # The few packages failing right now: upstream moved on and the new
     # version did not build, so they stay out of date for a human to look at.
-    failing = sorted((p for p in packages if p.requested and p.kind != "data"),
+    failing = sorted((p for p in packages
+                      if p.requested and p.kind != "data" and p.name not in reals),
                      key=lambda p: zlib.crc32(p.name.encode()))[:CURRENTLY_FAILING]
     for i, pkg in enumerate(failing):
         r = rng_for("failing", pkg.name)
@@ -604,6 +654,12 @@ def main() -> None:
                 disk_chroot=int(shape.chroot * r.uniform(0.98, 1.03)),
                 disk_workdir=int((size or shape.size) * r.uniform(1.8, 3.5)),
                 disk_sources=int(shape.sources * r.uniform(0.98, 1.02)))
+            real = reals.get(pkg.name) if b is current else None
+            if real:
+                values.update(
+                    size=real.size, peak_memory=real.peak_memory,
+                    disk_chroot=real.disk.get("chroot"), disk_workdir=real.disk.get("workdir"),
+                    disk_sources=real.disk.get("sources"), disk_build_tree=real.disk.get("build_tree"))
             if b is current:
                 # The demo worker's build becomes this one: it is what holds
                 # the published artifacts.
@@ -613,14 +669,19 @@ def main() -> None:
                 db.execute(f"INSERT INTO builds (pkg_id, {', '.join(values)}) "
                            f"VALUES (:pkg, {', '.join(f':{k}' for k in values)})",
                            {**values, "pkg": pkg.id})
-            write_log(log_path(inst / "build_logs", pkg.name, b.number), pkg, b, crates)
+            path = log_path(inst / "build_logs", pkg.name, b.number)
+            if real:
+                save(path, real_log(real, b.start).rstrip("\n").split("\n"))
+            else:
+                write_log(path, pkg, b, crates)
         record(act, pkg)
 
         # The artifact sizes the dashboard sums.
-        files = [fid for (fid,) in db.execute("SELECT id FROM files WHERE package_id = ?", (pkg.id,))]
-        for fid in files:
-            db.execute("UPDATE files SET size = ? WHERE id = ?",
-                       (max(1024, current_size(db, pkg) // len(files)), fid))
+        files = db.execute("SELECT id, filename FROM files WHERE package_id = ?", (pkg.id,)).fetchall()
+        real_files = reals[pkg.name].files if pkg.name in reals else {}
+        for fid, filename in files:
+            size = real_files.get(filename) or max(1024, current_size(db, pkg) // len(files))
+            db.execute("UPDATE files SET size = ? WHERE id = ?", (size, fid))
 
         last = pkg.builds[-1]
         db.execute("UPDATE packages SET status = ?, out_of_date = ?, upstream_version = ? WHERE id = ?",
