@@ -1,17 +1,74 @@
 //! Wire types for the remote-worker protocol (`/api/worker`).
 //!
-//! These are shared between the backend API and the `aurcache-worker` binary.
-//! A worker and its server are released together, so a field is simply
-//! required on both ends: nothing here reads a message from another version.
+//! The server and the workers in this repository share them, but a worker may
+//! be released on its own or come from elsewhere entirely. What a worker and a
+//! server agree on is a protocol number, negotiated at registration
+//! ([`PROTOCOLS`]), never a version of either. Within one protocol these types
+//! change only in ways a peer speaking it cannot notice:
+//!
+//! - a field added in either direction is optional (`Option`, or
+//!   `#[serde(default)]`), and its absence means what it meant before;
+//! - a route is added only if a worker that never calls it loses nothing.
+//!
+//! Anything else needs the next protocol number: a field that becomes required
+//! or changes meaning, a new variant in an enum a peer receives, a route that
+//! goes away or changes what it does, a change to lease or heartbeat timing.
+//! The fixtures under `tests/fixtures/worker-protocol/` hold each protocol's
+//! messages, and `tests/worker_protocol.rs` fails on a change that would break
+//! a peer speaking it. The types are not named after a protocol: a new one
+//! usually means an optional field, and code that looks at the agreed number
+//! only where behaviour differs.
+//!
+//! [`RegisterRequest`] and [`RegisterStatus`] are exchanged before a protocol
+//! is agreed, so they belong to none, and only ever gain optional fields.
 
 use crate::worker_config::{ConfigSnapshot, EffectiveConfig, SettingDecl};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
-/// Enrollment request a worker sends on first contact (no client cert yet).
+/// The worker protocols the types in this module implement, oldest to newest.
+///
+/// The server speaks these, and so do the workers built from this repository.
+pub const PROTOCOLS: ProtocolRange = ProtocolRange { min: 1, max: 1 };
+
+/// A contiguous range of worker protocols, both ends included.
+///
+/// A range rather than a set: a peer that speaks 1 and 3 but not 2 is not a
+/// case worth designing for.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProtocolRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+impl ProtocolRange {
+    /// The newest protocol both ranges hold, if they share any.
+    #[must_use]
+    pub fn negotiate(self, other: Self) -> Option<u32> {
+        let newest = self.max.min(other.max);
+        (newest >= self.min.max(other.min)).then_some(newest)
+    }
+}
+
+impl std::fmt::Display for ProtocolRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.min == self.max {
+            write!(f, "{}", self.min)
+        } else {
+            write!(f, "{} to {}", self.min, self.max)
+        }
+    }
+}
+
+/// Enrollment request a worker sends on first contact (no client cert yet),
+/// and again every time it starts.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RegisterRequest {
+    /// The protocols this worker speaks. The server answers with the newest
+    /// one it speaks too, in [`RegisterStatus::protocol`], or refuses the
+    /// registration with `426 Upgrade Required` when there is none.
+    pub protocols: ProtocolRange,
     pub name: String,
     pub native_arches: Vec<String>,
     pub emulated_arches: Vec<String>,
@@ -68,6 +125,12 @@ pub struct RegisterStatus {
     /// Sent at registration rather than per job because it describes the
     /// deployment, not the build.
     pub repo_template: String,
+    /// The protocol this worker and the server agreed on at registration.
+    ///
+    /// `None` only when polling for approval after the server restarted,
+    /// since the server keeps the agreement in memory: a worker gets it again
+    /// by registering, which it does anyway before any work.
+    pub protocol: Option<u32>,
 }
 
 /// Placeholder the worker replaces with the host it reaches the server on.
@@ -324,6 +387,31 @@ mod tests {
         assert_eq!(job.mirrorlist, back.mirrorlist);
         assert_eq!(job.packages, back.packages);
         assert_eq!(job.version, back.version);
+    }
+
+    fn range(min: u32, max: u32) -> ProtocolRange {
+        ProtocolRange { min, max }
+    }
+
+    #[test]
+    fn the_newest_shared_protocol_is_agreed() {
+        assert_eq!(range(1, 3).negotiate(range(2, 5)), Some(3));
+        assert_eq!(range(2, 5).negotiate(range(1, 3)), Some(3));
+        assert_eq!(range(1, 1).negotiate(range(1, 1)), Some(1));
+        assert_eq!(range(1, 4).negotiate(range(2, 2)), Some(2));
+    }
+
+    #[test]
+    fn ranges_that_do_not_meet_agree_on_nothing() {
+        assert_eq!(range(1, 1).negotiate(range(2, 3)), None);
+        assert_eq!(range(4, 5).negotiate(range(1, 3)), None);
+    }
+
+    /// The refusal names both ranges; a single protocol reads as one number.
+    #[test]
+    fn a_range_reads_as_its_ends() {
+        assert_eq!(range(1, 1).to_string(), "1");
+        assert_eq!(range(2, 3).to_string(), "2 to 3");
     }
 
     /// The preference is tagged, so adding a variant later does not silently

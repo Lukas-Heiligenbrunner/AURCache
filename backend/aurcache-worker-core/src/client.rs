@@ -15,7 +15,7 @@ use aurcache_common::worker::{
     RegisterRequest, RegisterStatus, WorkerLogReport,
 };
 use percent_encoding::{AsciiSet, CONTROLS};
-use reqwest::{Body, Certificate, Client, Identity, StatusCode};
+use reqwest::{Body, Certificate, Client, Identity, RequestBuilder, Response, StatusCode};
 use std::time::Duration;
 use tokio_util::io::ReaderStream;
 
@@ -63,25 +63,51 @@ trait SendChecked {
     async fn send_checked(self, what: &str) -> Result<reqwest::Response>;
 }
 
-impl SendChecked for reqwest::RequestBuilder {
-    async fn send_checked(self, what: &str) -> Result<reqwest::Response> {
+impl SendChecked for RequestBuilder {
+    async fn send_checked(self, what: &str) -> Result<Response> {
         let response = self
             .send()
             .await
             .with_context(|| format!("{what} request"))?;
-        let status = response.status();
-        if status.is_success() || status == StatusCode::NOT_MODIFIED {
-            return Ok(response);
-        }
-        // The body read can fail too (connection dropped mid-error); say that
-        // instead of blaming the server with an empty reason.
-        let reason = match response.text().await {
-            Ok(body) => body.trim().to_string(),
-            Err(e) => format!("<error body unreadable: {e}>"),
-        };
-        bail!("{what} rejected: {status}: {reason}")
+        checked(response, what).await
     }
 }
+
+/// `response` if it is a success, or an error carrying the server's reason.
+async fn checked(response: Response, what: &str) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        return Ok(response);
+    }
+    bail!("{what} rejected: {status}: {}", reason(response).await)
+}
+
+/// The text a refusal carries.
+///
+/// The body read can fail too (connection dropped mid-error); say that
+/// instead of blaming the server with an empty reason.
+async fn reason(response: Response) -> String {
+    match response.text().await {
+        Ok(body) => body.trim().to_string(),
+        Err(e) => format!("<error body unreadable: {e}>"),
+    }
+}
+
+/// The server refused to register this worker: the two share no worker
+/// protocol. The text is the server's, naming what each side speaks.
+///
+/// Waiting fixes it once the server (or this worker) is upgraded, so it is
+/// retried, slowly; see `enroll::enroll`.
+#[derive(Debug)]
+pub struct Incompatible(pub String);
+
+impl std::fmt::Display for Incompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the server refused this worker's protocol: {}", self.0)
+    }
+}
+
+impl std::error::Error for Incompatible {}
 
 /// A configured protocol client bound to a base URL.
 pub struct WorkerClient {
@@ -97,6 +123,9 @@ pub struct WorkerClient {
     /// set once enrollment completes. Empty when this server publishes no
     /// repository, or no host could be determined.
     repo_section: String,
+    /// The last registration the server accepted from this client, sent again
+    /// when the server asks for it (see [`Self::exchange`]).
+    registration: std::sync::Mutex<Option<RegisterRequest>>,
 }
 
 /// Fetch the server CA (PEM + fingerprint) using a deliberately
@@ -176,6 +205,7 @@ impl WorkerClient {
             upload_http: http.clone(),
             http,
             base: base.to_string(),
+            registration: std::sync::Mutex::new(None),
         })
     }
 
@@ -206,6 +236,7 @@ impl WorkerClient {
             upload_http,
             http,
             base: base.to_string(),
+            registration: std::sync::Mutex::new(None),
         })
     }
 
@@ -214,14 +245,79 @@ impl WorkerClient {
     }
 
     /// Register (or re-register) this worker, returning the current status.
+    ///
+    /// Fails with [`Incompatible`] when the server speaks no protocol this
+    /// worker does. Once accepted, the request is what this client sends again
+    /// when the server asks it to register (see [`Self::exchange`]).
     pub async fn register(&self, req: &RegisterRequest) -> Result<RegisterStatus> {
-        let resp = self
+        let response = self
             .http
             .post(self.url("/register"))
             .json(req)
-            .send_checked("register")
-            .await?;
-        resp.json().await.context("decoding register status")
+            .send()
+            .await
+            .context("register request")?;
+        if response.status() == StatusCode::UPGRADE_REQUIRED {
+            return Err(Incompatible(reason(response).await).into());
+        }
+        let status: RegisterStatus = checked(response, "register")
+            .await?
+            .json()
+            .await
+            .context("decoding register status")?;
+        self.remember_registration(req.clone());
+        Ok(status)
+    }
+
+    /// Take `req` as the registration to send again when the server asks: the
+    /// one this worker registered with, before this client existed.
+    pub fn remember_registration(&self, req: RegisterRequest) {
+        *self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(req);
+    }
+
+    /// Send a request on the authenticated plane.
+    ///
+    /// A server that holds no protocol agreed with this worker answers `428
+    /// Precondition Required` -- after a restart it holds none -- and this
+    /// registers again and sends the request once more. A request whose body
+    /// was a stream cannot be sent again; that fails, after registering, for
+    /// the caller's own retry to succeed.
+    async fn exchange(&self, request: RequestBuilder, what: &str) -> Result<Response> {
+        let again = request.try_clone();
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("{what} request"))?;
+        if response.status() != StatusCode::PRECONDITION_REQUIRED {
+            return Ok(response);
+        }
+        tracing::info!("The server asked this worker to register again");
+        let registration = self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .context(
+                "the server asked this worker to register, and it has no registration to send",
+            )?;
+        self.register(&registration)
+            .await
+            .context("registering again")?;
+        match again {
+            Some(again) => again
+                .send()
+                .await
+                .with_context(|| format!("{what} request")),
+            None => bail!("{what} was refused until this worker registered again, which it has"),
+        }
+    }
+
+    /// [`Self::exchange`], requiring a success.
+    async fn exchange_checked(&self, request: RequestBuilder, what: &str) -> Result<Response> {
+        checked(self.exchange(request, what).await?, what).await
     }
 
     /// Poll enrollment status by fingerprint.
@@ -237,12 +333,8 @@ impl WorkerClient {
     /// Claim the next job for the given arches, or `None` if the queue is empty.
     pub async fn claim(&self, req: &ClaimRequest) -> Result<Option<JobDescriptor>> {
         let resp = self
-            .http
-            .post(self.url("/jobs/claim"))
-            .json(req)
-            .send()
-            .await
-            .context("claim request")?;
+            .exchange(self.http.post(self.url("/jobs/claim")).json(req), "claim")
+            .await?;
         match resp.status() {
             StatusCode::OK => Ok(Some(resp.json().await.context("decoding job")?)),
             StatusCode::NO_CONTENT => Ok(None),
@@ -262,20 +354,23 @@ impl WorkerClient {
     /// Download the (server-patched) source tarball bytes for a build.
     pub async fn source(&self, build_id: i32) -> Result<Vec<u8>> {
         let resp = self
-            .http
-            .get(self.url(&format!("/jobs/{build_id}/source")))
-            .send_checked("source")
+            .exchange_checked(
+                self.http.get(self.url(&format!("/jobs/{build_id}/source"))),
+                "source",
+            )
             .await?;
         Ok(resp.bytes().await.context("reading source")?.to_vec())
     }
 
     /// Append a chunk of build log output.
     pub async fn append_log(&self, build_id: i32, text: &str) -> Result<()> {
-        self.http
-            .post(self.url(&format!("/jobs/{build_id}/logs")))
-            .body(text.to_string())
-            .send_checked("log")
-            .await?;
+        self.exchange_checked(
+            self.http
+                .post(self.url(&format!("/jobs/{build_id}/logs")))
+                .body(text.to_string()),
+            "log",
+        )
+        .await?;
         Ok(())
     }
 
@@ -291,15 +386,15 @@ impl WorkerClient {
         build_id: Option<i32>,
         message: &str,
     ) -> Result<()> {
-        self.http
-            .post(self.url("/log"))
-            .json(&WorkerLogReport {
+        self.exchange_checked(
+            self.http.post(self.url("/log")).json(&WorkerLogReport {
                 severity,
                 build_id,
                 message: message.to_string(),
-            })
-            .send_checked("worker log")
-            .await?;
+            }),
+            "worker log",
+        )
+        .await?;
         Ok(())
     }
 
@@ -334,17 +429,19 @@ impl WorkerClient {
         if let Some(len) = len {
             request = request.header(reqwest::header::CONTENT_LENGTH, len);
         }
-        request.send_checked("artifact").await?;
+        self.exchange_checked(request, "artifact").await?;
         Ok(())
     }
 
     /// Report a build's terminal result.
     pub async fn complete(&self, build_id: i32, report: &CompleteReport) -> Result<()> {
-        self.http
-            .post(self.url(&format!("/jobs/{build_id}/complete")))
-            .json(report)
-            .send_checked("complete")
-            .await?;
+        self.exchange_checked(
+            self.http
+                .post(self.url(&format!("/jobs/{build_id}/complete")))
+                .json(report),
+            "complete",
+        )
+        .await?;
         Ok(())
     }
 
@@ -355,10 +452,7 @@ impl WorkerClient {
     /// Send a heartbeat, and read what the server wants stopped or changed.
     pub async fn heartbeat(&self, hb: &Heartbeat) -> Result<HeartbeatResponse> {
         let resp = self
-            .http
-            .post(self.url("/heartbeat"))
-            .json(hb)
-            .send_checked("heartbeat")
+            .exchange_checked(self.http.post(self.url("/heartbeat")).json(hb), "heartbeat")
             .await?;
         // An answer that cannot be read is a failed heartbeat: it must not
         // refresh the lease watchdog.
@@ -368,9 +462,10 @@ impl WorkerClient {
     /// Poll whether a build has been asked to cancel.
     pub async fn job_status(&self, build_id: i32) -> Result<JobStatus> {
         let resp = self
-            .http
-            .get(self.url(&format!("/jobs/{build_id}/status")))
-            .send_checked("job status")
+            .exchange_checked(
+                self.http.get(self.url(&format!("/jobs/{build_id}/status"))),
+                "job status",
+            )
             .await?;
         resp.json().await.context("decoding job status")
     }

@@ -3,10 +3,10 @@
 
 use anyhow::{Context, Result};
 use aurcache_common::api::worker::ApprovalStatus;
-use aurcache_common::worker::{RegisterRequest, RegisterStatus};
+use aurcache_common::worker::{PROTOCOLS, RegisterRequest, RegisterStatus};
 use std::time::Duration;
 
-use crate::client::{WorkerClient, fetch_and_pin_ca};
+use crate::client::{Incompatible, WorkerClient, fetch_and_pin_ca};
 use crate::config::CoreConfig;
 use crate::identity::Identity;
 
@@ -35,6 +35,7 @@ pub fn publish_csr_to_enrollment_dir(cfg: &CoreConfig, fingerprint: &str, csr_pe
 /// cached.
 pub fn register_request(cfg: &CoreConfig, csr_pem: String, kind: &str) -> RegisterRequest {
     RegisterRequest {
+        protocols: PROTOCOLS,
         name: cfg.name.clone(),
         native_arches: cfg.native_arches.clone(),
         emulated_arches: cfg.emulated_arches.clone(),
@@ -62,17 +63,34 @@ impl std::fmt::Display for Revoked {
 
 impl std::error::Error for Revoked {}
 
+/// How long a worker refused for its protocol waits before registering again.
+///
+/// Slow, because only an upgrade on one side or the other changes the answer.
+/// Not an exit, because systemd would only restart the worker into the same
+/// refusal.
+const REFUSED_RETRY: Duration = Duration::from_secs(300);
+
 /// [`ensure_enrolled`], retried every poll interval until it succeeds.
 ///
 /// The server may not be reachable yet -- still starting in the same compose
 /// stack -- or may briefly go away, and a worker waits for it rather than
 /// exiting. Except when it was revoked: that is returned, so the process exits
-/// loudly for the operator instead of retrying forever.
+/// loudly for the operator instead of retrying forever. A server that speaks
+/// no protocol this worker does is waited for too, but slowly, and said once.
 pub async fn enroll(cfg: &CoreConfig, identity: &Identity, kind: &str) -> Result<WorkerClient> {
+    let mut refused: Option<String> = None;
     loop {
         match ensure_enrolled(cfg, identity, kind).await {
             Ok(client) => return Ok(client),
             Err(e) if e.downcast_ref::<Revoked>().is_some() => return Err(e),
+            Err(e) if e.downcast_ref::<Incompatible>().is_some() => {
+                let message = format!("{e:#}");
+                if refused.as_ref() != Some(&message) {
+                    tracing::error!("{message}; trying again every {}s", REFUSED_RETRY.as_secs());
+                    refused = Some(message);
+                }
+                tokio::time::sleep(REFUSED_RETRY).await;
+            }
             Err(e) => {
                 tracing::warn!(
                     "Enrollment not complete ({e:#}); retrying in {}s",
@@ -95,11 +113,14 @@ pub async fn enroll(cfg: &CoreConfig, identity: &Identity, kind: &str) -> Result
 /// state, so a revoked worker that comes back stays revoked (it does refresh
 /// `last_seen`, which is how the UI can show that the machine is asking again).
 ///
-/// When a signed certificate is already persisted, re-registration is
-/// **best-effort**: the bundled topology starts the worker and the backend from
-/// one `docker compose up`, so a worker will regularly reach the server before
-/// it is listening. Failing to register then must not stop a worker that is
-/// already able to build — it proceeds on its persisted configuration.
+/// It is also where this worker and the server agree on a worker protocol, so
+/// it has to succeed before any work, even with a signed certificate already
+/// persisted: a worker upgraded while the server was down would otherwise go
+/// on speaking whatever the server agreed with its previous binary. A failure
+/// is returned, and [`enroll`] tries again. That costs nothing -- a worker that
+/// cannot reach the server to register could not claim a job from it either --
+/// and the bundled topology, which starts the worker and the server from one
+/// `docker compose up`, sees a few retries instead of an unregistered start.
 pub async fn ensure_enrolled(
     cfg: &CoreConfig,
     identity: &Identity,
@@ -112,49 +133,53 @@ pub async fn ensure_enrolled(
     if identity.is_enrolled() {
         // Reuse the CA we already pinned rather than re-running trust-on-first-use.
         let ca_pem = identity.ca_pem()?;
-        match WorkerClient::enrollment(&cfg.aurcache_url, &ca_pem) {
-            Ok(client) => match client
-                .register(&register_request(cfg, csr_pem.clone(), kind))
-                .await
-            {
-                Ok(status) => {
-                    tracing::info!("Re-registered (status: {})", status.status);
-                    // Revocation is terminal, like on the fresh path below: a
-                    // revoked worker that carried on would run forever failing
-                    // every claim, instead of exiting loudly for the operator.
-                    if status.status == ApprovalStatus::Revoked {
-                        return Err(Revoked.into());
-                    }
-                    // Adopt a certificate the server has re-issued instead of
-                    // discarding it. The server re-issues when the one it had
-                    // on file was signed by a CA it no longer has, and a worker
-                    // that ignored the replacement kept presenting a
-                    // certificate nothing could verify.
-                    if let Some(client) = try_finish_enrollment(cfg, identity, &status)? {
-                        return Ok(client);
-                    }
+        let request = register_request(cfg, csr_pem.clone(), kind);
+        let client = WorkerClient::enrollment(&cfg.aurcache_url, &ca_pem)?;
+        let status = match client.register(&request).await {
+            Ok(status) => status,
+            Err(e) if e.downcast_ref::<Incompatible>().is_some() => return Err(e),
+            Err(e) => {
+                // A rotated CA looks exactly like this: the pinned CA cannot
+                // verify the server's new certificate, so the connection fails
+                // before anything else can run.
+                if let Some(client) =
+                    recover_from_rotated_ca(cfg, identity, &csr_pem, kind, &e).await?
+                {
+                    return Ok(client);
                 }
-                Err(e) => {
-                    // A rotated CA looks exactly like this: the pinned CA
-                    // cannot verify the server's new certificate, so the
-                    // connection fails before any of the above can run.
-                    if let Some(client) =
-                        recover_from_rotated_ca(cfg, identity, &csr_pem, kind, &e).await?
-                    {
-                        return Ok(client);
-                    }
-                }
-            },
-            Err(e) => tracing::warn!("Could not build enrollment client: {e:#}"),
+                return Err(e.context("registering"));
+            }
+        };
+        tracing::info!(
+            "Registered (status: {}, worker protocol {})",
+            status.status,
+            status
+                .protocol
+                .map_or_else(|| "unknown".to_string(), |p| p.to_string())
+        );
+        // Revocation is terminal, like on the fresh path below: a revoked
+        // worker that carried on would run forever failing every claim,
+        // instead of exiting loudly for the operator.
+        if status.status == ApprovalStatus::Revoked {
+            return Err(Revoked.into());
+        }
+        // Adopt a certificate the server has re-issued instead of discarding
+        // it. The server re-issues when the one it had on file was signed by a
+        // CA it no longer has, and a worker that ignored the replacement kept
+        // presenting a certificate nothing could verify.
+        if let Some(client) = try_finish_enrollment(cfg, identity, &status, &request)? {
+            return Ok(client);
         }
 
         tracing::info!("Reusing persisted worker certificate");
-        return WorkerClient::authenticated(
+        let client = WorkerClient::authenticated(
             &cfg.aurcache_url,
             &ca_pem,
             &identity.cert_pem()?,
             &identity.key_pem(),
-        );
+        )?;
+        client.remember_registration(request);
+        return Ok(client);
     }
 
     // 1. Pin the server CA (verified against a configured fingerprint or TOFU).
@@ -167,14 +192,15 @@ pub async fn ensure_enrolled(
     // 2. Submit our CSR and publish it for co-located auto-approval.
     publish_csr_to_enrollment_dir(cfg, &identity.fingerprint, &csr_pem);
 
+    let request = register_request(cfg, csr_pem, kind);
     let mut status = enroll_client
-        .register(&register_request(cfg, csr_pem, kind))
+        .register(&request)
         .await
         .context("registering")?;
 
     // 3. Poll until approved.
     loop {
-        if let Some(client) = try_finish_enrollment(cfg, identity, &status)? {
+        if let Some(client) = try_finish_enrollment(cfg, identity, &status, &request)? {
             tracing::info!("Worker approved and enrolled");
             return Ok(client);
         }
@@ -204,8 +230,8 @@ pub async fn ensure_enrolled(
 /// an interception.
 ///
 /// Returns `None` when recovery was not attempted or did not apply, leaving the
-/// caller to carry on with the persisted configuration -- a server that is
-/// merely not listening yet must not cost a worker its enrolment.
+/// caller to register again later -- a server that is merely not listening yet
+/// must not cost a worker its enrolment.
 async fn recover_from_rotated_ca(
     cfg: &CoreConfig,
     identity: &Identity,
@@ -214,30 +240,30 @@ async fn recover_from_rotated_ca(
     cause: &anyhow::Error,
 ) -> Result<Option<WorkerClient>> {
     let Some(expected) = cfg.server_ca_fingerprint.as_deref() else {
-        tracing::warn!(
-            "Re-registration failed ({cause:#}). If the server's CA was regenerated \
-             this worker cannot tell that apart from an interception, so it will keep \
-             using the CA it pinned. Set AURCACHE_SERVER_CA_FINGERPRINT to let it \
-             recover on its own, or remove the pinned CA to enrol afresh."
-        );
+        // Once per process: registering is retried every poll interval, and
+        // most failures are a server that is merely down, which this advice
+        // would otherwise follow every time.
+        static ADVISED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !ADVISED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "Registering failed ({cause:#}). If the server's CA was regenerated \
+                 this worker cannot tell that apart from an interception, so it will keep \
+                 trying with the CA it pinned. Set AURCACHE_SERVER_CA_FINGERPRINT to let it \
+                 recover on its own, or remove the pinned CA to enrol afresh."
+            );
+        }
         return Ok(None);
     };
 
     let Ok(fresh_ca) = fetch_and_pin_ca(&cfg.aurcache_url, Some(expected)).await else {
         // Unreachable, or offering a CA that fails the fingerprint check. Either
         // way this is not a rotation we can act on.
-        tracing::warn!(
-            "Re-registration failed, continuing with the persisted configuration: {cause:#}"
-        );
         return Ok(None);
     };
 
     if identity.ca_pem().is_ok_and(|pinned| pinned == fresh_ca) {
         // Same CA as before, so the failure was something else -- the server
         // starting up, most likely.
-        tracing::warn!(
-            "Re-registration failed, continuing with the persisted configuration: {cause:#}"
-        );
         return Ok(None);
     }
 
@@ -247,25 +273,29 @@ async fn recover_from_rotated_ca(
     );
     let client = WorkerClient::enrollment(&cfg.aurcache_url, &fresh_ca)?;
     publish_csr_to_enrollment_dir(cfg, &identity.fingerprint, csr_pem);
+    let request = register_request(cfg, csr_pem.to_string(), kind);
     let status = client
-        .register(&register_request(cfg, csr_pem.to_string(), kind))
+        .register(&request)
         .await
         .context("re-registering after the server CA changed")?;
-    try_finish_enrollment(cfg, identity, &status)
+    try_finish_enrollment(cfg, identity, &status, &request)
 }
 
 /// If the status carries a signed certificate, persist it and build the
-/// authenticated client. Returns `None` while still pending.
+/// authenticated client, which sends `request` again whenever the server asks
+/// this worker to register. Returns `None` while still pending.
 fn try_finish_enrollment(
     cfg: &CoreConfig,
     identity: &Identity,
     status: &RegisterStatus,
+    request: &RegisterRequest,
 ) -> Result<Option<WorkerClient>> {
     let (Some(cert), Some(ca)) = (&status.signed_cert, &status.ca_cert) else {
         return Ok(None);
     };
     identity.store_signed(cert, ca)?;
     let mut client = WorkerClient::authenticated(&cfg.aurcache_url, ca, cert, &identity.key_pem())?;
+    client.remember_registration(request.clone());
 
     // Render the server's `[repo]` template with the host we actually reach it
     // on. Done here, once, because it describes the deployment rather than any

@@ -20,7 +20,7 @@ use aurcache_common::api::worker::{
 use aurcache_common::build_state::BuildState;
 use aurcache_common::worker::{
     BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
-    JobStatus, MirrorlistOffer, MirrorlistPreference, RegisterRequest, RegisterStatus,
+    JobStatus, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, RegisterRequest, RegisterStatus,
     WorkerLogReport,
 };
 use aurcache_common::worker_config::{
@@ -148,8 +148,39 @@ fn resolve_mirrorlist(
 /// this in their local `makepkg.conf`; it is only a default.
 const WORKER_PKGDEST: &str = "/output";
 
+/// The worker protocol each worker agreed on at registration, by certificate
+/// fingerprint.
+///
+/// Memory only. An agreement means something to the server process that made
+/// it, so a restart -- an upgrade above all -- starts empty, and each worker
+/// registers again the first time [`WorkerAuth`] turns it away.
+#[derive(Default)]
+pub struct AgreedProtocols(std::sync::Mutex<HashMap<String, u32>>);
+
+impl AgreedProtocols {
+    fn agree(&self, fingerprint: &str, protocol: u32) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(fingerprint.to_string(), protocol);
+    }
+
+    fn of(&self, fingerprint: &str) -> Option<u32> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(fingerprint)
+            .copied()
+    }
+}
+
 /// Request guard: a verified, CA-signed client certificate mapped to an
 /// **approved** worker row. Pending/revoked/unknown workers are refused.
+///
+/// So is an approved worker this server process holds no protocol agreement
+/// for, with `428 Precondition Required`: it registers again and retries. That
+/// is how every worker renegotiates after the server restarts, so none of them
+/// goes on speaking a protocol a new server no longer does.
 pub struct WorkerAuth {
     pub worker: workers::Model,
 }
@@ -174,6 +205,17 @@ impl<'r> FromRequest<'r> for WorkerAuth {
         };
         match worker_store::find_worker_by_fingerprint(db, &fingerprint).await {
             Ok(Some(mut worker)) if worker.status == ApprovalStatus::Approved => {
+                let agreed = req
+                    .rocket()
+                    .state::<AgreedProtocols>()
+                    .and_then(|protocols| protocols.of(&fingerprint));
+                if agreed.is_none() {
+                    return Outcome::Error((
+                        Status::PreconditionRequired,
+                        "register first: this server holds no protocol agreed with this worker"
+                            .to_string(),
+                    ));
+                }
                 let _ = worker_store::touch_last_seen(db, &mut worker, None).await;
                 Outcome::Success(Self { worker })
             }
@@ -250,12 +292,21 @@ const DEFAULT_WORKER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-worke
 /// Register (or re-register) a worker. Idempotent by CSR fingerprint. The CSR is
 /// signed immediately so the certificate is ready the moment an admin approves;
 /// the worker only receives it (and may only use it) once approved.
-#[utoipa::path(post, path = "/worker/register", responses((status = 200, body = RegisterStatus)))]
+///
+/// This is also where the worker protocol is agreed: the newest one both sides
+/// speak. A worker that shares none is refused with `426 Upgrade Required`
+/// before anything about it is recorded, so it never reaches the approval
+/// list.
+#[utoipa::path(post, path = "/worker/register", responses(
+    (status = 200, body = RegisterStatus),
+    (status = 426, description = "No worker protocol in common; the body says which each side speaks"),
+))]
 #[post("/worker/register", data = "<input>")]
 pub async fn register_worker(
     db: &State<DatabaseConnection>,
     ca: &State<Ca>,
     al: &State<ActivityLog>,
+    protocols: &State<AgreedProtocols>,
     input: Json<RegisterRequest>,
 ) -> Result<Json<RegisterStatus>, ApiError> {
     let db = db.inner();
@@ -263,6 +314,15 @@ pub async fn register_worker(
 
     let fingerprint = aurcache_ca::fingerprint_from_csr_pem(&input.csr_pem)
         .map_err(|e| err(Status::BadRequest, e))?;
+
+    let Some(protocol) = PROTOCOLS.negotiate(input.protocols) else {
+        let reason = format!(
+            "this server speaks worker protocol {PROTOCOLS}; worker '{}' speaks {}",
+            input.name, input.protocols
+        );
+        tracing::warn!("Refused to register a worker: {reason}");
+        return Err(err(Status::UpgradeRequired, reason));
+    };
 
     // Asked before registering, because registering is an upsert and would
     // erase the difference: the first time is an enrollment, and every time
@@ -369,7 +429,8 @@ pub async fn register_worker(
         });
     }
 
-    register_status_for(db, ca, &fingerprint).await
+    protocols.agree(&fingerprint, protocol);
+    register_status_for(db, ca, &fingerprint, Some(protocol)).await
 }
 
 /// Poll enrollment status by fingerprint (the worker derives its own).
@@ -378,15 +439,18 @@ pub async fn register_worker(
 pub async fn register_status(
     db: &State<DatabaseConnection>,
     ca: &State<Ca>,
+    protocols: &State<AgreedProtocols>,
     fingerprint: &str,
 ) -> Result<Json<RegisterStatus>, ApiError> {
-    register_status_for(db.inner(), ca, fingerprint).await
+    let protocol = protocols.of(fingerprint);
+    register_status_for(db.inner(), ca, fingerprint, protocol).await
 }
 
 async fn register_status_for(
     db: &DatabaseConnection,
     ca: &Ca,
     fingerprint: &str,
+    protocol: Option<u32>,
 ) -> Result<Json<RegisterStatus>, ApiError> {
     let worker = worker_store::find_worker_by_fingerprint(db, fingerprint)
         .await
@@ -408,6 +472,7 @@ async fn register_status_for(
         signed_cert,
         ca_cert,
         repo_template: repo_template(),
+        protocol,
     }))
 }
 

@@ -206,6 +206,15 @@ defect this frontend has had was of that kind.
   `RETIRED_PACKAGE_GRACE`; the sweep judges by `repo.db`, never by the `files` table. Never write `repo.db` or a repository file any other way -- the lock is what
   keeps two changes from each dropping the other's entry. Uploads are staged under the repository root
   (`staging_dir`), so publishing is a rename on one filesystem.
+- Workers and the server agree on a numbered worker protocol at registration, never on versions:
+  workers are released separately and may come from elsewhere. The types in
+  `aurcache-common/src/worker.rs` are that protocol, and within one protocol they only gain optional
+  fields; anything else -- a field required or changing meaning, a new enum variant a peer receives,
+  a route removed, lease timing -- needs the next number in `PROTOCOLS`. The fixtures under
+  `aurcache-common/tests/fixtures/worker-protocol/` fail on a break; never rewrite one to pass. The
+  server keeps each agreement in memory and answers `428` to a worker it holds none for, which then
+  registers again; a worker does no work before a registration succeeds. See
+  `design/proposed/worker-protocol-versioning.md`.
 - A worker's successful completion is accepted at once: the build goes `ACTIVE` -> `PUBLISHING`, the
   lease ends, and `aurcache_utils::publish::publish_with_recovery` puts it in the repository in the background.
   Failures before the SQL commit fail the build; finalization failures preserve `PUBLISHING` and

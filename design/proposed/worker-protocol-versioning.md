@@ -54,8 +54,8 @@ speaks 1 and 3 but not 2 is not a case worth designing for.
 
 ### Negotiated at registration
 
-`RegisterRequest` gains `protocol_min` and `protocol_max`, the oldest and
-newest protocol the worker speaks. The server picks the highest protocol in
+`RegisterRequest` gains `protocols`, the oldest and newest protocol the
+worker speaks (`{"min": 1, "max": 1}`). The server picks the highest protocol in
 both ranges, keeps it in memory against the worker's certificate
 fingerprint, and returns it in `RegisterStatus`. From then on, everything
 that worker sends under its certificate is read as that protocol. No request
@@ -127,12 +127,11 @@ note, never a silent change.
 The two statuses ask for different things: `428` means register now, `426`
 means no protocol in common, so wait and retry slowly.
 
-The Workers page shows each worker's agreed protocol, or the range it offered
-and why it was refused (in the same words as the `426` body), from the same
-in-memory state; after a restart it fills back in as the workers register.
-A worker with no agreed protocol cannot be approved. A refusal is logged once
-per worker and mismatch, under the worker's entity, so it shows on the
-worker's log page without flooding it on every retry.
+A refused registration is turned away before anything about the worker is
+recorded, so it never reaches the approval list, and a worker can only be
+approved once a protocol was agreed. The server logs the refusal, and the
+worker's journal carries the `426` body. Showing a worker's agreed protocol on
+the Workers page can follow; nothing needs it while there is one protocol.
 
 ### What may change within a version
 
@@ -151,7 +150,7 @@ v1 is a contract with workers the server's authors never see, so it has rules:
   ends.
 
 The header comment in `aurcache-common/src/worker.rs` changes from "released
-together" to these rules. Each v1 message's JSON is committed as a fixture
+together" to these rules. Each protocol 1 message's JSON is committed as a fixture
 that the tests encode and decode against, so a change to a type that would
 alter v1 fails CI instead of shipping.
 
@@ -168,19 +167,20 @@ job alone.
 
 ### Implementation, for now
 
-With one protocol there is nothing to dispatch on, so v1 is simply the types
-in `aurcache-common/src/worker.rs`, used by both ends as today. What this
-design adds is small:
+With one protocol there is nothing to dispatch on, so protocol 1 is simply
+the types in `aurcache-common/src/worker.rs`, used by both ends as today.
+What this design adds is small:
 
-- the two range constants and a `negotiate` function in
+- the `PROTOCOLS` range and `ProtocolRange::negotiate` in
   `aurcache-common/src/worker.rs`;
 - the range in `RegisterRequest` and the agreed protocol in `RegisterStatus`;
 - on the server, the in-memory map from fingerprint to protocol, filled by
-  registration and read by the guard that authenticates workers (`ApprovedWorker`),
+  registration and read by the guard that authenticates workers (`WorkerAuth`),
   which answers `428` for a worker it does not hold;
 - on the worker, registration before any work, and registering again on a
   `428`;
-- the v1 fixtures.
+- the fixtures: `aurcache-common/tests/fixtures/worker-protocol/1/`, one file
+  per message, checked by `aurcache-common/tests/worker_protocol.rs`.
 
 No version is passed around, because no code yet behaves differently by
 version.
@@ -358,7 +358,8 @@ the day a breaking change is needed.
    agree to the tag scheme, and possibly create the environment, so this
    lands with or right after the merge.
 
-Steps 1-3 go on `upstream-merge` before the PR leaves draft.
+Steps 1-3 go on `upstream-merge` before the PR leaves draft. Step 2 is in
+place.
 
 ## Open questions
 

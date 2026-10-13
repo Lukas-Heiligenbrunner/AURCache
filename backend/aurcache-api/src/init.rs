@@ -281,6 +281,7 @@ pub fn init_worker_api(
             .manage(ca)
             .manage(store)
             .manage(repo)
+            .manage(crate::worker::AgreedProtocols::default())
             .mount("/api/", crate::worker::worker_protocol_routes())
             .launch()
             .await;
