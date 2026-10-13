@@ -95,32 +95,17 @@ USER packager
 ENV PATH="/home/packager/bin:/home/packager/.cargo/bin:${PATH}"
 # The scripts need no source, so they are copied ahead of the tree and a code
 # change does not invalidate them.
-COPY --chmod=0755 docker/install-rust-toolchain.sh docker/build-aurcache-packages.sh docker/install-wasm-bindgen.sh /usr/local/bin/
+COPY --chmod=0755 docker/install-rust-toolchain.sh docker/build-aurcache-packages.sh /usr/local/bin/
 
-# The lockfile alone, ahead of the source, so that the expensive `cargo install`
-# below is invalidated when the pinned version changes and not by a code edit.
-COPY frontend-rs/Cargo.lock /tmp/frontend-Cargo.lock
-# wasm-bindgen emits the frontend's JS glue and is not in Arch's repositories,
-# so it is built rather than installed. See install-wasm-bindgen.sh for why its
-# version comes from the lockfile rather than crates.io. The cache mount
-# carries the registry and the installed wasm-bindgen-cli, so the install is
-# skipped rather than recompiled once the worker or a previous hybrid build has
-# run. `uid`/`gid` solve the reason this used to be impossible: buildkit
-# creates the mount as root, leaving cargo -- running as `packager` -- unable to
-# write `~/.cargo/.crates.toml`; naming the owner makes the home writable and
-# the layer caches on its own again. The toolchain comes from
-# install-rust-toolchain.sh, which serializes rustup across the architectures
-# building at once and reinstalls it if buildkit evicted the mount; the wasm32
-# std is added there too. The binary itself is copied out of the
-# mount into the layer (`~/.cargo` is a cache mount, which buildkit may evict
-# independently of the layer cache -- the same trap server.Dockerfile copies
-# itself out of); `~/.cargo/bin` stays on PATH for the compiles that run under
-# `cargo`, and `~/bin` is where the durable copy lives.
+# The Rust toolchain, with the wasm32 std the server's frontend compiles
+# against; its JS glue comes from a build dependency, so nothing else is
+# installed. install-rust-toolchain.sh serializes rustup across the
+# architectures building at once and reinstalls it if buildkit evicted the
+# mount. `uid`/`gid` let cargo, running as `packager`, write the mounted
+# homes: buildkit creates them as root otherwise.
 RUN --mount=type=cache,target=/home/packager/.cargo,id=cargo-downloads-packager,uid=1000,gid=1000,mode=0700 \
     --mount=type=cache,target=/home/packager/.rustup,id=rustup-downloads-packager,uid=1000,gid=1000,mode=0700 \
-    install-rust-toolchain.sh wasm32-unknown-unknown \
-    && install-wasm-bindgen.sh /tmp/frontend-Cargo.lock \
-    && install -Dm755 /home/packager/.cargo/bin/wasm-bindgen /home/packager/bin/wasm-bindgen
+    install-rust-toolchain.sh wasm32-unknown-unknown
 
 COPY --chown=packager . /src
 # Build the three packages this image runs: the server, the sandbox it parses

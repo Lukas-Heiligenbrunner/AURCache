@@ -43,7 +43,16 @@ aurcache-common = { path = "../backend/aurcache-common", default-features = fals
 # Static for now: the crate has no hover support, and adding it upstream is a
 # separate piece of work.
 dioxus-charts = "0.4"
-wasm-bindgen = "0.2"
+# Pinned exactly, and to the same version as `wasm-bindgen-cli-support` in
+# backend/aurcache-api/Cargo.toml, which generates this crate's JS glue when
+# the server embeds the frontend: the two only work as a matching pair. Bump
+# them together.
+#
+# Held at 0.2.128: with 0.2.129, scripts/test-frontend.sh finds five pages
+# that mount but miss part of what they render (the dashboard's chart, the
+# "—" placeholders, the build rows' pointer cursor, the server's name in the
+# log). Run it after a bump; it is what catches this.
+wasm-bindgen = "=0.2.128"
 # The client's error type: only named to tell a 404 apart from other failures.
 anyhow = "1"
 # A log entry's payload, read for the entities a row's menu can narrow to.

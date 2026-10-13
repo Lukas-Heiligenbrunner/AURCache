@@ -52,32 +52,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # All of this is cheaper to check now than to debug from a blank screenshot.
 
 [ -n "$CHROME" ] || fail "no chrome/chromium found; set CHROME=/path/to/browser"
-# wasm-bindgen refuses a wasm file emitted by any other release of itself --
-# an upstream constraint, not a choice here: the CLI and the `wasm-bindgen`
-# crate exchange an unstable schema and must be the same version.
-#
-# So rather than require that whatever is on PATH happens to match, provision
-# the version this tree actually needs and put it first. That keeps the test
-# robust across a routine `cargo update`, and across a machine whose global
-# install serves some other project -- which is left exactly as it was.
-#
-# The wanted version comes from the frontend's lockfile, the same source the
-# container images pin from, so all three agree by construction.
-wb_want=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[",]/, "", $3); print $3; exit }' \
-    "$PROJECT_DIR/frontend-rs/Cargo.lock")
-[ -n "$wb_want" ] || fail "could not read the wasm-bindgen version from frontend-rs/Cargo.lock"
-if [ "$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')" != "$wb_want" ]; then
-    # Cached per version, so a bump costs one build and a revert costs none.
-    wb_root="${AURCACHE_WASM_BINDGEN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/aurcache/wasm-bindgen}/$wb_want"
-    if [ ! -x "$wb_root/bin/wasm-bindgen" ]; then
-        echo "==> wasm-bindgen $wb_want is not on PATH; building it into $wb_root"
-        echo "    (once per version; your own installation is not touched)"
-        cargo install wasm-bindgen-cli --locked --version "$wb_want" --root "$wb_root" >/dev/null \
-            || fail "could not build wasm-bindgen-cli $wb_want"
-    fi
-    PATH="$wb_root/bin:$PATH"
-    export PATH
-fi
 command -v sqlite3 >/dev/null 2>&1 || fail "sqlite3 not installed"
 rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown \
     || fail "rust target wasm32-unknown-unknown not installed"

@@ -121,8 +121,7 @@ COPY --chown=packager . /src
 # build-aurcache-packages.sh calls first, and which also reinstalls the
 # toolchain if buildkit evicted the mount. The `uid`/`gid` are the whole point: buildkit would
 # otherwise create the mount as root and cargo could not write
-# `~/.cargo/.crates.toml`, which is precisely why the hybrid image used to
-# avoid the mount for the wasm-bindgen install.
+# `~/.cargo/.crates.toml`.
 RUN --mount=type=cache,target=/home/packager/.cargo,id=cargo-downloads-packager,uid=1000,gid=1000,mode=0700 \
     --mount=type=cache,target=/home/packager/.rustup,id=rustup-downloads-packager,uid=1000,gid=1000,mode=0700 \
     build-aurcache-packages.sh aurcache-sandbox aurcache-worker

@@ -24,11 +24,10 @@ jobs:
           rustup install stable          
 
       # `aurcache-api`'s `static` feature compiles the frontend to wasm inside
-      # its build script, which needs the wasm target and the wasm-bindgen CLI
-      # pinned to the frontend's lockfile. The Docker images install both
-      # through this script; CI uses the same one so the two cannot drift.
-      - name: Install wasm toolchain
-        run: bash ../docker/install-wasm-bindgen.sh ../frontend-rs/Cargo.lock
+      # its build script, which needs the wasm target. The JS glue comes from a
+      # build dependency, so nothing else is installed.
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Toolchain info
         run: |
@@ -146,8 +145,8 @@ jobs:
       - name: Update local toolchain
         run: rustup update
 
-      - name: Install wasm toolchain
-        run: bash docker/install-wasm-bindgen.sh frontend-rs/Cargo.lock
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
 
       - name: Render every route
         run: ./scripts/test-frontend.sh --shots "$RUNNER_TEMP/shots"

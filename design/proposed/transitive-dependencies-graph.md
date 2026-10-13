@@ -31,8 +31,8 @@ Three precedents shape what follows:
   `dioxus-charts`. The graphs below go one step further — SVG rendered by our
   own components, so they can be interactive.
 - The frontend has almost no JS interop (a `js_sys::Date` call, a clipboard
-  promise) and no npm asset pipeline — the build shells out to `wasm-bindgen
-  --target web` (`aurcache-api/build.rs:78`). Anything needing a JS library is
+  promise) and no npm asset pipeline — the build runs wasm-bindgen for the
+  `web` target (`bindgen` in `aurcache-api/build.rs`). Anything needing a JS library is
   a new kind of dependency for this codebase.
 
 ## Phase 1: transitive lists

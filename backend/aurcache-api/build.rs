@@ -80,20 +80,69 @@ fn build_wasm(frontend: &Path) {
     );
 }
 
-/// Turn the wasm into something a browser can load.
+/// Turn the wasm into something a browser can load: the JS glue the page
+/// imports, beside a processed copy of the wasm, in `dist/`.
+///
+/// Done by the `wasm-bindgen-cli-support` library, a build dependency, rather
+/// than by the `wasm-bindgen` command. The two halves of wasm-bindgen -- the
+/// crate the frontend links and what generates its glue -- must be exactly the
+/// same version, and refuse any other pair. An installed command matched or
+/// did not depending on what the machine had (Arch's package, for one, follows
+/// its own schedule), and the frontend was held back to whatever that was. As
+/// a build dependency pinned to the frontend's version, it is fetched and
+/// built like any other crate, in every build, offline ones included.
+#[cfg(feature = "static")]
 fn bindgen(frontend: &Path) {
-    run(
-        Command::new("wasm-bindgen").current_dir(frontend).args([
-            "--target",
-            "web",
-            "--out-dir",
-            "dist",
-            "--no-typescript",
-            "target/wasm32-unknown-unknown/release/aurcache-frontend.wasm",
-        ]),
-        "wasm-bindgen",
-        "Is wasm-bindgen-cli installed? `cargo install wasm-bindgen-cli`",
-    );
+    check_pair(frontend);
+    wasm_bindgen_cli_support::Bindgen::new()
+        .input_path(frontend.join("target/wasm32-unknown-unknown/release/aurcache-frontend.wasm"))
+        .web(true)
+        .and_then(|bindgen| {
+            bindgen
+                .typescript(false)
+                // The command's default, not the library's: without it the
+                // glue's `init()` has no idea where its `.wasm` is, and the
+                // page calls it with no arguments.
+                .omit_default_module_path(false)
+                .generate(frontend.join("dist"))
+        })
+        .unwrap_or_else(|e| panic!("wasm-bindgen failed: {e:#}"));
+}
+
+#[cfg(not(feature = "static"))]
+fn bindgen(_frontend: &Path) {
+    unreachable!("only run under the `static` feature, which brings the bindgen library");
+}
+
+/// Refuse a frontend locked to another wasm-bindgen than the library here.
+///
+/// Both manifests pin the same exact version, so this only fires after one of
+/// the two pins was changed alone. The library would refuse too, but in terms
+/// of "this binary" and a schema version, with no word of which file to edit.
+#[cfg(feature = "static")]
+fn check_pair(frontend: &Path) {
+    let locked = |lockfile: &Path, name: &str| -> Option<String> {
+        let text = std::fs::read_to_string(lockfile).ok()?;
+        let entry = format!("name = \"{name}\"\nversion = \"");
+        let at = text.find(&entry)? + entry.len();
+        Some(text[at..].split('"').next()?.to_string())
+    };
+    let backend_lock = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("cargo always sets CARGO_MANIFEST_DIR"),
+    )
+    .join("../Cargo.lock");
+    let crate_version = locked(&frontend.join("Cargo.lock"), "wasm-bindgen");
+    let library_version = locked(&backend_lock, "wasm-bindgen-cli-support");
+    if crate_version != library_version {
+        panic!(
+            "frontend-rs is locked to wasm-bindgen {} but the bindgen library here is {}; \
+             the two only work as a pair. Pin both to the same version: `wasm-bindgen` in \
+             frontend-rs/Cargo.toml and `wasm-bindgen-cli-support` in \
+             backend/aurcache-api/Cargo.toml.",
+            crate_version.as_deref().unwrap_or("<unknown>"),
+            library_version.as_deref().unwrap_or("<unknown>"),
+        );
+    }
 }
 
 /// Copy the bundle, and the page that loads it, into the embed folder.
