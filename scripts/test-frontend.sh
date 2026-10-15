@@ -391,14 +391,16 @@ for entry in "${ROUTES[@]}"; do
 
     # The shell is the layout every route renders into. Missing it means the
     # app never mounted -- a blank page -- rather than a wrong screen.
-    if ! printf '%s' "$dom" | grep -q "drawer-side"; then
+    # A pipe into grep -q can SIGPIPE printf after an early match; with
+    # pipefail that falsely reports a missing marker on a large page.
+    if ! grep -q "drawer-side" <<<"$dom"; then
         echo "  FAIL  $route ($desc): app did not mount"
         failures=$((failures + 1))
         continue
     fi
     # `--` so a marker that starts with a dash -- a makepkg flag, say -- is
     # read as a pattern rather than as an option to grep.
-    if ! printf '%s' "$dom" | grep -q -- "$marker"; then
+    if ! grep -q -- "$marker" <<<"$dom"; then
         echo "  FAIL  $route ($desc): mounted, but did not render $marker"
         failures=$((failures + 1))
         continue
@@ -408,7 +410,7 @@ for entry in "${ROUTES[@]}"; do
     # notice something that should not be, which is how a debug probe rendering
     # `HREF[...]QUERY[...]` above two list pages survived four commits: the
     # markers it sat beside still matched. This asks the other question.
-    if junk="$(printf '%s' "$dom" | grep -oE "$JUNK" | sort -u | head -3)" && [ -n "$junk" ]; then
+    if junk="$(grep -oE "$JUNK" <<<"$dom" | sort -u)" && [ -n "$junk" ]; then
         echo "  FAIL  $route ($desc): left-over debugging in the page: $(printf '%s' "$junk" | tr '\n' ' ')"
         failures=$((failures + 1))
         continue
