@@ -6,17 +6,6 @@ use std::time::{Duration, Instant};
 use tracing::info;
 use url::Url;
 
-trait Benchmark {
-    /// Measure how long it takes to connect (from the user's geography) and
-    /// download `core/os/x86_64/core.db` in full.
-    ///
-    /// Every mirror is measured against the same file, so the elapsed time is
-    /// directly comparable between mirrors: lower is better. The client is the
-    /// rank's, not a fresh one per probe: per-request construction would throw
-    /// away connection pooling and time client setup instead of the mirror.
-    async fn measure_duration(&self, client: &Client) -> anyhow::Result<Duration>;
-}
-
 pub trait Bench {
     /// Rank the mirrors fastest-first.
     fn rank(&self) -> impl Future<Output = anyhow::Result<Vec<Mirror>>> + Send;
@@ -85,7 +74,8 @@ impl Bench for Mirrors {
     }
 }
 
-impl Benchmark for Mirror {
+impl Mirror {
+    /// Time a successful download of the benchmark database using the ranker's client.
     async fn measure_duration(&self, client: &Client) -> anyhow::Result<Duration> {
         let url: Url = self.url.join("core/os/x86_64/core.db")?;
 
@@ -93,7 +83,7 @@ impl Benchmark for Mirror {
         // the clock at the response headers would time the handshake only and
         // ignore how fast the mirror actually serves data.
         let start = Instant::now();
-        let response = client.get(url.as_str()).send().await?;
+        let response = client.get(url.as_str()).send().await?.error_for_status()?;
         let size = response.bytes().await?.len();
         let elapsed = start.elapsed();
 
@@ -127,6 +117,27 @@ mod tests {
             ipv6: false,
             details: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn http_errors_are_not_ranked_as_fast_mirrors() {
+        use super::Bench;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/archlinux/core/os/x86_64/core.db"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut mirror = mirror("example.com");
+        mirror.url = format!("{}/archlinux/", server.uri()).parse().unwrap();
+        mirror.protocol = Protocol::Http;
+
+        let ranked = crate::mirror::Mirrors(vec![mirror]).rank().await.unwrap();
+        assert!(ranked.is_empty());
     }
 
     /// Ranking only returns the mirrors that actually responded, which is

@@ -3823,8 +3823,10 @@ dependencies = [
  "reqwest",
  "sea-orm",
  "serde",
+ "tokio",
  "tracing",
  "url",
+ "wiremock",
 ]
 
 [[package]]
