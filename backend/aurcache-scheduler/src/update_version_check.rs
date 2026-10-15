@@ -49,6 +49,14 @@ pub fn start_update_version_checking(services: Services) -> JoinHandle<()> {
 #[derive(Default)]
 struct Unreadable(HashSet<i32>);
 
+/// Choose a produced package name for AUR RPC, which cannot look up a pkgbase.
+fn aur_query_name(pkgbase: &str, split_packages: Option<&str>) -> String {
+    aurcache_db::lists::json_list(split_packages)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| pkgbase.to_string())
+}
+
 async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> anyhow::Result<()> {
     let Services {
         db,
@@ -61,17 +69,7 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
     let aur_query_names: Vec<String> = packages
         .iter()
         .filter(|x| matches!(x.source_data, SourceData::Aur { .. }))
-        .map(|x| {
-            // AUR RPC /info matches by pkgname, not pkgbase.  For packages whose
-            // pkgbase differs from any child pkgname (e.g. czkawka → czkawka-cli),
-            // query by the first split child so the RPC returns a result whose
-            // package_base field can be matched below.
-            let names = aurcache_db::lists::json_list(x.split_packages.as_deref());
-            match names.as_slice() {
-                [first, _, ..] => first.clone(),
-                _ => x.name.clone(),
-            }
-        })
+        .map(|package| aur_query_name(&package.name, package.split_packages.as_deref()))
         .collect();
 
     let aur_name_refs: Vec<&str> = aur_query_names.iter().map(String::as_str).collect();
@@ -390,5 +388,24 @@ async fn save_package(
             pkg: name.into(),
             error: format!("{e:#}"),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aur_query_name;
+
+    #[test]
+    fn aur_queries_use_a_produced_name_even_with_only_one_child() {
+        assert_eq!(
+            aur_query_name("demo-base", Some(r#"["demo-cli"]"#)),
+            "demo-cli"
+        );
+        assert_eq!(
+            aur_query_name("demo-base", Some(r#"["demo-cli","demo-gui"]"#)),
+            "demo-cli"
+        );
+        assert_eq!(aur_query_name("demo", None), "demo");
+        assert_eq!(aur_query_name("demo", Some("[]")), "demo");
     }
 }
