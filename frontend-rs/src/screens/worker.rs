@@ -182,26 +182,26 @@ fn WorkerPage(name: String, fingerprint: String) -> Element {
     // Pausing and resuming from the page, as from the fleet list; the header
     // shows what the server made of it once the list is read again.
     let mut busy = use_signal(|| false);
-    let mut outcome = use_signal(|| Option::<(String, bool)>::None);
+    let mut outcome = use_signal(|| Option::<Result<String, String>>::None);
     let act = move |(id, action): (i32, WorkerAction)| async move {
         busy.set(true);
         let result = action.perform(id).await;
         busy.set(false);
         match result {
             Ok(()) => {
-                outcome.set(Some((action.done().to_string(), true)));
+                outcome.set(Some(Ok(action.done().to_string())));
                 workers.restart();
             }
-            Err(e) => outcome.set(Some((e, false))),
+            Err(e) => outcome.set(Some(Err(e))),
         }
     };
 
     rsx! {
         div { class: "flex flex-col gap-4",
-            if let Some((message, ok)) = outcome() {
+            if let Some(result) = outcome() {
                 div {
-                    class: if ok { "alert alert-success alert-soft text-sm" } else { "alert alert-error alert-soft text-sm" },
-                    span { "{message}" }
+                    class: if result.is_ok() { "alert alert-success alert-soft text-sm" } else { "alert alert-error alert-soft text-sm" },
+                    span { {result.as_ref().unwrap_or_else(|error| error).clone()} }
                 }
             }
             match &*workers.read_unchecked() {
@@ -483,7 +483,7 @@ fn WorkerConfig(id: i32) -> Element {
             .map_err(|e| e.to_string())
     });
     let mut drafts = use_signal(Drafts::new);
-    let mut status = use_signal(|| Option::<(String, bool)>::None);
+    let mut status = use_signal(|| Option::<Result<String, String>>::None);
     let mut saving = use_signal(|| false);
 
     // Refreshed briskly while a save is on its way to the worker, so the page
@@ -508,23 +508,22 @@ fn WorkerConfig(id: i32) -> Element {
         match result {
             Ok(_) => {
                 drafts.set(Drafts::new());
-                status.set(Some((
+                status.set(Some(Ok(
                     "Saved. The worker picks it up on its next heartbeat.".to_string(),
-                    true,
                 )));
                 config.restart();
             }
-            Err(e) => status.set(Some((format!("Could not save: {e}"), false))),
+            Err(e) => status.set(Some(Err(format!("Could not save: {e}")))),
         }
     };
 
     let pending = drafts.read().len();
     rsx! {
         div {
-            if let Some((message, ok)) = status() {
+            if let Some(result) = status() {
                 div {
-                    class: if ok { "alert alert-success alert-soft text-sm mb-3" } else { "alert alert-error alert-soft text-sm mb-3" },
-                    span { "{message}" }
+                    class: if result.is_ok() { "alert alert-success alert-soft text-sm mb-3" } else { "alert alert-error alert-soft text-sm mb-3" },
+                    span { {result.as_ref().unwrap_or_else(|error| error).clone()} }
                 }
             }
             match &*config.read_unchecked() {

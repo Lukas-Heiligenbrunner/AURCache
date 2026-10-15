@@ -59,7 +59,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
     // Edited text, kept separate from what was loaded so "dirty" and "revert"
     // are both expressible.
     let mut draft = use_signal(String::new);
-    let mut status = use_signal(|| Option::<(String, bool)>::None);
+    let mut error = use_signal(|| Option::<String>::None);
     let mut show_patch = use_signal(|| false);
     let mut patch_copied = use_signal(|| false);
     let mut patch_copy_error = use_signal(|| Option::<String>::None);
@@ -77,7 +77,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
         let client = match crate::api::client() {
             Ok(client) => client,
             Err(e) => {
-                status.set(Some((e, false)));
+                error.set(Some(e));
                 return;
             }
         };
@@ -88,10 +88,10 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                 draft.set(shown_content(&content).to_owned());
                 loaded.set(Some(content));
                 selected.set(Some(path));
-                status.set(None);
+                error.set(None);
                 show_patch.set(false);
             }
-            Err(e) => status.set(Some((e.to_string(), false))),
+            Err(e) => error.set(Some(e.to_string())),
         }
     };
 
@@ -279,7 +279,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                                 let client = match crate::api::client() {
                                     Ok(client) => client,
                                     Err(e) => {
-                                        status.set(Some((e, false)));
+                                        error.set(Some(e));
                                         return;
                                     }
                                 };
@@ -287,7 +287,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                                     Ok(()) => {
                                         navigator().push(Route::Package { pkgbase: pkgbase.clone() });
                                     }
-                                    Err(e) => status.set(Some((e.to_string(), false))),
+                                    Err(e) => error.set(Some(e.to_string())),
                                 }
                             }
                         }
@@ -308,7 +308,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                                 let client = match crate::api::client() {
                                     Ok(client) => client,
                                     Err(e) => {
-                                        status.set(Some((e, false)));
+                                        error.set(Some(e));
                                         return;
                                     }
                                 };
@@ -316,7 +316,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                                 // worked: rebuilding the old source would
                                 // report success for a change never stored.
                                 match client.put_source_file(&pkgbase, &path, &draft()).await {
-                                    Err(e) => status.set(Some((e.to_string(), false))),
+                                    Err(e) => error.set(Some(e.to_string())),
                                     Ok(()) => match client
                                         .update_package(&pkgbase, &aurcache_client::UpdatePackage { force: true })
                                         .await
@@ -347,9 +347,8 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                                         // Stay put on a partial failure: the
                                         // edit is saved but the build is not
                                         // queued, and leaving would hide that.
-                                        Err(e) => status.set(Some((
-                                            format!("Saved, but the rebuild could not be queued: {e}"),
-                                            false,
+                                        Err(e) => error.set(Some(format!(
+                                            "Saved, but the rebuild could not be queued: {e}"
                                         ))),
                                     },
                                 }
@@ -368,10 +367,10 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                         span { "Stored patch no longer applies: {err}. Showing upstream content." }
                     }
                 }
-                if let Some((msg, ok)) = status() {
+                if let Some(message) = error() {
                     div {
-                        class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
-                        span { "{msg}" }
+                        class: "alert alert-error text-sm",
+                        span { "{message}" }
                     }
                 }
             },

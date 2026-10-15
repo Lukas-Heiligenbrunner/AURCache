@@ -61,7 +61,7 @@ pub fn Workers() -> Element {
 
     let mut show_retired = use_signal(|| false);
     let mut busy = use_signal(|| Option::<i32>::None);
-    let mut status = use_signal(|| Option::<(String, bool)>::None);
+    let mut status = use_signal(|| Option::<Result<String, String>>::None);
 
     // Every action is the same shape, and every one must refetch: the server
     // decides what a worker becomes, and the row has to show what it decided.
@@ -72,10 +72,10 @@ pub fn Workers() -> Element {
         busy.set(None);
         match outcome {
             Ok(()) => {
-                status.set(Some((action.done().to_string(), true)));
+                status.set(Some(Ok(action.done().to_string())));
                 reload += 1;
             }
-            Err(e) => status.set(Some((e, false))),
+            Err(e) => status.set(Some(Err(e))),
         }
     };
 
@@ -87,10 +87,10 @@ pub fn Workers() -> Element {
                     "A worker cannot build until it is approved. Revoking refuses its certificate, releases anything it reserved and requeues its builds; the row is kept so old builds still name the machine that ran them."
                 }
 
-                if let Some((message, ok)) = status() {
+                if let Some(result) = status() {
                     div {
-                        class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
-                        span { "{message}" }
+                        class: if result.is_ok() { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
+                        span { {result.as_ref().unwrap_or_else(|error| error).clone()} }
                     }
                 }
 
