@@ -21,7 +21,11 @@ pub use aurcache_deps::paths::{
 /// the shared mount, and without a valid PACKAGER the generated `desc` file
 /// cannot be parsed by libalpm.
 ///
-/// `OPTIONS=(!debug)` suppresses makepkg's split `<pkgname>-debug` packages.
+/// `OPTIONS+=(!debug)` suppresses makepkg's split `<pkgname>-debug` packages.
+/// Appended to the array rather than assigned: an assignment replaces the
+/// whole of it, and makepkg reads an option the array does not mention as off
+/// -- `strip`, `zipman` and `purge` with it. The last mention of an option is
+/// the one that counts, so this wins over the chroot's `debug` and the user's.
 /// Arch's stock `makepkg.conf` enables `debug`, so a worker on distro defaults
 /// emits one per package. AURCache serves a single flat repo per architecture,
 /// so those would show up in `pacman -Ss` alongside real packages — Arch itself
@@ -38,7 +42,7 @@ fn makepkg_config(user_conf: &str, pkgdest_dir: &Path) -> String {
     }
     let _ = write!(
         config,
-        "MAKEFLAGS=-j$(nproc)\nPKGDEST={}\nPACKAGER='AURCache <aurcache@localhost>'\nOPTIONS=(!debug)\n",
+        "MAKEFLAGS=-j$(nproc)\nPKGDEST={}\nPACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
         pkgdest_dir.display()
     );
     config
@@ -136,7 +140,50 @@ mod tests {
     fn makepkg_config_disables_debug_packages() {
         for user_conf in ["", "OPTIONS=(debug)"] {
             let conf = makepkg_config(user_conf, Path::new("/out"));
-            assert!(conf.ends_with("OPTIONS=(!debug)\n"), "got:\n{conf}");
+            assert!(conf.ends_with("OPTIONS+=(!debug)\n"), "got:\n{conf}");
+        }
+    }
+
+    /// What makepkg ends up with, read the way it reads the array: the last
+    /// mention of an option wins, and one never mentioned is off.
+    fn options_after(conf: &str) -> Vec<String> {
+        let script = format!(
+            "OPTIONS=(strip docs !libtool !staticlibs emptydirs zipman purge debug !lto)\n\
+             nproc() {{ echo 1; }}\n{conf}\nprintf '%s\\n' \"${{OPTIONS[@]}}\""
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("running bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn enabled(options: &[String], option: &str) -> bool {
+        options
+            .iter()
+            .rev()
+            .find(|o| o.trim_start_matches('!') == option)
+            .is_some_and(|o| !o.starts_with('!'))
+    }
+
+    /// Turning `debug` off must leave the rest of the chroot's options alone:
+    /// assigning the array instead built every package unstripped.
+    #[test]
+    fn makepkg_config_keeps_the_other_options() {
+        let options = options_after(&makepkg_config("", Path::new("/out")));
+        assert!(!enabled(&options, "debug"), "{options:?}");
+        for kept in ["strip", "zipman", "purge", "docs"] {
+            assert!(enabled(&options, kept), "{kept} lost: {options:?}");
         }
     }
 

@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn parallelism_follows_the_cpu_limit() {
-        let server = "OPTIONS=(!debug)\nMAKEFLAGS=-j$(nproc)\nPKGDEST=/pkgdest";
+        let server = "OPTIONS+=(!debug)\nMAKEFLAGS=-j$(nproc)\nPKGDEST=/pkgdest";
         assert_eq!(limit_parallelism(server, None), server);
 
         let limited = limit_parallelism(server, Some(2.5));

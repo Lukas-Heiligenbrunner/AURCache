@@ -694,7 +694,7 @@ fn validate_artifact_names(expected: &[String], filenames: &[String]) -> anyhow:
 /// `core`/`extra`/`multilib` for exactly that reason — they live in separate,
 /// opt-in `*-debug` repos.
 ///
-/// The server already forces `OPTIONS=(!debug)` so these are not built at all.
+/// The server already forces `OPTIONS+=(!debug)` so these are not built at all.
 /// This is the backstop for a worker whose user-supplied `makepkg.conf`
 /// re-enables `debug`: without it, the extra artifact fails
 /// [`validate_artifact_names`] and the build fails.
