@@ -8,7 +8,7 @@ use crate::events::Event;
 use aurcache_db::prelude::LogEntities;
 use aurcache_db::{log_entities, logs};
 use sea_orm::ActiveValue::Set;
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, TransactionSession};
 
 pub use aurcache_common::api::activity::Severity;
 use aurcache_common::api::log::EntityRef;
@@ -207,9 +207,10 @@ pub fn spawn(db: DatabaseConnection) -> Writer {
 /// Both in one transaction: an entry that exists but is not indexed would be
 /// invisible to every entity filter, which is worse than not having been
 /// written at all, because nothing would show it was missing.
-pub(crate) async fn write(db: &DatabaseConnection, record: LogRecord) -> anyhow::Result<()> {
-    use sea_orm::TransactionTrait;
-
+pub(crate) async fn write<C: sea_orm::ConnectionTrait + sea_orm::TransactionTrait>(
+    db: &C,
+    record: LogRecord,
+) -> anyhow::Result<()> {
     // The scope is indexed like any other reference, under a role of its own,
     // so one query answers both "about this build" and "during it".
     let mut refs = record.references;

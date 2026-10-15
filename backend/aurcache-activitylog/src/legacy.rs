@@ -15,7 +15,7 @@ use aurcache_db::prelude::{Activities, Builds};
 use aurcache_db::{builds, packages};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait,
+    RelationTrait, TransactionTrait,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -54,11 +54,21 @@ pub async fn import_activities(db: &DatabaseConnection) -> anyhow::Result<u64> {
             continue;
         };
         let record = LogRecord::of(&event, None, user, row.timestamp)?;
-        if let Err(e) = write(db, record).await {
+        // The new entry and removal of the old one commit together, so a
+        // failed delete or interrupted import cannot duplicate the event.
+        let imported = db
+            .transaction::<_, (), anyhow::Error>(|txn| {
+                Box::pin(async move {
+                    write(txn, record).await?;
+                    Activities::delete_by_id(row.id).exec(txn).await?;
+                    Ok(())
+                })
+            })
+            .await;
+        if let Err(e) = imported {
             tracing::warn!("could not import activity row {}: {e}", row.id);
             continue;
         }
-        Activities::delete_by_id(row.id).exec(db).await?;
         moved += 1;
     }
     Ok(moved)
@@ -380,5 +390,49 @@ mod tests {
     async fn an_empty_table_imports_nothing() {
         let db = db().await;
         assert_eq!(import_activities(&db).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_does_not_duplicate_an_imported_event() {
+        use sea_orm::ConnectionTrait;
+
+        let db = db().await;
+        old_row(
+            &db,
+            ActivityType::AddPackage,
+            r#"{"package":"hello"}"#,
+            Some("alice"),
+        )
+        .await;
+        db.execute_unprepared(
+            "CREATE TRIGGER refuse_activity_delete BEFORE DELETE ON activity \
+             BEGIN SELECT RAISE(FAIL, 'cannot delete activity'); END",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(import_activities(&db).await.unwrap(), 0);
+        assert_eq!(
+            aurcache_db::prelude::Logs::find().count(&db).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            aurcache_db::prelude::LogEntities::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(Activities::find().count(&db).await.unwrap(), 1);
+
+        db.execute_unprepared("DROP TRIGGER refuse_activity_delete")
+            .await
+            .unwrap();
+        assert_eq!(import_activities(&db).await.unwrap(), 1);
+        assert_eq!(import_activities(&db).await.unwrap(), 0);
+        assert_eq!(
+            aurcache_db::prelude::Logs::find().count(&db).await.unwrap(),
+            1
+        );
     }
 }
