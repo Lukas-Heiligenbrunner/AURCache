@@ -875,8 +875,17 @@ fn sweep_retired(
             let path = entry.path();
             let since = known.remove(&path).unwrap_or(now);
             if now.saturating_duration_since(since) >= grace {
-                if remove_logged(log, &path) {
-                    swept.deleted.push(name.clone());
+                match std::fs::remove_file(&path) {
+                    Ok(()) => swept.deleted.push(name),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        log.emit(Event::RepoFileFailed {
+                            path: path.display().to_string(),
+                            action: FileAction::Remove,
+                            error: error.to_string(),
+                        });
+                        swept.still_retired.insert(path, since);
+                    }
                 }
             } else {
                 swept.still_retired.insert(path, since);
@@ -906,23 +915,6 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
-}
-
-/// Remove a retired file, returning whether it went -- one already gone did
-/// not, and is nothing to report either.
-fn remove_logged(log: &ActivityLog, path: &Path) -> bool {
-    match std::fs::remove_file(path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            log.emit(Event::RepoFileFailed {
-                path: path.display().to_string(),
-                action: FileAction::Remove,
-                error: e.to_string(),
-            });
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1158,6 +1150,40 @@ mod tests {
                 .unwrap(),
             2
         );
+        assert!(!old.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_removal_is_retried_without_another_grace_period() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path());
+        retire_one(&repo).await;
+        let old = platform_file(&repo, "foo", "1.0-1");
+        let grace = Duration::from_secs(3600);
+        let later = Instant::now() + grace;
+
+        // A directory makes remove_file fail even when tests run as root.
+        std::fs::remove_file(&old).unwrap();
+        std::fs::create_dir(&old).unwrap();
+        let first = sweep_retired(
+            repo.root(),
+            repo.retired_times().clone(),
+            later,
+            grace,
+            repo.log(),
+        );
+        assert!(first.still_retired.contains_key(&old));
+
+        std::fs::remove_dir(&old).unwrap();
+        std::fs::write(&old, b"retired package").unwrap();
+        let retried = sweep_retired(
+            repo.root(),
+            first.still_retired,
+            later + Duration::from_secs(1),
+            grace,
+            repo.log(),
+        );
+        assert_eq!(retried.deleted, [filename("foo", "1.0-1")]);
         assert!(!old.exists());
     }
 
