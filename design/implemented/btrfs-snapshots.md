@@ -14,7 +14,7 @@ Split off from this doc:
 - `design/rejected/source-cache-snapshots.md`: per-build snapshots of the source
   cache merged back with git, and mirrors shared by URL. Designed and
   prototyped, then rejected for now as not worth their cost.
-- `design/proposed/git-mirror-maintenance.md`, postponed: git's auto-gc in a
+- `design/rejected/git-mirror-maintenance.md`, postponed: git's auto-gc in a
   source mirror can prune objects a kept checkout still borrows. It is a
   separate issue that snapshots do not touch.
 

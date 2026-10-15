@@ -16,8 +16,8 @@ container worker declares its own settings (see [Recommendation](#recommendation
 Not built: fleet defaults, and phase 2 (SSE).
 
 - The first draft had a server-side allowlist of worker settings and a fleet
-  default. Two reviews ([`worker-configuration-review.md`](worker-configuration-review.md),
-  [`worker-configuration-review-codex.md`](worker-configuration-review-codex.md))
+  default. Two reviews ([`worker-configuration-review.md`](../reviews/worker-configuration-review.md),
+  [`worker-configuration-review-codex.md`](../reviews/worker-configuration-review-codex.md))
   agreed with the security boundary and the transport and found the protocol
   under-specified; the first revision adopted most of what they raised.
 - This revision replaces the allowlist with **settings each worker declares**,

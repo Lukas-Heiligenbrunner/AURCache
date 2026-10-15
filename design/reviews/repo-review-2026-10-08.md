@@ -48,19 +48,19 @@ correct. Upgrades from the released upstream 0.5 schema remain supported.
 
 ### 1. Durable repository finalization
 
-[Repository](../backend/aurcache-utils/src/repository.rs) now owns the SQL
+[Repository](../../backend/aurcache-utils/src/repository.rs) now owns the SQL
 transaction as well as preparation and finalization. Its callback receives a
 `DatabaseTransaction`; publication, deletion and restore participate in that
 transaction rather than committing their own.
 
-A [migration](../backend/aurcache-db/src/migration/m20261008_000001_repository_updates.rs)
+A [migration](../../backend/aurcache-db/src/migration/m20261008_000001_repository_updates.rs)
 adds the singleton `repository_updates` journal. The caller's SQL changes and
 filesystem plan commit together. Fallible artifact and database renames replay
 idempotently; the journal is cleared only after all replacements finish. Startup,
 the next update and repository sweeping recover pending work before proceeding.
 Blocking filesystem tasks retain an owned lock through cancellation.
 
-[Publication](../backend/aurcache-utils/src/publish.rs) retains uploaded originals
+[Publication](../../backend/aurcache-utils/src/publish.rs) retains uploaded originals
 until finalization, recording success and dependent promotion finish. A restart
 also resumes successful builds that still have an upload directory, covering a
 crash between success and dependent promotion. Post-commit failures preserve the
@@ -83,7 +83,7 @@ claim rolls back. Existing claim races and dependency transition tests remain.
 
 ### 3. One persisted CA identity
 
-[Ca](../backend/aurcache-ca/src/lib.rs) validates the certificate, CA constraint
+[Ca](../../backend/aurcache-ca/src/lib.rs) validates the certificate, CA constraint
 and certificate/key match when loading. An empty directory can create an identity;
 a partial or invalid legacy pair fails without replacing the surviving material.
 
@@ -97,7 +97,7 @@ interrupted PEM installation.
 
 ### 4. Explicit directory measurement completeness
 
-[DirectoryMeasurement](../backend/aurcache-common/src/fs.rs) is the shared tree
+[DirectoryMeasurement](../../backend/aurcache-common/src/fs.rs) is the shared tree
 measurement result: `Complete { bytes }` or `Incomplete { known_bytes }`.
 It walks iteratively and skips symlink entries. Worker sizing first uses it,
 then attempts privileged measurement. A failed total remains `None` in telemetry
@@ -109,7 +109,7 @@ unreadable trees, missing roots, symlinks, deep nesting and incomplete-size evic
 
 ### 5. Owned worker job phases
 
-[Job execution](../backend/aurcache-worker/src/job.rs) now separates preparation,
+[Job execution](../../backend/aurcache-worker/src/job.rs) now separates preparation,
 bind planning, process execution, execution reporting, lease settlement and cache
 cleanup. `PreparedJob` owns its resources; `BuildExecution` carries the process
 outcome and measurements needed for reporting. The top-level job function
@@ -122,7 +122,7 @@ both guards; the kernel and full worker suites cover storage and process behavio
 
 ### 6. Shared setting mutation and draft rules
 
-[Setting editing](../frontend-rs/src/setting_editor.rs) provides `SettingScope`,
+[Setting editing](../../frontend-rs/src/setting_editor.rs) provides `SettingScope`,
 `SettingChange`, `SettingEdit`, `EditorDraft` and one mutation controller. Global,
 package and config-file controls use it; the package build settings share one
 settings resource.
@@ -135,8 +135,8 @@ double-clicks it, edits during the request and rejects a reset.
 
 ### 7. Build-log polling separated from presentation
 
-[use_build_log](../frontend-rs/src/build_log.rs) owns polling and the named
-controller state; the component renders it. [LogCursor](../frontend-rs/src/log_tail.rs)
+[use_build_log](../../frontend-rs/src/build_log.rs) owns polling and the named
+controller state; the component renders it. [LogCursor](../../frontend-rs/src/log_tail.rs)
 centralizes offsets, restart positions and UTF-8 advancement. Named progress
 results distinguish catch-up, more output and retry.
 
@@ -168,9 +168,9 @@ smoke test exercises the actual aggregate and journal queries.
 
 ### 10. Shared shell quoting and private writes
 
-[quote_argument](../backend/aurcache-common/src/shell.rs) is the dependency-free
+[quote_argument](../../backend/aurcache-common/src/shell.rs) is the dependency-free
 POSIX shell argument helper used by the CLI and both workers.
-[write_private](../backend/aurcache-common/src/fs.rs) creates a private sibling,
+[write_private](../../backend/aurcache-common/src/fs.rs) creates a private sibling,
 syncs it, atomically replaces the destination and syncs the parent. CA persistence,
 worker identity, CLI configuration and private dumps use it.
 

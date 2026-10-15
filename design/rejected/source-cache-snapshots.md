@@ -30,7 +30,7 @@ What it would have bought:
   cloned again, which snapshots do not change, and the existing self-heals
   (`wipe_srcdest`, `wipe_borrowed_checkouts`) cover them.
 - **Control over git's gc.** This needs no snapshots at all. It is a separate
-  question, postponed in `design/proposed/git-mirror-maintenance.md`.
+  question, postponed in `design/rejected/git-mirror-maintenance.md`.
 
 What it would have cost:
 
