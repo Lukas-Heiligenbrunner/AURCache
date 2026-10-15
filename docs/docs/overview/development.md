@@ -37,9 +37,10 @@ cargo build --release
 
 #### `alpm-pkgbuild-bridge`
 
-The backend needs the [`alpm-pkgbuild-bridge`] script on your `$PATH` to parse
-PKGBUILDs. It is **not** bundled with any crate: `alpm-srcinfo` shells out to
-it, and looks it up in `$PATH` at runtime.
+The backend parses PKGBUILDs by running [`alpm-pkgbuild-bridge`] through
+`aurcache-sandbox`. The bridge is not bundled with a crate. Its path and the
+sandbox's path must be absolute; set `AURCACHE_PKGBUILD_BRIDGE` and
+`AURCACHE_SANDBOX` when they are installed outside their default locations.
 
 ```bash
 # Arch
@@ -51,12 +52,20 @@ sudo curl -sSLf -o /usr/local/bin/alpm-pkgbuild-bridge \
 sudo chmod 755 /usr/local/bin/alpm-pkgbuild-bridge
 ```
 
-Without it you get `PKGBUILD parsing failed and no fixes were applied` — but
-only for *patched* sources, which makes it look like a code bug rather than a
-missing tool. An unpatched package reads its shipped `.SRCINFO` and works fine;
-applying a patch invalidates that `.SRCINFO` and forces a PKGBUILD re-parse
-through the bridge. So most of the suite passes and a handful of patch-related
-tests fail.
+For a checkout, build the sandbox and point the tests at it from the repository
+root:
+
+```bash
+cargo build --manifest-path backend/Cargo.toml -p aurcache-sandbox
+export AURCACHE_SANDBOX="$PWD/backend/target/debug/aurcache-sandbox"
+# If installed using the curl command above:
+export AURCACHE_PKGBUILD_BRIDGE=/usr/local/bin/alpm-pkgbuild-bridge
+```
+
+An unpatched package can use its shipped `.SRCINFO`; applying a patch requires
+a PKGBUILD re-parse through the bridge. Tests requiring the parser skip locally
+when it is unavailable and fail under CI, so a passing local test run alone
+does not prove parsing was exercised.
 
 The Docker image installs it the same way (see `docker/server.Dockerfile`), so this
 only affects running the backend or its tests directly on your machine.
@@ -81,10 +90,11 @@ cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
 cargo test
 ```
 
-The repo root has a `Justfile` with `just format`, `just lint`, and
-`just codegen` for convenience, but note they are more lenient than CI —
-`just lint` runs `cargo clippy` without `-D warnings`, so it can pass where CI
-fails. Use the commands above when checking whether a change is ready.
+The root `Justfile` provides `just format`, `just lint`, and `just test` for both
+workspaces. `just lint` treats warnings as errors and checks the frontend for
+both host and wasm targets. Use `just test-browser` to verify that the embedded
+UI mounts and its interactions work in a real browser; host tests exercise
+the component logic without mounting the application.
 
 ### API types are shared, not mirrored
 
