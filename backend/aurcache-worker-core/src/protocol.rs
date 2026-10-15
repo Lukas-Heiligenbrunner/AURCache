@@ -10,6 +10,22 @@ use std::time::{Duration, Instant};
 use crate::artifacts;
 use crate::client::WorkerClient;
 
+/// The build's packages cannot be accepted: it made none, one is not a
+/// regular file, or the server refused one (too large, a bad name, empty).
+///
+/// The package's doing rather than the worker's, so the build fails instead
+/// of being retried; see [`crate::report::from_error`].
+#[derive(Debug)]
+pub struct PackagesRefused(pub String);
+
+impl std::fmt::Display for PackagesRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PackagesRefused {}
+
 /// Append a log line, ignoring transport errors.
 ///
 /// Log delivery is best-effort by design: losing a line is a cosmetic problem,
@@ -124,7 +140,7 @@ impl<'a> StopWatch<'a> {
 pub async fn upload_artifacts(client: &WorkerClient, build_id: i32, pkgdir: &Path) -> Result<()> {
     let found = artifacts::discover_artifacts(pkgdir);
     if found.is_empty() {
-        anyhow::bail!("build produced no artifacts");
+        return Err(PackagesRefused("build produced no artifacts".into()).into());
     }
     for path in found {
         let name = path
@@ -134,21 +150,34 @@ pub async fn upload_artifacts(client: &WorkerClient, build_id: i32, pkgdir: &Pat
             .to_string();
         // `O_NOFOLLOW`, and a regular file: see `discover_artifacts`. Checked
         // again at the open, which is the moment that decides what is read.
-        let reader = tokio::fs::OpenOptions::new()
+        let reader = match tokio::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
             .await
-            .with_context(|| format!("opening {} (a symlink is refused)", path.display()))?;
+        {
+            Ok(reader) => reader,
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(PackagesRefused(format!(
+                    "{} is a symlink; refusing to upload it",
+                    path.display()
+                ))
+                .into());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("opening {}", path.display()));
+            }
+        };
         let meta = reader
             .metadata()
             .await
             .with_context(|| format!("reading {}", path.display()))?;
         if !meta.is_file() {
-            anyhow::bail!(
+            return Err(PackagesRefused(format!(
                 "{} is not a regular file; refusing to upload it",
                 path.display()
-            );
+            ))
+            .into());
         }
         let len = Some(meta.len());
         log(client, build_id, &format!("[worker] uploading {name}\n")).await;

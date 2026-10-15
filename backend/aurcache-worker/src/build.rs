@@ -110,33 +110,34 @@ pub fn build_command(
     argv
 }
 
-/// Match a build's parallelism to its CPU limit, in its makepkg drop-in.
+/// Set a build's parallelism in its makepkg drop-in: a job per core, or per
+/// CPU its limit allows.
 ///
-/// `cpu.max` bounds the time a build gets, not how many processes it starts,
-/// and nothing inside the build can see the limit: `nproc` counts the cores the
-/// machine has, and the container hides the cgroup the limit is set on from
-/// anything that would look. So the server's `MAKEFLAGS=-j$(nproc)` still
-/// starts a compiler per core -- 24 of them sharing, say, six cores' worth of
-/// time, each holding its own memory, which is how a CPU limit turns into an
-/// out-of-memory kill.
+/// The job's `makepkg_conf` leaves `MAKEFLAGS` to the worker, which is the
+/// side that knows the limit. `cpu.max` bounds the time a build gets, not how
+/// many processes it starts, and nothing inside the build can see the limit:
+/// `nproc` counts the cores the machine has, and the container hides the
+/// cgroup the limit is set on from anything that would look. So
+/// `MAKEFLAGS=-j$(nproc)` under a limit starts a compiler per core -- 24 of
+/// them sharing, say, six cores' worth of time, each holding its own memory,
+/// which is how a CPU limit turns into an out-of-memory kill.
 ///
-/// Appended, because the server writes `MAKEFLAGS` last in this file to keep a
-/// user's makepkg.conf from dropping it; a later assignment is the only one
-/// that wins, and it replaces nothing but that. `OMP_NUM_THREADS` is what
-/// `nproc` itself, and OpenMP, defer to; `CARGO_BUILD_JOBS` is cargo's own. A
-/// build that picks its parallelism some other way is still held to the limit,
-/// only less efficiently.
+/// Appended, so it wins over any `MAKEFLAGS` the operator's configuration
+/// set. `OMP_NUM_THREADS` is what `nproc` itself, and OpenMP, defer to;
+/// `CARGO_BUILD_JOBS` is cargo's own. A build that picks its parallelism some
+/// other way is still held to the limit, only less efficiently.
 #[must_use]
-pub fn limit_parallelism(makepkg_conf: &str, cpus: Option<f64>) -> String {
-    let Some(cpus) = cpus else {
-        return makepkg_conf.to_string();
-    };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let jobs = (cpus.ceil() as u64).max(1);
+pub fn with_parallelism(makepkg_conf: &str, cpus: Option<f64>) -> String {
     let mut out = makepkg_conf.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
+    let Some(cpus) = cpus else {
+        out.push_str("MAKEFLAGS=\"-j$(nproc)\"\n");
+        return out;
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let jobs = (cpus.ceil() as u64).max(1);
     out.push_str(&format!(
         "# Added by aurcache-worker: this build is limited to {cpus} CPUs \
          (WORKER_BUILD_CPUS), so it runs as many jobs rather than one per core.\n\
@@ -153,23 +154,24 @@ mod tests {
 
     #[test]
     fn parallelism_follows_the_cpu_limit() {
-        let server = "OPTIONS+=(!debug)\nMAKEFLAGS=-j$(nproc)\nPKGDEST=/pkgdest";
-        assert_eq!(limit_parallelism(server, None), server);
+        let server = "OPTIONS+=(!debug)\nMAKEFLAGS=-j2\nPACKAGER='x'";
+        let unlimited = with_parallelism(server, None);
+        assert!(unlimited.ends_with("PACKAGER='x'\nMAKEFLAGS=\"-j$(nproc)\"\n"));
 
-        let limited = limit_parallelism(server, Some(2.5));
-        // After the server's own MAKEFLAGS, so it is the one that counts.
+        let limited = with_parallelism(server, Some(2.5));
+        // After the operator's own MAKEFLAGS, so it is the one that counts.
         let ours = limited
             .find("MAKEFLAGS=\"-j3\"")
             .expect("a MAKEFLAGS for the limit");
-        assert!(ours > limited.find("MAKEFLAGS=-j$(nproc)").unwrap());
+        assert!(ours > limited.find("MAKEFLAGS=-j2").unwrap());
         assert!(limited.contains("export OMP_NUM_THREADS=3\n"));
         assert!(limited.contains("export CARGO_BUILD_JOBS=3\n"));
         assert!(
-            limited.contains("PKGDEST=/pkgdest\n#"),
+            limited.contains("PACKAGER='x'\n#"),
             "the line before is kept whole"
         );
 
-        assert!(limit_parallelism("", Some(0.5)).contains("MAKEFLAGS=\"-j1\""));
+        assert!(with_parallelism("", Some(0.5)).contains("MAKEFLAGS=\"-j1\""));
     }
 
     #[test]

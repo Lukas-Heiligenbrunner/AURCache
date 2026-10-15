@@ -1,6 +1,6 @@
 # Versioned worker protocol, independently released components
 
-Status: **Proposed** · Last updated: 2026-10-13
+Status: **In progress** (negotiation, docs and the v1 review done; two review items open in section 2) · Last updated: 2026-10-15
 
 Workers and the server talk a numbered protocol, and that number is the only
 thing either side checks. Each component -- server, chroot worker, container
@@ -221,6 +221,58 @@ v1 freezes with the release, so anything awkward should be fixed before then:
   names, `Vec<String>` arches and build flags, `JobDescriptor::packages`,
   the settings declarations (`SettingDecl`). Each later fix to one of these
   costs a v2.
+
+### What the reading found (2026-10-15)
+
+**The protocol is not the Rust types.** It is JSON over HTTPS, defined by
+`docs/docs/workers/protocol.md` and the fixtures, and any language can speak
+it. The types in `aurcache-common` are this repository's implementation, shared
+by the server and the workers because both want the same shape today. When one
+end wants something else, that end gets its own type, converted at its edge,
+and the wire does not change. So `ApprovalStatus`, `Severity`, `DiskUsage` and
+`KeptBuild` stay shared with the REST API for now.
+
+**Reading rules.** Both sides ignore unknown fields at any depth, and every
+enumeration a peer receives names the value an unknown one reads as
+(`#[serde(other)]`, or a field-level reader for `Severity`, whose variant order
+is its ranking). A value can then be added within a protocol when its fallback
+is an acceptable reading. The fixture test decodes every sample with unknown
+fields added, and checks each fallback.
+
+Done:
+
+1. **`interrupted`**, an outcome for "the worker failed, not the build". Setup
+   failures, crashes and lost uploads report it. The server abandons the build
+   with `EndReason::Interrupted`, which counts against `MAX_ATTEMPTS` like a
+   silent worker. Packages that cannot be accepted (none, not a regular file,
+   refused with `400`/`413`) still report `failed`, through `PackagesRefused`.
+2. **`makepkg_conf`** holds the operator's assignments and the server's
+   (`PACKAGER`, `OPTIONS+=(!debug)`), and nothing else. `PKGDEST` and
+   `MAKEFLAGS` are the workers'.
+3. **Names.** `RegisterRequest::affinity`, `JobDescriptor::expected_packages`
+   and `expected_version`, and an optional `RegisterStatus::repo_template`.
+
+Still open, and cheap only until the freeze:
+
+4. **The lease is configured twice.** Server and worker each read
+   `LEASE_TTL` (`aurcache-worker-core/src/config.rs:225`) and the protocol
+   page asks for them to match. Sending the lease and heartbeat interval in
+   `RegisterStatus` would make timing the server's to set.
+5. **Two cancel channels.** The heartbeat's `cancel` and
+   `GET /jobs/{id}/status` say the same thing. A route can never be removed
+   after the freeze.
+
+Additive, so not blocking:
+
+- Appending to a log is not idempotent: a retried `POST .../logs` whose
+  answer was lost duplicates output. An optional offset can come later.
+- `CompleteReport` does not list what was uploaded, so the server publishes
+  whatever is staged. An optional manifest (names, sizes, digests) can come
+  later.
+
+Found on the way and fixed separately: `OPTIONS=(!debug)` replaced the
+chroot's whole `OPTIONS` array, so every package was built without `strip`,
+`zipman` and `purge`.
 
 ## 3. Component versions
 

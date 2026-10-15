@@ -5,6 +5,7 @@
 //! constructors are the vocabulary for that report; how the build itself ran is
 //! the executor's business.
 
+use crate::protocol::PackagesRefused;
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use std::process::ExitStatus;
 
@@ -52,11 +53,15 @@ pub fn exit_code_reason(code: i64) -> String {
     }
 }
 
-/// A terminal report for a failure before or around the build itself
-/// (source download, workspace preparation, artifact upload).
+/// A terminal report for a build this worker could not see through, for
+/// reasons of its own rather than the package's: see
+/// [`BuildOutcome::Interrupted`].
 #[must_use]
-pub fn setup_failure(reason: impl std::fmt::Display) -> CompleteReport {
-    failure(None, reason.to_string())
+pub fn interrupted(reason: impl std::fmt::Display) -> CompleteReport {
+    CompleteReport {
+        outcome: BuildOutcome::Interrupted,
+        ..failure(None, reason.to_string())
+    }
 }
 
 /// A terminal report for a build aborted before it started (cancel observed
@@ -90,6 +95,24 @@ fn failure(exit_code: Option<i32>, reason: String) -> CompleteReport {
     }
 }
 
+/// The terminal report for a job that ended in an error rather than a build
+/// result.
+///
+/// Failed when what went wrong was the build's packages being refused --
+/// none made, one not a regular file, or one the server would not take: the
+/// package's doing, which a retry repeats. Interrupted otherwise: preparing
+/// the build, fetching its sources and delivering its packages are this
+/// worker's to get right.
+#[must_use]
+pub fn from_error(error: &anyhow::Error) -> CompleteReport {
+    let reason = format!("{error:#}");
+    if error.downcast_ref::<PackagesRefused>().is_some() {
+        failure(None, reason)
+    } else {
+        interrupted(reason)
+    }
+}
+
 /// Short human label for a job, used in worker logs.
 #[must_use]
 pub fn describe(job: &JobDescriptor) -> String {
@@ -113,6 +136,21 @@ mod tests {
         assert_eq!(r.outcome, BuildOutcome::Failed);
         assert_eq!(r.exit_code, Some(137));
         assert!(r.reason.unwrap().contains("OOM"));
+    }
+
+    #[test]
+    fn refused_packages_fail_the_build() {
+        let refused = anyhow::Error::new(PackagesRefused("no packages".into()))
+            .context("uploading hello-1-1-x86_64.pkg.tar.zst");
+        assert_eq!(from_error(&refused).outcome, BuildOutcome::Failed);
+
+        let unreachable = anyhow::anyhow!("connection reset").context("downloading source");
+        let report = from_error(&unreachable);
+        assert_eq!(report.outcome, BuildOutcome::Interrupted);
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("downloading source: connection reset")
+        );
     }
 
     #[test]

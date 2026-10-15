@@ -1,6 +1,5 @@
 use crate::settings::{self, key};
 use sea_orm::DatabaseConnection;
-use std::fmt::Write as _;
 use std::path::Path;
 
 /// Canonical mirrorlist locations, re-exported from `aurcache-deps`.
@@ -13,13 +12,14 @@ pub use aurcache_deps::paths::{
     mirrorlist_dir, mirrorlist_file_name, mirrorlist_path, native_arch, shared_mirrorlist_path,
 };
 
-/// The makepkg.conf for a build, from the `makepkg_conf` setting's `user_conf`.
+/// The assignments a build applies over its worker's own makepkg.conf: the
+/// `makepkg_conf` setting's `user_conf`, then the server's own.
 ///
-/// The user's content is written first. PKGDEST, MAKEFLAGS, PACKAGER, and
-/// OPTIONS are always appended at the end so the user cannot accidentally
-/// override them — without the right PKGDEST the build can't be collected from
-/// the shared mount, and without a valid PACKAGER the generated `desc` file
-/// cannot be parsed by libalpm.
+/// The server's come last so the user cannot accidentally override them:
+/// without a valid PACKAGER the generated `desc` file cannot be parsed by
+/// libalpm. Where packages go (`PKGDEST`) and how many jobs a build runs
+/// (`MAKEFLAGS`) are the worker's to set, after these: only it knows its
+/// layout and its CPU limit.
 ///
 /// `OPTIONS+=(!debug)` suppresses makepkg's split `<pkgname>-debug` packages.
 /// Appended to the array rather than assigned: an assignment replaces the
@@ -32,7 +32,7 @@ pub use aurcache_deps::paths::{
 /// keeps them out of `core`/`extra` and ships them in separate opt-in `*-debug`
 /// repos. Publishing debug symbols would mean a second repo, not extra entries
 /// in this one.
-fn makepkg_config(user_conf: &str, pkgdest_dir: &Path) -> String {
+fn makepkg_config(user_conf: &str) -> String {
     let mut config = String::new();
     if !user_conf.trim().is_empty() {
         config.push_str(user_conf);
@@ -40,11 +40,7 @@ fn makepkg_config(user_conf: &str, pkgdest_dir: &Path) -> String {
             config.push('\n');
         }
     }
-    let _ = write!(
-        config,
-        "MAKEFLAGS=-j$(nproc)\nPKGDEST={}\nPACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
-        pkgdest_dir.display()
-    );
+    config.push_str("PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n");
     config
 }
 
@@ -94,7 +90,7 @@ pub async fn mirrorlist_for(arch: &str, mirrorlist_dir: &Path) -> Option<String>
     }
 }
 
-/// The rendered configuration a worker injects into its chroot.
+/// The configuration a job carries for its worker's chroot.
 pub struct JobConfig {
     pub makepkg_conf: String,
     /// Without a `[repo]` section: the worker appends one for the host it
@@ -103,17 +99,13 @@ pub struct JobConfig {
 }
 
 /// Assemble the self-contained build configuration for one of `pkg_id`'s builds.
-pub async fn build_job_config(
-    db: &DatabaseConnection,
-    pkg_id: i32,
-    pkgdest_dir: &Path,
-) -> JobConfig {
+pub async fn build_job_config(db: &DatabaseConnection, pkg_id: i32) -> JobConfig {
     let (makepkg, pacman) = tokio::join!(
         settings::get(db, key::MAKEPKG_CONF, Some(pkg_id)),
         settings::get(db, key::PACMAN_CONF, Some(pkg_id)),
     );
     JobConfig {
-        makepkg_conf: makepkg_config(&makepkg.value, pkgdest_dir),
+        makepkg_conf: makepkg_config(&makepkg.value),
         pacman_conf: pacman_config(&pacman.value),
     }
 }
@@ -139,7 +131,7 @@ mod tests {
     #[test]
     fn makepkg_config_disables_debug_packages() {
         for user_conf in ["", "OPTIONS=(debug)"] {
-            let conf = makepkg_config(user_conf, Path::new("/out"));
+            let conf = makepkg_config(user_conf);
             assert!(conf.ends_with("OPTIONS+=(!debug)\n"), "got:\n{conf}");
         }
     }
@@ -180,7 +172,7 @@ mod tests {
     /// assigning the array instead built every package unstripped.
     #[test]
     fn makepkg_config_keeps_the_other_options() {
-        let options = options_after(&makepkg_config("", Path::new("/out")));
+        let options = options_after(&makepkg_config(""));
         assert!(!enabled(&options, "debug"), "{options:?}");
         for kept in ["strip", "zipman", "purge", "docs"] {
             assert!(enabled(&options, kept), "{kept} lost: {options:?}");

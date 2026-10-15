@@ -222,7 +222,7 @@ impl DockerExecutor {
         );
 
         let cmd = commands::wrap_with_config(
-            &job.makepkg_conf,
+            &commands::with_layout(&job.makepkg_conf, CONTAINER_PKGDEST),
             MAKEPKG_CONF_PATH,
             &pacman_conf,
             &commands::build_build_command(
@@ -421,7 +421,7 @@ impl DockerExecutor {
                 reason: Some(report::exit_code_reason(code)),
                 ..CompleteReport::default()
             },
-            None => report::setup_failure("build container exited without a status"),
+            None => report::interrupted("build container exited without a status"),
         })
     }
 }
@@ -444,9 +444,10 @@ impl Executor for DockerExecutor {
         {
             Ok(report) => report,
             Err(e) => {
-                let msg = format!("build setup failed: {e:#}");
-                log(&client, job.build_id, &format!("\n[worker] {msg}\n")).await;
-                report::setup_failure(msg)
+                let report = report::from_error(&e);
+                let reason = report.reason.as_deref().unwrap_or_default();
+                log(&client, job.build_id, &format!("\n[worker] {reason}\n")).await;
+                report
             }
         }
     }

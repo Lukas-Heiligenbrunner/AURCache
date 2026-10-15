@@ -1,23 +1,34 @@
-//! Wire types for the remote-worker protocol (`/api/worker`).
+//! This repository's implementation of the worker protocol's messages
+//! (`/api/worker`).
 //!
-//! The server and the workers in this repository share them, but a worker may
-//! be released on its own or come from elsewhere entirely. What a worker and a
-//! server agree on is a protocol number, negotiated at registration
-//! ([`PROTOCOLS`]), never a version of either. Within one protocol these types
-//! change only in ways a peer speaking it cannot notice:
+//! The protocol itself is JSON over HTTPS, and belongs to no language: it is
+//! described in `docs/docs/workers/protocol.md`, and its messages are held as
+//! fixtures under `tests/fixtures/worker-protocol/`. These types are how the
+//! server and the workers here read and write it. They are shared because both
+//! ends currently want the same shape; the day one end wants something else,
+//! that end gets a type of its own, converted at its edge, and the wire stays
+//! as it was.
+//!
+//! What a worker and a server agree on is a protocol number, negotiated at
+//! registration ([`PROTOCOLS`]), never a version of either. Within one
+//! protocol, messages change only in ways a peer speaking it cannot notice:
 //!
 //! - a field added in either direction is optional (`Option`, or
 //!   `#[serde(default)]`), and its absence means what it meant before;
+//! - a value added to an enum is one whose stated fallback (`#[serde(other)]`
+//!   here) is an acceptable reading of it for a peer that does not know it;
 //! - a route is added only if a worker that never calls it loses nothing.
 //!
+//! Every receiver ignores fields it does not know, which serde does unless
+//! told otherwise; nothing here may use `deny_unknown_fields`.
+//!
 //! Anything else needs the next protocol number: a field that becomes required
-//! or changes meaning, a new variant in an enum a peer receives, a route that
+//! or changes meaning, a value in an enum without a fallback, a route that
 //! goes away or changes what it does, a change to lease or heartbeat timing.
-//! The fixtures under `tests/fixtures/worker-protocol/` hold each protocol's
-//! messages, and `tests/worker_protocol.rs` fails on a change that would break
-//! a peer speaking it. The types are not named after a protocol: a new one
-//! usually means an optional field, and code that looks at the agreed number
-//! only where behaviour differs.
+//! `tests/worker_protocol.rs` fails on a change that would break a peer
+//! speaking a protocol whose fixtures are committed. The types are not named
+//! after a protocol: a new one usually means an optional field, and code that
+//! looks at the agreed number only where behaviour differs.
 //!
 //! [`RegisterRequest`] and [`RegisterStatus`] are exchanged before a protocol
 //! is agreed, so they belong to none, and only ever gain optional fields.
@@ -85,7 +96,7 @@ pub struct RegisterRequest {
     pub enrollment_token: Option<String>,
     /// Exact pkgbase names this worker is specially provisioned for
     /// (`WORKER_PACKAGES`). Reserves those packages to workers that name them.
-    pub packages: Vec<String>,
+    pub affinity: Vec<String>,
     /// Scheduling preference, higher wins (`WORKER_PRIORITY`).
     pub priority: i32,
     /// Maximum concurrent builds (`WORKER_CONCURRENCY`), so the server can tell
@@ -101,11 +112,8 @@ pub struct RegisterRequest {
 /// Enrollment status returned while a worker polls for approval.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RegisterStatus {
-    /// Where the worker stands in the approval workflow.
-    ///
-    /// The same type the column holds and the operator API returns: this used
-    /// to be a `String` compared against constants that were defined three
-    /// times over, in three crates.
+    /// Where the worker stands in the approval workflow. A status the worker
+    /// does not know reads as `pending`: keep waiting.
     pub status: crate::api::worker::ApprovalStatus,
     /// PEM of the CA-signed leaf certificate, present once approved.
     pub signed_cert: Option<String>,
@@ -113,7 +121,7 @@ pub struct RegisterStatus {
     pub ca_cert: Option<String>,
     /// A `pacman.conf` `[repo]` section for this AURCache instance, with the
     /// host left as the placeholder [`REPO_HOST_PLACEHOLDER`] for the worker
-    /// to fill in. Empty when this instance publishes no repository.
+    /// to fill in. `None` when this instance publishes no repository.
     ///
     /// The host cannot be decided server-side: workers reach the same server by
     /// different addresses — a compose service name, a LAN address, `localhost`
@@ -124,7 +132,7 @@ pub struct RegisterStatus {
     ///
     /// Sent at registration rather than per job because it describes the
     /// deployment, not the build.
-    pub repo_template: String,
+    pub repo_template: Option<String>,
     /// The protocol this worker and the server agreed on at registration.
     ///
     /// `None` only when polling for approval after the server restarted,
@@ -147,8 +155,6 @@ pub const REPO_HOST_PLACEHOLDER: &str = "%AURCACHE_HOST%";
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum MirrorlistPreference {
-    /// The worker has its own mirrorlist and wants none sent.
-    Local,
     /// The worker takes the server's, and holds these checksums keyed by
     /// architecture. Keyed because a claim is sent *before* the server picks a
     /// job, so the worker does not yet know which of the arches it builds this
@@ -156,6 +162,10 @@ pub enum MirrorlistPreference {
     Server {
         checksums: std::collections::BTreeMap<String, String>,
     },
+    /// The worker has its own mirrorlist and wants none sent. Also how a
+    /// mode the server does not know reads: sending nothing is always safe.
+    #[serde(other)]
+    Local,
 }
 
 /// What the server says about a build's mirrorlist.
@@ -168,7 +178,9 @@ pub enum MirrorlistOffer {
     Keep,
     /// Nothing: the server has no mirrorlist for this arch, so the worker
     /// drops whatever it cached and falls back to its image's own -- or the
-    /// worker keeps its own and would discard anything sent anyway.
+    /// worker keeps its own and would discard anything sent anyway. Also how
+    /// an offer the worker does not know reads.
+    #[serde(other)]
     Nothing,
 }
 
@@ -194,14 +206,24 @@ pub struct JobDescriptor {
     pub pkgbase: String,
     /// Target architecture, e.g. `x86_64`, `aarch64`.
     pub arch: String,
+    /// Arguments added to makepkg's command line, as given.
     pub build_flags: Vec<String>,
     /// Keep the build tree between builds rather than starting from an empty
     /// one. Resolved server-side from the package's settings, because only the
     /// server knows them; the worker decides where such a tree lives.
     pub persistent_builddir: bool,
-    /// Rendered `makepkg.conf` for the build.
+    /// Assignments to apply over the worker's own `makepkg.conf`, after it:
+    /// the operator's configuration, then the server's (`PACKAGER`, debug
+    /// packages off).
+    ///
+    /// Never where things go or how many jobs run: `PKGDEST`, `BUILDDIR`,
+    /// `SRCDEST` and `MAKEFLAGS` are the worker's, since only it knows its
+    /// layout and its CPU limit. A worker drops any such line the operator
+    /// wrote, and sets them itself after this.
     pub makepkg_conf: String,
-    /// Rendered `pacman.conf` for the build.
+    /// The `pacman.conf` for the build, whole, without the AURCache
+    /// repository: the worker appends that, from
+    /// [`RegisterStatus::repo_template`].
     pub pacman_conf: String,
     /// What to build with for a mirrorlist; see [`MirrorlistOffer`].
     pub mirrorlist: MirrorlistOffer,
@@ -218,14 +240,14 @@ pub struct JobDescriptor {
     pub vcs_sources: Vec<JobVcsSource>,
     /// Package names this build is expected to produce: the pkgbase plus any
     /// split-package names recorded for it.
-    pub packages: Vec<String>,
+    pub expected_packages: Vec<String>,
     /// Full version (`pkgver-pkgrel`) the build is expected to produce.
     ///
     /// Read only by a worker that fabricates its archives (the demo worker):
     /// a real build's version is whatever makepkg makes of the PKGBUILD, which
     /// for a VCS package is not known until it runs, and publishing takes it
     /// from the archives' names.
-    pub version: String,
+    pub expected_version: String,
 }
 
 /// One `git+` source of a build, as the worker needs to find it.
@@ -283,12 +305,23 @@ pub struct HeartbeatResponse {
 #[serde(rename_all = "snake_case")]
 pub enum BuildOutcome {
     Succeeded,
-    /// Including an OOM kill or any non-zero exit: a deterministic failure,
-    /// which fails the build without queueing it again.
+    /// The build ran and failed -- a non-zero exit, an OOM kill, a timeout --
+    /// or made packages that cannot be accepted. The package's doing: the
+    /// build fails without being queued again.
     #[default]
     Failed,
     /// Stopped because it was cancelled.
     Canceled,
+    /// The worker could not see the build through, for reasons of its own
+    /// rather than the package's: preparing it, fetching its sources, a
+    /// crash, a lost connection while handing over its packages. The server
+    /// queues it again while it has attempts left, as it does a build whose
+    /// worker went silent.
+    ///
+    /// Also how an outcome the server does not know reads: retrying is the
+    /// answer that loses nothing.
+    #[serde(other)]
+    Interrupted,
 }
 
 /// Terminal report for a single build.
@@ -337,12 +370,30 @@ pub struct JobStatus {
 /// (`worker.warning`, `worker.error`) and keeps this as the sentence.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct WorkerLogReport {
+    /// A severity the server does not know reads as a warning.
+    #[serde(deserialize_with = "severity_or_warning")]
     pub severity: crate::api::activity::Severity,
     /// The build this happened during, when there is one -- absent for
     /// something that is not about any single job, such as chroot or cache
     /// maintenance.
     pub build_id: Option<i32>,
     pub message: String,
+}
+
+/// Read a severity, taking one this build does not know as a warning.
+///
+/// On the field rather than as `#[serde(other)]` on the type, because that
+/// has to be the last variant and `Severity`'s order is its ranking.
+fn severity_or_warning<'de, D>(deserializer: D) -> Result<crate::api::activity::Severity, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::value::{Error, StrDeserializer};
+    let raw = String::deserialize(deserializer)?;
+    Ok(
+        crate::api::activity::Severity::deserialize(StrDeserializer::<Error>::new(&raw))
+            .unwrap_or(crate::api::activity::Severity::Warning),
+    )
 }
 
 #[cfg(test)]
@@ -371,8 +422,8 @@ mod tests {
                 content: "Server = https://example/\\$repo".into(),
                 checksum: "abc123".into(),
             },
-            packages: vec!["hello".into(), "hello-docs".into()],
-            version: "1.0-1".into(),
+            expected_packages: vec!["hello".into(), "hello-docs".into()],
+            expected_version: "1.0-1".into(),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {
                 source_url: "git+https://example.test/repo.git".into(),
@@ -385,8 +436,8 @@ mod tests {
         assert_eq!(job.vcs_sources, back.vcs_sources);
         assert_eq!(job.pgp_keys, back.pgp_keys);
         assert_eq!(job.mirrorlist, back.mirrorlist);
-        assert_eq!(job.packages, back.packages);
-        assert_eq!(job.version, back.version);
+        assert_eq!(job.expected_packages, back.expected_packages);
+        assert_eq!(job.expected_version, back.expected_version);
     }
 
     fn range(min: u32, max: u32) -> ProtocolRange {

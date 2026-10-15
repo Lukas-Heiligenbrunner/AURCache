@@ -1,7 +1,8 @@
 //! Telling the logs about builds taken back from their workers.
 //!
-//! Three paths abandon builds -- the lease reaper, a heartbeat that stopped
-//! listing one, and revoking a worker -- and all of them go through
+//! Four paths abandon builds -- the lease reaper, a heartbeat that stopped
+//! listing one, a worker reporting one interrupted, and revoking a worker --
+//! and all of them go through
 //! `aurcache_db::helpers::worker_jobs::abandon_build`. What each build's log
 //! and the activity log then say about it is the same whichever path it was,
 //! so it is said here.

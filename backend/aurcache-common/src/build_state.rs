@@ -283,6 +283,10 @@ pub enum EndReason {
     /// An operator revoked the worker that was running it.
     #[cfg_attr(feature = "db", sea_orm(num_value = 4))]
     WorkerRevoked = 4,
+    /// Its worker reported that it could not see the build through, for
+    /// reasons of its own (`BuildOutcome::Interrupted`).
+    #[cfg_attr(feature = "db", sea_orm(num_value = 5))]
+    Interrupted = 5,
 }
 
 impl EndReason {
@@ -301,6 +305,7 @@ impl EndReason {
             2 => Some(Self::MaxDuration),
             3 => Some(Self::Dropped),
             4 => Some(Self::WorkerRevoked),
+            5 => Some(Self::Interrupted),
             _ => None,
         }
     }
@@ -310,11 +315,15 @@ impl EndReason {
     ///
     /// The build's own doing -- a worker that went silent, a build that would
     /// not end, one lost on the worker -- repeats if retried forever, so it is
-    /// counted. A revocation is the operator's decision about the machine, not
+    /// counted. So is one its worker could not finish: a worker that breaks
+    /// the same way each time must not retry it for ever either. A revocation is the operator's decision about the machine, not
     /// about the build, and a cancel is not retried at all.
     #[must_use]
     pub const fn spends_retry(self) -> bool {
-        matches!(self, Self::LeaseExpired | Self::MaxDuration | Self::Dropped)
+        matches!(
+            self,
+            Self::LeaseExpired | Self::MaxDuration | Self::Dropped | Self::Interrupted
+        )
     }
 
     /// Why the build was abandoned, as its log's last line says it.
@@ -326,6 +335,7 @@ impl EndReason {
             Self::MaxDuration => "it exceeded its maximum duration",
             Self::Dropped => "its worker stopped reporting it",
             Self::WorkerRevoked => "its worker was revoked",
+            Self::Interrupted => "its worker could not finish it",
         }
     }
 }
@@ -404,6 +414,7 @@ mod tests {
             EndReason::MaxDuration,
             EndReason::Dropped,
             EndReason::WorkerRevoked,
+            EndReason::Interrupted,
         ] {
             assert_eq!(EndReason::from_i32(reason.as_i32()), Some(reason));
         }

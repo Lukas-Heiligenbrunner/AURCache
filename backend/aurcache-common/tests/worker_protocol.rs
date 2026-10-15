@@ -12,9 +12,14 @@
 //! - encoding what it decoded still contains all of it, so a message to an
 //!   older peer still carries everything that peer reads.
 //!
-//! Adding an optional field passes both, as it should. A new variant in an
-//! enum a peer receives cannot be caught this way, since no old sample holds
-//! it; that one is down to the rule.
+//! Adding an optional field passes both, as it should. A sample also has to
+//! decode with fields nobody knows added to every object in it, since a
+//! receiver ignores those.
+//!
+//! A new value in an enum cannot be caught by the fixtures, since no old
+//! sample holds it. What can be checked is that each enum a peer receives
+//! reads a value it does not know as its stated fallback, which is what makes
+//! adding one possible within a protocol.
 //!
 //! `registration/` holds `RegisterRequest` and `RegisterStatus`, which are
 //! exchanged before any protocol is agreed and so belong to none.
@@ -68,6 +73,12 @@ fn check<T: Serialize + DeserializeOwned>(dir: &str, name: &str, samples: &[T]) 
         if let Some(missing) = missing(&sample, &encoded, "") {
             panic!("{} #{i}: encoding it again loses {missing}", path.display());
         }
+        if let Err(e) = serde_json::from_value::<T>(with_unknown_fields(sample)) {
+            panic!(
+                "{} #{i} no longer decodes with an unknown field: {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -90,6 +101,41 @@ fn missing(want: &Value, got: &Value, at: &str) -> Option<String> {
             .find_map(|(i, (w, g))| missing(w, g, &format!("{at}[{i}]"))),
         _ if want == got => None,
         _ => Some(format!("{at} (was {want}, now {got})")),
+    }
+}
+
+/// Fields whose objects are maps keyed by data -- an architecture, a setting,
+/// a source -- rather than messages: a key added there is an entry, not a
+/// field, so none is added to them.
+const MAPS: [&str; 3] = ["checksums", "settings", "vcs_commits"];
+
+/// `value` with a field nobody knows added to every message object in it.
+fn with_unknown_fields(value: Value) -> Value {
+    add_unknown_fields(value, true)
+}
+
+fn add_unknown_fields(value: Value, message: bool) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut map: serde_json::Map<String, Value> = map
+                .into_iter()
+                .map(|(key, value)| {
+                    let inner = add_unknown_fields(value, !MAPS.contains(&key.as_str()));
+                    (key, inner)
+                })
+                .collect();
+            if message {
+                map.insert("added_later".to_string(), serde_json::json!({"x": [1]}));
+            }
+            Value::Object(map)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| add_unknown_fields(item, true))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -127,7 +173,7 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
         arch: "x86_64".to_string(),
         build_flags: vec!["--noconfirm".to_string()],
         persistent_builddir: true,
-        makepkg_conf: "MAKEFLAGS=\"-j8\"\n".to_string(),
+        makepkg_conf: "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n".to_string(),
         pacman_conf: "[options]\n".to_string(),
         mirrorlist,
         pgp_keys: vec!["ABCDEF0123456789".to_string()],
@@ -136,8 +182,8 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
             dir: "hello".to_string(),
             git_ref: "0123abcd".to_string(),
         }],
-        packages: vec!["hello".to_string(), "hello-docs".to_string()],
-        version: "2.12.1-2".to_string(),
+        expected_packages: vec!["hello".to_string(), "hello-docs".to_string()],
+        expected_version: "2.12.1-2".to_string(),
     }
 }
 
@@ -221,6 +267,7 @@ fn protocol_1_messages_still_decode() {
             complete_report(BuildOutcome::Succeeded),
             complete_report(BuildOutcome::Failed),
             complete_report(BuildOutcome::Canceled),
+            complete_report(BuildOutcome::Interrupted),
         ],
     );
     check(
@@ -255,7 +302,7 @@ fn registration_messages_still_decode() {
             kind: "chroot".to_string(),
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n".to_string(),
             enrollment_token: Some("token".to_string()),
-            packages: vec!["chromium".to_string()],
+            affinity: vec!["chromium".to_string()],
             priority: 10,
             concurrency: 2,
             settings: vec![setting_decl()],
@@ -268,7 +315,9 @@ fn registration_messages_still_decode() {
             status: ApprovalStatus::Approved,
             signed_cert: Some("-----BEGIN CERTIFICATE-----\n...\n".to_string()),
             ca_cert: Some("-----BEGIN CERTIFICATE-----\n...\n".to_string()),
-            repo_template: "[aurcache]\nServer = http://%AURCACHE_HOST%:8081/$arch\n".to_string(),
+            repo_template: Some(
+                "[aurcache]\nServer = http://%AURCACHE_HOST%:8081/$arch\n".to_string(),
+            ),
             protocol: Some(1),
         }],
     );
@@ -283,4 +332,43 @@ fn every_spoken_protocol_has_fixtures() {
             "no fixtures for worker protocol {protocol}"
         );
     }
+}
+
+/// Decode `json` as `T`.
+fn decode<T: DeserializeOwned>(json: Value) -> T {
+    serde_json::from_value(json).unwrap()
+}
+
+/// Each enum a peer receives reads a value it does not know as its stated
+/// fallback, so a value can be added within a protocol when that fallback is
+/// an acceptable reading of it.
+#[test]
+fn unknown_values_read_as_their_fallback() {
+    let unknown = "added_in_a_later_release";
+    assert_eq!(
+        decode::<BuildOutcome>(Value::from(unknown)),
+        BuildOutcome::Interrupted
+    );
+    assert_eq!(
+        decode::<ApprovalStatus>(Value::from(unknown)),
+        ApprovalStatus::Pending
+    );
+    assert_eq!(
+        decode::<MirrorlistPreference>(serde_json::json!({"mode": unknown})),
+        MirrorlistPreference::Local
+    );
+    assert_eq!(
+        decode::<MirrorlistOffer>(serde_json::json!({"offer": unknown, "content": "x"})),
+        MirrorlistOffer::Nothing
+    );
+    assert!(matches!(
+        decode::<ValueKind>(serde_json::json!({"type": unknown})),
+        ValueKind::Unknown
+    ));
+    let report: WorkerLogReport = decode(serde_json::json!({
+        "severity": unknown,
+        "build_id": null,
+        "message": "m",
+    }));
+    assert_eq!(report.severity, Severity::Warning);
 }

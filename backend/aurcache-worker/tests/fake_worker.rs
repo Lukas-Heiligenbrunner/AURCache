@@ -22,7 +22,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::{BuildState, EndReason};
 use aurcache_common::settings::Setting;
 use aurcache_common::worker::{BuildOutcome, ClaimRequest, CompleteReport, MirrorlistPreference};
 use aurcache_db::builds;
@@ -484,6 +484,51 @@ async fn fake_worker_protocol_roundtrip() {
         client.claim(&claim_req).await.unwrap().is_none(),
         "nothing is left to claim"
     );
+
+    // --- A build its worker could not finish is queued again, rather than
+    // failed for good.
+    seed_build(&db, 3, "x86_64", 3000).await;
+    let job3 = client
+        .claim(&claim_req)
+        .await
+        .unwrap()
+        .expect("third job claimable");
+    assert_eq!(job3.build_id, 3);
+    let interrupted = CompleteReport {
+        outcome: BuildOutcome::Interrupted,
+        reason: Some("downloading source: connection reset".to_string()),
+        ..CompleteReport::default()
+    };
+    client
+        .complete(3, &interrupted)
+        .await
+        .expect("an interruption is accepted");
+    let row = builds::Entity::find_by_id(3)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, BuildState::Failed);
+    assert_eq!(row.end_reason, Some(EndReason::Interrupted));
+    let retries = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(3))
+        .filter(builds::Column::Status.eq(BuildState::Enqueued))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(retries.len(), 1, "one fresh attempt is queued");
+    // Its answer lost, the worker reports it again: acknowledged, no change.
+    client
+        .complete(3, &interrupted)
+        .await
+        .expect("a repeated interruption is acknowledged");
+    let retries = builds::Entity::find()
+        .filter(builds::Column::PkgId.eq(3))
+        .filter(builds::Column::Status.eq(BuildState::Enqueued))
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(retries.len(), 1, "and no second one");
 
     // --- Safety rail: a revoked worker is refused at the mTLS auth guard.
     let workers = worker_store::list_workers(&db).await.unwrap();

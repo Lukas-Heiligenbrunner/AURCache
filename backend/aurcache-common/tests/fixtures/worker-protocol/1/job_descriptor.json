@@ -7,7 +7,7 @@
       "--noconfirm"
     ],
     "persistent_builddir": true,
-    "makepkg_conf": "MAKEFLAGS=\"-j8\"\n",
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
     "pacman_conf": "[options]\n",
     "mirrorlist": {
       "offer": "send",
@@ -24,11 +24,11 @@
         "git_ref": "0123abcd"
       }
     ],
-    "packages": [
+    "expected_packages": [
       "hello",
       "hello-docs"
     ],
-    "version": "2.12.1-2"
+    "expected_version": "2.12.1-2"
   },
   {
     "build_id": 42,
@@ -38,7 +38,7 @@
       "--noconfirm"
     ],
     "persistent_builddir": true,
-    "makepkg_conf": "MAKEFLAGS=\"-j8\"\n",
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
     "pacman_conf": "[options]\n",
     "mirrorlist": {
       "offer": "keep"
@@ -53,11 +53,11 @@
         "git_ref": "0123abcd"
       }
     ],
-    "packages": [
+    "expected_packages": [
       "hello",
       "hello-docs"
     ],
-    "version": "2.12.1-2"
+    "expected_version": "2.12.1-2"
   },
   {
     "build_id": 42,
@@ -67,7 +67,7 @@
       "--noconfirm"
     ],
     "persistent_builddir": true,
-    "makepkg_conf": "MAKEFLAGS=\"-j8\"\n",
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
     "pacman_conf": "[options]\n",
     "mirrorlist": {
       "offer": "nothing"
@@ -82,10 +82,10 @@
         "git_ref": "0123abcd"
       }
     ],
-    "packages": [
+    "expected_packages": [
       "hello",
       "hello-docs"
     ],
-    "version": "2.12.1-2"
+    "expected_version": "2.12.1-2"
   }
 ]

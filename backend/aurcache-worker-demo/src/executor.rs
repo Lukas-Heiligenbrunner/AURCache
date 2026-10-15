@@ -62,7 +62,7 @@ impl Executor for DemoExecutor {
         )
         .await;
 
-        let names = job.packages.clone();
+        let names = job.expected_packages.clone();
 
         // The visible beat, in slices so a cancel lands promptly rather
         // than after the whole wait.
@@ -80,7 +80,7 @@ impl Executor for DemoExecutor {
 
         match fake_and_upload(&client, &job, &names).await {
             Ok(()) => report::success(),
-            Err(e) => report::setup_failure(format!("demo packaging failed: {e:#}")),
+            Err(e) => report::interrupted(format!("demo packaging failed: {e:#}")),
         }
     }
 
@@ -98,8 +98,8 @@ async fn fake_and_upload(
 ) -> Result<()> {
     let dir = tempfile::tempdir().context("demo staging directory")?;
     for name in names {
-        let bytes = fake_package_bytes(name, &job.pkgbase, &job.version, &job.arch)?;
-        let filename = format!("{name}-{}-{}.pkg.tar.zst", job.version, job.arch);
+        let bytes = fake_package_bytes(name, &job.pkgbase, &job.expected_version, &job.arch)?;
+        let filename = format!("{name}-{}-{}.pkg.tar.zst", job.expected_version, job.arch);
         std::fs::write(dir.path().join(&filename), &bytes)
             .with_context(|| format!("writing {filename}"))?;
     }

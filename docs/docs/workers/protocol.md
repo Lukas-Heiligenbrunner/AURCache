@@ -9,9 +9,12 @@ other, in what order, and with what timing. Each request and message is also
 in the server's API reference, under **Worker**, at `/docs` or `/redoc` on any
 instance. This page covers what that reference cannot.
 
-The workers in this repository (`aurcache-worker`, `aurcache-worker-docker`,
-the demo worker) all speak it through one crate, `aurcache-worker-core`, which
-is the reference implementation.
+The protocol is JSON over HTTPS and belongs to no language or codebase: this
+page and the reference are what it is. The workers in this repository
+(`aurcache-worker`, `aurcache-worker-docker`, the demo worker) all speak it
+through one crate, `aurcache-worker-core`, which is one implementation of it.
+Example messages for each protocol are kept under
+`backend/aurcache-common/tests/fixtures/worker-protocol/`.
 
 ## Transport
 
@@ -54,6 +57,7 @@ worker's approval, so it is always safe: a revoked worker stays revoked.
 The registration answer also carries a `[repo]` section for `pacman.conf`,
 with the host left as `%AURCACHE_HOST%` for the worker to fill in with however
 it reaches the server, so builds can use packages AURCache already built.
+`repo_template` is absent when the instance publishes no repository.
 
 ## Protocol versions
 
@@ -73,13 +77,40 @@ Only protocol 1 exists so far.
   The worker registers again and repeats the request. This is how every worker
   renegotiates with a server that was upgraded.
 
-Within a protocol, messages only change in ways a peer cannot notice: a field
-added in either direction is optional, and its absence means what it meant
-before. A receiver ignores fields it does not know. Anything else -- a field
-becoming required or changing meaning, a new value in an enum a peer receives,
-a route removed, a change in timing -- comes with the next protocol number.
-The registration messages and the CA routes are exchanged before any protocol
-is agreed, so they belong to none, and only ever gain optional fields.
+Within a protocol, messages only change in ways a peer cannot notice (see
+[Reading messages](#reading-messages)): a field added in either direction is
+optional, and its absence means what it meant before; a value added to an
+enumeration is one its fallback reads acceptably. Anything else -- a field
+becoming required or changing meaning, a value an older peer would misread, a
+route removed, a change in timing -- comes with the next protocol number. The
+registration messages and the CA routes are exchanged before any protocol is
+agreed, so they belong to none, and only ever gain optional fields.
+
+## Reading messages
+
+What lets either side grow without a new protocol number is how both read
+what they receive:
+
+- **Unknown fields are ignored**, at any depth. A field a newer peer added is
+  for peers that know it.
+- **A missing optional field** means what it meant before that field existed.
+  Optional fields may be sent as `null` or left out.
+- **An unknown value of an enumeration** reads as that enumeration's
+  fallback:
+
+  | Field | Received by | Unknown value reads as |
+  |---|---|---|
+  | `status` in the registration answer | worker | `pending`: keep waiting |
+  | `mirrorlist.mode` in a claim | server | `local`: send no mirrorlist |
+  | `mirrorlist.offer` in a job | worker | `nothing`: use the image's own |
+  | `outcome` in a completion | server | `interrupted`: retry the build |
+  | `severity` in a worker log report | server | `warning` |
+  | `kind.type` in a setting declaration | server | free text, unvalidated |
+
+  A value may be added to one of these within a protocol when reading it as
+  the fallback is acceptable to a peer that does not know it. The other
+  enumerations (`applies`, `source` and `status` in the settings reports) have
+  no fallback, so a value added to one of them needs the next protocol.
 
 ## Running a build
 
@@ -89,9 +120,21 @@ is agreed, so they belong to none, and only ever gain optional fields.
    (architectures, affinity, priority, concurrency), not from the claim.
 2. **Fetch the sources.** `GET /api/worker/jobs/{build_id}/source` returns the
    package's sources as a gzipped tarball, with any patches the operator made
-   applied. The job says the rest: build flags, `makepkg.conf`,
-   `pacman.conf`, PGP keys to import, the package names the build should
-   produce, and the commits to check out for `git+` sources.
+   applied. The job says the rest:
+   - `makepkg_conf`: assignments to apply over the worker's own
+     `makepkg.conf`, after it. Where things go (`PKGDEST`, `BUILDDIR`,
+     `SRCDEST`, `SRCPKGDEST`, `LOGDEST`) and how many jobs run (`MAKEFLAGS`)
+     are never in it: they are the worker's, set after it, and a line the
+     operator wrote for one of them is the worker's to drop.
+   - `pacman_conf`: the whole `pacman.conf`, without the AURCache repository.
+     The worker appends the `[repo]` section from its registration answer,
+     with the host filled in.
+   - `build_flags`: arguments added to makepkg's command line, as given.
+   - `pgp_keys` to import, and `vcs_sources`: the `git+` sources whose commit
+     to report back.
+   - `expected_packages` and `expected_version`: what the build should
+     produce. A real build's packages are whatever makepkg makes; these are
+     for a worker that fabricates them.
 3. **Stream the log.** `POST /api/worker/jobs/{build_id}/logs` appends UTF-8
    text to the build's log, as the build prints it.
 4. **Upload the packages.** `POST
@@ -100,12 +143,17 @@ is agreed, so they belong to none, and only ever gain optional fields.
    when known, so a file larger than the build may produce is refused (`413`)
    before any of it is sent.
 5. **Complete.** `POST /api/worker/jobs/{build_id}/complete` reports the
-   outcome (`succeeded`, `failed` or `canceled`) with whatever is known: exit
-   code, a reason, peak memory, disk use, the commits `git+` sources were at.
-   A success is accepted at once and the server publishes the uploaded files
-   in the background; nothing after that is the worker's to fix. Reporting
-   the same outcome again is answered `200` and changes nothing, so a report
-   whose answer was lost can simply be sent again.
+   outcome with whatever is known: exit code, a reason, peak memory, disk
+   use, the commits `git+` sources were at. Reporting the same outcome again
+   is answered `200` and changes nothing, so a report whose answer was lost
+   can simply be sent again.
+
+   | Outcome | When | What the server does |
+   |---|---|---|
+   | `succeeded` | The build made its packages, and they are uploaded. | Publishes them in the background; nothing after that is the worker's to fix. |
+   | `failed` | The build ran and failed (a non-zero exit, out of memory, a timeout), or its packages cannot be accepted: none, not a regular file, or refused on upload with `400` or `413`. | Fails the build. The package's doing, so it is not retried. |
+   | `canceled` | The worker stopped it because it was asked to. | Nothing more; the build was already stopped. |
+   | `interrupted` | The worker could not see it through, for reasons of its own: preparing it, fetching its sources, a crash, a lost connection while uploading. | Queues it again while it has attempts left, as for a worker that went silent. |
 
 Problems a worker notices on its own account, which the server would not see
 otherwise, go to `POST /api/worker/log`.

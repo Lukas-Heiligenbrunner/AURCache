@@ -63,11 +63,10 @@ pub async fn run_job(
     {
         Ok(report) => report,
         Err(e) => {
-            let msg = format!("build setup failed: {e:#}");
-            let _ = client
-                .append_log(job.build_id, &format!("\n[worker] {msg}\n"))
-                .await;
-            report::setup_failure(msg)
+            let report = report::from_error(&e);
+            let reason = report.reason.as_deref().unwrap_or_default();
+            log(client, job.build_id, &format!("\n[worker] {reason}\n")).await;
+            report
         }
     };
 
@@ -262,7 +261,7 @@ async fn prepare_job(
         pacman_conf,
     } = chroot::write_configs(
         &cfg_dir,
-        &build::limit_parallelism(
+        &build::with_parallelism(
             &credentials::augment_makepkg_conf(
                 &job.makepkg_conf,
                 credential.as_ref(),

@@ -146,9 +146,6 @@ pub struct WorkerJoinInfo {
     sea_orm(rs_type = "String", db_type = "String(StringLen::None)")
 )]
 pub enum ApprovalStatus {
-    /// Enrolled and waiting for an operator. Cannot build.
-    #[cfg_attr(feature = "db", sea_orm(string_value = "pending"))]
-    Pending,
     /// Approved: holds a signed certificate and may take jobs.
     #[cfg_attr(feature = "db", sea_orm(string_value = "approved"))]
     Approved,
@@ -156,6 +153,14 @@ pub enum ApprovalStatus {
     /// in-flight builds have been released.
     #[cfg_attr(feature = "db", sea_orm(string_value = "revoked"))]
     Revoked,
+    /// Enrolled and waiting for an operator. Cannot build.
+    ///
+    /// Also how a status this build does not know reads, wherever one is
+    /// received: a worker that is told something it does not understand keeps
+    /// waiting rather than failing to enroll. Last, as serde wants it.
+    #[cfg_attr(feature = "db", sea_orm(string_value = "pending"))]
+    #[serde(other)]
+    Pending,
 }
 
 impl ApprovalStatus {

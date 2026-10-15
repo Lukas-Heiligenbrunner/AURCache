@@ -8,6 +8,7 @@
 //!   certificate (mTLS) and validates the server against the pinned CA; used
 //!   for all job endpoints.
 
+use crate::protocol::PackagesRefused;
 use anyhow::{Context, Result, bail};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::{
@@ -409,7 +410,8 @@ impl WorkerClient {
     /// take a file that size says so before any of it is sent rather than after
     /// reading up to its limit. A refusal carries the server's own reason -- a
     /// bare "413 Payload Too Large" says nothing about which limit, or where
-    /// it is set.
+    /// it is set -- and is a [`PackagesRefused`] when it is about the file
+    /// (`400`, `413`) rather than about this worker.
     pub async fn upload_artifact<R>(
         &self,
         build_id: i32,
@@ -429,7 +431,16 @@ impl WorkerClient {
         if let Some(len) = len {
             request = request.header(reqwest::header::CONTENT_LENGTH, len);
         }
-        self.exchange_checked(request, "artifact").await?;
+        let response = self.exchange(request, "artifact").await?;
+        let status = response.status();
+        if matches!(
+            status,
+            StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+        ) {
+            let reason = reason(response).await;
+            return Err(PackagesRefused(format!("artifact refused: {status}: {reason}")).into());
+        }
+        checked(response, "artifact").await?;
         Ok(())
     }
 

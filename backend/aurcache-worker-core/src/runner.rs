@@ -317,7 +317,7 @@ impl<E: Executor> Runner<E> {
 
         let report = match result {
             Ok(report) => report,
-            Err(e) => report::setup_failure(format!("worker task panicked: {e}")),
+            Err(e) => report::interrupted(format!("worker task panicked: {e}")),
         };
 
         self.report_completion(build_id, &report).await;

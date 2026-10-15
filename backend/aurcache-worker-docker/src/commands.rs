@@ -73,6 +73,21 @@ pub fn build_build_command(
     )
 }
 
+/// The job's makepkg assignments, then this builder's own: where packages go,
+/// and a job per core.
+///
+/// Last, so they win over anything the operator's configuration set: the job
+/// leaves both to the worker, and the packages are collected from `pkgdest`.
+#[must_use]
+pub fn with_layout(makepkg_conf: &str, pkgdest: &str) -> String {
+    let mut out = makepkg_conf.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("PKGDEST={pkgdest}\nMAKEFLAGS=\"-j$(nproc)\"\n"));
+    out
+}
+
 /// Prefix the build with the job's rendered `makepkg.conf` / `pacman.conf`.
 ///
 /// The written config `source`s `/etc/makepkg.conf` before applying the
@@ -176,6 +191,14 @@ mod tests {
             .expect("sh should run");
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout), "<--opt=a b><--flag>");
+    }
+
+    /// The builder's own settings come after the operator's, so packages land
+    /// where the worker collects them whatever the operator wrote.
+    #[test]
+    fn the_builder_sets_where_packages_go_last() {
+        let conf = with_layout("PKGDEST=/elsewhere\nPACKAGER='x'", "/output");
+        assert!(conf.ends_with("PACKAGER='x'\nPKGDEST=/output\nMAKEFLAGS=\"-j$(nproc)\"\n"));
     }
 
     /// Only the one sudo path the builder image actually permits may appear.

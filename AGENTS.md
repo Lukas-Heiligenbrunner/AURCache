@@ -214,7 +214,7 @@ defect this frontend has had was of that kind.
   `aurcache-common/tests/fixtures/worker-protocol/` fail on a break; never rewrite one to pass. The
   server keeps each agreement in memory and answers `428` to a worker it holds none for, which then
   registers again; a worker does no work before a registration succeeds. See
-  `design/proposed/worker-protocol-versioning.md`.
+  `design/in-progress/worker-protocol-versioning.md`.
 - A worker's successful completion is accepted at once: the build goes `ACTIVE` -> `PUBLISHING`, the
   lease ends, and `aurcache_utils::publish::publish_with_recovery` puts it in the repository in the background.
   Failures before the SQL commit fail the build; finalization failures preserve `PUBLISHING` and

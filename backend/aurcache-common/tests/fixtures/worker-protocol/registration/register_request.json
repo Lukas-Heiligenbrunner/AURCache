@@ -15,7 +15,7 @@
     "kind": "chroot",
     "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...\n",
     "enrollment_token": "token",
-    "packages": [
+    "affinity": [
       "chromium"
     ],
     "priority": 10,

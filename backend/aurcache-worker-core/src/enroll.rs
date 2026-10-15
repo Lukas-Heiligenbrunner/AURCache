@@ -43,7 +43,7 @@ pub fn register_request(cfg: &CoreConfig, csr_pem: String, kind: &str) -> Regist
         kind: kind.to_string(),
         csr_pem,
         enrollment_token: cfg.enrollment_token.clone(),
-        packages: cfg.packages.clone(),
+        affinity: cfg.packages.clone(),
         priority: cfg.priority,
         concurrency: cfg.concurrency as u32,
         settings: cfg.settings.declare(),
@@ -300,12 +300,18 @@ fn try_finish_enrollment(
     // Render the server's `[repo]` template with the host we actually reach it
     // on. Done here, once, because it describes the deployment rather than any
     // one build.
-    let section = crate::repo::render(
-        &status.repo_template,
-        &cfg.aurcache_url,
-        cfg.repo_host.as_deref(),
-        cfg.repo_url.as_deref(),
-    );
+    let section = status
+        .repo_template
+        .as_deref()
+        .map(|template| {
+            crate::repo::render(
+                template,
+                &cfg.aurcache_url,
+                cfg.repo_host.as_deref(),
+                cfg.repo_url.as_deref(),
+            )
+        })
+        .unwrap_or_default();
     match section.lines().find(|l| l.starts_with("Server =")) {
         Some(server) => tracing::info!("Package repository for this worker: {server}"),
         None => tracing::warn!(

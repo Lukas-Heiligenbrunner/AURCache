@@ -17,7 +17,7 @@ use aurcache_common::api::log::{BuildRef, WorkerRef};
 use aurcache_common::api::worker::{
     ApprovalStatus, WorkerConfigUpdate, WorkerConfigView, WorkerJoinInfo, WorkerSummary,
 };
-use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::{BuildState, EndReason};
 use aurcache_common::worker::{
     BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
     JobStatus, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, RegisterRequest, RegisterStatus,
@@ -143,10 +143,6 @@ fn resolve_mirrorlist(
         MirrorlistOffer::Send { content, checksum }
     }
 }
-
-/// Conventional PKGDEST inside a worker's build environment. Workers may patch
-/// this in their local `makepkg.conf`; it is only a default.
-const WORKER_PKGDEST: &str = "/output";
 
 /// The worker protocol each worker agreed on at registration, by certificate
 /// fingerprint.
@@ -360,7 +356,7 @@ pub async fn register_worker(
             emulated_arches: &input.emulated_arches,
             version: &input.version,
             kind: &input.kind,
-            package_affinity: &input.packages,
+            package_affinity: &input.affinity,
             priority: input.priority,
             // Clamped to at least 1: a worker reporting 0 would be treated as
             // permanently full and could never block a lower-priority worker,
@@ -479,7 +475,7 @@ async fn register_status_for(
         status: worker.status,
         signed_cert,
         ca_cert,
-        repo_template: repo_template(),
+        repo_template: Some(repo_template()),
         protocol,
     }))
 }
@@ -585,7 +581,7 @@ async fn build_descriptor(
         // No `[repo]` section here: the worker appends one rendered from the
         // template it received at registration, using the host it actually
         // reaches this server on.
-        build_job_config(db, pkg.id, Path::new(WORKER_PKGDEST)).await;
+        build_job_config(db, pkg.id).await;
 
     let arch = build.platform.as_str().to_string();
     let mirrorlist = resolve_mirrorlist(
@@ -628,8 +624,8 @@ async fn build_descriptor(
     Ok(JobDescriptor {
         build_id: build.id,
         pkgbase: pkg.name,
-        packages,
-        version: build.version.clone(),
+        expected_packages: packages,
+        expected_version: build.version.clone(),
         arch,
         build_flags,
         persistent_builddir,
@@ -894,7 +890,8 @@ pub async fn job_artifact(
 /// so the worker's part is done, and the build moves to `PUBLISHING` while the
 /// server puts it in the repository in the background (see
 /// [`publish_with_recovery`]). Nothing that can go wrong from there is the worker's to
-/// fix. A failure is terminal.
+/// fix. A failure is terminal. An interruption is abandoned like a build whose
+/// worker went silent, and queued again while attempts remain.
 #[utoipa::path(post, path = "/worker/jobs/{build_id}/complete", request_body = CompleteReport, responses(
     (status = 200, description = "Accepted, or a repeat of a report already accepted; either way the worker is done with the build"),
     (status = 404, description = "No such build"),
@@ -974,7 +971,12 @@ async fn complete_job_inner(
     // guessed an id could remove another worker's staging directory.
     if build.worker_id == Some(auth.worker.id) {
         let failed = build.status == BuildState::Failed;
-        let acknowledged_abort = report.outcome == BuildOutcome::Canceled && failed;
+        // An interruption the server already abandoned the build for is the
+        // same: the build left this worker's hands either way.
+        let acknowledged_abort = matches!(
+            report.outcome,
+            BuildOutcome::Canceled | BuildOutcome::Interrupted
+        ) && failed;
         let repeated_success = report.outcome == BuildOutcome::Succeeded
             && (matches!(
                 build.status,
@@ -1070,6 +1072,21 @@ async fn complete_job_inner(
         .await
     {
         record_failed("failure reason", e.to_string());
+    }
+
+    if report.outcome == BuildOutcome::Interrupted {
+        let abandoned = worker_jobs::abandon_build(
+            db,
+            &build,
+            EndReason::Interrupted,
+            worker_policy().max_attempts,
+        )
+        .await
+        .map_err(|e| err(Status::InternalServerError, e))?
+        .ok_or_else(|| err(Status::Forbidden, "build is no longer this worker's"))?;
+        aurcache_utils::abandoned::report(db, activity, &[abandoned]).await;
+        let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+        return Ok(());
     }
     // Refused like a success above when the lease was lost in the meantime.
     worker_complete::complete_failure(db, build_id, auth.worker.id)
