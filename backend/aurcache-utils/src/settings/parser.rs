@@ -44,11 +44,7 @@ impl ParseSetting for bool {
     /// Accepts the spellings that turn up in environment variables, not just
     /// Rust's `true`/`false` — `BUILD_ON_NEW_VERSION=1` should work.
     fn parse_setting(s: &str) -> Result<Self, String> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Ok(true),
-            "false" | "0" | "no" | "off" | "" => Ok(false),
-            other => Err(format!("expected a boolean, got {other:?}")),
-        }
+        aurcache_common::settings::parse_boolean(s)
     }
 }
 

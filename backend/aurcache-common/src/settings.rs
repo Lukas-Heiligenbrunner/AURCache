@@ -244,6 +244,9 @@ impl Setting {
     /// A message saying what was expected.
     pub fn validate(&self, value: &str) -> Result<(), String> {
         match self {
+            Self::BuildOnNewVersion | Self::PersistentBuilddir | Self::ParseNetwork => {
+                parse_boolean(value).map(|_| ())
+            }
             Self::MaxArtifactSize => crate::units::parse_size(value)
                 .filter(|&bytes| bytes > 0)
                 .map(|_| ())
@@ -266,14 +269,41 @@ impl Setting {
             Self::AutoUpdateSchedule => crate::schedule::Schedule::parse(value, 0)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
-            _ => Ok(()),
+            Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
+    }
+}
+
+/// Parse a boolean setting, including the spellings used in environment variables.
+pub fn parse_boolean(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" | "" => Ok(false),
+        other => Err(format!("expected a boolean, got {other:?}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boolean_settings_reject_values_the_runtime_cannot_read() {
+        for setting in [
+            Setting::BuildOnNewVersion,
+            Setting::PersistentBuilddir,
+            Setting::ParseNetwork,
+        ] {
+            for valid in [
+                "true", "false", " TRUE ", "1", "0", "yes", "no", "on", "off", "",
+            ] {
+                assert_eq!(setting.validate(valid), Ok(()));
+            }
+            for invalid in ["ture", "enabled", "2"] {
+                assert!(setting.validate(invalid).is_err());
+            }
+        }
+    }
 
     /// A duration is checked before it is stored, and zero is refused: it
     /// would spin the version check, or reclaim every build as it starts.
