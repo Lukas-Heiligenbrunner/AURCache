@@ -1,6 +1,6 @@
 # Rebuilding packages when what they were built against changes
 
-Status: **Proposed** · Last updated: 2026-10-12
+Status: **Proposed** · Last updated: 2026-10-15
 
 `eternalterminal` links `libprotobuf.so.36.1.0`. When `protobuf` moves to 37
 in `extra`, that file is gone and the published `eternalterminal` stops
@@ -382,20 +382,55 @@ change, not a redesign.
   `x86_64` artifacts, and `rebuild_on` works anywhere our own repository is
   the source.
 
+## Review (2026-10-15)
+
+The facts above still hold; only line numbers have drifted. Five changes:
+
+1. **The version bump is a fix of its own, for every rebuild.** Any rebuild
+   at an unchanged version republishes the same filename today: an
+   operator's Rebuild button, a VCS package whose `pkgver()` did not move.
+   `replacing_a_file_with_one_of_the_same_name_keeps_the_new_one`
+   (`repository.rs`) is the test that pins it. Every such rebuild should take
+   the `.n` suffix, not only those this design queues, so it ships first and
+   on its own.
+2. **Bump pkgrel without a sandboxed parse.** A `SourcePatch` regenerates
+   `.SRCINFO` by sourcing the patched PKGBUILD, through `aurcache-sandbox`.
+   A pkgrel bump does not need that: it rewrites the one `pkgrel=` line in
+   the PKGBUILD and the one `pkgrel =` line in `.SRCINFO`, as text, after the
+   operator's own patch. A PKGBUILD without a literal `pkgrel=<integer>` line
+   is flagged for a manual rebuild, like a fractional one. This keeps the
+   bump out of the operator's patch, which they edit, and off the sandbox.
+3. **Absent is not empty.** `CompleteReport::linked_libraries` is an
+   optional field, so it is additive within worker protocol 1, but the
+   server must read its absence as "not recorded" (`None`), never as "links
+   nothing". A package published by a worker without the step is not checked
+   for libraries, and the package page says so.
+4. **A trigger of its own.** `BuildTrigger` gains `Rebuild` (rebuilt for
+   what is underneath it, not for a new version), and the reason is stored
+   on the build, so the queue, the activity log and the "still unresolved"
+   dedupe all read one column.
+5. **End users first.** What reaches clients is the point: the bump, then
+   the checks. The soname-pinning drop-in under "Not in this proposal" is
+   the one change that protects a client *before* the rebuild lands, and
+   should be the next design after this one.
+
 ## Open questions
 
-1. Should `rebuild_on` compare **pkgver** only (proposed), or also pkgrel?
-   Arch bumps pkgrel for rebuilds that can matter (Haskell), and for many
-   that do not.
-2. When the trigger dedupe stops a loop, should the package's status change
-   (a distinct "needs attention"), or is the reason on the build enough?
+1. ~~Should `rebuild_on` compare **pkgver** only, or also pkgrel?~~
+   **The full version.** The setting is opt-in and per name, so a person
+   naming `ghc-libs` or `rust` wants every rebuild of it, including Arch's
+   pkgrel-only ones: those are Haskell's ABI changes, and a statically
+   linked binary's security fixes.
+2. ~~When the trigger dedupe stops a loop, should the package's status
+   change?~~ **No new status.** A package's status is derived from its
+   builds; the unresolved trigger is shown on the package page beside it.
 3. Is the offline mode (step 4 of the split) something upstream wants in
    `checkrebuild`, or better as a separate script in the same package
    sharing the rules file? This is the maintainer's call; the rules file is
    the part that matters to AURCache.
-4. `ldd` in the legacy Docker builder: it runs makepkg in a container with
-   the dependencies installed, so the same step applies. Is it worth doing
-   there, or should the check only run on the chroot worker?
+4. ~~`ldd` in the legacy Docker builder?~~ **The chroot worker only.** The
+   field is optional, so the legacy builder can add it later without a
+   protocol change, and point 3 above keeps its packages honest meanwhile.
 
 ## Implementation order
 
@@ -403,12 +438,14 @@ change, not a redesign.
    It runs in parallel with everything below. AURCache starts on the
    vendored table and its tripwire, and switches to the upstream rules file
    and ldd step when they ship.
-1. `OfficialRepos` keeps versions and versioned provides (the data model
-   change everything else reads).
-2. Interpreter rules. These are stateless, with no worker change, and show
-   the queueing, reason and pkgrel-suffix path end to end.
-3. The `rebuild` counter and the pkgrel `SourcePatch`, with version
-   comparison stripping the suffix.
+1. The `rebuild` counter and the textual pkgrel bump, for **every** rebuild
+   at an unchanged version, with version comparison stripping the suffix.
+   This fixes manual rebuilds on its own.
+2. `OfficialRepos` keeps versions and versioned provides (the data model
+   change everything else reads), and `BuildTrigger::Rebuild` with its
+   reason.
+3. Interpreter rules. These are stateless, with no worker change, and show
+   the queueing and reason path end to end.
 4. The ldd step on the worker (upstream's `--ldd` once it exists, the same
    output format until then), `LinkedLibrary` in `CompleteReport`, the
    `linked_libraries` table and migration, and the provides/`.files`
