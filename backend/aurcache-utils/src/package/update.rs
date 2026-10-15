@@ -583,23 +583,23 @@ async fn sync_dependency_rows(
     Ok(())
 }
 
-/// Whether every dependency in the graph is satisfied on a single platform.
+/// Queue missing dependency builds and choose the dependent's initial queue state.
 ///
-/// Every dependency that is not gets a build of its own if it has none
+/// Every dependency not yet satisfied gets a build of its own if it has none
 /// pending, so it will be available when the dependent starts -- all of them,
 /// not only the first: the dependent is promoted once *every* dependency is
 /// satisfied, so one left without a build would hold it back for ever.
 /// Packages whose last build failed are never auto-retriggered — the user has
 /// to retry those explicitly.
-async fn dependencies_ready_for_platform(
+async fn prepare_dependencies_for_platform(
     services: &Services,
     platform: Platform,
     graph: &DependencyGraph,
     trigger: BuildTrigger,
     visited: &mut HashSet<i32>,
     needed_by: &str,
-) -> anyhow::Result<bool> {
-    let mut ready = true;
+) -> anyhow::Result<Pending> {
+    let mut pending = Pending::Enqueued;
     for dep_info in graph.deps.values() {
         // The same check the builder makes when this dependency's build
         // lands, against the constraint as the edge stores it.
@@ -613,7 +613,7 @@ async fn dependencies_ready_for_platform(
         {
             continue;
         }
-        ready = false;
+        pending = Pending::WaitingForDeps;
 
         let has_pending_build = aurcache_db::helpers::builds::pending_build(
             &services.db,
@@ -640,7 +640,7 @@ async fn dependencies_ready_for_platform(
         }
     }
 
-    Ok(ready)
+    Ok(pending)
 }
 
 /// What to build and its resolved dependency graph.
@@ -728,7 +728,7 @@ async fn enqueue_platform_builds(
     let mut results = Vec::new();
 
     for &platform in request.pkg_model.platforms.as_slice() {
-        let ready = dependencies_ready_for_platform(
+        let pending = prepare_dependencies_for_platform(
             services,
             platform,
             request.graph,
@@ -738,44 +738,40 @@ async fn enqueue_platform_builds(
         )
         .await?;
 
-        if ready {
-            let result = update_platform(
-                &services.db,
-                request.pkg_model.id,
-                platform,
-                request.version,
-                request.trigger,
-            )
-            .await?;
-            results.push(PlatformUpdateResult {
-                platform,
-                build_id: result.build.id,
-                build_number: result.build.number,
-                dispatch: result.queued.into(),
-                version: request.version.to_string(),
-            });
-        } else {
-            let waiting = enqueue_build_if_missing(
-                &services.db,
-                request.pkg_model.id,
-                platform,
-                request.version,
-                aurcache_db::helpers::time::now_secs(),
-                Pending::WaitingForDeps,
-                request.trigger,
-            )
-            .await?;
-            results.push(PlatformUpdateResult {
-                platform,
-                build_id: waiting.build.id,
-                build_number: waiting.build.number,
-                dispatch: match waiting.queued {
-                    Queued::Inserted => Dispatch::WaitingForDeps,
-                    queued => queued.into(),
-                },
-                version: request.version.to_string(),
-            });
-        }
+        let result = match pending {
+            Pending::Enqueued => {
+                update_platform(
+                    &services.db,
+                    request.pkg_model.id,
+                    platform,
+                    request.version,
+                    request.trigger,
+                )
+                .await?
+            }
+            Pending::WaitingForDeps => {
+                enqueue_build_if_missing(
+                    &services.db,
+                    request.pkg_model.id,
+                    platform,
+                    request.version,
+                    aurcache_db::helpers::time::now_secs(),
+                    pending,
+                    request.trigger,
+                )
+                .await?
+            }
+        };
+        results.push(PlatformUpdateResult {
+            platform,
+            build_id: result.build.id,
+            build_number: result.build.number,
+            dispatch: match (pending, result.queued) {
+                (Pending::WaitingForDeps, Queued::Inserted) => Dispatch::WaitingForDeps,
+                (_, queued) => queued.into(),
+            },
+            version: request.version.to_string(),
+        });
     }
 
     Ok(results)
