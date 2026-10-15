@@ -643,7 +643,9 @@ pub enum Principal { User(Option<String>), Plugin { id: i32, name: String, scope
 
 and endpoints that a plugin may call declare their scope
 (`_a: Authorized<scope::PackagesWrite>`), which admits any user and a plugin
-holding that scope. Endpoints that don't declare one refuse plugins. Opt-in per
+holding that scope. `api-tokens.md` builds this guard and the scope catalogue
+first, for limited API tokens; plugins then use them with their own
+principal. Endpoints that don't declare one refuse plugins. Opt-in per
 endpoint means a new endpoint is closed to plugins until someone decides
 otherwise, which is the failure direction we want.
 
