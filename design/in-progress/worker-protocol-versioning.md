@@ -1,6 +1,6 @@
 # Versioned worker protocol, independently released components
 
-Status: **In progress** (negotiation, docs and the v1 review done; two review items open in section 2) · Last updated: 2026-10-15
+Status: **In progress** (negotiation, docs and the v1 review done; three review items open in section 2) · Last updated: 2026-10-15
 
 Workers and the server talk a numbered protocol, and that number is the only
 thing either side checks. Each component -- server, chroot worker, container
@@ -261,6 +261,13 @@ Still open, and cheap only until the freeze:
 5. **Two cancel channels.** The heartbeat's `cancel` and
    `GET /jobs/{id}/status` say the same thing. A route can never be removed
    after the freeze.
+6. **The quarantine repository.** The hold design (`package-suspicion-signals.md`,
+   "Chains") lets builds use packages held from the repository, through a
+   second, opt-in pacman repository on the same port.
+   The registration answer gains `quarantine_template`, rendered like
+   `repo_template`, and a worker appends it after `[repo]`. A worker that
+   did not would fail a held chain's first builds, so the rule belongs in
+   protocol 1, before the freeze.
 
 Additive, so not blocking:
 

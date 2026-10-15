@@ -33,7 +33,7 @@ It supersedes Part 1 of `design/proposed/home-assistant-integration.md` (the
 proposed `aurcache-events` bus): the structured event catalogue now exists
 (`backend/aurcache-common/src/api/events.rs`, `design/implemented/structured-logs.md`),
 and the event feed below is that catalogue exposed, not a second one. It shares
-the `WITHHELD` state and quarantine with `design/proposed/package-suspicion-signals.md`
+the `HELD` state and quarantine repository with `design/proposed/package-suspicion-signals.md`
 rather than inventing a parallel one.
 
 ## Motivation
@@ -1044,9 +1044,10 @@ commit rechecks them.
 
 ### Withholding and releasing
 
-`hold` at the artifact gate is the suspicion-signals `WITHHELD` state and its
-quarantine, unchanged: the files move beside the repository, no `files` rows,
-no `repo.db` entry, and the previously published version stays installable.
+`hold` at the artifact gate is the suspicion-signals `HELD` state and its
+quarantine repository, unchanged: the files go into the opt-in `quarantine` repository
+beside the one clients use, no `files` rows, no `repo.db` entry, and the
+previously published version stays installable.
 Two designs arriving at the same state is the argument for building it once;
 whichever lands first owns it.
 
@@ -1667,7 +1668,7 @@ phase 4.
    and its e2e test.
 3. **Recipe gate.** Reviews table, `defer`, the claim-time skip,
    `WaitingReason::Review`/`Held`, subject pinning, release.
-4. **Artifact gate.** The `PUBLISHING` wait, `WITHHELD` and quarantine —
+4. **Artifact gate.** The `PUBLISHING` wait, `HELD` and the quarantine repository —
    shared with, or taken over from, suspicion-signals Change 6.
 
    *Decision point:* the LLM plugins exist, in their own repository. What did
