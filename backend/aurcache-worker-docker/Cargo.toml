@@ -1,0 +1,25 @@
+[package]
+name = "aurcache-worker-docker"
+version = "0.1.0"
+edition = "2024"
+
+# Legacy compatibility executor. Kept in its own crate so that the supported
+# chroot worker never links a Docker client, and so retiring this build
+# strategy is a deletion rather than a refactor.
+
+[[bin]]
+name = "aurcache-worker-docker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+bollard = "0.21"
+aurcache-common = { path = "../aurcache-common" }
+aurcache-worker-core = { path = "../aurcache-worker-core" }

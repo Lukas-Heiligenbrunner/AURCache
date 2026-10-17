@@ -1,3 +1,11 @@
 pub mod add;
+pub mod backfill;
+pub mod bulk_add;
 pub mod delete;
+pub(crate) mod edges;
+pub mod enqueue;
+pub mod live_check;
+pub mod metadata;
+pub mod replace;
+pub mod source_metadata;
 pub mod update;

@@ -1,0 +1,51 @@
+# =============================================================================
+# AURCache end-to-end test: the hybrid image's *legacy container builder*.
+# =============================================================================
+# Shaped like the old "Host build mode" setup: the Docker socket is mounted, a
+# shared artifact directory is exchanged through BUILD_ARTIFACT_DIR, and the
+# container is deliberately NOT privileged — that combination is precisely what
+# those users had, and `BUILD_ARTIFACT_DIR` being set is what selects the legacy
+# builder in the entrypoint.
+#
+# This is the path a socket-mode deployment lands on after upgrading. It builds
+# each package in a container spawned from BUILDER_IMAGE rather than in a
+# chroot, and is deprecated: it exists for continuity, not as a supported build
+# strategy.
+#
+# Driven by scripts/test-e2e-hybrid-legacy.sh.
+# =============================================================================
+
+services:
+  aurcache:
+    build:
+      context: ..
+      dockerfile: docker/hybrid.Dockerfile
+    ports:
+      - "${AURCACHE_PORT:-8080}:8080"
+      - "${AURCACHE_MIRROR_PORT:-8081}:8081"
+    environment:
+      - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug
+      - RUST_LOG=info,aurcache_worker_docker=debug
+      # Selects the legacy builder. Must be a path the *Docker daemon* can bind,
+      # and the same directory must be visible to this container (below).
+      - BUILD_ARTIFACT_DIR=/tmp/aurcache-legacy-builds
+      # Built locally by the test; the published default would be pulled.
+      - BUILDER_IMAGE=aurcache-legacy-builder:test
+      - AURCACHE_PUBLIC_URL=http://localhost:8081
+    volumes:
+      - db:/app/db
+      - repo:/app/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same directory, both views: the daemon binds the host path into each
+      # build container, while this container writes sources into it.
+      - /tmp/aurcache-legacy-builds:/app/builds
+    networks:
+      - aurcache_network
+
+volumes:
+  db:
+  repo:
+
+networks:
+  aurcache_network:
+    driver: bridge

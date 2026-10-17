@@ -1,1 +1,12 @@
+# Build output. These are the bulk of the tree — `backend/target` alone is tens
+# of gigabytes — and every one of them is regenerated inside the image, so
+# shipping them to the daemon only slows the build down.
 /backend/target
+/frontend-rs/target
+/frontend-rs/dist
+/backend/aurcache-api/web
+
+# Not used by any Dockerfile.
+/docs
+/.git
+/design

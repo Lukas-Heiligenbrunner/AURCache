@@ -1,0 +1,64 @@
+[Unit]
+Description=AURCache remote build worker
+Documentation=https://github.com/Lukas-Heiligenbrunner/AURCache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=aurcache
+Group=aurcache
+# The worker needs the shared group to reach the build user's caches.
+SupplementaryGroups=aurbuild
+WorkingDirectory=/var/lib/aurcache-worker
+ExecStart=/usr/bin/aurcache-worker run
+Restart=on-failure
+RestartSec=10s
+
+# At minimum this needs AURCACHE_URL and an enrollment token; see
+# docs/setup/native.md.
+EnvironmentFile=/etc/aurcache/worker.env
+
+Environment=WORKER_DATA_DIR=/var/lib/aurcache-worker
+Environment=WORKER_CHROOT_DIR=/var/lib/aurcache-worker/chroot
+
+# Deliberately NOT hardened the way the server is, and this is not an oversight.
+#
+# The worker's whole job is to run `sudo mkarchroot` / `sudo makechrootpkg`,
+# which need to mount, unshare and chroot. Every directive that would make this
+# unit look as careful as the server's breaks builds:
+#
+#   NoNewPrivileges=yes   - sudo cannot raise privilege, so no build can start.
+#   ProtectSystem=strict  - the chroot lives under /var/lib and pacman writes
+#                           /var/cache/pacman; both become read-only.
+#   PrivateDevices        - the chroot needs real device nodes.
+#   RestrictNamespaces    - systemd-nspawn is namespaces.
+#   SystemCallFilter      - mount(2) and friends are exactly what it calls.
+#
+# The isolation that matters here is not systemd's: each build runs in its own
+# devtools chroot as a *different* unprivileged user, and the two places a
+# PKGBUILD is executed outside that chroot are confined with Landlock by
+# aurcache-sandbox. Adding directives above without understanding that trade
+# will produce builds that fail in confusing ways.
+#
+# Hand the unit's cgroup subtree over rather than managing it.
+#
+# The worker gives each build a cgroup of its own so `memory.peak` reports one
+# build rather than the worker and every build running beside it. Creating one
+# means enabling the memory controller in `cgroup.subtree_control`, which is
+# systemd's to do unless it delegates -- and it also means the worker moves
+# itself into a leaf first, because cgroup v2 refuses to enable a controller
+# while processes sit directly in that cgroup.
+#
+# Without this the worker still builds; builds simply report no memory figure.
+Delegate=yes
+
+# What is safe to keep:
+PrivateTmp=yes
+ProtectHome=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

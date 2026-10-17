@@ -28,7 +28,7 @@ pub struct Status {
     pub cutoff: u32,
 
     /// The last time every listed Arch Linux mirror polled the [`lastsync`] file.
-    pub last_check: chrono::DateTime<chrono::Utc>,
+    pub last_check: jiff::Timestamp,
 
     /// The number of checks that have been run in the last 24 hours.
     pub num_checks: u32,
@@ -50,41 +50,46 @@ impl Status {
     pub const URL_X86_64_ALT: &'static str =
         "https://arjixwastaken.github.io/arch-mirrorlist-mirror/mirrors.json";
 
-    /// Get the status from [`Status::URL`](Self::URL).
+    /// Get the status from [`Status::URL_X86_64`].
     pub async fn get_from_default_url(target_platform: Platform) -> anyhow::Result<Self> {
         match target_platform {
-            Platform::X86_64 => {
-                let result = (|| async {
-                    // fetch original archlinux.org mirrorlist
-                    Self::get_from_url(Self::URL_X86_64, target_platform).await
-                })
-                .retry(FibonacciBuilder::default().with_max_times(2))
-                .await;
-                match result {
-                    Ok(v) => Ok(v),
-                    Err(_) => {
-                        warn!(
-                            "<{}> timed out! Using alternative mirrorlist URL: {}",
-                            Self::URL_X86_64,
-                            Self::URL_X86_64_ALT
-                        );
-                        (|| async {
-                            // fetch alternative archlinux mirrorlist
-                            Self::get_from_url(Self::URL_X86_64_ALT, target_platform).await
-                        })
-                        .retry(FibonacciBuilder::default().with_max_times(4))
-                        .await
-                    }
+            Platform::X86_64 => match Self::fetch_status(Self::URL_X86_64, 2).await {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    // Only a timeout is a timeout: DNS, TLS and HTTP errors
+                    // misreported as one send the operator after the wrong
+                    // cause.
+                    let what = if is_timeout(&e) {
+                        "timed out"
+                    } else {
+                        "failed"
+                    };
+                    warn!(
+                        "<{}> {what} ({e:#})! Using alternative mirrorlist URL: {}",
+                        Self::URL_X86_64,
+                        Self::URL_X86_64_ALT
+                    );
+                    Self::fetch_status(Self::URL_X86_64_ALT, 4).await
                 }
-            }
+            },
             Platform::Aarch64 => bail!("Aarch64 rank mirroring not supported"),
             Platform::Armv7h => bail!("ARM32 rank mirroring not supported"),
         }
     }
 
+    /// Fetch the status JSON from `url`, retrying up to `times` times.
+    async fn fetch_status(url: &str, times: usize) -> anyhow::Result<Self> {
+        (|| async { Self::get_from_url(url).await })
+            .retry(FibonacciBuilder::default().with_max_times(times))
+            .await
+    }
+
     /// Get the status from a given url.
-    pub async fn get_from_url(url: &str, _platform: Platform) -> anyhow::Result<Self> {
-        // todo we need to fetch mirror list differently dependent on platform
+    ///
+    /// Both known URLs serve the x86_64 mirrorlist; aarch64/armv7h ranking are
+    /// rejected in [`get_from_default_url`], so a platform discriminator would
+    /// be dead weight until an aarch64 source exists.
+    pub async fn get_from_url(url: &str) -> anyhow::Result<Self> {
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (compatible; AURCache/1.0;)")
             .http1_only()
@@ -104,11 +109,21 @@ impl Status {
     }
 }
 
+/// Whether any link in the failure chain is a request timeout, as opposed to
+/// a DNS, TLS, HTTP or parse error wearing a timeout's message.
+fn is_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+    })
+}
+
 impl TryFrom<Raw> for Status {
     type Error = anyhow::Error;
 
     fn try_from(raw: Raw) -> Result<Self, Self::Error> {
-        let last_check: chrono::DateTime<chrono::Utc> = raw
+        let last_check: jiff::Timestamp = raw
             .last_check
             .parse()
             .context("Failed to parse last check")?;

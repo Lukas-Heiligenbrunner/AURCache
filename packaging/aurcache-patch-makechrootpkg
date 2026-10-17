@@ -1,0 +1,39 @@
+#!/bin/bash
+# Re-derive the sandboxed makechrootpkg, for the pacman hook and post-install.
+#
+# A wrapper rather than calling the Python directly from the hook, so the two
+# callers cannot drift on where the source and destination are, and so a failure
+# says what it means for the machine rather than only what the patcher saw.
+set -euo pipefail
+
+readonly PATCHER=${MAKECHROOTPKG_PATCHER:-/usr/lib/aurcache/patch-makechrootpkg.py}
+# The same defaults the patcher uses, and overridable the same way, so the two
+# cannot disagree about which file to remove when a patch no longer applies.
+readonly SRC=${MAKECHROOTPKG_SRC:-/usr/bin/makechrootpkg}
+readonly DST=${MAKECHROOTPKG_DST:-/usr/lib/aurcache/bin/makechrootpkg}
+
+if [[ ! -x "$SRC" ]]; then
+    echo "aurcache: devtools is not installed; nothing to derive." >&2
+    exit 0
+fi
+
+if python3 "$PATCHER"; then
+    exit 0
+fi
+
+# The patcher already said which call site it could not find. Say what that
+# means for this machine: an unpatched worker does not fail, it silently
+# executes PKGBUILDs outside the chroot unconfined, so refusing to leave a stale
+# copy in place is the safer end state.
+cat >&2 <<'MSG'
+aurcache: could not confine this devtools release's makechrootpkg.
+
+  The AURCache worker will refuse to build rather than run PKGBUILDs
+  unconfined. Its copy has been removed so nothing stale is used.
+
+  This means devtools moved one of the two places makechrootpkg executes a
+  PKGBUILD outside the chroot. The patch has to be re-derived against the new
+  release; please report it with your devtools version.
+MSG
+rm -f "$DST"
+exit 1

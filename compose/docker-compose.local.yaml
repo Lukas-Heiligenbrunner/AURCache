@@ -1,0 +1,87 @@
+# =============================================================================
+# AURCache — local test stack, from images on ghcr.io
+# =============================================================================
+# The same topology as the turnkey `docker-compose.yaml` (server + one local
+# build worker, auto-enrolled through a shared volume), running the published
+# ghcr.io images.
+#
+#     docker compose -f compose/docker-compose.local.yaml up -d
+#     docker compose -f compose/docker-compose.local.yaml logs -f
+#     docker compose -f compose/docker-compose.local.yaml down -v     # -v drops the data
+#
+# Web UI / API : http://localhost:8090
+# Pacman repo  : http://localhost:8091
+#
+# Ports are shifted +10 from the defaults so this can run alongside a dev server
+# on 8080 or an e2e run on 8081 without either having to stop.
+# =============================================================================
+
+services:
+  aurcache:
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
+    ports:
+      - "8090:8080"   # Web UI + API
+      - "8091:8081"   # Pacman repository
+      - "8093:8083"   # Worker protocol (HTTPS + mutual TLS)
+    environment:
+      - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug
+      - TZ   # the schedule's timezone: the host's unless set (see docker-compose.yaml)
+      # The worker dials `aurcache` over the compose network, so the server's
+      # certificate has to be valid for that name; `localhost` keeps the UI
+      # reachable from the host.
+      - AURCACHE_TLS_SANS=aurcache,localhost
+      # How the repository is published to the outside: the address a pacman
+      # client on the host uses. The worker reaches it by a different address
+      # *and* a different port, which it sets for itself below.
+      - AURCACHE_PUBLIC_URL=http://localhost:8091
+      # Auto-approve any worker that can write to the shared `enroll` volume:
+      # no token, no approval click. Mounted read-only here.
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+    volumes:
+      - db:/app/db
+      - repo:/app/repo
+      - ca:/app/data/ca          # the internal worker CA, kept across restarts
+      - enroll:/enroll:ro
+      - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+  builder:
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+    depends_on:
+      - aurcache
+    environment:
+      - RUST_LOG=info,aurcache_worker=debug
+      # Must match a SAN in AURCACHE_TLS_SANS above.
+      - AURCACHE_URL=https://aurcache:8083
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      # Where *this* worker fetches AURCache-built dependencies. The server
+      # publishes the repository on the host as localhost:8091, but inside the
+      # compose network it is aurcache:8081 -- a different host and a different
+      # port. The server's template varies only by host, so the port has to be
+      # set here or the worker is pointed at a port nothing listens on.
+      - AURCACHE_REPO_URL=http://aurcache:8081
+      - WORKER_CONCURRENCY_DEFAULT=2
+    volumes:
+      - enroll:/enroll           # writable: the CSR it drops here is its enrollment
+      - worker_data:/var/lib/aurcache-worker   # persisted base chroot
+    # devtools builds each package in a systemd-nspawn chroot, which needs
+    # namespaces and mounts a plain container forbids.
+    privileged: true
+    tmpfs:
+      - /run
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+volumes:
+  db:
+  repo:
+  ca:
+  enroll:
+  worker_data:
+
+networks:
+  aurcache:
+    driver: bridge

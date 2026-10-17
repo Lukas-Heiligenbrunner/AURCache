@@ -1,0 +1,9 @@
+[
+  {
+    "status": "approved",
+    "signed_cert": "-----BEGIN CERTIFICATE-----\n...\n",
+    "ca_cert": "-----BEGIN CERTIFICATE-----\n...\n",
+    "repo_template": "[aurcache]\nServer = http://%AURCACHE_HOST%:8081/$arch\n",
+    "protocol": 1
+  }
+]

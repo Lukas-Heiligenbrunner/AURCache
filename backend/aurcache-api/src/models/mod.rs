@@ -1,6 +1,9 @@
-pub mod aur;
+//! Server-side view of the API shapes.
+//!
+//! The shapes themselves live in `aurcache-common` so the HTTP client and a
+//! browser frontend use the same structs rather than hand-mirrored copies.
+//! Only what is genuinely server-only — the request guard — is defined here.
+
 pub mod authenticated;
-pub mod builds;
-pub mod package;
-pub mod settings;
-pub mod stats;
+
+pub use aurcache_common::api::{aur, builds, operations, package, settings, stats};

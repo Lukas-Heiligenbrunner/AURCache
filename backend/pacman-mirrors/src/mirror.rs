@@ -36,7 +36,7 @@ pub struct Mirror {
     pub protocol: crate::Protocol,
 
     /// The last time it synced from Arch Linux server.
-    pub last_sync: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_sync: Option<jiff::Timestamp>,
 
     /// Completion PCT. Unknown what this means.
     pub completion_pct: Option<f64>,
@@ -84,7 +84,7 @@ impl TryFrom<Raw> for Mirror {
             .context("failed to parse protocol field from raw url")?;
         let last_sync = raw
             .last_sync
-            .map(|raw| raw.parse::<chrono::DateTime<chrono::Utc>>())
+            .map(|raw| raw.parse::<jiff::Timestamp>())
             .transpose()
             .context("failed to parse last_sync field from raw url")?;
         let country = Country::new(&raw.country, &raw.country_code);

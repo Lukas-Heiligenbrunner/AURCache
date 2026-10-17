@@ -1,5 +1,10 @@
 name: Build and Push Docker Images
 
+# Publishes the backend-only image as `aurcache-server`. The `aurcache`
+# name is reserved for the hybrid (server + embedded worker) compatibility
+# image, so existing single-container compose files keep working when they
+# pull `aurcache:latest`. New setups use `aurcache-server` + `aurcache-worker`.
+
 on:
   push:
     branches:
@@ -34,6 +39,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          # packaging/ holds AUR submodules; the image builds read the
+          # PKGBUILDs from them.
+          submodules: recursive
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -62,21 +70,30 @@ jobs:
           else
             echo "tag=unknown" >> $GITHUB_OUTPUT
           fi
+          # The release tag for the binaries to report, if this is one: empty
+          # otherwise, so ordinary images name their commit instead (see
+          # aurcache-common's build script).
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "git_tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "git_tag=" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Build and push Docker image (${{ matrix.tag_suffix }})
+      - name: Build and push aurcache-server (${{ matrix.tag_suffix }})
         if: steps.vars.outputs.tag != 'unknown'
         run: |
           docker buildx build \
             --platform linux/${{ matrix.arch }} \
             --build-arg LATEST_COMMIT_SHA=${{ github.event.head_commit.id }} \
+            --build-arg AURCACHE_GIT_TAG=${{ steps.vars.outputs.git_tag }} \
             --build-arg TARGET_ARCH=linux/${{ matrix.arch }} \
-            -f ./docker/Dockerfile \
-            -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
+            -f ./docker/server.Dockerfile \
+            -t ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}-server:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
             --push .
 
-      - name: Also tag and push latest${{ matrix.tag_suffix }} (for tags only)
+      - name: Also tag and push aurcache-server:latest${{ matrix.tag_suffix }} (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           docker buildx imagetools create \
-            ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
-            --tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}:latest${{ matrix.tag_suffix }}
+            ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}-server:${{ steps.vars.outputs.tag }}${{ matrix.tag_suffix }} \
+            --tag ghcr.io/${{ steps.repo_name_lc.outputs.lowercase }}-server:latest${{ matrix.tag_suffix }}
