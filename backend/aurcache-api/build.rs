@@ -53,6 +53,21 @@ fn main() {
     for path in ["src", "Cargo.toml", "Cargo.lock", "index.html"] {
         println!("cargo:rerun-if-changed={}", frontend.join(path).display());
     }
+    // The nested wasm build imports these local crates. Cargo does not track
+    // their sources as inputs to this build script automatically.
+    for dependency in ["aurcache-client", "aurcache-common"] {
+        let dependency = manifest.join("..").join(dependency);
+        for path in ["src", "Cargo.toml", "build.rs"] {
+            let path = dependency.join(path);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("../Cargo.toml").display()
+    );
     let logo = manifest.join("../../assets/icons/icon.svg");
     println!("cargo:rerun-if-changed={}", logo.display());
 

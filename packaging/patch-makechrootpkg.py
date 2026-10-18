@@ -24,8 +24,8 @@ allowing writes only to that build's own directories. The chroot build itself is
 untouched: Landlock refuses `mount(2)` outright, so nothing confined this way
 could run `arch-nspawn`.
 
-Writes a shadowed copy to /usr/local/bin, which precedes /usr/bin in both PATH
-and sudo's `secure_path`; the packaged script is left alone.
+Writes AURCache's private copy to /usr/lib/aurcache/bin/makechrootpkg. The
+worker invokes it by absolute path; the packaged script is left alone.
 
 Every patch MUST apply exactly once. If devtools moves a call site this fails
 the image build rather than silently shipping a worker that executes PKGBUILDs

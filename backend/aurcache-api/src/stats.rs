@@ -510,10 +510,10 @@ async fn out_of_date_slice(db: &DatabaseConnection) -> anyhow::Result<OutOfDateS
     // human", `update.rs`). A per-package override is never consulted by
     // either job, so resolving it here would disagree with what the server
     // actually does.
-    let (build_on_new_version, auto_update_schedule) = tokio::join!(
+    let (build_on_new_version, auto_update_schedule) = tokio::try_join!(
         settings::get(db, settings::key::BUILD_ON_NEW_VERSION, None),
         settings::get(db, settings::key::AUTO_UPDATE_SCHEDULE, None),
-    );
+    )?;
     // Whether the cron string itself parses is not re-checked here: an
     // invalid one already surfaces as a `ScheduleInvalid` warning, which the
     // Recent problems card shows.

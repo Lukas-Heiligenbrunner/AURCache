@@ -66,7 +66,7 @@ pub async fn get<T: ParseSetting>(
     db: &DatabaseConnection,
     key: Key<T>,
     pkg_id: Option<i32>,
-) -> SettingsEntry<T> {
+) -> Result<SettingsEntry<T>, sea_orm::DbErr> {
     let setting = key.setting.meta();
 
     let parse_or_default = |val: &str, context: &str| -> T {
@@ -84,37 +84,37 @@ pub async fn get<T: ParseSetting>(
     //    can override; anything else has one value for the whole server.
     if let Some(pid) = pkg_id
         && setting.scope == Scope::Package
-        && let Some(v) = stored(db, setting.key, Some(pid)).await
+        && let Some(v) = stored(db, setting.key, Some(pid)).await?
     {
-        return SettingsEntry {
+        return Ok(SettingsEntry {
             value: parse_or_default(&v, &format!("pkg setting {} pkg={pid}", setting.key)),
             source: SettingSource::Package,
-        };
+        });
     }
 
     // 2. The environment: the deployment's override of the server-wide value.
     if let Some(env_name) = setting.env_name
         && let Ok(env_value) = std::env::var(env_name)
     {
-        return SettingsEntry {
+        return Ok(SettingsEntry {
             value: parse_or_default(&env_value, &format!("ENV {env_name}")),
             source: SettingSource::Env,
-        };
+        });
     }
 
     // 3. The value set for the server.
-    if let Some(v) = stored(db, setting.key, None).await {
-        return SettingsEntry {
+    if let Some(v) = stored(db, setting.key, None).await? {
+        return Ok(SettingsEntry {
             value: parse_or_default(&v, &format!("global setting {}", setting.key)),
             source: SettingSource::Global,
-        };
+        });
     }
 
     // 4. The built-in default.
-    SettingsEntry {
+    Ok(SettingsEntry {
         value: parse_default(&setting),
         source: SettingSource::Default,
-    }
+    })
 }
 
 /// One setting's value as written, whatever its type: for showing and editing
@@ -123,25 +123,22 @@ pub async fn raw(
     db: &DatabaseConnection,
     setting: Setting,
     pkg_id: Option<i32>,
-) -> SettingsEntry<String> {
+) -> Result<SettingsEntry<String>, sea_orm::DbErr> {
     get(db, Key::of(setting), pkg_id).await
 }
 
-/// The value stored for `key` at `pkg_id`, when there is one.
-///
-/// No row is the common case, not an error; a failed query is reported and
-/// read as no row, so resolution carries on to the next source.
-async fn stored(db: &DatabaseConnection, key: &str, pkg_id: Option<i32>) -> Option<String> {
-    settings::Entity::find()
+/// A missing row permits fallback; a failed read must reach the caller.
+async fn stored(
+    db: &DatabaseConnection,
+    key: &str,
+    pkg_id: Option<i32>,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    Ok(settings::Entity::find()
         .filter(settings::Column::Key.eq(key))
         .filter(settings::Column::PkgId.eq(settings::scope(pkg_id)))
         .one(db)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to read setting {key} for {pkg_id:?}: {e}. Falling back.");
-            None
-        })
-        .and_then(|row| row.value)
+        .await?
+        .and_then(|row| row.value))
 }
 
 /// Parse a setting's built-in default. The defaults are compile-time constants
@@ -156,7 +153,10 @@ fn parse_default<T: ParseSetting>(setting: &SettingsMeta) -> T {
 }
 
 /// Every setting for `pkg_id`, resolved.
-pub async fn all(db: &DatabaseConnection, pkg_id: Option<i32>) -> ApplicationSettings {
+pub async fn all(
+    db: &DatabaseConnection,
+    pkg_id: Option<i32>,
+) -> Result<ApplicationSettings, sea_orm::DbErr> {
     // Independent reads over one pooled connection: serial awaits would pay
     // up to sixteen point queries (package + global each) in turn.
     let (
@@ -168,7 +168,7 @@ pub async fn all(db: &DatabaseConnection, pkg_id: Option<i32>) -> ApplicationSet
         build_on_new_version,
         persistent_builddir,
         parse_network,
-    ) = tokio::join!(
+    ) = tokio::try_join!(
         get(db, key::VERSION_CHECK_INTERVAL, pkg_id),
         get(db, key::AUTO_UPDATE_SCHEDULE, pkg_id),
         get(db, key::JOB_TIMEOUT, pkg_id),
@@ -177,13 +177,13 @@ pub async fn all(db: &DatabaseConnection, pkg_id: Option<i32>) -> ApplicationSet
         get(db, key::BUILD_ON_NEW_VERSION, pkg_id),
         get(db, key::PERSISTENT_BUILDDIR, pkg_id),
         get(db, key::PARSE_NETWORK, pkg_id),
-    );
+    )?;
     // Seconds on the wire, as they always were; written as durations.
     let seconds = |entry: SettingsEntry<Seconds>| SettingsEntry {
         value: u32::try_from(entry.value.0).unwrap_or(u32::MAX),
         source: entry.source,
     };
-    ApplicationSettings {
+    Ok(ApplicationSettings {
         version_check_interval: seconds(version_check_interval),
         auto_update_schedule,
         job_timeout: seconds(job_timeout),
@@ -195,7 +195,7 @@ pub async fn all(db: &DatabaseConnection, pkg_id: Option<i32>) -> ApplicationSet
         build_on_new_version,
         persistent_builddir,
         parse_network,
-    }
+    })
 }
 
 /// A value to store for a setting, or `None` to remove the one stored.
@@ -277,6 +277,19 @@ mod tests {
         db
     }
 
+    #[tokio::test]
+    async fn unavailable_storage_is_not_a_default_setting() {
+        let db = db().await;
+        db.clone().close().await.unwrap();
+        assert!(get(&db, key::MAX_ARTIFACT_SIZE, Some(1)).await.is_err());
+        assert!(
+            super::raw(&db, Setting::MaxArtifactSize, None)
+                .await
+                .is_err()
+        );
+        assert!(super::all(&db, None).await.is_err());
+    }
+
     /// A package value for a setting packages cannot override is not read,
     /// so the answer is the one the server actually uses.
     #[tokio::test]
@@ -292,7 +305,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let entry = get(&db, key::JOB_TIMEOUT, Some(1)).await;
+        let entry = get(&db, key::JOB_TIMEOUT, Some(1)).await.unwrap();
         assert_eq!(entry.source, SettingSource::Default);
     }
 
@@ -310,7 +323,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let entry = get(&db, key::MAX_ARTIFACT_SIZE, Some(1)).await;
+        let entry = get(&db, key::MAX_ARTIFACT_SIZE, Some(1)).await.unwrap();
         assert_eq!(entry.source, SettingSource::Package);
     }
 }

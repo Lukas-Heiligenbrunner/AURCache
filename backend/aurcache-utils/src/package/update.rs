@@ -15,8 +15,8 @@ use aurcache_db::{dependencies, package_vcs_sources, packages};
 use aurcache_deps::PkgDeps;
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
@@ -168,9 +168,8 @@ pub async fn package_update(
 ///
 /// A patch edit can change `depends`/`makedepends` without necessarily
 /// bumping `pkgver`/`pkgrel`, so the dependency graph needs to be kept in
-/// sync independently of the regular version-triggered update flow. This is
-/// intentionally lighter-weight than [`package_update`]: it does
-/// not enqueue or promote any builds.
+/// sync independently of the regular version-triggered update flow. Existing
+/// queued builds are reconciled with the new edges; no new parent builds are created.
 pub async fn package_resync_dependencies(
     services: &Services,
     pkg_model: &packages::Model,
@@ -184,7 +183,7 @@ pub async fn package_resync_dependencies(
 }
 
 /// Recompute and persist a package's dependency edges from its current source,
-/// adding missing dependencies but removing nothing.
+/// adding missing dependencies, removing stale edges and reconciling queued builds.
 pub(crate) async fn resync_graph(
     services: &Services,
     pkg_model: &packages::Model,
@@ -250,57 +249,43 @@ async fn package_update_inner(
     // With the update, it's possible some dependencies are no longer needed.
     collect_dropped(services, pkg_model.id, &former).await?;
 
-    // Only a *successful* build makes a version "already built". This used to
-    // ask for the latest build of any outcome, which meant a failed attempt at
-    // the new version blocked every retry of it: upstream moves to 1.4.1-1, the
-    // build fails, the package stays flagged out of date, and pressing Update
-    // answers "already up to date (version 1.4.1-1)" about a version that is
-    // nowhere in the repository. Nothing could shift it but a forced build.
-    let built_version = aurcache_db::helpers::builds::latest_successful_version_any_platform(
-        &services.db,
-        pkg_model.id,
-    )
-    .await?;
-
-    // Where the package's `git+` sources are now: what the up-to-date check
-    // below compares with the last build, and what the queued builds are
-    // recorded as made from. One `ls-remote` per source, and nothing at all
-    // for a package that has none.
     let queued_commits = resolve_vcs_commits(&sourceinfo).await;
-
+    let mut requested = pkg_model.clone();
     if !force {
-        // A VCS package's published `pkgver` says when its PKGBUILD was last
-        // touched, not what upstream is at, so the version comparison below
-        // cannot answer for one: it compares `1:r11002.cdabad3d0-1` from the
-        // AUR against `1:r14632.02cac3259-1` that `pkgver()` produced, which
-        // never match, and every unforced update rebuilt. The sources are what
-        // it should be asking about.
-        match vcs_sources_moved(&services.db, pkg_model.id, &queued_commits).await {
-            Ok(SourcesMoved::Unmoved) => bail!(
-                "Latest build is already up to date (no tracked source has moved; \
-                 use --force to rebuild anyway)"
-            ),
-            Ok(SourcesMoved::Moved) => {}
-            // Not a VCS package, or nothing recorded to compare against: the
-            // version is the only question there is.
-            Ok(SourcesMoved::Unknown) => {
-                if built_version.as_deref() == Some(upstream_version.as_str()) {
-                    bail!("Latest build is already up to date (version {upstream_version})");
+        let mut needed = Vec::new();
+        for &platform in pkg_model.platforms.as_slice() {
+            let moved =
+                vcs_sources_moved(&services.db, pkg_model.id, platform, &queued_commits).await?;
+            let current = match moved {
+                SourcesMoved::Unmoved => true,
+                SourcesMoved::Moved => false,
+                SourcesMoved::Unknown => {
+                    aurcache_db::helpers::builds::latest_successful_version(
+                        &services.db,
+                        pkg_model.id,
+                        platform,
+                    )
+                    .await?
+                    .as_deref()
+                        == Some(upstream_version.as_str())
                 }
+            };
+            if !current {
+                needed.push(platform);
             }
-            // A remote we could not reach is not evidence of anything. Falling
-            // through to the build is the safe direction.
-            Err(e) => services.activity.emit(Event::VcsSyncFailed {
-                pkg: pkg_model.name.as_str().into(),
-                error: format!("{e:#}, building anyway"),
-            }),
         }
+        if needed.is_empty() {
+            bail!(
+                "Latest build is already up to date on every configured platform (version {upstream_version})"
+            );
+        }
+        requested.platforms = aurcache_db::lists::Platforms::new(needed);
     }
 
     let platform_results = enqueue_platform_builds(
         services,
         BuildRequest {
-            pkg_model: &pkg_model,
+            pkg_model: &requested,
             version: &upstream_version,
             graph: &graph,
             trigger,
@@ -369,28 +354,27 @@ struct DependencyGraph {
 /// Resolve dependency constraints, ensure all dependees exist in the DB,
 /// and sync the dependency rows.
 ///
-/// Does not care about builds at this point.
+/// Reconcile pending builds with the new edges in the same transaction.
 async fn sync_dependency_graph(
     services: &Services,
     pkg_model: &packages::Model,
     deps: &PkgDeps,
 ) -> anyhow::Result<DependencyGraph> {
-    let dep_constraints_by_pkgbase = resolve_dependency_edges(services, pkg_model, deps).await?;
-
-    ensure_missing_dependency_packages(services, pkg_model, &dep_constraints_by_pkgbase).await?;
-
-    let dep_packages = fetch_dep_packages_map(&services.db, &dep_constraints_by_pkgbase).await?;
-
+    let (dep_constraints_by_pkgbase, dep_packages) =
+        prepare_graph(services, pkg_model, deps).await?;
+    let txn = aurcache_db::helpers::txn::begin_write(&services.db).await?;
     sync_dependency_rows(
-        &services.db,
+        &txn,
         pkg_model.id,
         &dep_constraints_by_pkgbase,
         &dep_packages,
     )
     .await?;
+    let unblocked = crate::worker_complete::resync_pending_builds(&txn, pkg_model.id).await?;
+    txn.commit().await?;
+    announce_unblocked(services, &unblocked).await;
 
-    // A dependency row can vanish between `ensure_missing_dependency_packages`
-    // and this re-read (a concurrent delete); skip it rather than panic.
+    // The prepared map contains every resolved dependency.
     let deps_map = dep_constraints_by_pkgbase
         .into_iter()
         .filter_map(|(pkgbase, constraint)| {
@@ -407,6 +391,97 @@ async fn sync_dependency_graph(
         .collect();
 
     Ok(DependencyGraph { deps: deps_map })
+}
+
+type PreparedGraph = (
+    HashMap<String, Vec<crate::pkg::Constraint>>,
+    HashMap<String, packages::Model>,
+);
+
+async fn prepare_graph(
+    services: &Services,
+    package: &packages::Model,
+    deps: &PkgDeps,
+) -> anyhow::Result<PreparedGraph> {
+    let edges = resolve_dependency_edges(services, package, deps).await?;
+    ensure_missing_dependency_packages(services, package, &edges).await?;
+    let packages = fetch_dep_packages_map(&services.db, &edges).await?;
+    if packages.len() != edges.len() {
+        bail!("a dependency disappeared during resolution; retry the update");
+    }
+    Ok((edges, packages))
+}
+
+async fn announce_unblocked(services: &Services, ids: &[i32]) {
+    match aurcache_db::helpers::builds::build_refs(&services.db, ids).await {
+        Ok(builds) => {
+            for build in builds {
+                services
+                    .activity
+                    .emit(Event::BuildUnblocked { build, by: None });
+            }
+        }
+        Err(error) => warn!("could not describe unblocked builds: {error}"),
+    }
+}
+
+/// Resolve an edit before committing its configuration, edges and queue state.
+/// Source fetching and dependency insertion happen before the write transaction.
+/// Orphan cleanup is best effort after commit; it must not report a saved edit as failed.
+pub async fn edit_package(
+    services: &Services,
+    original: &packages::Model,
+    proposed: &packages::Model,
+) -> anyhow::Result<()> {
+    let graph_changed =
+        original.patch != proposed.patch || original.platforms != proposed.platforms;
+    let former = direct_dependees(&services.db, original.id).await?;
+    let graph = if graph_changed {
+        let sourceinfo = services
+            .store
+            .sourceinfo(&proposed.source_data, proposed.patch.as_deref())
+            .await?;
+        let deps = aurcache_deps::deps_from_srcinfo(
+            &sourceinfo,
+            &crate::pkg::architectures(&proposed.platforms),
+        );
+        Some(prepare_graph(services, proposed, &deps).await?)
+    } else {
+        None
+    };
+    let txn = aurcache_db::helpers::txn::begin_write(&services.db).await?;
+    let current = Packages::find_by_id(original.id)
+        .lock_exclusive()
+        .one(&txn)
+        .await?
+        .ok_or_else(|| anyhow!("package was removed during the edit"))?;
+    if current.patch != original.patch
+        || current.platforms != original.platforms
+        || current.build_flags != original.build_flags
+    {
+        bail!("package configuration changed during the edit; reload and retry");
+    }
+    packages::ActiveModel {
+        id: Set(original.id),
+        patch: Set(proposed.patch.clone()),
+        platforms: Set(proposed.platforms.clone()),
+        build_flags: Set(proposed.build_flags.clone()),
+        ..Default::default()
+    }
+    .update(&txn)
+    .await?;
+    let mut unblocked = Vec::new();
+    if let Some((edges, packages)) = graph {
+        sync_dependency_rows(&txn, original.id, &edges, &packages).await?;
+        unblocked = crate::worker_complete::resync_pending_builds(&txn, original.id).await?;
+    }
+    aurcache_db::helpers::builds::refresh_package_status(&txn, original.id).await?;
+    txn.commit().await?;
+    announce_unblocked(services, &unblocked).await;
+    if graph_changed && let Err(error) = collect_dropped(services, original.id, &former).await {
+        warn!("package edit saved, but orphan cleanup failed: {error:#}");
+    }
+    Ok(())
 }
 
 /// The dependency edges `pkg_model` should have, keyed by dependee pkgbase.
@@ -525,20 +600,19 @@ async fn fetch_dep_packages_map(
 }
 
 /// Insert, update, or remove dependency rows to match the current constraint set.
-async fn sync_dependency_rows(
-    db: &DatabaseConnection,
+async fn sync_dependency_rows<C: ConnectionTrait>(
+    db: &C,
     dependent_id: i32,
     dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::pkg::Constraint>>,
     dep_packages: &HashMap<String, packages::Model>,
 ) -> anyhow::Result<()> {
-    let txn = db.begin().await?;
     let desired_dependee_ids: HashSet<i32> = dep_packages.values().map(|pkg| pkg.id).collect();
 
     // Loaded once and shared by both passes below: the rows the upsert pass
     // needs are already here, so re-querying each edge is pure overhead.
     let existing: HashMap<i32, dependencies::Model> = Dependencies::find()
         .filter(dependencies::Column::DependentId.eq(dependent_id))
-        .all(&txn)
+        .all(db)
         .await?
         .into_iter()
         .map(|row| (row.dependee_id, row))
@@ -553,7 +627,7 @@ async fn sync_dependency_rows(
         Dependencies::delete_many()
             .filter(dependencies::Column::DependentId.eq(dependent_id))
             .filter(dependencies::Column::DependeeId.is_in(stale))
-            .exec(&txn)
+            .exec(db)
             .await?;
     }
 
@@ -566,7 +640,7 @@ async fn sync_dependency_rows(
         if let Some(edge) = existing.get(&dep_pkg.id) {
             let mut active: dependencies::ActiveModel = edge.clone().into();
             active.version_constraint = Set(serialized.clone());
-            active.save(&txn).await?;
+            active.save(db).await?;
         } else {
             dependencies::ActiveModel {
                 dependent_id: Set(dependent_id),
@@ -574,12 +648,11 @@ async fn sync_dependency_rows(
                 version_constraint: Set(serialized),
                 ..Default::default()
             }
-            .save(&txn)
+            .save(db)
             .await?;
         }
     }
 
-    txn.commit().await?;
     Ok(())
 }
 
@@ -914,7 +987,6 @@ mod tests {
         depends: &[&str],
     ) -> PathBuf {
         let repo_path = aur_root.join(format!("{pkgbase}.git"));
-        let repo = Repository::init(&repo_path).unwrap();
 
         let srcinfo = make_srcinfo(pkgbase, version, depends);
         let depends_arr = depends
@@ -926,19 +998,10 @@ mod tests {
             "pkgname={pkgbase}\npkgver={version}\npkgrel=1\narch=('x86_64')\ndepends=({depends_arr})\nsource=()\nsha256sums=()\npackage() {{\n  :\n}}\n"
         );
 
-        fs::write(repo_path.join("PKGBUILD"), pkgbuild).unwrap();
-        fs::write(repo_path.join(".SRCINFO"), srcinfo).unwrap();
-
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("PKGBUILD")).unwrap();
-        index.add_path(Path::new(".SRCINFO")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = Signature::now("Test", "test@example.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-
+        crate::test_git::create_repo(
+            &repo_path,
+            &[("PKGBUILD", &pkgbuild), (".SRCINFO", &srcinfo)],
+        );
         repo_path
     }
 
@@ -2582,5 +2645,202 @@ mod tests {
             build_count, 0,
             "build records for deleted package should be removed"
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_version_queues_only_platforms_without_a_success() {
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "multiarch", "1.0.0", &[]);
+        let pkg = built_package(&db, "multiarch", true).await;
+        builds::Entity::update_many()
+            .col_expr(
+                builds::Column::Version,
+                sea_orm::sea_query::Expr::value("1.0.0-1"),
+            )
+            .exec(&db)
+            .await
+            .unwrap();
+        let mut model = pkg.into_active_model();
+        model.platforms = Set("x86_64;aarch64".parse().unwrap());
+        let pkg = model.update(&db).await.unwrap();
+        let TestStore { store, _checkouts } = test_store(aur_root.path());
+        let services = Services::new(
+            db.clone(),
+            Arc::new(store),
+            Arc::new(client),
+            test_repo(),
+            ActivityLog::discarding(),
+        );
+        let results = package_update(&services, pkg, false, BuildTrigger::User)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let queued = builds::Entity::find_by_id(results[0].build_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.platform, Platform::Aarch64);
+        assert_eq!(queued.status, BuildState::Enqueued);
+    }
+
+    #[tokio::test]
+    async fn resync_reconciles_existing_builds_in_both_directions() {
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_pkgbuild(&repo, "initial", "1.0.0", &["mydep"]);
+        let TwoProviders { parent, .. } = two_providers_of_one_name(&db, dir.path()).await;
+        let pending = builds::ActiveModel {
+            pkg_id: Set(parent.id),
+            status: Set(BuildState::Enqueued),
+            platform: Set(Platform::X86_64),
+            version: Set("1.0.0-1".into()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let checkout = tempdir().unwrap();
+        let services = Services::new(
+            db.clone(),
+            Arc::new(SnapshotStore::with_checkout_root(
+                checkout.path().to_path_buf(),
+            )),
+            Arc::new(client),
+            test_repo(),
+            ActivityLog::discarding(),
+        );
+        super::package_resync_dependencies(&services, &parent)
+            .await
+            .unwrap();
+        assert_eq!(
+            builds::Entity::find_by_id(pending.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::WaitingForDeps
+        );
+        commit_pkgbuild(&repo, "remove dependency", "1.0.0", &[]);
+        services.store.refresh(&parent.source_data).await.unwrap();
+        super::package_resync_dependencies(&services, &parent)
+            .await
+            .unwrap();
+        assert_eq!(
+            builds::Entity::find_by_id(pending.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::Enqueued
+        );
+        assert_eq!(
+            Packages::find_by_id(parent.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            BuildState::Enqueued
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_edit_keeps_configuration_and_dependency_edges() {
+        use sea_orm::ConnectionTrait;
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let dir = tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        commit_pkgbuild(&repo, "initial", "1.0.0", &["mydep"]);
+        let TwoProviders {
+            parent, by_name, ..
+        } = two_providers_of_one_name(&db, dir.path()).await;
+        dependencies::ActiveModel {
+            dependent_id: Set(parent.id),
+            dependee_id: Set(by_name),
+            version_constraint: Set(String::new()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let checkout = tempdir().unwrap();
+        let services = Services::new(
+            db.clone(),
+            Arc::new(SnapshotStore::with_checkout_root(
+                checkout.path().to_path_buf(),
+            )),
+            Arc::new(client),
+            test_repo(),
+            ActivityLog::discarding(),
+        );
+        let mut proposed = parent.clone();
+        proposed.platforms = "x86_64;aarch64".parse().unwrap();
+        proposed.patch = Some("invalid patch".into());
+        assert!(
+            super::edit_package(&services, &parent, &proposed)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Packages::find_by_id(parent.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            parent
+        );
+
+        // Fail after the configuration write, while removing the old edges.
+        proposed.patch = None;
+        commit_pkgbuild(&repo, "remove dependency", "1.0.0", &[]);
+        services.store.refresh(&parent.source_data).await.unwrap();
+        db.execute_unprepared("CREATE TRIGGER fail_edge_delete BEFORE DELETE ON dependencies BEGIN SELECT RAISE(ABORT, 'injected edge failure'); END").await.unwrap();
+        assert!(
+            super::edit_package(&services, &parent, &proposed)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Packages::find_by_id(parent.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            parent
+        );
+        assert_eq!(Dependencies::find().count(&db).await.unwrap(), 1);
+        db.execute_unprepared("DROP TRIGGER fail_edge_delete")
+            .await
+            .unwrap();
+        super::edit_package(&services, &parent, &proposed)
+            .await
+            .unwrap();
+        assert_eq!(
+            Packages::find_by_id(parent.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .platforms,
+            proposed.platforms
+        );
+        assert_eq!(Dependencies::find().count(&db).await.unwrap(), 0);
     }
 }

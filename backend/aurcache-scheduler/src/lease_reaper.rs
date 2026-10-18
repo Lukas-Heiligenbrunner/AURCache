@@ -42,6 +42,13 @@ pub fn start_lease_reaper(db: DatabaseConnection, activity: ActivityLog) -> Join
 
             // `MAX_BUILD_DURATION` reuses the configurable JobTimeout setting.
             let job_timeout = settings::get(&db, settings::key::JOB_TIMEOUT, None).await;
+            let job_timeout = match job_timeout {
+                Ok(timeout) => timeout,
+                Err(error) => {
+                    tracing::warn!("could not read job timeout: {error}");
+                    continue;
+                }
+            };
             let max_build_age = i64::try_from(job_timeout.value.0)
                 .unwrap_or(i64::MAX)
                 .saturating_add(grace);

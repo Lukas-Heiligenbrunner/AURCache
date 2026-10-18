@@ -26,9 +26,7 @@ use aurcache_db::{dependencies, files, packages};
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::replace::{self, ReplaceError};
-use aurcache_utils::package::update::{
-    Dispatch, package_resync_dependencies, package_update, queued,
-};
+use aurcache_utils::package::update::{Dispatch, edit_package, package_update, queued};
 use aurcache_utils::patch::SourcePatch;
 use aurcache_utils::pkg::satisfies_constraint;
 use aurcache_utils::services::Services;
@@ -40,11 +38,10 @@ use sea_orm::FromQueryResult;
 
 use rocket::serde::json::Json;
 use rocket::{State, delete, get, patch, post, put};
-use sea_orm::ActiveValue::{NotSet, Set};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, JoinType, Order, Select};
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
 };
+use sea_orm::{DatabaseConnection, JoinType, Order, Select};
 use std::str::FromStr;
 use std::sync::Arc;
 use utoipa::OpenApi;
@@ -350,50 +347,27 @@ pub async fn package_update_entity_endpoint(
     if let Some(Some(patch)) = &input.patch {
         SourcePatch::parse(patch).map_err(|e| err(Status::BadRequest, e))?;
     }
-    let platforms_changed = requested_platforms
-        .as_ref()
-        .is_some_and(|requested| *requested != pkg.platforms);
-
-    // Start building the update operation
-    let update_pkg = packages::ActiveModel {
-        id: Set(pkg.id),
-        build_flags: input
-            .build_flags
-            .map_or(NotSet, |flags| Set(BuildFlags::new(flags))),
-        platforms: requested_platforms.map_or(NotSet, Set),
-        patch: input.patch.map_or(NotSet, Set),
-        // Everything else is `NotSet`, left untouched, so a column added
-        // later cannot be cleared by a patch that never mentions it. The
-        // mirrored AUR metadata in particular belongs to the version-check
-        // scheduler.
-        ..Default::default()
-    };
-
-    // Execute the update query
-    let updated = update_pkg
-        .update(db)
+    let mut proposed = pkg.clone();
+    if let Some(flags) = input.build_flags {
+        proposed.build_flags = BuildFlags::new(flags);
+    }
+    if let Some(platforms) = requested_platforms {
+        proposed.platforms = platforms;
+    }
+    if let Some(patch) = input.patch {
+        proposed.patch = patch;
+    }
+    edit_package(services, &pkg, &proposed)
         .await
         .map_err(|e| err(Status::InternalServerError, e))?;
     if !fields.is_empty() {
         services.activity.emit_by(
             Event::PackageChanged {
-                pkg: updated.name.as_str().into(),
+                pkg: pkg.name.as_str().into(),
                 fields,
             },
             a.username,
         );
-    }
-
-    // A patch being set or cleared here (e.g. via the "reset patch" action)
-    // can change `depends`/`makedepends` without bumping the package's
-    // version, and so can a change to the platform set, so keep the dependency
-    // graph in sync immediately. `package_resync_dependencies` recomputes the
-    // whole graph from source, which both adds newly-required dependencies and
-    // drops ones no longer needed.
-    if patch_changed || platforms_changed {
-        package_resync_dependencies(services, &updated)
-            .await
-            .map_err(|e| err(Status::InternalServerError, e))?;
     }
 
     Ok(())
@@ -503,16 +477,9 @@ pub async fn package_source_file_update(
         .stored()
         .map_err(|e| err(Status::InternalServerError, e))?;
 
-    // No need to validate the patch applies cleanly here: it was just
-    // diffed fresh against the current pristine content above, so applying
-    // it back is guaranteed to succeed.
-    let update_pkg = packages::ActiveModel {
-        id: Set(pkg.id),
-        patch: Set(new_patch.clone()),
-        ..Default::default()
-    };
-    update_pkg
-        .update(db)
+    let mut proposed = pkg.clone();
+    proposed.patch = new_patch;
+    edit_package(services, &pkg, &proposed)
         .await
         .map_err(|e| err(Status::InternalServerError, e))?;
     services.activity.emit_by(
@@ -522,20 +489,6 @@ pub async fn package_source_file_update(
         },
         a.username,
     );
-
-    // A patch can change `depends`/`makedepends` without bumping the
-    // package's version, so resync the dependency graph immediately rather
-    // than waiting for the next explicit "update" trigger.
-    let mut resynced_pkg = pkg;
-    resynced_pkg.patch = new_patch;
-    package_resync_dependencies(services, &resynced_pkg)
-        .await
-        .map_err(|e| {
-            err(
-                Status::InternalServerError,
-                format!("Patch saved, but failed to resync dependencies: {e}"),
-            )
-        })?;
 
     Ok(())
 }

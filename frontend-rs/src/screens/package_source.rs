@@ -54,12 +54,11 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
             .map_err(|e| e.to_string())
     }));
 
-    let mut selected = use_signal(|| Option::<String>::None);
-    let mut loaded = use_signal(|| Option::<SourceFileContent>::None);
-    // Edited text, kept separate from what was loaded so "dirty" and "revert"
-    // are both expressible.
-    let mut draft = use_signal(String::new);
-    let mut error = use_signal(|| Option::<String>::None);
+    let editor = crate::source_editor::use_file_editor();
+    let selected = editor.selected;
+    let loaded = editor.loaded;
+    let mut draft = editor.draft;
+    let mut error = editor.error;
     let mut show_patch = use_signal(|| false);
     let mut patch_copied = use_signal(|| false);
     let mut patch_copy_error = use_signal(|| Option::<String>::None);
@@ -71,28 +70,14 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
 
     let open_file = move |pkgbase: String, path: String| async move {
         reset_open.set(false);
-        // A click that silently does nothing reads as broken: the client
-        // only fails to construct when the API URL is misconfigured, and
-        // that is exactly what the status line is for.
-        let client = match crate::api::client() {
-            Ok(client) => client,
-            Err(e) => {
-                error.set(Some(e));
-                return;
-            }
-        };
-        match client.get_source_file(&pkgbase, &path).await {
-            Ok(content) => {
-                // A patch that no longer applies falls back to pristine and
-                // says so, rather than showing nothing.
-                draft.set(shown_content(&content).to_owned());
-                loaded.set(Some(content));
-                selected.set(Some(path));
-                error.set(None);
-                show_patch.set(false);
-            }
-            Err(e) => error.set(Some(e.to_string())),
-        }
+        show_patch.set(false);
+        editor
+            .open(
+                crate::source_editor::SourceLocation::Package(pkgbase),
+                path,
+                None,
+            )
+            .await;
     };
 
     // Open the file named in the URL, if any, and reset when the page
@@ -103,9 +88,10 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
     use_effect(use_reactive(
         (&pkgbase, &initial_path),
         move |(pkgbase, initial_path)| {
-            selected.set(None);
-            loaded.set(None);
-            draft.set(String::new());
+            editor.reset();
+            pending_file.set(None);
+            show_patch.set(false);
+            reset_open.set(false);
             if let Some(path) = initial_path {
                 spawn(async move { open_file(pkgbase, path).await });
             }
@@ -124,7 +110,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
         .read()
         .as_ref()
         .is_some_and(|c| c.patch_error.is_some());
-    let can_save = edited || broken;
+    let can_save = (edited || broken) && !(editor.loading)();
     // Two ways back, because there are two things an edit can be measured
     // against. The saved version is what the editor opened with: the patched
     // file, or upstream when there is no patch or it no longer applies. Upstream
@@ -195,6 +181,7 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                 }
             },
             draft,
+            loading: (editor.loading)(),
             dirty: edited,
             patched,
             patch_failed: broken,

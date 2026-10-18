@@ -30,6 +30,14 @@ pub fn start_auto_update_job(services: Services) -> JoinHandle<()> {
             // Read on every turn: it is a setting, and may have changed.
             let interval =
                 settings::get(&services.db, settings::key::AUTO_UPDATE_SCHEDULE, None).await;
+            let interval = match interval {
+                Ok(interval) => interval,
+                Err(error) => {
+                    tracing::warn!("could not read auto-update schedule: {error}");
+                    tokio::time::sleep(RECHECK).await;
+                    continue;
+                }
+            };
             let expr = interval.value.filter(|expr| !is_off(expr));
             match expr.as_deref().map(|expr| schedule(Job::AutoUpdate, expr)) {
                 // Off.

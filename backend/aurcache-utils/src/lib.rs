@@ -21,3 +21,7 @@ pub mod vcs_check;
 pub mod worker_complete;
 /// How the server polices remote workers, read once from its environment.
 pub mod worker_policy;
+
+#[cfg(test)]
+#[path = "../test_support/git.rs"]
+pub(crate) mod test_git;

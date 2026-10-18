@@ -162,7 +162,22 @@ pub async fn latest_successful_build_vcs_sources<C: ConnectionTrait>(
     db: &C,
     pkg_id: i32,
 ) -> Result<BTreeMap<String, String>, DbErr> {
-    let recorded = newest_success_query(pkg_id, builds::Column::VcsSources)
+    latest_successful_build_vcs_sources_on(db, pkg_id, None).await
+}
+
+/// The successful source baseline on one architecture, or across all for summaries.
+pub async fn latest_successful_build_vcs_sources_on<C: ConnectionTrait>(
+    db: &C,
+    pkg_id: i32,
+    platform: Option<Platform>,
+) -> Result<BTreeMap<String, String>, DbErr> {
+    let query = newest_success_query(pkg_id, builds::Column::VcsSources);
+    let query = if let Some(platform) = platform {
+        query.filter(builds::Column::Platform.eq(platform))
+    } else {
+        query
+    };
+    let recorded = query
         .into_tuple::<Option<String>>()
         .one(db)
         .await?

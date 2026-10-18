@@ -252,6 +252,7 @@ impl Session {
 async fn interactions() {
     let session = Session::start().await;
 
+    source_editor_ignores_superseded_requests(&session).await;
     filtering_narrows_the_list_and_updates_the_url(&session).await;
     a_stored_config_file_is_loaded_into_the_editor(&session).await;
     settings_preserve_edits_in_flight_and_reject_double_submission(&session).await;
@@ -1525,4 +1526,85 @@ async fn settings_preserve_edits_in_flight_and_reject_double_submission(session:
     session
         .wait_until("restoring the seeded file", |text| text.contains("Saved."))
         .await;
+}
+
+/// Resolve the second file first, then deliver both a late success and a late
+/// failure. Neither may replace the selected file or erase its unsaved draft.
+async fn source_editor_ignores_superseded_requests(session: &Session) {
+    for fail in [false, true] {
+        session.open("/package/hello").await;
+        session.wait_for("a[href^='/package/hello/source']").await;
+        assert!(
+            session
+                .eval::<bool>(
+                    r#"
+            const fetch = window.fetch.bind(window);
+            window.__sourceRequests = [];
+            window.fetch = (request, options) => {
+                const url = new URL(request.url || request, location.origin);
+                const reply = (body, status = 200) => {
+                    const response = new Response(JSON.stringify(body), {
+                        status, headers: {'Content-Type': 'application/json'}
+                    });
+                    Object.defineProperty(response, 'url', {value: url.href});
+                    return response;
+                };
+                if (url.pathname.endsWith('/source/files')) {
+                    return Promise.resolve(reply({files: ['PKGBUILD', 'other.txt'], patched: []}));
+                }
+                if (url.pathname.endsWith('/source/file')) {
+                    return new Promise(resolve => {
+                        const path = url.searchParams.get('path');
+                        window.__sourceRequests.push((fail = false) => resolve(fail
+                            ? reply('obsolete failure', 500)
+                            : reply({path, original_content: path + ' content', patched_content: null,
+                                patch_error: null, stored_patch: null})));
+                    });
+                }
+                return fetch(request, options);
+            };
+            return true;
+        "#
+                    .to_string()
+                )
+                .await
+        );
+        session.click("a[href^='/package/hello/source']").await;
+        session.wait_for("a[title='PKGBUILD']").await;
+        session.click("a[title='PKGBUILD']").await;
+        session
+            .wait_for_script(
+                "first file request",
+                "return window.__sourceRequests.length === 1;".into(),
+            )
+            .await;
+        session.click("a[title='other.txt']").await;
+        session
+            .wait_for_script(
+                "second file request",
+                "return window.__sourceRequests.length === 2;".into(),
+            )
+            .await;
+        session
+            .eval::<bool>("window.__sourceRequests[1](); return true;".into())
+            .await;
+        session
+            .wait_for_script(
+                "second file loaded",
+                "return document.querySelector('textarea')?.value === 'other.txt content';".into(),
+            )
+            .await;
+        session.type_into("textarea", "unsaved draft").await;
+        session
+            .eval::<bool>(format!("window.__sourceRequests[0]({fail}); return true;"))
+            .await;
+        // Allow the resolved promise and Dioxus render to run before inspecting.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(session.value_of("textarea").await, "unsaved draft");
+        assert!(!session.text().await.contains("obsolete failure"));
+        session.type_into("textarea", "other.txt content").await;
+        session
+            .eval::<bool>("window.__sourceRequests = []; return true;".into())
+            .await;
+    }
 }

@@ -4,26 +4,81 @@
 //! Workers poll for enqueued jobs, so promoting a dependent from
 //! `WAITING_FOR_DEPS` to `ENQUEUED` is all that is required to dispatch it.
 
-use aurcache_common::api::log::BuildRef;
+use crate::build_logger::append_build_output;
+use crate::publish::publish_with_recovery;
+use crate::repository::Repository;
+use crate::worker_policy::worker_policy;
+use aurcache_activitylog::activity_utils::ActivityLog;
+use aurcache_activitylog::events::Event;
+use aurcache_common::api::log::{BuildRef, WorkerRef};
 use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::EndReason;
+use aurcache_common::worker::{BuildOutcome, CompleteReport};
 use aurcache_db::helpers::build_enqueue::{Demotion, demote_enqueued_build, promote_waiting_build};
 use aurcache_db::helpers::builds::refresh_package_status;
 use aurcache_db::helpers::time::now_secs;
+use aurcache_db::helpers::worker_jobs;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
 use aurcache_db::{builds, dependencies};
 use pacman_mirrors::platforms::Platform;
+use sea_orm::DatabaseConnection;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, TransactionSession,
     TransactionTrait,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub enum CompletionError {
+    NotFound(i32),
+    LeaseLost { build_id: i32, worker_id: i32 },
+    Persistence(DbErr),
+}
+impl std::fmt::Display for CompletionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "build {id} not found"),
+            Self::LeaseLost {
+                build_id,
+                worker_id,
+            } => write!(
+                f,
+                "build {build_id} is no longer owned+active by worker {worker_id} (lease lost)"
+            ),
+            Self::Persistence(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+impl std::error::Error for CompletionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Persistence(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<DbErr> for CompletionError {
+    fn from(error: DbErr) -> Self {
+        Self::Persistence(error)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Completion {
+    Accepted,
+    AlreadyAccepted,
+}
 
 /// The build `build_id`, or an error naming it.
-async fn find_build<C: ConnectionTrait>(db: &C, build_id: i32) -> Result<builds::Model, DbErr> {
+async fn find_build<C: ConnectionTrait>(
+    db: &C,
+    build_id: i32,
+) -> Result<builds::Model, CompletionError> {
     Builds::find_by_id(build_id)
         .one(db)
         .await?
-        .ok_or_else(|| DbErr::Custom(format!("build {build_id} not found")))
+        .ok_or_else(|| CompletionError::NotFound(build_id))
 }
 
 /// Confirm the given worker currently holds the active lease on the build.
@@ -33,7 +88,7 @@ pub async fn assert_owned_active<C: ConnectionTrait>(
     db: &C,
     worker_id: i32,
     build_id: i32,
-) -> Result<builds::Model, DbErr> {
+) -> Result<builds::Model, CompletionError> {
     let build = find_build(db, build_id).await?;
     check_owned_active(worker_id, &build)?;
     Ok(build)
@@ -49,7 +104,7 @@ pub async fn assert_owned<C: ConnectionTrait>(
     db: &C,
     worker_id: i32,
     build_id: i32,
-) -> Result<builds::Model, DbErr> {
+) -> Result<builds::Model, CompletionError> {
     let build = find_build(db, build_id).await?;
     check_owned(worker_id, &build)?;
     Ok(build)
@@ -60,20 +115,17 @@ pub async fn assert_owned<C: ConnectionTrait>(
 /// checks, and re-querying it here would pay a second point lookup on the
 /// hottest worker endpoint for a row that cannot usefully change between the
 /// two reads (a concurrent state change fails the CAS further down anyway).
-pub fn check_owned_active(worker_id: i32, build: &builds::Model) -> Result<(), DbErr> {
+pub fn check_owned_active(worker_id: i32, build: &builds::Model) -> Result<(), CompletionError> {
     if build.status != BuildState::Active {
-        return Err(DbErr::Custom(format!("build {} is not active", build.id)));
+        return Err(lease_lost(build.id, worker_id));
     }
     check_owned(worker_id, build)
 }
 
 /// Whether `worker_id` is the worker that ran `build`, as an error when not.
-fn check_owned(worker_id: i32, build: &builds::Model) -> Result<(), DbErr> {
+fn check_owned(worker_id: i32, build: &builds::Model) -> Result<(), CompletionError> {
     if build.worker_id != Some(worker_id) {
-        return Err(DbErr::Custom(format!(
-            "build {} is not owned by worker {worker_id}",
-            build.id
-        )));
+        return Err(lease_lost(build.id, worker_id));
     }
     Ok(())
 }
@@ -141,10 +193,11 @@ pub async fn record_kept<C: ConnectionTrait>(
 /// A build the worker was building is no longer `ACTIVE`-and-owned by it (the
 /// lease was reclaimed by the reaper and possibly re-handed to another worker).
 /// The late completion must be discarded rather than clobbering the new owner.
-fn lease_lost(build_id: i32, worker_id: i32) -> DbErr {
-    DbErr::Custom(format!(
-        "build {build_id} is no longer owned+active by worker {worker_id} (lease lost); completion discarded"
-    ))
+fn lease_lost(build_id: i32, worker_id: i32) -> CompletionError {
+    CompletionError::LeaseLost {
+        build_id,
+        worker_id,
+    }
 }
 
 /// End `worker_id`'s lease on `build_id`, moving the build from `ACTIVE` to
@@ -166,7 +219,7 @@ async fn release<C: ConnectionTrait + TransactionTrait>(
     worker_id: i32,
     status: BuildState,
     ended_at: Option<i64>,
-) -> Result<(), DbErr> {
+) -> Result<(), CompletionError> {
     let build = find_build(db, build_id).await?;
 
     let txn = db.begin().await?;
@@ -203,7 +256,7 @@ pub async fn accept_for_publishing<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     build_id: i32,
     worker_id: i32,
-) -> Result<(), DbErr> {
+) -> Result<(), CompletionError> {
     release(db, build_id, worker_id, BuildState::Publishing, None).await
 }
 
@@ -213,7 +266,7 @@ pub async fn complete_failure<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     build_id: i32,
     worker_id: i32,
-) -> Result<(), DbErr> {
+) -> Result<(), CompletionError> {
     release(
         db,
         build_id,
@@ -354,6 +407,162 @@ async fn promote_dependent<C: ConnectionTrait + TransactionTrait>(
             pkgbase: pkg.name,
             number: promoted.number,
         }))
+}
+
+/// Accept a completion, including retries, publication and staging cleanup.
+pub async fn complete(
+    db: &DatabaseConnection,
+    repo: &Arc<Repository>,
+    activity: &ActivityLog,
+    worker_model: &aurcache_db::workers::Model,
+    build_id: i32,
+    report: CompleteReport,
+) -> Result<Completion, CompletionError> {
+    let build = find_build(db, build_id).await?;
+
+    // A report about a build this worker ran that has already moved on is a
+    // repeat, and is answered 200 without changing anything: the worker's
+    // earlier request got through and only its answer was lost.
+    //
+    // * A cancelled report acknowledges an abort the server carried out
+    //   (operator Stop, or the reaper abandoning the build).
+    // * A success repeats a completion that was accepted: the build is being
+    //   published, was published, or failed to publish -- which fails with no
+    //   end reason, unlike a cancel or an abandonment.
+    //
+    // A real ownership check: without it, any authenticated worker that
+    // guessed an id could remove another worker's staging directory.
+    if build.worker_id == Some(worker_model.id) {
+        let failed = build.status == BuildState::Failed;
+        // An interruption the server already abandoned the build for is the
+        // same: the build left this worker's hands either way.
+        let acknowledged_abort = matches!(
+            report.outcome,
+            BuildOutcome::Canceled | BuildOutcome::Interrupted
+        ) && failed;
+        let repeated_success = report.outcome == BuildOutcome::Succeeded
+            && (matches!(
+                build.status,
+                BuildState::Publishing | BuildState::Successful
+            ) || (failed && build.end_reason.is_none()));
+        if acknowledged_abort {
+            let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+            return Ok(Completion::AlreadyAccepted);
+        }
+        if repeated_success {
+            return Ok(Completion::AlreadyAccepted);
+        }
+    }
+
+    check_owned_active(worker_model.id, &build)?;
+
+    // What the entries below name it by. A package gone from under an active
+    // build is not something to refuse the report over.
+    let pkgbase = Packages::find_by_id(build.pkg_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|pkg| pkg.name);
+    let named = pkgbase.as_ref().map(|pkgbase| BuildRef {
+        pkgbase: pkgbase.clone(),
+        number: build.number,
+    });
+    let worker = || WorkerRef::from(worker_model.name.as_str());
+    let record_failed = |what: &str, error: String| {
+        if let Some(build) = &named {
+            activity.emit(Event::BuildRecordFailed {
+                build: build.clone(),
+                what: what.to_string(),
+                error,
+            });
+        }
+    };
+
+    // Before the branch below: an OOM-killed build never reaches the success
+    // path, and that is the build whose memory figure matters most.
+    if let Some(peak) = report.peak_memory_bytes
+        && let Err(e) = record_peak_memory(db, build_id, peak).await
+    {
+        record_failed("peak memory", e.to_string());
+    }
+    if let Some(usage) = report.disk_usage.as_ref().filter(|u| !u.is_empty())
+        && let Err(e) = record_disk_usage(db, build_id, usage).await
+    {
+        record_failed("disk usage", e.to_string());
+    }
+    if let Some(kept) = report.kept.as_ref()
+        && let Err(e) = record_kept(db, build_id, kept).await
+    {
+        record_failed("kept chroot", e.to_string());
+    }
+
+    if report.outcome == BuildOutcome::Succeeded {
+        // What the worker actually checked out replaces what the server
+        // guessed when it queued the build. Only from a success, and only when
+        // the worker reported something: one that could not resolve a source
+        // leaves the queue-time record standing -- the older commit, so the
+        // error is a redundant rebuild rather than a missed one.
+        if !report.vcs_commits.is_empty()
+            && let Err(e) = aurcache_db::helpers::builds::record_build_vcs_sources(
+                db,
+                build_id,
+                &report.vcs_commits,
+            )
+            .await
+        {
+            record_failed("built VCS sources", e.to_string());
+        }
+        accept_for_publishing(db, build_id, worker_model.id).await?;
+        if let Some(build) = named.clone() {
+            activity.emit(Event::BuildSucceeded {
+                build,
+                worker: worker(),
+            });
+        }
+        let (db, repo, activity) = (db.clone(), Arc::clone(repo), activity.clone());
+        tokio::spawn(async move {
+            publish_with_recovery(&db, &repo, &activity, build_id).await;
+        });
+        return Ok(Completion::Accepted);
+    }
+
+    if let Some(reason) = &report.reason
+        && let Some(pkgbase) = &pkgbase
+        && let Err(e) = append_build_output(
+            pkgbase,
+            build.number,
+            &format!("worker reported failure: {reason}\n"),
+        )
+        .await
+    {
+        record_failed("failure reason", e.to_string());
+    }
+
+    if report.outcome == BuildOutcome::Interrupted {
+        let abandoned = worker_jobs::abandon_build(
+            db,
+            &build,
+            EndReason::Interrupted,
+            worker_policy().max_attempts,
+        )
+        .await?
+        .ok_or_else(|| lease_lost(build_id, worker_model.id))?;
+        crate::abandoned::report(db, activity, &[abandoned]).await;
+        let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+        return Ok(Completion::Accepted);
+    }
+    // Refused like a success above when the lease was lost in the meantime.
+    complete_failure(db, build_id, worker_model.id).await?;
+    if let Some(build) = named {
+        activity.emit(Event::BuildFailed {
+            build,
+            worker: worker(),
+            reason: report.reason.clone(),
+        });
+    }
+    let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+    Ok(Completion::Accepted)
 }
 
 #[cfg(test)]
@@ -598,7 +807,22 @@ mod tests {
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
         assert!(assert_owned_active(&db, 5, 10).await.is_ok());
-        assert!(assert_owned_active(&db, 6, 10).await.is_err());
+        assert!(matches!(
+            assert_owned_active(&db, 6, 10).await,
+            Err(CompletionError::LeaseLost {
+                build_id: 10,
+                worker_id: 6
+            })
+        ));
+        assert!(matches!(
+            assert_owned_active(&db, 5, 99).await,
+            Err(CompletionError::NotFound(99))
+        ));
+        db.clone().close().await.unwrap();
+        assert!(matches!(
+            assert_owned_active(&db, 5, 10).await,
+            Err(CompletionError::Persistence(_))
+        ));
     }
 
     /// Accepting a completion releases the worker: the build is the server's to

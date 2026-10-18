@@ -17,10 +17,10 @@ use aurcache_common::api::log::{BuildRef, WorkerRef};
 use aurcache_common::api::worker::{
     ApprovalStatus, WorkerConfigUpdate, WorkerConfigView, WorkerJoinInfo, WorkerSummary,
 };
-use aurcache_common::build_state::{BuildState, EndReason};
+use aurcache_common::build_state::BuildState;
 use aurcache_common::worker::{
-    BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
-    JobStatus, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, RegisterRequest, RegisterStatus,
+    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, JobStatus,
+    MirrorlistOffer, MirrorlistPreference, PROTOCOLS, RegisterRequest, RegisterStatus,
     WorkerLogReport,
 };
 use aurcache_common::worker_config::{
@@ -32,7 +32,6 @@ use aurcache_db::prelude::{Builds, Packages};
 use aurcache_db::{builds, workers};
 use aurcache_utils::build_logger::append_build_output;
 use aurcache_utils::job_config::{JobConfig, build_job_config, mirrorlist_dir, mirrorlist_for};
-use aurcache_utils::publish::publish_with_recovery;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::settings;
 use aurcache_utils::snapshot::SnapshotStore;
@@ -581,7 +580,7 @@ async fn build_descriptor(
         // No `[repo]` section here: the worker appends one rendered from the
         // template it received at registration, using the host it actually
         // reaches this server on.
-        build_job_config(db, pkg.id).await;
+        build_job_config(db, pkg.id).await?;
 
     let arch = build.platform.as_str().to_string();
     let mirrorlist = resolve_mirrorlist(
@@ -616,7 +615,7 @@ async fn build_descriptor(
     // with the package overriding the global default.
     let persistent_builddir =
         settings::get(db, settings::key::PERSISTENT_BUILDDIR, Some(build.pkg_id))
-            .await
+            .await?
             .value;
 
     // Before `pkg.name` moves into the descriptor below.
@@ -654,7 +653,7 @@ pub async fn job_source(
     let db = db.inner();
     let build = worker_complete::assert_owned_active(db, auth.worker.id, build_id)
         .await
-        .map_err(|e| err(Status::Forbidden, e))?;
+        .map_err(completion_error)?;
     let pkg = Packages::find_by_id(build.pkg_id)
         .one(db)
         .await
@@ -700,7 +699,7 @@ pub async fn job_logs(
     let db = db.inner();
     let build = worker_complete::assert_owned_active(db, auth.worker.id, build_id)
         .await
-        .map_err(|e| err(Status::Forbidden, e))?;
+        .map_err(completion_error)?;
 
     let text = data
         .open(4.mebibytes())
@@ -752,7 +751,7 @@ pub async fn worker_log(
         Some(build_id) => {
             let build = worker_complete::assert_owned(db, auth.worker.id, build_id)
                 .await
-                .map_err(|e| err(Status::Forbidden, e))?;
+                .map_err(completion_error)?;
             let pkgbase = build_pkgbase(db, build.pkg_id).await?;
             Some(BuildRef {
                 pkgbase,
@@ -826,13 +825,15 @@ pub async fn job_artifact(
     let db = db.inner();
     let build = worker_complete::assert_owned_active(db, auth.worker.id, build_id)
         .await
-        .map_err(|e| err(Status::Forbidden, e))?;
+        .map_err(completion_error)?;
 
     // A backstop against a runaway or hostile PKGBUILD filling the server's
     // disk, not a statement about what a package should weigh -- which is why
     // it is a setting, and per package: `unreal-engine` is past 20 GiB, and
     // allowing it that should not allow everything else the same.
-    let limit = settings::get(db, settings::key::MAX_ARTIFACT_SIZE, Some(build.pkg_id)).await;
+    let limit = settings::get(db, settings::key::MAX_ARTIFACT_SIZE, Some(build.pkg_id))
+        .await
+        .map_err(|e| err(Status::InternalServerError, e))?;
     let (limit, source) = (limit.value.0, limit.source);
     let too_large = || {
         err(
@@ -912,15 +913,17 @@ pub async fn complete_job(
     // journal is on another machine, and the activity log is where an
     // operator looks. Refusing quietly is what made a stale `files` row take
     // an afternoon to find.
-    let outcome = complete_job_inner(
+    let outcome = worker_complete::complete(
         db.inner(),
         repo.inner(),
         al.inner(),
-        &auth,
+        &auth.worker,
         build_id,
         input.into_inner(),
     )
-    .await;
+    .await
+    .map(|_| ())
+    .map_err(completion_error);
     if let Err(e) = &outcome {
         tracing::warn!(
             "rejected completion of build {build_id} from worker {}: {} -- {}",
@@ -943,164 +946,14 @@ pub async fn complete_job(
     outcome
 }
 
-async fn complete_job_inner(
-    db: &DatabaseConnection,
-    repo: &Arc<Repository>,
-    activity: &ActivityLog,
-    auth: &WorkerAuth,
-    build_id: i32,
-    report: CompleteReport,
-) -> Result<(), ApiError> {
-    let build = Builds::find_by_id(build_id)
-        .one(db)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-        .ok_or_else(|| err(Status::NotFound, "build not found"))?;
-
-    // A report about a build this worker ran that has already moved on is a
-    // repeat, and is answered 200 without changing anything: the worker's
-    // earlier request got through and only its answer was lost.
-    //
-    // * A cancelled report acknowledges an abort the server carried out
-    //   (operator Stop, or the reaper abandoning the build).
-    // * A success repeats a completion that was accepted: the build is being
-    //   published, was published, or failed to publish -- which fails with no
-    //   end reason, unlike a cancel or an abandonment.
-    //
-    // A real ownership check: without it, any authenticated worker that
-    // guessed an id could remove another worker's staging directory.
-    if build.worker_id == Some(auth.worker.id) {
-        let failed = build.status == BuildState::Failed;
-        // An interruption the server already abandoned the build for is the
-        // same: the build left this worker's hands either way.
-        let acknowledged_abort = matches!(
-            report.outcome,
-            BuildOutcome::Canceled | BuildOutcome::Interrupted
-        ) && failed;
-        let repeated_success = report.outcome == BuildOutcome::Succeeded
-            && (matches!(
-                build.status,
-                BuildState::Publishing | BuildState::Successful
-            ) || (failed && build.end_reason.is_none()));
-        if acknowledged_abort {
-            let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
-            return Ok(());
-        }
-        if repeated_success {
-            return Ok(());
-        }
-    }
-
-    worker_complete::check_owned_active(auth.worker.id, &build)
-        .map_err(|e| err(Status::Forbidden, e))?;
-
-    // What the entries below name it by. A package gone from under an active
-    // build is not something to refuse the report over.
-    let pkgbase = build_pkgbase(db, build.pkg_id).await.ok();
-    let named = pkgbase.as_ref().map(|pkgbase| BuildRef {
-        pkgbase: pkgbase.clone(),
-        number: build.number,
-    });
-    let worker = || WorkerRef::from(auth.worker.name.as_str());
-    let record_failed = |what: &str, error: String| {
-        if let Some(build) = &named {
-            activity.emit(Event::BuildRecordFailed {
-                build: build.clone(),
-                what: what.to_string(),
-                error,
-            });
-        }
+fn completion_error(error: worker_complete::CompletionError) -> ApiError {
+    use worker_complete::CompletionError;
+    let status = match &error {
+        CompletionError::NotFound(_) => Status::NotFound,
+        CompletionError::LeaseLost { .. } => Status::Forbidden,
+        CompletionError::Persistence(_) => Status::InternalServerError,
     };
-
-    // Before the branch below: an OOM-killed build never reaches the success
-    // path, and that is the build whose memory figure matters most.
-    if let Some(peak) = report.peak_memory_bytes
-        && let Err(e) = worker_complete::record_peak_memory(db, build_id, peak).await
-    {
-        record_failed("peak memory", e.to_string());
-    }
-    if let Some(usage) = report.disk_usage.as_ref().filter(|u| !u.is_empty())
-        && let Err(e) = worker_complete::record_disk_usage(db, build_id, usage).await
-    {
-        record_failed("disk usage", e.to_string());
-    }
-    if let Some(kept) = report.kept.as_ref()
-        && let Err(e) = worker_complete::record_kept(db, build_id, kept).await
-    {
-        record_failed("kept chroot", e.to_string());
-    }
-
-    if report.outcome == BuildOutcome::Succeeded {
-        // What the worker actually checked out replaces what the server
-        // guessed when it queued the build. Only from a success, and only when
-        // the worker reported something: one that could not resolve a source
-        // leaves the queue-time record standing -- the older commit, so the
-        // error is a redundant rebuild rather than a missed one.
-        if !report.vcs_commits.is_empty()
-            && let Err(e) = aurcache_db::helpers::builds::record_build_vcs_sources(
-                db,
-                build_id,
-                &report.vcs_commits,
-            )
-            .await
-        {
-            record_failed("built VCS sources", e.to_string());
-        }
-        worker_complete::accept_for_publishing(db, build_id, auth.worker.id)
-            .await
-            .map_err(|e| err(Status::Forbidden, e))?;
-        if let Some(build) = named.clone() {
-            activity.emit(Event::BuildSucceeded {
-                build,
-                worker: worker(),
-            });
-        }
-        let (db, repo, activity) = (db.clone(), Arc::clone(repo), activity.clone());
-        tokio::spawn(async move {
-            publish_with_recovery(&db, &repo, &activity, build_id).await;
-        });
-        return Ok(());
-    }
-
-    if let Some(reason) = &report.reason
-        && let Some(pkgbase) = &pkgbase
-        && let Err(e) = append_build_output(
-            pkgbase,
-            build.number,
-            &format!("worker reported failure: {reason}\n"),
-        )
-        .await
-    {
-        record_failed("failure reason", e.to_string());
-    }
-
-    if report.outcome == BuildOutcome::Interrupted {
-        let abandoned = worker_jobs::abandon_build(
-            db,
-            &build,
-            EndReason::Interrupted,
-            worker_policy().max_attempts,
-        )
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-        .ok_or_else(|| err(Status::Forbidden, "build is no longer this worker's"))?;
-        aurcache_utils::abandoned::report(db, activity, &[abandoned]).await;
-        let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
-        return Ok(());
-    }
-    // Refused like a success above when the lease was lost in the meantime.
-    worker_complete::complete_failure(db, build_id, auth.worker.id)
-        .await
-        .map_err(|e| err(Status::Forbidden, e))?;
-    if let Some(build) = named {
-        activity.emit(Event::BuildFailed {
-            build,
-            worker: worker(),
-            reason: report.reason.clone(),
-        });
-    }
-    let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
-    Ok(())
+    err(status, error)
 }
 
 /// Liveness heartbeat: renews leases for reported builds, abandons any this

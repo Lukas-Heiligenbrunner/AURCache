@@ -113,7 +113,7 @@ fn produced_names(pkg: &ExtendedPackage) -> Vec<String> {
 /// What the package page shows: the package, and its most recent builds.
 struct PackagePage {
     package: ExtendedPackage,
-    builds: Vec<Build>,
+    builds: Result<Vec<Build>, String>,
 }
 
 async fn load(pkgbase: String) -> Result<PackagePage, LoadError> {
@@ -137,7 +137,7 @@ async fn load(pkgbase: String) -> Result<PackagePage, LoadError> {
     // summary is secondary, and the rest of the page is still worth showing.
     Ok(PackagePage {
         package: package?,
-        builds: builds.unwrap_or_default(),
+        builds: builds.map_err(|e| e.to_string()),
     })
 }
 
@@ -168,7 +168,7 @@ pub fn Package(pkgbase: String) -> Element {
     // flight, so a build finishing updates the status and the build summary
     // without a reload; a slow tick otherwise as a catch-all.
     let busy = matches!(&*data.read_unchecked(), Some(Ok(PackagePage { package, builds }))
-        if package.status.is_in_progress() || builds.iter().any(|b| b.status.is_in_progress()));
+        if package.status.is_in_progress() || builds.as_ref().is_ok_and(|builds| builds.iter().any(|b| b.status.is_in_progress())));
     crate::poll::use_poll(data, busy);
 
     rsx! {
@@ -201,9 +201,9 @@ pub fn Package(pkgbase: String) -> Element {
                         // Dependency lists are unbounded — thirty entries is
                         // ordinary — so they take the flexible column.
                         div { class: "space-y-4 min-w-0",
-                            BuildSummary {
-                                pkgbase: pkg.name.clone(),
-                                builds: builds.clone(),
+                            match builds {
+                                Ok(builds) => rsx! { BuildSummary { pkgbase: pkg.name.clone(), builds: builds.clone() } },
+                                Err(error) => rsx! { div { class: "alert alert-error", "Could not load build history: {error}" } },
                             }
                             Relations {
                                 pkg: pkg.clone(),

@@ -1,3 +1,6 @@
+#[path = "../test_support/git.rs"]
+mod test_git;
+
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
 use aurcache_db::migration::Migrator;
@@ -178,7 +181,6 @@ fn create_aur_git_repo_with_provides(
 
 fn create_aur_git_repo(aur_root: &Path, pkgbase: &str, version: &str, depends: &[&str]) {
     let repo_path = aur_root.join(format!("{pkgbase}.git"));
-    let repo = git2::Repository::init(&repo_path).expect("failed to init aur git repo");
 
     let srcinfo = make_srcinfo(pkgbase, version, depends);
     let depends_arr = depends
@@ -190,18 +192,10 @@ fn create_aur_git_repo(aur_root: &Path, pkgbase: &str, version: &str, depends: &
         "pkgname={pkgbase}\npkgver={version}\npkgrel=1\narch=('x86_64')\ndepends=({depends_arr})\nsource=()\nsha256sums=()\npackage() {{\n  :\n}}\n"
     );
 
-    fs::write(repo_path.join("PKGBUILD"), pkgbuild).unwrap();
-    fs::write(repo_path.join(".SRCINFO"), srcinfo).unwrap();
-
-    let mut index = repo.index().unwrap();
-    index.add_path(Path::new("PKGBUILD")).unwrap();
-    index.add_path(Path::new(".SRCINFO")).unwrap();
-    index.write().unwrap();
-    let tree_id = index.write_tree().unwrap();
-    let tree = repo.find_tree(tree_id).unwrap();
-    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-        .unwrap();
+    test_git::create_repo(
+        &repo_path,
+        &[("PKGBUILD", &pkgbuild), (".SRCINFO", &srcinfo)],
+    );
 }
 
 fn seed_official_repo_cache_empty(cache_dir: &Path) {

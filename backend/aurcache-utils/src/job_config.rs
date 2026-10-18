@@ -99,15 +99,15 @@ pub struct JobConfig {
 }
 
 /// Assemble the self-contained build configuration for one of `pkg_id`'s builds.
-pub async fn build_job_config(db: &DatabaseConnection, pkg_id: i32) -> JobConfig {
-    let (makepkg, pacman) = tokio::join!(
+pub async fn build_job_config(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<JobConfig> {
+    let (makepkg, pacman) = tokio::try_join!(
         settings::get(db, key::MAKEPKG_CONF, Some(pkg_id)),
         settings::get(db, key::PACMAN_CONF, Some(pkg_id)),
-    );
-    JobConfig {
+    )?;
+    Ok(JobConfig {
         makepkg_conf: makepkg_config(&makepkg.value),
         pacman_conf: pacman_config(&pacman.value),
-    }
+    })
 }
 
 #[cfg(test)]

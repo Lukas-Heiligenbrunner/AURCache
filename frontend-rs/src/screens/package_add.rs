@@ -321,6 +321,43 @@ pub fn PackageAdd(q: String) -> Element {
     }
 }
 
+/// Each result carries its query while a newer request is pending.
+fn use_package_search(
+    debounced: Signal<String>,
+    mut cache: Signal<SearchCache>,
+) -> Resource<(String, Result<Vec<SearchResult>, String>)> {
+    use_resource(move || async move {
+        let q = debounced();
+        // Nothing to look up for a remote: the AUR does not know about it, and
+        // asking would spend a request to be told so. An empty box is not a
+        // search either — but one character is, and the server answers it with
+        // an exact lookup.
+        if q.trim().is_empty() || looks_like_git_url(q.trim()) {
+            return (q, Ok(Vec::new()));
+        }
+        // A search already made can answer anything that extends it, with no
+        // request and no wait — which is most of typing, since a query grows a
+        // character at a time.
+        // Already ranked inside `narrow`, on the precomputed keys.
+        if let Some(narrowed) = cache.read().narrow(&q) {
+            return (q, Ok(narrowed));
+        }
+        let found = match crate::api::client() {
+            Ok(client) => client.search(&q).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
+        let found = match found {
+            Ok(mut found) => {
+                cache.write().insert(&q, &found);
+                rank_results(&q, &mut found);
+                Ok(found)
+            }
+            Err(e) => Err(e),
+        };
+        (q, found)
+    })
+}
+
 #[component]
 fn AddPackageDialog(q: String) -> Element {
     // The one field: a package name or a git remote, told apart by their shape.
@@ -330,8 +367,6 @@ fn AddPackageDialog(q: String) -> Element {
     // Starts equal to the entry so a URL-seeded search runs immediately, rather
     // than waiting for a keystroke that may never come.
     let mut debounced = use_signal(|| q);
-    // Completed searches, so refining a query stops asking the AUR again.
-    let mut cache = use_signal(SearchCache::default);
 
     // Only meaningful once the entry is a remote, which is when they appear.
     let mut git_ref = use_signal(|| "master".to_string());
@@ -381,42 +416,8 @@ fn AddPackageDialog(q: String) -> Element {
 
     let is_git = move || looks_like_git_url(entry().trim());
 
-    // Carries the query it answered, because `use_resource` keeps returning the
-    // previous value while a new future runs. Without it there is a window --
-    // after the debounce fires, before the search lands -- where the displayed
-    // results belong to a shorter query but nothing says so, and an empty one
-    // renders as a settled "nothing matches" for a package the user is halfway
-    // through typing.
-    let results = use_resource(move || async move {
-        let q = debounced();
-        // Nothing to look up for a remote: the AUR does not know about it, and
-        // asking would spend a request to be told so. An empty box is not a
-        // search either — but one character is, and the server answers it with
-        // an exact lookup.
-        if q.trim().is_empty() || looks_like_git_url(q.trim()) {
-            return (q, Ok(Vec::new()));
-        }
-        // A search already made can answer anything that extends it, with no
-        // request and no wait — which is most of typing, since a query grows a
-        // character at a time.
-        // Already ranked inside `narrow`, on the precomputed keys.
-        if let Some(narrowed) = cache.read().narrow(&q) {
-            return (q, Ok(narrowed));
-        }
-        let found = match crate::api::client() {
-            Ok(client) => client.search(&q).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
-        let found = match found {
-            Ok(mut found) => {
-                cache.write().insert(&q, &found);
-                rank_results(&q, &mut found);
-                Ok(found)
-            }
-            Err(e) => Err(e),
-        };
-        (q, found)
-    });
+    let cache = use_signal(SearchCache::default);
+    let results = use_package_search(debounced, cache);
 
     // Takes `()`: three different events close this dialog.
     let close = move |()| {
@@ -1645,60 +1646,27 @@ fn AddSourceEditor(
         }
     });
 
-    let mut selected = use_signal(|| Option::<String>::None);
-    // What the file looks like upstream, so an edit can be measured against it
-    // and reverted to it.
-    let mut pristine = use_signal(String::new);
-    let mut draft = use_signal(String::new);
-    let mut error = use_signal(|| Option::<String>::None);
-    // Which open request is newest. A slow fetch landing after the user moved
-    // on must not paint its file over the current one.
-    let mut open_generation = use_signal(|| 0_u64);
-
+    let editor = crate::source_editor::use_file_editor();
+    let selected = editor.selected;
+    let mut draft = editor.draft;
+    let error = editor.error;
+    let pristine = move || {
+        editor
+            .loaded
+            .read()
+            .as_ref()
+            .map(|file| file.original_content.clone())
+            .unwrap_or_default()
+    };
     let open_file = move |source: SourceData, path: String| async move {
-        error.set(None);
-        open_generation.set(open_generation() + 1);
-        let generation = open_generation();
-        // What the editor holds right now: keystrokes typed while the fetch
-        // is in flight live only here, and the arrival must not paint over
-        // them.
-        let draft_before = draft.peek().clone();
-        let client = match crate::api::client() {
-            Ok(client) => client,
-            Err(e) => return error.set(Some(e)),
-        };
-        match client.preview_source_file(&source, &path).await {
-            Ok(content) => {
-                if generation != open_generation() {
-                    return;
-                }
-                pristine.set(content.original_content.clone());
-                // An edit already made to this file wins over the upstream
-                // copy, so reopening it shows the work rather than losing it.
-                // Anything typed into this same file while it was re-read
-                // stays on screen. Typing into a *different* file does not
-                // count: that draft belongs to the file being left, and
-                // keeping it would show it -- and save it -- under this one.
-                let same_file = selected.peek().as_deref() == Some(path.as_str());
-                if !same_file || draft.peek().as_str() == draft_before {
-                    draft.set(
-                        patched
-                            .peek()
-                            .get(&path)
-                            .cloned()
-                            .unwrap_or(content.original_content),
-                    );
-                }
-                selected.set(Some(path));
-            }
-            Err(e) => {
-                // A superseded request's failure belongs to a file nobody is
-                // looking at anymore.
-                if generation == open_generation() {
-                    error.set(Some(e.to_string()));
-                }
-            }
-        }
+        let saved = patched.peek().get(&path).cloned();
+        editor
+            .open(
+                crate::source_editor::SourceLocation::Preview(source),
+                path,
+                saved,
+            )
+            .await;
     };
 
     // The point of opening the editor is nearly always the PKGBUILD, so it is
@@ -1755,6 +1723,7 @@ fn AddSourceEditor(
                 },
                 modified: patched().keys().cloned().collect(),
                 draft,
+                loading: (editor.loading)(),
                 dirty,
                 // A modal has less room than a page.
                 height: "h-64",
@@ -1778,6 +1747,7 @@ fn AddSourceEditor(
                     }
                     button {
                         class: "btn btn-primary btn-sm",
+                        disabled: (editor.loading)(),
                         onclick: move |_| {
                             keep();
                             onsubmit.call(());

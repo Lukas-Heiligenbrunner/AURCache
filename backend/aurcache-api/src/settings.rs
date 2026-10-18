@@ -45,7 +45,11 @@ async fn settings_impl(
     db: &DatabaseConnection,
     pkg_id: Option<i32>,
 ) -> Result<Json<ApplicationSettings>, ApiError> {
-    Ok(Json(store::all(db, pkg_id).await))
+    Ok(Json(
+        store::all(db, pkg_id)
+            .await
+            .map_err(|e| err(Status::InternalServerError, e))?,
+    ))
 }
 
 async fn setting_get_impl(
@@ -54,7 +58,9 @@ async fn setting_get_impl(
     pkg_id: Option<i32>,
 ) -> Result<Json<SettingResponse>, ApiError> {
     let setting = parse_setting(key)?;
-    let entry = store::raw(db, setting, pkg_id).await;
+    let entry = store::raw(db, setting, pkg_id)
+        .await
+        .map_err(|e| err(Status::InternalServerError, e))?;
     Ok(Json(SettingResponse {
         value: entry.value,
         source: entry.source,

@@ -39,13 +39,30 @@ use crate::api::activity::Severity;
 use crate::api::log::{BuildRef, EntityRef, PackageRef, WorkerRef};
 use serde::{Deserialize, Serialize};
 
-/// Anything worth recording, tagged by its kind.
-///
-/// Serializes to `{"kind": .., "data": {..}}` -- the two columns a row is
-/// stored in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data")]
-pub enum Event {
+// Each event declares its wire tag and picker metadata beside its fields.
+macro_rules! events {
+    ($( $(#[$doc:meta])* $variant:ident => ($tag:literal, $group:literal, $label:literal) { $($fields:tt)* }, )*) => {
+        /// Anything worth recording, tagged by its kind.
+        ///
+        /// Serializes to `{"kind": .., "data": {..}}` -- the two columns a row is
+        /// stored in.
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        #[serde(tag = "kind", content = "data")]
+        pub enum Event {
+            $( $(#[$doc])* #[serde(rename = $tag)] $variant { $($fields)* }, )*
+        }
+        impl Event {
+            #[must_use]
+            pub const fn kind(&self) -> &'static str {
+                match self { $( Self::$variant { .. } => $tag, )* }
+            }
+        }
+        /// Every event's picker metadata, generated from its declaration.
+        pub const KINDS: &[Kind] = &[$(Kind { kind: $tag, group: $group, label: $label },)*];
+    };
+}
+
+events! {
     // -----------------------------------------------------------------------
     // Resolving a package's source
     // -----------------------------------------------------------------------
@@ -55,8 +72,7 @@ pub enum Event {
     /// One kind for the git remote and the snapshot cache alike; `target` says
     /// which, because that is a detail worth keeping and not worth a kind of
     /// its own.
-    #[serde(rename = "source.refresh_failed")]
-    SourceRefreshFailed {
+    SourceRefreshFailed => ("source.refresh_failed", "Sources and versions", "Source refresh failed") {
         pkg: PackageRef,
         target: RefreshTarget,
         error: String,
@@ -68,8 +84,7 @@ pub enum Event {
     /// fail the same way later -- which is why one package's failure does not
     /// abort the pass. `purpose` says which of the package's tracking stops
     /// being updated.
-    #[serde(rename = "source.sourceinfo_failed")]
-    SourceinfoFailed {
+    SourceinfoFailed => ("source.sourceinfo_failed", "Sources and versions", "Sourceinfo unreadable") {
         pkg: PackageRef,
         purpose: SourceinfoPurpose,
         error: String,
@@ -77,8 +92,7 @@ pub enum Event {
 
     /// The `git+` sources a package names could not be resolved, so a moved
     /// upstream will not be noticed until a later round succeeds.
-    #[serde(rename = "vcs.sync_failed")]
-    VcsSyncFailed { pkg: PackageRef, error: String },
+    VcsSyncFailed => ("vcs.sync_failed", "Sources and versions", "VCS sources not synced") { pkg: PackageRef, error: String },
 
     // -----------------------------------------------------------------------
     // Deciding what is out of date
@@ -88,21 +102,18 @@ pub enum Event {
     /// Its metadata still comes from the checkout, which continues to exist, so
     /// this is worth saying rather than leaving to be inferred from a page that
     /// stopped changing.
-    #[serde(rename = "version_check.aur_missing")]
-    AurMissing { pkg: PackageRef },
+    AurMissing => ("version_check.aur_missing", "Sources and versions", "Gone from the AUR") { pkg: PackageRef },
 
     /// A check's result could not be written back, so the package looks
     /// unchecked and the next pass does the work again.
-    #[serde(rename = "version_check.store_failed")]
-    VersionCheckStoreFailed { pkg: PackageRef, error: String },
+    VersionCheckStoreFailed => ("version_check.store_failed", "Sources and versions", "Version check not stored") { pkg: PackageRef, error: String },
 
     /// Two versions that could not be compared, so the check fell back to
     /// asking only whether they differ.
     ///
     /// The pair is the point: fused into a sentence they were something to
     /// read, and apart they are something to filter on.
-    #[serde(rename = "version.compare_fallback")]
-    VersionCompareFallback {
+    VersionCompareFallback => ("version.compare_fallback", "Sources and versions", "Versions not comparable") {
         pkg: PackageRef,
         upstream_version: String,
         built_version: String,
@@ -112,42 +123,36 @@ pub enum Event {
     ///
     /// The check worked and the builds did not happen, which looks exactly like
     /// nothing being out of date unless it says so.
-    #[serde(rename = "update.queue_failed")]
-    UpdateQueueFailed { error: String },
+    UpdateQueueFailed => ("update.queue_failed", "Packages", "Update queueing failed") { error: String },
 
     // -----------------------------------------------------------------------
     // Publishing a finished build
     // -----------------------------------------------------------------------
     /// A build finished and its dependents were not triggered, so packages that
     /// were waiting on it are still waiting.
-    #[serde(rename = "dependents.trigger_failed")]
-    DependentsTriggerFailed { pkg: PackageRef, error: String },
+    DependentsTriggerFailed => ("dependents.trigger_failed", "Builds", "Dependents not triggered") { pkg: PackageRef, error: String },
 
     /// A build could not be marked failed after its publish failed, so the row
     /// says something other than what happened.
-    #[serde(rename = "build.mark_failed")]
-    BuildMarkFailed { build: BuildRef, error: String },
+    BuildMarkFailed => ("build.mark_failed", "Builds", "Build not marked failed") { build: BuildRef, error: String },
 
     /// A line could not be appended to a build's log.
     ///
     /// The build is unaffected; what is lost is the explanation in the place
     /// somebody would look for it.
-    #[serde(rename = "build_log.append_failed")]
-    BuildLogAppendFailed { build: BuildRef, error: String },
+    BuildLogAppendFailed => ("build_log.append_failed", "Builds", "Build log line lost") { build: BuildRef, error: String },
 
     /// A build produced a package that never reached the repository.
     ///
     /// Distinct from a build that failed: this one worked, and the artifact
     /// exists.
-    #[serde(rename = "publish.failed")]
-    PublishFailed { build: BuildRef, error: String },
+    PublishFailed => ("publish.failed", "Builds", "Publishing failed") { build: BuildRef, error: String },
 
     // -----------------------------------------------------------------------
     // What people did to packages
     // -----------------------------------------------------------------------
     /// A package was added, with whatever it depends on.
-    #[serde(rename = "package.added")]
-    PackageAdded { pkg: PackageRef },
+    PackageAdded => ("package.added", "Packages", "Package added") { pkg: PackageRef },
 
     /// A package's build was queued -- on somebody's request, or by the
     /// auto-updater.
@@ -155,8 +160,7 @@ pub enum Event {
     /// One kind whatever the reason; `cause` says which, told apart by what
     /// came before: an update attempts a new version, a rebuild repeats a build
     /// that worked, a retry repeats one that failed.
-    #[serde(rename = "build.queued")]
-    BuildQueued {
+    BuildQueued => ("build.queued", "Builds", "Build queued") {
         pkg: PackageRef,
         #[serde(default)]
         cause: QueueCause,
@@ -177,8 +181,7 @@ pub enum Event {
 
     /// A build that was waiting on its dependencies can start: a dependency's
     /// build was published, or the dependencies it was waiting on changed.
-    #[serde(rename = "build.unblocked")]
-    BuildUnblocked {
+    BuildUnblocked => ("build.unblocked", "Builds", "Build unblocked") {
         build: BuildRef,
         /// The published dependency build that freed it; absent when it was a
         /// change to its dependencies instead.
@@ -189,8 +192,7 @@ pub enum Event {
     /// A package's upstream moved on: a newer version, or new commits in its
     /// VCS sources. Recorded when the package goes out of date, whether or not
     /// a build follows -- that is the auto-updater's call, and its settings'.
-    #[serde(rename = "version.detected")]
-    VersionDetected {
+    VersionDetected => ("version.detected", "Sources and versions", "New version detected") {
         pkg: PackageRef,
         /// What upstream now says.
         version: String,
@@ -203,8 +205,7 @@ pub enum Event {
     },
 
     /// A package was removed, with its builds and artifacts.
-    #[serde(rename = "package.deleted")]
-    PackageDeleted { pkg: PackageRef },
+    PackageDeleted => ("package.deleted", "Packages", "Package deleted") { pkg: PackageRef },
 
     // -----------------------------------------------------------------------
     // The server and its fleet
@@ -213,37 +214,30 @@ pub enum Event {
     /// three worth lining up against what else happened.
     ///
     /// The marker "since the last restart" counts back to.
-    #[serde(rename = "server.start")]
-    ServerStarted { version: String },
+    ServerStarted => ("server.start", "Server and repository", "Server started") { version: String },
 
     /// A pass of the version check did not finish, so nothing was found to be
     /// out of date that pass.
-    #[serde(rename = "version_check.pass_failed")]
-    VersionCheckFailed { error: String },
+    VersionCheckFailed => ("version_check.pass_failed", "Sources and versions", "Version check failed") { error: String },
 
     /// A machine asked to join the fleet for the first time.
     ///
     /// Only the first time: a worker registers on every startup, so recording
     /// each one would turn an ordinary restart into a log nobody can read past.
-    #[serde(rename = "worker.enrolled")]
-    WorkerEnrolled { worker: WorkerRef },
+    WorkerEnrolled => ("worker.enrolled", "Workers", "Worker enrolled") { worker: WorkerRef },
 
     /// A worker was let into the fleet, by someone or by the enrollment rules.
-    #[serde(rename = "worker.approved")]
-    WorkerApproved { worker: WorkerRef },
+    WorkerApproved => ("worker.approved", "Workers", "Worker approved") { worker: WorkerRef },
 
     /// Somebody asked a worker to take no new builds and let the ones it holds
     /// finish.
-    #[serde(rename = "worker.paused")]
-    WorkerPaused { worker: WorkerRef },
+    WorkerPaused => ("worker.paused", "Workers", "Worker intake stopped") { worker: WorkerRef },
 
     /// Somebody let a paused worker take builds again.
-    #[serde(rename = "worker.resumed")]
-    WorkerResumed { worker: WorkerRef },
+    WorkerResumed => ("worker.resumed", "Workers", "Worker intake resumed") { worker: WorkerRef },
 
     /// A worker was put out of the fleet, and its builds taken back.
-    #[serde(rename = "worker.revoked")]
-    WorkerRevoked {
+    WorkerRevoked => ("worker.revoked", "Workers", "Worker revoked") {
         worker: WorkerRef,
         /// The builds it was running, handed back to the queue. Absent from
         /// entries written before it was recorded.
@@ -256,8 +250,7 @@ pub enum Event {
     ///
     /// One entry per pass rather than per build: the reaper (or the heartbeat)
     /// finds them together, and they have one cause.
-    #[serde(rename = "worker.reaped")]
-    WorkerReaped {
+    WorkerReaped => ("worker.reaped", "Workers", "Worker stopped answering") {
         /// The workers that stopped answering. Absent from entries written
         /// before it was recorded.
         #[serde(default)]
@@ -270,24 +263,21 @@ pub enum Event {
 
     /// A worker refused values its machine was configured with, and is running
     /// something else.
-    #[serde(rename = "worker.setting_rejected")]
-    WorkerSettingRejected {
+    WorkerSettingRejected => ("worker.setting_rejected", "Workers", "Worker setting refused") {
         worker: WorkerRef,
         settings: Vec<String>,
     },
 
     /// A worker checked in at startup. Every start, not only the first: the
     /// version it reports is how a fleet upgrade shows up.
-    #[serde(rename = "worker.registered")]
-    WorkerRegistered {
+    WorkerRegistered => ("worker.registered", "Workers", "Worker checked in") {
         worker: WorkerRef,
         #[serde(default)]
         version: Option<String>,
     },
 
     /// What a worker's settings resolved to changed since it last reported.
-    #[serde(rename = "worker.config_changed")]
-    WorkerConfigChanged {
+    WorkerConfigChanged => ("worker.config_changed", "Workers", "Worker configuration changed") {
         worker: WorkerRef,
         settings: Vec<String>,
     },
@@ -295,8 +285,7 @@ pub enum Event {
     /// Somebody saved values for a worker's settings here. Like
     /// [`Self::SettingChanged`], the values are left out; what the worker then
     /// ran is [`Self::WorkerConfigChanged`], once it has picked the save up.
-    #[serde(rename = "worker.settings_saved")]
-    WorkerSettingsSaved {
+    WorkerSettingsSaved => ("worker.settings_saved", "Workers", "Worker settings saved") {
         worker: WorkerRef,
         /// Keys given a value.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -308,8 +297,7 @@ pub enum Event {
 
     /// Something a worker sent about itself could not be stored or read, so
     /// its page shows less than it reported.
-    #[serde(rename = "worker.report_failed")]
-    WorkerReportFailed {
+    WorkerReportFailed => ("worker.report_failed", "Workers", "Worker report not stored") {
         worker: WorkerRef,
         /// Which report: its setting declaration, or what they resolved to.
         report: WorkerReport,
@@ -322,8 +310,7 @@ pub enum Event {
     ///
     /// `build` is absent for a report that is not about any one job -- chroot
     /// or cache maintenance runs independently of any single build.
-    #[serde(rename = "worker.warning")]
-    WorkerWarning {
+    WorkerWarning => ("worker.warning", "Workers", "Worker warning") {
         worker: WorkerRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         build: Option<BuildRef>,
@@ -332,8 +319,7 @@ pub enum Event {
 
     /// As [`Self::WorkerWarning`], for something the worker could not recover
     /// from.
-    #[serde(rename = "worker.error")]
-    WorkerError {
+    WorkerError => ("worker.error", "Workers", "Worker error") {
         worker: WorkerRef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         build: Option<BuildRef>,
@@ -344,16 +330,13 @@ pub enum Event {
     // Builds
     // -----------------------------------------------------------------------
     /// A worker took a build.
-    #[serde(rename = "build.started")]
-    BuildStarted { build: BuildRef, worker: WorkerRef },
+    BuildStarted => ("build.started", "Builds", "Build picked up") { build: BuildRef, worker: WorkerRef },
 
     /// A worker finished a build, and it is on its way into the repository.
-    #[serde(rename = "build.succeeded")]
-    BuildSucceeded { build: BuildRef, worker: WorkerRef },
+    BuildSucceeded => ("build.succeeded", "Builds", "Build finished") { build: BuildRef, worker: WorkerRef },
 
     /// A build failed on its worker.
-    #[serde(rename = "build.failed")]
-    BuildFailed {
+    BuildFailed => ("build.failed", "Builds", "Build failed") {
         build: BuildRef,
         worker: WorkerRef,
         /// What the worker said, when it said anything.
@@ -362,8 +345,7 @@ pub enum Event {
     },
 
     /// A finished build reached the repository.
-    #[serde(rename = "build.published")]
-    BuildPublished {
+    BuildPublished => ("build.published", "Builds", "Build published") {
         build: BuildRef,
         /// The version it published. Absent from entries written before it
         /// was recorded.
@@ -373,8 +355,7 @@ pub enum Event {
 
     /// A worker reported a build finished, and the report was refused -- which
     /// is how a build that worked becomes one that failed.
-    #[serde(rename = "build.completion_rejected")]
-    BuildCompletionRejected {
+    BuildCompletionRejected => ("build.completion_rejected", "Builds", "Finish report refused") {
         build: BuildRef,
         worker: WorkerRef,
         reason: String,
@@ -385,60 +366,50 @@ pub enum Event {
     ///
     /// One kind for every such fact; `what` says which, since nobody filters
     /// peak memory apart from failure reasons.
-    #[serde(rename = "build.record_failed")]
-    BuildRecordFailed {
+    BuildRecordFailed => ("build.record_failed", "Builds", "Build detail not recorded") {
         build: BuildRef,
         what: String,
         error: String,
     },
 
     /// Somebody stopped a build.
-    #[serde(rename = "build.cancelled")]
-    BuildCancelled { build: BuildRef },
+    BuildCancelled => ("build.cancelled", "Builds", "Build stopped") { build: BuildRef },
 
     /// Somebody deleted a build and its log.
-    #[serde(rename = "build.deleted")]
-    BuildDeleted { build: BuildRef },
+    BuildDeleted => ("build.deleted", "Builds", "Build deleted") { build: BuildRef },
 
     /// Nothing waiting was queued at startup, so builds that should have
     /// resumed did not.
-    #[serde(rename = "build.startup_enqueue_failed")]
-    StartupEnqueueFailed { error: String },
+    StartupEnqueueFailed => ("build.startup_enqueue_failed", "Builds", "Startup queueing failed") { error: String },
 
     // -----------------------------------------------------------------------
     // Packages and their sources
     // -----------------------------------------------------------------------
     /// Somebody changed how a package is built: its platforms or build flags.
-    #[serde(rename = "package.changed")]
-    PackageChanged {
+    PackageChanged => ("package.changed", "Packages", "Package changed") {
         pkg: PackageRef,
         fields: Vec<String>,
     },
 
     /// Somebody edited one of a package's source files, which is stored as a
     /// patch against upstream.
-    #[serde(rename = "source.edited")]
-    SourceEdited { pkg: PackageRef, path: String },
+    SourceEdited => ("source.edited", "Sources and versions", "Source edited") { pkg: PackageRef, path: String },
 
     /// A package's source metadata -- description, maintainer, history --
     /// could not be refreshed, so its page shows what it last knew.
-    #[serde(rename = "source.metadata_failed")]
-    SourceMetadataFailed { pkg: PackageRef, error: String },
+    SourceMetadataFailed => ("source.metadata_failed", "Sources and versions", "Metadata not refreshed") { pkg: PackageRef, error: String },
 
     /// A deleted package's source checkout could not be removed, and is taking
     /// up space until a later sweep.
-    #[serde(rename = "source.checkout_remove_failed")]
-    CheckoutRemoveFailed { pkg: PackageRef, error: String },
+    CheckoutRemoveFailed => ("source.checkout_remove_failed", "Sources and versions", "Checkout left behind") { pkg: PackageRef, error: String },
 
     /// A dependency nothing provides -- not the official repositories, not a
     /// tracked package, not the AUR -- so the package builds without it and
     /// will likely fail.
-    #[serde(rename = "deps.unresolved")]
-    DepsUnresolved { pkg: PackageRef, dependency: String },
+    DepsUnresolved => ("deps.unresolved", "Dependencies", "Dependency unresolved") { pkg: PackageRef, dependency: String },
 
     /// Somebody pointed a dependency of one package at another package.
-    #[serde(rename = "deps.replaced")]
-    DepsReplaced {
+    DepsReplaced => ("deps.replaced", "Dependencies", "Dependency replaced") {
         dependent: PackageRef,
         old: PackageRef,
         new: PackageRef,
@@ -446,24 +417,20 @@ pub enum Event {
 
     /// Somebody dropped a dependency the official repositories provide, so it
     /// is installed from there rather than built here.
-    #[serde(rename = "deps.dropped")]
-    DepsDropped {
+    DepsDropped => ("deps.dropped", "Dependencies", "Dependency dropped") {
         dependent: PackageRef,
         dependency: PackageRef,
     },
 
     /// An auto-update of one package failed; the rest went ahead.
-    #[serde(rename = "update.skipped")]
-    UpdateSkipped { pkg: PackageRef, error: String },
+    UpdateSkipped => ("update.skipped", "Packages", "Auto-update skipped") { pkg: PackageRef, error: String },
 
     /// A bulk add could not resolve its names in one request, and fell back
     /// to one request per package -- slower, and nothing more.
-    #[serde(rename = "bulk_add.resolve_failed")]
-    BulkAddResolveFailed { error: String },
+    BulkAddResolveFailed => ("bulk_add.resolve_failed", "Packages", "Bulk add slowed") { error: String },
 
     /// A bulk add or a restore stopped before its end.
-    #[serde(rename = "operation.aborted")]
-    OperationAborted {
+    OperationAborted => ("operation.aborted", "Packages", "Bulk add or restore aborted") {
         /// `bulk_add` or `restore`.
         operation: String,
         error: String,
@@ -475,24 +442,21 @@ pub enum Event {
     /// Somebody changed a setting -- server-wide, or for one package. The
     /// value is left out: config files are long, and some settings are
     /// nobody's business but the instance's.
-    #[serde(rename = "setting.changed")]
-    SettingChanged {
+    SettingChanged => ("setting.changed", "Settings and access", "Setting changed") {
         key: String,
         #[serde(default)]
         pkg: Option<PackageRef>,
     },
 
     /// Somebody put a setting back to what it inherits.
-    #[serde(rename = "setting.reset")]
-    SettingReset {
+    SettingReset => ("setting.reset", "Settings and access", "Setting reset") {
         key: String,
         #[serde(default)]
         pkg: Option<PackageRef>,
     },
 
     /// A cron schedule could not be used, so that job is not running on it.
-    #[serde(rename = "schedule.invalid")]
-    ScheduleInvalid {
+    ScheduleInvalid => ("schedule.invalid", "Settings and access", "Schedule unusable") {
         /// Which job: `auto_update` or `mirror_ranking`.
         job: String,
         error: String,
@@ -501,8 +465,7 @@ pub enum Event {
     /// A schedule written in 0.5.0's seconds-first syntax, read as the
     /// five-field schedule it means. The job runs; the setting is worth
     /// rewriting.
-    #[serde(rename = "schedule.outdated")]
-    ScheduleOutdated {
+    ScheduleOutdated => ("schedule.outdated", "Settings and access", "Schedule in old syntax") {
         /// Which job: `auto_update` or `mirror_ranking`.
         job: String,
         written: String,
@@ -510,25 +473,20 @@ pub enum Event {
     },
 
     /// Somebody signed in with an account that is not allowed.
-    #[serde(rename = "auth.sign_in_refused")]
-    SignInRefused { user: String },
+    SignInRefused => ("auth.sign_in_refused", "Settings and access", "Sign-in refused") { user: String },
 
     /// Somebody replaced the API token, and every client using the old one
     /// now needs the new one.
-    #[serde(rename = "auth.token_regenerated")]
-    TokenRegenerated {},
+    TokenRegenerated => ("auth.token_regenerated", "Settings and access", "API token replaced") {},
 
     /// Somebody exported a dump -- with the secrets in it, when `secrets`.
-    #[serde(rename = "dump.exported")]
-    DumpExported { secrets: bool },
+    DumpExported => ("dump.exported", "Backups", "Dump exported") { secrets: bool },
 
     /// Somebody restored a dump.
-    #[serde(rename = "restore.applied")]
-    RestoreApplied { packages: usize },
+    RestoreApplied => ("restore.applied", "Backups", "Dump restored") { packages: usize },
 
     /// A restored package came in, but one of the steps after it did not.
-    #[serde(rename = "restore.package_failed")]
-    RestorePackageFailed {
+    RestorePackageFailed => ("restore.package_failed", "Backups", "Restore step failed") {
         pkg: PackageRef,
         step: RestoreStep,
         error: String,
@@ -536,31 +494,26 @@ pub enum Event {
 
     /// A restore replaced the worker CA: every certificate the current workers
     /// hold is now worthless, and each has to enroll again.
-    #[serde(rename = "restore.ca_replaced")]
-    RestoreCaReplaced {},
+    RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
     /// The mirrors could not be ranked, so builds keep using the old order.
-    #[serde(rename = "mirrors.rank_failed")]
-    MirrorRankFailed { error: String },
+    MirrorRankFailed => ("mirrors.rank_failed", "Server and repository", "Mirror ranking failed") { error: String },
 
     /// The official repositories' databases could not be refreshed, so
     /// dependency resolution works from an older copy.
-    #[serde(rename = "official_repos.refresh_failed")]
-    OfficialReposRefreshFailed { error: String },
+    OfficialReposRefreshFailed => ("official_repos.refresh_failed", "Server and repository", "Official repos not refreshed") { error: String },
 
     /// A change to the repository did not commit, and is being tried again.
-    #[serde(rename = "repo.commit_retry")]
-    RepoCommitRetried { attempt: u32, error: String },
+    RepoCommitRetried => ("repo.commit_retry", "Server and repository", "Repository commit retried") { attempt: u32, error: String },
 
     /// A file in the repository could not be moved or removed.
     ///
     /// A move that failed is a package the repository says it has and does
     /// not serve.
-    #[serde(rename = "repo.file_failed")]
-    RepoFileFailed {
+    RepoFileFailed => ("repo.file_failed", "Server and repository", "Repository file failed") {
         path: String,
         action: FileAction,
         error: String,
@@ -568,12 +521,10 @@ pub enum Event {
 
     /// Retired package files were removed from the repository, once no client
     /// could still be asking for them.
-    #[serde(rename = "repo.swept")]
-    RepoSwept { files: Vec<String> },
+    RepoSwept => ("repo.swept", "Server and repository", "Retired files removed") { files: Vec<String> },
 
     /// The sweep of retired package files did not run, so they stay on disk.
-    #[serde(rename = "repo.sweep_failed")]
-    RepoSweepFailed { error: String },
+    RepoSweepFailed => ("repo.sweep_failed", "Server and repository", "Sweep failed") { error: String },
 }
 
 /// One kind, as a person picking it from a list would read it.
@@ -586,344 +537,6 @@ pub struct Kind {
     /// What it is called in that list.
     pub label: &'static str,
 }
-
-/// Every kind this build records, grouped for a picker.
-///
-/// A list rather than something derived from the enum: the enum has no way to
-/// name its variants without an instance, and the labels are prose. A test
-/// holds it to the catalogue, so a new event cannot be missing from it.
-pub const KINDS: &[Kind] = &[
-    Kind {
-        kind: "build.queued",
-        group: "Builds",
-        label: "Build queued",
-    },
-    Kind {
-        kind: "build.started",
-        group: "Builds",
-        label: "Build picked up",
-    },
-    Kind {
-        kind: "build.succeeded",
-        group: "Builds",
-        label: "Build finished",
-    },
-    Kind {
-        kind: "build.failed",
-        group: "Builds",
-        label: "Build failed",
-    },
-    Kind {
-        kind: "build.published",
-        group: "Builds",
-        label: "Build published",
-    },
-    Kind {
-        kind: "publish.failed",
-        group: "Builds",
-        label: "Publishing failed",
-    },
-    Kind {
-        kind: "build.cancelled",
-        group: "Builds",
-        label: "Build stopped",
-    },
-    Kind {
-        kind: "build.deleted",
-        group: "Builds",
-        label: "Build deleted",
-    },
-    Kind {
-        kind: "build.completion_rejected",
-        group: "Builds",
-        label: "Finish report refused",
-    },
-    Kind {
-        kind: "build.record_failed",
-        group: "Builds",
-        label: "Build detail not recorded",
-    },
-    Kind {
-        kind: "build.mark_failed",
-        group: "Builds",
-        label: "Build not marked failed",
-    },
-    Kind {
-        kind: "build_log.append_failed",
-        group: "Builds",
-        label: "Build log line lost",
-    },
-    Kind {
-        kind: "build.unblocked",
-        group: "Builds",
-        label: "Build unblocked",
-    },
-    Kind {
-        kind: "build.startup_enqueue_failed",
-        group: "Builds",
-        label: "Startup queueing failed",
-    },
-    Kind {
-        kind: "dependents.trigger_failed",
-        group: "Builds",
-        label: "Dependents not triggered",
-    },
-    Kind {
-        kind: "package.added",
-        group: "Packages",
-        label: "Package added",
-    },
-    Kind {
-        kind: "package.changed",
-        group: "Packages",
-        label: "Package changed",
-    },
-    Kind {
-        kind: "package.deleted",
-        group: "Packages",
-        label: "Package deleted",
-    },
-    Kind {
-        kind: "update.skipped",
-        group: "Packages",
-        label: "Auto-update skipped",
-    },
-    Kind {
-        kind: "update.queue_failed",
-        group: "Packages",
-        label: "Update queueing failed",
-    },
-    Kind {
-        kind: "bulk_add.resolve_failed",
-        group: "Packages",
-        label: "Bulk add slowed",
-    },
-    Kind {
-        kind: "operation.aborted",
-        group: "Packages",
-        label: "Bulk add or restore aborted",
-    },
-    Kind {
-        kind: "source.edited",
-        group: "Sources and versions",
-        label: "Source edited",
-    },
-    Kind {
-        kind: "source.refresh_failed",
-        group: "Sources and versions",
-        label: "Source refresh failed",
-    },
-    Kind {
-        kind: "source.sourceinfo_failed",
-        group: "Sources and versions",
-        label: "Sourceinfo unreadable",
-    },
-    Kind {
-        kind: "source.metadata_failed",
-        group: "Sources and versions",
-        label: "Metadata not refreshed",
-    },
-    Kind {
-        kind: "source.checkout_remove_failed",
-        group: "Sources and versions",
-        label: "Checkout left behind",
-    },
-    Kind {
-        kind: "vcs.sync_failed",
-        group: "Sources and versions",
-        label: "VCS sources not synced",
-    },
-    Kind {
-        kind: "version.detected",
-        group: "Sources and versions",
-        label: "New version detected",
-    },
-    Kind {
-        kind: "version_check.pass_failed",
-        group: "Sources and versions",
-        label: "Version check failed",
-    },
-    Kind {
-        kind: "version_check.aur_missing",
-        group: "Sources and versions",
-        label: "Gone from the AUR",
-    },
-    Kind {
-        kind: "version_check.store_failed",
-        group: "Sources and versions",
-        label: "Version check not stored",
-    },
-    Kind {
-        kind: "version.compare_fallback",
-        group: "Sources and versions",
-        label: "Versions not comparable",
-    },
-    Kind {
-        kind: "deps.unresolved",
-        group: "Dependencies",
-        label: "Dependency unresolved",
-    },
-    Kind {
-        kind: "deps.replaced",
-        group: "Dependencies",
-        label: "Dependency replaced",
-    },
-    Kind {
-        kind: "deps.dropped",
-        group: "Dependencies",
-        label: "Dependency dropped",
-    },
-    Kind {
-        kind: "worker.enrolled",
-        group: "Workers",
-        label: "Worker enrolled",
-    },
-    Kind {
-        kind: "worker.registered",
-        group: "Workers",
-        label: "Worker checked in",
-    },
-    Kind {
-        kind: "worker.approved",
-        group: "Workers",
-        label: "Worker approved",
-    },
-    Kind {
-        kind: "worker.paused",
-        group: "Workers",
-        label: "Worker intake stopped",
-    },
-    Kind {
-        kind: "worker.resumed",
-        group: "Workers",
-        label: "Worker intake resumed",
-    },
-    Kind {
-        kind: "worker.revoked",
-        group: "Workers",
-        label: "Worker revoked",
-    },
-    Kind {
-        kind: "worker.reaped",
-        group: "Workers",
-        label: "Worker stopped answering",
-    },
-    Kind {
-        kind: "worker.config_changed",
-        group: "Workers",
-        label: "Worker configuration changed",
-    },
-    Kind {
-        kind: "worker.settings_saved",
-        group: "Workers",
-        label: "Worker settings saved",
-    },
-    Kind {
-        kind: "worker.setting_rejected",
-        group: "Workers",
-        label: "Worker setting refused",
-    },
-    Kind {
-        kind: "worker.report_failed",
-        group: "Workers",
-        label: "Worker report not stored",
-    },
-    Kind {
-        kind: "worker.warning",
-        group: "Workers",
-        label: "Worker warning",
-    },
-    Kind {
-        kind: "worker.error",
-        group: "Workers",
-        label: "Worker error",
-    },
-    Kind {
-        kind: "setting.changed",
-        group: "Settings and access",
-        label: "Setting changed",
-    },
-    Kind {
-        kind: "setting.reset",
-        group: "Settings and access",
-        label: "Setting reset",
-    },
-    Kind {
-        kind: "schedule.invalid",
-        group: "Settings and access",
-        label: "Schedule unusable",
-    },
-    Kind {
-        kind: "schedule.outdated",
-        group: "Settings and access",
-        label: "Schedule in old syntax",
-    },
-    Kind {
-        kind: "auth.sign_in_refused",
-        group: "Settings and access",
-        label: "Sign-in refused",
-    },
-    Kind {
-        kind: "auth.token_regenerated",
-        group: "Settings and access",
-        label: "API token replaced",
-    },
-    Kind {
-        kind: "dump.exported",
-        group: "Backups",
-        label: "Dump exported",
-    },
-    Kind {
-        kind: "restore.applied",
-        group: "Backups",
-        label: "Dump restored",
-    },
-    Kind {
-        kind: "restore.package_failed",
-        group: "Backups",
-        label: "Restore step failed",
-    },
-    Kind {
-        kind: "restore.ca_replaced",
-        group: "Backups",
-        label: "Worker CA replaced",
-    },
-    Kind {
-        kind: "server.start",
-        group: "Server and repository",
-        label: "Server started",
-    },
-    Kind {
-        kind: "repo.swept",
-        group: "Server and repository",
-        label: "Retired files removed",
-    },
-    Kind {
-        kind: "repo.sweep_failed",
-        group: "Server and repository",
-        label: "Sweep failed",
-    },
-    Kind {
-        kind: "repo.commit_retry",
-        group: "Server and repository",
-        label: "Repository commit retried",
-    },
-    Kind {
-        kind: "repo.file_failed",
-        group: "Server and repository",
-        label: "Repository file failed",
-    },
-    Kind {
-        kind: "mirrors.rank_failed",
-        group: "Server and repository",
-        label: "Mirror ranking failed",
-    },
-    Kind {
-        kind: "official_repos.refresh_failed",
-        group: "Server and repository",
-        label: "Official repos not refreshed",
-    },
-];
 
 /// The picker's name for `kind`, or the kind itself for one this build does
 /// not know -- a row from a newer server still has something to show.
@@ -1096,82 +709,6 @@ impl SourceinfoPurpose {
 }
 
 impl Event {
-    /// This event's stable identity, as the `kind` column holds it.
-    ///
-    /// The same string serde tags it with -- asserted below, since the two are
-    /// written separately.
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        match self {
-            Self::SourceRefreshFailed { .. } => "source.refresh_failed",
-            Self::SourceinfoFailed { .. } => "source.sourceinfo_failed",
-            Self::VcsSyncFailed { .. } => "vcs.sync_failed",
-            Self::AurMissing { .. } => "version_check.aur_missing",
-            Self::VersionCheckStoreFailed { .. } => "version_check.store_failed",
-            Self::VersionCompareFallback { .. } => "version.compare_fallback",
-            Self::UpdateQueueFailed { .. } => "update.queue_failed",
-            Self::DependentsTriggerFailed { .. } => "dependents.trigger_failed",
-            Self::BuildMarkFailed { .. } => "build.mark_failed",
-            Self::BuildLogAppendFailed { .. } => "build_log.append_failed",
-            Self::PublishFailed { .. } => "publish.failed",
-            Self::PackageAdded { .. } => "package.added",
-            Self::BuildQueued { .. } => "build.queued",
-            Self::VersionDetected { .. } => "version.detected",
-            Self::BuildUnblocked { .. } => "build.unblocked",
-            Self::PackageDeleted { .. } => "package.deleted",
-            Self::ServerStarted { .. } => SERVER_START,
-            Self::VersionCheckFailed { .. } => "version_check.pass_failed",
-            Self::WorkerEnrolled { .. } => "worker.enrolled",
-            Self::WorkerApproved { .. } => "worker.approved",
-            Self::WorkerPaused { .. } => "worker.paused",
-            Self::WorkerResumed { .. } => "worker.resumed",
-            Self::WorkerRevoked { .. } => "worker.revoked",
-            Self::WorkerReaped { .. } => "worker.reaped",
-            Self::WorkerSettingRejected { .. } => "worker.setting_rejected",
-            Self::WorkerReportFailed { .. } => "worker.report_failed",
-            Self::WorkerWarning { .. } => "worker.warning",
-            Self::WorkerError { .. } => "worker.error",
-            Self::BuildStarted { .. } => "build.started",
-            Self::BuildSucceeded { .. } => "build.succeeded",
-            Self::WorkerRegistered { .. } => "worker.registered",
-            Self::WorkerConfigChanged { .. } => "worker.config_changed",
-            Self::WorkerSettingsSaved { .. } => "worker.settings_saved",
-            Self::BuildFailed { .. } => "build.failed",
-            Self::BuildPublished { .. } => "build.published",
-            Self::BuildCompletionRejected { .. } => "build.completion_rejected",
-            Self::BuildRecordFailed { .. } => "build.record_failed",
-            Self::BuildCancelled { .. } => "build.cancelled",
-            Self::BuildDeleted { .. } => "build.deleted",
-            Self::StartupEnqueueFailed { .. } => "build.startup_enqueue_failed",
-            Self::PackageChanged { .. } => "package.changed",
-            Self::SourceEdited { .. } => "source.edited",
-            Self::SourceMetadataFailed { .. } => "source.metadata_failed",
-            Self::CheckoutRemoveFailed { .. } => "source.checkout_remove_failed",
-            Self::DepsUnresolved { .. } => "deps.unresolved",
-            Self::DepsReplaced { .. } => "deps.replaced",
-            Self::DepsDropped { .. } => "deps.dropped",
-            Self::UpdateSkipped { .. } => "update.skipped",
-            Self::BulkAddResolveFailed { .. } => "bulk_add.resolve_failed",
-            Self::OperationAborted { .. } => "operation.aborted",
-            Self::SettingChanged { .. } => "setting.changed",
-            Self::SettingReset { .. } => "setting.reset",
-            Self::ScheduleInvalid { .. } => "schedule.invalid",
-            Self::ScheduleOutdated { .. } => "schedule.outdated",
-            Self::SignInRefused { .. } => "auth.sign_in_refused",
-            Self::TokenRegenerated {} => "auth.token_regenerated",
-            Self::DumpExported { .. } => "dump.exported",
-            Self::RestoreApplied { .. } => "restore.applied",
-            Self::RestorePackageFailed { .. } => "restore.package_failed",
-            Self::RestoreCaReplaced {} => "restore.ca_replaced",
-            Self::MirrorRankFailed { .. } => "mirrors.rank_failed",
-            Self::OfficialReposRefreshFailed { .. } => "official_repos.refresh_failed",
-            Self::RepoCommitRetried { .. } => "repo.commit_retry",
-            Self::RepoFileFailed { .. } => "repo.file_failed",
-            Self::RepoSwept { .. } => "repo.swept",
-            Self::RepoSweepFailed { .. } => "repo.sweep_failed",
-        }
-    }
-
     /// How much attention it deserves, from the kind rather than the caller.
     ///
     /// Exhaustive with no default arm, so a new event does not compile until it

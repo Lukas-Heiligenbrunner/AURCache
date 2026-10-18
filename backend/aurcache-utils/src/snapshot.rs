@@ -210,13 +210,15 @@ impl SnapshotStore {
     /// Global only: the packages that need it are identified by what their
     /// PKGBUILD does when sourced, which is known before any package row
     /// exists. A per-package override can layer on later by passing the id.
-    async fn parse_network(&self) -> bool {
+    async fn parse_network(&self) -> anyhow::Result<bool> {
         let Some(db) = &self.db else {
-            return false;
+            return Ok(false);
         };
-        crate::settings::get(db, crate::settings::key::PARSE_NETWORK, None)
-            .await
-            .value
+        Ok(
+            crate::settings::get(db, crate::settings::key::PARSE_NETWORK, None)
+                .await?
+                .value,
+        )
     }
 
     /// Return the parsed `.SRCINFO` for `source_data`, fetching it if not cached.
@@ -562,7 +564,7 @@ impl SnapshotStore {
 
         // Read once (see the fetch path): both consumers below want the same
         // answer, and each call is a DB round trip.
-        let network = self.parse_network().await;
+        let network = self.parse_network().await?;
         let CheckedOutSource { commit, raw } = self.checkout(source_data, network).await?;
 
         let changed = previous_commit != Some(commit);
@@ -605,7 +607,7 @@ impl SnapshotStore {
 
         // Read once: a DB round trip per call, and both consumers below want
         // the same answer.
-        let network = self.parse_network().await;
+        let network = self.parse_network().await?;
         // Cached under another patch: the pristine snapshot is already here,
         // and only the patch has to be applied again. Fetching is `refresh`'s
         // job; doing it here too cost a round trip to the remote and a fresh
@@ -1583,7 +1585,6 @@ license=('MIT')
     /// remote in tests.
     fn create_aur_git_repo(aur_root: &Path, pkgbase: &str, version: &str) -> PathBuf {
         let repo_path = aur_root.join(format!("{pkgbase}.git"));
-        let repo = Repository::init(&repo_path).unwrap();
 
         let pkgbuild = format!(
             "pkgname={pkgbase}\npkgver={version}\npkgrel=1\narch=('x86_64')\ndepends=()\nsource=()\nsha256sums=()\npackage() {{\n  :\n}}\n"
@@ -1592,19 +1593,10 @@ license=('MIT')
             "pkgbase = {pkgbase}\n\tpkgver = {version}\n\tpkgrel = 1\n\narch = x86_64\n\npkgname = {pkgbase}\n"
         );
 
-        std::fs::write(repo_path.join("PKGBUILD"), pkgbuild).unwrap();
-        std::fs::write(repo_path.join(".SRCINFO"), srcinfo).unwrap();
-
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("PKGBUILD")).unwrap();
-        index.add_path(Path::new(".SRCINFO")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = Signature::now("Test", "test@example.com").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-
+        crate::test_git::create_repo(
+            &repo_path,
+            &[("PKGBUILD", &pkgbuild), (".SRCINFO", &srcinfo)],
+        );
         repo_path
     }
 

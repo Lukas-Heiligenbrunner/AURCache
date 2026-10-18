@@ -35,7 +35,14 @@ pub fn start_update_version_checking(services: Services) -> JoinHandle<()> {
 
             let check_interval =
                 settings::get(&services.db, settings::key::VERSION_CHECK_INTERVAL, None).await;
-            tokio::time::sleep(Duration::from_secs(check_interval.value.0.max(1))).await;
+            let delay = match check_interval {
+                Ok(interval) => interval.value.0.max(1),
+                Err(error) => {
+                    error!("could not read version-check interval: {error}");
+                    30
+                }
+            };
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
     })
 }
@@ -176,7 +183,7 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
     // Reuses the auto-update job's own selection rather than restating it:
     // out-of-date packages whose last build succeeded. A package whose build
     // is failing stays flagged for a human instead of being retried in a loop.
-    let build_now = settings::get(db, settings::key::BUILD_ON_NEW_VERSION, None).await;
+    let build_now = settings::get(db, settings::key::BUILD_ON_NEW_VERSION, None).await?;
     if build_now.value
         && let Err(e) = package_update_all_outdated(services).await
     {

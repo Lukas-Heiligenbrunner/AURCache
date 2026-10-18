@@ -311,12 +311,18 @@ pub enum SourcesMoved {
 pub async fn vcs_sources_moved(
     db: &DatabaseConnection,
     package_id: i32,
+    platform: pacman_mirrors::platforms::Platform,
     now: &BTreeMap<String, String>,
 ) -> anyhow::Result<SourcesMoved> {
     if now.is_empty() {
         return Ok(SourcesMoved::Unknown);
     }
-    let built = latest_successful_build_vcs_sources(db, package_id).await?;
+    let built = aurcache_db::helpers::builds::latest_successful_build_vcs_sources_on(
+        db,
+        package_id,
+        Some(platform),
+    )
+    .await?;
     if built.is_empty() {
         return Ok(SourcesMoved::Unknown);
     }

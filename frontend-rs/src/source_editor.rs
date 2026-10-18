@@ -8,15 +8,102 @@
 //! only way to add a package whose PKGBUILD fails to parse, since there is no
 //! package to fix afterwards.
 //!
-//! What is shared is the shape and the rules for showing it: which file is
-//! open, whether it differs from upstream, and where the buttons go. Loading
-//! and saving are the caller's, because that is the part that genuinely
-//! differs — a component that did both behind a flag would be two components
-//! wearing one name.
+//! Both flows share file loading, request invalidation and presentation.
+//! Callers own saving: an existing package persists its patch immediately,
+//! while a preview keeps edits until the package is added.
 //!
 //! No syntax highlighting: a textarea needs no JS editor component.
 
 use dioxus::prelude::*;
+
+/// Identifies the source independently of the component's current route.
+#[derive(Clone)]
+pub enum SourceLocation {
+    Package(String),
+    Preview(aurcache_client::SourceData),
+}
+
+#[derive(Default)]
+struct Requests(u64);
+impl Requests {
+    fn begin(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+    fn accepts(&self, request: u64) -> bool {
+        self.0 == request
+    }
+}
+
+/// Shared loading state for both editors. Resetting invalidates outstanding requests.
+#[derive(Clone, Copy)]
+pub struct FileEditor {
+    pub selected: Signal<Option<String>>,
+    pub loaded: Signal<Option<aurcache_client::SourceFileContent>>,
+    pub draft: Signal<String>,
+    pub error: Signal<Option<String>>,
+    pub loading: Signal<bool>,
+    requests: Signal<Requests>,
+}
+
+pub fn use_file_editor() -> FileEditor {
+    FileEditor {
+        selected: use_signal(|| None),
+        loaded: use_signal(|| None),
+        draft: use_signal(String::new),
+        error: use_signal(|| None),
+        loading: use_signal(|| false),
+        requests: use_signal(Requests::default),
+    }
+}
+
+impl FileEditor {
+    pub fn reset(mut self) {
+        self.requests.write().begin();
+        self.selected.set(None);
+        self.loaded.set(None);
+        self.draft.set(String::new());
+        self.error.set(None);
+        self.loading.set(false);
+    }
+
+    pub async fn open(mut self, source: SourceLocation, path: String, saved: Option<String>) {
+        let generation = self.requests.write().begin();
+        let draft_before = self.draft.peek().clone();
+        self.loading.set(true);
+        self.error.set(None);
+        let result = async {
+            let client = crate::api::client()?;
+            match source {
+                SourceLocation::Package(pkgbase) => client.get_source_file(&pkgbase, &path).await,
+                SourceLocation::Preview(source) => client.preview_source_file(&source, &path).await,
+            }
+            .map_err(|e| e.to_string())
+        }
+        .await;
+        if !self.requests.peek().accepts(generation) {
+            return;
+        }
+        self.loading.set(false);
+        match result {
+            Ok(content) => {
+                let same_file = self.selected.peek().as_deref() == Some(path.as_str());
+                if !same_file || *self.draft.peek() == draft_before {
+                    self.draft.set(saved.unwrap_or_else(|| {
+                        content
+                            .patched_content
+                            .as_ref()
+                            .unwrap_or(&content.original_content)
+                            .clone()
+                    }));
+                }
+                self.loaded.set(Some(content));
+                self.selected.set(Some(path));
+            }
+            Err(error) => self.error.set(Some(error)),
+        }
+    }
+}
 
 /// A file list beside an editor for the file selected in it.
 #[component]
@@ -38,6 +125,7 @@ pub fn SourcePane(
     /// The text being edited. A signal rather than a value and a callback,
     /// because the caller has to read it to save it.
     draft: Signal<String>,
+    #[props(default = false)] loading: bool,
     /// Whether the open file differs from what was loaded into it.
     dirty: bool,
     /// Whether the open file already carried a change before this edit.
@@ -118,6 +206,7 @@ pub fn SourcePane(
                             }
                             {notices}
                             textarea {
+                                disabled: loading,
                                 class: "textarea textarea-bordered font-mono text-xs w-full leading-snug {height}",
                                 spellcheck: "false",
                                 value: "{draft}",
@@ -185,5 +274,25 @@ mod tests {
             1,
             "{html}"
         );
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::Requests;
+    #[test]
+    fn a_late_response_cannot_replace_the_new_selection() {
+        let mut requests = Requests::default();
+        let first = requests.begin();
+        let second = requests.begin();
+        assert!(!requests.accepts(first));
+        assert!(requests.accepts(second));
+    }
+    #[test]
+    fn navigation_invalidates_even_without_a_new_file() {
+        let mut requests = Requests::default();
+        let old_package = requests.begin();
+        requests.begin();
+        assert!(!requests.accepts(old_package));
     }
 }
