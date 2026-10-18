@@ -360,8 +360,10 @@ async fn sync_dependency_graph(
     pkg_model: &packages::Model,
     deps: &PkgDeps,
 ) -> anyhow::Result<DependencyGraph> {
-    let (dep_constraints_by_pkgbase, dep_packages) =
-        prepare_graph(services, pkg_model, deps).await?;
+    let PreparedGraph {
+        edges: dep_constraints_by_pkgbase,
+        packages: dep_packages,
+    } = prepare_graph(services, pkg_model, deps).await?;
     let txn = aurcache_db::helpers::txn::begin_write(&services.db).await?;
     sync_dependency_rows(
         &txn,
@@ -393,10 +395,13 @@ async fn sync_dependency_graph(
     Ok(DependencyGraph { deps: deps_map })
 }
 
-type PreparedGraph = (
-    HashMap<String, Vec<crate::pkg::Constraint>>,
-    HashMap<String, packages::Model>,
-);
+/// A package's resolved dependency edges, with every dependee's row.
+struct PreparedGraph {
+    /// The constraints on each dependee, keyed by its pkgbase.
+    edges: HashMap<String, Vec<crate::pkg::Constraint>>,
+    /// The row of each dependee in `edges`, by the same key.
+    packages: HashMap<String, packages::Model>,
+}
 
 async fn prepare_graph(
     services: &Services,
@@ -409,7 +414,7 @@ async fn prepare_graph(
     if packages.len() != edges.len() {
         bail!("a dependency disappeared during resolution; retry the update");
     }
-    Ok((edges, packages))
+    Ok(PreparedGraph { edges, packages })
 }
 
 async fn announce_unblocked(services: &Services, ids: &[i32]) {
@@ -471,7 +476,7 @@ pub async fn edit_package(
     .update(&txn)
     .await?;
     let mut unblocked = Vec::new();
-    if let Some((edges, packages)) = graph {
+    if let Some(PreparedGraph { edges, packages }) = graph {
         sync_dependency_rows(&txn, original.id, &edges, &packages).await?;
         unblocked = crate::worker_complete::resync_pending_builds(&txn, original.id).await?;
     }
