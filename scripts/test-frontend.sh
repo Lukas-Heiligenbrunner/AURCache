@@ -453,9 +453,12 @@ echo "==> all ${#ROUTES[@]} routes rendered"
 # queue something, take it back. That needs a session rather than one
 # --dump-dom per assertion, so it lives in Rust. The browser is the test
 # crate's business — it resolves Chrome, fetches a matching chromedriver and
-# stops both — so there is nothing to start or clean up here.
-echo "==> checking interactions"
+# stops both — so there is nothing to start or clean up here. The same run
+# opens each page on a phone's screens and fails on anything cut off at the
+# edge. One test at a time: they share the server, and the interactions change
+# what it holds.
+echo "==> checking interactions and phone screens"
 ( cd "$PROJECT_DIR/frontend-rs" \
     && AURCACHE_UI="http://localhost:$API_PORT" AURCACHE_ONLINE="$ONLINE" \
-       timeout 240 cargo test --quiet --test browser -- --ignored ) \
+       timeout 360 cargo test --quiet --test browser -- --ignored --test-threads=1 ) \
     || fail "interaction tests failed"

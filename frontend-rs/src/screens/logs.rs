@@ -825,7 +825,10 @@ fn LogTable(
                             td { class: "{WIDE_ONLY} w-px whitespace-nowrap text-sm",
                                 {actor(entry.user.as_deref())}
                             }
-                            td { class: "text-sm",
+                            // A word longer than a phone's column -- a git
+                            // build's version, say -- breaks rather than
+                            // widening the table past the screen.
+                            td { class: "text-sm [overflow-wrap:anywhere]",
                                 SeverityBadge { severity: entry.severity }
                                 EntryText { entry: entry.clone() }
                             }

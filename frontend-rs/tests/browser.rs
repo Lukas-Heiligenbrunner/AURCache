@@ -54,7 +54,28 @@ impl Session {
     /// Start Chrome. thirtyfour downloads and supervises the matching
     /// chromedriver itself, so nothing outside has to.
     async fn start() -> Self {
+        Self::launch(DesiredCapabilities::chrome()).await
+    }
+
+    /// Start Chrome emulating a phone's screen: its size in CSS pixels, its
+    /// pixel density and touch, as the devtools device toolbar does.
+    async fn start_on(screen: &Screen) -> Self {
         let mut caps = DesiredCapabilities::chrome();
+        caps.add_experimental_option(
+            "mobileEmulation",
+            serde_json::json!({
+                "deviceMetrics": {
+                    "width": screen.width,
+                    "height": screen.height,
+                    "pixelRatio": screen.pixel_ratio,
+                },
+            }),
+        )
+        .expect("mobile emulation");
+        Self::launch(caps).await
+    }
+
+    async fn launch(mut caps: thirtyfour::ChromeCapabilities) -> Self {
         caps.set_headless().expect("headless");
         caps.add_arg("--no-sandbox").expect("no-sandbox");
         caps.add_arg("--disable-gpu").expect("disable-gpu");
@@ -283,6 +304,189 @@ async fn interactions() {
     removing_a_package_takes_it_out_of_the_list(&session).await;
 
     session.stop().await;
+}
+
+/// A phone's screen, in the CSS pixels the browser lays the page out in.
+struct Screen {
+    name: &'static str,
+    width: u32,
+    height: u32,
+    pixel_ratio: f64,
+}
+
+/// A Galaxy Z Fold 7's two screens, as measured on the device less the
+/// browser's toolbars. They fall either side of the layout's `md` breakpoint
+/// and both below `lg`, so between them they see each narrow layout.
+const PHONE_SCREENS: [Screen; 2] = [
+    Screen {
+        name: "cover screen",
+        width: 412,
+        height: 813,
+        pixel_ratio: 2.63,
+    },
+    Screen {
+        name: "inner screen",
+        width: 984,
+        height: 980,
+        pixel_ratio: 2.0,
+    },
+];
+
+/// A page to look at, and text it shows only once its data is in.
+struct Page {
+    path: &'static str,
+    loaded: &'static str,
+}
+
+const PHONE_PAGES: &[Page] = &[
+    Page {
+        path: "/",
+        loaded: "Longest builds",
+    },
+    Page {
+        path: "/packages",
+        loaded: "Dependencies (2)",
+    },
+    Page {
+        path: "/packages/add",
+        loaded: "Applied to every package above",
+    },
+    Page {
+        path: "/package/hello",
+        loaded: "Remove package",
+    },
+    Page {
+        path: "/package/paru/builds",
+        loaded: "Page 1 of",
+    },
+    Page {
+        path: "/package/hello/build/1",
+        loaded: "took 43s",
+    },
+    Page {
+        path: "/package/neofetch/config-files",
+        loaded: "package override",
+    },
+    Page {
+        path: "/builds",
+        loaded: "Page 1 of",
+    },
+    Page {
+        path: "/workers",
+        loaded: "builder-01",
+    },
+    Page {
+        path: "/worker/builder-01",
+        loaded: "450 giraffes",
+    },
+    Page {
+        path: "/logs",
+        loaded: "no space left on device",
+    },
+    Page {
+        path: "/settings",
+        loaded: "Max artifact size",
+    },
+    Page {
+        path: "/settings/config-files",
+        loaded: "stored",
+    },
+    Page {
+        path: "/no/such/page",
+        loaded: "Not found",
+    },
+];
+
+/// Whatever is wider than the screen, one line each, or "ok".
+///
+/// Two ways to be: scrolling sideways, as the shell's `main` and the tables'
+/// wrappers do with anything too wide for them, or sticking out past the edge
+/// of something that does not scroll, where it is simply cut off. Only the
+/// outermost element sticking out is named, so one wide row is one line rather
+/// than one per cell.
+///
+/// Text that cannot wrap without changing what it says -- a log, a command, a
+/// file name, all preformatted or monospace -- may scroll; that is the one
+/// thing sideways scrolling is for.
+const TOO_WIDE: &str = "
+    const vw = document.documentElement.clientWidth;
+    const label = el => [el.tagName.toLowerCase(),
+        ...(el.getAttribute('class') || '').split(/\\s+/).filter(Boolean).slice(0, 4)].join('.');
+    const text = el => JSON.stringify((el.innerText || '').replace(/\\s+/g, ' ').slice(0, 50));
+    const scrolls = el => ['auto', 'scroll'].includes(getComputedStyle(el).overflowX);
+    const verbatim = el => {
+        const style = getComputedStyle(el);
+        return style.whiteSpace.startsWith('pre') || style.fontFamily.includes('monospace');
+    };
+    const past = el => el.getBoundingClientRect().right > vw + 1;
+    const out = [];
+    for (const el of document.querySelectorAll('body *')) {
+        if (scrolls(el) && el.scrollWidth > el.clientWidth + 1 && !verbatim(el)) {
+            out.push(`${label(el)} scrolls sideways, ${el.scrollWidth}px in ${el.clientWidth}px: ${text(el)}`);
+        }
+        if (!past(el) || el.getBoundingClientRect().width === 0) { continue; }
+        if (getComputedStyle(el).visibility === 'hidden') { continue; }
+        let p = el.parentElement, inScroller = false;
+        for (; p && p !== document.body; p = p.parentElement) {
+            if (scrolls(p)) { inScroller = true; break; }
+        }
+        if (inScroller) { continue; }
+        if (el.parentElement !== document.body && past(el.parentElement)) { continue; }
+        out.push(`${label(el)} is cut off at ${Math.round(el.getBoundingClientRect().right)}px: ${text(el)}`);
+    }
+    return out.length ? out.join('\\n') : 'ok';";
+
+/// No page is wider than a phone's screen.
+///
+/// Something too wide either scrolls sideways or is cut off, and on a phone
+/// both hide it: the build log's controls and half of every list's columns sat
+/// off to the right, and the source editor was squeezed one character wide,
+/// while every other check here passed -- none of them looks at width, and
+/// they run in a desktop-sized window.
+#[tokio::test]
+#[ignore = "needs the stack from scripts/test-frontend.sh"]
+async fn every_page_fits_a_phone_screen() {
+    let mut pages: Vec<&Page> = PHONE_PAGES.iter().collect();
+    // Fetches the PKGBUILD from the AUR, like the source editor's route checks.
+    let editor = Page {
+        path: "/package/hello/source/PKGBUILD",
+        loaded: "Save & Rebuild",
+    };
+    if std::env::var("AURCACHE_ONLINE").as_deref() == Ok("1") {
+        pages.push(&editor);
+    }
+
+    let mut too_wide = Vec::new();
+    for screen in &PHONE_SCREENS {
+        let session = Session::start_on(screen).await;
+        // Without emulation the page lays out at the desktop window's width
+        // and every page passes.
+        session.open("/").await;
+        let width: u32 = session
+            .eval("return document.documentElement.clientWidth;".to_string())
+            .await;
+        assert_eq!(width, screen.width, "the {} was not emulated", screen.name);
+        for page in &pages {
+            session.open(page.path).await;
+            session
+                .wait_until(&format!("{} to load", page.path), |t| {
+                    t.contains(page.loaded)
+                })
+                .await;
+            // `eval` yields `Default` when a script fails, so an empty report
+            // would pass for a check that never ran; success is spelled out.
+            let report: String = session.eval(TOO_WIDE.to_string()).await;
+            if report != "ok" {
+                too_wide.push(format!("{} on the {}:\n{report}", page.path, screen.name));
+            }
+        }
+        session.stop().await;
+    }
+    assert!(
+        too_wide.is_empty(),
+        "wider than the screen:\n\n{}",
+        too_wide.join("\n\n")
+    );
 }
 
 /// A link outlives what it names -- a log entry, a bookmark, a pasted URL --
