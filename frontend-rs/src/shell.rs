@@ -21,6 +21,7 @@ const DRAWER_ID: &str = "menu-drawer";
 #[component]
 pub fn MenuShell() -> Element {
     crate::notice::use_notice_provider();
+    let section = use_route::<Route>().menu_entry();
     rsx! {
         crate::notice::NoticeToast {}
         div { class: "drawer lg:drawer-open",
@@ -33,14 +34,17 @@ pub fn MenuShell() -> Element {
             // only guess at a height, overshoot, and leave the window scrolling
             // behind the pane that is already scrolling.
             div { class: "drawer-content flex flex-col h-screen overflow-hidden bg-base-200",
-                // Only exists below `lg`, where the drawer is collapsed.
+                // Only exists below `lg`, where the drawer is collapsed. It
+                // names the section the open page is in -- the one thing the
+                // hidden menu would otherwise have said -- since a page's own
+                // heading can be a long way down a phone's screen.
                 div { class: "navbar bg-base-100 shadow-sm lg:hidden",
                     label {
                         r#for: DRAWER_ID,
                         class: "btn btn-square btn-ghost drawer-button",
                         MenuIcon {}
                     }
-                    span { class: "font-bold px-2", "AURCache" }
+                    span { class: "font-bold px-2", {section.map_or("AURCache", MenuEntry::label)} }
                 }
 
                 // The one scrollbar for pages that simply run long. A page
@@ -111,31 +115,31 @@ fn SideMenu() -> Element {
                 MenuSection { title: "General",
                     MenuLink {
                         to: Route::Dashboard {},
-                        label: "Dashboard",
+                        label: MenuEntry::Dashboard.label(),
                         active: active == Some(MenuEntry::Dashboard),
                         icon: rsx! { DashboardIcon {} },
                     }
                     MenuLink {
                         to: Route::Packages { view: ViewParams::default(), q: String::new() },
-                        label: "Packages",
+                        label: MenuEntry::Packages.label(),
     active: active == Some(MenuEntry::Packages),
                         icon: rsx! { PackagesIcon {} },
                     }
                     MenuLink {
                         to: Route::Builds { view: ViewParams::default(), q: String::new() },
-                        label: "Builds",
+                        label: MenuEntry::Builds.label(),
     active: active == Some(MenuEntry::Builds),
                         icon: rsx! { BuildsIcon {} },
                     }
                     MenuLink {
                         to: Route::Logs { view: crate::listing::ViewParams::default() },
-                        label: "Logs",
+                        label: MenuEntry::Logs.label(),
                         active: active == Some(MenuEntry::Logs),
                         icon: rsx! { LogsIcon {} },
                     }
                     MenuLink {
                         to: Route::Workers {},
-                        label: "Workers",
+                        label: MenuEntry::Workers.label(),
                         active: active == Some(MenuEntry::Workers),
                         icon: rsx! { WorkersIcon {} },
                     }
@@ -144,7 +148,7 @@ fn SideMenu() -> Element {
                 MenuSection { title: "Settings",
                     MenuLink {
                         to: Route::Settings {},
-                        label: "Settings",
+                        label: MenuEntry::Settings.label(),
                         active: active == Some(MenuEntry::Settings),
                         icon: rsx! { SettingsIcon {} },
                     }
@@ -522,6 +526,26 @@ mod tests {
             assert!(
                 html.contains(&format!("href=\"{href}\"")),
                 "no link to {href}: {html}"
+            );
+        }
+    }
+
+    /// On a phone the menu is folded away, so the top bar says which section
+    /// the page is in -- the section, not the page: a package's builds are
+    /// still in Packages. A page with no section keeps the product's name.
+    #[test]
+    fn the_top_bar_names_the_section() {
+        for (path, section) in [
+            ("/", "Dashboard"),
+            ("/package/hello/builds", "Packages"),
+            ("/worker/builder-01", "Workers"),
+            ("/settings/config-files", "Settings"),
+            ("/no/such/page", "AURCache"),
+        ] {
+            let html = render_at(path);
+            assert!(
+                html.contains(&format!("<span class=\"font-bold px-2\">{section}</span>")),
+                "{path} should say {section}: {html}"
             );
         }
     }

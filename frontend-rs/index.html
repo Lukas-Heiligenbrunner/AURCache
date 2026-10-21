@@ -28,6 +28,13 @@
          box mean anything at all. */
       .chart-box > div { height: 100%; }
 
+      /* daisyUI pads a card by 2rem a side, which on a phone is a sixth of
+         the screen spent on margins inside margins. Below `md` it is halved,
+         through the variable daisyUI reads so `card-compact` still wins. */
+      @media (max-width: 767.98px) {
+        :root { --padding-card: 1rem; }
+      }
+
       .series-0 .chart-line { stroke: oklch(var(--p)); }
       .series-1 .chart-line { stroke: oklch(var(--su)); }
       .dx-grid-label {

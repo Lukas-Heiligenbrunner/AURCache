@@ -212,27 +212,47 @@ enum Editor {
 }
 
 impl Editor {
-    /// Whether this control wants a line to itself.
-    fn is_stacked(&self) -> bool {
-        matches!(self, Self::Text { wide: true, .. })
+    fn layout(&self) -> RowLayout {
+        match self {
+            Self::Toggle => RowLayout::Beside,
+            Self::Text { wide: true, .. } => RowLayout::Below,
+            Self::Text { wide: false, .. } | Self::Schedule { .. } => RowLayout::BesideWhenRoom,
+        }
     }
 }
 
-/// How a row arranges its label and its control.
-fn row_layout(stacked: bool) -> &'static str {
-    if stacked {
-        "flex-col"
-    } else {
-        "flex-wrap items-start justify-between"
+/// Where a row puts its control.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum RowLayout {
+    /// Beside the label at any width: a switch is narrow enough to.
+    Beside,
+    /// Beside the label, or under it on a phone, where a field and a label
+    /// side by side squeeze each other into a column a few words wide.
+    #[default]
+    BesideWhenRoom,
+    /// Under the label at any width, for values too long to sit beside their
+    /// name -- a container image reference is the case that forced this.
+    Below,
+}
+
+impl RowLayout {
+    fn classes(self) -> &'static str {
+        match self {
+            Self::Beside => "items-start justify-between",
+            Self::BesideWhenRoom => {
+                "flex-col md:flex-row md:flex-wrap md:items-start md:justify-between"
+            }
+            Self::Below => "flex-col",
+        }
     }
 }
 
 /// A text field wide enough for what it holds.
 ///
-/// The wide case is on its own line already (see [`Editor::is_stacked`]), so it
-/// takes the row rather than a fixed width.
+/// Wherever it is under its label (see [`RowLayout`]) it takes the row rather
+/// than a fixed width.
 fn text_width(wide: bool) -> &'static str {
-    if wide { "w-full" } else { "w-64" }
+    if wide { "w-full" } else { "w-full md:w-64" }
 }
 
 /// Whether this scope holds a stored value that a reset could clear.
@@ -316,16 +336,12 @@ fn RowShell(
     description: String,
     #[props(default)] warning: Option<String>,
     source: SettingSource,
-    /// Put the control on its own line under the label. For values too long to
-    /// sit beside their name without squeezing it into a column of single
-    /// words — a container image reference is the case that forced this.
-    #[props(default = false)]
-    stacked: bool,
+    #[props(default)] layout: RowLayout,
     children: Element,
 ) -> Element {
     rsx! {
         div {
-            class: "py-3 flex gap-3 {row_layout(stacked)}",
+            class: "py-3 flex gap-3 {layout.classes()}",
             div { class: "min-w-0 flex-1",
                 div { class: "flex items-center gap-2 flex-wrap",
                     span { class: "font-medium text-sm", "{label}" }
@@ -366,7 +382,7 @@ fn SettingRow(
     let dirty = draft().is_dirty();
 
     rsx! {
-        RowShell { setting, label, description, warning, source, stacked: editor.is_stacked(),
+        RowShell { setting, label, description, warning, source, layout: editor.layout(),
             {
                 let control = match editor {
                     Editor::Toggle => rsx! {
@@ -387,7 +403,9 @@ fn SettingRow(
                         TextField { setting, draft, placeholder, wide, locked, save }
                     },
                     Editor::Schedule { placeholder } => rsx! {
-                        div { class: "flex flex-col gap-1",
+                        // The field's width, so the note under it wraps rather than
+                        // pulling the field out of line with the others.
+                        div { class: "flex flex-col gap-1 min-w-0 max-md:flex-1 md:w-64",
                             TextField { setting, draft, placeholder, wide: false, locked, save }
                             ScheduleRuns { setting, value: draft().text() }
                         }
@@ -425,7 +443,7 @@ fn TextField(
     rsx! {
         input {
             r#type: "text",
-            class: "input input-bordered input-sm max-w-full font-mono text-xs {text_width(wide)}",
+            class: "input input-bordered input-sm min-w-0 max-w-full font-mono text-xs {text_width(wide)}",
             disabled: locked,
             placeholder: "{placeholder}",
             value: draft().text(),
@@ -495,6 +513,9 @@ fn schedule_note(preview: &SchedulePreview, date: impl Fn(i64) -> String) -> Sch
 /// The Reset button, in a slot that is held open whether or not this row has
 /// anything to reset — otherwise one stored setting knocks its own field out of
 /// the column every other field lines up in.
+///
+/// Not on a phone, where each field has a line of its own and there is no
+/// column to keep: an empty slot there only stops the field short of the edge.
 #[component]
 fn ResetSlot(
     setting: Setting,
@@ -503,7 +524,8 @@ fn ResetSlot(
     #[props(default)] draft: Option<Signal<EditorDraft>>,
 ) -> Element {
     rsx! {
-        div { class: "w-16 shrink-0 flex justify-end",
+        div {
+            class: if is_stored(source) { "w-16 shrink-0 flex justify-end" } else { "hidden md:flex w-16 shrink-0 justify-end" },
             if is_stored(source) {
                 button {
                     class: "btn btn-ghost btn-sm",
@@ -513,6 +535,15 @@ fn ResetSlot(
                 }
             }
         }
+    }
+}
+
+/// The room a [`ResetSlot`] takes, for a row whose reset is elsewhere, so its
+/// control still lines up with the rest.
+#[component]
+fn NoResetSlot() -> Element {
+    rsx! {
+        div { class: "hidden md:block w-16 shrink-0" }
     }
 }
 
@@ -556,7 +587,7 @@ fn DateFormatRows(
             description: "",
             source,
             select {
-                class: "select select-bordered select-sm w-48",
+                class: "select select-bordered select-sm w-full md:w-48",
                 disabled: locked,
                 onchange: move |e: FormEvent| {
                     let order = DateOrder::ALL
@@ -574,6 +605,7 @@ fn DateFormatRows(
                     }
                 }
             }
+            NoResetSlot {}
         }
 
         RowShell {
@@ -582,7 +614,7 @@ fn DateFormatRows(
             description: "",
             source,
             select {
-                class: "select select-bordered select-sm w-48",
+                class: "select select-bordered select-sm w-full md:w-48",
                 disabled: locked,
                 onchange: move |e: FormEvent| {
                     let clock = Clock::ALL
@@ -600,6 +632,7 @@ fn DateFormatRows(
                     }
                 }
             }
+            NoResetSlot {}
         }
 
         RowShell {
@@ -607,6 +640,7 @@ fn DateFormatRows(
             label: "Leading zeros",
             description: "Pad the day and month to two digits.",
             source,
+            layout: RowLayout::Beside,
             input {
                 r#type: "checkbox",
                 class: "toggle toggle-primary",
@@ -617,6 +651,7 @@ fn DateFormatRows(
                     save.call(SettingEdit::set(Setting::DateFormat, DateStyle { pad, ..style }.id()));
                 },
             }
+            NoResetSlot {}
         }
 
         div { class: "py-3 flex items-center justify-between gap-3 flex-wrap",

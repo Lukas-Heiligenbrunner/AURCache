@@ -120,6 +120,21 @@ pub enum MenuEntry {
     Settings,
 }
 
+impl MenuEntry {
+    /// The entry's name in the menu, which is also what the phone's top bar
+    /// calls the page.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Builds => "Builds",
+            Self::Packages => "Packages",
+            Self::Logs => "Logs",
+            Self::Workers => "Workers",
+            Self::Settings => "Settings",
+        }
+    }
+}
+
 impl Route {
     /// Which menu entry should be highlighted while this route is open.
     ///
