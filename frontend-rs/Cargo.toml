@@ -46,13 +46,9 @@ dioxus-charts = "0.4"
 # Pinned exactly, and to the same version as `wasm-bindgen-cli-support` in
 # backend/aurcache-api/Cargo.toml, which generates this crate's JS glue when
 # the server embeds the frontend: the two only work as a matching pair. Bump
-# them together.
-#
-# Held at 0.2.128: with 0.2.129, scripts/test-frontend.sh finds five pages
-# that mount but miss part of what they render (the dashboard's chart, the
-# "—" placeholders, the build rows' pointer cursor, the server's name in the
-# log). Run it after a bump; it is what catches this.
-wasm-bindgen = "=0.2.128"
+# them together, and run scripts/test-frontend.sh after: every page boots
+# through that glue, and no unit test loads it.
+wasm-bindgen = "=0.2.129"
 # The client's error type: only named to tell a 404 apart from other failures.
 anyhow = "1"
 # A log entry's payload, read for the entities a row's menu can narrow to.
