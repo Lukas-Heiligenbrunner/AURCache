@@ -6,6 +6,10 @@
 /frontend-rs/dist
 /backend/aurcache-api/web
 
+# Agent worktrees, each a whole checkout with build output of its own: one
+# was 11 GB, copied into every platform's source tarball, and filled the disk.
+/.claude
+
 # Not used by any Dockerfile.
 /docs
 /.git
