@@ -1513,11 +1513,10 @@ license=('MIT')
 
     /// A versioned dependency on a library name, as paru's `.SRCINFO` has.
     ///
-    /// alpm-types 0.12 (with alpm-srcinfo 0.6.4) reads `libalpm.so>=14` as a
-    /// malformed soname and rejects the whole file, so paru -- among the AUR's
-    /// most popular packages -- could not be added or updated. The alpm crates
-    /// are held at the release before for that; this is what tells whether a
-    /// newer one can be taken.
+    /// alpm-types 0.12 (with alpm-srcinfo 0.6.4) read `libalpm.so>=14` as a
+    /// malformed soname and rejected the whole file, so paru -- among the AUR's
+    /// most popular packages -- could not be added or updated. 0.13 parses it
+    /// again; this keeps a later release from bringing the fault back.
     #[test]
     fn a_versioned_dependency_on_a_library_name_parses() {
         let srcinfo = "pkgbase = paru\n\
@@ -1534,9 +1533,9 @@ license=('MIT')
 
     /// A provision whose name continues past `.so`, as librtmp0's does.
     ///
-    /// The same alpm-types 0.12 fault as above: `librtmp.so` reads as a soname
-    /// and the `.0` after it is left over, so the package name it actually is
-    /// never gets tried.
+    /// The same alpm-types 0.12 fault as above: `librtmp.so` read as a soname
+    /// and the `.0` after it was left over, so the package name it actually is
+    /// never got tried.
     #[test]
     fn a_provision_named_after_a_versioned_library_parses() {
         let srcinfo = "pkgbase = librtmp0\n\

@@ -26,7 +26,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 alpm-srcinfo = {workspace = true}
 alpm-pkgbuild = {workspace = true}
-alpm-types = "=0.11.2"
+alpm-types = "0.13.0"
 diffy = {workspace = true}
 lru = "0.19"
 serde = { workspace = true }

@@ -69,11 +69,8 @@ flate2 = "1.1.10"
 tar = "0.4.46"
 utoipa = { version = "6.0.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
-# Held at the release before 2026-10-02: alpm-types 0.12 rejects `libalpm.so>=14`
-# (paru) and `librtmp.so.0` (librtmp0). See the `..._parses` tests beside
-# `a_versioned_dependency_on_a_library_name_parses` before moving these on.
-alpm-srcinfo = "=0.6.3"
-alpm-pkgbuild = "=0.2.4"
+alpm-srcinfo = "0.7.0"
+alpm-pkgbuild = "0.2.6"
 diffy = "0.5"
 
 [profile.release]
