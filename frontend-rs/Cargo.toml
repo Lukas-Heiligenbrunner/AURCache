@@ -99,6 +99,6 @@ dioxus-ssr = "0.7"
 # --all-targets` would otherwise fail on a dependency no wasm build uses.
 # `tests/browser.rs` is gated the same way.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-thirtyfour = "0.37"
+thirtyfour = "0.38"
 serde = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

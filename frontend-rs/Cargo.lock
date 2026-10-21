@@ -3285,9 +3285,9 @@ dependencies = [
 
 [[package]]
 name = "thirtyfour"
-version = "0.37.10"
+version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1bf50fc14946e7a1ea6b1eea2daee2a6a92be91d17853184489bde0dfe349d9"
+checksum = "4ee66d96cfd32e01668efd6ec62caf5f7000438d771a9d673bf0c727bc05fbb6"
 dependencies = [
  "arc-swap",
  "async-trait",
