@@ -28,7 +28,7 @@ alpm-srcinfo = {workspace = true}
 alpm-pkgbuild = {workspace = true}
 alpm-types = "=0.11.2"
 diffy = {workspace = true}
-lru = "0.18"
+lru = "0.19"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = "3.24.0"
