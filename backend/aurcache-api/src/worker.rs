@@ -593,19 +593,26 @@ async fn build_descriptor(
     // trust, and the `git+` sources whose commit it should report back. A
     // parse failure costs neither outright -- the worker can still self-extract
     // the keys, and an unreported source leaves the commit recorded at queue
-    // time standing.
+    // time standing -- as does a PKGBUILD that cannot be read, which reports
+    // no source at all.
     let (pgp_keys, vcs_sources) = match store
         .sourceinfo(&pkg.source_data, pkg.patch.as_deref())
         .await
     {
-        Ok(si) => (
-            si.base
-                .pgp_fingerprints
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            job_vcs_sources(&si),
-        ),
+        Ok(si) => {
+            let pkgbuild = store
+                .pkgbuild(&pkg.source_data, pkg.patch.as_deref())
+                .await
+                .unwrap_or_default();
+            (
+                si.base
+                    .pgp_fingerprints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                job_vcs_sources(&si, &pkgbuild),
+            )
+        }
         Err(_) => (Vec::new(), Vec::new()),
     };
 

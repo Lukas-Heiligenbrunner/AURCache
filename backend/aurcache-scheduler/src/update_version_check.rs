@@ -254,7 +254,7 @@ impl Check<'_> {
         let mut vcs_moved = false;
         if let Some(resolved) = resolved {
             apply_source_metadata(model, &resolved.metadata);
-            vcs_moved = self.vcs_moved(&resolved.sourceinfo, round).await;
+            vcs_moved = self.vcs_moved(resolved, round).await;
         }
         // Only newer counts, never merely different: a VCS package's AUR
         // version is from when its PKGBUILD was last touched, which may be
@@ -280,12 +280,16 @@ impl Check<'_> {
     ///
     /// A sync that fails is logged and counts as not moved: a later round
     /// retries.
-    async fn vcs_moved(
-        &self,
-        sourceinfo: &alpm_srcinfo::SourceInfoV1,
-        round: &mut RoundCache,
-    ) -> bool {
-        match sync_vcs_sources(&self.services.db, self.package.id, sourceinfo, round).await {
+    async fn vcs_moved(&self, resolved: &Resolved, round: &mut RoundCache) -> bool {
+        match sync_vcs_sources(
+            &self.services.db,
+            self.package.id,
+            &resolved.sourceinfo,
+            &resolved.pkgbuild,
+            round,
+        )
+        .await
+        {
             Ok(sync) => sync == VcsSync::Moved,
             Err(e) => {
                 self.services.activity.emit(Event::VcsSyncFailed {

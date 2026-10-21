@@ -64,6 +64,11 @@ impl SourceSnapshot {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Source's .SRCINFO/PKGBUILD could not be parsed"))
     }
+
+    /// The `PKGBUILD`'s text.
+    fn pkgbuild(&self) -> anyhow::Result<String> {
+        read_file_from_archive(&self.archive_bytes, &self.pkgbase, "PKGBUILD")
+    }
 }
 
 /// What [`SnapshotStore::refresh`] found.
@@ -75,9 +80,11 @@ pub enum Refresh {
     Current,
 }
 
-/// A source's parsed `.SRCINFO` and the metadata read beside it.
+/// A source's parsed `.SRCINFO`, its `PKGBUILD` and the metadata read beside
+/// them.
 pub struct Resolved {
     pub sourceinfo: SourceInfoV1,
+    pub pkgbuild: String,
     pub metadata: crate::package::source_metadata::SourceMetadata,
 }
 
@@ -240,6 +247,19 @@ impl SnapshotStore {
         self.get_or_fetch(source_data, patch).await?.active.parsed()
     }
 
+    /// The `PKGBUILD` [`SnapshotStore::sourceinfo`] was parsed from: patched
+    /// when `patch` is.
+    pub async fn pkgbuild(
+        &self,
+        source_data: &SourceData,
+        patch: Option<&str>,
+    ) -> anyhow::Result<String> {
+        self.get_or_fetch(source_data, patch)
+            .await?
+            .active
+            .pkgbuild()
+    }
+
     /// Return the raw archive bytes for `source_data`, fetching it if not cached.
     ///
     /// See [`SnapshotStore::sourceinfo`] for the meaning of `patch`.
@@ -346,12 +366,13 @@ impl SnapshotStore {
         Ok(self.metadata_from_entry(&entry, source_data).await)
     }
 
-    /// The parsed `.SRCINFO` and the metadata, from a single resolve.
+    /// The parsed `.SRCINFO`, the `PKGBUILD` and the metadata, from a single
+    /// resolve.
     ///
-    /// The version check needs both: the `.SRCINFO` to sync VCS sources, and
-    /// the metadata to mirror onto the row. Asking for them separately meant
-    /// two `get_or_fetch` round trips per package per pass — cheap, since the
-    /// second is served from cache, but pointless.
+    /// The version check needs all three: the `.SRCINFO` and `PKGBUILD` to
+    /// sync VCS sources, and the metadata to mirror onto the row. Asking for
+    /// them separately meant two `get_or_fetch` round trips per package per
+    /// pass — cheap, since the second is served from cache, but pointless.
     pub async fn sourceinfo_and_metadata(
         &self,
         source_data: &SourceData,
@@ -361,6 +382,7 @@ impl SnapshotStore {
         Ok(Resolved {
             metadata: self.metadata_from_entry(&entry, source_data).await,
             sourceinfo: entry.active.parsed()?,
+            pkgbuild: entry.active.pkgbuild()?,
         })
     }
 
@@ -380,11 +402,7 @@ impl SnapshotStore {
 
         // Best-effort: a PKGBUILD that cannot be read still leaves the
         // `.SRCINFO`-derived fields usable.
-        if let Ok(pkgbuild) = read_file_from_archive(
-            &entry.active.archive_bytes,
-            &entry.active.pkgbase,
-            "PKGBUILD",
-        ) {
+        if let Ok(pkgbuild) = entry.active.pkgbuild() {
             metadata.maintainer = maintainer_from_pkgbuild(&pkgbuild);
         }
 

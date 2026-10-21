@@ -88,9 +88,13 @@ fn makepkg_source_dir(filename: Option<&str>, url: &str) -> String {
     last.split(".git").next().unwrap_or(last).to_string()
 }
 
-/// The `git+` sources of `sourceinfo`, in the shape a job descriptor carries.
+/// The tracked `git+` sources of a package, in the shape a job descriptor
+/// carries; see [`extract_git_vcs_sources`] for which those are.
 #[must_use]
-pub fn job_vcs_sources(sourceinfo: &SourceInfoV1) -> Vec<JobVcsSource> {
+pub fn job_vcs_sources(sourceinfo: &SourceInfoV1, pkgbuild: &str) -> Vec<JobVcsSource> {
+    if !defines_pkgver(pkgbuild) {
+        return Vec::new();
+    }
     sourceinfo
         .base
         .sources
@@ -110,16 +114,28 @@ pub fn job_vcs_sources(sourceinfo: &SourceInfoV1) -> Vec<JobVcsSource> {
         .collect()
 }
 
-/// Extract all *trackable* `git+` VCS sources from `sourceinfo`.
+/// Extract all *trackable* `git+` VCS sources of a package.
 ///
-/// Only the package base's generic `source` array is considered;
+/// None at all unless its PKGBUILD defines `pkgver()` (see
+/// [`defines_pkgver`]). Only the package base's generic `source` array is
+/// considered;
 /// architecture-specific overrides (`source_x86_64=(...)` etc.) are not
 /// tracked. Sources pinned to an exact `#commit=<sha>` are skipped, since
 /// they're immutable by construction and can never go "out of date" — as are
-/// `#tag=`/`#branch=` values that are themselves a full commit SHA.
+/// `#branch=` values that are themselves a full commit SHA, and every `#tag=`.
+///
+/// A tag can be moved, but it almost never is, and when the maintainer moves to
+/// a new one `pkgver` changes with it, which the version check already sees.
+/// Watching one cost a remote lookup per package on every check -- and an
+/// error whenever its forge was down -- to catch a rebuild under an unchanged
+/// version that no client would install. A moved tag is simply built from
+/// wherever it points the next time the package builds for another reason.
 /// Non-git VCS types (`svn+`, `hg+`, `bzr+`, `fossil+`) are not yet
 /// supported and are skipped.
-fn extract_git_vcs_sources(sourceinfo: &SourceInfoV1) -> Vec<VcsSource> {
+fn extract_git_vcs_sources(sourceinfo: &SourceInfoV1, pkgbuild: &str) -> Vec<VcsSource> {
+    if !defines_pkgver(pkgbuild) {
+        return Vec::new();
+    }
     sourceinfo
         .base
         .sources
@@ -128,13 +144,43 @@ fn extract_git_vcs_sources(sourceinfo: &SourceInfoV1) -> Vec<VcsSource> {
         .collect()
 }
 
-/// Whether a `#branch=`/`#tag=` value is really a pinned commit SHA.
+/// Whether `pkgbuild` defines a `pkgver()` function, the only way a package's
+/// version can follow its sources.
 ///
-/// Some PKGBUILDs write the pin as `#tag=<sha>` (e.g. libgcrypt15's
+/// Without one the version is fixed, and a rebuild from a moved source comes
+/// out under the same `pkgver-pkgrel`, which no client would install: there
+/// is nothing worth a remote lookup. A survey of the AUR found about one in
+/// nine packages with a floating `git+` source but no `pkgver()`, among them
+/// the submodule pattern -- a bare `git+` source next to a pinned parent
+/// (mingw-w64-glib2's `gvdb.git`), checked out at whatever commit the parent
+/// records -- and PKGBUILDs that build a `_commit` of their own (electron14).
+///
+/// A text match, since `.SRCINFO` does not record it: a line opening with
+/// `pkgver()`, or with `function pkgver`, which bash allows without the
+/// parentheses. A `pkgver()` sourced from another file is missed, which costs
+/// only the tracking.
+fn defines_pkgver(pkgbuild: &str) -> bool {
+    pkgbuild.lines().any(|line| {
+        let line = line.trim_start();
+        match line.strip_prefix("function") {
+            Some(rest) if rest.starts_with([' ', '\t']) => rest
+                .trim_start()
+                .strip_prefix("pkgver")
+                .is_some_and(|name_end| name_end.starts_with([' ', '\t', '(', '{'])),
+            _ => line
+                .strip_prefix("pkgver")
+                .is_some_and(|rest| rest.trim_start().starts_with("()")),
+        }
+    })
+}
+
+/// Whether a `#branch=` value is really a pinned commit SHA.
+///
+/// Some PKGBUILDs write a pin as a ref holding a SHA (e.g. libgcrypt15's
 /// `_tag=6e481d6b…` used as `#tag=${_tag}`): makepkg still checks out that
 /// exact commit, so it is immutable like `#commit=` and there is nothing to
 /// track. Only full-length SHAs count (SHA-1's 40 or SHA-256's 64 hex
-/// digits): a short prefix could also be a genuine branch or tag name.
+/// digits): a short prefix could also be a genuine branch name.
 fn is_commit_sha(name: &str) -> bool {
     (name.len() == 40 || name.len() == 64) && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -149,14 +195,12 @@ fn git_vcs_source_from(source: &Source) -> Option<VcsSource> {
     };
 
     let git_ref = match fragment {
-        // Pinned to an exact commit: never changes, nothing to track.
-        Some(GitFragment::Commit(_)) => return None,
-        // A tag/branch value that is a full commit SHA pins the same way
-        // (`#tag=<sha>`): immutable, nothing to track.
-        Some(GitFragment::Branch(name) | GitFragment::Tag(name)) if is_commit_sha(name) => {
-            return None;
-        }
-        Some(GitFragment::Branch(name) | GitFragment::Tag(name)) => name.clone(),
+        // Pinned to an exact commit, or to a tag (see
+        // `extract_git_vcs_sources`): nothing to track.
+        Some(GitFragment::Commit(_) | GitFragment::Tag(_)) => return None,
+        // A branch value that is a full commit SHA pins the same way.
+        Some(GitFragment::Branch(name)) if is_commit_sha(name) => return None,
+        Some(GitFragment::Branch(name)) => name.clone(),
         None => "HEAD".to_string(),
     };
 
@@ -167,7 +211,7 @@ fn git_vcs_source_from(source: &Source) -> Option<VcsSource> {
     })
 }
 
-/// Resolve every trackable git-VCS source in `sourceinfo`, upsert their
+/// Resolve every trackable git-VCS source of a package, upsert their
 /// current commit into `package_vcs_sources`, remove rows for sources no
 /// longer present (e.g. after a PKGBUILD edit changed/removed a VCS source),
 /// and report whether any tracked source's commit moved since last time.
@@ -179,9 +223,10 @@ pub async fn sync_vcs_sources(
     db: &DatabaseConnection,
     package_id: i32,
     sourceinfo: &SourceInfoV1,
+    pkgbuild: &str,
     round: &mut RoundCache,
 ) -> anyhow::Result<VcsSync> {
-    let vcs_sources = extract_git_vcs_sources(sourceinfo);
+    let vcs_sources = extract_git_vcs_sources(sourceinfo, pkgbuild);
 
     let existing: HashMap<String, String> = PackageVcsSources::find()
         .filter(package_vcs_sources::Column::PackageId.eq(package_id))
@@ -270,16 +315,19 @@ pub enum VcsSync {
     Unchanged,
 }
 
-/// Resolve every trackable VCS source of `sourceinfo` to the commit it points
+/// Resolve every trackable VCS source of a package to the commit it points
 /// at right now.
 ///
 /// One `ls-remote` per source, no clone. Errors are per source rather than
 /// fatal: a remote that cannot be reached leaves that source unrecorded, which
 /// reads as unknown downstream and costs at most one redundant rebuild -- where
 /// failing the caller would cost the build itself.
-pub async fn resolve_vcs_commits(sourceinfo: &SourceInfoV1) -> BTreeMap<String, String> {
+pub async fn resolve_vcs_commits(
+    sourceinfo: &SourceInfoV1,
+    pkgbuild: &str,
+) -> BTreeMap<String, String> {
     let mut resolved = BTreeMap::new();
-    for source in extract_git_vcs_sources(sourceinfo) {
+    for source in extract_git_vcs_sources(sourceinfo, pkgbuild) {
         let source_url = source.source_url.clone();
         match tokio::task::spawn_blocking(move || source.resolve_commit()).await {
             Ok(Ok(commit)) => {
@@ -426,7 +474,7 @@ fn source_moved(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_git_vcs_sources, is_commit_sha, source_moved};
+    use super::{defines_pkgver, extract_git_vcs_sources, is_commit_sha, source_moved};
     use std::collections::{BTreeMap, HashMap};
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -564,6 +612,9 @@ mod tests {
         );
     }
 
+    /// A PKGBUILD whose version follows its sources.
+    const VCS_PKGBUILD: &str = "pkgname=demo\npkgver() {\n  git describe\n}\n";
+
     fn srcinfo_with_source(source: &str) -> alpm_srcinfo::SourceInfoV1 {
         let raw = format!(
             "pkgbase = demo\n\tpkgver = 1.0\n\tpkgrel = 1\n\tarch = x86_64\n\tsource = {source}\n\npkgname = demo\n"
@@ -581,7 +632,7 @@ mod tests {
             "git+https://github.com/gpg/libgcrypt.git#tag=6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f",
         );
         assert!(
-            extract_git_vcs_sources(&info).is_empty(),
+            extract_git_vcs_sources(&info, VCS_PKGBUILD).is_empty(),
             "a #tag=<sha> pin must not be tracked"
         );
     }
@@ -593,28 +644,70 @@ mod tests {
             "git+https://example.test/repo.git#branch=6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f",
         );
         assert!(
-            extract_git_vcs_sources(&info).is_empty(),
+            extract_git_vcs_sources(&info, VCS_PKGBUILD).is_empty(),
             "a #branch=<sha> pin must not be tracked"
         );
     }
 
-    /// Genuine tags and branches are still tracked, and a bare `git+` source
-    /// still follows the default branch.
+    /// A named tag is not watched: lib32-orc's
+    /// `orc.git?signed#tag=0.4.44` made a remote lookup on every check.
     #[test]
-    fn real_tags_branches_and_bare_sources_are_still_tracked() {
-        let tagged = srcinfo_with_source("git+https://example.test/repo.git#tag=v1.5.6");
-        let tagged = extract_git_vcs_sources(&tagged);
-        assert_eq!(tagged.len(), 1);
-        assert_eq!(tagged[0].git_ref, "v1.5.6");
+    fn a_named_tag_is_not_tracked() {
+        let info = srcinfo_with_source("git+https://example.test/repo.git?signed#tag=v1.5.6");
+        assert!(
+            extract_git_vcs_sources(&info, VCS_PKGBUILD).is_empty(),
+            "a #tag= source must not be tracked"
+        );
+    }
 
+    /// Genuine branches are still tracked, and a bare `git+` source still
+    /// follows the default branch.
+    #[test]
+    fn branches_and_bare_sources_are_still_tracked() {
         let branched = srcinfo_with_source("git+https://example.test/repo.git#branch=main");
-        let branched = extract_git_vcs_sources(&branched);
+        let branched = extract_git_vcs_sources(&branched, VCS_PKGBUILD);
         assert_eq!(branched.len(), 1);
         assert_eq!(branched[0].git_ref, "main");
 
         let bare = srcinfo_with_source("git+https://example.test/repo.git");
-        let bare = extract_git_vcs_sources(&bare);
+        let bare = extract_git_vcs_sources(&bare, VCS_PKGBUILD);
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].git_ref, "HEAD");
+    }
+
+    /// Without `pkgver()` the version cannot follow the source, so even a
+    /// bare `git+` source is not watched: mingw-w64-glib2's submodule mirror
+    /// `gvdb.git` would otherwise rebuild it on every gvdb commit.
+    #[test]
+    fn nothing_is_tracked_without_pkgver() {
+        let info = srcinfo_with_source("git+https://gitlab.gnome.org/GNOME/gvdb.git");
+        assert!(
+            extract_git_vcs_sources(&info, "pkgname=demo\npkgver=2.89.1\n").is_empty(),
+            "a fixed version has nothing to track"
+        );
+    }
+
+    #[test]
+    fn pkgver_function_is_recognised_in_its_usual_spellings() {
+        for pkgbuild in [
+            "pkgver() {\n}",
+            "pkgver(){ echo 1; }",
+            "  pkgver () {\n}",
+            "function pkgver() {\n}",
+            "function\tpkgver {\n}",
+        ] {
+            assert!(defines_pkgver(pkgbuild), "{pkgbuild:?}");
+        }
+        for pkgbuild in [
+            "pkgver=1.0",
+            "# pkgver() {\n# }",
+            "_pkgver() {\n}",
+            "pkgver_x() {\n}",
+            "functionpkgver() {\n}",
+            "function pkgver_x {\n}",
+            "echo pkgver()",
+        ] {
+            assert!(!defines_pkgver(pkgbuild), "{pkgbuild:?}");
+        }
     }
 }

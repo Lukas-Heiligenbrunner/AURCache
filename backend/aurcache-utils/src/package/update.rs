@@ -237,6 +237,11 @@ async fn package_update_inner(
         .sourceinfo(&pkg_model.source_data, pkg_model.patch.as_deref())
         .await
         .map_err(|e| anyhow!("Failed to resolve source info: {e:#}"))?;
+    let pkgbuild = services
+        .store
+        .pkgbuild(&pkg_model.source_data, pkg_model.patch.as_deref())
+        .await
+        .map_err(|e| anyhow!("Failed to read the PKGBUILD: {e:#}"))?;
     let upstream_version = sourceinfo.base.version.to_string();
     let deps = aurcache_deps::deps_from_srcinfo(
         &sourceinfo,
@@ -249,7 +254,7 @@ async fn package_update_inner(
     // With the update, it's possible some dependencies are no longer needed.
     collect_dropped(services, pkg_model.id, &former).await?;
 
-    let queued_commits = resolve_vcs_commits(&sourceinfo).await;
+    let queued_commits = resolve_vcs_commits(&sourceinfo, &pkgbuild).await;
     let mut requested = pkg_model.clone();
     if !force {
         let mut needed = Vec::new();
