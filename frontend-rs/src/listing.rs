@@ -1454,6 +1454,10 @@ pub fn SortableHeader(
 /// rather than the first page of everything.
 pub const PAGE_SIZE: usize = 100;
 
+/// A list's table. daisyUI's cell padding spends a fifth of a phone's width on
+/// two columns, so it is halved below `md`.
+pub const LIST_TABLE: &str = "table table-zebra max-md:[&_td]:px-2 max-md:[&_th]:px-2";
+
 /// One page of `items`, with the page number that was actually used.
 ///
 /// The page is clamped rather than trusted. Narrowing a filter while on a later

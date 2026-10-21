@@ -4,8 +4,8 @@ use crate::api::client;
 use crate::dates::DateOnly;
 use crate::format::format_duration;
 use crate::listing::{
-    ListControls, ListHeader, Page, Pager, Sort, SortDir, SortKey, SortableHeader, ViewParams,
-    filter_builds, paginate, sort_builds, use_url_search, use_url_view,
+    LIST_TABLE, ListControls, ListHeader, Page, Pager, Sort, SortDir, SortKey, SortableHeader,
+    ViewParams, filter_builds, paginate, sort_builds, use_url_search, use_url_view,
 };
 use crate::routes::Route;
 use crate::status::BuildStatusBadge;
@@ -15,6 +15,9 @@ use dioxus::prelude::*;
 
 /// Columns that only appear once there is room for them.
 const WIDE_ONLY: &str = "hidden md:table-cell";
+/// Columns that wait for a laptop-sized screen: an unfolded phone has room for
+/// everything else.
+const WIDEST_ONLY: &str = "hidden lg:table-cell";
 
 /// Every build, paged in the browser.
 ///
@@ -117,7 +120,7 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                             div { class: "alert mt-2", span { "Nothing matches that filter." } }
                         } else {
                         div { class: "overflow-x-auto",
-                            table { class: "table table-zebra",
+                            table { class: LIST_TABLE,
                                 thead {
                                     tr {
                                         // Sorting by build is sorting by
@@ -129,10 +132,10 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                                         th { class: "{WIDE_ONLY}", "Version" }
                                         SortableHeader { label: "Started", column: SortKey::Time, sort, class: "{WIDE_ONLY}" }
                                         SortableHeader { label: "Duration", column: SortKey::Duration, sort, class: "{WIDE_ONLY}" }
-                                        th { class: "{WIDE_ONLY}", "Platform" }
+                                        th { class: "{WIDEST_ONLY}", "Platform" }
                                         SortableHeader { label: "Worker", column: SortKey::Worker, sort, class: "{WIDE_ONLY}" }
                                         SortableHeader { label: "Size", column: SortKey::Size, sort, class: "{WIDE_ONLY} text-right" }
-                                        SortableHeader { label: "Peak RAM", column: SortKey::Memory, sort, class: "{WIDE_ONLY} text-right" }
+                                        SortableHeader { label: "Peak RAM", column: SortKey::Memory, sort, class: "{WIDEST_ONLY} text-right" }
                                         SortableHeader { label: "Status", column: SortKey::Status, sort, class: "" }
                                     }
                                 }
@@ -162,13 +165,19 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                                             // from the build's own page.
                                             td {
                                                 Link {
-                                                    class: "font-mono",
+                                                    class: "font-mono [overflow-wrap:anywhere]",
                                                     to: Route::Build {
                                                         pkgbase: build.pkg_name.clone(),
                                                         number: build.number,
                                                     },
                                                     onclick: move |e: MouseEvent| e.stop_propagation(),
                                                     "{build.pkg_name}/{build.number}"
+                                                }
+                                                // What the dropped columns said,
+                                                // on a screen too narrow for them.
+                                                div { class: "md:hidden text-xs opacity-60",
+                                                    DateOnly { ts: build.start_time }
+                                                    " · {format_duration(build.elapsed())}"
                                                 }
                                             }
                                             td { class: "{WIDE_ONLY} font-mono text-sm", "{build.version}" }
@@ -178,7 +187,7 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                                             td { class: "{WIDE_ONLY} font-mono text-sm opacity-70",
                                                 {format_duration(build.elapsed())}
                                             }
-                                            td { class: "{WIDE_ONLY} text-sm opacity-70", "{build.platform}" }
+                                            td { class: "{WIDEST_ONLY} text-sm opacity-70", "{build.platform}" }
                                             td { class: "{WIDE_ONLY} text-sm opacity-70",
                                                 if let Some(worker) = build.worker_name.as_deref() {
                                                     "{worker}"
@@ -196,7 +205,7 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                                                 {build_size(build)}
                                             }
                                             td {
-                                                class: "{WIDE_ONLY} text-right font-mono text-sm opacity-70",
+                                                class: "{WIDEST_ONLY} text-right font-mono text-sm opacity-70",
                                                 title: "Peak memory of the build's whole process tree, from its cgroup.",
                                                 {build_peak_memory(build)}
                                             }

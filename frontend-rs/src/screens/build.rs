@@ -423,7 +423,9 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
     rsx! {
         div { class: "card bg-base-100 shadow-xl flex-1 min-h-0",
             div { class: "card-body flex flex-col min-h-0",
-                div { class: "flex items-center gap-3",
+                // Wraps, so on a narrow screen the details take a second line
+                // rather than pushing the controls off the edge.
+                div { class: "flex flex-wrap items-center gap-x-3 gap-y-1",
                     // The same badge the lists use, so a state means the same
                     // thing everywhere and a new one added server-side breaks
                     // the exhaustive match instead of rendering as a guess.

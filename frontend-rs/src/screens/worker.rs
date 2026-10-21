@@ -306,7 +306,7 @@ fn WorkerHeader(
         div { class: "card bg-base-100 shadow-xl",
             div { class: "card-body",
                 div { class: "flex items-center min-h-8",
-                    h1 { class: "card-title block leading-8 break-all",
+                    h1 { class: "card-title block leading-8 break-words",
                         Link {
                             class: "opacity-60 link-hover",
                             to: Route::Workers {},
@@ -744,13 +744,15 @@ fn SettingRow(
     );
 
     rsx! {
-        tr {
-            td { class: "align-top w-1/3",
+        // A row on a wide screen; on a phone the value goes under its
+        // description, which a third of the width squeezed to a word a line.
+        tr { class: "flex flex-col md:table-row",
+            td { class: "align-top md:w-1/3 max-md:pb-1",
                 div { class: "font-mono text-sm", "{decl.key}" }
                 div { class: "text-xs opacity-60", "{decl.description}" }
             }
-            td { class: "align-top",
-                div { class: "flex items-center gap-2",
+            td { class: "align-top max-md:pt-0",
+                div { class: "flex flex-wrap items-center gap-2",
                     {
                         match &decl.kind {
                             ValueKind::Bool => rsx! {

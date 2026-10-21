@@ -750,46 +750,65 @@ fn BuildsChart(points: Vec<GraphDataPoint>) -> Element {
     // width defaults to 100%. Left alone it grows to whatever the card allows
     // and the axis labels come out enormous. A wide, short viewBox in a fixed
     // height gives a chart shaped like a chart.
+    //
+    // A phone gets a narrower viewBox of its own rather than the wide one
+    // shrunk: scaled to a third, the axis labels came out 4px tall in a box
+    // two-thirds empty.
     rsx! {
         // `chart-box` is what stops the chart growing with the window; see the
         // rule in index.html. Without it the fixed height below is advice the
         // svg is free to ignore, and does.
-        div { class: "chart-box h-64",
-            LineChart {
-                width: "100%",
-                height: "100%",
-                viewbox_width: 900,
-                viewbox_height: 260,
-                padding_top: 20,
-                padding_left: 50,
-                padding_right: 30,
-                padding_bottom: 45,
-                series: vec![started, succeeded],
-                labels,
-                // Named explicitly rather than relying on the crate's default,
-                // which is not the class its own docs imply: each series is
-                // grouped as `{class_line}-{n}`, and the CSS below keys on it.
-                class_line: "series",
-                // Its own series labels are drawn past the last point, where
-                // the viewBox clips them. The legend above the chart says the
-                // same thing with room for it.
-                show_line_labels: false,
-                show_grid_ticks: true,
-                show_dotted_grid: false,
-                // Counts start at zero, and letting the axis float makes a
-                // quiet month look like a collapse.
-                lowest: 0.0,
-                // Whole builds; halves on the axis are meaningless.
-                max_ticks: 5,
-                // The crate hardcodes a stroke as an SVG presentation
-                // attribute, which any CSS rule outranks — so a class is
-                // enough to put the lines back under the theme. It puts each
-                // series in a `dx-chart-line-{n}` group, and the rules that
-                // colour them separately live in index.html, since Tailwind
-                // cannot express "a path inside that group".
-                class_line_path: "chart-line",
-                class_line_dot: "chart-line",
-            }
+        div { class: "chart-box h-56 md:hidden",
+            {line_chart(420, 300, vec![started.clone(), succeeded.clone()], labels.clone())}
+        }
+        div { class: "chart-box h-64 hidden md:block",
+            {line_chart(900, 260, vec![started, succeeded], labels)}
+        }
+    }
+}
+
+/// The builds-per-month lines, drawn on a viewBox of the given size.
+fn line_chart(
+    viewbox_width: i32,
+    viewbox_height: i32,
+    series: Vec<Vec<f32>>,
+    labels: Vec<String>,
+) -> Element {
+    rsx! {
+        LineChart {
+            width: "100%",
+            height: "100%",
+            viewbox_width,
+            viewbox_height,
+            padding_top: 20,
+            padding_left: 50,
+            padding_right: 30,
+            padding_bottom: 45,
+            series,
+            labels,
+            // Named explicitly rather than relying on the crate's default,
+            // which is not the class its own docs imply: each series is
+            // grouped as `{class_line}-{n}`, and the CSS below keys on it.
+            class_line: "series",
+            // Its own series labels are drawn past the last point, where
+            // the viewBox clips them. The legend above the chart says the
+            // same thing with room for it.
+            show_line_labels: false,
+            show_grid_ticks: true,
+            show_dotted_grid: false,
+            // Counts start at zero, and letting the axis float makes a
+            // quiet month look like a collapse.
+            lowest: 0.0,
+            // Whole builds; halves on the axis are meaningless.
+            max_ticks: 5,
+            // The crate hardcodes a stroke as an SVG presentation
+            // attribute, which any CSS rule outranks — so a class is
+            // enough to put the lines back under the theme. It puts each
+            // series in a `dx-chart-line-{n}` group, and the rules that
+            // colour them separately live in index.html, since Tailwind
+            // cannot express "a path inside that group".
+            class_line_path: "chart-line",
+            class_line_dot: "chart-line",
         }
     }
 }

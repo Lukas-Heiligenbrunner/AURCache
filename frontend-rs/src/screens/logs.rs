@@ -15,7 +15,7 @@
 //! page would only ever search the page you were already looking at.
 
 use crate::dates::AbsoluteDate;
-use crate::listing::{ListHeader, PAGE_SIZE, Pager, ViewParams, use_url_view};
+use crate::listing::{LIST_TABLE, ListHeader, PAGE_SIZE, Pager, ViewParams, use_url_view};
 use crate::routes::Route;
 use aurcache_client::{
     ActiveOperation, EntityRef, Event, KINDS, LogEntry, LogFilter, PackageRef, Segment, Severity,
@@ -798,7 +798,7 @@ fn LogTable(
 ) -> Element {
     rsx! {
         div { class: "overflow-x-auto",
-            table { class: "table table-zebra",
+            table { class: LIST_TABLE,
                 thead {
                     tr {
                         // The two narrow columns take only what they need, so
@@ -813,8 +813,14 @@ fn LogTable(
                 tbody {
                     for entry in entries.iter() {
                         tr { key: "{entry.id}", class: "group",
-                            td { class: "w-px whitespace-nowrap text-sm opacity-70",
-                                AbsoluteDate { ts: Some(entry.timestamp) }
+                            // On a phone the time drops under the date,
+                            // halving the column the text has to share. The
+                            // minimum keeps the date itself whole rather than
+                            // broken at its hyphens.
+                            td { class: "w-px md:whitespace-nowrap text-sm opacity-70",
+                                div { class: "max-md:min-w-24",
+                                    AbsoluteDate { ts: Some(entry.timestamp) }
+                                }
                             }
                             td { class: "{WIDE_ONLY} w-px whitespace-nowrap text-sm",
                                 {actor(entry.user.as_deref())}

@@ -13,7 +13,7 @@
 
 use crate::dates::RelativeDate;
 use crate::format::now_secs;
-use crate::listing::{ListHeader, ViewParams};
+use crate::listing::{LIST_TABLE, ListHeader, ViewParams};
 use crate::routes::Route;
 use aurcache_client::{ApprovalStatus, Worker, WorkerJoinInfo};
 use aurcache_common::build_state::BuildState;
@@ -22,6 +22,8 @@ use std::collections::HashSet;
 
 /// Columns that only appear once there is room for them.
 const WIDE_ONLY: &str = "hidden lg:table-cell";
+/// Columns a phone drops: what they say moves under the worker's name.
+const MEDIUM_UP: &str = "hidden md:table-cell";
 
 #[component]
 pub fn Workers() -> Element {
@@ -300,14 +302,14 @@ fn WorkersTable(
 
     rsx! {
         div { class: "overflow-x-auto",
-            table { class: "table table-zebra",
+            table { class: LIST_TABLE,
                 thead {
                     tr {
                         th { "Worker" }
                         th { "Status" }
-                        th { "Now" }
+                        th { class: "{MEDIUM_UP}", "Now" }
                         th { class: "{WIDE_ONLY}", "Builds" }
-                        th { "Architectures" }
+                        th { class: "{MEDIUM_UP}", "Architectures" }
                         th { class: "{WIDE_ONLY}", "Reserved for" }
                         th { class: "{WIDE_ONLY}", "Priority" }
                         th { class: "{WIDE_ONLY}", "Type" }
@@ -331,7 +333,7 @@ fn WorkersTable(
                                 // The fingerprint is the identity; the name is
                                 // whatever the machine called itself and is not
                                 // unique.
-                                div { class: "font-mono text-sm flex items-center gap-1",
+                                div { class: "font-mono text-sm flex items-center gap-1 [overflow-wrap:anywhere]",
                                     // The name is the way in. The fingerprint
                                     // is the identity behind it; the name is
                                     // whatever the machine called itself and is
@@ -355,6 +357,10 @@ fn WorkersTable(
                                         }
                                     }
                                 }
+                                div { class: "md:hidden flex flex-wrap items-center gap-x-2 mt-1",
+                                    Liveness { worker: worker.clone() }
+                                    span { class: "text-xs opacity-60", {architectures(worker)} }
+                                }
                             }
                             td {
                                 div { class: "flex flex-wrap gap-1",
@@ -364,11 +370,11 @@ fn WorkersTable(
                                     }
                                 }
                             }
-                            td { Liveness { worker: worker.clone() } }
+                            td { class: "{MEDIUM_UP}", Liveness { worker: worker.clone() } }
                             td { class: "{WIDE_ONLY}",
                                 Record { worker: worker.clone(), fleet_finished }
                             }
-                            td { class: "text-sm", {architectures(worker)} }
+                            td { class: "{MEDIUM_UP} text-sm", {architectures(worker)} }
                             td { class: "{WIDE_ONLY}",
                                 if worker.package_affinity.is_empty() {
                                     span { class: "opacity-40", "—" }
@@ -443,7 +449,9 @@ fn WorkersTable(
 fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerAction)>) -> Element {
     let id = worker.id;
     rsx! {
-        div { class: "flex gap-2 justify-end",
+        // Stacked on a phone, where side by side they took the width the
+        // worker's name needed.
+        div { class: "flex flex-col items-end gap-1 md:flex-row md:justify-end md:gap-2",
             if busy {
                 span { class: "loading loading-spinner loading-xs" }
             }

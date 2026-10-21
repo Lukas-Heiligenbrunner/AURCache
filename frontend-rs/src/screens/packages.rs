@@ -6,8 +6,8 @@
 
 use crate::api::client;
 use crate::listing::{
-    ListControls, ListHeader, Page, Pager, Sort, SortDir, SortKey, SortableHeader, ViewParams,
-    filter_packages, paginate, sort_packages, use_url_search, use_url_view,
+    LIST_TABLE, ListControls, ListHeader, Page, Pager, Sort, SortDir, SortKey, SortableHeader,
+    ViewParams, filter_packages, paginate, sort_packages, use_url_search, use_url_view,
 };
 use crate::routes::Route;
 use crate::status::StatusBadge;
@@ -17,6 +17,9 @@ use dioxus::prelude::*;
 
 /// Columns that only appear once there is room for them.
 const WIDE_ONLY: &str = "hidden md:table-cell";
+/// Columns that wait for a laptop-sized screen: an unfolded phone has room for
+/// everything else.
+const WIDEST_ONLY: &str = "hidden lg:table-cell";
 
 /// Everything, dependencies included, filtered down in the browser.
 ///
@@ -189,14 +192,16 @@ pub fn Packages(
                             div { class: "alert mt-2", span { "Nothing matches that filter." } }
                         } else {
                         div { class: "overflow-x-auto",
-                            table { class: "table table-zebra",
+                            table { class: LIST_TABLE,
                                 thead {
                                     tr {
                                         SortableHeader { label: "Package", column: SortKey::Name, sort, class: "" }
-                                        th { "Version" }
-                                        // Upstream and Actions are dropped on a
-                                        // narrow screen rather than scrolled to.
-                                        th { class: "{WIDE_ONLY}", "Upstream" }
+                                        // On a narrow screen the version sits
+                                        // under the name instead, and Upstream,
+                                        // Size and Actions are dropped rather
+                                        // than scrolled to.
+                                        th { class: "{WIDE_ONLY}", "Version" }
+                                        th { class: "{WIDEST_ONLY}", "Upstream" }
                                         SortableHeader { label: "Size", column: SortKey::Size, sort, class: "{WIDE_ONLY} text-right" }
                                         SortableHeader { label: "Status", column: SortKey::Status, sort, class: "" }
                                         th { class: "{WIDE_ONLY} text-right", "Actions" }
@@ -233,7 +238,10 @@ pub fn Packages(
                                                     // navigates, underlining one
                                                     // cell implies the rest does
                                                     // not.
-                                                    class: "font-mono",
+                                                    // `anywhere` lets the column shrink
+                                                    // below a long name on a phone; a
+                                                    // name that fits is not broken.
+                                                    class: "font-mono [overflow-wrap:anywhere]",
                                                     // pkgbase is the public identifier.
                                                     to: Route::Package { pkgbase: pkg.name.clone() },
                                                     // Otherwise the click reaches
@@ -254,14 +262,17 @@ pub fn Packages(
                                                         "dependency"
                                                     }
                                                 }
+                                                div { class: "md:hidden font-mono text-xs opacity-60 [overflow-wrap:anywhere]",
+                                                    {pkg.built_version.clone().unwrap_or_else(|| "—".into())}
+                                                }
                                             }
-                                            td { class: "font-mono text-sm",
+                                            td { class: "{WIDE_ONLY} font-mono text-sm",
                                                 {pkg.built_version.clone().unwrap_or_else(|| "—".into())}
                                             }
-                                            td { class: "{WIDE_ONLY} font-mono text-sm opacity-70",
+                                            td { class: "{WIDEST_ONLY} font-mono text-sm opacity-70",
                                                 {pkg.upstream_version.clone().unwrap_or_else(|| "—".into())}
                                             }
-                                            td { class: "{WIDE_ONLY} text-right font-mono text-sm opacity-70",
+                                            td { class: "{WIDE_ONLY} text-right font-mono text-sm opacity-70 whitespace-nowrap",
                                                 {package_size(pkg)}
                                             }
                                             td { StatusBadge { status: pkg.status, out_of_date: pkg.out_of_date } }

@@ -146,15 +146,17 @@ pub fn SourcePane(
     let mut draft = draft;
 
     rsx! {
-        div { class: "flex gap-4",
-            div { class: "card bg-base-100 shadow-xl w-72 shrink-0",
+        // Side by side only where there is room for both: on a phone the fixed
+        // list would leave the editor a column one character wide.
+        div { class: "flex flex-col md:flex-row gap-4",
+            div { class: "card bg-base-100 shadow-xl md:w-72 shrink-0",
                 div { class: "card-body p-4",
                     h2 { class: "card-title text-base break-all", "{title}" }
                     match files {
                         None => rsx! { span { class: "loading loading-spinner loading-sm" } },
                         Some(Err(e)) => rsx! { div { class: "alert alert-error text-xs", "{e}" } },
                         Some(Ok(list)) => rsx! {
-                            ul { class: "menu menu-sm p-0 max-h-[60vh] overflow-y-auto flex-nowrap",
+                            ul { class: "menu menu-sm p-0 max-h-40 md:max-h-[60vh] overflow-y-auto flex-nowrap",
                                 for path in list.iter() {
                                     li { key: "{path}",
                                         a {

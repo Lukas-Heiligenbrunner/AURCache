@@ -351,7 +351,9 @@ async fn a_link_to_something_gone_lands_somewhere_useful(session: &Session) {
     // The notice belongs to the page it explained, not to whatever comes next.
     session.click_labelled("a", "Packages").await;
     session
-        .wait_until("the packages list", |t| t.contains("Upstream"))
+        // The dependency toggle rather than a column header: which columns
+        // show depends on the window's width, and only this list has it.
+        .wait_until("the packages list", |t| t.contains("Dependencies ("))
         .await;
     assert!(
         !session.text().await.contains("No worker is called"),

@@ -298,7 +298,7 @@ pub fn PackageHeader(
                         // to a half pixel and rounds the whole heading up by
                         // one.
                         div { class: "flex items-center min-h-8",
-                            h1 { class: "card-title block leading-8 break-all",
+                            h1 { class: "card-title block leading-8 break-words",
                                 Link {
                                     class: "opacity-60 link-hover",
                                     to: Route::Packages { view: ViewParams::default(), q: String::new() },

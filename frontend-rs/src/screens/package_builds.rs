@@ -7,7 +7,7 @@ use crate::api::{LoadError, client};
 use crate::dates::DateOnly;
 use crate::format::format_duration;
 use crate::listing::{
-    ListHeader, Pager, Sort, SortDir, SortKey, SortableHeader, paginate, sort_builds,
+    LIST_TABLE, ListHeader, Pager, Sort, SortDir, SortKey, SortableHeader, paginate, sort_builds,
 };
 use crate::routes::Route;
 use crate::screens::builds::{build_peak_memory, build_size};
@@ -110,7 +110,7 @@ pub fn PackageBuilds(pkgbase: String) -> Element {
                         let current = paginate(&sorted, page());
                         rsx! {
                         div { class: "overflow-x-auto",
-                            table { class: "table table-zebra",
+                            table { class: LIST_TABLE,
                                 thead {
                                     tr {
                                         SortableHeader { label: "Build", column: SortKey::Name, sort, class: "" }
@@ -163,6 +163,14 @@ pub fn PackageBuilds(pkgbase: String) -> Element {
                                                     // duplicate history entry.
                                                     onclick: move |e: MouseEvent| e.stop_propagation(),
                                                     "{build.number}"
+                                                }
+                                                // What the dropped columns said,
+                                                // on a screen too narrow for them.
+                                                div { class: "md:hidden text-xs opacity-60 [overflow-wrap:anywhere]",
+                                                    span { class: "font-mono", "{build.version}" }
+                                                    " · "
+                                                    DateOnly { ts: build.start_time }
+                                                    " · {format_duration(build.elapsed())}"
                                                 }
                                             }
                                             td { class: "{WIDE_ONLY} font-mono text-sm", "{build.version}" }
