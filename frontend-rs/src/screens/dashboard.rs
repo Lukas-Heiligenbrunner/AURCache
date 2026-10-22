@@ -70,8 +70,13 @@ pub fn Dashboard() -> Element {
                 },
             }
 
+            // `min-w-0` on both, as in `DashboardGrid`: a grid item is
+            // otherwise at least as wide as its longest unbreakable run of
+            // text, and one warning quoting a long AUR query URL stretched the
+            // phone's single column -- and the chart sharing it -- past the
+            // screen.
             div { class: "grid gap-4 lg:grid-cols-2 items-start",
-                div { class: "card bg-base-100 shadow-xl",
+                div { class: "card bg-base-100 shadow-xl min-w-0",
                     div { class: "card-body",
                         div { class: "flex items-baseline gap-4 flex-wrap",
                             h2 { class: "card-title text-base", "Builds per month" }
@@ -101,7 +106,7 @@ pub fn Dashboard() -> Element {
                         }
                     }
                 }
-                {problems}
+                div { class: "min-w-0", {problems} }
             }
 
             match &*dashboard.read_unchecked() {
@@ -484,7 +489,9 @@ fn RecentProblemsCard(problems: Option<Vec<LogEntry>>) -> Element {
                         span { class: "text-sm opacity-60 shrink-0",
                             AbsoluteDate { ts: Some(entry.timestamp) }
                         }
-                        span { class: "text-sm line-clamp-2 min-w-0",
+                        // Breaks a word too long for the line, as the log's
+                        // own table does, rather than clipping it at the edge.
+                        span { class: "text-sm line-clamp-2 min-w-0 [overflow-wrap:anywhere]",
                             EntryText { entry: entry }
                         }
                     }

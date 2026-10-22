@@ -195,6 +195,19 @@ INSERT INTO log (id, kind, severity, message, data, timestamp, user) VALUES
   (1008, 'build.queued', 0, 'queued a build of neofetch (new version 7.1.0-2)', '{"pkg":"pkg:neofetch","cause":"update","version":"7.1.0-2"}',
     CAST(strftime('%s','now') AS INTEGER) - 86000, NULL);
 
+-- A failure quoting a URL thousands of characters long, as a version check
+-- that cannot read the AUR's answer does: the query asks about every package
+-- at once. No hyphen in it, since a browser may break a line after one: the
+-- real URL's longest stretch between package names like `jenn3d-git` was
+-- still wider than a phone, and that stretch is what a column has to break
+-- rather than grow to fit.
+INSERT INTO log (id, kind, severity, message, data, timestamp, user)
+SELECT 1009, 'version_check.pass_failed', 1, 'the version check did not finish: ' || error,
+    json_object('error', error), CAST(strftime('%s','now') AS INTEGER) - 150, NULL
+FROM (SELECT 'couldn''t download version update: error decoding response body for url '
+    || '(https://aur.archlinux.org/rpc/v5/info?'
+    || replace(hex(zeroblob(200)), '00', 'arg%5B%5D=pythonexample&') || 'arg%5B%5D=last)' AS error);
+
 INSERT INTO log_entity (log_id, role, ns, id) VALUES
   (1001, 'pkg', 'pkg', 'hello'),
   (1002, 'build', 'pkg', 'yay'),
