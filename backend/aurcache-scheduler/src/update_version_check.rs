@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::Context;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, RefreshTarget, SourceinfoPurpose};
 use aurcache_db::helpers::builds::latest_successful_version_any_platform;
@@ -25,7 +25,7 @@ pub fn start_update_version_checking(services: Services) -> JoinHandle<()> {
         loop {
             info!("performing aur version checks");
             if let Err(e) = check_versions(&services, &mut unreadable).await {
-                error!("Failed to perform aur version check: {e}");
+                error!("Failed to perform aur version check: {e:#}");
                 // Nothing was found to be out of date this pass, which looks
                 // exactly like nothing *being* out of date unless it says so.
                 services.activity.emit(Event::VersionCheckFailed {
@@ -87,7 +87,10 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
         client
             .multi_info_of(&aur_name_refs)
             .await
-            .map_err(|e| anyhow!("couldn't download version update: {e}"))?
+            // Context rather than a message of its own: the causes under it --
+            // a connection cut short, an answer that is not JSON -- are what
+            // says why, and formatting the error into a string dropped them.
+            .context("couldn't download version update")?
     };
     // Indexed once: the per-package loop below looks every package up by its
     // pkgbase, which a linear scan would make quadratic in the package count.

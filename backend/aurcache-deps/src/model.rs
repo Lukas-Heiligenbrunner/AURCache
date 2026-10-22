@@ -12,6 +12,16 @@ pub enum Error {
     /// An underlying HTTP error from `reqwest`.
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+    /// The answer stopped arriving partway, after the request had succeeded.
+    ///
+    /// How much arrived of how much was announced tells a connection cut short
+    /// from an answer that was never going to be readable.
+    #[error("the answer broke off after {received} of {} bytes", announced(*.expected))]
+    Body {
+        received: usize,
+        expected: Option<u64>,
+        source: reqwest::Error,
+    },
     /// Reading or writing the local repo / official-repo DB cache failed.
     #[error("repository cache I/O failed")]
     Io(#[from] std::io::Error),
@@ -35,6 +45,11 @@ pub enum Error {
          check that a mirror is reachable"
     )]
     OfficialReposUnread,
+}
+
+/// A body's announced length, for a message: a gzipped answer has none.
+fn announced(expected: Option<u64>) -> String {
+    expected.map_or_else(|| "an unannounced number of".to_string(), |n| n.to_string())
 }
 
 /// Dependency lists extracted from a package's metadata.

@@ -5,6 +5,7 @@ use std::time::Duration;
 use backon::{FibonacciBuilder, Retryable};
 
 use reqwest::Client;
+use tracing::warn;
 use url::Url;
 
 /// How an outbound request rides out a blip: three attempts, Fibonacci from
@@ -52,6 +53,55 @@ fn is_transient(error: &reqwest::Error) -> bool {
         }
         None => true,
     }
+}
+
+/// The whole of `response`'s body, or how much had arrived when it broke off.
+///
+/// Read a chunk at a time so that what did arrive can be logged: the AUR's
+/// answer to a version check is hundreds of kilobytes, and without it a broken
+/// one says only that it broke.
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, Error> {
+    let expected = response.content_length();
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            Ok(None) => return Ok(body),
+            Err(error) => {
+                // A chunk's error does not name the request; it gets the URL
+                // back without its query, for the reason `send_with_retry`
+                // drops it.
+                let source = without_query(error.with_url(response.url().clone()));
+                warn!(
+                    url = ?source.url().map(Url::as_str),
+                    received = body.len(),
+                    expected,
+                    head = %head(&body),
+                    tail = %tail(&body),
+                    "the AUR's answer broke off"
+                );
+                return Err(Error::Body {
+                    received: body.len(),
+                    expected,
+                    source,
+                });
+            }
+        }
+    }
+}
+
+/// How much of a body's start and end to log: enough to tell an error page
+/// from JSON, and to see where a broken answer stopped.
+const EXCERPT_BYTES: usize = 1024;
+
+/// The start of `body`, for a log line.
+fn head(body: &[u8]) -> String {
+    String::from_utf8_lossy(&body[..body.len().min(EXCERPT_BYTES)]).into_owned()
+}
+
+/// The end of `body`, for a log line.
+fn tail(body: &[u8]) -> String {
+    String::from_utf8_lossy(&body[body.len().saturating_sub(EXCERPT_BYTES)..]).into_owned()
 }
 
 fn without_query(error: reqwest::Error) -> reqwest::Error {
@@ -508,9 +558,17 @@ impl AurClient {
     }
 
     async fn rpc_fetch(&self, url: Url) -> Result<Vec<Package>, Error> {
-        let resp = self.retry_get(url).await?;
-        let text = resp.text().await?;
-        let response: PackageResponse = serde_json::from_str(&text)?;
+        let body = read_body(self.retry_get(url).await?).await?;
+        let response: PackageResponse = serde_json::from_slice(&body).map_err(|error| {
+            warn!(
+                %error,
+                bytes = body.len(),
+                head = %head(&body),
+                tail = %tail(&body),
+                "the AUR's answer is not the JSON expected"
+            );
+            Error::Json(error)
+        })?;
         if response.response_type == "error" {
             return Err(Error::Rpc(
                 response
