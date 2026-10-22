@@ -1,0 +1,192 @@
+# =============================================================================
+# AURCache — bundled single-host setup (the turnkey default)
+# =============================================================================
+# One command, zero edits, zero secrets, zero approval clicks:
+#
+#     docker compose up -d
+#
+# This starts the AURCache server plus a single local build worker. The worker
+# auto-enrolls by dropping its certificate request into the shared `enroll`
+# volume that the server reads — presence in that volume is proof of trust, so
+# no token and no manual approval are needed. Within a few seconds the worker
+# logs that it is connected and starts polling for build jobs.
+#
+# Web UI / API : http://localhost:8080   (plain HTTP; put a reverse proxy in front for TLS)
+# Pacman repo  : http://localhost:8081   (add as a [repo] Server in pacman.conf)
+#
+# For more local build throughput, raise the worker's concurrency on its page
+# in AURCache (or WORKER_CONCURRENCY_DEFAULT below): each build already uses
+# every core, so concurrency buys builds at once, not faster builds.
+#
+# For a worker on separate hardware / a foreign architecture (e.g. aarch64), see
+# docker-compose.remote-worker.yaml.
+# =============================================================================
+
+services:
+  aurcache:
+    # Backend only. The `aurcache` image (without `-server`) is the hybrid
+    # compatibility image, which bundles its own worker — do not use it here.
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
+    # Prefer a published image; uncomment to build locally instead:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/server.Dockerfile
+    ports:
+      - "8080:8080"   # Web UI + API (plain HTTP; front with a reverse proxy for TLS)
+      # No 8081 here: the `repo` service below publishes nginx on that host
+      # port instead. Rocket's builtin file handler keeps listening on 8081
+      # inside this container for non-compose deployments.
+      - "8083:8083"   # Remote-worker protocol (HTTPS + mutual TLS)
+    environment:
+      - LOG_LEVEL=info
+      # The timezone cron schedules (the auto-update one) are read in. The
+      # host's by default, through the /etc/localtime mount below; to force
+      # one, set TZ where compose runs (a shell export, or `TZ=Europe/Paris`
+      # in a .env file beside this one). Unset there, it stays unset here.
+      - TZ
+      # The server's TLS certificate must be valid for the hostname the worker
+      # dials. In-compose that is the service name `aurcache`; keep `localhost`
+      # so the UI/API is reachable from the host too.
+      - AURCACHE_TLS_SANS=aurcache,localhost
+      # Public base URL pacman clients (and workers) use to fetch built packages.
+      # Set this to your host's address/domain for remote pacman clients.
+      - AURCACHE_PUBLIC_URL=http://localhost:8081
+      # Bundled enrollment: auto-approve any worker that can write to the shared
+      # `enroll` volume (mounted read-only here). No secret, no approval click.
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+    volumes:
+      # Everything the server keeps lives under /app, so one mount persists all
+      # of it: the database, the package repository, the internal worker CA,
+      # each build's log, and the source cache. Mounting the pieces separately
+      # works too (see below) but means every directory added later is a
+      # directory someone forgets -- which is how build logs came to be lost on
+      # every image update.
+      - aurcache_data:/app
+      - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)
+      # Add specific mounts alongside it if some parts belong on different
+      # pools -- a big repo on bulk storage, the database on an SSD. Overlapping
+      # mounts are applied parent-first whatever order they are listed in, and
+      # the inner one shadows what the outer volume holds at that path, so copy
+      # existing data across before adding one to a running deployment:
+      #   - aurcache_db:/app/db                # SQLite (unused with Postgres)
+      #   - aurcache_repo:/app/repo            # built packages
+      #   - aurcache_ca:/app/data/ca           # internal worker CA
+      #   - aurcache_logs:/app/build_logs      # per-build logs
+      #   - aurcache_srccache:/app/source_cache
+      - enroll:/enroll:ro             # read the workers' enrollment CSRs
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+  repo:
+    # The pacman repository, served statically. Same files Rocket's builtin
+    # file handler would serve (it stays in the binary for simple
+    # deployments), at line rate instead of ~200 MB/s: nginx uses sendfile
+    # while Rocket streams 4 KiB chunks through userspace. Mounts the same
+    # data volume read-only; the server remains the only writer, so the
+    # publish-rename protocol is unchanged.
+    image: nginx:alpine
+    ports:
+      - "8081:80"   # Pacman repository (plain HTTP, for `pacman -Sy`)
+    volumes:
+      - aurcache_data:/app:ro   # read the repository (served from /app/repo)
+      - ./docker/repo-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - aurcache
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+  builder:
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+    # Prefer a published image; uncomment to build locally instead:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/worker.Dockerfile
+    depends_on:
+      - aurcache
+    environment:
+      - RUST_LOG=info
+      # Reach the server over the internal network. mTLS host must match a SAN
+      # in AURCACHE_TLS_SANS above.
+      - AURCACHE_URL=https://aurcache:8083
+      # Same shared volume as the server -> this worker is auto-approved. This is
+      # also the worker's default path, shown here for clarity.
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      # How many packages this worker builds in parallel. `_DEFAULT` makes it a
+      # starting point you can change from the worker's page in AURCache; the
+      # plain WORKER_CONCURRENCY would pin it here.
+      - WORKER_CONCURRENCY_DEFAULT=2
+      # Native architectures this worker builds (default: auto = host arch).
+      # - WORKER_ARCHES=x86_64
+    volumes:
+      - enroll:/enroll                # writable: drop CSR for auto-enrollment
+      - worker_data:/var/lib/aurcache-worker   # identity + storage pool (chroots, caches)
+    # devtools builds each package in a systemd-nspawn chroot, which needs the
+    # namespaces/mounts a plain container forbids. `privileged` + a tmpfs `/run`
+    # is the tightest config that works out of the box. If your host lets you,
+    # you can narrow this to specific capabilities + seccomp/apparmor unconfined.
+    privileged: true
+    tmpfs:
+      - /run
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Optional: a foreign-architecture builder (e.g. aarch64) on this same host.
+  # It is the exact same worker image, just run emulated via qemu-user + binfmt
+  # (`platform: linux/arm64`). The build path stays uniform — the emulated
+  # worker builds aarch64 packages in a devtools chroot like any native worker.
+  # Jobs for aarch64 are routed here in preference to slow emulation elsewhere.
+  #
+  # To enable: `docker compose --profile arm up -d`. The `binfmt` one-shot below
+  # registers the qemu handlers on the host kernel (idempotent) before the
+  # emulated worker starts.
+  # ---------------------------------------------------------------------------
+  binfmt:
+    image: tonistiigi/binfmt:latest
+    profiles: ["arm"]
+    privileged: true
+    command: --install arm64,arm
+    restart: "no"
+
+  aarch64-builder:
+    # Same multi-arch image as the native builder; `platform` selects the
+    # arm64 variant from the manifest list. There is no `-arm64` tag.
+    image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+    profiles: ["arm"]
+    platform: linux/arm64
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+    depends_on:
+      - aurcache
+      - binfmt
+    environment:
+      - RUST_LOG=info
+      - AURCACHE_URL=https://aurcache:8083
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      # This worker builds aarch64 natively (from the emulated container's POV).
+      - WORKER_ARCHES=aarch64
+      # Emulated builds are slow; keep concurrency low.
+      - WORKER_CONCURRENCY_DEFAULT=1
+    volumes:
+      - enroll:/enroll
+      - worker_data_arm:/var/lib/aurcache-worker
+    privileged: true
+    tmpfs:
+      - /run
+    networks:
+      - aurcache
+    restart: unless-stopped
+
+volumes:
+  aurcache_data:
+  enroll:
+  worker_data:
+  worker_data_arm:
+
+networks:
+  aurcache:
+    driver: bridge

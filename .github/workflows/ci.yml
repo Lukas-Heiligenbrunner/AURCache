@@ -23,57 +23,175 @@ jobs:
           rustup component add clippy
           rustup install stable          
 
+      # `aurcache-api`'s `static` feature compiles the frontend to wasm inside
+      # its build script, which needs the wasm target. The JS glue comes from a
+      # build dependency, so nothing else is installed.
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Toolchain info
         run: |
           cargo --version --verbose
           rustc --version
-          cargo clippy --version          
+          cargo clippy --version
+
+      # The server parses a PKGBUILD by running this script through
+      # aurcache-sandbox, both by absolute path (`aurcache-utils/src/pkgbuild.rs`).
+      # Tests that parse one skip without them locally, and fail under CI, so
+      # both paths are exported here. The runtime image installs the script the
+      # same way - see docker/server.Dockerfile.
+      - name: Install alpm-pkgbuild-bridge
+        run: |
+          curl -sSLf -o "$RUNNER_TEMP/alpm-pkgbuild-bridge" \
+            "https://gitlab.archlinux.org/archlinux/alpm/alpm-pkgbuild-bridge/-/raw/main/alpm-pkgbuild-bridge.sh?ref_type=heads"
+          sudo install -m 755 "$RUNNER_TEMP/alpm-pkgbuild-bridge" /usr/local/bin/alpm-pkgbuild-bridge
+          echo "AURCACHE_PKGBUILD_BRIDGE=/usr/local/bin/alpm-pkgbuild-bridge" >> "$GITHUB_ENV"
+          echo "AURCACHE_SANDBOX=$PWD/target/debug/aurcache-sandbox" >> "$GITHUB_ENV"
 
       - name: Lint
         run: |
           cargo fmt -- --check
-          cargo clippy -- -D warnings          
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features static -p aurcache-api -- -D warnings
 
       - name: Test
         run: |
           cargo check
+          # `cargo test` builds no plain binaries for a crate without
+          # integration tests, and the PKGBUILD tests need this one.
+          cargo build -p aurcache-sandbox
           cargo test --all
-  lintFlutter:
+          # The app-shell fallback only exists under `static`, which is also
+          # what mounts the asset handler, so its tests are invisible to the
+          # run above.
+          cargo test -p aurcache-api --features static
+
+      # The run above is unprivileged, so it parses under Landlock alone -- a
+      # native install. The container images run the server as root, and there
+      # a parse runs as a separate user with Landlock layered on top where the
+      # kernel has it. The same parse tests, as root: once as the images run on
+      # this kernel, and once with Landlock off, as they run on a kernel
+      # without it (Synology). See aurcache-sandbox/src/parse.rs.
+      - name: Test PKGBUILD parsing as root
+        run: |
+          sudo useradd --system --no-create-home aurcache-parse
+          tests=$(cargo test -p aurcache-utils --lib --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "aurcache_utils" and .executable != null) | .executable')
+          cd aurcache-utils
+          as_root() { sudo --preserve-env=AURCACHE_SANDBOX,AURCACHE_PKGBUILD_BRIDGE,CI env "$@"; }
+          as_root "$tests" pkgbuild snapshot
+          # Denying TCP is Landlock's, and hardening rather than part of the
+          # profile, so a kernel without Landlock cannot be held to it.
+          as_root AURCACHE_SANDBOX_DISABLE=landlock "$tests" pkgbuild snapshot \
+            --skip a_parse_cannot_open_a_tcp_connection
+
+      # The Dockerfiles build a subset of the workspace, not all of it. Cargo
+      # unifies features across whatever is selected, and `cargo test --all`
+      # also pulls in dev-dependencies -- so a crate can under-declare a
+      # feature, compile fine here, and still fail in the image. Checking the
+      # exact package sets the Dockerfiles use is what catches that.
+      - name: Check Docker build shapes
+        run: |
+          # docker/worker.Dockerfile
+          cargo check -p aurcache-worker -p aurcache-sandbox
+          # docker/hybrid.Dockerfile
+          cargo check -p aurcache -p aurcache-worker -p aurcache-worker-docker -p aurcache-sandbox
+          # docker/build-rust.sh
+          cargo check --features static
+
+      # `aurcache-common` exists so a browser frontend can share the API shapes
+      # without a database driver or the filesystem helpers. Every workspace
+      # build turns the `db` and `fs` features on, so only an explicit
+      # no-default-features check proves that still holds.
+      - name: Check driver-free types
+        run: |
+          cargo check -p aurcache-common --no-default-features
+          cargo check -p aurcache-client
+  # The frontend is its own workspace, built only for wasm32, so the backend
+  # job above never lints or tests it. Both targets are linted, as `just lint`
+  # does: the crate ships as wasm and its tests run on the host.
+  lintAndTestFrontend:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./frontend
+        working-directory: ./frontend-rs
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: 3.44.1
-
-      - name: Toolchain info
-        run: flutter doctor
-
-      - name: Build Runner
+      - name: Update local toolchain
         run: |
-          flutter pub get
-          flutter pub run build_runner build --delete-conflicting-outputs
-      - name: Lint
-        run: flutter analyze --no-fatal-infos
+          rustup update
+          rustup component add clippy rustfmt
+          rustup target add wasm32-unknown-unknown
 
-      - name: formatting
-        run: dart format --set-exit-if-changed .
-  e2eTest:
+      - name: Lint
+        run: |
+          cargo fmt -- --check
+          cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  # The unit tests render components directly, so they cannot see whether the
+  # page boots; this opens every route in the runner's Chrome against a
+  # seeded server with the frontend embedded. Offline routes only: `--online`
+  # would make the run depend on the AUR being up.
+  browserTest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Docker
-        uses: docker/setup-docker-action@v5
+      - name: Update local toolchain
+        run: rustup update
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
 
-      - name: Run E2E test
-        run: ./scripts/test-e2e.sh hello
+      - name: Render every route
+        run: ./scripts/test-frontend.sh --shots "$RUNNER_TEMP/shots"
+
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-screenshots
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: ignore
+
+  # What `cargo test` leaves out because it needs root and a real kernel: the
+  # worker's btrfs storage pool (loop devices, simple quotas) and its build
+  # cgroups. They run as root in a privileged container on the runner's
+  # kernel. The pool needs Linux 6.7+; on an older runner kernel the script
+  # skips those tests with a warning annotation rather than failing.
+  #
+  # Not covered here: a pool on a real block device or zvol, and ZFS under an
+  # image -- the runner has neither. `test-e2e.sh` builds in an image pool.
+  kernelTests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update local toolchain
+        run: rustup update
+
+      - name: Pool and cgroup tests
+        run: ./scripts/test-kernel.sh
+
+  # A PKGBUILD runs outside the chroot while its sources are fetched; this
+  # checks the Landlock confinement around that, both that it denies and that
+  # the same fixture escapes without it. Docker only, on the runner's kernel.
+  sandboxTest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update local toolchain
+        run: rustup update
+
+      - name: Sandbox test
+        run: ./scripts/test-sandbox.sh
+
+  # No e2e job here: the full suite builds images and hits the real AUR and
+  # Arch mirrors, so it runs nightly (see e2e-nightly.yml) instead of on every
+  # push -- and only when something landed since the last run.

@@ -4,31 +4,74 @@ members = [
     "pacman-mirrors",
     "pacman-repo-utils",
     "aurcache",
-    "aurcache-builder",
+    "aurcache-cli",
+    "aurcache-client",
+    "aurcache-deps",
     "aurcache-db",
     "aurcache-api",
     "aurcache-activitylog",
     "aurcache-utils",
     "aurcache-scheduler",
-    "aurcache-types"]
+    "aurcache-common",
+    "aurcache-ca",
+    "aurcache-worker",
+    "aurcache-worker-core",
+    "aurcache-worker-demo",
+    "aurcache-worker-docker",
+    "aurcache-sandbox",
+    "aurcache-chroot"]
+
+# Idioms enforced across the workspace. Every lint here is at zero warnings, so
+# these guard against regression rather than demanding a cleanup.
+#
+# To accommodate a specific site, suppress it locally there rather than dropping
+# the lint from this list. A rule is left out below only when we object to it
+# generally, not because of one awkward case.
+#
+# Pedantic/nursery lints deliberately not adopted:
+#   map_unwrap_or        - map_or_else puts the fallback before the transform,
+#                          inverting reading order.
+#   redundant_pub_crate  - contradicts rustc's own unreachable_pub; pub(crate)
+#                          in a private module documents intent.
+#   option_if_let_else, single_match_else
+#                        - point-free map_or is not clearer than an explicit
+#                          if let / match.
+#   assert_is_empty      - .is_empty() beats assert_eq!(x, "").
+#   missing_errors_doc   - 137 sites; not a convention this project follows.
+[workspace.lints.clippy]
+use_self = "warn"
+or_fun_call = "warn"
+unnecessary_wraps = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_is_variant_and = "warn"
+redundant_clone = "warn"
+assigning_clones = "warn"
+needless_collect = "warn"
+uninlined_format_args = "warn"
+explicit_into_iter_loop = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+cloned_instead_of_copied = "warn"
 
 [workspace.dependencies]
-tokio = "1.53.1"
+tokio = "1.53.2"
 anyhow = "1.0.104"
 reqwest = "0.13.5"
 tracing = "0.1.44"
-chrono = "0.4.45"
+jiff = "0.2.38"
 serde = "1.0.229"
 backon = "1.6.0"
-serde_json = "1.0.151"
-sea-orm = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
-itertools = "0.15.0"
-aur-rs = "0.1.1"
+serde_json = "1.0.154"
+subtle = "2.6"
+sea-orm = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 flate2 = "1.1.10"
 tar = "0.4.46"
-utoipa = { version = "5.5.0", features = ["rocket_extras"] }
+utoipa = { version = "6.0.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
-alpm-srcinfo = "0.6.3"
+alpm-srcinfo = "0.7.0"
+alpm-pkgbuild = "0.2.6"
+diffy = "0.5"
 
 [profile.release]
 strip = "debuginfo"  # Automatically strip symbols from the binary.

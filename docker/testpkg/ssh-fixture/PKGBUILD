@@ -1,0 +1,21 @@
+# Fixture for the SSH-credential end-to-end test.
+#
+# The source is fetched over git+ssh *during the build*, so it only succeeds if
+# the worker's credential reached makepkg inside the chroot — which is the one
+# part of the credential path that unit tests cannot cover, because it depends
+# on makechrootpkg's uid mapping.
+pkgname=aurcache-ssh-test
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Fetches its source over git+ssh to prove build credentials reach the chroot"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('git' 'openssh')
+source=('payload::git+ssh://git@gitssh/srv/git/payload.git')
+sha256sums=('SKIP')
+
+package() {
+  install -Dm644 "$srcdir/payload/marker.txt" \
+    "${pkgdir}/usr/share/aurcache-ssh-test/marker.txt"
+}

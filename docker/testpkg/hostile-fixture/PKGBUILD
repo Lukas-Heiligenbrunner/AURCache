@@ -1,0 +1,49 @@
+# Regression fixture for build isolation. NOT a real package.
+#
+# Every statement below runs when this file is *sourced*, which happens twice on
+# the worker outside any chroot: once by `makepkg --verifysource` during
+# `download_sources()`, and once by the direct `source PKGBUILD` in
+# makechrootpkg. Both are confined by aurcache-sandbox; this fixture proves it.
+#
+# The writes target the shared state a build must never reach. Note that
+# checksums are no defence against any of this: they are declared by the
+# PKGBUILD, so an attacker rewriting a neighbour's PKGBUILD rewrites its
+# checksums too.
+pkgname=hostile-fixture
+pkgver=1
+pkgrel=1
+arch=('x86_64')
+license=('MIT')
+source=("fixture::git+file:///srv/upstream.git")
+sha256sums=('SKIP')
+
+# --- payloads: each must fail under the sandbox ---
+$(touch "${AURCACHE_TEST_SHARED:-/shared}/gnupg/EVIL_trustdb" 2>/dev/null)
+$(echo pwned > "${AURCACHE_TEST_SHARED:-/shared}/srcdest-other/victim-source" 2>/dev/null)
+$(touch "${AURCACHE_TEST_SHARED:-/shared}/work-other/EVIL_pkgbuild" 2>/dev/null)
+
+# Capability the sandbox must *permit*, not deny: makepkg's signature
+# verification does `statusfile=$(mktemp)`, so a policy that blocks temp files
+# breaks every package with signed sources — while every package without them
+# builds fine, which is how this went unnoticed.
+#
+# Guarded on a host-only path: this file is sourced twice — once on the worker
+# under the sandbox, and once inside the chroot where no policy applies. An
+# unguarded probe records the chroot's success and reports "works" even when
+# the host-side call was denied, which is exactly the false pass this fixture
+# exists to prevent.
+$([ -d /var/lib/aurcache-worker ] && mktemp >> ./mktemp-ok 2>/dev/null)
+
+# Read payloads. These redirect into the package directory, which *is* writable,
+# so a non-empty result isolates a successful read from a successful write.
+#
+# Appending matters: this file is sourced twice — once on the worker, where the
+# secrets exist, and once inside the chroot, where they do not. A truncating
+# `>` would let the second run erase what the first one stole, which reads as
+# protection.
+$(cat /var/lib/aurcache-worker/secrets/id_ed25519 >> ./stolen-ssh 2>/dev/null)
+$(cat /var/lib/aurcache-worker/worker-key.pem >> ./stolen-mtls 2>/dev/null)
+
+package() {
+    install -Dm644 /dev/null "$pkgdir/usr/share/hostile-fixture/marker"
+}

@@ -1,0 +1,48 @@
+# =============================================================================
+# AURCache end-to-end test: the hybrid compatibility image.
+# =============================================================================
+# This file is deliberately shaped like the *old* single-container setup that
+# predates build workers — the one documented as "DinD build mode". It names one
+# service, exposes only the web and repository ports, mounts only the database
+# and repository, and sets `privileged: true`. It knows nothing about workers,
+# the mTLS port, or an enrollment volume.
+#
+# That is the point: it is the configuration an existing user already has, and
+# the test asserts that pulling the new `aurcache` image keeps their builds
+# working with no edits. If this ever needs a worker service, a port 8083, or an
+# enrollment volume added to pass, the zero-effort migration claim is false.
+#
+# Note what is *absent*: no Docker socket and no BUILD_ARTIFACT_DIR. That is
+# DinD mode, so the entrypoint starts Podman inside the container, as the old
+# image did, and the embedded legacy builder spawns each build there. Driven by
+# scripts/test-e2e-hybrid.sh.
+# =============================================================================
+
+services:
+  aurcache:
+    build:
+      context: ..
+      dockerfile: docker/hybrid.Dockerfile
+    ports:
+      - "${AURCACHE_PORT:-8080}:8080"          # Web UI + API
+      - "${AURCACHE_MIRROR_PORT:-8081}:8081"   # Pacman repo
+    environment:
+      - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug,aurcache_utils=debug,aurcache_db=debug
+      - RUST_LOG=info,aurcache_worker=debug
+      # The embedded worker reaches the server over loopback, so the repository
+      # URL baked into build configs is this container's own port.
+      - AURCACHE_PUBLIC_URL=http://localhost:8081
+    volumes:
+      - db:/app/db
+      - repo:/app/repo
+    privileged: true
+    networks:
+      - aurcache_network
+
+volumes:
+  db:
+  repo:
+
+networks:
+  aurcache_network:
+    driver: bridge

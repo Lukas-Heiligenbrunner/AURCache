@@ -1,1 +1,16 @@
+# Build output. These are the bulk of the tree — `backend/target` alone is tens
+# of gigabytes — and every one of them is regenerated inside the image, so
+# shipping them to the daemon only slows the build down.
 /backend/target
+/frontend-rs/target
+/frontend-rs/dist
+/backend/aurcache-api/web
+
+# Agent worktrees, each a whole checkout with build output of its own: one
+# was 11 GB, copied into every platform's source tarball, and filled the disk.
+/.claude
+
+# Not used by any Dockerfile.
+/docs
+/.git
+/design

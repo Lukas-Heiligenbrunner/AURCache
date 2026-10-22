@@ -1,0 +1,37 @@
+[package]
+name = "aurcache-common"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+sea-orm = { workspace = true, optional = true }
+# Only for working out when a schedule runs (`clock`). Default features off:
+# the server's own jiff brings the time zone database.
+jiff = { version = "0.2.38", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+jiff = "0.2.38"
+tempfile = { workspace = true }
+
+[features]
+# Plain serde types that a browser frontend can use, with the database derives
+# optional: wasm consumers take `default-features = false` and still get the
+# API types and enums.
+default = ["db", "fs", "clock"]
+# Enables the sea-orm derives on types that are also stored in the database.
+# A browser frontend takes `default-features = false` and gets the same shapes
+# without a database driver.
+db = ["dep:sea-orm"]
+# Filesystem helpers. No extra dependencies — the gate exists so a wasm build
+# does not carry `std::fs` code it can never run.
+fs = []
+# When a schedule next runs, which takes jiff. The browser only needs to know
+# whether a schedule parses -- the server tells it when that is -- and the
+# frontend keeps a date crate out of its bundle on purpose.
+clock = ["dep:jiff"]

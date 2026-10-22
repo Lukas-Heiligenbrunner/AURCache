@@ -1,0 +1,22 @@
+[package]
+name = "aurcache-ca"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+x509-parser = "0.18"
+sha2 = "0.11"
+hex = "0.4"
+time = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }

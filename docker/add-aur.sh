@@ -36,7 +36,28 @@ sed -i 's/^#Server/Server/' /etc/pacman.d/mirrorlist.backup
 rankmirrors -n 10 /etc/pacman.d/mirrorlist.backup > /etc/pacman.d/mirrorlist
 rm /etc/pacman.d/mirrorlist.backup
 
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git || echo "Nothing to do"
+# The toolchain, in its own transaction and without a `|| true`. pacman aborts
+# the whole transaction when any one target cannot be resolved, so grouping
+# these with multilib-devel meant a missing multilib repo silently took
+# base-devel and git down with it -- producing an image with no compiler that
+# still built successfully, and failed much later inside somebody's package
+# build with "a compiler with support for C++14 language features is required".
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git
+
+# multilib is x86_64-only, and lives behind a repository that only the amd64
+# pacman.conf above enables. Asked for separately so that its absence skips
+# multilib rather than taking the toolchain with it.
+if pacman --sync --info multilib-devel >/dev/null 2>&1; then
+    pacman --sync --needed --noconfirm --noprogressbar multilib-devel
+else
+    echo "multilib-devel unavailable (expected off x86_64); continuing without it"
+fi
+
+# The failure above was invisible for so long because nothing checked. A build
+# image without a compiler is worth catching here rather than in a package.
+for tool in gcc g++ make makepkg; do
+    command -v "$tool" >/dev/null || { echo "FATAL: $tool missing after install" >&2; exit 1; }
+done
 git config --global --add safe.directory '*'
 
 # create the user
@@ -50,6 +71,7 @@ passwd --lock "${AUR_USER}"
 echo "${AUR_USER} ALL=(ALL) NOPASSWD: /usr/bin/pacman" > "/etc/sudoers.d/allow_${AUR_USER}_to_pacman"
 echo "${AUR_USER} ALL=(ALL) NOPASSWD: /usr/bin/pacman-key" >> "/etc/sudoers.d/allow_${AUR_USER}_to_pacman"
 echo "${AUR_USER} ALL=(ALL) NOPASSWD: /usr/bin/chmod" >> "/etc/sudoers.d/allow_${AUR_USER}_to_pacman"
+echo "${AUR_USER} ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/pacman.conf" >> "/etc/sudoers.d/allow_${AUR_USER}_to_pacman"
 
 # let root cd with sudo
 echo "root ALL=(ALL) CWD=* ALL" > /etc/sudoers.d/permissive_root_Chdir_Spec

@@ -4,154 +4,121 @@ sidebar_position: 2
 
 # Docker Compose setup
 
-There are two ways the packages can be built:
-In both ways for each package built a seperate container is spawned and destroyed afterwards.
+AURCache runs as two pieces:
 
-## Docker Tags
-`:git` - current master branch build
+- the **server** (`aurcache-server`) — package database, web UI, API, and the
+  pacman repository;
+- one or more **build workers** (`aurcache-worker`) — each builds packages in a
+  clean `devtools` chroot and uploads the results.
 
-`:latest` - latest version
+They talk over mutual TLS on port 8083, so a worker can live in the same compose
+stack, on another machine, or on another architecture.
 
-`:<version>` - version git tag (latest version = latest tag)
+See [Docker images](./artifacts/docker-images.md) for the images and tags.
 
-## DinD (Docker in Docker) build mode
-The build container will spawn a new container for each package inside the main container.
-For this to work the container needs to be priviledged!
+## Single host
 
+The bundled [`docker-compose.yaml`](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/compose/docker-compose.yaml)
+starts a server plus one local worker and needs no edits:
 
-Example with PostgreSQL database (recommended):
-```yaml
-services:
-  aurcache:
-    image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
-    ports:
-      - "8080:8080" # Frontend
-      - "8081:8081" # Repository
-    volumes:
-      - ./aurcache/repo:/app/repo
-    privileged: true
-    environment:
-      - DB_TYPE=POSTGRESQL
-      - DB_USER=aurcache
-      - DB_PWD=YOUR_SECURE_PWD
-      - DB_HOST=dbhost
-    networks:
-      aurcache_network:
-    restart: unless-stopped
-  aurcache_database:
-    image: postgres:latest
-    volumes:
-      - ./aurcache/db:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_PASSWORD=YOUR_SECURE_PWD
-      - POSTGRES_USER=aurcache
-    restart: unless-stopped
-    networks:
-      aurcache_network:
-        aliases:
-          - "dbhost"
-
-networks:
-  aurcache_network:
-    driver: bridge
+```bash
+curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/compose/docker-compose.yaml
+docker compose up -d
 ```
 
-Example with SQLite database:
+The worker auto-enrolls through the shared `enroll` volume — being able to write
+to a volume the server reads is what proves it is trusted, so there is no token
+to configure and no approval to click.
+
+See the [Quick Start](../overview/quick-start.md) for the same setup with
+PostgreSQL.
+
+## What to persist
+
+Everything the server keeps lives under `/app`, so one mount covers all of it:
+
 ```yaml
-services:
-    aurcache:
-        image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
-        ports:
-        - "8080:8080" # Frontend
-        - "8081:8081" # Repository
-        volumes:
-          - ./aurcache/db:/app/db
-          - ./aurcache/repo:/app/repo
-        privileged: true 
-```
-
-Use SQLite database only for development, I don't recommend using it in production.
-## Host build mode
-For every package built a new container is spawned on the host system and destroyed afterwards.
-For this method the docker socket needs to be mounted to the aurcache container.
-
-Example with PostgreSQL database (recommended):
-```yaml
-services:
-    aurcache:
-        image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
-        ports:
-        - "8080:8080" # Frontend
-        - "8081:8081" # Repository
-        volumes:
-          - ./aurcache/repo:/app/repo
-          - /var/run/docker.sock:/var/run/docker.sock
-          - artifact_cache:/app/builds
-        environment:
-          - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
-          - DB_TYPE=POSTGRESQL
-          - DB_USER=aurcache
-          - DB_PWD=YOUR_SECURE_PWD
-          - DB_HOST=dbhost
-    aurcache_database:
-      image: postgres:latest
-      volumes:
-        - ./aurcache/db:/var/lib/postgresql/data
-      environment:
-        - POSTGRES_PASSWORD=YOUR_SECURE_PWD
-        - POSTGRES_USER=aurcache
-      restart: unless-stopped
-      networks:
-        aurcache_network:
-          aliases:
-            - "dbhost"
-
-networks:
-  aurcache_network:
-    driver: bridge
-
 volumes:
-  artifact_cache:
-        name: artifact_cache
-        driver: local
+  - aurcache_data:/app
 ```
 
-Example with SQLite database:
+That is the database, the package repository, the internal worker CA, each
+build's log and the source cache. Mounting the pieces individually works and is
+the right thing when they belong on different storage — a large repository on
+bulk disks, the database on an SSD — but then **anything you do not mount lives
+in the container and is gone when the container is replaced**, which happens on
+every image update. Build logs were lost that way for a long time, because
+`/app/build_logs` was in nobody's volume list.
+
+Both shapes can be combined: a mount for `/app` and a more specific one for a
+subdirectory of it are applied parent-first regardless of the order you list
+them.
+
 ```yaml
-services:
-    aurcache:
-        image: ghcr.io/lukas-heiligenbrunner/aurcache:latest
-        ports:
-        - "8080:8080" # Frontend
-        - "8081:8081" # Repository
-        volumes:
-          - ./aurcache/db:/app/db
-          - ./aurcache/repo:/app/repo
-          - /var/run/docker.sock:/var/run/docker.sock
-          - artifact_cache:/app/builds
-        environment:
-          - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
 volumes:
-  artifact_cache:
-        name: artifact_cache
-        driver: local
+  - aurcache_data:/app          # everything by default
+  - big_pool:/app/repo          # …except the packages, which live elsewhere
 ```
-Use SQLite database only for development, I don't recommend using it in production.
 
-For this method to work you need to mount a exchange volume to pass the built packages to the aurcache container.
-In this example the `artifact_cache` volume is mounted to the aurcache container and the `BUILD_ARTIFACT_DIR` environment variable is set to the volume.
+One catch when adding a specific mount to a deployment that has been running:
+the inner mount **shadows** whatever the outer volume holds at that path rather
+than adopting it. Packages already in `aurcache_data/repo` would still be there,
+but the server would no longer see them. Copy them into the new volume before
+switching, or it looks exactly like data loss.
 
-:::info
+## Why the worker needs `privileged`
 
-When using **Podman**: Pointing the artifact cache to a volume mount won't work since Podman doesn't support subpath Volume-mounts.
-So use absolute cache path when using podman.
+Each package is built in its own `systemd-nspawn` chroot, which needs mounts and
+namespaces an ordinary container forbids. `privileged: true` plus a tmpfs `/run`
+is the tightest configuration that works everywhere; if your host allows it you
+can narrow this to specific capabilities with seccomp/apparmor unconfined.
 
-:::
+Only the **worker** needs this. The server handles no build payloads and runs
+unprivileged.
 
-## Accessing WebUI
+## Where the worker keeps its builds
 
-Access AURCache through your web browser at http://localhost:8080.
+Everything a worker stores (the base chroot, each build, its caches) lives in
+its [storage pool](../workers/storage-pool.md), a btrfs filesystem with a disk
+quota per build and one over the whole worker. By default the pool is a sparse
+image file in the worker's `/var/lib/aurcache-worker` volume, and needs no
+setup. On ZFS, such as TrueNAS, back it with a zvol instead. Pass the zvol
+through as a device and name it in `WORKER_POOL`:
 
-You can now start adding packages for building and utilizing the AURCache repository.
+```yaml
+  builder:
+    environment:
+      - WORKER_POOL=/dev/aurcache-pool
+      - WORKER_DISK_MAX_DEFAULT=950G
+    devices:
+      - /dev/zvol/tank/aurcache-worker:/dev/aurcache-pool
+```
 
-See [Pacman-Repo](/docs/setup/pacman-repo) how to setup your Archlinux client to use the repo.
+## Generating these files
+
+`aurcli setup compose --role bundle|backend|worker` writes the file for
+each of these topologies, with the same comments and the same defaults, and
+`--database postgres|sqlite` chooses the server's database, and
+`--[no-]postgres-upgrade` whether PostgreSQL gets an upgrade step (both asked
+for when omitted). A file with a worker also asks what backs its
+[storage pool](../workers/storage-pool.md#setting-it-up-with-the-cli), or takes
+`--pool-image`, `--pool-device PATH` or `--pool-mount PATH`. It needs
+no server and no token, so it is available before anything is running — useful
+for a system that deploys from a pasted compose file, such as TrueNAS, Portainer
+or Unraid. See [Quick Start](../overview/quick-start.md#for-truenas-portainer-unraid).
+
+On a machine with Docker to hand, `aurcli setup server` and
+`aurcli setup worker` skip the file and run the containers directly.
+
+## More workers
+
+For more build throughput, raise the worker's concurrency on its page in the
+web UI (or `WORKER_CONCURRENCY_DEFAULT`): each build already uses every core,
+so concurrency buys builds at once, not faster builds.
+
+Workers on separate hardware, or on a foreign architecture, are covered in
+[Build Workers](../workers/split-chroot.md) and
+[`docker-compose.remote-worker.yaml`](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/compose/docker-compose.remote-worker.yaml).
+
+If you still run AURCache as one container, see the [hybrid compatibility
+image](../workers/hybrid.md).

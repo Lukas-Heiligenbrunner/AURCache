@@ -1,0 +1,28 @@
+[package]
+name = "aurcache-deps"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+aurcache-common = { path = "../aurcache-common" }
+alpm-compress = "0.1.5"
+alpm-srcinfo = { workspace = true }
+alpm-types = "0.13.0"
+backon = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = "2"
+tokio = { workspace = true, features = ["sync"] }
+url = "2"
+
+[dev-dependencies]
+flate2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+wiremock = "0.6"

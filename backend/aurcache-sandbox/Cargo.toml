@@ -1,0 +1,19 @@
+[package]
+name = "aurcache-sandbox"
+version = "0.1.0"
+edition = "2024"
+
+# Deliberately standalone: this is exec'd from a PATH shim in front of
+# `makepkg`, not linked into the worker, so it stays auditable on its own and
+# has no dependency on worker internals.
+
+[[bin]]
+name = "aurcache-sandbox"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+landlock = "0.4"
+libc = "0.2"

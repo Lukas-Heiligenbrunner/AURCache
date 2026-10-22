@@ -1,17 +1,8 @@
 #!/bin/sh
-
-# Start main process
-/usr/local/bin/aurcache &
-
-if [[ -z "${BUILD_ARTIFACT_DIR}" ]]; then
-  echo "Starting Podman service."
-  podman system service --time=0 unix:///var/run/docker.sock &
-else
-  echo "Docker socket should be available."
-fi
-
-# Wait for any process to exit
-wait -n
-
-# Exit with status of process that exited first
-exit $?
+# AURCache server entrypoint.
+#
+# The server no longer builds packages itself — remote workers do (see
+# design/implemented/remote-workers.md), so there is no Podman/Docker daemon to start here.
+# Run the server in the foreground so signals and its exit code propagate.
+/usr/local/bin/aurcache-private-state
+exec /usr/local/bin/aurcache

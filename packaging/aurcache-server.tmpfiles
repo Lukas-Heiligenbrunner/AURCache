@@ -1,0 +1,4 @@
+# The server's state: the repository, the database and the worker CA.
+d /var/lib/aurcache              0750 aurcache aurcache -
+d /var/lib/aurcache/data         0750 aurcache aurcache -
+d /var/lib/aurcache/data/ca      0700 aurcache aurcache -

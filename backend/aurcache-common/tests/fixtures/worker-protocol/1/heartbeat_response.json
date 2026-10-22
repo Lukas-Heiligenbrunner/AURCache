@@ -1,0 +1,13 @@
+[
+  {
+    "cancel": [
+      43
+    ],
+    "config": {
+      "revision": "3f2a",
+      "settings": {
+        "max_disk": "100G"
+      }
+    }
+  }
+]
