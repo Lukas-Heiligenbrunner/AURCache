@@ -14,13 +14,13 @@ chrono = {workspace = true}
 # todo try to remove this dep from here, shouldn't be required
 aur-rs = {workspace = true}
 
-rocket = "0.5.1"
+rocket = "0.5.2"
 rocket_oauth2 = "0.5.0"
 utoipa = { workspace = true }
 utoipa-redoc = { version = "6.0.0", features = ["rocket"] }
-utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
-rust-embed = "8.12.0"
-bigdecimal = "0.4.10"
+utoipa-scalar = { version = "0.4.0", features = ["rocket"] }
+rust-embed = "8.13.0"
+bigdecimal = "0.4.11"
 reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
 
 
