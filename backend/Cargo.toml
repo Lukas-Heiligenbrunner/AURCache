@@ -13,14 +13,14 @@ members = [
     "aurcache-types"]
 
 [workspace.dependencies]
-tokio = "1.53.1"
+tokio = "1.54.1"
 anyhow = "1.0.104"
 reqwest = "0.13.5"
 tracing = "0.1.44"
 chrono = "0.4.45"
 serde = "1.0.229"
 backon = "1.6.0"
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 sea-orm = { version = "1.1.20", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros", "with-bigdecimal"] }
 itertools = "0.15.0"
 aur-rs = "0.1.1"
@@ -28,7 +28,7 @@ flate2 = "1.1.10"
 tar = "0.4.46"
 utoipa = { version = "5.5.0", features = ["rocket_extras"] }
 tempfile = "3.27.0"
-alpm-srcinfo = "0.6.3"
+alpm-srcinfo = "0.7.0"
 
 [profile.release]
 strip = "debuginfo"  # Automatically strip symbols from the binary.
