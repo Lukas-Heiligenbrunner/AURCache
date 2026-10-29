@@ -118,7 +118,6 @@ pub struct WorkerEnv {
     pub enrollment_dir: Option<String>,
     pub name: Option<String>,
     pub arches: Vec<String>,
-    pub emulated_arches: Vec<String>,
     pub packages: Vec<String>,
     pub concurrency: Option<u32>,
     pub priority: Option<i32>,
@@ -235,7 +234,6 @@ impl WorkerEnv {
         push("AURCACHE_ENROLLMENT_DIR", self.enrollment_dir.clone());
         push("WORKER_NAME", self.name.clone());
         push("WORKER_ARCHES", join_list(&self.arches));
-        push("WORKER_EMULATED_ARCHES", join_list(&self.emulated_arches));
         // Policy is written as the machine's starting point, not a pin, so it
         // can be changed from the worker's page afterwards without anyone
         // editing this file. The plain names would lock these values to the

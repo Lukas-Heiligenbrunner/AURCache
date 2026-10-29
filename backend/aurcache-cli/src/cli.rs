@@ -329,10 +329,6 @@ pub(crate) struct WorkerKnobs {
     #[arg(long = "arch")]
     pub(crate) arches: Vec<String>,
 
-    /// Architecture built under emulation — slower, and worth telling apart.
-    #[arg(long = "emulated-arch")]
-    pub(crate) emulated_arches: Vec<String>,
-
     /// Reserve a pkgbase to this worker. Repeat for several.
     #[arg(long = "package")]
     pub(crate) packages: Vec<String>,

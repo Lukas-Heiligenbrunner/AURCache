@@ -111,7 +111,6 @@ the machine, where they always were.
 |---|---|---|---|
 | `WORKER_NAME` | String | Name shown on the Workers page | hostname |
 | `WORKER_ARCHES` | String | Architectures this worker builds natively, comma or space separated | host architecture |
-| `WORKER_EMULATED_ARCHES` | String | Architectures it can build via emulation (qemu-user + binfmt) | empty |
 | `WORKER_CONCURRENCY` | Integer | Maximum builds at once | 1 |
 
 :::note Raising concurrency
@@ -122,11 +121,10 @@ cache. Raise it when you have memory and disk headroom, not simply because the
 machine has cores; two or three is a large increase for most hosts.
 :::
 
-A foreign architecture is only ever emulated when **no** worker builds it
-natively. That keeps an aarch64 job waiting for the aarch64 machine instead of
-crawling through emulation somewhere else.
-
 ## Building for another architecture
+
+A worker builds in a chroot of its own architecture, so it builds for that
+architecture only.
 
 A foreign-architecture worker is the *same* worker image run emulated, with
 `platform: linux/arm64` (or `linux/arm/v7`). Docker uses binfmt_misc to register

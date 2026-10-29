@@ -31,10 +31,10 @@ configuration:
 definition of host build mode, so a deployment that sets it gets the behaviour
 it had before.
 
-Packages for other architectures build as before too, through the host's
-qemu/binfmt handlers: the image offers every architecture whose handler is
-registered (`/proc/sys/fs/binfmt_misc`). `MAX_CONCURRENT_BUILDS` still sets how
-many packages build at once.
+Packages for other architectures build through the host's qemu/binfmt
+handlers, as before, for the architectures listed in `WORKER_EMULATED_ARCHES`
+(see the [legacy container builder](./legacy-docker.md#other-architectures)).
+`MAX_CONCURRENT_BUILDS` still sets how many packages build at once.
 
 ### Keeping its state across recreates
 
@@ -57,7 +57,7 @@ app before every start — the worker comes back with a new key and the server
 gives its existing row the new key: same history, same settings, same approval.
 Nothing to do.
 
-### What you gain by migrating### What you gain by migrating
+### What you gain by migrating
 
 - Builds move off the server host, or onto several machines.
 - Native workers for other architectures, instead of emulation.

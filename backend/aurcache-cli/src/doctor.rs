@@ -209,7 +209,7 @@ pub fn check_queue(builds: &[Build]) -> Check {
 fn hint_for_reason(reason: &WaitingReason) -> String {
     match reason {
         WaitingReason::Arch { arch } => format!(
-            "add a worker that builds {arch}, or set WORKER_EMULATED_ARCHES={arch} on an existing one"
+            "add a worker that builds {arch}: one on a machine of that architecture, or the worker image run for that platform under emulation"
         ),
         WaitingReason::Offline => {
             "no capable worker has checked in recently; check the worker container is running"
@@ -507,7 +507,7 @@ mod tests {
                 .hint
                 .as_deref()
                 .unwrap_or_default()
-                .contains("WORKER_EMULATED_ARCHES"),
+                .contains("worker image run for that platform"),
             "{:?}",
             check.hint
         );

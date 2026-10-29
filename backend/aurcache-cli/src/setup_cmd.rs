@@ -24,7 +24,6 @@ impl WorkerKnobs {
             enrollment_dir: None,
             name: self.worker_name.clone(),
             arches: self.arches.clone(),
-            emulated_arches: self.emulated_arches.clone(),
             packages: self.packages.clone(),
             concurrency: self.concurrency,
             priority: self.priority,

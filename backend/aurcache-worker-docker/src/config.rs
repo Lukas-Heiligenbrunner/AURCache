@@ -7,7 +7,7 @@
 //! also be set from the server -- `CPU_LIMIT` still pins, as it always did.
 
 use crate::settings::keys;
-use aurcache_worker_core::config::{CoreConfig, env_opt};
+use aurcache_worker_core::config::{CoreConfig, env_opt, parse_list};
 use aurcache_worker_core::settings::WorkerSettings;
 use std::path::PathBuf;
 
@@ -61,6 +61,11 @@ impl Config {
             });
 
         let mut core = CoreConfig::from_env();
+        // Each build runs in an image pulled for the job's platform, so a
+        // foreign architecture the host's binfmt handles builds as it is.
+        core.emulated_arches = env_opt("WORKER_EMULATED_ARCHES")
+            .map(|s| parse_list(&s))
+            .unwrap_or_default();
         // Declared beside the protocol settings, so registration reports one
         // table and the limits below read from the values the server is shown.
         let settings =

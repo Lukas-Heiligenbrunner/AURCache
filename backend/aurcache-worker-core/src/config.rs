@@ -29,6 +29,12 @@ pub struct CoreConfig {
     /// Architectures this worker builds natively.
     pub native_arches: Vec<String>,
     /// Architectures this worker can build via emulation.
+    ///
+    /// Empty here: whether a worker can emulate at all is its executor's
+    /// business, so an executor that can fills this in from its own settings
+    /// (the container one reads `WORKER_EMULATED_ARCHES`). Advertising an
+    /// architecture the executor would then build natively publishes
+    /// packages for the wrong one.
     pub emulated_arches: Vec<String>,
     /// Exact pkgbase names this worker is specially provisioned for
     /// (credentials, licensed toolchain, scratch space). Packages named here
@@ -201,10 +207,6 @@ impl CoreConfig {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec![detect_arch()]);
 
-        let emulated_arches = env_opt("WORKER_EMULATED_ARCHES")
-            .map(|s| parse_list(&s))
-            .unwrap_or_default();
-
         let settings = WorkerSettings::from_env(protocol_settings());
 
         let mut cfg = Self {
@@ -220,7 +222,7 @@ impl CoreConfig {
             enrollment_token: env_opt("AURCACHE_ENROLLMENT_TOKEN"),
             embedded_secret: env_opt("AURCACHE_EMBEDDED_WORKER_SECRET"),
             native_arches,
-            emulated_arches,
+            emulated_arches: Vec::new(),
             name: env_opt("WORKER_NAME").unwrap_or_else(detect_hostname),
             data_dir: env_opt("WORKER_DATA_DIR")
                 .map(PathBuf::from)

@@ -33,3 +33,17 @@ pin. Its builder image and build directory are not settable from AURCache.
 The **Type** column on the Workers page tells the strategies apart: `chroot`
 for the supported worker, `docker` (highlighted) for this one — see
 [Managing workers](./managing.md#build-strategies).
+
+## Other architectures
+
+Each build container is created from the builder image for the package's
+platform, so a host whose kernel runs that platform's binaries through
+qemu/binfmt builds for it as it is. `WORKER_EMULATED_ARCHES` lists those
+architectures, comma separated (`aarch64`, `armv7h`, `x86_64`); the worker
+takes their jobs only when no worker builds them natively. In the hybrid image
+it is filled in from the handlers under `/proc/sys/fs/binfmt_misc` when the
+container can see them, which most cannot: set it to be sure.
+
+This is the legacy builder's alone. A [chroot worker](./split-chroot.md) builds
+for its own architecture, and builds for another as the worker image run for
+that platform.
