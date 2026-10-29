@@ -36,7 +36,28 @@ qemu/binfmt handlers: the image offers every architecture whose handler is
 registered (`/proc/sys/fs/binfmt_misc`). `MAX_CONCURRENT_BUILDS` still sets how
 many packages build at once.
 
-### What you gain by migrating
+### Keeping its state across recreates
+
+Your compose file persists the repository (and, with SQLite, the database), and
+that is all the upgrade needs. What the image adds that must survive goes into
+the repository volume, under dot directories that are never served and that
+only root can read:
+
+| Path | What it holds |
+|---|---|
+| `/app/repo/.build_logs` | Build logs, including those your old version kept in its database |
+| `/app/repo/.ca` | The internal CA that signs every worker's certificate |
+
+If you copy the repository somewhere else to serve it — `rsync` to a mirror,
+say — exclude dot directories, as you would `.staging`.
+
+The embedded worker keeps its own identity in an anonymous volume. When that is
+lost — `docker compose down`, or an orchestrator such as TrueNAS that stops the
+app before every start — the worker comes back with a new key and the server
+gives its existing row the new key: same history, same settings, same approval.
+Nothing to do.
+
+### What you gain by migrating### What you gain by migrating
 
 - Builds move off the server host, or onto several machines.
 - Native workers for other architectures, instead of emulation.
@@ -54,10 +75,15 @@ many packages build at once.
    image, worker on `aurcache-worker`.
 2. Keep your existing `/app/repo` and database volumes on the server. Nothing
    about the repository or package history changes.
-3. Drop `BUILD_ARTIFACT_DIR`, the Docker socket mount, and the `artifact_cache`
+3. Set `AURCACHE_CA_DIR=/app/repo/.ca` and
+   `AURCACHE_BUILD_LOG_PATH=/app/repo/.build_logs` on the server, where this
+   image keeps them. Without them the split server creates a new CA, which
+   every worker you enrolled would stop trusting, and finds none of the logs
+   written so far.
+4. Drop `BUILD_ARTIFACT_DIR`, the Docker socket mount, and the `artifact_cache`
    volume — the worker uploads its packages over the API instead of through a
    shared directory.
-4. Move `privileged: true` from the server to the worker, and give the worker a
+5. Move `privileged: true` from the server to the worker, and give the worker a
    tmpfs `/run`.
 
 The split worker has requirements this image does not, Linux 6.7 or newer

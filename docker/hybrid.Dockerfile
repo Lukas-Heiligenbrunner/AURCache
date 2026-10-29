@@ -200,27 +200,45 @@ COPY --chmod=0755 docker/private-state.sh /usr/local/bin/aurcache-private-state
 
 # State that must outlive the container.
 #
-#   /app/data                 the internal CA that signs every worker's
-#                             certificate.
-#   /var/lib/aurcache-worker  the embedded worker's identity.
+# A pre-worker compose file persists the repository (and, with SQLite, the
+# database) and nothing else, and this image has to keep building from such a
+# file unedited. So what must survive goes into the repository volume, under
+# dot directories that are never served -- the server's file server and
+# repo-nginx.conf refuse dot segments, as they do for `.staging` -- that the
+# retired-package sweep skips, and that private-state.sh closes to everyone but
+# root:
+#
+#   /app/repo/.build_logs  build logs. 0.5.0 kept them in its database; the
+#                          upgrade moves them out to files.
+#   /app/repo/.ca          the internal CA that signs every worker's
+#                          certificate. Losing it orphans every worker that
+#                          ever enrolled.
+#
+# Anywhere else they lived in the container's own layer or an anonymous volume,
+# and an anonymous volume is not as durable as it looks: `docker compose up`
+# carries it across a recreate, but `down` does not, and neither does an
+# orchestrator that recreates the container rather than updating it -- TrueNAS
+# runs `down` before every start. A leaked CA key cannot authenticate anyone as
+# a worker -- the server also requires an approved key -- so the repository
+# volume is no worse a home for it than a data directory.
+#
+# A deployment moving on to the split images keeps both by setting the same
+# variables on the server.
+ENV AURCACHE_BUILD_LOG_PATH=/app/repo/.build_logs \
+    AURCACHE_CA_DIR=/app/repo/.ca
+
+# Kept in anonymous volumes, as losing them is survivable:
+#
+#   /var/lib/aurcache-worker  the embedded worker's identity. Recreated, the
+#                             worker comes back under a new key and the server
+#                             re-keys its row (AURCACHE_EMBEDDED_WORKER_SECRET in
+#                             hybrid-entrypoint.sh). Not with the CA: unlike the
+#                             CA's, this key does authenticate as a worker.
 #   /var/lib/containers       Podman's image store in DinD mode, kept off the
 #                             container's own overlay filesystem (see
-#                             podman-storage.conf) and the builder image with
+#                             podman-storage.conf), and the builder image with
 #                             it, so it is not pulled again on every recreate.
-#
-# `/app/data` was missing here, and its absence was worse than it looks: losing
-# the CA invalidates the certificate of *every* worker that ever enrolled, so a
-# recreate orphaned the whole fleet and not just the embedded worker. The
-# worker directory below was declared without the one that makes it useful.
-#
-# Declaring them means `docker compose up` carries them across a recreate even
-# for a compose file that mounts none of them. That is not universal, though:
-# an orchestrator that deletes and recreates the container rather than updating
-# it in place -- TrueNAS's app system among them -- starts each deployment with
-# fresh anonymous volumes, and the embedded worker then enrolls as a new machine
-# every single time. A deployment that updates regularly should mount named
-# volumes here explicitly rather than trusting the anonymous ones to survive.
-VOLUME ["/app/data", "/var/lib/aurcache-worker", "/var/lib/containers"]
+VOLUME ["/var/lib/aurcache-worker", "/var/lib/containers"]
 
 WORKDIR /app
 CMD ["/usr/local/bin/hybrid-entrypoint"]
