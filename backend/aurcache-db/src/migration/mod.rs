@@ -20,6 +20,7 @@ mod m20251204_160000_settings;
 pub mod m20261008_000000_from_0_5;
 
 mod m20261008_000001_repository_updates;
+mod m20261029_000000_files_unique_per_platform;
 
 pub struct Migrator;
 
@@ -36,6 +37,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251107_000000_build_flags_no_install::Migration),
             Box::new(m20261008_000000_from_0_5::Migration),
             Box::new(m20261008_000001_repository_updates::Migration),
+            Box::new(m20261029_000000_files_unique_per_platform::Migration),
         ]
     }
 }
