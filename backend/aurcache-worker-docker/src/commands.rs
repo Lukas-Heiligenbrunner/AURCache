@@ -88,7 +88,7 @@ pub fn with_layout(makepkg_conf: &str, pkgdest: &str) -> String {
     out
 }
 
-/// Prefix the build with the job's rendered `makepkg.conf` / `pacman.conf`.
+/// Prefix the build with the job's rendered `makepkg.conf`.
 ///
 /// The written config `source`s `/etc/makepkg.conf` before applying the
 /// server's settings, and is passed to `makepkg --config`.
@@ -102,26 +102,24 @@ pub fn with_layout(makepkg_conf: &str, pkgdest: &str) -> String {
 /// ignored entirely — silently producing debug packages and putting the built
 /// package somewhere the worker does not look.
 ///
-/// The mirrorlist is deliberately absent here: it is bind-mounted over
-/// `/etc/pacman.d/mirrorlist` instead of written in. The builder image grants
-/// the build user passwordless sudo for exactly four commands — `pacman`,
-/// `pacman-key`, `chmod`, and `tee /etc/pacman.conf` — so `sudo tee` on any
-/// other path fails with "a password is required" and takes the build with it.
+/// `pacman.conf` and the mirrorlist are deliberately absent here: they are
+/// bind-mounted over `/etc` instead of written in. The build user has
+/// passwordless sudo for `pacman`, `pacman-key` and `chmod` alone, in every
+/// builder image ever published -- the `ghcr.io/.../aurcache-builder:latest` a
+/// 0.5.0 deployment keeps pulling included -- so writing anywhere under `/etc`
+/// fails with "a password is required" and takes the build with it.
 #[must_use]
 pub fn wrap_with_config(
     makepkg_config: &str,
     makepkg_config_path: &str,
-    pacman_config: &str,
     build_cmd: &str,
 ) -> String {
     format!(
         "printf 'source /etc/makepkg.conf\\n' > {makepkg_config_path}\n\
          printf '%s' {makepkg_config} >> {makepkg_config_path}\n\
-         printf '%s' {pacman_config} | sudo tee /etc/pacman.conf >/dev/null\n\
          {build_cmd}",
         makepkg_config = quote_argument(makepkg_config),
         makepkg_config_path = quote_argument(makepkg_config_path),
-        pacman_config = quote_argument(pacman_config),
     )
 }
 
@@ -201,14 +199,19 @@ mod tests {
         assert!(conf.ends_with("PACKAGER='x'\nPKGDEST=/output\nMAKEFLAGS=\"-j$(nproc)\"\n"));
     }
 
-    /// Only the one sudo path the builder image actually permits may appear.
-    /// The image grants passwordless sudo for `pacman`, `pacman-key`, `chmod`
-    /// and `tee /etc/pacman.conf` only; any other `sudo` fails the build with
-    /// "a password is required".
+    /// Only what the builder image permits may run under sudo: `pacman`,
+    /// `pacman-key` and `chmod`. The image of 0.5.0, still what an unchanged
+    /// compose file pulls, grants nothing more, and any other `sudo` fails the
+    /// build with "a password is required".
     #[test]
     fn only_the_permitted_sudo_commands_are_used() {
-        let conf = wrap_with_config("MK", "/output/makepkg.conf", "PAC", "build");
-        assert!(conf.contains("sudo tee /etc/pacman.conf"));
+        let build = build_build_command(
+            "hello",
+            &["--noconfirm".to_string()],
+            Path::new("/output/src"),
+            "/output/makepkg.conf",
+        );
+        let conf = wrap_with_config("MK", "/output/makepkg.conf", &build);
         // The system defaults must be pulled in first: makepkg loads exactly
         // one config file, so the server's settings alone would lose PKGEXT.
         assert!(conf.contains("source /etc/makepkg.conf"));
@@ -218,11 +221,13 @@ mod tests {
             sourced < overrides,
             "defaults must be sourced before overrides"
         );
-        assert!(!conf.contains("/etc/pacman.d/mirrorlist"));
-        for line in conf.lines().filter(|l| l.contains("sudo ")) {
+        assert!(!conf.contains("/etc/pacman"));
+        for (index, _) in conf.match_indices("sudo ") {
+            let command = conf[index + "sudo ".len()..].split_whitespace().next();
             assert!(
-                line.contains("sudo tee /etc/pacman.conf"),
-                "unpermitted sudo use: {line}"
+                matches!(command, Some("pacman" | "pacman-key" | "chmod")),
+                "unpermitted sudo use: {}",
+                &conf[index..]
             );
         }
     }

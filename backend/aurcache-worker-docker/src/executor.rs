@@ -215,16 +215,24 @@ impl DockerExecutor {
         }
 
         // The server sends no `[repo]` section; append the one rendered for the
-        // host this worker reaches the server on.
+        // host this worker reaches the server on. Read-only, as 0.5.0 mounted
+        // it: a `pacman -Syu` that upgrades pacman finds it differs from the
+        // packaged file and leaves a `.pacnew` beside it rather than writing.
         let pacman_conf = aurcache_worker_core::repo::append_to_pacman_conf(
             &job.pacman_conf,
             client.repo_section(),
         );
+        let path = local_dir.join("pacman.conf");
+        std::fs::write(&path, &pacman_conf)
+            .with_context(|| format!("writing {}", path.display()))?;
+        binds.push(format!(
+            "{}/pacman.conf:/etc/pacman.conf:ro",
+            host_dir.display()
+        ));
 
         let cmd = commands::wrap_with_config(
             &commands::with_layout(&job.makepkg_conf, CONTAINER_PKGDEST),
             MAKEPKG_CONF_PATH,
-            &pacman_conf,
             &commands::build_build_command(
                 &job.pkgbase,
                 &job.build_flags,
