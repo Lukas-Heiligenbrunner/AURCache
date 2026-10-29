@@ -285,7 +285,14 @@ impl DockerExecutor {
             .create_container(
                 Some(CreateContainerOptions {
                     name: Some(container_name.clone()),
-                    ..Default::default()
+                    // The builder image is multi-arch. Without this the daemon
+                    // creates the host's variant (containerd image store) or
+                    // whichever was pulled last (classic store): an x86_64
+                    // build for an aarch64 job either way. 0.5.0 passed it.
+                    // `pull_image` has refused an architecture this lacks.
+                    platform: docker_arch(&job.arch)
+                        .map(|platform| format!("linux/{platform}"))
+                        .unwrap_or_default(),
                 }),
                 body,
             )
