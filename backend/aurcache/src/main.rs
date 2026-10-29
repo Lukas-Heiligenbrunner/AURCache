@@ -66,6 +66,7 @@ async fn main() {
     if let Ok(fp) = ca.ca_cert_fingerprint() {
         tracing::info!("Worker CA fingerprint (pin this on workers): {fp}");
     }
+    startup::report_untrusted_workers(&db, &ca, &activity).await;
 
     // A single, long-lived `SnapshotStore` shared by every path that resolves
     // package sources: the version-check loop, the auto-update job, the API/UI

@@ -226,6 +226,13 @@ events! {
     /// each one would turn an ordinary restart into a log nobody can read past.
     WorkerEnrolled => ("worker.enrolled", "Workers", "Worker enrolled") { worker: WorkerRef },
 
+    /// Approved workers hold certificates the server's CA did not issue, so
+    /// the server no longer trusts them: the CA was replaced, most often
+    /// because the directory holding it was not persisted. Checked at startup.
+    WorkersUntrusted => ("worker.untrusted", "Workers", "Workers no longer trusted") {
+        workers: Vec<String>,
+    },
+
     /// A worker was let into the fleet, by someone or by the enrollment rules.
     WorkerApproved => ("worker.approved", "Workers", "Worker approved") { worker: WorkerRef },
 
@@ -771,6 +778,7 @@ impl Event {
             | Self::SignInRefused { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
+            | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
             | Self::RepoCommitRetried { .. }
@@ -1193,6 +1201,11 @@ impl Event {
                 entity(pkg),
                 text(format!(", but {}: {error}", step.as_str())),
             ],
+            Self::WorkersUntrusted { workers } => vec![text(format!(
+                "the worker CA did not issue the certificates of {}, so they have to enroll \
+                 again; was the CA directory (AURCACHE_CA_DIR) lost?",
+                workers.join(", ")
+            ))],
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
@@ -1477,6 +1490,9 @@ mod tests {
                 error: error(),
             },
             Event::RestoreCaReplaced {},
+            Event::WorkersUntrusted {
+                workers: vec!["builder-01".to_string()],
+            },
             Event::MirrorRankFailed { error: error() },
             Event::OfficialReposRefreshFailed { error: error() },
             Event::RepoCommitRetried {

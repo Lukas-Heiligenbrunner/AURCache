@@ -3,6 +3,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use aurcache_activitylog::events::Event;
+use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::source::SourceData;
 use aurcache_db::helpers::operations;
 use aurcache_db::prelude::Packages;
@@ -210,6 +212,40 @@ pub async fn prune_source_checkouts(db: &DatabaseConnection, store: &SnapshotSto
         Ok(0) => {}
         Ok(removed) => info!("removed {removed} orphaned source checkout(s)"),
         Err(e) => warn!("source checkout prune did not complete: {e}"),
+    }
+}
+
+/// Report approved workers whose certificates this server's CA did not issue.
+///
+/// That is a replaced CA -- most often its directory was not persisted -- and
+/// nothing else says so: those workers are refused on every request, and look
+/// merely idle until someone wonders why. The embedded worker is left out, as
+/// it enrolls again by itself.
+pub async fn report_untrusted_workers(
+    db: &DatabaseConnection,
+    ca: &aurcache_ca::Ca,
+    activity: &ActivityLog,
+) {
+    let workers = match aurcache_db::helpers::worker_store::list_workers(db).await {
+        Ok(workers) => workers,
+        Err(e) => {
+            warn!("could not check the workers against the CA: {e}");
+            return;
+        }
+    };
+    let untrusted: Vec<String> = workers
+        .into_iter()
+        .filter(|worker| worker.status == ApprovalStatus::Approved && !worker.embedded)
+        .filter(|worker| {
+            worker
+                .signed_cert
+                .as_deref()
+                .is_some_and(|cert| !ca.issued(cert))
+        })
+        .map(|worker| worker.name)
+        .collect();
+    if !untrusted.is_empty() {
+        activity.emit(Event::WorkersUntrusted { workers: untrusted });
     }
 }
 
