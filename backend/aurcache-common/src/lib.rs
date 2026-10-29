@@ -6,6 +6,7 @@
 //! consumer can take `default-features = false` and still get the types.
 
 pub mod api;
+pub mod build_flags;
 pub mod build_state;
 /// Filesystem helpers. Requires the `fs` feature: `std::fs` is meaningless in
 /// a browser, so wasm consumers leave it off.

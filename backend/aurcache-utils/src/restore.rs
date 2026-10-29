@@ -130,6 +130,8 @@ pub fn load_dump(bytes: &[u8]) -> anyhow::Result<LoadedDump> {
             name.parse::<pacman_mirrors::platforms::Platform>()
                 .map_err(|e| anyhow::anyhow!("'{pkgbase}': {e}"))?;
         }
+        aurcache_common::build_flags::canonical(&package.build_flags)
+            .map_err(|e| anyhow::anyhow!("'{pkgbase}': {e}"))?;
     }
 
     let secrets = load_secrets(&files, &workers)?;
@@ -779,11 +781,19 @@ fn platforms(package: &DumpPackage) -> Platforms {
     )
 }
 
+/// A dump's build flags in their canonical form; [`load_dump`] has refused
+/// one a build cannot take.
+fn build_flags(package: &DumpPackage) -> BuildFlags {
+    BuildFlags::new(
+        aurcache_common::build_flags::canonical(&package.build_flags).unwrap_or_default(),
+    )
+}
+
 /// The columns a dump owns. Everything else on the row is derived and is left
 /// to the passes that follow.
 fn apply_config(active: &mut packages::ActiveModel, package: &DumpPackage, patch: Option<String>) {
     active.platforms = Set(platforms(package));
-    active.build_flags = Set(BuildFlags::new(&package.build_flags));
+    active.build_flags = Set(build_flags(package));
     active.directly_requested = Set(package.directly_requested);
     active.source_data = Set(package.source_data.clone());
     active.patch = Set(patch);
@@ -802,7 +812,7 @@ async fn insert_row<C: sea_orm::ConnectionTrait>(
         status: Set(BuildState::Enqueued),
         out_of_date: Set(false),
         platforms: Set(platforms(package)),
-        build_flags: Set(BuildFlags::new(&package.build_flags)),
+        build_flags: Set(build_flags(package)),
         source_data: Set(package.source_data.clone()),
         directly_requested: Set(package.directly_requested),
         patch: Set(patch),
@@ -1039,6 +1049,21 @@ mod tests {
         );
         let error = load(files).unwrap_err().to_string();
         assert!(error.contains("no platforms"), "unhelpful: {error}");
+    }
+
+    /// makepkg is handed a package's flags as they are, so one it rejects
+    /// would fail every build of the restored package.
+    #[test]
+    fn a_flag_no_build_can_take_is_refused() {
+        let mut files = good();
+        files.insert(
+            "packages.json",
+            r#"{"hello":{"source_data":{"type":"aur","name":"hello"},
+                "platforms":["x86_64"],"build_flags":["--pgpfetch"],"directly_requested":true}}"#
+                .to_string(),
+        );
+        let error = load(files).unwrap_err().to_string();
+        assert!(error.contains("'--pgpfetch'"), "unhelpful: {error}");
     }
 
     /// Clearing is undone by a rollback.

@@ -106,6 +106,16 @@ fn parse_platforms(platforms: Option<Vec<String>>) -> Result<Option<Vec<Platform
         .transpose()
 }
 
+/// Requested build flags in their canonical form, or a 400 naming the first a
+/// build cannot take: stored as given, it would fail every build of the package.
+fn parse_build_flags(flags: Option<Vec<String>>) -> Result<Option<Vec<String>>, ApiError> {
+    flags
+        .map(|flags| {
+            aurcache_common::build_flags::canonical(&flags).map_err(|e| err(Status::BadRequest, e))
+        })
+        .transpose()
+}
+
 /// Counts a bulk add's entries, and logs each package it added.
 struct BulkAddRecorder {
     activity: ActivityLog,
@@ -163,7 +173,7 @@ pub async fn packages_add_endpoint(
         return Err(err(Status::BadRequest, "No sources given"));
     }
     let platforms = parse_platforms(input.platforms)?;
-    let build_flags = input.build_flags;
+    let build_flags = parse_build_flags(input.build_flags)?;
     let total = i32::try_from(input.sources.len()).unwrap_or(i32::MAX);
 
     let job_id = operations::create(&services.db, operations::KIND_BULK_ADD, total)
@@ -278,11 +288,12 @@ pub async fn package_add_endpoint(
 ) -> Result<(), ApiError> {
     let input = input.into_inner();
     let platforms = parse_platforms(input.platforms)?;
+    let build_flags = parse_build_flags(input.build_flags)?;
 
     let new_pkg_name = package_add(
         services,
         platforms,
-        input.build_flags,
+        build_flags,
         input.source,
         input.patched_files,
     )
@@ -347,8 +358,9 @@ pub async fn package_update_entity_endpoint(
     if let Some(Some(patch)) = &input.patch {
         SourcePatch::parse(patch).map_err(|e| err(Status::BadRequest, e))?;
     }
+    let requested_flags = parse_build_flags(input.build_flags)?;
     let mut proposed = pkg.clone();
-    if let Some(flags) = input.build_flags {
+    if let Some(flags) = requested_flags {
         proposed.build_flags = BuildFlags::new(flags);
     }
     if let Some(platforms) = requested_platforms {
