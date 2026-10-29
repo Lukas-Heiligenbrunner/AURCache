@@ -23,6 +23,9 @@ pub struct CoreConfig {
     pub enrollment_dir: Option<PathBuf>,
     /// Shared-secret enrollment token (fallback path).
     pub enrollment_token: Option<String>,
+    /// The secret proving this is the hybrid image's embedded worker; see
+    /// [`aurcache_common::worker::RegisterRequest::embedded_secret`].
+    pub embedded_secret: Option<String>,
     /// Architectures this worker builds natively.
     pub native_arches: Vec<String>,
     /// Architectures this worker can build via emulation.
@@ -215,6 +218,7 @@ impl CoreConfig {
                 .map(PathBuf::from)
                 .or_else(|| Some(PathBuf::from("/enroll"))),
             enrollment_token: env_opt("AURCACHE_ENROLLMENT_TOKEN"),
+            embedded_secret: env_opt("AURCACHE_EMBEDDED_WORKER_SECRET"),
             native_arches,
             emulated_arches,
             name: env_opt("WORKER_NAME").unwrap_or_else(detect_hostname),

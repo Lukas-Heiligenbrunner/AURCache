@@ -64,6 +64,27 @@ pub fn auto_approves(
     )
 }
 
+/// Whether `provided` is the embedded-worker secret `expected`: the pure check.
+///
+/// Unset or empty on the server means there is no embedded worker -- only the
+/// hybrid image's entrypoint sets one.
+#[must_use]
+pub fn is_embedded_secret(provided: Option<&str>, expected: Option<&str>) -> bool {
+    // In constant time, like the enrollment token.
+    matches!(
+        (provided, expected),
+        (Some(p), Some(e)) if !e.is_empty() && bool::from(p.as_bytes().ct_eq(e.as_bytes()))
+    )
+}
+
+/// [`is_embedded_secret`] against this server's
+/// `AURCACHE_EMBEDDED_WORKER_SECRET`.
+#[must_use]
+pub fn env_is_embedded(provided: Option<&str>) -> bool {
+    let expected = env::var("AURCACHE_EMBEDDED_WORKER_SECRET").ok();
+    is_embedded_secret(provided, expected.as_deref())
+}
+
 /// Parse `AURCACHE_PREAPPROVED_WORKERS` (`fp[:name[:arches]],…`) into the set of
 /// pre-approved fingerprints (the first `:`-separated field of each entry).
 #[must_use]
@@ -222,5 +243,15 @@ mod tests {
         let parsed = parse_preapproved("aa:worker-a:x86_64, bb , cc:worker-c");
         assert_eq!(parsed, vec!["aa", "bb", "cc"]);
         assert!(parse_preapproved("").is_empty());
+    }
+
+    #[test]
+    fn only_the_servers_own_embedded_secret_matches() {
+        assert!(is_embedded_secret(Some("s3cret"), Some("s3cret")));
+        assert!(!is_embedded_secret(Some("guess"), Some("s3cret")));
+        assert!(!is_embedded_secret(None, Some("s3cret")));
+        // A server outside the hybrid image has no embedded worker at all.
+        assert!(!is_embedded_secret(Some(""), Some("")));
+        assert!(!is_embedded_secret(Some("s3cret"), None));
     }
 }

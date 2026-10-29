@@ -7,7 +7,7 @@ use crate::prelude::{WorkerSettings, Workers};
 use crate::{worker_settings, workers};
 use aurcache_common::api::worker::ApprovalStatus;
 use sea_orm::ActiveValue::Set;
-use sea_orm::sea_query::{OnConflict, Query};
+use sea_orm::sea_query::{Expr, OnConflict, Query};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
     TransactionSession, TransactionTrait,
@@ -108,6 +108,60 @@ pub async fn register_worker<C: ConnectionTrait>(
     find_worker_by_fingerprint(db, reg.fingerprint)
         .await?
         .ok_or_else(|| DbErr::Custom("worker vanished after registration".to_string()))
+}
+
+/// What became of the embedded worker's row when it registered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rekey {
+    /// A row already holds this key: nothing to move.
+    Known,
+    /// No row is marked embedded yet.
+    NoRow,
+    /// The embedded row now holds this key; it held `previous`.
+    Rekeyed { previous: String },
+}
+
+/// Give the embedded worker's row the key it registered with, keeping the
+/// row's id, approval, settings and build history.
+///
+/// Its identity lives in an anonymous volume that an orchestrator recreating
+/// the container discards, so the same worker comes back under a new key. The
+/// certificate is cleared: it was issued for the old key. The approval is
+/// kept, both ways -- an operator who revoked the embedded worker revoked it
+/// for good, whatever its key.
+pub async fn rekey_embedded<C: ConnectionTrait>(db: &C, fingerprint: &str) -> Result<Rekey, DbErr> {
+    if find_worker_by_fingerprint(db, fingerprint).await?.is_some() {
+        return Ok(Rekey::Known);
+    }
+    let Some(row) = Workers::find()
+        .filter(workers::Column::Embedded.eq(true))
+        .one(db)
+        .await?
+    else {
+        return Ok(Rekey::NoRow);
+    };
+    let previous = row.cert_fingerprint.clone();
+    let mut active: workers::ActiveModel = row.into();
+    active.cert_fingerprint = Set(fingerprint.to_string());
+    active.signed_cert = Set(None);
+    active.not_after = Set(None);
+    active.update(db).await?;
+    Ok(Rekey::Rekeyed { previous })
+}
+
+/// Mark `id` as the embedded worker, and no other row.
+pub async fn mark_embedded<C: ConnectionTrait>(db: &C, id: i32) -> Result<(), DbErr> {
+    Workers::update_many()
+        .col_expr(workers::Column::Embedded, Expr::value(false))
+        .filter(workers::Column::Id.ne(id))
+        .exec(db)
+        .await?;
+    Workers::update_many()
+        .col_expr(workers::Column::Embedded, Expr::value(true))
+        .filter(workers::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// Look up a worker by id.
@@ -872,5 +926,63 @@ mod tests {
             .unwrap();
         Workers::delete_by_id(w.id).exec(&db).await.unwrap();
         assert_eq!(WorkerSettings::find().all(&db).await.unwrap().len(), 0);
+    }
+
+    /// The embedded worker coming back under a new key keeps its row: its id,
+    /// its approval -- revoked included -- and nothing of the old certificate.
+    #[tokio::test]
+    async fn the_embedded_worker_keeps_its_row_under_a_new_key() {
+        let db = setup().await;
+        assert_eq!(rekey_embedded(&db, "fp-1").await.unwrap(), Rekey::NoRow);
+        let first = register_worker(&db, &reg("bundled", "fp-1")).await.unwrap();
+        mark_embedded(&db, first.id).await.unwrap();
+        approve_worker(&db, first.id).await.unwrap();
+        store_signed_cert(&db, first.id, "old cert", 1)
+            .await
+            .unwrap();
+        let other = register_worker(&db, &reg("bundled", "fp-remote"))
+            .await
+            .unwrap();
+
+        assert_eq!(rekey_embedded(&db, "fp-1").await.unwrap(), Rekey::Known);
+        assert_eq!(
+            rekey_embedded(&db, "fp-2").await.unwrap(),
+            Rekey::Rekeyed {
+                previous: "fp-1".to_string()
+            }
+        );
+        let again = register_worker(&db, &reg("bundled", "fp-2")).await.unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.status, ApprovalStatus::Approved);
+        assert_eq!(again.signed_cert, None);
+        assert!(
+            find_worker_by_fingerprint(&db, "fp-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // A same-named worker that is not the embedded one is never touched.
+        let untouched = find_worker(&db, other.id).await.unwrap().unwrap();
+        assert_eq!(untouched.cert_fingerprint, "fp-remote");
+        assert!(!untouched.embedded);
+
+        set_status(&db, first.id, ApprovalStatus::Revoked)
+            .await
+            .unwrap();
+        rekey_embedded(&db, "fp-3").await.unwrap();
+        let revoked = find_worker(&db, first.id).await.unwrap().unwrap();
+        assert_eq!(revoked.cert_fingerprint, "fp-3");
+        assert_eq!(revoked.status, ApprovalStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn one_row_is_embedded_at_a_time() {
+        let db = setup().await;
+        let a = register_worker(&db, &reg("a", "fp-a")).await.unwrap();
+        let b = register_worker(&db, &reg("b", "fp-b")).await.unwrap();
+        mark_embedded(&db, a.id).await.unwrap();
+        mark_embedded(&db, b.id).await.unwrap();
+        assert!(!find_worker(&db, a.id).await.unwrap().unwrap().embedded);
+        assert!(find_worker(&db, b.id).await.unwrap().unwrap().embedded);
     }
 }

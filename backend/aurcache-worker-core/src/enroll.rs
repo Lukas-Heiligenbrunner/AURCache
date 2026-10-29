@@ -43,6 +43,7 @@ pub fn register_request(cfg: &CoreConfig, csr_pem: String, kind: &str) -> Regist
         kind: kind.to_string(),
         csr_pem,
         enrollment_token: cfg.enrollment_token.clone(),
+        embedded_secret: cfg.embedded_secret.clone(),
         affinity: cfg.packages.clone(),
         priority: cfg.priority,
         concurrency: cfg.concurrency as u32,

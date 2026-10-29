@@ -302,6 +302,7 @@ fn registration_messages_still_decode() {
             kind: "chroot".to_string(),
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n".to_string(),
             enrollment_token: Some("token".to_string()),
+            embedded_secret: None,
             affinity: vec!["chromium".to_string()],
             priority: 10,
             concurrency: 2,

@@ -327,6 +327,23 @@ pub async fn register_worker(
         return Err(err(Status::UpgradeRequired, reason));
     };
 
+    // The hybrid image's embedded worker keeps its identity in an anonymous
+    // volume, which an orchestrator that recreates the container discards --
+    // TrueNAS does on every start. Its row takes the new key, rather than the
+    // same worker enrolling as one more machine each time.
+    let embedded = crate::worker_enroll::env_is_embedded(input.embedded_secret.as_deref());
+    if embedded {
+        let rekey = worker_store::rekey_embedded(db, &fingerprint)
+            .await
+            .map_err(|e| err(Status::InternalServerError, e))?;
+        if let worker_store::Rekey::Rekeyed { previous } = rekey {
+            tracing::info!(
+                "The embedded worker came back with a new key ({previous} -> {fingerprint}); \
+                 its row keeps its history and approval"
+            );
+        }
+    }
+
     // Asked before registering, because registering is an upsert and would
     // erase the difference: the first time is an enrollment, and every time
     // after is a worker coming back up.
@@ -366,6 +383,11 @@ pub async fn register_worker(
     )
     .await
     .map_err(|e| err(Status::InternalServerError, e))?;
+    if embedded && !worker.embedded {
+        worker_store::mark_embedded(db, worker.id)
+            .await
+            .map_err(|e| err(Status::InternalServerError, e))?;
+    }
 
     if known {
         al.emit(Event::WorkerRegistered {

@@ -63,6 +63,10 @@ pub struct Model {
     /// trusted and keeps its builds; unlike a setting, it needs nothing from
     /// the worker -- the claim query simply stops offering it jobs.
     pub paused: bool,
+    /// The hybrid image's embedded worker: proven by a secret only that
+    /// container holds, and re-keyed in place when it comes back with a new
+    /// identity rather than enrolled as another machine.
+    pub embedded: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

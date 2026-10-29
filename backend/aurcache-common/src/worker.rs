@@ -94,6 +94,12 @@ pub struct RegisterRequest {
     /// worker). When it matches the server's configured token the worker is
     /// auto-approved without an admin click.
     pub enrollment_token: Option<String>,
+    /// The secret the hybrid image shares between its server and its embedded
+    /// worker (`AURCACHE_EMBEDDED_WORKER_SECRET` on both), generated on each
+    /// start and never leaving the container. A worker presenting the
+    /// server's is the embedded worker, whatever key it has this time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_secret: Option<String>,
     /// Exact pkgbase names this worker is specially provisioned for
     /// (`WORKER_PACKAGES`). Reserves those packages to workers that name them.
     pub affinity: Vec<String>,

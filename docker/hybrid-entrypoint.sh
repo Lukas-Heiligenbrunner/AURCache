@@ -30,6 +30,14 @@ log() { printf '[hybrid] %s\n' "$*" >&2; }
 # ---------------------------------------------------------------------------
 export AURCACHE_ENROLLMENT_TOKEN="${AURCACHE_ENROLLMENT_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -d '\n')}"
 export AURCACHE_URL="${AURCACHE_URL:-https://localhost:8083}"
+# Proves to the server that the worker presenting it is this container's own,
+# so its row is re-keyed rather than duplicated when the worker comes back under
+# a new identity -- which it does whenever the container is recreated with fresh
+# anonymous volumes, as TrueNAS does on every start. Always generated, never
+# taken from the environment: a value an operator set could be handed to a
+# remote worker, which would then take over the embedded worker's row.
+AURCACHE_EMBEDDED_WORKER_SECRET="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+export AURCACHE_EMBEDDED_WORKER_SECRET
 # The worker dials the server as `localhost`, so the listener's certificate has
 # to be valid for it.
 export AURCACHE_TLS_SANS="${AURCACHE_TLS_SANS:-localhost}"
@@ -143,6 +151,12 @@ if [ -n "$WORKER" ]; then
     log "starting embedded worker: legacy container builder"
     log "NOTE: the hybrid image is deprecated. Migrate to the separate"
     log "      aurcache-server and aurcache-worker images when convenient."
+    # The worker reaches this container's own server over loopback, so it
+    # learns the CA afresh on every start instead of trusting the copy it
+    # cached on first use. That copy is stale whenever the CA was replaced, and
+    # would keep the worker out for good ("invalid peer certificate:
+    # BadSignature") while its identity, kept in another volume, still works.
+    rm -f "$WORKER_DATA_DIR/ca-cert.pem"
     # Root, as the pre-worker server was: it drives a root-owned socket, and
     # runs no build code itself -- each build runs in a container of its own.
     /usr/bin/aurcache-worker-docker run &

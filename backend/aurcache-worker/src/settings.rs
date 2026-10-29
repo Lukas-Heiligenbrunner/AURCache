@@ -298,6 +298,7 @@ mod tests {
             "WORKER_DATA_DIR",
             "AURCACHE_URL",
             "AURCACHE_ENROLLMENT_TOKEN",
+            "AURCACHE_EMBEDDED_WORKER_SECRET",
             "AURCACHE_ENROLLMENT_DIR",
             "AURCACHE_SERVER_CA_FINGERPRINT",
             "WORKER_HEARTBEAT_INTERVAL",
