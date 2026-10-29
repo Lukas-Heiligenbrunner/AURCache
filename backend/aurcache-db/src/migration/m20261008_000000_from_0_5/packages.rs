@@ -21,16 +21,6 @@ const FAILED_BUILD_STATUS: i32 = 2;
 const ENQUEUED_BUILD_STATUS: i32 = 3;
 const WAITING_FOR_DEPS_STATUS: i32 = 4;
 
-fn normalize_build_flags(build_flags: &str) -> String {
-    // Any paru-specific flag should go away.
-    build_flags
-        .split(';')
-        .map(str::trim)
-        .filter(|flag| !flag.is_empty() && *flag != "-Syu" && *flag != "-Byu")
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
 /// A package as 0.5.0 stored it, as far as these conversions read it.
 #[derive(FromQueryResult)]
 struct Stored {
@@ -68,11 +58,25 @@ async fn stored(db: &impl ConnectionTrait) -> Result<Vec<Stored>, DbErr> {
     .await
 }
 
-/// Drop the flags only paru needed from every package's build flags.
+/// Turn every package's build flags, which 0.5.0 handed to paru, into the
+/// makepkg flags a build now takes; see
+/// [`aurcache_common::build_flags::upgrade_from_paru`].
+///
+/// A flag no build can take is dropped and named in the log: kept, it would
+/// fail every build of the package.
 pub(super) async fn normalize_build_flags_in_db(db: &impl ConnectionTrait) -> Result<(), DbErr> {
     for pkg in stored(db).await? {
         let stored = pkg.build_flags.unwrap_or_default();
-        let normalized = normalize_build_flags(&stored);
+        let flags: Vec<&str> = stored.split(';').collect();
+        let upgraded = aurcache_common::build_flags::upgrade_from_paru(&flags);
+        if !upgraded.dropped.is_empty() {
+            tracing::warn!(
+                "{}: dropped build flags makepkg cannot take: {}",
+                pkg.name,
+                upgraded.dropped.join(" ")
+            );
+        }
+        let normalized = upgraded.flags.join(";");
         if normalized == stored {
             continue;
         }
@@ -296,16 +300,50 @@ pub(super) fn patch_repo_packager() -> anyhow::Result<()> {
 }
 
 /// Rewrite a single `.db.tar.gz` / `.files.tar.gz`, replacing `Unknown Packager`
-/// with `AURCache <aurcache@localhost>` in every `desc` entry.
-/// Returns the number of entries patched.
+/// with `AURCache <aurcache@localhost>` in every `desc` entry, and compressed
+/// whatever it held.
+///
+/// 0.5.0 created the databases of every platform it had not built for as a
+/// bare, uncompressed tar under the `.tar.gz` name. pacman reads either, but
+/// the repository reads gzip, so the first package published for such a
+/// platform -- the first build of a newly added ARM worker -- would fail.
 fn patch_db_archive(path: &std::path::Path) -> anyhow::Result<()> {
-    let mut patched = 0usize;
-
-    let mut archive = Archive::new(GzDecoder::new(File::open(path)?));
+    let data = std::fs::read(path)?;
+    let gzipped = data.starts_with(&[0x1f, 0x8b]);
 
     // Write to a new file, then move atomically at the end.
-    let new_archive_path = path.with_added_extension(".new");
-    let enc = GzEncoder::new(File::create(&new_archive_path)?, Compression::default());
+    let new_archive_path = path.with_added_extension("new");
+    let patched = rewrite_db_archive(&data, gzipped, &new_archive_path);
+    match patched {
+        Ok(patched) if patched > 0 || !gzipped => {
+            std::fs::rename(&new_archive_path, path)?;
+        }
+        // Nevermind we were never here!
+        Ok(_) => std::fs::remove_file(&new_archive_path)?,
+        Err(e) => {
+            let _ = std::fs::remove_file(&new_archive_path);
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Write `data`, a repository database, to `output` gzipped and with every
+/// `Unknown Packager` replaced. Returns the number of entries patched.
+fn rewrite_db_archive(
+    data: &[u8],
+    gzipped: bool,
+    output: &std::path::Path,
+) -> anyhow::Result<usize> {
+    let mut patched = 0usize;
+
+    let reader: Box<dyn Read> = if gzipped {
+        Box::new(GzDecoder::new(data))
+    } else {
+        Box::new(data)
+    };
+    let mut archive = Archive::new(reader);
+    let enc = GzEncoder::new(File::create(output)?, Compression::default());
     let mut builder = Builder::new(enc);
 
     let unknown_packager = format!("%PACKAGER%\n{OLD_PACKAGER}\n");
@@ -332,6 +370,9 @@ fn patch_db_archive(path: &std::path::Path) -> anyhow::Result<()> {
                 patched += 1;
                 continue;
             }
+
+            builder.append(&header, content.as_bytes())?;
+            continue;
         }
 
         // Pass through unchanged.
@@ -340,15 +381,7 @@ fn patch_db_archive(path: &std::path::Path) -> anyhow::Result<()> {
 
     // Builder::into_inner finishes the archive internally, then we finish the gz stream.
     builder.into_inner()?.finish()?;
-
-    if patched > 0 {
-        std::fs::rename(new_archive_path, path)?;
-    } else {
-        // Nevermind we were never here!
-        std::fs::remove_file(new_archive_path)?;
-    }
-
-    Ok(())
+    Ok(patched)
 }
 
 /// For each existing AUR package that has no rows in the `dependencies` table,
@@ -399,21 +432,96 @@ pub(super) async fn queue_dependency_backfill(manager: &SchemaManager<'_>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_build_flags;
+    use super::*;
 
+    fn desc(name: &str, packager: &str) -> String {
+        format!("%NAME%\n{name}\n\n%PACKAGER%\n{packager}\n\n")
+    }
+
+    /// A tar holding one `desc` per `(name, packager)`.
+    fn tar(entries: &[String]) -> Vec<u8> {
+        let mut builder = Builder::new(Vec::new());
+        for (i, content) in entries.iter().enumerate() {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("pkg{i}-1-1/desc"), content.as_bytes())
+                .unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut enc, data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// Every `desc` in a gzipped database, in order.
+    fn descs(path: &std::path::Path) -> Vec<String> {
+        let mut archive = Archive::new(GzDecoder::new(File::open(path).unwrap()));
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut content = String::new();
+                entry.unwrap().read_to_string(&mut content).unwrap();
+                content
+            })
+            .collect()
+    }
+
+    /// What 0.5.0 left for every platform it never built for: an empty tar,
+    /// uncompressed, under the `.tar.gz` name.
     #[test]
-    fn normalize_build_flags_strips_paru_prefix() {
+    fn an_uncompressed_database_comes_out_gzipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo.db.tar.gz");
+        std::fs::write(&path, tar(&[])).unwrap();
+
+        patch_db_archive(&path).unwrap();
+
+        assert!(std::fs::read(&path).unwrap().starts_with(&[0x1f, 0x8b]));
+        assert!(descs(&path).is_empty());
         assert_eq!(
-            normalize_build_flags("-Byu;--noconfirm;--noprogressbar;--color never"),
-            "--noconfirm;--noprogressbar;--color never"
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temp file left behind"
         );
     }
 
+    /// An entry that needs no patch keeps its content beside one that does.
     #[test]
-    fn normalize_build_flags_removes_legacy_tokens_anywhere() {
+    fn unpatched_entries_keep_their_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo.db.tar.gz");
+        let kept = desc("kept", "Someone <s@example.com>");
+        std::fs::write(
+            &path,
+            gzip(&tar(&[kept.clone(), desc("old", OLD_PACKAGER)])),
+        )
+        .unwrap();
+
+        patch_db_archive(&path).unwrap();
+
+        assert_eq!(descs(&path), [kept, desc("old", NEW_PACKAGER)]);
+    }
+
+    #[test]
+    fn an_unreadable_database_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo.db.tar.gz");
+        std::fs::write(&path, [0x1f, 0x8b, 0, 1, 2]).unwrap();
+
+        assert!(patch_db_archive(&path).is_err());
+
+        assert_eq!(std::fs::read(&path).unwrap(), [0x1f, 0x8b, 0, 1, 2]);
         assert_eq!(
-            normalize_build_flags("--noconfirm;-Byu;--foo;-Syu;--skippgpcheck;--noprogressbar"),
-            "--noconfirm;--foo;--skippgpcheck;--noprogressbar"
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "temp file left behind"
         );
     }
 }

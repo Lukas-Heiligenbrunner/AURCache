@@ -15,9 +15,9 @@ const UPSTREAM: u32 = 7;
 /// is gone.
 const SEED: &str = r#"
 INSERT INTO packages (id, name, status, out_of_date, upstream_version, latest_build, build_flags, platforms, source_type, source_data) VALUES
- (1, 'hello', 1, 1, '1.1-1', 3, '-Syu;--noconfirm', 'x86_64;aarch64', 'aur', '{"type":"aur","name":"hello"}'),
- (2, 'czkawka-cli', 1, 0, '2.0-1', 5, '--noconfirm', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}'),
- (3, 'czkawka-gui', 2, 0, '2.0-1', 6, '--noconfirm', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}');
+ (1, 'hello', 1, 1, '1.1-1', 3, '-Byu;--noconfirm;--noprogressbar;--color never', 'x86_64;aarch64', 'aur', '{"type":"aur","name":"hello"}'),
+ (2, 'czkawka-cli', 1, 0, '2.0-1', 5, '--pgpfetch;-B;--noconfirm;--noprogressbar;--color never', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}'),
+ (3, 'czkawka-gui', 2, 0, '2.0-1', 6, '--pgpfetch;-B;--noconfirm;--noprogressbar;--color never;--skipreview', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}');
 INSERT INTO builds (id, pkg_id, output, status, start_time, end_time, platform, version) VALUES
  (1, 1, 'first log', 2, 100, 110, 'x86_64', '1.0-1'),
  (2, 1, '', 1, 200, 210, 'x86_64', '1.0-1'),
@@ -76,15 +76,19 @@ async fn column(db: &DatabaseConnection, sql: &str) -> Vec<String> {
 async fn a_0_5_database_is_upgraded() {
     let db = upgraded().await;
 
-    // One row per package base, keeping the one built most recently; the
-    // flags paru needed are gone.
+    // One row per package base, keeping the one built most recently; 0.5.0's
+    // two paru defaults (the older one as its own migration left it) are now
+    // the makepkg default, and what makepkg would reject is gone.
     assert_eq!(
         column(
             &db,
             "SELECT id || ' ' || name || ' ' || build_flags FROM packages ORDER BY id"
         )
         .await,
-        ["1 hello --noconfirm", "3 czkawka --noconfirm"]
+        [
+            "1 hello --noconfirm;--noprogressbar;--nocolor",
+            "3 czkawka --noconfirm;--noprogressbar;--nocolor",
+        ]
     );
     // Numbered per package in the order they were made; the duplicate
     // pending build and the one without a status failed; the orphan gone;
