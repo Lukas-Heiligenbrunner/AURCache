@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use alpm_compress::tarball::TarballReader;
 use reqwest::Client;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use url::Url;
 
 use crate::client::send_with_retry;
@@ -61,6 +61,8 @@ pub struct OfficialRepos {
     /// successful refresh: the server serves while it retries, so questions
     /// can arrive before there is anything to answer them with.
     names: RwLock<Option<[HashSet<String>; OFFICIAL_REPO_NAMES.len()]>>,
+    /// Whether `names` has been filled, for [`OfficialRepos::wait_until_read`].
+    read: watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for OfficialRepos {
@@ -87,6 +89,7 @@ impl OfficialRepos {
             mirrorlist_path,
             cache_dir,
             names: RwLock::new(None),
+            read: watch::channel(false).0,
         }
     }
 
@@ -151,7 +154,18 @@ impl OfficialRepos {
         // reader waits for three `HashSet`s to be swapped, never for a mirror.
         let mut names = self.names.write().await;
         *names = Some(rebuilt.try_into().expect("one set per database"));
+        self.read.send_replace(true);
         Ok(())
+    }
+
+    /// Wait until the databases have been read once, after which
+    /// [`OfficialRepos::holds`] answers.
+    ///
+    /// For work that would otherwise fail on every name it asks about while
+    /// the server is still starting, and has nobody to retry it.
+    pub async fn wait_until_read(&self) {
+        // The sender lives as long as `self`, so the wait cannot fail.
+        let _ = self.read.subscribe().wait_for(|read| *read).await;
     }
 
     /// Bring one database up to date and read the names out of it.
@@ -476,7 +490,11 @@ mod tests {
             PathBuf::from("/nonexistent/mirrorlist"),
             cache_dir.path().to_path_buf(),
         );
+        let waiting = tokio::time::timeout(Duration::from_millis(50), repos.wait_until_read());
+        assert!(waiting.await.is_err(), "nothing has been read yet");
         repos.refresh().await.expect("a warm cache needs no mirror");
+        let waiting = tokio::time::timeout(Duration::from_secs(5), repos.wait_until_read());
+        assert!(waiting.await.is_ok(), "a refresh is a read");
 
         assert!(repos.holds("git").await.unwrap());
         assert!(!repos.holds("not-a-real-package").await.unwrap());

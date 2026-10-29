@@ -56,6 +56,11 @@ pub async fn backfill_dependencies(services: &Services) -> anyhow::Result<Backfi
     let Some(operation) = operations::pending(db, KIND_DEPENDENCY_BACKFILL).await? else {
         return Ok(Backfill::NotQueued);
     };
+    // Before the official databases are read, every package with a dependency
+    // fails to resolve -- and nothing would run this again. The server reads
+    // them as it starts, so this waits seconds; through a mirror outage, as
+    // long as the outage lasts, which only delays what a backfill records.
+    services.client.official.wait_until_read().await;
     tracing::info!("Recording the dependencies of packages from before they were tracked");
     let packages = Packages::find()
         .order_by_asc(packages::Column::Id)
