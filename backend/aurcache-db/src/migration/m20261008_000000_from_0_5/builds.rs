@@ -1,7 +1,7 @@
 //! Build-level conversions of a 0.5.0 database: a status and a number for
 //! every build, its log in a file, and what it produced measured.
 
-use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::{BuildState, BuildTrigger, EndReason};
 use aurcache_common::fs::{REPO_ROOT, build_log_path};
 use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
 use sea_orm_migration::prelude::*;
@@ -20,6 +20,9 @@ enum Builds {
     Number,
     Size,
     Output,
+    Version,
+    Trigger,
+    EndReason,
 }
 
 #[derive(DeriveIden)]
@@ -40,6 +43,71 @@ pub(super) async fn fail_unknown_statuses(manager: &SchemaManager<'_>) -> Result
                 .table(Builds::Table)
                 .value(Builds::Status, BuildState::Failed.as_i32())
                 .and_where(Expr::col(Builds::Status).is_null())
+                .to_owned(),
+        )
+        .await
+}
+
+/// Hold every build 0.5.0 left pending until its dependencies are recorded.
+///
+/// 0.5.0 recorded none, so until the backfill this queues has resolved a
+/// package, its build reads as ready and a worker would take it before what it
+/// depends on -- which 0.5.0 built inside the build. Waiting, each is released
+/// as its package is resolved. A build 0.5.0 was running died with it: it
+/// fails as interrupted, keeping its log, and a fresh one waits in its place.
+pub(super) async fn hold_pending_builds(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let active = || Expr::col(Builds::Status).eq(BuildState::Active.as_i32());
+    let now = crate::helpers::time::now_secs();
+    manager
+        .exec_stmt(
+            Query::insert()
+                .into_table(Builds::Table)
+                .columns([
+                    Builds::PkgId,
+                    Builds::Platform,
+                    Builds::Version,
+                    Builds::Status,
+                    Builds::StartTime,
+                    Builds::Trigger,
+                ])
+                .select_from(
+                    Query::select()
+                        .columns([Builds::PkgId, Builds::Platform, Builds::Version])
+                        .expr(Expr::val(BuildState::WaitingForDeps.as_i32()))
+                        .expr(Expr::val(now))
+                        .expr(Expr::val(BuildTrigger::TimeoutRetry.as_i32()))
+                        .from(Builds::Table)
+                        .and_where(active())
+                        .order_by(Builds::Id, Order::Asc)
+                        .to_owned(),
+                )
+                .map_err(|e| DbErr::Migration(e.to_string()))?
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .exec_stmt(
+            Query::update()
+                .table(Builds::Table)
+                .value(Builds::Status, BuildState::Failed.as_i32())
+                .value(Builds::EndReason, EndReason::Interrupted.as_i32())
+                .value(
+                    Builds::EndTime,
+                    Expr::FunctionCall(Func::coalesce([
+                        Expr::col(Builds::EndTime),
+                        Expr::val(now),
+                    ])),
+                )
+                .and_where(active())
+                .to_owned(),
+        )
+        .await?;
+    manager
+        .exec_stmt(
+            Query::update()
+                .table(Builds::Table)
+                .value(Builds::Status, BuildState::WaitingForDeps.as_i32())
+                .and_where(Expr::col(Builds::Status).eq(BuildState::Enqueued.as_i32()))
                 .to_owned(),
         )
         .await

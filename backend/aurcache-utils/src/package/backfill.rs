@@ -3,14 +3,16 @@
 //! The upgrade from 0.5.0 queues this as an operation, because resolving
 //! takes each package's source and the server's resolver, which a migration
 //! has neither of. It runs at the next start, in the background, and shows
-//! as an operation in progress while it does.
+//! as an operation in progress while it does. The builds 0.5.0 left pending
+//! wait for it: each is released as its package is resolved, or by the
+//! pass that queues what is missing once the backfill is done.
 
 use crate::package::update::resync_graph;
 use crate::services::Services;
 use aurcache_db::helpers::operations::{self, KIND_DEPENDENCY_BACKFILL};
 use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
-use sea_orm::{EntityTrait, QueryOrder};
+use sea_orm::{DatabaseConnection, EntityTrait, QueryOrder};
 use serde::Serialize;
 
 /// How one package's dependencies were recorded.
@@ -39,6 +41,17 @@ pub enum Backfill {
     NotQueued,
     /// It ran to the end; the failures are in its operation.
     Ran,
+}
+
+/// Whether the upgrade from 0.5.0 queued a backfill that has not finished.
+///
+/// # Errors
+///
+/// A database error from finding the operation.
+pub async fn queued(db: &DatabaseConnection) -> anyhow::Result<bool> {
+    Ok(operations::pending(db, KIND_DEPENDENCY_BACKFILL)
+        .await?
+        .is_some())
 }
 
 /// Run the dependency backfill the upgrade from 0.5.0 queued, if one is

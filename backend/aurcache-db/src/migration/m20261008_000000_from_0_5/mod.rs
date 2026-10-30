@@ -47,6 +47,7 @@ impl MigrationTrait for Migration {
         packages::normalize_package_names_and_merge_duplicates(db).await?;
         builds::fail_unknown_statuses(manager).await?;
         packages::mark_duplicate_pending_builds_failed(db).await?;
+        builds::hold_pending_builds(manager).await?;
         builds::number_builds(manager).await?;
         builds::fill_start_times(manager).await?;
         builds::move_logs_to_files(manager).await?;

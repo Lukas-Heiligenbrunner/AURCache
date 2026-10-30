@@ -125,8 +125,15 @@ async fn main() {
 
     // Anything that should be building and has no build -- a package added
     // while the server was down, or whose build row was lost -- gets one.
-    if let Err(e) =
-        aurcache_utils::package::enqueue::enqueue_missing_buildable_packages(&db, &activity).await
+    // Not before an upgrade's backfill, though: until it has recorded what a
+    // package from 0.5.0 depends on, every one reads as ready to build. The
+    // backfill makes this pass itself once it has.
+    if !aurcache_utils::package::backfill::queued(&db)
+        .await
+        .unwrap_or(false)
+        && let Err(e) =
+            aurcache_utils::package::enqueue::enqueue_missing_buildable_packages(&db, &activity)
+                .await
     {
         activity.emit(Event::StartupEnqueueFailed {
             error: format!("{e:#}"),

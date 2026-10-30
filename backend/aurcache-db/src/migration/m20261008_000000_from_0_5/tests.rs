@@ -10,8 +10,8 @@ const UPSTREAM: u32 = 7;
 
 /// A 0.5.0 instance with something for every conversion: a package added by
 /// a split package's name twice, builds without a status, logs in the
-/// database, two pending builds for one platform, files linked through the
-/// old table, an interval schedule, a retired setting, and rows whose package
+/// database, two pending builds for one platform, one it was running when it
+/// stopped, files linked through the old table, an interval schedule, a retired setting, and rows whose package
 /// is gone.
 const SEED: &str = r#"
 INSERT INTO packages (id, name, status, out_of_date, upstream_version, latest_build, build_flags, platforms, source_type, source_data) VALUES
@@ -27,6 +27,7 @@ INSERT INTO builds (id, pkg_id, output, status, start_time, end_time, platform, 
  (6, 3, 'gui log', 2, 600, 610, 'x86_64', '2.0-1'),
  (7, 1, NULL, 3, 700, NULL, 'aarch64', '1.1-1'),
  (8, 1, NULL, NULL, NULL, 800, 'x86_64', '1.1-1'),
+ (9, 3, 'partial log', 0, 900, NULL, 'x86_64', '2.0-1'),
  (10, 99, 'orphan', 1, 1000, 1010, 'x86_64', '0.1-1');
 INSERT INTO files (id, filename, platform) VALUES
  (1, 'hello-1.1-1-x86_64.pkg.tar.zst', 'x86_64'),
@@ -91,13 +92,14 @@ async fn a_0_5_database_is_upgraded() {
         ]
     );
     // Numbered per package in the order they were made; the duplicate
-    // pending build and the one without a status failed; the orphan gone;
-    // a missing start time filled from the end.
+    // pending build and the one without a status failed; the one still
+    // pending waits for the backfill; the orphan gone; a missing start time
+    // filled from the end.
     assert_eq!(
         column(
             &db,
             "SELECT id || ' #' || number || ' status=' || status || ' start=' || start_time \
-             FROM builds ORDER BY id"
+             FROM builds WHERE id < 11 ORDER BY id"
         )
         .await,
         [
@@ -106,9 +108,30 @@ async fn a_0_5_database_is_upgraded() {
             "3 #3 status=1 start=300",
             "4 #4 status=2 start=400",
             "6 #1 status=2 start=600",
-            "7 #5 status=3 start=700",
+            "7 #5 status=4 start=700",
             "8 #6 status=2 start=800",
+            "9 #2 status=2 start=900",
         ]
+    );
+    // The build 0.5.0 was running died with it: interrupted, with a fresh one
+    // waiting in its place.
+    assert_eq!(
+        column(
+            &db,
+            "SELECT id || ' end_reason=' || end_reason || ' ended=' || (end_time > 0) \
+             FROM builds WHERE id = 9"
+        )
+        .await,
+        ["9 end_reason=5 ended=1"]
+    );
+    assert_eq!(
+        column(
+            &db,
+            "SELECT pkg_id || ' #' || number || ' ' || platform || ' ' || version \
+             || ' status=' || status || ' trigger=' || \"trigger\" FROM builds WHERE id >= 11"
+        )
+        .await,
+        ["3 #3 x86_64 2.0-1 status=4 trigger=2"]
     );
     // Derived from the newest build per platform: one is enqueued.
     assert_eq!(
@@ -117,7 +140,7 @@ async fn a_0_5_database_is_upgraded() {
             "SELECT name || ' ' || status FROM packages ORDER BY id"
         )
         .await,
-        ["hello 3", "czkawka 2"]
+        ["hello 4", "czkawka 4"]
     );
     // Logs left the database, named after the build; an empty one made no
     // file.
@@ -126,6 +149,7 @@ async fn a_0_5_database_is_upgraded() {
     assert_eq!(read("hello/2.log"), None);
     assert_eq!(read("hello/3.log").as_deref(), Some("third log"));
     assert_eq!(read("czkawka/1.log").as_deref(), Some("gui log"));
+    assert_eq!(read("czkawka/2.log").as_deref(), Some("partial log"));
     // Each file belongs to its package; one with none, or whose package was
     // merged away, is gone.
     assert_eq!(
