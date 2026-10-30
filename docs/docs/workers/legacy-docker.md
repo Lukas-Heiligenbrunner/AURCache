@@ -36,16 +36,17 @@ for the supported worker, `docker` (highlighted) for this one — see
 
 ## Other architectures
 
-Each build container is created from the builder image for the package's
-platform, so a host whose kernel runs that platform's binaries through
-qemu/binfmt builds for it as it is. `WORKER_EMULATED_ARCHES` lists those
-architectures, comma separated (`aarch64`, `armv7h`, `x86_64`), and the worker
-offers them alongside its own. It competes for their builds like any worker
-that builds them, so give a faster one a higher [priority](./routing.md), or
-pause this one, to keep it from taking them. In the hybrid image
-it is filled in from the handlers under `/proc/sys/fs/binfmt_misc` when the
-container can see them, which most cannot: set it to be sure.
+It builds for every platform AURCache supports, as the old builder did: each
+build container is created from the builder image for the package's platform,
+and a foreign one runs through the host's qemu/binfmt handlers. Without a
+handler for a platform, its builds fail, as they always did; register one
+(`docker run --privileged --rm tonistiigi/binfmt --install all`) or set
+`WORKER_ARCHES` to the platforms this host can build, comma separated
+(`x86_64`, `aarch64`, `armv7h`).
 
-This is the legacy builder's alone. A [chroot worker](./split-chroot.md) builds
-for its own architecture, and builds for another as the worker image run for
-that platform.
+It competes for those builds like any worker that builds them, so give a
+faster one a higher [priority](./routing.md), or pause this one, to keep it
+from taking them.
+
+A [chroot worker](./split-chroot.md) builds for its own architecture only, and
+for another as the worker image run for that platform.

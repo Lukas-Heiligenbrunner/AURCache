@@ -215,8 +215,8 @@ contents under a valid pkgname (see non-goals).
 > competes for its builds; there is no native-first reservation, and
 > `priority` (or pausing the slower worker) is how one is preferred. Richer,
 > server-configurable per-architecture preference is left for later.
-> `WORKER_EMULATED_ARCHES` survives only as the container worker's own setting,
-> which adds those architectures to its list.
+> `WORKER_EMULATED_ARCHES` is gone: the container worker lists every platform
+> unless `WORKER_ARCHES` narrows it, as the pre-worker builder built them all.
 
 - Workers advertise `native_arches` and optional `emulated_arches`.
 - `claim` matches `build.platform` against the worker's arches and **prefers

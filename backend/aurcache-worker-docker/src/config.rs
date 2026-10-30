@@ -7,7 +7,7 @@
 //! also be set from the server -- `CPU_LIMIT` still pins, as it always did.
 
 use crate::settings::keys;
-use aurcache_worker_core::config::{CoreConfig, env_opt, parse_list};
+use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::WorkerSettings;
 use std::path::PathBuf;
 
@@ -40,6 +40,10 @@ pub struct Config {
     pub memory_limit: i64,
 }
 
+/// The platforms the pre-worker builder built for: `pacman_mirrors::Platform::ALL`,
+/// spelled out because that crate would bring a database driver with it.
+const PLATFORMS: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
+
 /// The default builder image, matching the pre-worker default.
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
@@ -61,15 +65,12 @@ impl Config {
             });
 
         let mut core = CoreConfig::from_env();
-        // Each build runs in an image pulled for the job's platform, so a
-        // foreign architecture the host's binfmt handles builds as it is.
-        for arch in env_opt("WORKER_EMULATED_ARCHES")
-            .map(|s| parse_list(&s))
-            .unwrap_or_default()
-        {
-            if !core.arches.contains(&arch) {
-                core.arches.push(arch);
-            }
+        // Every platform unless told otherwise, as the pre-worker builder did:
+        // each build runs in an image pulled for its platform, and the host's
+        // binfmt runs a foreign one. Checking for the handlers instead would
+        // stop builds that used to work, since a container rarely sees them.
+        if env_opt("WORKER_ARCHES").is_none() {
+            core.arches = PLATFORMS.iter().map(ToString::to_string).collect();
         }
         // Declared beside the protocol settings, so registration reports one
         // table and the limits below read from the values the server is shown.

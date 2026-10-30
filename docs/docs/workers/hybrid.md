@@ -31,9 +31,9 @@ configuration:
 definition of host build mode, so a deployment that sets it gets the behaviour
 it had before.
 
-Packages for other architectures build through the host's qemu/binfmt
-handlers, as before, for the architectures listed in `WORKER_EMULATED_ARCHES`
-(see the [legacy container builder](./legacy-docker.md#other-architectures)).
+Packages for other architectures build as before, through the host's
+qemu/binfmt handlers (see the
+[legacy container builder](./legacy-docker.md#other-architectures)).
 `MAX_CONCURRENT_BUILDS` still sets how many packages build at once.
 
 ### Keeping its state across recreates

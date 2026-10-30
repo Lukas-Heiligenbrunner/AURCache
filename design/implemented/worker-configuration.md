@@ -147,7 +147,7 @@ arrives. What the native worker declares:
 | **Local network view** | `AURCACHE_REPO_HOST`, `AURCACHE_REPO_URL` | **No.** How this machine reaches the repository (split DNS, a VPN, a proxy). |
 | **Protocol timing** | `WORKER_HEARTBEAT_INTERVAL` | **No.** Has to stay well inside the server's `LEASE_TTL` and `WORKER_LIVENESS_TIMEOUT` (both 60 s). |
 | **Host access** | `WORKER_CHROOT_DIR`, `WORKER_CACHE_DIR`, `WORKER_BUILD_USER`, `WORKER_BIND_MOUNTS`, `WORKER_MAKECHROOTPKG`, `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS`, `AURCACHE_NSPAWN_KEEP_UNIT`, `AURCACHE_DROPIN` | **No.** The security boundary above. |
-| **Machine facts** | `WORKER_ARCHES`, `WORKER_EMULATED_ARCHES`, `WORKER_NAME`, `WORKER_CHROOT_OVERLAY` | **No.** Reported, not chosen. |
+| **Machine facts** | `WORKER_ARCHES`, `WORKER_NAME`, `WORKER_CHROOT_OVERLAY` | **No.** Reported, not chosen. |
 | **Mirrorlist** | `WORKER_MIRRORLIST_SERVERS`/`_FILE` | **No.** The server already delivers a per-architecture mirrorlist at registration, and these override it locally (`design/implemented/mirrorlist-configuration.md`). |
 | **Policy and tuning** | `WORKER_CONCURRENCY`, `WORKER_PRIORITY`, `WORKER_PACKAGES`, `WORKER_BUILD_MEMORY_MAX`/`_SWAP_MAX`/`_CPUS`, `WORKER_TOTAL_BUILD_MEMORY_MAX`/`_SWAP_MAX`/`_CPUS`, `WORKER_BUILD_TIMEOUT`, `WORKER_BUILDDIR_MAX_BYTES`/`_MIN_FREE`, `WORKER_CACHE_MAX_SIZE`/`_TTL`, `WORKER_PKGCACHE_MAX_SIZE`/`_TTL`, `WORKER_SRCCACHE_MAX_SIZE`, `WORKER_CHROOT_REFRESH_INTERVAL`, `WORKER_POLL_INTERVAL`, `WORKER_KEYSERVER` | **Yes.** |
 

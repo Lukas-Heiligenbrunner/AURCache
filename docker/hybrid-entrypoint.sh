@@ -61,28 +61,6 @@ if [ -n "${MAX_CONCURRENT_BUILDS:-}" ] && [ -z "${WORKER_CONCURRENCY:-}" ]; then
     export WORKER_CONCURRENCY_DEFAULT="${WORKER_CONCURRENCY_DEFAULT:-$MAX_CONCURRENT_BUILDS}"
 fi
 
-# Foreign architectures this host can run, as the old builder could: it pulled
-# each build's image for the package's platform and let binfmt run it. Read
-# from the handlers registered on the host kernel, which is what decides
-# whether such a build can work at all.
-if [ -z "${WORKER_EMULATED_ARCHES:-}" ]; then
-    native=$(uname -m)
-    emulated=()
-    for pair in x86_64:qemu-x86_64 aarch64:qemu-aarch64 armv7h:qemu-arm; do
-        arch=${pair%%:*} handler=${pair#*:}
-        [ "$arch" = "$native" ] && continue
-        [ "$arch" = armv7h ] && [ "$native" = armv7l ] && continue
-        if grep -qx enabled "/proc/sys/fs/binfmt_misc/$handler" 2>/dev/null; then
-            emulated+=("$arch")
-        fi
-    done
-    if [ ${#emulated[@]} -gt 0 ]; then
-        WORKER_EMULATED_ARCHES=$(IFS=,; echo "${emulated[*]}")
-        export WORKER_EMULATED_ARCHES
-        log "emulated architectures available through binfmt: $WORKER_EMULATED_ARCHES"
-    fi
-fi
-
 # ---------------------------------------------------------------------------
 # Which Docker API the builder talks to.
 #
