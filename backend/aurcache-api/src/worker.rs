@@ -594,6 +594,7 @@ async fn build_descriptor(
         .await?
         .ok_or_else(|| anyhow::anyhow!("package {} not found", build.pkg_id))?;
 
+    let arch = build.platform.as_str().to_string();
     let JobConfig {
         makepkg_conf,
         pacman_conf,
@@ -601,9 +602,7 @@ async fn build_descriptor(
         // No `[repo]` section here: the worker appends one rendered from the
         // template it received at registration, using the host it actually
         // reaches this server on.
-        build_job_config(db, pkg.id).await?;
-
-    let arch = build.platform.as_str().to_string();
+        build_job_config(db, pkg.id, &arch).await?;
     let mirrorlist = resolve_mirrorlist(
         held_mirrorlist,
         &arch,

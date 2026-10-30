@@ -44,30 +44,51 @@ fn makepkg_config(user_conf: &str) -> String {
     config
 }
 
-/// The standard pacman.conf written inside a build container.
+/// The official repositories of `arch`'s distribution, in pacman.conf order.
+///
+/// Arch Linux has `multilib` and only for x86_64; Arch Linux ARM has `alarm`
+/// and `aur` instead. The same lists as the pre-worker builder images' own
+/// pacman.conf for each platform, and a repository a mirror does not serve
+/// fails every `pacman -Sy`.
+fn official_repos(arch: &str) -> &'static [&'static str] {
+    match arch {
+        "x86_64" => &["core", "extra", "multilib"],
+        "aarch64" | "armv7h" => &["core", "extra", "alarm", "aur"],
+        _ => &["core", "extra"],
+    }
+}
+
+/// The standard pacman.conf written inside a build container for `arch`.
 ///
 /// `DisableSandbox`: pacman 7's Landlock download sandbox needs syscalls that
 /// some runtimes block or do not implement (older seccomp profiles, qemu
 /// emulation), and aborts every `pacman -Sy` where they are unavailable.
 /// Disabling it keeps builds working on any host; it only relaxes pacman's
 /// own download isolation, not the surrounding `makechrootpkg` chroot.
-pub fn base_pacman_config() -> String {
-    "[options]\nDisableSandbox\nSigLevel = Never\nHoldPkg = pacman glibc\nArchitecture = auto\n\n\
-     [core]\nInclude = /etc/pacman.d/mirrorlist\n\n\
-     [extra]\nInclude = /etc/pacman.d/mirrorlist\n\n\
-     [multilib]\nInclude = /etc/pacman.d/mirrorlist\n"
-        .to_string()
+///
+/// The architecture is named rather than `auto`: under emulation `auto` reads
+/// the emulator's idea of the machine, which for armv7h is `armv7l`.
+#[must_use]
+pub fn base_pacman_config(arch: &str) -> String {
+    let mut conf = format!(
+        "[options]\nDisableSandbox\nSigLevel = Never\nHoldPkg = pacman glibc\nArchitecture = {arch}\n"
+    );
+    for repo in official_repos(arch) {
+        conf.push_str(&format!("\n[{repo}]\nInclude = /etc/pacman.d/mirrorlist\n"));
+    }
+    conf
 }
 
-/// The pacman.conf written inside the build container, from the `pacman_conf`
-/// setting's `user_conf`: that in place of the standard one, when it is set.
+/// The pacman.conf written inside the build container for `arch`, from the
+/// `pacman_conf` setting's `user_conf`: that in place of the standard one, when
+/// it is set.
 ///
 /// No `[repo]` section is emitted: the worker appends one rendered from the
 /// template it received at registration, because only the worker knows which
 /// address it reaches this server on.
-fn pacman_config(user_conf: &str) -> String {
+fn pacman_config(user_conf: &str, arch: &str) -> String {
     if user_conf.trim().is_empty() {
-        base_pacman_config()
+        base_pacman_config(arch)
     } else {
         format!("[options]\nDisableSandbox\n{user_conf}")
     }
@@ -98,15 +119,20 @@ pub struct JobConfig {
     pub pacman_conf: String,
 }
 
-/// Assemble the self-contained build configuration for one of `pkg_id`'s builds.
-pub async fn build_job_config(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<JobConfig> {
+/// Assemble the self-contained build configuration for `pkg_id`'s build for
+/// `arch`.
+pub async fn build_job_config(
+    db: &DatabaseConnection,
+    pkg_id: i32,
+    arch: &str,
+) -> anyhow::Result<JobConfig> {
     let (makepkg, pacman) = tokio::try_join!(
         settings::get(db, key::MAKEPKG_CONF, Some(pkg_id)),
         settings::get(db, key::PACMAN_CONF, Some(pkg_id)),
     )?;
     Ok(JobConfig {
         makepkg_conf: makepkg_config(&makepkg.value),
-        pacman_conf: pacman_config(&pacman.value),
+        pacman_conf: pacman_config(&pacman.value, arch),
     })
 }
 
@@ -118,11 +144,29 @@ mod tests {
     /// one for the host it actually reaches this server on.
     #[test]
     fn base_pacman_config_has_expected_markers_and_no_repo() {
-        let conf = base_pacman_config();
+        let conf = base_pacman_config("x86_64");
         assert!(conf.contains("DisableSandbox"));
         assert!(conf.contains("SigLevel = Never"));
         assert!(conf.contains("Include = /etc/pacman.d/mirrorlist"));
         assert!(!conf.contains("[repo]"));
+    }
+
+    /// Each distribution's own repositories: a `[multilib]` on aarch64 fails
+    /// `pacman -Sy` against every Arch Linux ARM mirror.
+    #[test]
+    fn the_repositories_are_the_architectures_own() {
+        let sections = |arch| {
+            base_pacman_config(arch)
+                .lines()
+                .filter(|l| l.starts_with('[') && *l != "[options]")
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sections("x86_64"), ["[core]", "[extra]", "[multilib]"]);
+        for arch in ["aarch64", "armv7h"] {
+            assert_eq!(sections(arch), ["[core]", "[extra]", "[alarm]", "[aur]"]);
+            assert!(base_pacman_config(arch).contains(&format!("Architecture = {arch}\n")));
+        }
     }
 
     /// The build server forces this; a worker on Arch defaults would otherwise
