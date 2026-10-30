@@ -129,8 +129,7 @@ impl FromStr for BuildFlags {
     }
 }
 
-/// The worker columns -- `native_arches`, `emulated_arches`,
-/// `package_affinity` -- `,`-joined, in the order the worker gave them.
+/// The worker columns -- `arches`, `package_affinity` -- `,`-joined, in the order the worker gave them.
 #[derive(Clone, Debug, Default, PartialEq, Eq, sea_orm::DeriveValueType)]
 #[sea_orm(value_type = "String")]
 pub struct WorkerList(Vec<String>);

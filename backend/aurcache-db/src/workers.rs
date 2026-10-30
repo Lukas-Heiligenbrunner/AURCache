@@ -23,10 +23,9 @@ pub struct Model {
     pub signed_cert: Option<String>,
     /// Epoch seconds when the signed certificate expires.
     pub not_after: Option<i64>,
-    /// Architectures the worker builds natively.
-    pub native_arches: WorkerList,
-    /// Architectures the worker can build via emulation.
-    pub emulated_arches: WorkerList,
+    /// Architectures the worker builds. How -- natively, emulated, or by
+    /// handing the build to another machine -- is its own business.
+    pub arches: WorkerList,
     /// Epoch seconds of the last heartbeat/contact.
     pub last_seen: Option<i64>,
     /// Worker software version reported at enrollment/heartbeat.

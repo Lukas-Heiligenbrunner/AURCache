@@ -3,8 +3,8 @@
 # =============================================================================
 # Run this on separate hardware (e.g. an aarch64 or armv7h machine) to add a
 # native builder for that architecture to an AURCache server running elsewhere.
-# Jobs for this worker's native arch are routed to it in preference to slow
-# emulation on the main host.
+# If an emulated worker also builds that architecture, give this one a higher
+# WORKER_PRIORITY so it is preferred.
 #
 # Unlike the bundled setup there is no shared `enroll` volume, so trust must be
 # established explicitly. Two independent things:

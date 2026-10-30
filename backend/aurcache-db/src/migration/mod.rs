@@ -22,6 +22,7 @@ pub mod m20261008_000000_from_0_5;
 mod m20261008_000001_repository_updates;
 mod m20261029_000000_files_unique_per_platform;
 mod m20261029_000001_embedded_worker;
+mod m20261029_000002_worker_arches;
 
 pub struct Migrator;
 
@@ -40,6 +41,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261008_000001_repository_updates::Migration),
             Box::new(m20261029_000000_files_unique_per_platform::Migration),
             Box::new(m20261029_000001_embedded_worker::Migration),
+            Box::new(m20261029_000002_worker_arches::Migration),
         ]
     }
 }

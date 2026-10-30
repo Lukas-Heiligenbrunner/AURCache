@@ -63,9 +63,14 @@ impl Config {
         let mut core = CoreConfig::from_env();
         // Each build runs in an image pulled for the job's platform, so a
         // foreign architecture the host's binfmt handles builds as it is.
-        core.emulated_arches = env_opt("WORKER_EMULATED_ARCHES")
+        for arch in env_opt("WORKER_EMULATED_ARCHES")
             .map(|s| parse_list(&s))
-            .unwrap_or_default();
+            .unwrap_or_default()
+        {
+            if !core.arches.contains(&arch) {
+                core.arches.push(arch);
+            }
+        }
         // Declared beside the protocol settings, so registration reports one
         // table and the limits below read from the values the server is shown.
         let settings =

@@ -298,8 +298,7 @@ pub(crate) fn print_worker_list(workers: &[Worker]) {
                 // future executor calls itself. A dash for a worker that
                 // enrolled before workers reported one.
                 w.kind.clone().unwrap_or_else(|| "-".to_string()),
-                or_dash(&w.native_arches),
-                or_dash(&w.emulated_arches),
+                or_dash(&w.arches),
                 or_dash(&w.package_affinity),
                 if w.priority == 0 {
                     // Zero is the default and means "no preference"; printing
@@ -320,8 +319,7 @@ pub(crate) fn print_worker_list(workers: &[Worker]) {
             "name",
             "status",
             "kind",
-            "native",
-            "emulated",
+            "arches",
             "affinity",
             "priority",
             "version",

@@ -280,9 +280,7 @@ ROUTES=(
     # out, not left to be spotted in a status column.
     "/workers|1 worker is waiting for approval|a pending worker is surfaced"
     "/workers|>Approve<|a pending worker can be approved"
-    # Emulation is marked rather than listed as native: a fleet that reads as
-    # having native aarch64 when it does not is worth not implying.
-    "/workers|emulated: armv7h|emulated architectures are marked"
+    "/workers|aarch64, armv7h|a worker's architectures are listed"
     # Revoked rows are kept so old builds still name their machine, so they are
     # hidden until asked for.
     "/workers|Show retired (2)|retired workers are hidden behind a toggle"

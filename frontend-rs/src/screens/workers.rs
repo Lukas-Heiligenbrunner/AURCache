@@ -625,24 +625,12 @@ pub(crate) fn KindBadge(worker: Worker) -> Element {
     }
 }
 
-/// What a worker can build, and how.
-///
-/// Emulated architectures are marked rather than listed alongside the native
-/// ones: they work, but slowly, and a fleet that looks like it has four native
-/// aarch64 machines when it has none is worth not implying.
+/// What a worker can build.
 pub(crate) fn architectures(worker: &Worker) -> String {
-    match (
-        worker.native_arches.is_empty(),
-        worker.emulated_arches.is_empty(),
-    ) {
-        (true, true) => "—".to_string(),
-        (false, true) => worker.native_arches.join(", "),
-        (true, false) => format!("emulated: {}", worker.emulated_arches.join(", ")),
-        (false, false) => format!(
-            "{} (emulated: {})",
-            worker.native_arches.join(", "),
-            worker.emulated_arches.join(", ")
-        ),
+    if worker.arches.is_empty() {
+        "—".to_string()
+    } else {
+        worker.arches.join(", ")
     }
 }
 
@@ -655,14 +643,13 @@ mod tests {
     use aurcache_client::{ApprovalStatus, Worker, WorkerJoinInfo};
     use dioxus::prelude::*;
 
-    fn worker(native: &[&str], emulated: &[&str]) -> Worker {
+    fn worker(arches: &[&str]) -> Worker {
         Worker {
             id: 1,
             name: "builder".to_string(),
             status: ApprovalStatus::Approved,
             cert_fingerprint: "abc".to_string(),
-            native_arches: native.iter().map(ToString::to_string).collect(),
-            emulated_arches: emulated.iter().map(ToString::to_string).collect(),
+            arches: arches.iter().map(ToString::to_string).collect(),
             package_affinity: Vec::new(),
             priority: 0,
             last_seen: None,
@@ -682,7 +669,7 @@ mod tests {
     /// One column, so the two values are joined rather than shown side by side.
     #[test]
     fn the_type_column_names_the_kind_at_its_version() {
-        let mut w = worker(&["x86_64"], &[]);
+        let mut w = worker(&["x86_64"]);
         w.kind = Some("chroot".to_string());
         w.version = Some("0.5.0".to_string());
         assert_eq!(kind_label(&w).as_deref(), Some("chroot@0.5.0"));
@@ -693,7 +680,7 @@ mod tests {
     /// look exactly like that. Neither case may render a dangling separator.
     #[test]
     fn a_missing_half_does_not_leave_a_separator() {
-        let mut w = worker(&["x86_64"], &[]);
+        let mut w = worker(&["x86_64"]);
 
         w.kind = Some("chroot".to_string());
         w.version = None;
@@ -708,20 +695,13 @@ mod tests {
         assert_eq!(kind_label(&w), None);
     }
 
-    /// Emulation works but is slow. A fleet that reads as four native aarch64
-    /// machines when it has none would be a misleading thing to imply.
     #[test]
-    fn emulated_architectures_are_marked_as_such() {
-        assert_eq!(architectures(&worker(&["x86_64"], &[])), "x86_64");
+    fn architectures_are_listed_or_a_dash() {
         assert_eq!(
-            architectures(&worker(&["x86_64"], &["aarch64"])),
-            "x86_64 (emulated: aarch64)"
+            architectures(&worker(&["x86_64", "aarch64"])),
+            "x86_64, aarch64"
         );
-        assert_eq!(
-            architectures(&worker(&[], &["aarch64"])),
-            "emulated: aarch64"
-        );
-        assert_eq!(architectures(&worker(&[], &[])), "—");
+        assert_eq!(architectures(&worker(&[])), "—");
     }
 
     #[test]
@@ -780,7 +760,7 @@ mod tests {
                 }
             }
         }
-        let mut w = worker(&["x86_64"], &[]);
+        let mut w = worker(&["x86_64"]);
         w.status = status;
         w.paused = paused;
         let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { worker: w });

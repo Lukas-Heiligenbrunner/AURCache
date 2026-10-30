@@ -78,7 +78,7 @@ When the machine is ready again, **Resume intake** (`aurcli worker resume
 worker restarting, so it will not start building the moment it comes back up.
 
 Stopping intake does not change which jobs are its to take. A package reserved
-to it through `WORKER_PACKAGES`, or an architecture only it builds natively,
+to it through `WORKER_PACKAGES`, or an architecture only it builds,
 waits for it rather than going elsewhere, and the Builds page says so. To hand
 that work to others for good, revoke the worker instead.
 

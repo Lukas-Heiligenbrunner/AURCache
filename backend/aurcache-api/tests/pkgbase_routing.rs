@@ -694,9 +694,9 @@ async fn insert_worker_build(
 async fn insert_worker(db: &DatabaseConnection, id: i32) {
     use sea_orm::ConnectionTrait;
     db.execute_unprepared(&format!(
-        "INSERT INTO workers (id, name, status, cert_fingerprint, native_arches, \
-         emulated_arches, package_affinity, priority, concurrency, settings_declaration) \
-         VALUES ({id}, 'w{id}', 'approved', 'fp{id}', 'x86_64', '', '', 0, 1, '[]')"
+        "INSERT INTO workers (id, name, status, cert_fingerprint, arches, \
+         package_affinity, priority, concurrency, settings_declaration) \
+         VALUES ({id}, 'w{id}', 'approved', 'fp{id}', 'x86_64', '', 0, 1, '[]')"
     ))
     .await
     .expect("insert worker");

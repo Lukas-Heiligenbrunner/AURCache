@@ -702,8 +702,7 @@ async fn write_workers<C: sea_orm::ConnectionTrait>(
             name: Set(worker.name.clone()),
             status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
             cert_fingerprint: Set(worker.cert_fingerprint.clone()),
-            native_arches: Set(WorkerList::new(&worker.native_arches)),
-            emulated_arches: Set(WorkerList::new(&worker.emulated_arches)),
+            arches: Set(WorkerList::new(&worker.arches)),
             package_affinity: Set(WorkerList::new(&worker.package_affinity)),
             priority: Set(worker.priority),
             concurrency: Set(worker.concurrency),
@@ -1130,8 +1129,8 @@ mod tests {
         let mut files = good();
         files.insert(
             "workers.json",
-            r#"[{"name":"w","cert_fingerprint":"fp","status":"approved","native_arches":["x86_64"],
-                 "emulated_arches":[],"package_affinity":[],"priority":0,"concurrency":1,
+            r#"[{"name":"w","cert_fingerprint":"fp","status":"approved","arches":["x86_64"],
+                 "package_affinity":[],"priority":0,"concurrency":1,
                  "signed_cert":"-----BEGIN CERTIFICATE-----"}]"#
                 .to_string(),
         );

@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
             let identity = Identity::load_or_create(&cfg.core.data_dir)?;
             println!("Worker fingerprint: {}", identity.fingerprint);
             println!("Name: {}", cfg.core.name);
-            println!("Native arches: {}", cfg.core.native_arches.join(","));
+            println!("Arches: {}", cfg.core.arches.join(","));
             Ok(())
         }
         Command::BuildOnce { path, flags } => oneshot::build_once(&cfg, &path, &flags).await,

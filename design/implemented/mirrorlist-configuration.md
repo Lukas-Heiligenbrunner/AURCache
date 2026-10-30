@@ -71,8 +71,8 @@ The first two need no work beyond confirming them in docs.
 
 ### Do workers build only for their own arch?
 
-**No.** A worker registers `native_arches` *and* `emulated_arches`
-(`aurcache-common/src/api/worker.rs:24`), so one worker may be routed jobs for
+**No.** A worker registers a list of `arches` (`native_arches` and
+`emulated_arches` when this was written), so one worker may be routed jobs for
 several architectures. Registration-time delivery must therefore send a **map
 of arch → mirrorlist**, not a single string.
 

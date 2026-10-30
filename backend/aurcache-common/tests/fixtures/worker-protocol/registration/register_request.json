@@ -5,10 +5,8 @@
       "max": 1
     },
     "name": "builder-01",
-    "native_arches": [
-      "x86_64"
-    ],
-    "emulated_arches": [
+    "arches": [
+      "x86_64",
       "aarch64"
     ],
     "version": "0.6.0",

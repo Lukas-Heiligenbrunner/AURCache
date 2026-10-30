@@ -220,8 +220,7 @@ async fn only_approved_workers_are_carried() {
             name: Set(name.to_string()),
             status: Set(status),
             cert_fingerprint: Set(format!("fp-{name}")),
-            native_arches: Set("x86_64".parse().unwrap()),
-            emulated_arches: Set(Default::default()),
+            arches: Set("x86_64".parse().unwrap()),
             package_affinity: Set(Default::default()),
             priority: Set(0),
             concurrency: Set(1),
@@ -818,8 +817,7 @@ async fn workers_are_restored_by_fingerprint() {
         name: Set("builder".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
         cert_fingerprint: Set("fp-1".to_string()),
-        native_arches: Set("x86_64".parse().unwrap()),
-        emulated_arches: Set(Default::default()),
+        arches: Set("x86_64".parse().unwrap()),
         package_affinity: Set(Default::default()),
         priority: Set(7),
         concurrency: Set(3),
@@ -877,8 +875,7 @@ async fn a_workers_lists_travel_as_lists() {
         name: Set("builder".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
         cert_fingerprint: Set("fp-1".to_string()),
-        native_arches: Set("x86_64,aarch64".parse().unwrap()),
-        emulated_arches: Set("armv7h".parse().unwrap()),
+        arches: Set("x86_64,aarch64".parse().unwrap()),
         package_affinity: Set("big-one,other".parse().unwrap()),
         priority: Set(0),
         concurrency: Set(1),
@@ -890,7 +887,7 @@ async fn a_workers_lists_travel_as_lists() {
     .unwrap();
 
     let dump = build_dump(&source, "test", None).await.unwrap();
-    assert_eq!(dump.workers[0].native_arches, ["x86_64", "aarch64"]);
+    assert_eq!(dump.workers[0].arches, ["x86_64", "aarch64"]);
     assert_eq!(dump.workers[0].package_affinity, ["big-one", "other"]);
 
     let target = db().await;
@@ -899,7 +896,7 @@ async fn a_workers_lists_travel_as_lists() {
         .await
         .unwrap();
     let restored = workers::Entity::find().one(&target).await.unwrap().unwrap();
-    assert_eq!(restored.native_arches.to_string(), "x86_64,aarch64");
+    assert_eq!(restored.arches.to_string(), "x86_64,aarch64");
     assert_eq!(restored.package_affinity.to_string(), "big-one,other");
 }
 
@@ -913,8 +910,7 @@ async fn an_already_trusted_worker_keeps_its_routing() {
         name: Set("builder".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
         cert_fingerprint: Set("fp-1".to_string()),
-        native_arches: Set("x86_64".parse().unwrap()),
-        emulated_arches: Set(Default::default()),
+        arches: Set("x86_64".parse().unwrap()),
         package_affinity: Set(Default::default()),
         priority: Set(7),
         concurrency: Set(3),
@@ -931,8 +927,7 @@ async fn an_already_trusted_worker_keeps_its_routing() {
         name: Set("same-machine-other-name".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
         cert_fingerprint: Set("fp-1".to_string()),
-        native_arches: Set("x86_64".parse().unwrap()),
-        emulated_arches: Set(Default::default()),
+        arches: Set("x86_64".parse().unwrap()),
         package_affinity: Set(Default::default()),
         priority: Set(1),
         concurrency: Set(9),
@@ -1009,8 +1004,7 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
         cert_fingerprint: Set("fp-1".to_string()),
         signed_cert: Set(Some("-----BEGIN CERTIFICATE-----".to_string())),
         not_after: Set(Some(99)),
-        native_arches: Set("x86_64".parse().unwrap()),
-        emulated_arches: Set(Default::default()),
+        arches: Set("x86_64".parse().unwrap()),
         package_affinity: Set(Default::default()),
         priority: Set(0),
         concurrency: Set(1),

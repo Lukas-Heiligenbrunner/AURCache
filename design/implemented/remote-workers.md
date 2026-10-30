@@ -209,6 +209,15 @@ contents under a valid pkgname (see non-goals).
 
 ## Arch-aware routing
 
+> **Superseded (2026-10-29):** workers now report one `arches` list and say
+> nothing about how they build them -- emulation is one way, dispatching to
+> machines of each architecture another. Every worker listing an architecture
+> competes for its builds; there is no native-first reservation, and
+> `priority` (or pausing the slower worker) is how one is preferred. Richer,
+> server-configurable per-architecture preference is left for later.
+> `WORKER_EMULATED_ARCHES` survives only as the container worker's own setting,
+> which adds those architectures to its list.
+
 - Workers advertise `native_arches` and optional `emulated_arches`.
 - `claim` matches `build.platform` against the worker's arches and **prefers
   native over emulated**: a native aarch64/armv7 worker gets its arch's jobs

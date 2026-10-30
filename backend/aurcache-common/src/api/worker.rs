@@ -20,10 +20,8 @@ pub struct WorkerSummary {
     /// SHA-256 fingerprint of the worker's certificate: the stable identity
     /// behind the name, which is not unique.
     pub cert_fingerprint: String,
-    /// Architectures built natively.
-    pub native_arches: Vec<String>,
-    /// Architectures built under emulation — slower, and worth telling apart.
-    pub emulated_arches: Vec<String>,
+    /// Architectures this worker builds.
+    pub arches: Vec<String>,
     /// Exact pkgbases this worker is provisioned for. A package named by *any*
     /// approved worker may only be built by workers that name it, so this is a
     /// restriction on the package as much as a capability of the worker.

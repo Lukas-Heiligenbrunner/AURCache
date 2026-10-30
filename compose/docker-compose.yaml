@@ -138,7 +138,6 @@ services:
   # It is the exact same worker image, just run emulated via qemu-user + binfmt
   # (`platform: linux/arm64`). The build path stays uniform — the emulated
   # worker builds aarch64 packages in a devtools chroot like any native worker.
-  # Jobs for aarch64 are routed here in preference to slow emulation elsewhere.
   #
   # To enable: `docker compose --profile arm up -d`. The `binfmt` one-shot below
   # registers the qemu handlers on the host kernel (idempotent) before the

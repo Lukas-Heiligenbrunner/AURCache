@@ -12,7 +12,7 @@ pub enum WaitingReason {
     /// Reserved by package affinity to workers that are not currently live.
     /// Revoking a listed worker releases the reservation.
     Affinity { workers: Vec<String> },
-    /// No approved worker builds this architecture, natively or emulated.
+    /// No approved worker builds this architecture.
     Arch { arch: String },
     /// A capable worker exists but none has been seen recently.
     Offline,

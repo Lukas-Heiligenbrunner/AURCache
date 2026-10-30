@@ -98,8 +98,7 @@ pub struct DumpWorker {
     /// Always `approved`: nothing else is dumped, and a restore approves
     /// every worker it brings back.
     pub status: crate::api::worker::ApprovalStatus,
-    pub native_arches: Vec<String>,
-    pub emulated_arches: Vec<String>,
+    pub arches: Vec<String>,
     pub package_affinity: Vec<String>,
     pub priority: i32,
     pub concurrency: i32,

@@ -325,7 +325,7 @@ pub(crate) struct WorkerKnobs {
     #[arg(long = "worker-name")]
     pub(crate) worker_name: Option<String>,
 
-    /// Architecture built natively. Repeat for several. Defaults to the host's.
+    /// Architecture this worker builds. Repeat for several. Defaults to the host's.
     #[arg(long = "arch")]
     pub(crate) arches: Vec<String>,
 

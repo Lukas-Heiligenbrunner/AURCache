@@ -81,8 +81,10 @@ pub struct RegisterRequest {
     /// registration with `426 Upgrade Required` when there is none.
     pub protocols: ProtocolRange,
     pub name: String,
-    pub native_arches: Vec<String>,
-    pub emulated_arches: Vec<String>,
+    /// The architectures this worker builds. How it builds them -- natively,
+    /// emulated, or by handing them to machines of that architecture -- is
+    /// its own business; every worker listing one competes for its builds.
+    pub arches: Vec<String>,
     pub version: String,
     /// Which build strategy this worker runs -- `chroot`, `docker`. Free-form
     /// so a future executor can name itself without the server knowing about it

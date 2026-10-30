@@ -26,16 +26,12 @@ pub struct CoreConfig {
     /// The secret proving this is the hybrid image's embedded worker; see
     /// [`aurcache_common::worker::RegisterRequest::embedded_secret`].
     pub embedded_secret: Option<String>,
-    /// Architectures this worker builds natively.
-    pub native_arches: Vec<String>,
-    /// Architectures this worker can build via emulation.
+    /// Architectures this worker builds (`WORKER_ARCHES`, or the host's).
     ///
-    /// Empty here: whether a worker can emulate at all is its executor's
-    /// business, so an executor that can fills this in from its own settings
-    /// (the container one reads `WORKER_EMULATED_ARCHES`). Advertising an
-    /// architecture the executor would then build natively publishes
-    /// packages for the wrong one.
-    pub emulated_arches: Vec<String>,
+    /// All the protocol carries: how they are built is the executor's
+    /// business, so an executor that can build more than the host's -- the
+    /// container one, through binfmt -- adds them from its own settings.
+    pub arches: Vec<String>,
     /// Exact pkgbase names this worker is specially provisioned for
     /// (credentials, licensed toolchain, scratch space). Packages named here
     /// are reserved to workers that name them.
@@ -202,7 +198,7 @@ impl CoreConfig {
     /// zero-config defaults for everything not explicitly set.
     #[must_use]
     pub fn from_env() -> Self {
-        let native_arches = env_opt("WORKER_ARCHES")
+        let arches = env_opt("WORKER_ARCHES")
             .map(|s| parse_list(&s))
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| vec![detect_arch()]);
@@ -221,8 +217,7 @@ impl CoreConfig {
                 .or_else(|| Some(PathBuf::from("/enroll"))),
             enrollment_token: env_opt("AURCACHE_ENROLLMENT_TOKEN"),
             embedded_secret: env_opt("AURCACHE_EMBEDDED_WORKER_SECRET"),
-            native_arches,
-            emulated_arches: Vec::new(),
+            arches,
             name: env_opt("WORKER_NAME").unwrap_or_else(detect_hostname),
             data_dir: env_opt("WORKER_DATA_DIR")
                 .map(PathBuf::from)

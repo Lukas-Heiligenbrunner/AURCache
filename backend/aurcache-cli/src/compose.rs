@@ -421,8 +421,8 @@ fn header(params: &ComposeParams) -> String {
         ComposeRole::Worker => {
             "# AURCache — build worker\n\
              # =============================================================================\n\
-             # A worker joining an AURCache server that runs elsewhere. Jobs for this\n\
-             # machine's native architecture are routed here in preference to emulation.\n\
+             # A worker joining an AURCache server that runs elsewhere, building for\n\
+             # this machine's architecture.\n\
              #\n\
              # There is no shared `enroll` volume across machines, so trust is explicit:\n\
              #\n\

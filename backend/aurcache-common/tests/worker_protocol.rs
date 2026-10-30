@@ -296,8 +296,7 @@ fn registration_messages_still_decode() {
         &[RegisterRequest {
             protocols: ProtocolRange { min: 1, max: 1 },
             name: "builder-01".to_string(),
-            native_arches: vec!["x86_64".to_string()],
-            emulated_arches: vec!["aarch64".to_string()],
+            arches: vec!["x86_64".to_string(), "aarch64".to_string()],
             version: "0.6.0".to_string(),
             kind: "chroot".to_string(),
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n".to_string(),

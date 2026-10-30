@@ -205,10 +205,9 @@ impl<E: Executor> Runner<E> {
 
         let cfg = self.cfg();
         tracing::info!(
-            "Worker '{}' online: native={:?} emulated={:?} concurrency={} executor={}",
+            "Worker '{}' online: arches={:?} concurrency={} executor={}",
             cfg.name,
-            cfg.native_arches,
-            cfg.emulated_arches,
+            cfg.arches,
             cfg.concurrency,
             self.executor.describe_self()
         );

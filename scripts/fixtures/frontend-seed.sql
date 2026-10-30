@@ -293,30 +293,30 @@ DELETE FROM workers;
 -- Ids are explicit because the worker page is reached at `/worker/<id>`, and a
 -- route check naming one has to land on the same machine every run.
 INSERT INTO workers
-  (id, name, status, cert_fingerprint, native_arches, emulated_arches, last_seen, version, package_affinity, priority, settings_declaration)
+  (id, name, status, cert_fingerprint, arches, last_seen, version, package_affinity, priority, settings_declaration)
 VALUES
   -- Approved, busy, and tuned: reserved for one package and preferred over the
   -- others, so both of those columns have something to show.
-  (1, 'builder-01', 'approved', '1111111111111111aaaa1111111111111111aaaa1111111111111111aaaa1111', 'x86_64', '',
+  (1, 'builder-01', 'approved', '1111111111111111aaaa1111111111111111aaaa1111111111111111aaaa1111', 'x86_64',
    CAST(strftime('%s','now') AS INTEGER) - 5, '0.1.0', 'visual-studio-code-bin', 10, '[]'),
-  -- Approved, but only reaches aarch64 through emulation. Its reservation
-  -- names no known package, so the column has to leave it as plain text.
-  (2, 'builder-arm', 'approved', '2222222222222222bbbb2222222222222222bbbb2222222222222222bbbb2222', 'aarch64', 'armv7h',
+  -- Approved, for two architectures. Its reservation names no known package,
+  -- so the column has to leave it as plain text.
+  (2, 'builder-arm', 'approved', '2222222222222222bbbb2222222222222222bbbb2222222222222222bbbb2222', 'aarch64,armv7h',
    CAST(strftime('%s','now') AS INTEGER) - 200000, '0.1.0', 'not-a-package', 0, '[]'),
   -- Enrolled and waiting. Has never checked in, so "last seen" is never rather
   -- than a long time ago.
-  (3, 'new-machine', 'pending', '3333333333333333cccc3333333333333333cccc3333333333333333cccc3333', 'x86_64', '',
+  (3, 'new-machine', 'pending', '3333333333333333cccc3333333333333333cccc3333333333333333cccc3333', 'x86_64',
    NULL, '0.1.0', '', 0, '[]'),
   -- Retired. Kept so old builds still name the machine that ran them, and
   -- hidden behind the toggle by default.
-  (4, 'old-builder', 'revoked', '4444444444444444dddd4444444444444444dddd4444444444444444dddd4444', 'x86_64', '',
+  (4, 'old-builder', 'revoked', '4444444444444444dddd4444444444444444dddd4444444444444444dddd4444', 'x86_64',
    CAST(strftime('%s','now') AS INTEGER) - 5000000, '0.0.9', '', 0, '[]'),
   -- A machine replaced by another of the same hostname: the retired row keeps
   -- the name, so two workers answer to it. This is why worker names are not
   -- unique and the URL has a way past them.
-  (5, 'replaced-host', 'approved', '5555555555555555eeee5555555555555555eeee5555555555555555eeee5555', 'x86_64', '',
+  (5, 'replaced-host', 'approved', '5555555555555555eeee5555555555555555eeee5555555555555555eeee5555', 'x86_64',
    CAST(strftime('%s','now') AS INTEGER) - 20, '0.1.0', '', 0, '[]'),
-  (6, 'replaced-host', 'revoked', '6666666666666666ffff6666666666666666ffff6666666666666666ffff6666', 'x86_64', '',
+  (6, 'replaced-host', 'revoked', '6666666666666666ffff6666666666666666ffff6666666666666666ffff6666', 'x86_64',
    CAST(strftime('%s','now') AS INTEGER) - 9000000, '0.0.9', '', 0, '[]');
 
 -- What builder-01 declares it can be configured with, and what those settings

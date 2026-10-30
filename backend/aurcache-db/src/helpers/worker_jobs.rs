@@ -69,8 +69,7 @@ struct WorkerCap {
     name: String,
     priority: i32,
     concurrency: i32,
-    native: Vec<String>,
-    emulated: Vec<String>,
+    arches: Vec<String>,
     last_seen: Option<i64>,
     /// Builds this worker currently holds in the ACTIVE state.
     active: i32,
@@ -92,9 +91,6 @@ struct WorkerCap {
 #[derive(Debug, Default)]
 struct Fleet {
     workers: Vec<WorkerCap>,
-    /// Arches at least one approved worker builds *natively*; these are
-    /// reserved from emulated claims.
-    native_arches: HashSet<String>,
     /// pkgbase -> the approved workers that named it. Because affinity entries
     /// are exact names, this is a direct inversion of the worker rows: one pass,
     /// no matching, and no dependency on which builds are queued.
@@ -109,8 +105,7 @@ struct WorkerRow {
     name: String,
     priority: i32,
     concurrency: i32,
-    native_arches: WorkerList,
-    emulated_arches: WorkerList,
+    arches: WorkerList,
     package_affinity: WorkerList,
     last_seen: Option<i64>,
     paused: bool,
@@ -125,8 +120,7 @@ impl Fleet {
             .column(workers::Column::Name)
             .column(workers::Column::Priority)
             .column(workers::Column::Concurrency)
-            .column(workers::Column::NativeArches)
-            .column(workers::Column::EmulatedArches)
+            .column(workers::Column::Arches)
             .column(workers::Column::PackageAffinity)
             .column(workers::Column::LastSeen)
             .column(workers::Column::Paused)
@@ -151,8 +145,6 @@ impl Fleet {
 
         let mut fleet = Self::default();
         for row in rows {
-            let native = row.native_arches.into_vec();
-            fleet.native_arches.extend(native.iter().cloned());
             for pkg in row.package_affinity.into_vec() {
                 fleet.affinity.entry(pkg).or_default().insert(row.id);
             }
@@ -161,8 +153,7 @@ impl Fleet {
                 name: row.name,
                 priority: row.priority,
                 concurrency: row.concurrency,
-                native,
-                emulated: row.emulated_arches.into_vec(),
+                arches: row.arches.into_vec(),
                 last_seen: row.last_seen,
                 active: active.get(&row.id).copied().unwrap_or(0),
                 paused: row.paused,
@@ -203,18 +194,17 @@ impl Fleet {
             .is_some_and(|ws| ws.contains(&worker_id))
     }
 
-    /// Native arches first; an emulated arch is only claimable when *no*
-    /// approved worker builds it natively, so foreign-arch work stays reserved
-    /// for the native worker rather than crawling through emulation elsewhere.
-    fn arch_ok(&self, w: &WorkerCap, platform: &str) -> bool {
-        w.native.iter().any(|a| a == platform)
-            || (w.emulated.iter().any(|a| a == platform) && !self.native_arches.contains(platform))
+    /// Whether the worker builds this architecture. Every worker that lists
+    /// it competes for its builds on equal terms; how each builds it is not
+    /// the router's concern.
+    fn arch_ok(w: &WorkerCap, platform: &str) -> bool {
+        w.arches.iter().any(|a| a == platform)
     }
 
     /// Whether this worker may build this job at all — a hard filter combining
     /// architecture routing with package affinity.
     fn capable(&self, w: &WorkerCap, platform: &str, pkg: &str) -> bool {
-        self.arch_ok(w, platform) && (!self.reserved(pkg) || self.affine(w.id, pkg))
+        Self::arch_ok(w, platform) && (!self.reserved(pkg) || self.affine(w.id, pkg))
     }
 
     /// Whether this worker was seen recently enough to count as up.
@@ -254,15 +244,14 @@ impl Fleet {
 }
 
 /// Where a queued build stands in one worker's claim order, compared field by
-/// field: affine jobs first, then native ones, then the oldest, then the id.
+/// field: affine jobs first, then the oldest, then the id.
 ///
-/// The first two are negated because `false < true`. A worker that *is* affine
+/// The first is negated because `false < true`. A worker that *is* affine
 /// for a package should take that job ahead of one anybody could have taken,
 /// since it may be the only worker that can.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct ClaimRank {
     not_affine: bool,
-    emulated: bool,
     queued_at: i64,
     id: i32,
 }
@@ -284,8 +273,8 @@ pub fn is_live(last_seen: Option<i64>, now: i64, liveness_timeout: i64) -> bool 
 /// 1. **Affinity** (hard) — a package named by any approved worker may only be
 ///    built by workers that name it. Ignores liveness: handing an affine job to
 ///    a worker without the credential fails, where waiting merely waits.
-/// 2. **Architecture** (hard) — native arches first, foreign arches reserved for
-///    a worker that builds them natively.
+/// 2. **Architecture** (hard) — only a worker that lists the build's
+///    architecture.
 /// 3. **Priority** (soft) — a worker declines a job while a strictly
 ///    higher-priority worker is live and under its concurrency limit, until the
 ///    job has waited `spill_delay_secs`.
@@ -368,7 +357,6 @@ pub async fn claim_job<C: ConnectionTrait + sea_orm::TransactionTrait>(
             }
             ranked.push(ClaimRank {
                 not_affine: !fleet.affine(me.id, pkg),
-                emulated: !me.native.iter().any(|a| a == platform),
                 queued_at: build.start_time.unwrap_or(0),
                 id: build.id,
             });
@@ -897,8 +885,7 @@ mod tests {
     /// anything nor blocks anyone.
     struct W {
         id: i32,
-        native: &'static str,
-        emulated: &'static str,
+        arches: &'static str,
         affinity: &'static str,
         priority: i32,
         concurrency: i32,
@@ -911,8 +898,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 id: 1,
-                native: "x86_64",
-                emulated: "",
+                arches: "x86_64",
                 affinity: "",
                 priority: 0,
                 concurrency: 1,
@@ -927,11 +913,10 @@ mod tests {
             .last_seen
             .map_or_else(|| "NULL".to_string(), |t| t.to_string());
         db.execute_unprepared(&format!(
-            "INSERT INTO workers (id, name, status, cert_fingerprint, native_arches, \
-             emulated_arches, package_affinity, priority, concurrency, last_seen, \
-             settings_declaration) \
-             VALUES ({}, 'w{}', '{}', 'fp{}', '{}', '{}', '{}', {}, {}, {last_seen}, '[]')",
-            w.id, w.id, w.status, w.id, w.native, w.emulated, w.affinity, w.priority, w.concurrency
+            "INSERT INTO workers (id, name, status, cert_fingerprint, arches, \
+             package_affinity, priority, concurrency, last_seen, settings_declaration) \
+             VALUES ({}, 'w{}', '{}', 'fp{}', '{}', '{}', {}, {}, {last_seen}, '[]')",
+            w.id, w.id, w.status, w.id, w.arches, w.affinity, w.priority, w.concurrency
         ))
         .await
         .unwrap();
@@ -1003,7 +988,7 @@ mod tests {
         worker(
             &db,
             W {
-                native: "x86_64,aarch64",
+                arches: "x86_64,aarch64",
                 concurrency: 2,
                 ..W::default()
             },
@@ -1032,7 +1017,7 @@ mod tests {
             &db,
             W {
                 id: 1,
-                native: "x86_64,aarch64",
+                arches: "x86_64,aarch64",
                 ..W::default()
             },
         )
@@ -1041,7 +1026,7 @@ mod tests {
             &db,
             W {
                 id: 2,
-                native: "aarch64",
+                arches: "aarch64",
                 ..W::default()
             },
         )
@@ -1066,7 +1051,7 @@ mod tests {
         worker(
             &db,
             W {
-                native: "x86_64,aarch64",
+                arches: "x86_64,aarch64",
                 concurrency: 2,
                 ..W::default()
             },
@@ -1218,33 +1203,15 @@ mod tests {
         assert!(claim(&db, 99).await.is_none(), "unknown worker claimed");
     }
 
+    /// Only workers that list an architecture take its builds, and all of
+    /// them compete: the one that asks first gets it.
     #[tokio::test]
-    async fn native_preferred_over_emulated() {
-        let db = setup().await;
-        worker(
-            &db,
-            W {
-                emulated: "aarch64",
-                ..W::default()
-            },
-        )
-        .await;
-        enqueue(&db, 30, "aarch64", 50).await; // older, emulatable
-        enqueue(&db, 31, "x86_64", 100).await; // newer, native
-
-        // No native aarch64 worker exists, so it *may* emulate — but native
-        // work comes first.
-        assert_eq!(claim(&db, 1).await.unwrap().id, 31);
-    }
-
-    #[tokio::test]
-    async fn foreign_arch_reserved_for_native_worker() {
+    async fn workers_listing_an_arch_compete_for_it() {
         let db = setup().await;
         worker(
             &db,
             W {
                 id: 1,
-                emulated: "aarch64",
                 ..W::default()
             },
         )
@@ -1253,33 +1220,29 @@ mod tests {
             &db,
             W {
                 id: 2,
-                native: "aarch64",
+                arches: "x86_64,aarch64",
+                ..W::default()
+            },
+        )
+        .await;
+        worker(
+            &db,
+            W {
+                id: 3,
+                arches: "aarch64",
                 ..W::default()
             },
         )
         .await;
         enqueue(&db, 40, "aarch64", 50).await;
+        enqueue(&db, 41, "aarch64", 60).await;
 
-        // The emulating worker must not grab the reserved job...
-        assert!(claim(&db, 1).await.is_none());
-        // ...the native one does.
+        assert!(
+            claim(&db, 1).await.is_none(),
+            "took an arch it does not list"
+        );
         assert_eq!(claim(&db, 2).await.unwrap().id, 40);
-    }
-
-    #[tokio::test]
-    async fn emulated_claim_when_no_native_worker() {
-        let db = setup().await;
-        worker(
-            &db,
-            W {
-                emulated: "armv7h",
-                ..W::default()
-            },
-        )
-        .await;
-        enqueue(&db, 50, "armv7h", 50).await;
-
-        assert_eq!(claim(&db, 1).await.unwrap().id, 50);
+        assert_eq!(claim(&db, 3).await.unwrap().id, 41);
     }
 
     // -------------------------------------------------------------- affinity
@@ -1447,7 +1410,7 @@ mod tests {
             &db,
             W {
                 id: 1,
-                native: "x86_64",
+                arches: "x86_64",
                 affinity: "unreal-engine",
                 ..W::default()
             },
@@ -1458,7 +1421,7 @@ mod tests {
             &db,
             W {
                 id: 2,
-                native: "aarch64",
+                arches: "aarch64",
                 ..W::default()
             },
         )
@@ -1468,7 +1431,7 @@ mod tests {
             &db,
             W {
                 id: 3,
-                native: "aarch64",
+                arches: "aarch64",
                 affinity: "unreal-engine",
                 ..W::default()
             },
@@ -1627,7 +1590,7 @@ mod tests {
             &db,
             W {
                 id: 1,
-                native: "aarch64",
+                arches: "aarch64",
                 priority: 10,
                 ..W::default()
             },

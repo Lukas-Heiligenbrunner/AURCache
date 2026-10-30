@@ -100,9 +100,10 @@ builder:
 
 Keep concurrency at 1 — a Pi has neither the memory nor the I/O for parallel
 chroot builds — and put `worker_data` on an external SSD rather than the SD
-card. `aarch64` jobs then prefer this worker over any emulation; `x86_64` jobs
-always go to the x86_64 machine, since a foreign architecture is only ever
-emulated when **no** worker builds it natively.
+card. `aarch64` jobs go to this worker and `x86_64` jobs to the x86_64 machine.
+If another worker also builds `aarch64` -- an emulated one, say -- both compete
+for those jobs; give the Pi a higher [priority](../workers/routing.md) to
+prefer it, or pause the other.
 
 ## Using it
 

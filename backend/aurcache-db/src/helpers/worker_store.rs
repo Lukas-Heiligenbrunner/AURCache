@@ -22,8 +22,7 @@ use std::collections::BTreeMap;
 pub struct WorkerRegistration<'a> {
     pub name: &'a str,
     pub fingerprint: &'a str,
-    pub native_arches: &'a [String],
-    pub emulated_arches: &'a [String],
+    pub arches: &'a [String],
     pub version: &'a str,
     /// Build strategy the worker runs (`chroot`, `docker`).
     pub kind: &'a str,
@@ -60,8 +59,7 @@ pub async fn register_worker<C: ConnectionTrait>(
             workers::Column::Name,
             workers::Column::Status,
             workers::Column::CertFingerprint,
-            workers::Column::NativeArches,
-            workers::Column::EmulatedArches,
+            workers::Column::Arches,
             workers::Column::LastSeen,
             workers::Column::Version,
             workers::Column::Kind,
@@ -74,8 +72,7 @@ pub async fn register_worker<C: ConnectionTrait>(
             reg.name.into(),
             ApprovalStatus::Pending.into(),
             reg.fingerprint.into(),
-            WorkerList::new(reg.native_arches).to_string().into(),
-            WorkerList::new(reg.emulated_arches).to_string().into(),
+            WorkerList::new(reg.arches).to_string().into(),
             now.into(),
             reg.version.into(),
             reg.kind.into(),
@@ -89,8 +86,7 @@ pub async fn register_worker<C: ConnectionTrait>(
             OnConflict::column(workers::Column::CertFingerprint)
                 .update_columns([
                     workers::Column::Name,
-                    workers::Column::NativeArches,
-                    workers::Column::EmulatedArches,
+                    workers::Column::Arches,
                     workers::Column::LastSeen,
                     workers::Column::Version,
                     workers::Column::Kind,
@@ -484,8 +480,7 @@ mod tests {
         WorkerRegistration {
             name,
             fingerprint,
-            native_arches: names(&["x86_64"]),
-            emulated_arches: names(&[]),
+            arches: names(&["x86_64"]),
             version: "0.1.0",
             kind: "chroot",
             package_affinity: names(&[]),
@@ -586,7 +581,7 @@ mod tests {
         let b = register_worker(
             &db,
             &WorkerRegistration {
-                emulated_arches: names(&["aarch64"]),
+                arches: names(&["x86_64", "aarch64"]),
                 version: "0.2.0",
                 ..reg("w1", "fp-1")
             },
@@ -595,7 +590,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(b.status, ApprovalStatus::Pending);
-        assert_eq!(b.emulated_arches.to_string(), "aarch64");
+        assert_eq!(b.arches.to_string(), "x86_64,aarch64");
         assert_eq!(b.version.as_deref(), Some("0.2.0"));
         assert_eq!(list_workers(&db).await.unwrap().len(), 1);
     }
@@ -614,8 +609,7 @@ mod tests {
         let updated = register_worker(
             &db,
             &WorkerRegistration {
-                native_arches: names(&["aarch64"]),
-                emulated_arches: names(&["armv7h"]),
+                arches: names(&["aarch64", "armv7h"]),
                 version: "9.9.9",
                 package_affinity: names(&["unreal-engine"]),
                 priority: 10,
@@ -628,8 +622,7 @@ mod tests {
 
         assert_eq!(updated.id, w.id);
         assert_eq!(updated.name, "new-name");
-        assert_eq!(updated.native_arches.to_string(), "aarch64");
-        assert_eq!(updated.emulated_arches.to_string(), "armv7h");
+        assert_eq!(updated.arches.to_string(), "aarch64,armv7h");
         assert_eq!(updated.package_affinity.to_string(), "unreal-engine");
         assert_eq!(updated.priority, 10);
         assert_eq!(updated.concurrency, 8);

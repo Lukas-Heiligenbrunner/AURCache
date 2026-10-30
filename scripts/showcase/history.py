@@ -626,10 +626,10 @@ def main() -> None:
                   last_seen = ? WHERE name = ?""", (now - 20, WORKERS[0]))
     if not db.execute("SELECT 1 FROM workers WHERE name = ?", (WORKERS[1],)).fetchone():
         db.execute("""INSERT INTO workers (name, status, cert_fingerprint, signed_cert, not_after,
-                      native_arches, emulated_arches, last_seen, version, package_affinity, priority,
+                      arches, last_seen, version, package_affinity, priority,
                       concurrency, kind, settings_declaration, effective_config, paused)
                       SELECT ?, status, 'showcase-' || cert_fingerprint, signed_cert, not_after,
-                      native_arches, emulated_arches, ?, version, package_affinity, priority,
+                      arches, ?, version, package_affinity, priority,
                       concurrency, kind, settings_declaration, effective_config, paused
                       FROM workers WHERE name = ?""", (WORKERS[1], now - 35, WORKERS[0]))
     worker_ids = dict(db.execute("SELECT name, id FROM workers"))

@@ -7,6 +7,15 @@ architecture only: `claim_job` prefers native arches and reserves a foreign arch
 for a worker that can build it natively. This document adds two orthogonal
 routing dimensions on top of it.
 
+> **Superseded (2026-10-29):** workers now report one `arches` list and say
+> nothing about how they build them -- emulation is one way, dispatching to
+> machines of each architecture another. Every worker listing an architecture
+> competes for its builds; there is no native-first reservation, and
+> `priority` (or pausing the slower worker) is how one is preferred. Richer,
+> server-configurable per-architecture preference is left for later.
+> `WORKER_EMULATED_ARCHES` survives only as the container worker's own setting,
+> which adds those architectures to its list.
+
 ## Motivation
 
 Two independent problems, both currently unsolvable:

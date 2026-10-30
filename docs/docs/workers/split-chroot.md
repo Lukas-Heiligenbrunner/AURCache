@@ -110,7 +110,7 @@ the machine, where they always were.
 | Variable | Type | Description | Default |
 |---|---|---|---|
 | `WORKER_NAME` | String | Name shown on the Workers page | hostname |
-| `WORKER_ARCHES` | String | Architectures this worker builds natively, comma or space separated | host architecture |
+| `WORKER_ARCHES` | String | Architectures this worker builds, comma or space separated | host architecture |
 | `WORKER_CONCURRENCY` | Integer | Maximum builds at once | 1 |
 
 :::note Raising concurrency
