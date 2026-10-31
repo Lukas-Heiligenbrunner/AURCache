@@ -1,0 +1,31 @@
+services:
+  aurcache:
+    build:
+        context: ..
+        dockerfile: docker/server.Dockerfile
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      - LOG_LEVEL=debug
+      - TZ   # the schedule's timezone: the host's unless set (see docker-compose.yaml)
+      #- BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
+      - BUILD_ARTIFACT_DIR=artifact_cache # also absolute path is possible
+    volumes:
+      - ../aurcache/db:/app/db
+      - ../aurcache/repo:/app/repo
+      - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - artifact_cache:/app/builds
+    privileged: true
+    networks:
+      aurcache_network:
+
+volumes:
+  artifact_cache:
+    name: artifact_cache
+    driver: local
+
+networks:
+  aurcache_network:
+    driver: bridge

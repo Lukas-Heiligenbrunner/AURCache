@@ -1,0 +1,29 @@
+[package]
+name = "aurcache-worker-demo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "aurcache-worker-demo"
+path = "src/main.rs"
+
+[lib]
+name = "aurcache_worker_demo"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tar = { workspace = true }
+zstd = "0.14.2"
+tempfile = { workspace = true }
+aurcache-common = { path = "../aurcache-common" }
+aurcache-worker-core = { path = "../aurcache-worker-core" }
+
+[dev-dependencies]
+pacman-repo-utils = { path = "../pacman-repo-utils" }

@@ -1,0 +1,74 @@
+# =============================================================================
+# AURCache end-to-end test topology (remote-worker architecture).
+# =============================================================================
+# Mirrors the bundled `docker-compose.yaml`: the AURCache server plus one real
+# privileged build worker that enrolls over mTLS, claims a job, builds the
+# package in a devtools chroot, and uploads it. Driven by scripts/test-e2e.sh.
+#
+# Single mode only — there is no host/dind split anymore. The worker is a
+# long-lived process; it needs `privileged` + a tmpfs `/run` for systemd-nspawn.
+# =============================================================================
+
+services:
+  aurcache:
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+    ports:
+      - "${AURCACHE_PORT:-8080}:8080"          # Web UI + API (plain HTTP)
+      - "${AURCACHE_MIRROR_PORT:-8081}:8081"   # Pacman repo (plain HTTP)
+      - "${AURCACHE_WORKER_PORT:-8083}:8083"   # Worker protocol (HTTPS + mTLS)
+    environment:
+      # Debug for our own crates only. A bare `debug` turns on hyper/h2/rustls
+      # too, which emit a line per protocol frame and bury the few lines that
+      # actually explain a failure.
+      - LOG_LEVEL=info,aurcache=debug,aurcache_api=debug,aurcache_utils=debug,aurcache_db=debug
+      # The worker dials `aurcache` on the compose network; the server's TLS
+      # cert must be valid for that name (plus localhost for host-side probing).
+      - AURCACHE_TLS_SANS=aurcache,localhost
+      # Repo base URL baked into built packages' pacman.conf `[repo] Server`.
+      - AURCACHE_PUBLIC_URL=http://aurcache:8081
+      # Bundled auto-approval: any worker that can write to the shared `enroll`
+      # volume is trusted (this is the e2e's single co-located worker).
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+    volumes:
+      - db:/app/db
+      - repo:/app/repo
+      - ca:/app/data/ca
+      - enroll:/enroll:ro
+    networks:
+      - aurcache_network
+
+  builder:
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+    depends_on:
+      - aurcache
+    environment:
+      # See the note on the server's LOG_LEVEL: scope debug to our own crates so
+      # the build output stays readable.
+      - RUST_LOG=info,aurcache_worker=debug
+      - AURCACHE_URL=https://aurcache:8083
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      - WORKER_CONCURRENCY=2
+    volumes:
+      - enroll:/enroll
+      - worker_data:/var/lib/aurcache-worker
+    privileged: true
+    tmpfs:
+      - /run
+    networks:
+      - aurcache_network
+    restart: unless-stopped
+
+volumes:
+  db:
+  repo:
+  ca:
+  enroll:
+  worker_data:
+
+networks:
+  aurcache_network:
+    driver: bridge

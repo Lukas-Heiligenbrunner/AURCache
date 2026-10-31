@@ -1,0 +1,21 @@
+[
+  {
+    "active_build_ids": [
+      42,
+      43
+    ],
+    "version": "0.6.0",
+    "effective": {
+      "received_revision": "3f2a",
+      "settings": {
+        "max_disk": {
+          "value": "100G",
+          "source": "server",
+          "status": "applied",
+          "reason": "set on the server"
+        }
+      }
+    },
+    "received_revision": "3f2a"
+  }
+]

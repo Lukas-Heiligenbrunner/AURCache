@@ -1,0 +1,17 @@
+# The user the AURCache server runs as.
+#
+# Declared rather than created by a script: systemd-sysusers is idempotent by
+# construction and re-applied on boot, where an install script has to be
+# written carefully not to clobber an existing account.
+#
+# The worker package declares this same user in its own file. Two sysusers
+# files may declare one user -- the second is a no-op -- and they must be two
+# files, because pacman refuses to install two packages that ship the same
+# path even when the contents are identical.
+u aurcache - "AURCache server and build worker" /var/lib/aurcache -
+
+# Who a PKGBUILD parse runs as when the server runs as root on a kernel without
+# Landlock -- the hybrid image, which installs this package. A native server
+# runs as `aurcache` and confines parses with Landlock alone, so there it is
+# never used.
+u aurcache-parse - "AURCache PKGBUILD parsing" /nonexistent /usr/bin/nologin

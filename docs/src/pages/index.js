@@ -7,7 +7,7 @@ import HomepageFeatures from '@site/src/components/HomepageFeatures';
 import Heading from '@theme/Heading';
 import styles from './index.module.css';
 
-const Svg = require('../../../frontend/assets/icons/icon.svg').default;
+const Svg = require('../../../assets/icons/icon.svg').default;
 
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
@@ -35,8 +35,8 @@ export default function Home() {
   const {siteConfig} = useDocusaurusContext();
   return (
     <Layout
-      title={`Hello from ${siteConfig.title}`}
-      description="Description will go into a meta tag in <head />">
+      title={siteConfig.tagline}
+      description="AURCache builds AUR packages in containers and serves them as a pacman repository, with live build logs and version tracking.">
       <HomepageHeader />
       <main>
         <HomepageFeatures />

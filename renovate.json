@@ -16,6 +16,12 @@
       "groupName": "Rust (Cargo) non-major updates"
     },
     {
+      "description": "The frontend's wasm-bindgen and the library that generates its glue only work at the same version, so they move in one PR whatever the update.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["wasm-bindgen", "wasm-bindgen-cli-support"],
+      "groupName": "wasm-bindgen"
+    },
+    {
       "matchManagers": ["pub"],
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "Dart (pub) non-major updates"

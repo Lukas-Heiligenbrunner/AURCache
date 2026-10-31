@@ -1,0 +1,148 @@
+# =============================================================================
+# AURCache demo instance: UI and dependency resolution, no real builds
+# =============================================================================
+# A public-facing playground built from this working tree: the AURCache
+# server, one dummy worker that completes every job with synthetic near-empty
+# packages (see backend/aurcache-worker-demo), and PostgreSQL.
+#
+#     docker compose -f compose/docker-compose.demo.yaml up -d --build
+#     docker compose -f compose/docker-compose.demo.yaml logs -f
+#     docker compose -f compose/docker-compose.demo.yaml down -v     # -v drops all data
+#
+# Or run the prebuilt images instead of compiling: scripts/deploy-truenas.sh
+# (local-only) pushes `aurcache-server` and `aurcache-demo-worker` to
+# $AURCACHE_REGISTRY, so
+#
+#     docker compose -f compose/docker-compose.demo.yaml pull aurcache demo-worker
+#     docker compose -f compose/docker-compose.demo.yaml up -d
+#
+# runs this tree's code without building it. `up -d --build` always ignores
+# the registry and compiles locally, which is the path that needs no
+# registry access. Set AURCACHE_REGISTRY to point the `image:` tags below at
+# another registry (default: ghcr.io/lukas-heiligenbrunner).
+#
+# Web UI / API : http://localhost:8080
+#
+# Deliberately the ONLY published port: the pacman repository (8081) is not
+# exposed -- the demo's packages are synthetic and must never be installed --
+# and the worker protocol (8083) stays inside the compose network. Visitors
+# can add AUR packages and watch dependency resolution and publishing happen
+# in seconds, without any compilation running anywhere.
+#
+# Data: server state (repository files, build logs, source cache, worker CA)
+# lives in `demo_data`, the database in `demo_postgres`, the dummy worker's
+# identity in `demo_worker_data`. `down -v` resets the demo to empty.
+#
+# The database password defaults to `aurcache-demo` (set POSTGRES_PASSWORD to
+# change it). It only guards the Postgres TCP socket inside the compose
+# network, which is itself unpublished -- there is no stronger secret here,
+# and none is needed.
+# =============================================================================
+
+services:
+  aurcache:
+    # Prebuilt equivalent of the `build:` below; `pull` fetches it, `--build`
+    # recompiles and re-tags this same name.
+    image: ${AURCACHE_REGISTRY:-ghcr.io/lukas-heiligenbrunner}/aurcache-server:latest
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+    ports:
+      - "${AURCACHE_PORT:-8080}:8080"   # Web UI + API (plain HTTP): the only port out
+    environment:
+      - LOG_LEVEL=info
+      - TZ   # the schedule's timezone: the host's unless set (see docker-compose.yaml)
+      # The worker dials `aurcache` over the compose network, so the server's
+      # certificate has to be valid for that name; `localhost` keeps the UI
+      # reachable from the host.
+      - AURCACHE_TLS_SANS=aurcache,localhost
+      # Auto-approve any worker that can write to the shared `enroll` volume:
+      # no token, no approval click. Mounted read-only here.
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      # PostgreSQL, in the `aurcache_database` service below.
+      - DB_TYPE=POSTGRESQL
+      - DB_HOST=aurcache_database
+      - DB_USER=aurcache
+      - DB_PWD=${POSTGRES_PASSWORD:-aurcache-demo}
+      - DB_NAME=aurcache
+    volumes:
+      # Everything the server keeps except the database: the repository, the
+      # internal worker CA, each build's log, and the source cache. One mount
+      # persists all of it, so no directory added later is silently lost.
+      - demo_data:/app
+      - enroll:/enroll:ro             # read the workers' enrollment CSRs
+      - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)
+    depends_on:
+      aurcache_database:
+        condition: service_healthy
+    networks:
+      - demo
+    restart: unless-stopped
+
+  aurcache_database:
+    # Pinned to the major version *and* the Debian release: `postgres:18`
+    # moves to a newer Debian from time to time, and a newer C library sorts
+    # text differently under indexes already built. Same pin the CLI's
+    # generated compose files use.
+    image: postgres:18-trixie
+    user: "999:999"
+    environment:
+      - POSTGRES_USER=aurcache
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aurcache-demo}
+      - POSTGRES_DB=aurcache
+    volumes:
+      # Mounted at the parent of PGDATA rather than PGDATA itself, so a major
+      # version upgrade can build the new directory beside the old one.
+      - demo_postgres:/var/lib/postgresql
+    # Over TCP rather than the socket: while the image initialises a new
+    # database, a temporary server answers on the socket and then stops.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "aurcache", "-d", "aurcache"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks:
+      - demo
+    restart: unless-stopped
+
+  demo-worker:
+    # Prebuilt equivalent of the `build:` below; `pull` fetches it, `--build`
+    # recompiles and re-tags this same name.
+    image: ${AURCACHE_REGISTRY:-ghcr.io/lukas-heiligenbrunner}/aurcache-demo-worker:latest
+    build:
+      context: ..
+      dockerfile: docker/demo-worker.Dockerfile
+    depends_on:
+      - aurcache
+    environment:
+      - RUST_LOG=info
+      # Must match a SAN in AURCACHE_TLS_SANS above.
+      - AURCACHE_URL=https://aurcache:8083
+      - AURCACHE_ENROLLMENT_DIR=/enroll
+      - WORKER_NAME=dummy
+      # Pinned (not _DEFAULT, which the server could override): the dummy
+      # worker is I/O-free, so four concurrent fake builds drain the demo
+      # queue quickly.
+      - WORKER_CONCURRENCY=4
+      # Seconds each fake build appears to take: long enough to watch a build
+      # move through the queue UI, short enough that dependency fan-out stays
+      # lively.
+      - DEMO_BUILD_SECS=3
+    volumes:
+      - enroll:/enroll               # writable: the CSR it drops here is its enrollment
+      - demo_worker_data:/var/lib/aurcache-worker   # persisted mTLS identity
+    # Deliberately unprivileged: the dummy worker compiles nothing, runs no
+    # chroot and needs no cgroups -- a plain container is the whole point.
+    networks:
+      - demo
+    restart: unless-stopped
+
+volumes:
+  demo_data:
+  demo_postgres:
+  enroll:
+  demo_worker_data:
+
+networks:
+  demo:
+    driver: bridge

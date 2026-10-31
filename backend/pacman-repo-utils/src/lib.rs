@@ -1,5 +1,7 @@
+pub mod describe;
 mod pkginfo;
-pub mod repo_add;
 mod repo_database;
 pub mod repo_init;
-pub mod repo_remove;
+
+pub use describe::{PackageEntry, describe_package};
+pub use repo_database::db::{listed_filenames, write_updated_databases};

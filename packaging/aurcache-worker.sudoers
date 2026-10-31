@@ -1,0 +1,27 @@
+# The worker runs as `aurcache` and needs root for the chroot operations that
+# devtools performs: creating the base chroot, refreshing it, and running each
+# build in a copy of it.
+#
+# Deliberately not restricted to a command list. `makechrootpkg` is a shell
+# script that invokes mkarchroot, arch-nspawn, systemd-nspawn, pacman, mount and
+# others with arguments derived from the job, and it accepts `-r` (any chroot
+# path), `-d host:chroot` (bind any host path into a container running as root)
+# and `-I` (install any package). An allowlist naming it would read as a
+# restriction while granting exactly as much as `ALL` -- the same is true of
+# `install` with a free destination, which can write /etc/sudoers. Narrowing
+# this for real means removing the arguments from the sudo boundary altogether,
+# not enumerating the commands that carry them.
+#
+# So be clear about what this grant is and is not. It is not a boundary against
+# a compromised worker: with NOPASSWD:ALL, code execution in the worker is root.
+# What running unprivileged buys is that the worker's *own* mistakes -- a wrong
+# path, a bad cleanup -- are bounded by what `aurcache` owns, because privilege
+# requires one of the handful of explicit `sudo` calls in its source; and that
+# every privileged action is logged with its full argument vector, attributable
+# to the service account.
+#
+# The isolation that constrains *untrusted* input is elsewhere: each build runs
+# in its own chroot as the unprivileged `builder`, and the two places a PKGBUILD
+# is executed outside that chroot are confined by aurcache-sandbox with Landlock
+# -- which sets no_new_privs, so sudo is inert there regardless of this file.
+aurcache ALL=(ALL) NOPASSWD: ALL

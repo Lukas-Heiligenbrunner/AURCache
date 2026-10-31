@@ -1,0 +1,28 @@
+# Re-derive AURCache's sandboxed makechrootpkg whenever devtools changes.
+#
+# The copy under /usr/lib/aurcache/bin is derived from the *installed*
+# /usr/bin/makechrootpkg at install time. It is not a fork: makechrootpkg
+# sources six files from /usr/share/devtools/lib and /usr/share/makepkg/util at
+# runtime, so a copy taken against one devtools release and left alone would end
+# up running against another release's libraries -- which fails as a confusing
+# build error rather than as a version mismatch.
+#
+# Without this hook nothing re-runs the patch on a host, and the copy silently
+# goes stale. In the container images a rebuild re-applies it or fails the
+# build; this restores that property for a package.
+#
+# The patch fails loudly if a call site moved, which is exactly when a human
+# must look: it means the two places a PKGBUILD is executed outside the chroot
+# may no longer be the two places being confined.
+
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = devtools
+
+[Action]
+Description = Re-deriving AURCache's sandboxed makechrootpkg...
+When = PostTransaction
+Exec = /usr/lib/aurcache/aurcache-patch-makechrootpkg
+NeedsTargets

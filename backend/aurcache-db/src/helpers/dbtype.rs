@@ -3,11 +3,8 @@ use std::env;
 
 #[must_use]
 pub fn database_type() -> DbBackend {
-    env::var("DB_TYPE").map_or(DbBackend::Sqlite, |t| {
-        if t == "POSTGRESQL" {
-            DbBackend::Postgres
-        } else {
-            DbBackend::Sqlite
-        }
-    })
+    match env::var("DB_TYPE").as_deref() {
+        Ok("POSTGRESQL") => DbBackend::Postgres,
+        _ => DbBackend::Sqlite,
+    }
 }

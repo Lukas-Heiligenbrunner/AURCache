@@ -8,6 +8,7 @@ use rocket::route::{Handler, Outcome};
 use rocket::{Data, Request, Response, Route};
 use rust_embed::RustEmbed;
 use std::io::Cursor;
+use std::path::PathBuf;
 use tracing::error;
 
 #[derive(RustEmbed)]
@@ -15,11 +16,11 @@ use tracing::error;
 struct Asset;
 
 #[derive(Clone)]
-pub struct CustomHandler {}
+pub struct CustomHandler;
 
-impl Into<Vec<Route>> for CustomHandler {
-    fn into(self) -> Vec<Route> {
-        vec![Route::ranked(-2, Method::Get, "/<path..>", self)]
+impl From<CustomHandler> for Vec<Route> {
+    fn from(handler: CustomHandler) -> Self {
+        vec![Route::ranked(-2, Method::Get, "/<path..>", handler)]
     }
 }
 
@@ -30,27 +31,30 @@ impl Handler for CustomHandler {
             return match Redirect::to("/api/login").respond_to(request) {
                 Ok(r) => Outcome::Success(r),
                 Err(e) => {
-                    error!("Failed to redirect: {:?}", e);
+                    error!("Failed to redirect: {e:?}");
                     Outcome::Error(Status::InternalServerError)
                 }
             };
         }
 
-        let mut path = request
+        let Some(mut path) = request
             .segments::<Segments<'_, Path>>(0..)
             .ok()
             .and_then(|segments| segments.to_path_buf(true).ok())
-            .unwrap();
+        else {
+            return Outcome::Error(Status::BadRequest);
+        };
 
-        if path.is_dir() || path.to_str() == Some("") {
-            path = path.join("index.html")
+        // A frontend route matches no file. Answering it with the app shell is
+        // what makes a reload or a pasted deep link work; see `crate::spa`.
+        // The root is the shell too, so it needs no case of its own.
+        let mut file = Asset::get(path.to_string_lossy().as_ref());
+        if file.is_none() && crate::spa::serves_app_shell(&path) {
+            path = PathBuf::from("index.html");
+            file = Asset::get("index.html");
         }
 
-        // if let None =  path.extension()  {
-        //     path = "index.html".into();
-        // }
-
-        match <Asset as RustEmbed>::get(path.to_string_lossy().as_ref()) {
+        match file {
             None => Outcome::Error(Status::NotFound),
             Some(file_content) => {
                 let content_type: ContentType = path

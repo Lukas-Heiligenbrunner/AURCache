@@ -1,0 +1,17 @@
+[package]
+name = "aurcache-client"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Shared API shapes. `default-features = false` keeps sea-orm out, so this
+# crate — and the wasm frontend that uses it — stay driver-free.
+aurcache-common = { path = "../aurcache-common", default-features = false }
+anyhow = { workspace = true }
+# Zero-copy uploads: `restore` takes `Bytes` straight into the request body.
+bytes = "1"
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

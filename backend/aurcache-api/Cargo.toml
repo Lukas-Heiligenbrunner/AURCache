@@ -2,35 +2,56 @@
 name = "aurcache-api"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = {workspace = true}
 tracing = {workspace = true}
-tokio = {workspace = true}
+tokio = {workspace = true, features = ["fs", "io-util"] }
 sea-orm = {workspace = true}
-itertools = {workspace = true}
 serde = { workspace = true }
-chrono = {workspace = true}
+serde_json = { workspace = true }
+jiff = {workspace = true}
+subtle = {workspace = true}
 
-# todo try to remove this dep from here, shouldn't be required
-aur-rs = {workspace = true}
+aurcache-deps = {path = "../aurcache-deps"}
 
-rocket = "0.5.1"
+rocket = { version = "0.5.1", features = ["mtls", "json"] }
 rocket_oauth2 = "0.5.0"
 utoipa = { workspace = true }
-utoipa-redoc = { version = "6.0.0", features = ["rocket"] }
-utoipa-scalar = { version = "0.3.0", features = ["rocket"] }
-rust-embed = "8.12.0"
-bigdecimal = "0.4.10"
+utoipa-redoc = { version = "7.0.0", features = ["rocket"] }
+utoipa-scalar = { version = "0.4.0", features = ["rocket"] }
+rust-embed = { version = "8.13.0", optional = true }
 reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
+hex = "0.4.3"
+rand = "0.10"
+rand_core = "0.10"
+sha2 = "0.11"
 
 
 aurcache-db = {path = "../aurcache-db"}
-aurcache-builder = {path = "../aurcache-builder"}
+aurcache-ca = {path = "../aurcache-ca"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-utils = {path = "../aurcache-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
-aurcache-types = {path = "../aurcache-types"}
+aurcache-common = {path = "../aurcache-common"}
+rocket_async_compression = "0.6.1"
 
 [features]
 default = []
-static = []
+static = ["dep:rust-embed", "dep:wasm-bindgen-cli-support"]
+
+[build-dependencies]
+# Generates the frontend's JS glue in the build script, under `static`. Pinned
+# exactly, and to the same version as the `wasm-bindgen` crate in
+# frontend-rs/Cargo.toml: the two refuse to work together at any other pair,
+# and pinning both is what keeps them a pair. Bump them together.
+wasm-bindgen-cli-support = { version = "=0.2.129", optional = true }
+
+[dev-dependencies]
+# Lets the routing tests assert that client and server share one type per
+# API shape, rather than two structs that silently drift apart.
+aurcache-client = { path = "../aurcache-client" }
+sea-orm-migration = {version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
+tempfile = { workspace = true }

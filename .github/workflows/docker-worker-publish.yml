@@ -1,0 +1,155 @@
+name: Publish Arch-based images
+
+# The Arch-based images: the worker, the hybrid compatibility image, and the
+# legacy builder image the hybrid's compatibility executor spawns — plus the
+# Debian-based demo worker, which the demo compose file pulls from ghcr.io.
+#
+# All four must be published for every release tag: a release whose server and
+# worker images come from different commits can disagree about the worker
+# protocol. The weekly cron additionally refreshes `latest`, which these images
+# need more than most — an Arch image that is never rebuilt eventually fails its
+# own `pacman -Syu` as the keyring and base packages go stale.
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * 1"
+
+jobs:
+  build:
+    name: Build multi-arch AURCache Arch images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # packaging/ holds AUR submodules; the image builds read the
+          # PKGBUILDs from them.
+          submodules: recursive
+      - id: repo_name_lc
+        uses: ASzc/change-string-case-action@v8
+        with:
+          string: ${{ github.repository }}
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        name: Determine image tags
+        id: vars
+        run: |
+          REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION=""
+          fi
+          emit() {
+            # $1 = output name, $2 = image
+            {
+              echo "$1<<EOF"
+              # An `&&` list here would return 1 on non-tag builds and, under
+              # the default `bash -e`, abort the whole step.
+              if [ -n "$VERSION" ]; then echo "$2:$VERSION"; fi
+              echo "$2:latest"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          }
+          emit worker_tags "$REPO/aurcache-worker"
+          emit hybrid_tags "$REPO/aurcache"
+          emit builder_tags "$REPO/aurcache-builder"
+          emit demo_tags "$REPO/aurcache-demo-worker"
+          # The release tag for the binaries to report, if this is one (see
+          # aurcache-common's build script): empty on the weekly cron refresh,
+          # which builds master rather than a release and names its commit.
+          echo "git_tag=$VERSION" >> "$GITHUB_OUTPUT"
+      -
+        name: Build worker container
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # armv7's cross toolchain is built from the AUR in a stage of its own
+          # -- seven packages, gcc three times. Locally Docker's layer cache
+          # keeps it, but a CI runner starts cold every time, so the cache is
+          # exported to and restored from GitHub's cache backend. Without this
+          # every publish pays the better part of an hour.
+          # Scoped per image: both steps run in one job and would otherwise
+          # share a cache key, each overwriting the other's entry.
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+          push: true
+          context: .
+          file: ./docker/worker.Dockerfile
+          tags: ${{ steps.vars.outputs.worker_tags }}
+          # What the worker binary reports as its version (see
+          # aurcache-common's build script).
+          build-args: |
+            LATEST_COMMIT_SHA=${{ github.sha }}
+            AURCACHE_GIT_TAG=${{ steps.vars.outputs.git_tag }}
+      -
+        name: Build hybrid compatibility container
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # armv7's cross toolchain is built from the AUR in a stage of its own
+          # -- seven packages, gcc three times. Locally Docker's layer cache
+          # keeps it, but a CI runner starts cold every time, so the cache is
+          # exported to and restored from GitHub's cache backend. Without this
+          # every publish pays the better part of an hour.
+          # Scoped per image: both steps run in one job and would otherwise
+          # share a cache key, each overwriting the other's entry.
+          cache-from: type=gha,scope=hybrid
+          cache-to: type=gha,scope=hybrid,mode=max
+          push: true
+          context: .
+          file: ./docker/hybrid.Dockerfile
+          tags: ${{ steps.vars.outputs.hybrid_tags }}
+          # What the bundled binaries report as their version (see
+          # aurcache-common's build script).
+          build-args: |
+            LATEST_COMMIT_SHA=${{ github.sha }}
+            AURCACHE_GIT_TAG=${{ steps.vars.outputs.git_tag }}
+      -
+        # Spawned per build by the hybrid image's compatibility executor.
+        name: Build legacy builder container
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          context: .
+          file: ./docker/builder.Dockerfile
+          tags: ${{ steps.vars.outputs.builder_tags }}
+      -
+        # The dummy worker the demo compose file pulls from ghcr.io.
+        # amd64 only: it builds natively per platform, so a foreign arch
+        # would each pay a full emulated Rust build, and the demo runs on
+        # x86_64.
+        name: Build demo worker container
+        uses: docker/build-push-action@v7
+        with:
+          platforms: linux/amd64
+          cache-from: type=gha,scope=demo-worker
+          cache-to: type=gha,scope=demo-worker,mode=max
+          push: true
+          context: .
+          file: ./docker/demo-worker.Dockerfile
+          tags: ${{ steps.vars.outputs.demo_tags }}
+          # What the worker binary reports as its version (see
+          # aurcache-common's build script).
+          build-args: |
+            LATEST_COMMIT_SHA=${{ github.sha }}
+            AURCACHE_GIT_TAG=${{ steps.vars.outputs.git_tag }}

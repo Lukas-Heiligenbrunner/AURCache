@@ -1,0 +1,48 @@
+[Unit]
+Description=AURCache build server and pacman repository
+Documentation=https://github.com/Lukas-Heiligenbrunner/AURCache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=aurcache
+Group=aurcache
+# The server resolves ./repo, ./db and ./data/ca relative to where it runs, so
+# the working directory is part of its configuration rather than a convenience.
+WorkingDirectory=/var/lib/aurcache
+ExecStart=/usr/bin/aurcache
+Restart=on-failure
+RestartSec=5s
+
+# Read at start, so an operator edits one file rather than the unit.
+EnvironmentFile=-/etc/aurcache/server.env
+
+# The server needs no privilege at all: it listens on three high ports, talks to
+# a database and writes files under its own directory. Hardened accordingly --
+# the worker unit deliberately is not, and says why.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/aurcache
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

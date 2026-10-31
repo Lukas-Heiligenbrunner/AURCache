@@ -1,0 +1,46 @@
+[package]
+name = "aurcache-worker"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "aurcache-worker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+rcgen = { version = "0.14", features = ["pem"] }
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.23"
+clap = { version = "4", features = ["derive", "env"] }
+flate2 = { workspace = true }
+tar = { workspace = true }
+percent-encoding = "2.3"
+url = "2"
+aurcache-common = { path = "../aurcache-common" }
+aurcache-worker-core = { path = "../aurcache-worker-core" }
+aurcache-chroot = { path = "../aurcache-chroot" }
+# The page size, for reading RSS out of /proc; see src/memory.rs.
+libc = "0.2"
+
+[dev-dependencies]
+aurcache-activitylog = {path = "../aurcache-activitylog"}
+aurcache-worker-core = { path = "../aurcache-worker-core" }
+tempfile = { workspace = true }
+aurcache-api = { path = "../aurcache-api" }
+aurcache-db = { path = "../aurcache-db" }
+aurcache-ca = { path = "../aurcache-ca" }
+aurcache-utils = { path = "../aurcache-utils" }
+sea-orm = { workspace = true }
+sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+zstd = "0.14"

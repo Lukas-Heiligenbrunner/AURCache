@@ -1,0 +1,16 @@
+[package]
+name = "aurcache-chroot"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process", "fs", "sync", "time", "macros", "rt"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
