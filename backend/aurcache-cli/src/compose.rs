@@ -465,12 +465,8 @@ fn server_service(params: &ComposeParams) -> String {
         ..
     } = params;
 
-    let (database_env, database_volume, depends_on) = match database {
-        ComposeDatabase::Sqlite => (
-            String::new(),
-            "\x20     - aurcache_db:/app/db               # SQLite database\n".to_string(),
-            String::new(),
-        ),
+    let (database_env, depends_on) = match database {
+        ComposeDatabase::Sqlite => (String::new(), String::new()),
         ComposeDatabase::Postgres { password, .. } => (
             format!(
                 "\x20     # PostgreSQL, in the `{DATABASE_SERVICE}` service below.\n\
@@ -480,7 +476,6 @@ fn server_service(params: &ComposeParams) -> String {
                  \x20     - DB_PWD={password}\n\
                  \x20     - DB_NAME={DATABASE_USER}\n"
             ),
-            String::new(),
             // Migrations run at startup, so the server waits for a database
             // that answers rather than failing its first connection.
             format!(
@@ -521,9 +516,12 @@ fn server_service(params: &ComposeParams) -> String {
          \x20     - AURCACHE_ENROLLMENT_DIR={ENROLLMENT_DIR}\n\
          {database_env}\
          \x20   volumes:\n\
-         {database_volume}\
-         \x20     - aurcache_repo:/app/repo\n\
-         \x20     - aurcache_ca:/app/data/ca      # internal worker CA (persist across restarts)\n\
+         \x20     # Everything the server keeps lives under /app, so one volume persists\n\
+         \x20     # all of it: the package repository, the internal worker CA, each\n\
+         \x20     # build's log, the source cache, and an SQLite database. A piece that\n\
+         \x20     # belongs on other storage can have its own mount beside this one; see\n\
+         \x20     # the docs' \"What to persist\" before adding one to a running setup.\n\
+         \x20     - aurcache_data:/app\n\
          \x20     - enroll:{ENROLLMENT_DIR}:ro             # read the workers' enrollment CSRs\n\
          \x20     - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)\n\
          {depends_on}\
@@ -551,7 +549,7 @@ fn repo_service() -> String {
          \x20   ports:\n\
          \x20     - \"{AURCACHE_MIRROR_PORT}:80\"   # Pacman repository (plain HTTP, for `pacman -Sy`)\n\
          \x20   volumes:\n\
-         \x20     - aurcache_repo:/app/repo:ro   # read the repository the server publishes\n\
+         \x20     - aurcache_data:/app:ro   # read the repository (served from /app/repo)\n\
          \x20   command:\n\
          \x20     - sh\n\
          \x20     - -c\n\
@@ -758,11 +756,10 @@ fn volumes(params: &ComposeParams) -> String {
     let role = params.role;
     let mut out = String::from("volumes:\n");
     if role.has_server() {
-        out.push_str(match params.database {
-            ComposeDatabase::Sqlite => "  aurcache_db:\n",
-            ComposeDatabase::Postgres { .. } => "  aurcache_postgres:\n",
-        });
-        out.push_str("  aurcache_repo:\n  aurcache_ca:\n");
+        if let ComposeDatabase::Postgres { .. } = params.database {
+            out.push_str("  aurcache_postgres:\n");
+        }
+        out.push_str("  aurcache_data:\n");
     }
     // The bundle needs it on both sides; the backend declares it so a worker on
     // this host can be added later without editing the server service.
@@ -1026,7 +1023,8 @@ mod tests {
     fn a_sqlite_server_keeps_its_database_in_a_volume_and_runs_no_postgres() {
         let doc = parsed(&params(ComposeRole::Bundle));
         assert!(doc["services"]["aurcache_database"].is_badvalue());
-        assert!(!doc["volumes"]["aurcache_db"].is_badvalue());
+        // In /app/db, which the server's one data volume covers.
+        assert!(!doc["volumes"]["aurcache_data"].is_badvalue());
         let env = environment(&doc, "aurcache");
         assert_eq!(value_of(&env, "DB_TYPE"), None);
     }
@@ -1313,7 +1311,7 @@ mod tests {
             assert!(
                 volumes
                     .iter()
-                    .any(|v| v.as_str() == Some("aurcache_repo:/app/repo:ro")),
+                    .any(|v| v.as_str() == Some("aurcache_data:/app:ro")),
                 "{role:?}: {volumes:?}"
             );
             let depends_on = doc["services"]["repo"]["depends_on"]

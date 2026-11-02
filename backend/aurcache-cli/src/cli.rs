@@ -250,6 +250,19 @@ pub(crate) struct ComposeArgs {
     #[arg(long)]
     pub(crate) tls_sans: Option<String>,
 
+    /// For `--role worker`: worker-protocol URL of the server to join, e.g.
+    /// `https://aurcache.example.com:8083`. Left as that placeholder when
+    /// omitted.
+    #[arg(long)]
+    pub(crate) server_url: Option<String>,
+
+    /// For `--role worker`: SHA-256 of the server's CA, from its startup log
+    /// line "Worker CA fingerprint (pin this on workers)". Left as a
+    /// placeholder when omitted, which the worker refuses until it is filled
+    /// in or removed.
+    #[arg(long)]
+    pub(crate) ca_fingerprint: Option<String>,
+
     #[command(flatten)]
     pub(crate) worker: WorkerKnobs,
 

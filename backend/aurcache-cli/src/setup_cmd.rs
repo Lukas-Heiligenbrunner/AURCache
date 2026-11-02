@@ -94,6 +94,15 @@ pub(crate) fn run_setup_command(format: OutputFormat, command: SetupCommand) -> 
 pub(crate) fn run_setup_compose(format: OutputFormat, args: ComposeArgs) -> Result<()> {
     let database = compose_database(&args, config::is_interactive())?;
     let defaults = compose::ComposeParams::default();
+    let mut worker = args
+        .worker
+        .to_env(args.role.has_worker() && config::is_interactive())?;
+    // Only a worker on its own joins a server by address: a bundled one
+    // reaches the server beside it by service name.
+    if !args.role.has_server() {
+        worker.url.clone_from(&args.server_url);
+        worker.ca_fingerprint.clone_from(&args.ca_fingerprint);
+    }
     let params = compose::ComposeParams {
         role: args.role,
         database: database.clone(),
@@ -102,9 +111,7 @@ pub(crate) fn run_setup_compose(format: OutputFormat, args: ComposeArgs) -> Resu
         public_url: args.public_url.unwrap_or(defaults.public_url),
         log_level: args.common.log_level,
         tls_sans: args.tls_sans.unwrap_or(defaults.tls_sans),
-        worker: args
-            .worker
-            .to_env(args.role.has_worker() && config::is_interactive())?,
+        worker,
     };
     let rendered = compose::render_compose(&params);
 

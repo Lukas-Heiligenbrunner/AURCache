@@ -54,7 +54,10 @@ aurcli setup compose --role worker    # a worker for another machine
 otherwise it writes `docker-compose.yaml` and refuses to clobber an existing
 file without `--force`. `--database postgres|sqlite` chooses the server's
 database, and `--[no-]postgres-upgrade` whether PostgreSQL gets an upgrade
-step. See [Quick Start](../overview/quick-start.md#for-truenas-portainer-unraid).
+step. A worker file takes `--server-url` and `--ca-fingerprint`, as `setup
+worker` does; without them it holds placeholders, and the worker will not trust
+the server until the fingerprint one is filled in or removed. See [Quick
+Start](../overview/quick-start.md#for-truenas-portainer-unraid).
 
 ## Consuming the repository
 

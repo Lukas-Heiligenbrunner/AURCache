@@ -99,14 +99,10 @@ pub fn server_run(
         args.push(format!("{key}={value}"));
     }
 
-    for volume in [
-        "aurcache_db:/app/db",
-        "aurcache_repo:/app/repo",
-        "aurcache_ca:/app/data/ca",
-    ] {
-        args.push("-v".into());
-        args.push(volume.into());
-    }
+    // Everything the server keeps lives under /app: one volume persists the
+    // database, the repository, the CA, the build logs and the source cache.
+    args.push("-v".into());
+    args.push("aurcache_data:/app".into());
     args.push("-v".into());
     args.push(format!("{ENROLL_VOLUME}:{ENROLLMENT_DIR}:ro"));
 
@@ -359,18 +355,13 @@ mod tests {
         );
     }
 
-    /// The CA and the database are what a restart must not lose.
+    /// Everything a restart must not lose -- the CA, the database, the build
+    /// logs -- is under /app, in one named volume.
     #[test]
     fn the_server_persists_its_state_in_named_volumes() {
         let run = server_run("img", "http://localhost:8081", "info", "sans", &[]);
         let args = args_of(&run);
-        for volume in [
-            "aurcache_db:/app/db",
-            "aurcache_repo:/app/repo",
-            "aurcache_ca:/app/data/ca",
-        ] {
-            assert!(args.contains(volume), "{args}");
-        }
+        assert!(args.contains("aurcache_data:/app"), "{args}");
     }
 
     /// The server only reads enrollment requests; a worker writes them.
