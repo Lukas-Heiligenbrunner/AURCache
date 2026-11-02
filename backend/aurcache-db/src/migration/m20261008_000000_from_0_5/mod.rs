@@ -36,6 +36,16 @@ impl MigrationName for Migration {
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// One transaction on every backend. sea-orm only opens one on Postgres by
+    /// default, and on SQLite a failure part-way left a database neither this
+    /// version nor 0.5.0 could start on: tables made, 0.5.0's link table gone,
+    /// and no record that any of it had run. What it writes outside the
+    /// database -- log files, the repository databases' packager -- is the
+    /// same however many times it runs.
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
@@ -44,8 +54,11 @@ impl MigrationTrait for Migration {
 
         packages::normalize_build_flags_in_db(db).await?;
         packages::merge_file_links(manager).await?;
-        packages::normalize_package_names_and_merge_duplicates(db).await?;
+        let bases = packages::bases_in_repo(std::path::Path::new(aurcache_common::fs::REPO_ROOT));
+        packages::normalize_package_names_and_merge_duplicates(db, &bases).await?;
+        packages::drop_file_links(manager).await?;
         builds::fail_unknown_statuses(manager).await?;
+        builds::delete_unknown_platforms(manager).await?;
         packages::mark_duplicate_pending_builds_failed(db).await?;
         builds::hold_pending_builds(manager).await?;
         builds::number_builds(manager).await?;

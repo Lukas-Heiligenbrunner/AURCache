@@ -388,6 +388,81 @@ pub async fn save_worker_settings<C: ConnectionTrait + TransactionTrait>(
     Ok(saved)
 }
 
+/// A 0.5.0 build limit the embedded worker could not take.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RefusedLimit {
+    /// The worker setting it would have become.
+    pub key: String,
+    pub value: String,
+    /// Why the worker's declaration refuses it.
+    pub reason: String,
+}
+
+/// What became of the 0.5.0 build limits an upgrade kept.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AdoptedLimits {
+    pub saved: SavedSettings,
+    pub refused: Vec<RefusedLimit>,
+}
+
+/// Move the server-wide build limits an upgrade from 0.5.0 kept onto the
+/// embedded worker, which runs 0.5.0's builder and so is what they were set
+/// for; see [`aurcache_common::settings::EMBEDDED_WORKER_LIMITS`].
+///
+/// Each value is checked against `declared`, the worker's own declaration, as
+/// an operator's would be. The kept rows go either way, so this runs once: a
+/// value no setting takes is reported and dropped, not offered again at every
+/// start.
+pub async fn adopt_0_5_limits<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    worker_id: i32,
+    declared: &[aurcache_common::worker_config::SettingDecl],
+) -> Result<AdoptedLimits, DbErr> {
+    use aurcache_common::settings::EMBEDDED_WORKER_LIMITS;
+    let kept = crate::settings::Entity::find()
+        .filter(crate::settings::Column::PkgId.eq(crate::settings::scope(None)))
+        .filter(crate::settings::Column::Key.is_in(EMBEDDED_WORKER_LIMITS.map(|(old, _)| old)))
+        .all(db)
+        .await?;
+    if kept.is_empty() {
+        return Ok(AdoptedLimits::default());
+    }
+    let mut changes = BTreeMap::new();
+    let mut refused = Vec::new();
+    for row in &kept {
+        let Some((_, key)) = EMBEDDED_WORKER_LIMITS
+            .iter()
+            .find(|(old, _)| *old == row.key)
+        else {
+            continue;
+        };
+        let Some(value) = row
+            .value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        match aurcache_common::worker_config::validate_value(declared, key, value) {
+            Ok(()) => {
+                changes.insert((*key).to_string(), Some(value.to_string()));
+            }
+            Err(reason) => refused.push(RefusedLimit {
+                key: (*key).to_string(),
+                value: value.to_string(),
+                reason,
+            }),
+        }
+    }
+    let saved = save_worker_settings(db, worker_id, &changes).await?;
+    crate::settings::Entity::delete_many()
+        .filter(crate::settings::Column::Id.is_in(kept.iter().map(|row| row.id)))
+        .exec(db)
+        .await?;
+    Ok(AdoptedLimits { saved, refused })
+}
+
 /// Write one value, replacing whatever the worker had under that key.
 ///
 /// Public for restore, which writes a restored worker's values inside the
@@ -906,6 +981,54 @@ mod tests {
             worker_setting_values(&db, a.id).await.unwrap()["concurrency"],
             "4"
         );
+    }
+
+    /// 0.5.0's server-wide limits become the embedded worker's settings, once;
+    /// a value its declaration refuses is reported, and a limit set for one
+    /// package was never kept.
+    #[tokio::test]
+    async fn the_embedded_worker_adopts_0_5_limits_once() {
+        use aurcache_common::worker_config::{Applies, SettingDecl, ValueKind};
+        let db = setup().await;
+        let worker = register_worker(&db, &reg("bundled", "fp-1")).await.unwrap();
+        db.execute_unprepared(
+            "INSERT INTO settings (key, value, pkg_id) VALUES \
+             ('cpu_limit', '1500', -1), ('memory_limit', '2048', -1), \
+             ('max_concurrent_builds', '0', -1)",
+        )
+        .await
+        .unwrap();
+        let decl = |key: &str, min| SettingDecl {
+            key: key.to_string(),
+            kind: ValueKind::Integer { min, max: None },
+            description: String::new(),
+            category: String::new(),
+            default: None,
+            env_var: None,
+            applies: Applies::NextJob,
+        };
+        let declared = [
+            decl("cpu_limit", Some(0)),
+            decl("memory_limit", None),
+            decl("concurrency", Some(1)),
+        ];
+
+        let adopted = adopt_0_5_limits(&db, worker.id, &declared).await.unwrap();
+        assert_eq!(adopted.saved.set, ["cpu_limit", "memory_limit"]);
+        assert_eq!(
+            adopted
+                .refused
+                .iter()
+                .map(|r| format!("{}={}", r.key, r.value))
+                .collect::<Vec<_>>(),
+            ["concurrency=0"]
+        );
+        let values = worker_setting_values(&db, worker.id).await.unwrap();
+        assert_eq!(values["cpu_limit"], "1500");
+        assert_eq!(values["memory_limit"], "2048");
+
+        let again = adopt_0_5_limits(&db, worker.id, &declared).await.unwrap();
+        assert_eq!(again, AdoptedLimits::default());
     }
 
     /// The values go with their worker: foreign keys are enforced, and a

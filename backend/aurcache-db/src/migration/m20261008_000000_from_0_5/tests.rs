@@ -9,7 +9,8 @@ use sea_orm_migration::MigratorTrait;
 const UPSTREAM: u32 = 7;
 
 /// A 0.5.0 instance with something for every conversion: a package added by
-/// a split package's name twice, builds without a status, logs in the
+/// a split package's name twice, one added twice under its own, a build for
+/// no platform, builds without a status, logs in the
 /// database, two pending builds for one platform, one it was running when it
 /// stopped, files linked through the old table, an interval schedule, a retired setting, and rows whose package
 /// is gone.
@@ -17,7 +18,8 @@ const SEED: &str = r#"
 INSERT INTO packages (id, name, status, out_of_date, upstream_version, latest_build, build_flags, platforms, source_type, source_data) VALUES
  (1, 'hello', 1, 1, '1.1-1', 3, '-Byu;--noconfirm;--noprogressbar;--color never', 'x86_64;aarch64', 'aur', '{"type":"aur","name":"hello"}'),
  (2, 'czkawka-cli', 1, 0, '2.0-1', 5, '--pgpfetch;-B;--noconfirm;--noprogressbar;--color never', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}'),
- (3, 'czkawka-gui', 2, 0, '2.0-1', 6, '--pgpfetch;-B;--noconfirm;--noprogressbar;--color never;--skipreview', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}');
+ (3, 'czkawka-gui', 2, 0, '2.0-1', 6, '--pgpfetch;-B;--noconfirm;--noprogressbar;--color never;--skipreview', 'x86_64', 'aur', '{"type":"aur","name":"czkawka"}'),
+ (4, 'hello', 1, 0, '1.1-1', NULL, '', 'x86_64', 'aur', '{"type":"aur","name":"hello"}');
 INSERT INTO builds (id, pkg_id, output, status, start_time, end_time, platform, version) VALUES
  (1, 1, 'first log', 2, 100, 110, 'x86_64', '1.0-1'),
  (2, 1, '', 1, 200, 210, 'x86_64', '1.0-1'),
@@ -28,7 +30,8 @@ INSERT INTO builds (id, pkg_id, output, status, start_time, end_time, platform, 
  (7, 1, NULL, 3, 700, NULL, 'aarch64', '1.1-1'),
  (8, 1, NULL, NULL, NULL, 800, 'x86_64', '1.1-1'),
  (9, 3, 'partial log', 0, 900, NULL, 'x86_64', '2.0-1'),
- (10, 99, 'orphan', 1, 1000, 1010, 'x86_64', '0.1-1');
+ (10, 99, 'orphan', 1, 1000, 1010, 'x86_64', '0.1-1'),
+ (11, 1, 'no platform', 2, 1100, 1110, '', '1.1-1');
 INSERT INTO files (id, filename, platform) VALUES
  (1, 'hello-1.1-1-x86_64.pkg.tar.zst', 'x86_64'),
  (2, 'czkawka-cli-2.0-1-x86_64.pkg.tar.zst', 'x86_64'),
@@ -128,7 +131,7 @@ async fn a_0_5_database_is_upgraded() {
         column(
             &db,
             "SELECT pkg_id || ' #' || number || ' ' || platform || ' ' || version \
-             || ' status=' || status || ' trigger=' || \"trigger\" FROM builds WHERE id >= 11"
+             || ' status=' || status || ' trigger=' || \"trigger\" FROM builds WHERE \"trigger\" = 2"
         )
         .await,
         ["3 #3 x86_64 2.0-1 status=4 trigger=2"]
@@ -150,15 +153,18 @@ async fn a_0_5_database_is_upgraded() {
     assert_eq!(read("hello/3.log").as_deref(), Some("third log"));
     assert_eq!(read("czkawka/1.log").as_deref(), Some("gui log"));
     assert_eq!(read("czkawka/2.log").as_deref(), Some("partial log"));
-    // Each file belongs to its package; one with none, or whose package was
-    // merged away, is gone.
+    // Each file belongs to its package, one whose package was merged away to
+    // the package it was merged into; one with none is gone.
     assert_eq!(
         column(
             &db,
             "SELECT filename || ' ' || package_id FROM files ORDER BY id"
         )
         .await,
-        ["hello-1.1-1-x86_64.pkg.tar.zst 1"]
+        [
+            "hello-1.1-1-x86_64.pkg.tar.zst 1",
+            "czkawka-cli-2.0-1-x86_64.pkg.tar.zst 3"
+        ]
     );
     // Recording their dependencies is queued for the server, over both.
     assert_eq!(
@@ -170,15 +176,15 @@ async fn a_0_5_database_is_upgraded() {
         ["dependency_backfill 2"]
     );
     // The seconds-first schedule became a crontab one, Sunday 1 now 0, under
-    // its new key; the retired
-    // setting and the merged package's setting are gone.
+    // its new key; the server-wide build limit stays for the embedded worker
+    // to take over, and the merged package's setting is gone.
     assert_eq!(
         column(
             &db,
             "SELECT key || '=' || value || ' @' || pkg_id FROM settings ORDER BY id"
         )
         .await,
-        ["auto_update_schedule=0 2 * * 0 @-1"]
+        ["auto_update_schedule=0 2 * * 0 @-1", "cpu_limit=2 @-1"]
     );
 }
 
@@ -223,7 +229,11 @@ async fn the_new_constraints_hold() {
     db.execute_unprepared("DELETE FROM packages WHERE id = 1")
         .await
         .unwrap();
-    for table in ["builds WHERE pkg_id = 1", "files", "dependencies"] {
+    for table in [
+        "builds WHERE pkg_id = 1",
+        "files WHERE package_id = 1",
+        "dependencies",
+    ] {
         assert_eq!(
             column(&db, &format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}")).await,
             ["0"],
@@ -257,5 +267,81 @@ async fn a_new_instance_queues_no_backfill() {
     assert_eq!(
         column(&db, "SELECT CAST(COUNT(*) AS TEXT) FROM operations").await,
         ["0"]
+    );
+}
+
+/// 0.5.0 stored a package under the name it was added by, which for a split
+/// package is not its base; the repository database records the base.
+#[tokio::test]
+async fn split_packages_take_their_base_from_the_repository() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path().join("x86_64");
+    std::fs::create_dir(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("repo.db.tar.gz")).unwrap();
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+        file,
+        flate2::Compression::default(),
+    ));
+    for name in ["nvidia-470xx-utils", "nvidia-470xx-dkms"] {
+        let desc = format!(
+            "%FILENAME%\n{name}-470-1-x86_64.pkg.tar.zst\n\n%NAME%\n{name}\n\n%BASE%\nnvidia-470xx\n\n"
+        );
+        let mut header = tar::Header::new_gnu();
+        header.set_size(desc.len() as u64);
+        header.set_mode(0o644);
+        archive
+            .append_data(&mut header, format!("{name}-470-1/desc"), desc.as_bytes())
+            .unwrap();
+    }
+    archive.into_inner().unwrap().finish().unwrap();
+    let bases = super::packages::bases_in_repo(repo.path());
+
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(&db, Some(UPSTREAM)).await.unwrap();
+    db.execute_unprepared(
+        r#"
+INSERT INTO packages (id, name, status, out_of_date, upstream_version, latest_build, build_flags, platforms, source_type, source_data) VALUES
+ (1, 'nvidia-470xx-utils', 1, 0, '470-1', 2, '', 'x86_64', 'aur', '{"type":"aur","name":"nvidia-470xx-utils"}'),
+ (2, 'nvidia-470xx-dkms', 1, 0, '470-1', 1, '', 'x86_64', 'aur', '{"type":"aur","name":"nvidia-470xx-dkms"}'),
+ (3, 'yay', 1, 0, '12-1', NULL, '', 'x86_64', 'aur', '{"type":"aur","name":"yay"}');
+INSERT INTO files (id, filename, platform) VALUES
+ (1, 'nvidia-470xx-utils-470-1-x86_64.pkg.tar.zst', 'x86_64'),
+ (2, 'nvidia-470xx-dkms-470-1-x86_64.pkg.tar.zst', 'x86_64');
+INSERT INTO packages_files (id, file_id, package_id) VALUES (1, 1, 1), (2, 2, 1), (3, 1, 2), (4, 2, 2);
+"#,
+    )
+    .await
+    .unwrap();
+    let manager = sea_orm_migration::SchemaManager::new(&db);
+    super::schema::create_tables(&manager).await.unwrap();
+    super::schema::add_columns(&manager).await.unwrap();
+    super::packages::merge_file_links(&manager).await.unwrap();
+    super::packages::normalize_package_names_and_merge_duplicates(&db, &bases)
+        .await
+        .unwrap();
+
+    // One package, named after the base and built from it; the other name's
+    // file is its now. A package without a recorded base keeps its name.
+    assert_eq!(
+        column(
+            &db,
+            "SELECT id || ' ' || name || ' ' || source_data FROM packages ORDER BY id"
+        )
+        .await,
+        [
+            r#"1 nvidia-470xx {"type":"aur","name":"nvidia-470xx"}"#,
+            r#"3 yay {"type":"aur","name":"yay"}"#
+        ]
+    );
+    assert_eq!(
+        column(
+            &db,
+            "SELECT filename || ' ' || package_id FROM files ORDER BY id"
+        )
+        .await,
+        [
+            "nvidia-470xx-utils-470-1-x86_64.pkg.tar.zst 1",
+            "nvidia-470xx-dkms-470-1-x86_64.pkg.tar.zst 1"
+        ]
     );
 }

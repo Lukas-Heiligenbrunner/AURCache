@@ -387,6 +387,9 @@ pub async fn register_worker(
             .await
             .map_err(|e| err(Status::InternalServerError, e))?;
     }
+    if embedded {
+        adopt_0_5_limits(db, al, &worker.name, worker.id, &input.settings).await;
+    }
 
     if known {
         al.emit(Event::WorkerRegistered {
@@ -1288,6 +1291,45 @@ pub async fn worker_join_info(_a: Authenticated) -> Json<WorkerJoinInfo> {
         image,
         worker_port: crate::init::worker_port(),
     })
+}
+
+/// Give the embedded worker the build limits an upgrade from 0.5.0 kept.
+///
+/// Logged rather than failing the registration: a limit lost is worth a line,
+/// and a worker that cannot register builds nothing at all.
+async fn adopt_0_5_limits(
+    db: &DatabaseConnection,
+    al: &ActivityLog,
+    name: &str,
+    id: i32,
+    declared: &[aurcache_common::worker_config::SettingDecl],
+) {
+    let adopted = match worker_store::adopt_0_5_limits(db, id, declared).await {
+        Ok(adopted) => adopted,
+        Err(e) => {
+            tracing::warn!("Could not give the embedded worker 0.5.0's build limits: {e}");
+            return;
+        }
+    };
+    for refused in &adopted.refused {
+        tracing::warn!(
+            "Dropped 0.5.0's build limit {}={}: {}",
+            refused.key,
+            refused.value,
+            refused.reason
+        );
+    }
+    if !adopted.saved.is_empty() {
+        tracing::info!(
+            "The embedded worker took over 0.5.0's build limits: {}",
+            adopted.saved.set.join(", ")
+        );
+        al.emit(Event::WorkerSettingsSaved {
+            worker: name.into(),
+            set: adopted.saved.set,
+            reset: adopted.saved.reset,
+        });
+    }
 }
 
 /// What one worker can be configured with, and what it is running.

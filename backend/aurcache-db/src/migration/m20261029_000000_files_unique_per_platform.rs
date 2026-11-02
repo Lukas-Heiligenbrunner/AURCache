@@ -40,6 +40,12 @@ ALTER TABLE public.files ADD CONSTRAINT files_filename_platform_key UNIQUE (file
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// In one transaction on SQLite too: the table is dropped and rebuilt, and
+    /// a failure between the two would leave no `files` table at all.
+    fn use_transaction(&self) -> Option<bool> {
+        Some(true)
+    }
+
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let sql = match manager.get_database_backend() {
             DbBackend::Sqlite => SQLITE_UP,

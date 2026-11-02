@@ -89,13 +89,28 @@ pub enum Setting {
 ///   one the Workers page suggests for enrolling a new worker comes from
 ///   `AURCACHE_WORKER_IMAGE`.
 ///
-/// A migration deletes their rows, and a restore skips them so an older dump
+/// A migration deletes their rows -- all but the server-wide values of
+/// [`EMBEDDED_WORKER_LIMITS`] -- and a restore skips them so an older dump
 /// does not bring them back.
 pub const RETIRED_SETTING_KEYS: &[&str] = &[
     "cpu_limit",
     "memory_limit",
     "max_concurrent_builds",
     "builder_image",
+];
+
+/// The 0.5.0 build limits the hybrid image's embedded worker takes over, as
+/// (0.5.0 setting key, the worker setting it becomes), in the same units.
+///
+/// Upgrading to that image keeps 0.5.0's builder: the embedded worker runs
+/// what the server used to, so it is what the limits were set for. Their
+/// server-wide values are kept through the upgrade, and the embedded worker's
+/// registration moves them onto it. A limit set for one package has nowhere
+/// to go -- a worker's limits are its own -- and the migration drops it.
+pub const EMBEDDED_WORKER_LIMITS: [(&str, &str); 3] = [
+    ("cpu_limit", "cpu_limit"),
+    ("memory_limit", "memory_limit"),
+    ("max_concurrent_builds", "concurrency"),
 ];
 
 impl Setting {

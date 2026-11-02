@@ -3,9 +3,7 @@
 //! and the dependency edges 0.5.0 never recorded queued for the server.
 
 use crate::builds;
-use crate::files;
 use crate::packages;
-use crate::settings;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -32,9 +30,10 @@ struct Stored {
 }
 
 impl Stored {
-    /// The package base an AUR package is built from; `None` for any other
+    /// The name an AUR package was added by -- for 0.5.0, whatever the user
+    /// typed, which for a split package is not its base; `None` for any other
     /// source.
-    fn aur_base(&self) -> Option<String> {
+    fn aur_name(&self) -> Option<String> {
         match serde_json::from_str(&self.source_data) {
             Ok(packages::SourceData::Aur { name }) => Some(name),
             _ => None,
@@ -92,85 +91,181 @@ pub(super) async fn normalize_build_flags_in_db(db: &impl ConnectionTrait) -> Re
     Ok(())
 }
 
-/// Name every AUR package after its package base, and keep one row per base:
-/// 0.5.0 could hold one per split package.
+/// Name every package after its package base, and keep one row per name.
+///
+/// 0.5.0 stored an AUR package under the name it was added by, which for a
+/// split package is not its base: the AUR has no repository by that name, so
+/// nothing would build it again. The base comes from the package's files in
+/// the repository; one never built is renamed at the next start instead, by
+/// `aurcache_utils::package::backfill`. Rows that end up with one name -- two
+/// names of one split package, a name added twice, a rename into another's --
+/// are one package now: the one built most recently stays and takes the
+/// others' files, so everything the repository serves keeps an owner.
+///
+/// `bases` is [`bases_in_repo`]'s answer: the base of each file, by name.
 pub(super) async fn normalize_package_names_and_merge_duplicates(
     db: &impl ConnectionTrait,
+    bases: &HashMap<String, String>,
 ) -> Result<(), DbErr> {
-    let aur_packages: Vec<(Stored, String)> = stored(db)
-        .await?
-        .into_iter()
-        .filter_map(|pkg| pkg.aur_base().map(|base| (pkg, base)))
-        .collect();
+    #[derive(FromQueryResult)]
+    struct Owned {
+        package_id: i32,
+        filename: String,
+    }
+    // Through 0.5.0's link table rather than each file's one owner: a split
+    // package's every name built the whole base, so each name links the same
+    // files, and only the link table says that all of them are this base.
+    let owned = Owned::find_by_statement(
+        db.get_database_backend().build(
+            Query::select()
+                .column((Alias::new("packages_files"), Alias::new("package_id")))
+                .column((Alias::new("files"), Alias::new("filename")))
+                .from(Alias::new("packages_files"))
+                .inner_join(
+                    Alias::new("files"),
+                    Expr::col((Alias::new("files"), Alias::new("id")))
+                        .equals((Alias::new("packages_files"), Alias::new("file_id"))),
+                ),
+        ),
+    )
+    .all(db)
+    .await?;
+    let mut base_of: HashMap<i32, &str> = HashMap::new();
+    for file in &owned {
+        if let Some(base) = bases.get(&file.filename) {
+            base_of.entry(file.package_id).or_insert(base);
+        }
+    }
 
-    // First normalize all AUR package names to their canonical pkgbase.
-    for (pkg, base) in &aur_packages {
-        if base != &pkg.name {
-            packages::Entity::update_many()
-                .col_expr(packages::Column::Name, Expr::value(base.clone()))
-                .filter(packages::Column::Id.eq(pkg.id))
-                .exec(db)
+    let packages = stored(db).await?;
+    let mut by_name: HashMap<String, Vec<&Stored>> = HashMap::new();
+    for pkg in &packages {
+        let name = match pkg.aur_name() {
+            Some(added_as) => base_of
+                .get(&pkg.id)
+                .map_or_else(|| added_as.trim().to_string(), ToString::to_string),
+            None => pkg.name.trim().to_string(),
+        };
+        by_name.entry(name).or_default().push(pkg);
+    }
+
+    for (name, mut rows) in by_name {
+        // Most recent build first (a higher id is a later build; never built
+        // sorts last), then the oldest row.
+        rows.sort_by(|a, b| b.latest_build.cmp(&a.latest_build).then(a.id.cmp(&b.id)));
+        let (keep, merged) = rows.split_first().expect("a name groups at least one row");
+        for dup in merged {
+            tracing::warn!(
+                "{name}: package #{} ({}, {}) is the same package as #{} and was merged into it; \
+                 its builds and settings are gone, its files now belong to #{}",
+                dup.id,
+                dup.name,
+                dup.source_data,
+                keep.id,
+                keep.id
+            );
+            db.execute(
+                &Query::update()
+                    .table(Alias::new("files"))
+                    .value(Alias::new("package_id"), keep.id)
+                    .and_where(Expr::col(Alias::new("package_id")).eq(dup.id))
+                    .to_owned(),
+            )
+            .await?;
+            for (table, column) in [
+                ("builds", "pkg_id"),
+                ("settings", "pkg_id"),
+                ("packages", "id"),
+            ] {
+                db.execute(
+                    &Query::delete()
+                        .from_table(Alias::new(table))
+                        .and_where(Expr::col(Alias::new(column)).eq(dup.id))
+                        .to_owned(),
+                )
                 .await?;
+            }
+        }
+
+        let mut update = Query::update();
+        update
+            .table(Alias::new("packages"))
+            .and_where(Expr::col(Alias::new("id")).eq(keep.id));
+        let mut changed = false;
+        if keep.name != name {
+            tracing::info!("{}: renamed to its package base, {name}", keep.name);
+            update.value(Alias::new("name"), name.clone());
+            changed = true;
+        }
+        if keep.aur_name().is_some_and(|added_as| added_as != name) {
+            let source = serde_json::to_string(&packages::SourceData::Aur { name: name.clone() })
+                .map_err(|e| DbErr::Migration(e.to_string()))?;
+            update.value(Alias::new("source_data"), source);
+            changed = true;
+        }
+        if changed {
+            db.execute(&update).await?;
         }
     }
-
-    // Group packages by base; keep the row with the most recent build.
-    let latest_build: HashMap<i32, Option<i32>> = aur_packages
-        .iter()
-        .map(|(pkg, _)| (pkg.id, pkg.latest_build))
-        .collect();
-
-    let mut by_name: HashMap<&str, Vec<i32>> = HashMap::new();
-    for (pkg, base) in &aur_packages {
-        by_name.entry(base).or_default().push(pkg.id);
-    }
-
-    let mut dup_ids: Vec<i32> = Vec::new();
-    for ids in by_name.values_mut() {
-        if ids.len() > 1 {
-            // Sort by descending latest_build id (higher = more recent, None = never built),
-            // then ascending package id as a tiebreaker.
-            ids.sort_by(|&a, &b| {
-                let ba = latest_build.get(&a).copied().flatten();
-                let bb = latest_build.get(&b).copied().flatten();
-                bb.cmp(&ba).then(a.cmp(&b))
-            });
-            dup_ids.extend_from_slice(&ids[1..]);
-        }
-    }
-
-    // For each duplicate: drop its builds and files (the surviving package already has its own),
-    // drop its settings, and repoint dependency links.
-    for &dup_id in &dup_ids {
-        builds::Entity::delete_many()
-            .filter(builds::Column::PkgId.eq(dup_id))
-            .exec(db)
-            .await?;
-
-        files::Entity::delete_many()
-            .filter(files::Column::PackageId.eq(dup_id))
-            .exec(db)
-            .await?;
-
-        // Drop settings for the duplicate; the surviving package keeps its own.
-        settings::Entity::delete_many()
-            .filter(settings::Column::PkgId.eq(dup_id))
-            .exec(db)
-            .await?;
-    }
-
-    // Delete the now-orphaned duplicate packages.
-    if !dup_ids.is_empty() {
-        packages::Entity::delete_many()
-            .filter(packages::Column::Id.is_in(dup_ids))
-            .exec(db)
-            .await?;
-    }
-
     Ok(())
 }
-/// Give each file the package it belongs to, from the 0.5.0 link table, which
-/// then goes: a file belongs to exactly one package.
+
+/// The package base each file in the repository was built from, by file name.
+///
+/// Read from the repository databases because they are the only record of
+/// it: 0.5.0 stored the name a package was added by, and asking the AUR is
+/// not something a migration can count on. A database that cannot be read
+/// only leaves its packages to be renamed at the next start.
+pub(super) fn bases_in_repo(root: &std::path::Path) -> HashMap<String, String> {
+    let mut bases = HashMap::new();
+    let Ok(dirs) = std::fs::read_dir(root) else {
+        return bases;
+    };
+    for dir in dirs.flatten() {
+        let path = dir.path().join("repo.db.tar.gz");
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        if let Err(e) = read_bases(&data, &mut bases) {
+            tracing::warn!("could not read {}: {e:#}", path.display());
+        }
+    }
+    bases
+}
+
+/// Add every entry of `data`, a repository database, gzipped or not.
+fn read_bases(data: &[u8], bases: &mut HashMap<String, String>) -> anyhow::Result<()> {
+    let reader: Box<dyn Read> = if data.starts_with(&[0x1f, 0x8b]) {
+        Box::new(GzDecoder::new(data))
+    } else {
+        Box::new(data)
+    };
+    for entry in Archive::new(reader).entries()? {
+        let mut entry = entry?;
+        if !entry.path()?.to_string_lossy().ends_with("/desc") {
+            continue;
+        }
+        let mut desc = String::new();
+        entry.read_to_string(&mut desc)?;
+        if let (Some(file), Some(base)) = (desc_field(&desc, "FILENAME"), desc_field(&desc, "BASE"))
+        {
+            bases.insert(file.to_string(), base.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// The value of a `desc` field: the line after its `%NAME%` header.
+fn desc_field<'a>(desc: &'a str, name: &str) -> Option<&'a str> {
+    let header = format!("%{name}%");
+    let mut lines = desc.lines();
+    lines.find(|line| *line == header)?;
+    lines.next()
+}
+
+/// Give each file the package it belongs to, from the 0.5.0 link table: a file
+/// belongs to exactly one package now. The table stays until
+/// [`drop_file_links`], for what still needs every package a file was built by.
 pub(super) async fn merge_file_links(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let db = manager.get_connection();
     let schema = crate::migration::schema_prefix(manager.get_database_backend());
@@ -182,6 +277,11 @@ pub(super) async fn merge_file_links(manager: &SchemaManager<'_>) -> Result<(), 
                            LIMIT 1);"
     ))
     .await?;
+    Ok(())
+}
+
+/// Drop 0.5.0's link table, once nothing reads it.
+pub(super) async fn drop_file_links(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     manager
         .drop_table(Table::drop().table(Alias::new("packages_files")).to_owned())
         .await

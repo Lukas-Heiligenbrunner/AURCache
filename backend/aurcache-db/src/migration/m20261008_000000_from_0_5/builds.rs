@@ -48,6 +48,28 @@ pub(super) async fn fail_unknown_statuses(manager: &SchemaManager<'_>) -> Result
         .await
 }
 
+/// Remove the builds 0.5.0 made for no platform it knew of.
+///
+/// Its platform settings could be unticked down to none, which it stored as
+/// an empty list and then built for anyway, under an empty platform. A build
+/// names one platform now, and a row whose platform is none of them cannot be
+/// read at all -- this migration's own status pass included.
+pub(super) async fn delete_unknown_platforms(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let known = pacman_mirrors::platforms::Platform::ALL.map(|p| p.as_str());
+    manager
+        .exec_stmt(
+            Query::delete()
+                .from_table(Builds::Table)
+                .cond_where(
+                    Condition::any()
+                        .add(Expr::col(Builds::Platform).is_null())
+                        .add(Expr::col(Builds::Platform).is_not_in(known)),
+                )
+                .to_owned(),
+        )
+        .await
+}
+
 /// Hold every build 0.5.0 left pending until its dependencies are recorded.
 ///
 /// 0.5.0 recorded none, so until the backfill this queues has resolved a
@@ -115,7 +137,22 @@ pub(super) async fn hold_pending_builds(manager: &SchemaManager<'_>) -> Result<(
 
 /// Give every build its number within its package, in the order the builds
 /// were made.
+///
+/// Each count reads the package's earlier builds through an index made for
+/// it: without one, every build scans the whole table, and a large instance
+/// sits silent long enough for someone to restart it mid-upgrade.
 pub(super) async fn number_builds(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    let index = "idx_builds_pkg_id_id";
+    manager
+        .create_index(
+            Index::create()
+                .name(index)
+                .table(Builds::Table)
+                .col(Builds::PkgId)
+                .col(Builds::Id)
+                .to_owned(),
+        )
+        .await?;
     manager
         .get_connection()
         .execute_unprepared(
@@ -125,7 +162,9 @@ pub(super) async fn number_builds(manager: &SchemaManager<'_>) -> Result<(), DbE
              );",
         )
         .await?;
-    Ok(())
+    manager
+        .drop_index(Index::drop().name(index).table(Builds::Table).to_owned())
+        .await
 }
 
 /// Give every build a start time, so lists can order by the bare column: its
