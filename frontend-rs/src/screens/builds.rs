@@ -262,7 +262,7 @@ pub(crate) fn build_size(build: &Build) -> String {
 
 /// How much memory a build needed at its peak.
 ///
-/// A dash where the worker reported nothing: an older worker, the deprecated
+/// A dash where nothing was reported: a build 0.5 ran, the hybrid image's
 /// container builder, or a worker without a cgroup subtree to measure in. That
 /// is a different statement from a build that used no memory, which cannot
 /// happen -- so it is never rendered as `0 B`.

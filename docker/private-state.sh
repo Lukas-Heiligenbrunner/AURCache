@@ -6,7 +6,7 @@
 # and refuses to parse when one of these directories is open to other users.
 # Setting the modes here, at every start, keeps that a property of the image
 # rather than something each place that creates a file must remember, and
-# fixes a volume created by an older image on its first boot with this one.
+# fixes a volume a 0.5 image created on the first boot after the upgrade.
 #
 # Directory modes are enough: a 0700 directory shuts out other users whatever
 # modes the files inside carry. The repository is not here: it is public over

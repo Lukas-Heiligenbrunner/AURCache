@@ -18,8 +18,8 @@ directory either way.
 |---|---|
 | `docker-compose.local.yaml` | Same topology as the turnkey file, running the published ghcr.io images; ports shifted +10 so it runs alongside a dev server or an e2e run. |
 | `docker-compose.demo.yaml` | Public playground: server + dummy worker completing jobs with synthetic packages + PostgreSQL. No real builds; the repo port is unpublished on purpose. |
-| `docker-compose.hostmode.dev.yaml` | Legacy dev setup that mounts the host Docker socket. |
-| `docker-compose.dindmode.dev.yaml` | Simpler legacy dev setup. |
+| `docker-compose.hostmode.dev.yaml` | The hybrid image built from this tree, in host mode: builds run on the host's Docker, through its socket. |
+| `docker-compose.dindmode.dev.yaml` | The hybrid image built from this tree, in DinD mode: builds run in a Podman inside the privileged container. |
 
 ## End-to-end tests (driven by `scripts/`)
 

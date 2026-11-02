@@ -487,7 +487,6 @@ pub(crate) enum PackagesCommand {
         command: DependencyCommand,
     },
     /// Remove the direct-request flag from one or more packages.
-    #[command(visible_alias = "delete")]
     Rm {
         /// Package names (pkgbase). Accepts several, so the names printed by
         /// `pkg list -q` can be passed straight through.
@@ -1119,19 +1118,6 @@ mod tests {
     #[test]
     fn rm_still_requires_a_package() {
         assert!(Cli::try_parse_from(["aurcli", "pkg", "rm"]).is_err());
-    }
-
-    /// The old name keeps working for anything already scripted against it.
-    #[test]
-    fn delete_stays_an_alias_for_rm() {
-        let cli = Cli::parse_from(["aurcli", "pkg", "delete", "paru"]);
-        let Command::Pkg {
-            command: PackagesCommand::Rm { pkgbases },
-        } = cli.command
-        else {
-            panic!("expected pkg rm");
-        };
-        assert_eq!(pkgbases, vec!["paru"]);
     }
 
     #[test]

@@ -292,7 +292,6 @@ mod tests {
             "WORKER_CHROOT_DIR",
             "WORKER_POOL",
             "WORKER_DISK_RESERVE",
-            "WORKER_CACHE_DIR",
             "WORKER_GIT_SSH_KEY",
             "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_DATA_DIR",

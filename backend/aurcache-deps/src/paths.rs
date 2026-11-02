@@ -21,10 +21,9 @@
 //! mirrors for — but the layout is arch-keyed from the start so adding one later
 //! means writing another file rather than reworking every path.
 //!
-//! A single plain `<dir>/mirrorlist` is still honoured as a **convenience
-//! mount**: it is adopted into the native architecture's slot at startup (see
-//! `aurcache::startup`), which keeps existing deployments working and lets an
-//! operator mount one file without caring about the arch suffix.
+//! A single plain `<dir>/mirrorlist` is a **convenience mount**: it is adopted
+//! into the native architecture's slot at startup (see `aurcache::startup`),
+//! which lets an operator mount one file without caring about the arch suffix.
 
 use std::path::PathBuf;
 

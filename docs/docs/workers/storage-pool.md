@@ -103,8 +103,7 @@ zvol there, or set `refreservation` on the dataset that holds the image.
 
 The worker marks the image's directory `nodatacow` (`chattr +C`) before it
 creates the image, so writes inside the pool are not copied a second time by
-the host. `+C` only applies to files created after it is set, so an image made
-by an older worker keeps copy-on-write until it is recreated.
+the host.
 
 Snapshots of the host filesystem, such as snapper's or timeshift's, undo that.
 The first write to each block after a snapshot is copied anyway, and the

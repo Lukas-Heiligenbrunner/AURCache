@@ -92,10 +92,10 @@ fn warn_about_ephemeral_data() {
 
 /// Copy a mounted `mirrorlist` into this host's `mirrorlist.<arch>` slot.
 ///
-/// Mirrorlists are stored per-architecture, but mounting a single file is both
-/// the convenient thing to do and what deployments predating the arch-keyed
-/// layout already have. Adopting at boot means every reader deals only with the
-/// arch-keyed layout instead of each carrying a fallback.
+/// Mirrorlists are stored per-architecture, but mounting a single file is the
+/// convenient thing to do, and what a 0.5 deployment has. Adopting at boot
+/// means every reader deals only with the arch-keyed layout instead of each
+/// carrying a fallback.
 ///
 /// The copy is unconditional, so editing the mounted file takes effect on the
 /// next boot with no staleness bookkeeping to get wrong. Re-copying identical
@@ -144,8 +144,7 @@ pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
         );
     }
     // A single mounted `mirrorlist` is the convenient thing for an operator to
-    // provide, and is what every deployment predating the arch-keyed layout
-    // already has. Adopt it into this host's slot so every reader can assume
+    // provide. Adopt it into this host's slot so every reader can assume
     // `mirrorlist.<arch>` and no fallback logic is needed anywhere else.
     adopt_shared_mirrorlist().await;
 

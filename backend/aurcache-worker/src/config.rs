@@ -143,18 +143,6 @@ impl Config {
             keep_failed: None,
             core,
         };
-        if env_opt("WORKER_CACHE_DIR").is_some() {
-            tracing::warn!(
-                "WORKER_CACHE_DIR is no longer used: the caches live in the storage pool, at {}",
-                cfg.cache_dir.display()
-            );
-        }
-        if env_opt("WORKER_CHROOT_OVERLAY").is_some() {
-            tracing::warn!(
-                "WORKER_CHROOT_OVERLAY is no longer used: every chroot is a snapshot in the \
-                 storage pool now"
-            );
-        }
         cfg.read_settings();
         cfg
     }
