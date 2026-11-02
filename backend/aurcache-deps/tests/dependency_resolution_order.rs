@@ -330,6 +330,35 @@ async fn a_provided_dependency_also_costs_no_rpc_call() {
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+/// The AUR answers a request that names no client with a bot challenge, not
+/// JSON, so every request says what it comes from.
+#[tokio::test]
+async fn requests_to_the_aur_carry_a_user_agent() {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"type":"multiinfo","resultcount":0,"results":[],"version":5}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let env = env_for(&format!("{}/rpc/v5", server.uri()), &[]).await;
+
+    env.client.resolve_bases(&["anything"]).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    for request in requests {
+        assert_eq!(
+            request
+                .headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok()),
+            Some(aurcache_deps::USER_AGENT)
+        );
+    }
+}
+
 /// Stage 3: a mix still asks the AUR, but only about the name the repositories
 /// could not answer -- and in one request, not one per dependency.
 #[tokio::test]

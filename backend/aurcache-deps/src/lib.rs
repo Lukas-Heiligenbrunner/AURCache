@@ -6,7 +6,7 @@ mod repo;
 mod satisfy;
 mod version;
 
-pub use client::AurClient;
+pub use client::{AurClient, USER_AGENT};
 pub use deps::{deps_from_srcinfo, parse_dep};
 pub use model::{Dependency, DependencyResolution, Error, Package, PkgDeps, Resolutions};
 pub use satisfy::{Match, MatchKind, SatisfyIndex};

@@ -210,6 +210,9 @@ fn undecided<'a>(evidence: &[(Dependency<'a>, Evidence)]) -> Vec<&'a str> {
         .collect()
 }
 
+/// What the server calls itself to the AUR and the mirrors.
+pub const USER_AGENT: &str = "AURCache (+https://github.com/Lukas-Heiligenbrunner/AURCache)";
+
 impl AurClient {
     /// Construct a new client from the `AUR_RPC_URL` env var (or default).
     pub fn new() -> Self {
@@ -246,7 +249,11 @@ impl AurClient {
         // before anything else can time it out. These are metadata RPCs and
         // mirrorlist reads, never bulk transfers, so a minute total is a
         // hung socket, not a slow server.
+        //
+        // Named: the AUR answers a request without a User-Agent with a bot
+        // challenge page rather than JSON, which fails every lookup.
         let http = Client::builder()
+            .user_agent(USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(60))
             .build()
