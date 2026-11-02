@@ -184,6 +184,10 @@ pub async fn package_resync_dependencies(
 
 /// Recompute and persist a package's dependency edges from its current source,
 /// adding missing dependencies, removing stale edges and reconciling queued builds.
+///
+/// The names it builds and provides are recorded from the same source: a
+/// build is published only if its packages are among those names, and a
+/// package from 0.5.0 has none recorded until this runs.
 pub(crate) async fn resync_graph(
     services: &Services,
     pkg_model: &packages::Model,
@@ -198,6 +202,18 @@ pub(crate) async fn resync_graph(
         &crate::pkg::architectures(&pkg_model.platforms),
     );
 
+    let split_packages = split_packages_json(&pkg_model.name, &deps.pkgnames)?;
+    let provides = provides_json(&deps.provides)?;
+    if split_packages != pkg_model.split_packages || provides != pkg_model.provides {
+        packages::ActiveModel {
+            id: Set(pkg_model.id),
+            split_packages: Set(split_packages),
+            provides: Set(provides),
+            ..Default::default()
+        }
+        .update(&services.db)
+        .await?;
+    }
     sync_dependency_graph(services, pkg_model, &deps).await?;
     Ok(())
 }
@@ -422,7 +438,7 @@ async fn prepare_graph(
     Ok(PreparedGraph { edges, packages })
 }
 
-async fn announce_unblocked(services: &Services, ids: &[i32]) {
+pub(crate) async fn announce_unblocked(services: &Services, ids: &[i32]) {
     match aurcache_db::helpers::builds::build_refs(&services.db, ids).await {
         Ok(builds) => {
             for build in builds {

@@ -18,6 +18,7 @@ use aurcache_utils::snapshot::SnapshotStore;
 use dotenvy::dotenv;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 mod logger;
@@ -140,14 +141,50 @@ async fn main() {
         });
     }
 
+    // Before the version check starts: it would find no AUR package base by
+    // the split-package names 0.5.0 stored and report those packages removed.
+    // Bounded, because it asks the AUR; the backfill asks again if this fails.
+    let backfill_queued = aurcache_utils::package::backfill::queued(&db)
+        .await
+        .unwrap_or(false);
+    let named = !backfill_queued
+        || match tokio::time::timeout(
+            Duration::from_secs(60),
+            aurcache_utils::package::backfill::canonicalize_names(&services),
+        )
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                warn!("Could not ask the AUR for the package bases of 0.5.0's packages: {e:#}");
+                false
+            }
+            Err(_) => {
+                warn!("The AUR did not answer for the package bases of 0.5.0's packages in time");
+                false
+            }
+        };
+
+    // Set once there is no backfill to wait for; see the version check below.
+    let (backfilled, backfill_done) = tokio::sync::watch::channel(!backfill_queued);
+
     // An upgrade from 0.5.0 queues its packages' dependencies to be recorded.
     // In the background: it resolves every package's source, and nothing
     // below waits on it. What it adds is queued to build once it is done.
     tokio::spawn({
         let services = services.clone();
         async move {
-            use aurcache_utils::package::backfill::{Backfill, backfill_dependencies};
-            match backfill_dependencies(&services).await {
+            use aurcache_utils::package::backfill::{
+                Backfill, backfill_dependencies, canonicalize_names,
+            };
+            // Asked again, unbounded this time, if the AUR could not say as the
+            // server started: the backfill resolves every package by its name.
+            if !named && let Err(e) = canonicalize_names(&services).await {
+                warn!("Could not ask the AUR for the package bases of 0.5.0's packages: {e:#}");
+            }
+            let outcome = backfill_dependencies(&services).await;
+            backfilled.send_replace(true);
+            match outcome {
                 Ok(Backfill::Ran) => {}
                 Ok(Backfill::NotQueued) => return,
                 Err(e) => {
@@ -168,7 +205,17 @@ async fn main() {
         }
     });
 
-    let version_check_handle = start_update_version_checking(services.clone());
+    // After an upgrade's backfill: until it has recorded the names a package
+    // from 0.5.0 builds, the check asks the AUR by the package's base, which
+    // for a split package names nothing, and reports it removed.
+    let version_check_handle = {
+        let services = services.clone();
+        let mut backfill_done = backfill_done;
+        tokio::spawn(async move {
+            let _ = backfill_done.wait_for(|done| *done).await;
+            let _ = start_update_version_checking(services).await;
+        })
+    };
     let auto_update_handle = start_auto_update_job(services.clone());
 
     let mirrorlist_override =
