@@ -298,14 +298,16 @@ mod tests {
         write(
             &db,
             [Change {
-                setting: Setting::JobTimeout,
+                setting: Setting::VersionCheckInterval,
                 pkg_id: Some(1),
                 value: Some("2h".to_string()),
             }],
         )
         .await
         .unwrap();
-        let entry = get(&db, key::JOB_TIMEOUT, Some(1)).await.unwrap();
+        let entry = get(&db, key::VERSION_CHECK_INTERVAL, Some(1))
+            .await
+            .unwrap();
         assert_eq!(entry.source, SettingSource::Default);
     }
 

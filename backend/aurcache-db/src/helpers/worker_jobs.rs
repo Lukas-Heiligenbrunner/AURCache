@@ -783,6 +783,45 @@ pub enum Retry {
     Spent,
 }
 
+/// How long a build may run before the reaper reclaims it, in seconds: its
+/// package's job timeout, plus grace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildAges {
+    /// For a package without a timeout of its own.
+    pub default: i64,
+    /// The packages that have one.
+    pub by_package: HashMap<i32, i64>,
+}
+
+impl BuildAges {
+    /// The same age for every package.
+    #[must_use]
+    pub fn all(age: i64) -> Self {
+        Self {
+            default: age,
+            by_package: HashMap::new(),
+        }
+    }
+
+    /// The age a build of `pkg_id` may reach.
+    #[must_use]
+    pub fn of(&self, pkg_id: i32) -> i64 {
+        self.by_package
+            .get(&pkg_id)
+            .copied()
+            .unwrap_or(self.default)
+    }
+
+    /// The shortest any build may run.
+    #[must_use]
+    pub fn shortest(&self) -> i64 {
+        self.by_package
+            .values()
+            .copied()
+            .fold(self.default, i64::min)
+    }
+}
+
 /// Reaper pass: reclaim `ACTIVE` builds whose owning worker went silent, and
 /// backstop builds that have run implausibly long. Returns every build it
 /// abandoned.
@@ -800,22 +839,23 @@ pub enum Retry {
 /// never a requeue of the same row. The fresh row's version comes from the
 /// current package metadata, matching every other enqueue path.
 ///
-/// `now` and `max_build_age` (`MAX_BUILD_DURATION + grace`, in seconds) are
+/// `now` and `ages` (each package's job timeout plus grace, in seconds) are
 /// passed in so callers stay testable and can source them from settings.
 pub async fn reap_expired_builds<C: ConnectionTrait + TransactionTrait>(
     db: &C,
     now: i64,
     max_attempts: i32,
-    max_build_age: i64,
+    ages: &BuildAges,
 ) -> Result<Vec<Abandoned>, DbErr> {
-    let backstop_before = now - max_build_age;
+    // Every build past the shortest age is a candidate; each is then held to
+    // its own package's.
     let candidates: Vec<builds::Model> = Builds::find()
         .filter(builds::Column::Status.eq(BuildState::Active))
         .filter(
             sea_orm::Condition::any()
                 .add(builds::Column::LeaseExpiresAt.lt(now))
                 .add(builds::Column::LeaseExpiresAt.is_null())
-                .add(builds::Column::StartTime.lt(backstop_before)),
+                .add(builds::Column::StartTime.lt(now - ages.shortest())),
         )
         .all(db)
         .await?;
@@ -828,11 +868,16 @@ pub async fn reap_expired_builds<C: ConnectionTrait + TransactionTrait>(
         // select above is skipped rather than clobbered. The backstop deadline
         // outranks the lease for choosing the end reason: a build past it is
         // too long whether or not it was still heartbeating.
-        let over_backstop = build.start_time.is_some_and(|t| t < backstop_before);
+        let over_backstop = build
+            .start_time
+            .is_some_and(|t| t < now - ages.of(build.pkg_id));
+        let lease_lost = build.lease_expires_at.is_none_or(|expires| expires < now);
         let end_reason = if over_backstop {
             EndReason::MaxDuration
-        } else {
+        } else if lease_lost {
             EndReason::LeaseExpired
+        } else {
+            continue;
         };
         abandoned.extend(abandon_build(db, &build, end_reason, max_attempts).await?);
     }
@@ -1880,7 +1925,7 @@ mod tests {
 
         let out = heartbeat(&db, 5, &[], 60, 3).await.unwrap();
         assert!(out.dropped.is_empty(), "abandoned by a heartbeat");
-        let reaped = reap_expired_builds(&db, now_secs() + 100_000, 3, 1)
+        let reaped = reap_expired_builds(&db, now_secs() + 100_000, 3, &BuildAges::all(1))
             .await
             .unwrap();
         assert!(reaped.is_empty(), "abandoned by the reaper");
@@ -1961,7 +2006,9 @@ mod tests {
         // is failed for good (naming the worker that ran it) and a *fresh*
         // build is queued in its place.
         let far = now_secs() + 10_000;
-        let out = reap_expired_builds(&db, far, 3, 100_000).await.unwrap();
+        let out = reap_expired_builds(&db, far, 3, &BuildAges::all(100_000))
+            .await
+            .unwrap();
         assert!(failed(&out).is_empty());
         assert_eq!(retried(&out).len(), 2);
 
@@ -2083,7 +2130,7 @@ mod tests {
         claim_job(&db, 4, 600, SPILL, LIVENESS).await.unwrap();
 
         // "now" is right after the claim: lease is fresh, build is young.
-        let out = reap_expired_builds(&db, now_secs(), 3, 100_000)
+        let out = reap_expired_builds(&db, now_secs(), 3, &BuildAges::all(100_000))
             .await
             .unwrap();
         assert!(retried(&out).is_empty());
@@ -2110,11 +2157,47 @@ mod tests {
         // Backstop: max_build_age small so start_time(=claim now) is "too old"
         // relative to a `now` well past it, even though the lease is fresh.
         let now = now_secs() + 10_000;
-        let out = reap_expired_builds(&db, now, 3, 1).await.unwrap();
+        let out = reap_expired_builds(&db, now, 3, &BuildAges::all(1))
+            .await
+            .unwrap();
         assert_eq!(retried(&out).len(), 1, "80 must get a fresh attempt");
         let b = Builds::find_by_id(80).one(&db).await.unwrap().unwrap();
         assert_eq!(b.status, BuildState::Failed);
         assert_eq!(b.end_reason, Some(EndReason::MaxDuration));
+    }
+
+    /// A package given longer than the server's timeout keeps its build past
+    /// the server's; another package's would have been reclaimed.
+    #[tokio::test]
+    async fn a_package_timeout_holds_back_the_backstop() {
+        let db = setup().await;
+        worker(
+            &db,
+            W {
+                id: 6,
+                ..W::default()
+            },
+        )
+        .await;
+        enqueue(&db, 80, "x86_64", 100).await;
+        claim_job(&db, 6, 1_000_000, SPILL, LIVENESS).await.unwrap();
+        let pkg_id = Builds::find_by_id(80)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .pkg_id;
+
+        let ages = BuildAges {
+            default: 1,
+            by_package: HashMap::from([(pkg_id, 1_000_000)]),
+        };
+        let out = reap_expired_builds(&db, now_secs() + 10_000, 3, &ages)
+            .await
+            .unwrap();
+        assert!(out.is_empty(), "{out:?}");
+        let b = Builds::find_by_id(80).one(&db).await.unwrap().unwrap();
+        assert_eq!(b.status, BuildState::Active);
     }
 
     /// The retry budget is derived from the history, not counted: three
@@ -2170,7 +2253,9 @@ mod tests {
         // Claiming pointed the package at the attempt it is running.
 
         let far = now_secs() + 10_000;
-        let out = reap_expired_builds(&db, far, 3, 100_000).await.unwrap();
+        let out = reap_expired_builds(&db, far, 3, &BuildAges::all(100_000))
+            .await
+            .unwrap();
         assert_eq!(failed(&out), vec![90]);
         assert!(retried(&out).is_empty());
 
@@ -2294,7 +2379,9 @@ mod tests {
         .await;
 
         let far = now_secs() + 10_000;
-        let out = reap_expired_builds(&db, far, 3, 100_000).await.unwrap();
+        let out = reap_expired_builds(&db, far, 3, &BuildAges::all(100_000))
+            .await
+            .unwrap();
 
         assert!(
             failed(&out).is_empty(),
@@ -2319,7 +2406,9 @@ mod tests {
         .unwrap();
 
         let far = now_secs() + 10_000;
-        let out = reap_expired_builds(&db, far, 3, 100_000).await.unwrap();
+        let out = reap_expired_builds(&db, far, 3, &BuildAges::all(100_000))
+            .await
+            .unwrap();
 
         assert_eq!(failed(&out), vec![95], "the budget is spent");
         assert_eq!(pkg_status(&db, 95).await, BuildState::Failed);

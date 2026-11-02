@@ -18,6 +18,7 @@ use crate::routes::Route;
 use crate::status::{BuildStatusBadge, StatusBadge};
 use aurcache_client::{
     Build, ExtendedPackage, PackageFile, PackagePatch, PackageSource, Setting, SettingSource,
+    SettingsEntry,
 };
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
@@ -1175,7 +1176,18 @@ fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>) -> Elemen
                     on_changed,
                 }
                 PersistBuildDirField { key: "persist-{pkg.name}", pkgbase: pkg.name.clone(), entry }
-                ArtifactSizeField { key: "artifact-{pkg.name}", pkgbase: pkg.name.clone(), entry }
+                PackageLimitField {
+                    key: "artifact-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    limit: PackageLimit::ArtifactSize,
+                }
+                PackageLimitField {
+                    key: "timeout-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    limit: PackageLimit::JobTimeout,
+                }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
                 // row of its own saying so beside it.
@@ -1309,17 +1321,20 @@ fn PersistBuildDirField(
     }
 }
 
-/// The largest package file this package's builds may upload.
+/// A server setting this package may set for itself: the largest file its
+/// builds may upload, or how long one may run.
 ///
-/// A server setting that resolves per package (see `Setting::MaxArtifactSize`),
-/// so one outsized package can be allowed more without raising the limit for
-/// all. Shown as the size it is written in (`20G`), with where the value comes
-/// from; typing a new one offers Save, and a package override offers Reset.
+/// Both resolve per package (see `Setting::MaxArtifactSize`), so one outsized
+/// or slow package can be allowed more without raising the limit for all.
+/// Shown as it is written (`20G`, `3h`), with where the value comes from;
+/// typing a new one offers Save, and a package override offers Reset.
 #[component]
-fn ArtifactSizeField(
+fn PackageLimitField(
     pkgbase: String,
     mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
+    limit: PackageLimit,
 ) -> Element {
+    let setting = limit.setting();
     use crate::setting_editor::{
         MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
     };
@@ -1330,7 +1345,7 @@ fn ArtifactSizeField(
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|settings| aurcache_common::units::format_size(settings.max_artifact_size.value));
+        .map(|settings| limit.shown(settings).value);
     let mut draft = use_editor_draft(loaded);
     let scope = SettingScope::Package(pkgbase);
     let save_scope = scope.clone();
@@ -1339,10 +1354,7 @@ fn ArtifactSizeField(
         async move {
             let value = draft().text().trim().to_owned();
             if controller
-                .apply(
-                    &scope,
-                    SettingEdit::set(Setting::MaxArtifactSize, value).editing(draft),
-                )
+                .apply(&scope, SettingEdit::set(setting, value).editing(draft))
                 .await
                 == MutationOutcome::Applied
             {
@@ -1354,10 +1366,7 @@ fn ArtifactSizeField(
         let scope = scope.clone();
         async move {
             if controller
-                .apply(
-                    &scope,
-                    SettingEdit::reset(Setting::MaxArtifactSize).editing(draft),
-                )
+                .apply(&scope, SettingEdit::reset(setting).editing(draft))
                 .await
                 == MutationOutcome::Applied
             {
@@ -1368,7 +1377,7 @@ fn ArtifactSizeField(
 
     rsx! {
         div { class: "flex gap-2 py-1 text-sm items-center",
-            span { class: "opacity-60 w-32 shrink-0", "Max artifact size" }
+            span { class: "opacity-60 w-32 shrink-0", "{limit.label()}" }
             div { class: "min-w-0 flex-1",
                 match &*entry.read_unchecked() {
                     None => rsx! { span { class: "loading loading-spinner loading-xs" } },
@@ -1376,8 +1385,7 @@ fn ArtifactSizeField(
                         span { class: "text-xs text-error", "Could not load the setting: {e}" }
                     },
                     Some(Ok(settings)) => {
-                        let current = aurcache_common::units::format_size(settings.max_artifact_size.value);
-                        let source = settings.max_artifact_size.source;
+                        let SettingsEntry { value: current, source } = limit.shown(settings);
                         // No lock for an environment variable: a package's own
                         // value outranks it (Package -> Env -> Global -> Default),
                         // so an override here still applies.
@@ -1387,7 +1395,7 @@ fn ArtifactSizeField(
                                 input {
                                     r#type: "text",
                                     class: "input input-bordered input-xs w-24 font-mono",
-                                    placeholder: "20G",
+                                    placeholder: limit.placeholder(),
                                     disabled: busy(),
                                     value: draft().text(),
                                     oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
@@ -1426,6 +1434,52 @@ fn ArtifactSizeField(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The limits a package may set for itself, each shown by [`PackageLimitField`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageLimit {
+    ArtifactSize,
+    JobTimeout,
+}
+
+impl PackageLimit {
+    const fn setting(self) -> Setting {
+        match self {
+            Self::ArtifactSize => Setting::MaxArtifactSize,
+            Self::JobTimeout => Setting::JobTimeout,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ArtifactSize => "Max artifact size",
+            Self::JobTimeout => "Job timeout",
+        }
+    }
+
+    const fn placeholder(self) -> &'static str {
+        match self {
+            Self::ArtifactSize => "20G",
+            Self::JobTimeout => "1h",
+        }
+    }
+
+    /// The value as it is written, and where it comes from.
+    fn shown(self, settings: &aurcache_client::ApplicationSettings) -> SettingsEntry<String> {
+        match self {
+            Self::ArtifactSize => SettingsEntry {
+                value: aurcache_common::units::format_size(settings.max_artifact_size.value),
+                source: settings.max_artifact_size.source,
+            },
+            Self::JobTimeout => SettingsEntry {
+                value: aurcache_common::units::format_duration(u64::from(
+                    settings.job_timeout.value,
+                )),
+                source: settings.job_timeout.source,
+            },
         }
     }
 }

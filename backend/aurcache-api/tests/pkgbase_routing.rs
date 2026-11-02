@@ -161,7 +161,7 @@ async fn only_package_scoped_settings_can_be_set_per_package() {
             .header(ContentType::JSON)
             .body(format!(r#"{{"value":"{value}"}}"#))
     };
-    let refused = patch("job_timeout", "2h").dispatch().await;
+    let refused = patch("version_check_interval", "2h").dispatch().await;
     assert_eq!(refused.status(), Status::BadRequest);
     let taken = patch("max_artifact_size", "40G").dispatch().await;
     assert_eq!(taken.status(), Status::Ok);

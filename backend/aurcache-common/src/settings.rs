@@ -196,11 +196,13 @@ impl Setting {
                 default: "true",
                 scope: Scope::Package,
             },
+            // Per package, as 0.5.0 had it: one package's build can be
+            // allowed hours without letting every hung build sit that long.
             Self::JobTimeout => SettingsMeta {
                 key: "job_timeout",
                 env_name: Some("JOB_TIMEOUT"),
                 default: "1h",
-                scope: Scope::Global,
+                scope: Scope::Package,
             },
             // Largest package file a worker may upload, checked per package so
             // one outsized package (an engine, a game) can be allowed more
