@@ -321,14 +321,16 @@ AURCache.
 | `WORKER_DATA_DIR` | Path | Worker identity, credentials, chroots | `/var/lib/aurcache-worker` |
 | `WORKER_CHROOT_DIR` | Path | Where the storage pool's image and mount point go (see below) | `<data dir>/chroot` |
 | `WORKER_CHROOT_REFRESH_INTERVAL` | Duration | How long a `pacman -Syu`'d base chroot counts as current (`0` refreshes before every build) | `15m` |
+| `WORKER_BUILD_USER` | String | The user each build runs as. Its primary group must be `aurbuild`: `makechrootpkg` carries only the primary group into the chroot | `builder` |
+| `WORKER_MAKECHROOTPKG` | Path | The sandbox-wrapping `makechrootpkg` the native package installs, if you moved it | `/usr/lib/aurcache/bin/makechrootpkg` |
 
 The base chroot is brought up to date with `pacman -Syu` before a build, but
 not more often than `WORKER_CHROOT_REFRESH_INTERVAL`. The refresh takes around
 13 seconds, so paying it per build delayed every build start in a burst; measured over a day on one
 worker, 23 of 26 refreshes upgraded nothing at all, because Arch's repositories
 move a few times a day rather than a few times an hour. Lower it if you would
-rather have the newest dependencies than the fastest starts; `0` restores the
-old behaviour.
+rather have the newest dependencies than the fastest starts; `0` refreshes
+before every build.
 
 `WORKER_DATA_DIR` **must be a persisted volume.** It holds the worker's identity
 and its generated SSH key; if it is lost, the worker re-enrolls as a new,
@@ -387,10 +389,17 @@ browser or a game engine.
 
 | Variable | Type | Description | Default |
 |---|---|---|---|
-| `AURCACHE_URL` | String | Worker protocol endpoint (HTTPS + mTLS) | `https://localhost:8080` |
+| `AURCACHE_URL` | String | Worker protocol endpoint (HTTPS + mTLS) | `https://localhost:8083` |
 | `AURCACHE_SERVER_CA_FINGERPRINT` | String | Pin the server's CA (SHA-256 hex) | trust on first use |
 | `AURCACHE_ENROLLMENT_DIR` | Path | Shared volume for zero-touch approval | `/enroll` |
 | `AURCACHE_ENROLLMENT_TOKEN` | String | Shared secret for non-interactive approval | none |
+| `AURCACHE_REPO_URL` | String | The package repository's base URL as this worker reaches it, in place of the one the server gives every worker | the server's |
+| `AURCACHE_REPO_HOST` | String | Only the host of that URL, for a worker that reaches the repository at another address | the server's |
+
+The server renders one repository URL for every worker from its
+`AURCACHE_PUBLIC_URL`. A worker that reaches the repository another way — inside
+the compose network rather than through a reverse proxy, say — sets one of the
+last two.
 
 ## Server-side settings
 

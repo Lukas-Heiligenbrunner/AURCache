@@ -53,6 +53,33 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
 | AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081` | `http://localhost:8081` |
 
+## Where the server keeps its state
+
+All relative to the working directory, `/app` in the images; see [Docker
+Compose setup](../setup/docker.md#what-to-persist) for what to persist.
+
+| Variable                   | Description                                                        | Default |
+|----------------------------|--------------------------------------------------------------------|---------|
+| AURCACHE_CA_DIR            | The internal CA that signs every worker's certificate. Losing it orphans every enrolled worker | `./data/ca` |
+| AURCACHE_BUILD_LOG_PATH    | Build logs, one file per build                                     | `./build_logs` |
+| AURCACHE_SOURCE_CACHE_PATH | Checkouts of package sources, reused between builds; safe to lose  | `./source_cache` |
+| AURCACHE_MIRRORLIST_DIR    | Mirrorlists, one per architecture; see [Mirrorlist](./mirrorlist.md) | `./repo` |
+| OFFICIAL_REPO_CACHE_DIR    | The official repositories' databases, read to resolve dependencies | `<mirrorlist dir>/official_repo_cache` |
+| OFFICIAL_MIRRORLIST_PATH   | The mirrorlist those databases are fetched with                    | the x86_64 mirrorlist |
+
+The hybrid image sets the first two under `/app/repo` (see [Hybrid
+image](../workers/hybrid.md)).
+
+## Where the server finds the AUR
+
+| Variable     | Description                                    | Default |
+|--------------|------------------------------------------------|---------|
+| AUR_RPC_URL  | The AUR's RPC endpoint                          | `https://aur.archlinux.org/rpc/v5` |
+| AUR_GIT_URL  | Where AUR package sources are cloned from       | `https://aur.archlinux.org` |
+
+Point them at a mirror of the AUR, or at a local copy for an instance that must
+not reach the network.
+
 Builds run on [build workers](../workers/split-chroot.md), which are configured
 on the worker itself rather than here — including how many builds it runs at
 once and how long it will let one run.
