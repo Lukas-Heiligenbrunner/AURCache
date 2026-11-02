@@ -25,5 +25,5 @@ subcommand:
 
 ```bash
 aurcli raw GET /packages/list
-aurcli raw POST /worker/approve --body '{"id": 3}'
+aurcli raw POST /workers/3/approve
 ```

@@ -66,7 +66,9 @@ method, not just this one.
 Everything is optional in `server.env`; the defaults work for a single machine.
 Two worth setting before anything else reaches it:
 
-- `AURCACHE_URL` — how workers and pacman clients address this server.
+- `AURCACHE_TLS_SANS` — the host names workers dial this server by, which its
+  worker certificate must be valid for, and `AURCACHE_PUBLIC_URL` — where
+  pacman clients fetch the repository.
 - The `OAUTH_*` block. With all of them unset there is **no authentication**,
   which is only sensible on a machine nothing else can reach. See
   [Authentication](../Configuration/authentication.md), and note
@@ -75,13 +77,13 @@ Two worth setting before anything else reaches it:
 ## Worker
 
 ```bash
-$EDITOR /etc/aurcache/worker.env    # AURCACHE_URL and an enrolment token
+$EDITOR /etc/aurcache/worker.env    # AURCACHE_URL: the server's https://<host>:8083
 systemctl enable --now aurcache-worker
 ```
 
-Get the enrolment token from the server's **Workers** page. After the first
-successful enrolment the worker authenticates with its own certificate and the
-token is no longer used.
+The worker then waits for approval on the server's **Workers** page. To skip
+that, give the worker the secret the server has as `AURCACHE_ENROLLMENT_TOKEN`.
+Once approved, it authenticates with its own certificate.
 
 ### What the package sets up
 
@@ -157,7 +159,8 @@ other users: running it yourself gets the packaged one.
 
 Install both packages. They share the `aurcache` user and their state
 directories are separate, so no extra configuration is needed — point
-`AURCACHE_URL` in `worker.env` at `http://localhost:8080`.
+`AURCACHE_URL` in `worker.env` at `https://localhost:8083`, which is also its
+default.
 
 ## Building the packages yourself
 

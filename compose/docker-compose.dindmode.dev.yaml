@@ -1,8 +1,10 @@
+# The single-container DinD setup: the hybrid image, whose embedded worker
+# builds in a Podman running inside this privileged container.
 services:
   aurcache:
     build:
         context: ..
-        dockerfile: docker/server.Dockerfile
+        dockerfile: docker/hybrid.Dockerfile
     ports:
       - "8080:8080"
       - "8081:8081"

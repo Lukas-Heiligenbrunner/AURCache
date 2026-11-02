@@ -28,6 +28,9 @@ STAGE=$(mktemp -d)
 readonly STAGE
 trap 'rm -rf "$STAGE"' EXIT
 
+# makepkg's own output is left out too: the images build several packages in
+# turn from one tree, and each would otherwise carry the extracted sources,
+# build trees and archives of every package built before it.
 tar czf "$STAGE/$PKGNAME-$PKGVER.tar.gz" \
     --transform "s,^\\.,$TOP," \
     --exclude=./.git \
@@ -36,6 +39,9 @@ tar czf "$STAGE/$PKGNAME-$PKGVER.tar.gz" \
     --exclude=./frontend-rs/target \
     --exclude=./frontend \
     --exclude=./docs/node_modules \
+    --exclude='./packaging/*/src' \
+    --exclude='./packaging/*/pkg' \
+    --exclude='./packaging/*/*.tar.*' \
     -C "$ROOT" .
 
 mv "$STAGE/$PKGNAME-$PKGVER.tar.gz" "$DEST/"

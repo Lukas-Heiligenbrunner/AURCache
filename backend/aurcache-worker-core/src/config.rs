@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// Worker configuration shared by every executor.
 #[derive(Clone, Debug)]
 pub struct CoreConfig {
-    /// Backend API base URL, e.g. `https://aurcache:8080`.
+    /// The server's worker-protocol URL, e.g. `https://aurcache:8083`.
     pub aurcache_url: String,
     /// Optional pinned CA/server fingerprint (SHA-256 hex). When unset the
     /// worker trusts-on-first-use the CA it downloads during enrollment.
@@ -207,7 +207,7 @@ impl CoreConfig {
 
         let mut cfg = Self {
             aurcache_url: env_opt("AURCACHE_URL")
-                .unwrap_or_else(|| "https://localhost:8080".to_string())
+                .unwrap_or_else(|| "https://localhost:8083".to_string())
                 .trim_end_matches('/')
                 .to_string(),
             server_ca_fingerprint: env_opt("AURCACHE_SERVER_CA_FINGERPRINT")

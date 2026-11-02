@@ -75,7 +75,7 @@ instead — see [Storage pool](../workers/storage-pool.md).
 
 Alternatively, if the x86_64 machine runs Arch Linux, skip Docker and install
 the worker natively (`paru -S aurcache-worker` — it lives in the AUR, so use
-an AUR helper — enrol with a token from the **Workers** page). See [Native install](../setup/native.md#worker).
+an AUR helper — and approve it on the **Workers** page). See [Native install](../setup/native.md#worker).
 
 ## Optionally: native aarch64 builds on the Pi
 

@@ -53,22 +53,21 @@ the database, the worker CA and the build logs.
 
 ## Worker
 
-Take an enrolment token from the server's **Workers** page, then:
-
 ```bash
-$EDITOR /etc/aurcache/worker.env    # AURCACHE_URL and the enrolment token
+$EDITOR /etc/aurcache/worker.env    # AURCACHE_URL, for a server elsewhere
 systemctl enable --now aurcache-worker
 ```
 
-Minimal `worker.env`:
+A worker on the server's machine needs nothing in `worker.env`: it dials
+`https://localhost:8083` by default. One elsewhere:
 
 ```bash
-AURCACHE_URL=http://localhost:8080
-AURCACHE_ENROLLMENT_TOKEN=<token-from-the-workers-page>
+AURCACHE_URL=https://aur.example.com:8083
+AURCACHE_ENROLLMENT_TOKEN=<the server's AURCACHE_ENROLLMENT_TOKEN>   # optional
 ```
 
-After the first successful enrolment the worker authenticates with its own
-certificate and the token is no longer used. Set
+Without the token, approve the worker on the server's **Workers** page. Once
+approved, it authenticates with its own certificate. Set
 `AURCACHE_SERVER_CA_FINGERPRINT` as well to pin the server's CA instead of
 trusting it on first contact.
 
