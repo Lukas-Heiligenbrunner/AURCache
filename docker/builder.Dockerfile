@@ -22,5 +22,11 @@ ENV TARGETPLATFORM=${TARGETPLATFORM}
 ADD docker/add-aur.sh /root
 ADD docker/pacman.conf.amd64 /etc/pacman.conf.amd64
 ADD --chmod=0755 docker/pacman-keyring.sh /usr/local/bin/aurcache-pacman-keyring
+ADD --chmod=0755 docker/builder-entrypoint.sh /usr/local/bin/aurcache-builder-entrypoint
 RUN /bin/bash /root/add-aur.sh ab
 USER ab
+# Each container makes its own pacman keyring master key before the build
+# runs; see the script. The worker supplies the command; CMD keeps a bare
+# `docker run -it` a shell, as the base image's was.
+ENTRYPOINT ["/usr/local/bin/aurcache-builder-entrypoint"]
+CMD ["/bin/bash"]

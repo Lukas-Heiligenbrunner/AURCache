@@ -17,11 +17,11 @@
 #           key signed stays valid -- the distribution's keys keep the trust it
 #           gave them -- and nobody holds the key any more to sign anything else.
 #
-#   ensure  Generate a master key if there is none. pacman needs one to vouch
-#           for a *new* distribution master key, which happens when an
-#           archlinux-keyring upgrade runs `--populate`; without it, that
-#           step fails and the new key is never trusted. Cheap when a key is
-#           already there: nothing is regenerated.
+#   ensure  Generate a master key if there is none. An archlinux-keyring
+#           upgrade runs `pacman-key --populate`, which refuses to start
+#           without one: new packager keys are not imported, revoked ones are
+#           not disabled, and a new distribution master key is not trusted.
+#           Cheap when a key is already there: nothing is regenerated.
 set -euo pipefail
 
 readonly GNUPG=/etc/pacman.d/gnupg
