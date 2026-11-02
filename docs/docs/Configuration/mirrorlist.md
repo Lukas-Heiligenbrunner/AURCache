@@ -25,7 +25,7 @@ substituting the architecture. It has to be configured separately.
 | Variable               | Type         | Description                                                                    | Default                   |
 |------------------------|--------------|--------------------------------------------------------------------------------|---------------------------|
 | MIRROR_RANK_SCHEDULE                | String (crontab) | When to re-rank the mirrors, as a [schedule](environment-variables.md#schedules) | `@weekly` (once a week, on a day and at a time picked for this server) |
-| MIRRORLIST_PATH_X86_64                | String       | directory containing mirrorlist inside aurcache container                 | /app/config/pacman_x86_64 |
+| AURCACHE_MIRRORLIST_DIR                | String       | directory the server keeps its mirrorlists in, as `mirrorlist.<arch>`, and reads a mounted `mirrorlist` from                 | `./repo` (`/app/repo` in the image) |
 | MIRRORLIST_SERVERS_X86_64                | String       | semicolon-separated list of mirror URLs (disables auto ranking)                 | null |
 | MIRRORLIST_SERVERS_AARCH64                | String       | the same, for aarch64 workers (no auto ranking for this arch)                 | null |
 | MIRRORLIST_SERVERS_ARMV7H                | String       | the same, for armv7h workers                 | null |
@@ -51,11 +51,20 @@ When this env var is set, automatic mirror ranking is disabled.
 To enable auto mirror ranking set `MIRROR_RANK_SCHEDULE` to your desired [schedule](environment-variables.md#schedules) and it will automatically rerank the mirrors based on their download speed.
 
 ## Manually set mirrorlist
-To manually set a mirrorlist mount a directory containing your `mirrorlist` to the same path as `MIRRORLIST_PATH_X86_64` with a volume or bind mount.
-Ranking stands down on its own while a mirrorlist is mounted, rather than overwrite it. To turn it off anyway, set `MIRROR_RANK_SCHEDULE=@never`.
+To manage the mirrorlist yourself, mount your `mirrorlist` file as
+`/app/repo/mirrorlist` (in `AURCACHE_MIRRORLIST_DIR`). At every start the server
+adopts it as the mirrorlist for its own architecture, so editing the file takes
+effect at the next restart. Ranking stands down on its own while a mirrorlist is
+mounted, rather than overwrite it. To turn it off anyway, set
+`MIRROR_RANK_SCHEDULE=@never`.
+
+A mirrorlist mounted where 0.5 read it — `mirrorlist` in
+`MIRRORLIST_PATH_X86_64`, `/app/config/pacman_x86_64` unless set — is adopted the
+same way, so an upgraded instance keeps the mirrors you chose. In 0.5's host
+build mode that file was 0.5's own, and is not adopted.
 ## Example
 ### Auto Ranking
-```ỳaml
+```yaml
 services:
   aurcache:
     image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
@@ -63,8 +72,7 @@ services:
       - "8080:8080" # Frontend
       - "8081:8081" # Repository
     volumes:
-      - ./aurcache/repo:/app/repo
-    privileged: true
+      - ./aurcache/app:/app
     environment:
       - DB_TYPE=POSTGRESQL
       - DB_USER=aurcache
@@ -105,10 +113,8 @@ services:
       - "8080:8080" # Frontend
       - "8081:8081" # Repository
     volumes:
-      - ./aurcache/repo:/app/repo
-      - ./hostmirrorlistpath:/app/config/pacman_x86_64 # the container path must match with MIRRORLIST_PATH_X86_64
-      # hostmirrorlistpath is a directory containing a `mirrorlist` file with your mirrorlist
-    privileged: true
+      - ./aurcache/app:/app
+      - ./mirrorlist:/app/repo/mirrorlist:ro   # your mirrorlist, adopted at every start
     environment:
       - DB_TYPE=POSTGRESQL
       - DB_USER=aurcache
@@ -182,10 +188,7 @@ next build without shipping the same bytes with every job.
 :::
 
 :::note Hybrid image
-In the [hybrid compatibility
-image](../workers/hybrid.md), whose
-legacy container builder spawns a container per build, the mirrorlist must live where the spawned build
-containers can reach it — the default `MIRRORLIST_PATH_X86_64` is then
-`BUILD_ARTIFACT_DIR/config/pacman_x86_64`, and any path you mount instead has to
-be inside `BUILD_ARTIFACT_DIR/`.
+The [hybrid image](../workers/hybrid.md)'s builder receives the mirrorlist
+with each job, like any worker, and binds it into the build container itself:
+there is nothing to place in `BUILD_ARTIFACT_DIR`.
 :::

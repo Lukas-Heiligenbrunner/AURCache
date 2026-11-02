@@ -8,7 +8,7 @@ use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::source::SourceData;
 use aurcache_db::helpers::operations;
 use aurcache_db::prelude::Packages;
-use aurcache_utils::job_config::{self, mirrorlist_dir, native_arch, shared_mirrorlist_path};
+use aurcache_utils::job_config::{self, mirrorlist_dir, native_arch};
 use aurcache_utils::publish;
 use aurcache_utils::repository::{REPO_ROOT, Repository};
 use aurcache_utils::snapshot::SnapshotStore;
@@ -109,10 +109,9 @@ fn warn_about_ephemeral_data() {
 /// Best-effort — failure just leaves the mirrorlist unpopulated, which every
 /// caller already tolerates.
 async fn adopt_shared_mirrorlist() {
-    let shared = shared_mirrorlist_path();
-    if !fs::try_exists(&shared).await.unwrap_or(false) {
+    let Some(shared) = job_config::mounted_mirrorlist() else {
         return;
-    }
+    };
     let target = job_config::mirrorlist_path(native_arch());
     match fs::copy(&shared, &target).await {
         Ok(_) => info!(

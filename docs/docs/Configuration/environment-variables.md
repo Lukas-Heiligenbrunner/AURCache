@@ -45,6 +45,8 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
 | JOB_TIMEOUT            | Duration      | Longest a build may run before the server reclaims it (`3h`, seconds); also a setting, which a package can set for itself | `1h`    |
 | MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker may upload, e.g. `20G`; also a setting, per package or global | `20G` |
+| PERSISTENT_BUILDDIR    | Boolean       | Keep a package's build tree between its builds, as an AUR helper does; also a setting, per package or global | `true` |
+| DATE_FORMAT            | String        | How the web UI writes dates: field order, zero padding and clock, e.g. `dmy-nopad-12`; also a setting, which a browser can override for itself | `ymd-pad-24` |
 | RETIRED_PACKAGE_GRACE  | Duration      | How long a package file stays downloadable after a newer build or a removal takes it out of the repository database (`1d`, `12h`, or seconds), so clients that synced just before can still fetch it | `1d` |
 | ACTIVITY_RETENTION     | Duration      | How long an entry stays in the **Logs** page (`90d`, `4w`, or seconds). `0` keeps everything | `90d` |
 | PARSE_NETWORK          | Boolean       | Let a PKGBUILD reach the network while the server parses it; also a setting, global | false |

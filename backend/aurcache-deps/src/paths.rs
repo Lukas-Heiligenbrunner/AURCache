@@ -55,6 +55,31 @@ pub fn shared_mirrorlist_path() -> PathBuf {
     mirrorlist_dir().join("mirrorlist")
 }
 
+/// Where 0.5.0 read a mirrorlist an operator mounted: `mirrorlist` in
+/// `MIRRORLIST_PATH_X86_64`, by default `./config/pacman_x86_64`. `None` in
+/// its host build mode (`BUILD_ARTIFACT_DIR` set), where 0.5.0 wrote one
+/// there itself, so a file there says nothing about who chose its mirrors.
+#[must_use]
+pub fn legacy_mirrorlist_path() -> Option<PathBuf> {
+    if std::env::var_os("BUILD_ARTIFACT_DIR").is_some() {
+        return None;
+    }
+    let dir = std::env::var("MIRRORLIST_PATH_X86_64")
+        .unwrap_or_else(|_| "./config/pacman_x86_64".to_string());
+    Some(PathBuf::from(dir).join("mirrorlist"))
+}
+
+/// The mirrorlist the operator mounted, if there is one: the
+/// [`shared_mirrorlist_path`], or where 0.5.0 read one, so an upgraded
+/// instance keeps the mirrors its operator chose. In a container a file
+/// survives in either place only if it was mounted there.
+#[must_use]
+pub fn mounted_mirrorlist() -> Option<PathBuf> {
+    std::iter::once(shared_mirrorlist_path())
+        .chain(legacy_mirrorlist_path())
+        .find(|path| path.is_file())
+}
+
 /// The architecture AURCache itself is running on, in Arch Linux's naming.
 ///
 /// Rust and Arch disagree on 32-bit ARM (`arm` vs `armv7h`); everything else we

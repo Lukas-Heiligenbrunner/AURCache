@@ -8,6 +8,11 @@ sidebar_position: 1
 ...`); the reusable Rust client library backing it lives in
 `backend/aurcache-client`. It authenticates via `Authorization: Bearer <token>`.
 
+## Installing
+
+On Arch, from the AUR: `paru -S aurcache-cli`. Elsewhere, with a Rust
+toolchain: `cargo install --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli`.
+
 ## Connecting
 
 Every command resolves `--url` / `--token`, then `AURCACHE_URL` /

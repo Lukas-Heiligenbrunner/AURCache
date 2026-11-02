@@ -204,7 +204,7 @@ COPY --chmod=0755 docker/private-state.sh /usr/local/bin/aurcache-private-state
 # database) and nothing else, and this image has to keep building from such a
 # file unedited. So what must survive goes into the repository volume, under
 # dot directories that are never served -- the server's file server and
-# repo-nginx.conf refuse dot segments, as they do for `.staging` -- that the
+# the compose files' nginx config refuse dot segments, as they do for `.staging` -- that the
 # retired-package sweep skips, and that private-state.sh closes to everyone but
 # root:
 #

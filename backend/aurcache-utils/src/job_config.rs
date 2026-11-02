@@ -9,7 +9,8 @@ use std::path::Path;
 /// cannot depend on this crate. Re-exporting keeps one import path for
 /// everyone else.
 pub use aurcache_deps::paths::{
-    mirrorlist_dir, mirrorlist_file_name, mirrorlist_path, native_arch, shared_mirrorlist_path,
+    mirrorlist_dir, mirrorlist_file_name, mirrorlist_path, mounted_mirrorlist, native_arch,
+    shared_mirrorlist_path,
 };
 
 /// The assignments a build applies over its worker's own makepkg.conf: the

@@ -379,6 +379,7 @@ pub fn render_compose(params: &ComposeParams) -> String {
 
     out.push_str(&volumes(params));
     if params.role.has_server() {
+        out.push_str(&configs());
         // A single-service worker file needs no network: it reaches the server
         // over the host's, wherever that server happens to be.
         out.push_str("\nnetworks:\n  aurcache:\n    driver: bridge\n");
@@ -531,16 +532,33 @@ fn server_service(params: &ComposeParams) -> String {
     )
 }
 
-/// The pacman repository, served statically by nginx: the same files Rocket's
-/// builtin file handler would serve, at line rate instead of ~200 MB/s. The
-/// server remains the only writer (publishing renames into place), so this
-/// service mounts the repository volume read-only.
+/// The nginx server block for the pacman repository, as every compose file
+/// gives it: the same files Rocket's builtin file handler would serve, at line
+/// rate instead of ~200 MB/s (sendfile rather than 4 KiB chunks through
+/// userspace). Dot segments are refused, as Rocket's handler refuses them:
+/// uploads mid-publish, build logs and the CA live under that root.
 ///
-/// The nginx config travels inside `command` rather than a mounted file, so a
-/// generated file stays one file: paste it into Portainer or Unraid as is,
-/// with no sibling files to carry along. (The repository's own
-/// `compose/docker-compose.yaml` mounts `docker/repo-nginx.conf` instead -- the same
-/// server block, kept as a file because it lives beside it.)
+/// The repository's `compose/docker-compose.yaml` carries the same block; a
+/// test keeps the two the same.
+pub const NGINX_CONF: &str = "\
+server {
+  listen 80;
+  root /app/repo;
+  sendfile on;
+  tcp_nopush on;
+  server_tokens off;
+  location ~ /\\. { return 404; }
+}
+";
+
+/// The pacman repository, served statically by nginx. The server remains the
+/// only writer (publishing renames into place), so this service mounts the
+/// server's data read-only.
+///
+/// Its config is a compose `config` with its content inline (see
+/// [`configs`]), so a generated file stays one file: paste it into TrueNAS,
+/// Portainer or Unraid as is, with no sibling files to carry along. Inline
+/// content needs Compose 2.23 or newer.
 fn repo_service() -> String {
     format!(
         "  repo:\n\
@@ -550,25 +568,27 @@ fn repo_service() -> String {
          \x20     - \"{AURCACHE_MIRROR_PORT}:80\"   # Pacman repository (plain HTTP, for `pacman -Sy`)\n\
          \x20   volumes:\n\
          \x20     - aurcache_data:/app:ro   # read the repository (served from /app/repo)\n\
-         \x20   command:\n\
-         \x20     - sh\n\
-         \x20     - -c\n\
-         \x20     - |\n\
-         \x20       printf '%s' 'server {{\n\
-         \x20         listen 80;\n\
-         \x20         root /app/repo;\n\
-         \x20         sendfile on;\n\
-         \x20         tcp_nopush on;\n\
-         \x20         server_tokens off;\n\
-         \x20         location ~ /\\. {{ return 404; }}\n\
-         \x20       }}' > /etc/nginx/conf.d/default.conf\n\
-         \x20       exec nginx -g 'daemon off;'\n\
+         \x20   configs:\n\
+         \x20     - source: {NGINX_CONFIG}\n\
+         \x20       target: /etc/nginx/conf.d/default.conf\n\
          \x20   depends_on:\n\
          \x20     - aurcache\n\
          \x20   networks:\n\
          \x20     - aurcache\n\
          \x20   restart: unless-stopped\n\n"
     )
+}
+
+/// The name of the `repo` service's nginx config.
+const NGINX_CONFIG: &str = "repo_nginx";
+
+/// The top-level `configs:` section: [`NGINX_CONF`], inline.
+fn configs() -> String {
+    let mut out = format!("\nconfigs:\n  {NGINX_CONFIG}:\n    content: |\n");
+    for line in NGINX_CONF.lines() {
+        let _ = writeln!(out, "      {line}");
+    }
+    out
 }
 
 /// The database, and the step that upgrades its data before it starts when
@@ -777,8 +797,8 @@ fn volumes(params: &ComposeParams) -> String {
 mod tests {
     use super::{
         ComposeDatabase, ComposeParams, ComposeRole, ENROLLMENT_DIR, EnvVar,
-        FINGERPRINT_PLACEHOLDER, NGINX_IMAGE, POSTGRES_IMAGE, POSTGRES_MAJOR, PoolBacking,
-        PoolSetup, WorkerEnv, is_plain_password, render_compose,
+        FINGERPRINT_PLACEHOLDER, NGINX_CONF, NGINX_IMAGE, POSTGRES_IMAGE, POSTGRES_MAJOR,
+        PoolBacking, PoolSetup, WorkerEnv, is_plain_password, render_compose,
     };
     use aurcache_common::ports::AURCACHE_MIRROR_PORT;
     use yaml_rust2::{Yaml, YamlLoader};
@@ -1278,6 +1298,29 @@ mod tests {
             .iter()
             .map(|v| v.as_str().expect("a port mapping").to_string())
             .collect()
+    }
+
+    /// The repository's own compose file and the quick start give nginx the
+    /// same server block as a generated file, so a fix to one reaches all.
+    #[test]
+    fn every_compose_file_serves_the_repository_alike() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let ours = parsed(&params(ComposeRole::Bundle));
+        assert_eq!(
+            ours["configs"]["repo_nginx"]["content"].as_str(),
+            Some(NGINX_CONF)
+        );
+        for file in [
+            "compose/docker-compose.yaml",
+            "docs/docs/overview/quick-start.md",
+        ] {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            let indented: String = NGINX_CONF.lines().map(|l| format!("      {l}\n")).collect();
+            assert!(
+                text.contains(&indented),
+                "{file} serves the repository differently"
+            );
+        }
     }
 
     /// The mirror port moved off the server onto nginx: the same host port,

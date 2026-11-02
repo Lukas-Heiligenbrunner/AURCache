@@ -27,9 +27,9 @@ goes through package deletion on the server.
 Dependencies can be repointed when upstream changes what provides them:
 
 ```bash
-aurcli pkg deps list --package hello --dep libfoo
-aurcli pkg deps set --package hello --dep libfoo --to libfoobar
-aurcli pkg deps drop --package hello --dep libfoo   # only what the official repos now publish
+aurcli pkg dep options hello libfoo            # what could take over libfoo
+aurcli pkg dep replace hello libfoo libfoobar  # depend on libfoobar instead
+aurcli pkg dep drop hello libfoo               # only what the official repos now publish
 ```
 
 Also: `aurcli search <query>` searches the AUR through AURCache,

@@ -39,8 +39,9 @@ services:
       # inside this container, unpublished.
       - "8083:8083"   # Worker protocol (HTTPS + mutual TLS)
     volumes:
-      - ./aurcache/repo:/app/repo
-      - aurcache_ca:/app/data/ca   # internal worker CA; persist across restarts
+      # Everything the server keeps -- the repository, the worker CA, build
+      # logs -- is under /app; see Docker Compose setup, "What to persist".
+      - ./aurcache/app:/app
       - enroll:/enroll:ro
     environment:
       - AURCACHE_TLS_SANS=aurcache,localhost
@@ -77,15 +78,16 @@ services:
   repo:
     # The pacman repository, served statically at line rate: nginx uses
     # sendfile while Rocket's builtin handler streams 4 KiB chunks through
-    # userspace. Mounts the repository read-only; the server remains the only
-    # writer. Fetch the conf from the repo next to the compose file:
-    # curl -O https://raw.githubusercontent.com/Lukas-Heiligenbrunner/AURCache/master/docker/repo-nginx.conf
+    # userspace. Mounts the server's data read-only and serves /app/repo; the
+    # server remains the only writer.
     image: nginx:alpine
     ports:
       - "8081:80"   # Pacman repository (plain HTTP, for `pacman -Sy`)
     volumes:
-      - ./aurcache/repo:/app/repo:ro
-      - ./repo-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./aurcache/app:/app:ro
+    configs:
+      - source: repo_nginx
+        target: /etc/nginx/conf.d/default.conf
     depends_on:
       - aurcache
     networks:
@@ -111,9 +113,23 @@ services:
           - "dbhost"
 
 volumes:
-  aurcache_ca:
   enroll:
   worker_data:
+
+configs:
+  repo_nginx:
+    # nginx for the `repo` service. Inline, so this file needs nothing beside
+    # it (Compose 2.23 or newer). Dot segments are refused: uploads
+    # mid-publish, build logs and the worker CA live under that root.
+    content: |
+      server {
+        listen 80;
+        root /app/repo;
+        sendfile on;
+        tcp_nopush on;
+        server_tokens off;
+        location ~ /\. { return 404; }
+      }
 
 networks:
   aurcache_network:
@@ -137,7 +153,7 @@ restore.
 
 ## Or let the CLI do it
 
-If you have `aurcli` (`cargo install aurcache-cli`), it can stand the whole
+If you have `aurcli` (see [installing it](../cli/index.md#installing)), it can stand the whole
 thing up. Nothing here needs a token or a running server — it is the command for
 when you have neither:
 

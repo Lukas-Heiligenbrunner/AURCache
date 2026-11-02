@@ -2,7 +2,7 @@ use crate::{Wake, sleep_until_next_fire};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
 use aurcache_utils::job_config::{
-    mirrorlist_dir, mirrorlist_path, native_arch, shared_mirrorlist_path,
+    mirrorlist_dir, mirrorlist_path, mounted_mirrorlist, native_arch,
 };
 use aurcache_utils::scheduled::{Job, schedule};
 use pacman_mirrors::benchmark::{Bench, gen_mirrorlist};
@@ -115,10 +115,11 @@ fn mount_owns_ranked_slot(shared_mirrorlist_exists: bool, native_arch: &str) -> 
 /// does not carry), so the only coherent options are "use their mirrors" or
 /// "replace them", and an explicit mount is the stronger signal.
 async fn update_mirrorlist() -> anyhow::Result<()> {
-    if mount_owns_ranked_slot(shared_mirrorlist_path().exists(), native_arch()) {
+    let mounted = mounted_mirrorlist();
+    if let Some(path) = mounted.filter(|_| mount_owns_ranked_slot(true, native_arch())) {
         info!(
             "Skipping mirror ranking: {} is provided and adopted as the {RANKED_ARCH} mirrorlist",
-            shared_mirrorlist_path().display()
+            path.display()
         );
         return Ok(());
     }

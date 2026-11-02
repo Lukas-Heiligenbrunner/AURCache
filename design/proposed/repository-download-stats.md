@@ -17,9 +17,9 @@ traffic, the same whichever of them served the request.
 
 - **Two things serve the repository.** In the compose setups, the `repo`
   service (`nginx:alpine`) publishes the mirror port and serves the
-  repository volume read-only with sendfile (`docker/repo-nginx.conf`,
-  `compose/docker-compose.yaml`; the one `aurcli setup compose` writes inlines
-  the same server block, `aurcache-cli/src/compose.rs:548`). Everywhere else
+  repository volume read-only with sendfile (the `repo_nginx` config inline in
+  `compose/docker-compose.yaml`, and the same server block, `NGINX_CONF` in
+  `aurcache-cli/src/compose.rs`, in the files `aurcli setup compose` writes). Everywhere else
   (bare metal, `just serve`, the e2e suite) Rocket's `CustomFileServer`
   serves it on 8081 (`aurcache-api/src/custom_file_server.rs:39`, mounted at
   `aurcache-api/src/init.rs:318`).
