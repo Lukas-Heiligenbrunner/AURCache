@@ -43,7 +43,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | BUILD_ON_NEW_VERSION   | Boolean       | Queue a rebuild as soon as a version check finds a package out of date, rather than waiting for the auto-update schedule | `true`  |
 | TZ                     | String        | Timezone cron schedules (`AUTO_UPDATE_SCHEDULE`, `MIRROR_RANK_SCHEDULE`) are read in, e.g. `Europe/Paris`. The compose files forward the host's `/etc/localtime` and pass `TZ` through when it is set where compose runs | the host's, else UTC |
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
-| JOB_TIMEOUT            | Duration      | Longest a build may run before the server reclaims it (`3h`, seconds) | `1h`    |
+| JOB_TIMEOUT            | Duration      | Longest a build may run before the server reclaims it (`3h`, seconds); also a setting, which a package can set for itself | `1h`    |
 | MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker may upload, e.g. `20G`; also a setting, per package or global | `20G` |
 | RETIRED_PACKAGE_GRACE  | Duration      | How long a package file stays downloadable after a newer build or a removal takes it out of the repository database (`1d`, `12h`, or seconds), so clients that synced just before can still fetch it | `1d` |
 | ACTIVITY_RETENTION     | Duration      | How long an entry stays in the **Logs** page (`90d`, `4w`, or seconds). `0` keeps everything | `90d` |
@@ -69,7 +69,9 @@ host build mode there, as it always did.
 
 `MAX_CONCURRENT_BUILDS` is replaced by `WORKER_CONCURRENCY` on each worker (the
 hybrid image still reads it, as its embedded worker's default), and
-`AURCACHE_REPO_URL` by `AURCACHE_PUBLIC_URL`.
+`AURCACHE_REPO_URL` by `AURCACHE_PUBLIC_URL`. The values an upgrade from 0.5
+finds for them on its settings page become the embedded worker's; see
+[Upgrading from 0.5](../overview/upgrading.md#settings).
 :::
 
 ## Build workers

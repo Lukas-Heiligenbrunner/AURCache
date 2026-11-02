@@ -12,7 +12,9 @@ release — migrate to `aurcache-server` + `aurcache-worker` when convenient.
 :::
 
 If you already run AURCache as a single container, pulling the new `aurcache`
-image keeps it building with no changes. On startup it launches the server, then
+image keeps it building with no changes — read [Upgrading from
+0.5](../overview/upgrading.md) first, for what to back up and what the first
+start does. On startup it launches the server, then
 an embedded worker that enrolls over loopback with a secret generated inside the
 container.
 
@@ -34,7 +36,10 @@ it had before.
 Packages for other architectures build as before, through the host's
 qemu/binfmt handlers (see the
 [legacy container builder](./legacy-docker.md#other-architectures)).
-`MAX_CONCURRENT_BUILDS` still sets how many packages build at once.
+`MAX_CONCURRENT_BUILDS` still sets how many packages build at once, and
+`CPU_LIMIT` and `MEMORY_LIMIT` each build's share. Set instead on 0.5's settings
+page, the three become the embedded worker's settings, on its page under
+Workers.
 
 ### Keeping its state across recreates
 

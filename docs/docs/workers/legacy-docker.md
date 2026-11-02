@@ -44,6 +44,14 @@ handler for a platform, its builds fail, as they always did; register one
 `WORKER_ARCHES` to the platforms this host can build, comma separated
 (`x86_64`, `aarch64`, `armv7h`).
 
+A package whose build runs `sudo` (pacman, to install its dependencies) also
+needs the handler registered with the `C` flag, or `sudo` stops with
+`effective uid is not 0`: qemu has to run it with the binary's own setuid
+credentials. `tonistiigi/binfmt` sets it; Arch's `qemu-user-static-binfmt`
+does not, and a copy of its `/usr/lib/binfmt.d/qemu-<arch>-static.conf` in
+`/etc/binfmt.d/` with the flags `FP` changed to `FPC` does, at the next boot or
+`systemctl restart systemd-binfmt`.
+
 It competes for those builds like any worker that builds them, so give a
 faster one a higher [priority](./routing.md), or pause this one, to keep it
 from taking them.

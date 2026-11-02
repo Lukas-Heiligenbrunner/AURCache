@@ -241,8 +241,10 @@ fish, elvish or powershell.
 
 ## Upgrading from a single-container setup
 
-If you already run AURCache as one container, it keeps working: see
-[hybrid compatibility image](../workers/hybrid.md).
+If you already run AURCache as one container, it keeps working: change the
+image line and nothing else. [Upgrading from 0.5](./upgrading.md) says what to
+back up first and what the first start does; the [hybrid compatibility
+image](../workers/hybrid.md) is what it then runs.
 
 For more advanced setup see the
 [Configuration](/docs/Configuration/environment-variables) page.
