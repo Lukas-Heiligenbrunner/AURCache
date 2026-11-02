@@ -37,4 +37,11 @@ if [ -d /sys/fs/cgroup ]; then
     done
 fi
 
+# A pacman keyring master key of this container's own. The image ships none
+# (see pacman-keyring.sh), and the worker needs one: `mkarchroot` copies this
+# keyring into every base chroot, and a chroot's `pacman -Syu` that upgrades
+# archlinux-keyring uses it to trust a new distribution key. Made once per
+# container -- a restart keeps it -- and before the worker can create a chroot.
+sudo /usr/local/bin/aurcache-pacman-keyring ensure
+
 exec /usr/bin/aurcache-worker "$@"

@@ -109,4 +109,11 @@ rm -rf "${AUR_USER_HOME}/.cache/go-build"
 rm -rf /tmp/*
 rm -rf /var/tmp/* /var/cache/* || true
 
+# The keyring's master key, generated above, must not ship: every build
+# container from this image would share it, and so would everyone who pulled
+# the image (see pacman-keyring.sh). Last, and in this same RUN, so it never
+# reaches a layer. A build container runs without one, as the official Arch
+# Linux image does: the distribution's keys keep the trust it gave them.
+aurcache-pacman-keyring forget
+
 echo "Cleanup complete"

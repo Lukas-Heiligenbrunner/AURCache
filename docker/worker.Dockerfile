@@ -160,11 +160,17 @@ ARG TARGETPLATFORM
 # this image working everywhere; it only affects pacman's own download
 # isolation, not the per-build chroot isolation (each build still runs in its
 # own `makechrootpkg` chroot).
+#
+# The keyring's master key is generated here and deleted in the same layer: an
+# image must not carry a private key that every container from it shares. Each
+# container makes its own when it starts (see pacman-keyring.sh).
+COPY --chmod=0755 docker/pacman-keyring.sh /usr/local/bin/aurcache-pacman-keyring
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf \
     && pacman -Syu --noconfirm --needed \
     && pacman-key --init \
     && pacman-key --populate \
+    && aurcache-pacman-keyring forget \
     && systemd-machine-id-setup
 
 # Everything the worker needs on a host -- the binaries, the two users, the
@@ -190,9 +196,15 @@ COPY --from=packager /pkg/*.pkg.tar.zst /tmp/pkg/
 # 404 for a file none of them has kept -- which reads as the mirrors being
 # broken rather than as the database being stale. Re-syncing in the same layer
 # as the install is what keeps the two from drifting apart.
+#
+# That `-Syu` can upgrade archlinux-keyring, whose install script needs a master
+# key to trust a new distribution key: one is made for this layer and deleted
+# with it, as above.
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
-    pacman -Syu --noconfirm --needed \
+    aurcache-pacman-keyring ensure \
+    && pacman -Syu --noconfirm --needed \
     && pacman -U --noconfirm /tmp/pkg/*.pkg.tar.zst \
+    && aurcache-pacman-keyring forget \
     && rm -rf /tmp/pkg \
     && systemd-sysusers \
     && systemd-tmpfiles --create

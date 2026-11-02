@@ -21,5 +21,6 @@ ENV TARGETPLATFORM=${TARGETPLATFORM}
 ########## Files ##########
 ADD docker/add-aur.sh /root
 ADD docker/pacman.conf.amd64 /etc/pacman.conf.amd64
+ADD --chmod=0755 docker/pacman-keyring.sh /usr/local/bin/aurcache-pacman-keyring
 RUN /bin/bash /root/add-aur.sh ab
 USER ab
