@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::Executor;
-use aurcache_worker_core::protocol::{Stop, StopWatch, log, upload_artifacts};
+use aurcache_worker_core::protocol::{Stop, StopWatch, Timeout, log, upload_artifacts};
 use aurcache_worker_core::settings::WorkerSettings;
 use aurcache_worker_core::{artifacts, report};
 use bollard::Docker;
@@ -300,7 +300,7 @@ impl DockerExecutor {
             .context("creating build container")?;
 
         let result = self
-            .run_container(cfg, client, build_id, &created.id, cancel)
+            .run_container(cfg, client, job, &created.id, cancel)
             .await;
 
         // Always remove the container, whatever happened to the build.
@@ -323,15 +323,16 @@ impl DockerExecutor {
     }
 
     /// Start the container, stream its output, and wait for it while honouring
-    /// cancellation and the build timeout.
+    /// cancellation and the build's timeout.
     async fn run_container(
         &self,
         cfg: &Config,
         client: &Arc<WorkerClient>,
-        build_id: i32,
+        job: &JobDescriptor,
         container_id: &str,
         cancel: &AtomicBool,
     ) -> Result<CompleteReport> {
+        let build_id = job.build_id;
         let attached = self
             .docker
             .attach_container(
@@ -360,7 +361,8 @@ impl DockerExecutor {
             }
         });
 
-        let mut watch = StopWatch::start(cfg.core.build_timeout, cancel, build_id);
+        let timeout = Timeout::for_job(cfg.core.build_timeout, job);
+        let mut watch = StopWatch::start(timeout, cancel, build_id);
         let mut wait = self.docker.wait_container(
             container_id,
             None::<bollard::query_parameters::WaitContainerOptions>,
@@ -420,8 +422,8 @@ impl DockerExecutor {
             let _ = pump.await;
         }
 
-        if stopped == Some(Stop::TimedOut) {
-            return Ok(report::timeout_failure(watch.elapsed().as_secs()));
+        if let Some(Stop::TimedOut(limit)) = stopped {
+            return Ok(report::timeout_failure(watch.elapsed().as_secs(), limit));
         }
         if stopped == Some(Stop::Canceled) {
             return Ok(report::canceled());

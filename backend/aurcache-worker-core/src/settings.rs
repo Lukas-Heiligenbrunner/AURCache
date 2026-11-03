@@ -534,8 +534,9 @@ pub fn protocol_settings() -> Vec<SettingSpec> {
             key: keys::BUILD_TIMEOUT,
             env_var: "WORKER_BUILD_TIMEOUT",
             kind: ValueKind::Duration,
-            description: "How long a single build may run before the worker kills it. 0 leaves \
-                          it to the server's lease.",
+            description: "How long a single build may run before the worker kills it, unless \
+                          the package's job timeout on the server is shorter. 0 leaves it to \
+                          that.",
             category: "Build limits",
             applies: Applies::NextJob,
             default: Builtin::Duration(DEFAULT_BUILD_TIMEOUT),

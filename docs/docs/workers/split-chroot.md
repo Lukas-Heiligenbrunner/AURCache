@@ -370,7 +370,7 @@ early, oldest first, when the pool needs the room.
 
 | Variable | Type | Description | Default |
 |---|---|---|---|
-| `WORKER_BUILD_TIMEOUT` | Duration | Kill a build after this long (`0` disables) | `3h` |
+| `WORKER_BUILD_TIMEOUT` | Duration | Kill a build after this long (`0` disables), or after the package's job timeout when that is shorter | `3h` |
 | `WORKER_POLL_INTERVAL` | Duration | Time between job claims when idle | `10s` |
 | `WORKER_HEARTBEAT_INTERVAL` | Duration | Time between heartbeats | `15s` |
 | `LEASE_TTL` | Duration | How long before a silent worker's build is requeued | `60s` |
@@ -381,9 +381,12 @@ Durations are a plain number of seconds, or terms with a unit that add up:
 `h`, `d` and `w`, or spelled out (`min`, `hours`, `days`), in any case. Like
 sizes, a value that cannot be read is logged at startup and the default used.
 
-Very large packages need `WORKER_BUILD_TIMEOUT` raised — the three-hour default
-is generous for ordinary packages and nowhere near enough for something like a
-browser or a game engine.
+A build stops at the shorter of `WORKER_BUILD_TIMEOUT` and its package's job
+timeout (`JOB_TIMEOUT`, an hour by default, which a package can set for itself),
+and its log says which it ran into. Very large packages need both raised: an
+hour, or three, is generous for ordinary packages and nowhere near enough for
+something like a browser or a game engine. Raising the package's own job
+timeout leaves every other package's as it is.
 
 ## Connecting to AURCache
 

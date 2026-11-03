@@ -234,5 +234,10 @@ stops, its builds are requeued after `LEASE_TTL` and retried, up to
 implausibly long is reclaimed the same way even if its worker is still
 heartbeating, which covers a hung build on a healthy machine.
 
-If a build is genuinely just slow, raise `WORKER_BUILD_TIMEOUT` on the worker —
-the default kills a build after three hours.
+If a build is genuinely just slow, raise the limit it ran into; its log names
+it. A build stops at the shorter of its package's job timeout (an hour by
+default; set it on the package's page, or `JOB_TIMEOUT` for every package) and
+the worker's `WORKER_BUILD_TIMEOUT` (three hours by default). The reclaiming
+above, past the job timeout plus a grace, is only the backstop for a worker
+that did not stop the build itself: one hung, or too old to be sent the job
+timeout.

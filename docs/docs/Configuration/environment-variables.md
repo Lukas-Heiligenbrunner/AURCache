@@ -43,7 +43,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | BUILD_ON_NEW_VERSION   | Boolean       | Queue a rebuild as soon as a version check finds a package out of date, rather than waiting for the auto-update schedule | `true`  |
 | TZ                     | String        | Timezone cron schedules (`AUTO_UPDATE_SCHEDULE`, `MIRROR_RANK_SCHEDULE`) are read in, e.g. `Europe/Paris`. The compose files forward the host's `/etc/localtime` and pass `TZ` through when it is set where compose runs | the host's, else UTC |
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
-| JOB_TIMEOUT            | Duration      | Longest a build may run before the server reclaims it (`3h`, seconds); also a setting, which a package can set for itself | `1h`    |
+| JOB_TIMEOUT            | Duration      | Longest a build may run (`3h`, seconds). Sent with each job: the worker stops the build at this or its own `WORKER_BUILD_TIMEOUT`, whichever is shorter. Also a setting, which a package can set for itself | `1h`    |
 | MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker may upload, e.g. `20G`; also a setting, per package or global | `20G` |
 | PERSISTENT_BUILDDIR    | Boolean       | Keep a package's build tree between its builds, as an AUR helper does; also a setting, per package or global | `true` |
 | DATE_FORMAT            | String        | How the web UI writes dates: field order, zero padding and clock, e.g. `dmy-nopad-12`; also a setting, which a browser can override for itself | `ymd-pad-24` |

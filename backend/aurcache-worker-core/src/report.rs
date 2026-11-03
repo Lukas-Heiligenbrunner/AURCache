@@ -5,7 +5,7 @@
 //! constructors are the vocabulary for that report; how the build itself ran is
 //! the executor's business.
 
-use crate::protocol::PackagesRefused;
+use crate::protocol::{PackagesRefused, Timeout, TimeoutSource};
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use std::process::ExitStatus;
 
@@ -79,10 +79,25 @@ fn canceled_report(exit_code: Option<i32>) -> CompleteReport {
     }
 }
 
-/// A terminal report for a build the worker killed after exceeding its timeout.
+/// A terminal report for a build the worker killed after `secs`, for running
+/// past `limit`. Says whose limit it was: raising the wrong one changes
+/// nothing.
 #[must_use]
-pub fn timeout_failure(secs: u64) -> CompleteReport {
-    failure(Some(124), format!("build timed out after {secs}s"))
+pub fn timeout_failure(secs: u64, limit: Timeout) -> CompleteReport {
+    let whose = match limit.set_by {
+        TimeoutSource::Worker => "this worker's build timeout",
+        TimeoutSource::Server => "the package's job timeout",
+    };
+    // A whole number of minutes or more reads with its unit; anything else
+    // is a bare count of seconds, which needs one.
+    let mut limit = aurcache_common::units::format_duration(limit.secs);
+    if limit.bytes().all(|b| b.is_ascii_digit()) {
+        limit.push('s');
+    }
+    failure(
+        Some(124),
+        format!("build timed out after {secs}s ({whose}, {limit})"),
+    )
 }
 
 /// A failed build with nothing measured about it.
@@ -122,6 +137,35 @@ pub fn describe(job: &JobDescriptor) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Raising the wrong limit changes nothing, so the report says which.
+    #[test]
+    fn a_timeout_names_the_limit_that_ended_it() {
+        let server = Timeout {
+            secs: 3600,
+            set_by: TimeoutSource::Server,
+        };
+        let reason = timeout_failure(3601, server).reason.unwrap();
+        assert_eq!(
+            reason,
+            "build timed out after 3601s (the package's job timeout, 1h)"
+        );
+        let worker = Timeout {
+            secs: 3 * 3600,
+            set_by: TimeoutSource::Worker,
+        };
+        let reason = timeout_failure(10801, worker).reason.unwrap();
+        assert!(
+            reason.contains("this worker's build timeout, 3h"),
+            "{reason}"
+        );
+        let short = Timeout {
+            secs: 90,
+            set_by: TimeoutSource::Server,
+        };
+        let reason = timeout_failure(90, short).reason.unwrap();
+        assert!(reason.ends_with("job timeout, 90s)"), "{reason}");
+    }
 
     #[test]
     fn classifies_success() {

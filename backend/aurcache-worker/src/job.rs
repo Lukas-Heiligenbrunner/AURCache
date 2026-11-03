@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aurcache_worker_core::client::WorkerClient;
-use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
+use aurcache_worker_core::protocol::{
+    Stop, StopWatch, Timeout, log, report_warning, upload_artifacts,
+};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, BindMount};
@@ -872,7 +874,8 @@ async fn execute_build_process(
 
     // Watched for cancellation and the timeout while the child runs; see
     // `StopWatch` for how often each is looked at.
-    let mut watch = StopWatch::start(ctx.cfg.core.build_timeout, cancel, build_id);
+    let timeout = Timeout::for_job(ctx.cfg.core.build_timeout, job);
+    let mut watch = StopWatch::start(timeout, cancel, build_id);
     // Forward both streams to the build log. Held so they can be awaited after
     // the child exits, which is what guarantees the final lines are sent.
     let pumps = [
@@ -983,9 +986,8 @@ async fn finish_build_execution(
     execution: BuildExecution,
 ) -> CompleteReport {
     let canceled = execution.stopped == Some(Stop::Canceled);
-    let timed_out = execution.stopped == Some(Stop::TimedOut);
-    let mut report = if timed_out {
-        report::timeout_failure(execution.elapsed.as_secs())
+    let mut report = if let Some(Stop::TimedOut(limit)) = execution.stopped {
+        report::timeout_failure(execution.elapsed.as_secs(), limit)
     } else {
         report::classify_exit(execution.status, canceled)
     };
@@ -1022,7 +1024,7 @@ async fn report_build_resources(
     let build_id = job.build_id;
     let srcdest = cache.srcdest(&job.pkgbase);
     let canceled = stopped == Some(Stop::Canceled);
-    let timed_out = stopped == Some(Stop::TimedOut);
+    let timed_out = matches!(stopped, Some(Stop::TimedOut(_)));
     // Attached after the fact rather than threaded through every constructor:
     // how much a build used is orthogonal to why it ended, and a timeout or a
     // cancellation is exactly when the number is most worth having.
@@ -1281,7 +1283,11 @@ mod tests {
         assert!(should_keep(7, &report::classify_exit(status(137), false)));
         assert!(!should_keep(7, &report::classify_exit(status(0), false)));
         assert!(!should_keep(7, &report::classify_exit(status(1), true)));
-        assert!(!should_keep(7, &report::timeout_failure(60)));
+        let limit = aurcache_worker_core::protocol::Timeout {
+            secs: 60,
+            set_by: aurcache_worker_core::protocol::TimeoutSource::Server,
+        };
+        assert!(!should_keep(7, &report::timeout_failure(60, limit)));
         assert!(!should_keep(7, &report::classify_exit(status(124), false)));
         assert!(!should_keep(
             crate::chroots::ONE_SHOT_BUILD_ID,

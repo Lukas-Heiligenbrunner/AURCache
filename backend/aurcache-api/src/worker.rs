@@ -648,6 +648,14 @@ async fn build_descriptor(
             .await?
             .value;
 
+    // The package's job timeout, for the worker to stop the build at. The
+    // lease reaper holds the build to the same limit, plus a grace, only as a
+    // backstop for a worker that cannot.
+    let timeout = settings::get(db, settings::key::JOB_TIMEOUT, Some(build.pkg_id))
+        .await?
+        .value
+        .0;
+
     // Before `pkg.name` moves into the descriptor below.
     let packages = aurcache_utils::publish::expected_pkgnames(&pkg);
     Ok(JobDescriptor {
@@ -655,6 +663,7 @@ async fn build_descriptor(
         pkgbase: pkg.name,
         expected_packages: packages,
         expected_version: build.version.clone(),
+        timeout_secs: Some(timeout),
         arch,
         build_flags,
         persistent_builddir,

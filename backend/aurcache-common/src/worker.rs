@@ -249,6 +249,12 @@ pub struct JobDescriptor {
     /// Package names this build is expected to produce: the pkgbase plus any
     /// split-package names recorded for it.
     pub expected_packages: Vec<String>,
+    /// The server's job timeout for this package, in seconds. The worker
+    /// stops the build at this or its own build timeout, whichever is
+    /// shorter, and reports it as timed out. Absent from a server that does
+    /// not send one, where the worker's own applies alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
     /// Full version (`pkgver-pkgrel`) the build is expected to produce.
     ///
     /// Read only by a worker that fabricates its archives (the demo worker):
@@ -431,6 +437,7 @@ mod tests {
                 checksum: "abc123".into(),
             },
             expected_packages: vec!["hello".into(), "hello-docs".into()],
+            timeout_secs: Some(3600),
             expected_version: "1.0-1".into(),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {

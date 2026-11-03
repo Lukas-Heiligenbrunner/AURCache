@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use aurcache_common::api::activity::Severity;
+use aurcache_common::worker::JobDescriptor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -64,8 +65,42 @@ pub async fn cancel_requested(client: &WorkerClient, build_id: i32) -> bool {
 pub enum Stop {
     /// The worker abandoned it, or the server asked for it to stop.
     Canceled,
-    /// It ran past the build timeout.
-    TimedOut,
+    /// It ran past this limit.
+    TimedOut(Timeout),
+}
+
+/// How long a build may run, and whose limit that is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeout {
+    pub secs: u64,
+    pub set_by: TimeoutSource,
+}
+
+/// Where a build's [`Timeout`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeoutSource {
+    /// This worker's `build_timeout`.
+    Worker,
+    /// The server's job timeout for the package, sent with the job.
+    Server,
+}
+
+impl Timeout {
+    /// The shorter of this worker's build timeout and the one the server
+    /// sent with the job, or none when neither sets one. `0` is no limit,
+    /// from either side.
+    #[must_use]
+    pub fn for_job(own_secs: u64, job: &JobDescriptor) -> Option<Self> {
+        let limit = |secs: u64, set_by| (secs > 0).then_some(Self { secs, set_by });
+        let own = limit(own_secs, TimeoutSource::Worker);
+        let server = job
+            .timeout_secs
+            .and_then(|secs| limit(secs, TimeoutSource::Server));
+        match (own, server) {
+            (Some(own), Some(server)) if server.secs < own.secs => Some(server),
+            (own, server) => own.or(server),
+        }
+    }
 }
 
 /// Decides, while a build runs, whether it has to be stopped -- the same way
@@ -73,8 +108,7 @@ pub enum Stop {
 /// it.
 pub struct StopWatch<'a> {
     started: Instant,
-    /// Seconds; `0` is no limit.
-    timeout: u64,
+    timeout: Option<Timeout>,
     /// Set when this worker has given up on the build itself.
     cancel: &'a AtomicBool,
     build_id: i32,
@@ -93,7 +127,7 @@ impl<'a> StopWatch<'a> {
 
     /// Start timing a build that has just started.
     #[must_use]
-    pub fn start(timeout: u64, cancel: &'a AtomicBool, build_id: i32) -> Self {
+    pub fn start(timeout: Option<Timeout>, cancel: &'a AtomicBool, build_id: i32) -> Self {
         let now = Instant::now();
         Self {
             started: now,
@@ -117,17 +151,18 @@ impl<'a> StopWatch<'a> {
     /// a cancelled build on, would refuse a timeout report for it.
     pub async fn check(&mut self, client: &WorkerClient) -> Option<Stop> {
         // `>=`: a timeout of N means N seconds, not N+1.
-        let timed_out = self.timeout > 0 && self.elapsed().as_secs() >= self.timeout;
+        let elapsed = self.elapsed().as_secs();
+        let timed_out = self.timeout.filter(|limit| elapsed >= limit.secs);
         if self.cancel.load(Ordering::SeqCst) {
             return Some(Stop::Canceled);
         }
-        if !timed_out && self.last_poll.elapsed() >= Self::POLL {
+        if timed_out.is_none() && self.last_poll.elapsed() >= Self::POLL {
             self.last_poll = Instant::now();
             if cancel_requested(client, self.build_id).await {
                 return Some(Stop::Canceled);
             }
         }
-        timed_out.then_some(Stop::TimedOut)
+        timed_out.map(Stop::TimedOut)
     }
 }
 
@@ -187,4 +222,65 @@ pub async fn upload_artifacts(client: &WorkerClient, build_id: i32, pkgdir: &Pat
             .with_context(|| format!("uploading {name}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aurcache_common::worker::MirrorlistOffer;
+
+    fn job(timeout_secs: Option<u64>) -> JobDescriptor {
+        JobDescriptor {
+            build_id: 1,
+            pkgbase: "hello".into(),
+            arch: "x86_64".into(),
+            build_flags: Vec::new(),
+            persistent_builddir: false,
+            makepkg_conf: String::new(),
+            pacman_conf: String::new(),
+            mirrorlist: MirrorlistOffer::Nothing,
+            pgp_keys: Vec::new(),
+            vcs_sources: Vec::new(),
+            expected_packages: vec!["hello".into()],
+            timeout_secs,
+            expected_version: "1-1".into(),
+        }
+    }
+
+    const fn limit(secs: u64, set_by: TimeoutSource) -> Timeout {
+        Timeout { secs, set_by }
+    }
+
+    #[test]
+    fn the_shorter_limit_wins_whichever_side_sets_it() {
+        use TimeoutSource::{Server, Worker};
+        assert_eq!(
+            Timeout::for_job(3 * 3600, &job(Some(3600))),
+            Some(limit(3600, Server))
+        );
+        assert_eq!(
+            Timeout::for_job(1800, &job(Some(3600))),
+            Some(limit(1800, Worker))
+        );
+    }
+
+    /// `0` on either side is no limit, not an instant one; a server that
+    /// sends none leaves the worker's alone.
+    #[test]
+    fn no_limit_from_one_side_leaves_the_other() {
+        use TimeoutSource::{Server, Worker};
+        assert_eq!(
+            Timeout::for_job(0, &job(Some(3600))),
+            Some(limit(3600, Server))
+        );
+        assert_eq!(
+            Timeout::for_job(1800, &job(Some(0))),
+            Some(limit(1800, Worker))
+        );
+        assert_eq!(
+            Timeout::for_job(1800, &job(None)),
+            Some(limit(1800, Worker))
+        );
+        assert_eq!(Timeout::for_job(0, &job(None)), None);
+    }
 }

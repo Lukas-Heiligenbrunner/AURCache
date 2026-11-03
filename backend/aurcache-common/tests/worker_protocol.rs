@@ -183,6 +183,8 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
             git_ref: "0123abcd".to_string(),
         }],
         expected_packages: vec!["hello".to_string(), "hello-docs".to_string()],
+        // Protocol 1's fixture predates it; absent, it is what it was then.
+        timeout_secs: None,
         expected_version: "2.12.1-2".to_string(),
     }
 }
