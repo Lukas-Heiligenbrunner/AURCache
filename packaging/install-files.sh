@@ -77,7 +77,10 @@ worker)
     # environment variable.
     install -Dm644 "$PKG/sandbox-protected" "$PKGDIR/etc/aurcache/sandbox-protected"
     install -Dm644 "$PKG/worker.env" "$PKGDIR/etc/aurcache/worker.env"
-    install -Dm440 "$PKG/aurcache-worker.sudoers" \
+    # The directory as sudo's own package makes it: `install -D` would make it
+    # 755, and pacman warns on every install that it differs.
+    install -dm750 "$PKGDIR/etc/sudoers.d"
+    install -m440 "$PKG/aurcache-worker.sudoers" \
         "$PKGDIR/etc/sudoers.d/aurcache-worker"
     ;;
 worker-docker)
