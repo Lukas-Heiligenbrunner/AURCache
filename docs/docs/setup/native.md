@@ -131,16 +131,18 @@ The isolation that matters here is not systemd's. Each build runs in its own
 devtools chroot as a different unprivileged user, and the two places a PKGBUILD
 is executed *outside* that chroot are confined with Landlock.
 
-### The patched `makechrootpkg`
+### `aurcache-build`, the patched `makechrootpkg`
 
 `makechrootpkg` executes the PKGBUILD twice outside the chroot — once for
 `makepkg --verifysource`, once to read `pkgbase`/`pkgname`. A PKGBUILD is bash,
 so unconfined either one lets a build write another build's files. Checksums are
 no defence: they are declared by the PKGBUILD being run.
 
-The package installs a copy at `/usr/lib/aurcache/bin/makechrootpkg` with those
-two sites wrapped in `aurcache-sandbox`, and the worker names that path
-absolutely. It is derived at install time from the `devtools` on **this**
+The package installs a copy of it as `/usr/lib/aurcache/bin/aurcache-build`
+with those two sites wrapped in `aurcache-sandbox`, and the worker names that
+path absolutely. The copy also takes a leading `--interface=N` that the stock
+script rejects, so the two cannot stand in for each other: the worker checks the
+copy at startup and refuses to start without it. It is derived at install time from the `devtools` on **this**
 machine rather than shipped pre-patched, because `makechrootpkg` sources six
 files from `/usr/share/devtools/lib` and `/usr/share/makepkg/util` at runtime —
 a copy taken against one devtools release would end up running against
@@ -148,7 +150,7 @@ another's libraries.
 
 A pacman hook re-derives it whenever `devtools` is installed or upgraded. If a
 future devtools moves one of those two call sites the hook **fails the
-transaction and removes the stale copy**, so the worker refuses to build rather
+transaction and removes the stale copy**, so the worker refuses to start rather
 than quietly building with two steps unconfined. If that happens, please report
 it with your `devtools` version.
 

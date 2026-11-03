@@ -175,7 +175,8 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPL
 
 # Everything the worker needs on a host -- the binaries, the two users, the
 # directories and their modes, the sudoers entry, the sandbox policy, and the
-# patched makechrootpkg -- installs from the same package a native install uses.
+# patched makechrootpkg (`aurcache-build`) -- installs from the same package a
+# native install uses.
 #
 # That is the point of packaging first: the image stops being a second,
 # hand-maintained copy of the host contract that can drift from the documented

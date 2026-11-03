@@ -23,9 +23,9 @@
 //!
 //! What must *not* be declared is as deliberate as what is: a worker runs
 //! devtools as root, so the variables that decide what a build may reach
-//! (`WORKER_BIND_MOUNTS`, `WORKER_BUILD_USER`, `WORKER_MAKECHROOTPKG`) and the
-//! ones needed before the server can be trusted at all (`AURCACHE_URL`, the
-//! enrollment settings) are not in any spec table. See
+//! (`WORKER_BIND_MOUNTS`, `WORKER_BUILD_USER`) and the ones needed before the
+//! server can be trusted at all (`AURCACHE_URL`, the enrollment settings) are
+//! not in any spec table. See
 //! `design/implemented/worker-configuration.md`.
 
 use aurcache_common::units::{format_duration, format_size, parse_duration, parse_size};

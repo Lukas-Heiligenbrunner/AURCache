@@ -322,7 +322,6 @@ AURCache.
 | `WORKER_CHROOT_DIR` | Path | Where the storage pool's image and mount point go (see below) | `<data dir>/chroot` |
 | `WORKER_CHROOT_REFRESH_INTERVAL` | Duration | How long a `pacman -Syu`'d base chroot counts as current (`0` refreshes before every build) | `15m` |
 | `WORKER_BUILD_USER` | String | The user each build runs as. Its primary group must be `aurbuild`: `makechrootpkg` carries only the primary group into the chroot | `builder` |
-| `WORKER_MAKECHROOTPKG` | Path | The sandbox-wrapping `makechrootpkg` the native package installs, if you moved it | `/usr/lib/aurcache/bin/makechrootpkg` |
 
 The base chroot is brought up to date with `pacman -Syu` before a build, but
 not more often than `WORKER_CHROOT_REFRESH_INTERVAL`. The refresh takes around

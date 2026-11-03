@@ -24,8 +24,11 @@ allowing writes only to that build's own directories. The chroot build itself is
 untouched: Landlock refuses `mount(2)` outright, so nothing confined this way
 could run `arch-nspawn`.
 
-Writes AURCache's private copy to /usr/lib/aurcache/bin/makechrootpkg. The
-worker invokes it by absolute path; the packaged script is left alone.
+Writes AURCache's private copy to /usr/lib/aurcache/bin/aurcache-build. The
+worker invokes it by absolute path; the packaged script is left alone. The copy
+is named for what it is to AURCache rather than for what it was derived from,
+and it takes a leading `--interface=N` the stock script rejects: so the stock
+script can be neither mistaken for it by name nor run in its place by argv.
 
 Every patch MUST apply exactly once. If devtools moves a call site this fails
 the image build rather than silently shipping a worker that executes PKGBUILDs
@@ -38,18 +41,54 @@ import stat
 import sys
 
 SRC = os.environ.get("MAKECHROOTPKG_SRC", "/usr/bin/makechrootpkg")
-# A location AURCache owns, named by the worker as an absolute path.
+# A location AURCache owns, named by the worker as an absolute path
+# (`aurcache_worker::build::SCRIPT`).
 #
 # Not `/usr/local/bin`: that belongs to the administrator rather than to a
-# package, and a copy there shadows `makechrootpkg` for *every* user on the
-# host, so someone building something unrelated by hand silently gets this
-# sandboxed variant. It was chosen originally because it is on sudo's
-# `secure_path` -- the worker runs devtools through sudo, which replaces PATH --
-# and naming the file absolutely removes that constraint entirely.
-DST = os.environ.get("MAKECHROOTPKG_DST", "/usr/lib/aurcache/bin/makechrootpkg")
+# package, and is on sudo's `secure_path` -- the worker runs this through sudo,
+# which replaces PATH -- so nothing would stop an unqualified name finding
+# something else. Naming the file absolutely removes that question entirely.
+DST = os.environ.get("AURCACHE_BUILD_DST", "/usr/lib/aurcache/bin/aurcache-build")
+
+# The interface the copy speaks, as `aurcache_worker::build::INTERFACE` (a unit
+# test there checks the two agree). Bump both when the worker starts relying on
+# something a copy derived by the previous version of this file would not do.
+INTERFACE = "1"
 
 # (description, anchor, replacement)
 PATCHES = [
+    (
+        # The worker's own interface, ahead of makechrootpkg's options. Stock
+        # `makechrootpkg` parses its options with getopts, which answers
+        # `--interface...` with usage and exit 1 -- so if the stock script is
+        # ever run where this copy should be, the build stops before anything
+        # executes, rather than running with the PKGBUILD unconfined. The worker
+        # asks `--interface` at startup and refuses to start on any other
+        # answer, which covers a missing copy too.
+        #
+        # Required rather than optional, or the stock script's answer to a
+        # build would be the only thing telling them apart. Before getopts, and
+        # before `check_root`: the query needs no root, and an unprivileged
+        # caller's re-exec gets the argument back (see below).
+        "the build interface: a leading argument stock makechrootpkg rejects",
+        "\nwhile getopts '",
+        f"""
+case ${{1:-}} in
+\t--interface)
+\t\tprintf '%s\\n' {INTERFACE}
+\t\texit 0
+\t\t;;
+\t--interface={INTERFACE})
+\t\tshift
+\t\t;;
+\t*)
+\t\tdie 'aurcache-build speaks interface %s and needs --interface=%s first, not %s' \\
+\t\t\t{INTERFACE} {INTERFACE} "${{1:-nothing}}"
+\t\t;;
+esac
+
+while getopts '""",
+    ),
     (
         "download_sources: makepkg --verifysource",
         '\t\tmakepkg --config="$copydir/etc/makepkg.conf" --verifysource -o',
@@ -166,12 +205,14 @@ prepare_chroot
         # drops everything else. A no-op for the worker, which is already root
         # by then, but without this the drop-in -- and the cgroup placement
         # below -- silently vanish for anyone invoking the script unprivileged.
-        "AURCACHE_* kept across the root re-exec",
+        # The re-exec passes on `"$@"`, from which the interface patch above
+        # has shifted `--interface=N`, so it is put back in front.
+        "AURCACHE_* and the interface kept across the root re-exec",
         "check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,"
-        "SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER",
+        'SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER "${BASH_SOURCE[0]}" "$@"',
         "check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,"
         "SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER,AURCACHE_DROPIN,"
-        "AURCACHE_NSPAWN_KEEP_UNIT",
+        f'AURCACHE_NSPAWN_KEEP_UNIT "${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
     ),
     (
         "direct `source PKGBUILD` for pkgbase/pkgname",
@@ -302,7 +343,7 @@ def main() -> int:
     # Written beside the target and renamed over it, never opened for writing in
     # place. `open(DST, "w")` truncates, and bash reads a script incrementally as
     # it runs -- so re-deriving this while a build was in flight rewrote the file
-    # under the `makechrootpkg` executing it, mid-build. A rename swaps the
+    # under the copy executing it, mid-build. A rename swaps the
     # directory entry and leaves the running copy holding its own inode, which
     # is also what lets the package be upgraded while builds are running.
     tmp = f"{DST}.new"

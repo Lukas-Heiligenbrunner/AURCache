@@ -6,7 +6,7 @@ arguments it fixes, from inputs that are data rather than paths. It is the
 build half of the root helper in `unprivileged-workers.md` (option F), and
 the prerequisite for a sudoers grant narrower than `ALL`.
 
-Status: **Proposed** · Last updated: 2026-10-01
+Status: **Proposed**, step 0 done · Last updated: 2026-11-03
 
 ---
 
@@ -36,16 +36,18 @@ the sudoers file cannot change that while `makechrootpkg` is what it grants.
 
 ### What we have done to it so far
 
-`packaging/patch-makechrootpkg.py` applies ten patches to a copy of the
-script, re-derived on every devtools upgrade by a pacman hook:
+`packaging/patch-makechrootpkg.py` applies eleven patches to a copy of the
+script, `aurcache-build`, re-derived on every devtools upgrade by a pacman
+hook:
 
 | patch | why |
 |---|---|
+| a leading `--interface=N`, which stock `makechrootpkg` rejects | the stock script must not be able to stand in for the copy |
 | Landlock around `makepkg --verifysource` | the PKGBUILD runs on the host there |
 | `TMPDIR` into the job's directory | Landlock refuses `/tmp`, which broke signed sources |
 | clear a poisoned source cache, retry once | a fetch killed mid-way wedges VCS sources forever |
 | per-build makepkg drop-in into the copy | a drop-in in the base raced between concurrent builds |
-| `AURCACHE_*` across `check_root`'s re-exec | sudo drops the rest |
+| `AURCACHE_*` and `--interface` across `check_root`'s re-exec | sudo drops the rest; the argument was shifted |
 | Landlock around `source PKGBUILD` | the PKGBUILD runs on the host there too |
 | `arch-nspawn` wrapper: `--keep-unit`, `--restrict-address-families=` | the container escaped the build's cgroup; a systemd default is changing |
 | skip non-regular files in `pkgdest`, `srcpkgdest`, `logdest`; `chown -h` (three patches) | a build could make host root `chown` any host file, see below |
@@ -55,7 +57,8 @@ right failure, and it makes every devtools release a possible broken
 release here. The worker meanwhile already does, itself, the parts devtools
 is best at: the chroot copy is a pool snapshot, deletion and keeping a failed
 build are the worker's, and so are the quota and the cgroup. The worker
-calls `makechrootpkg -r -l -U -u -d` and none of `-c -T -I -n -C -x`.
+calls `aurcache-build --interface=1 -r -l -U -u -d` and none of
+`-c -T -I -n -C -x`.
 
 ### `arch-nspawn` decides binds from the chroot's own `pacman.conf`
 
@@ -226,7 +229,7 @@ Stop and `memory.peak` cover it. That retires both the patch and
 
 ### Sources are fetched inside the container
 
-The in-container script (written into the copy as `/aurcache-build`, root
+The in-container script (written into the copy as `/aurcache-chrootbuild`, root
 owned, mode 0755) does, as `builduser`:
 
 1. `makepkg --verifysource -o` with `SRCDEST=/srcdest`, `GNUPGHOME` on the
@@ -289,10 +292,17 @@ served from an AURCache repository that is the accurate answer.
 
 ## Steps
 
+0. **A name and an interface of its own** (done, 2026-11-03). The patched
+   copy is `/usr/lib/aurcache/bin/aurcache-build`, not configurable, and
+   takes a leading `--interface=N` that stock `makechrootpkg` rejects; the
+   worker asks it `--interface` at startup and refuses to start on any
+   other answer. `WORKER_MAKECHROOTPKG` is gone. What the worker runs is
+   now AURCache's by name and argv, so the steps below change what is
+   behind `aurcache-build`, not what the worker calls it.
 1. **Parity.** The runner, in `aurcache-chroot`, reproducing today's
    behaviour step for step: downloads still on the host, Landlocked, but
    through the runner instead of the patched script. Selected by a worker
-   setting; `makechrootpkg` stays the default. The e2e suite runs both and
+   setting; `aurcache-build` stays the default. The e2e suite runs both and
    compares packages and `.BUILDINFO` apart from the build tool fields.
 2. **Downloads in the container.** Drop the host-side fetch. Watch for
    sources that fail only this way; that is the open question above.
@@ -300,9 +310,8 @@ served from an AURCache repository that is the accurate answer.
 4. **Into the helper.** The runner becomes the root helper's `start-build
    <job-id>`. The sudoers file shrinks to the helper and `(builder) ALL`,
    and the worker's unit can take the hardening its comment rules out today.
-5. **Remove** `patch-makechrootpkg.py`, the pacman hook, the patched copy,
-   `docker/nspawn-wrapper.sh`, `WORKER_MAKECHROOTPKG` and the parity
-   setting.
+5. **Remove** `patch-makechrootpkg.py`, the pacman hook, `aurcache-build`,
+   `docker/nspawn-wrapper.sh` and the parity setting.
 
 The container images take the same path at the same time; they call the
 same worker code.

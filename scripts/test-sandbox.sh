@@ -43,7 +43,7 @@ COPY PKGBUILD /fixture/PKGBUILD
 RUN chmod +x /usr/local/bin/aurcache-sandbox /usr/local/bin/systemd-nspawn \
       /usr/local/bin/patch-makechrootpkg \
  && /usr/local/bin/patch-makechrootpkg \
- && mv /usr/lib/aurcache/bin/makechrootpkg /usr/local/bin/makechrootpkg.confined
+ && /usr/lib/aurcache/bin/aurcache-build --interface >/dev/null
 COPY probe.sh /probe.sh
 RUN chmod +x /probe.sh
 EOF
@@ -55,12 +55,12 @@ set -u
 mode=$1
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 
-# The only difference between the legs is which makechrootpkg is on PATH:
-# the patched copy, or the stock one from /usr/bin.
+# The only difference between the legs is which script builds: the patched
+# copy, as the worker runs it, or the stock one from /usr/bin.
 if [[ $mode == confined ]]; then
-    cp /usr/local/bin/makechrootpkg.confined /usr/local/bin/makechrootpkg
+    build=(/usr/lib/aurcache/bin/aurcache-build --interface=1)
 else
-    rm -f /usr/local/bin/makechrootpkg
+    build=(/usr/bin/makechrootpkg)
 fi
 
 mkdir -p /srv && cd /srv && rm -rf upstream.git && git init -q --bare upstream.git
@@ -83,7 +83,7 @@ chown -R builder: /job /shared
 [[ -d /chroot/root ]] || mkarchroot -C /etc/pacman.conf -M /etc/makepkg.conf /chroot/root base-devel git >/dev/null 2>&1
 
 cd /job/pkg
-sudo -u builder env SRCDEST=/job/srcdest makechrootpkg -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
+sudo -u builder env SRCDEST=/job/srcdest "${build[@]}" -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"

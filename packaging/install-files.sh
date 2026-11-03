@@ -70,8 +70,8 @@ worker)
         "$PKGDIR/usr/lib/aurcache/patch-makechrootpkg.py"
     install -Dm755 "$PKG/aurcache-patch-makechrootpkg" \
         "$PKGDIR/usr/lib/aurcache/aurcache-patch-makechrootpkg"
-    install -Dm644 "$PKG/aurcache-makechrootpkg.hook" \
-        "$PKGDIR/usr/share/libalpm/hooks/aurcache-makechrootpkg.hook"
+    install -Dm644 "$PKG/aurcache-build.hook" \
+        "$PKGDIR/usr/share/libalpm/hooks/aurcache-build.hook"
 
     # Paths a PKGBUILD must never read; see the file for why it is not an
     # environment variable.
@@ -85,8 +85,8 @@ worker)
     ;;
 worker-docker)
     # The legacy executor delegates builds to containers, so it needs none of
-    # the chroot machinery the chroot worker installs -- no sandbox, no patched
-    # makechrootpkg, no sudoers entry. Just the binary and the shared users and
+    # the chroot machinery the chroot worker installs -- no sandbox, no
+    # aurcache-build, no sudoers entry. Just the binary and the shared users and
     # directories declared above.
     install -Dm755 "$BINDIR/aurcache-worker-docker" \
         "$PKGDIR/usr/bin/aurcache-worker-docker"

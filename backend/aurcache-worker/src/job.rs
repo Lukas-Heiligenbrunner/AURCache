@@ -820,7 +820,7 @@ async fn execute_build_process(
             // systemd-nspawn moves it into a scope of its own under
             // devtools.slice, where neither `cgroup.kill` nor `memory.peak`
             // reaches -- a stopped build kept compiling, and the figure was
-            // only the host-side download. The patched makechrootpkg turns this
+            // only the host-side download. `aurcache-build` turns this
             // into `--keep-unit`; see `packaging/patch-makechrootpkg.py`.
             // Only with a cgroup: without one, the unit nspawn would keep is
             // the worker's own service.

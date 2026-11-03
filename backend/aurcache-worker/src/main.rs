@@ -12,7 +12,7 @@ use std::sync::Arc;
 use aurcache_worker::agent;
 use aurcache_worker::config::Config;
 use aurcache_worker::executor::ChrootExecutor;
-use aurcache_worker::{credentials, oneshot};
+use aurcache_worker::{build, credentials, oneshot};
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::{Registration, Runner};
@@ -62,8 +62,14 @@ async fn main() -> Result<()> {
             println!("Arches: {}", cfg.core.arches.join(","));
             Ok(())
         }
-        Command::BuildOnce { path, flags } => oneshot::build_once(&cfg, &path, &flags).await,
-        Command::Run => run(cfg).await,
+        Command::BuildOnce { path, flags } => {
+            build::check_script().await?;
+            oneshot::build_once(&cfg, &path, &flags).await
+        }
+        Command::Run => {
+            build::check_script().await?;
+            run(cfg).await
+        }
     }
 }
 
@@ -113,7 +119,7 @@ async fn run(cfg: Arc<Config>) -> Result<()> {
     .await
     {
         Ok(Some(a)) => {
-            // Children inherit this, which is how `makechrootpkg` -- and the
+            // Children inherit this, which is how `aurcache-build` -- and the
             // build inside the chroot -- reach the agent.
             unsafe { std::env::set_var("SSH_AUTH_SOCK", a.socket()) };
             tracing::info!(

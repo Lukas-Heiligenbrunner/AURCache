@@ -8,27 +8,67 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where to find the sandbox-wrapping `makechrootpkg`.
+use anyhow::Context;
+
+/// The worker's build script: AURCache's derivation of devtools'
+/// `makechrootpkg`, which the native package writes here.
 ///
-/// An absolute path, not a name on `PATH`. The worker runs devtools through
-/// `sudo`, and sudo replaces `PATH` with its own `secure_path`, so a `PATH`
-/// set for the service never reaches the command. Naming the file is the only
-/// way to be sure which one runs.
+/// An absolute path, not a name on `PATH`. The worker runs it through `sudo`,
+/// and sudo replaces `PATH` with its own `secure_path`, so a `PATH` set for the
+/// service never reaches the command. Naming the file is the only way to be
+/// sure which one runs.
 ///
-/// This is *not* the packaged `/usr/bin/makechrootpkg`: it is a copy with the
-/// two places a PKGBUILD is executed outside the chroot wrapped in
+/// Not configurable, and not named `makechrootpkg`, so that nothing invites
+/// pointing it at the packaged `/usr/bin/makechrootpkg`. That one executes a
+/// PKGBUILD twice outside the chroot unconfined, and this copy wraps both in
 /// `aurcache-sandbox` (see `packaging/patch-makechrootpkg.py`). Running the
-/// unpatched one would build packages with those two steps unconfined, which is
-/// a silent loss of isolation rather than a failure -- so the default points at
-/// the patched copy and an operator who moves it says where it went.
-fn makechrootpkg_path() -> String {
-    std::env::var("WORKER_MAKECHROOTPKG")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "/usr/lib/aurcache/bin/makechrootpkg".to_string())
+/// stock script would be a silent loss of isolation rather than a failure,
+/// which is also why [`INTERFACE`] exists.
+pub const SCRIPT: &str = "/usr/lib/aurcache/bin/aurcache-build";
+
+/// The interface [`SCRIPT`] speaks, which stock `makechrootpkg` does not.
+///
+/// Every build passes `--interface=<this>` first, so the stock script given
+/// the same argv rejects the option and exits before it does anything, and
+/// `--interface` alone makes the script print the number ([`check_script`]).
+/// Must equal `INTERFACE` in `packaging/patch-makechrootpkg.py`; bump both
+/// when the worker starts relying on something a copy derived by the previous
+/// patcher would not do.
+pub const INTERFACE: &str = "1";
+
+/// Refuse to start unless [`SCRIPT`] is there and speaks [`INTERFACE`].
+///
+/// At startup rather than at the first build: a missing or stock copy would
+/// otherwise surface as every build failing, long after the operator who could
+/// fix it has stopped watching. The query runs before the script needs root,
+/// so it is run directly rather than through `sudo`.
+pub async fn check_script() -> anyhow::Result<()> {
+    let output = tokio::process::Command::new(SCRIPT)
+        .arg("--interface")
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "cannot run {SCRIPT}; it is derived from devtools' makechrootpkg when \
+                 the aurcache-worker package is installed, and removed if devtools \
+                 changed in a way the patch no longer applies to. Reinstall the \
+                 package to re-derive it."
+            )
+        })?;
+    let answer = String::from_utf8_lossy(&output.stdout);
+    if output.status.success() && answer.trim() == INTERFACE {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{SCRIPT} does not speak build interface {INTERFACE} (exit {}, answered {:?}); \
+         it is not a copy derived by this worker's package. Reinstall the \
+         aurcache-worker package to re-derive it.",
+        output.status,
+        answer.trim(),
+    )
 }
 
-/// Build the `makechrootpkg` argv for a per-package build.
+/// Build the [`SCRIPT`] argv for a per-package build.
 ///
 /// No `systemd-run` wrapper: the worker places the build in a cgroup of its own
 /// (see `crate::cgroup`), which is where its limits are set, its memory is
@@ -66,7 +106,7 @@ pub fn build_command(
     // No `-c`: the worker has already made this build's chroot, a snapshot in
     // the storage pool with a disk quota on it, and devtools finds it there.
     // Nor `-T`: the worker deletes it too, with the quota group around it.
-    let mut argv = vec![makechrootpkg_path()];
+    let mut argv = vec![SCRIPT.to_string(), format!("--interface={INTERFACE}")];
     argv.extend([
         "-r".to_string(),
         chroot_root.display().to_string(),
@@ -174,6 +214,17 @@ mod tests {
         assert!(with_parallelism("", Some(0.5)).contains("MAKEFLAGS=\"-j1\""));
     }
 
+    /// The worker and the patcher agree on the interface. A worker built with
+    /// a bump the patcher lacks would refuse to start against every copy.
+    #[test]
+    fn the_patcher_writes_the_interface_the_worker_speaks() {
+        let patcher = include_str!("../../../packaging/patch-makechrootpkg.py");
+        assert!(
+            patcher.contains(&format!("\nINTERFACE = \"{INTERFACE}\"\n")),
+            "packaging/patch-makechrootpkg.py must set INTERFACE = \"{INTERFACE}\""
+        );
+    }
+
     #[test]
     fn build_command_includes_flags() {
         let cmd = build_command(
@@ -186,16 +237,15 @@ mod tests {
         let joined = cmd.join(" ");
         // An absolute path, not a bare name: the command goes through `sudo`,
         // which replaces PATH with its own `secure_path`, so a name would
-        // resolve to the *unpatched* system makechrootpkg and run two steps of
-        // every build unconfined.
+        // resolve to whatever sudo finds.
         assert!(
-            cmd[0].starts_with('/') && cmd[0].ends_with("/makechrootpkg"),
-            "makechrootpkg must be named by absolute path, got {}",
+            cmd[0].starts_with('/'),
+            "named by absolute path, got {}",
             cmd[0]
         );
         assert!(!cmd.iter().any(|a| a == "systemd-run"));
         assert!(!cmd.iter().any(|a| a == "--pkgdest"));
-        assert!(joined.contains("makechrootpkg -r /chroot -l job-42"));
+        assert!(joined.contains("aurcache-build --interface=1 -r /chroot -l job-42"));
         // Builds must never inherit the worker's user via SUDO_USER.
         assert!(joined.contains("-U builder"));
         assert!(joined.contains("-- --nocheck"));

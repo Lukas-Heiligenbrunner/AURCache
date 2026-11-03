@@ -288,7 +288,6 @@ mod tests {
         for forbidden in [
             "WORKER_BIND_MOUNTS",
             "WORKER_BUILD_USER",
-            "WORKER_MAKECHROOTPKG",
             "WORKER_CHROOT_DIR",
             "WORKER_POOL",
             "WORKER_DISK_RESERVE",
