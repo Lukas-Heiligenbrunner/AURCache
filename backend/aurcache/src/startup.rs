@@ -26,14 +26,87 @@ const START_BANNER: &str = r"
  /_/    \_\____/|_|  \_\\_____\__,_|\___|_| |_|\___|
 ";
 
-pub fn pre_startup_tasks(version: &str) {
+pub fn pre_startup_tasks(version: &str) -> std::io::Result<()> {
     info!("{START_BANNER}");
     info!("Version: {version}");
 
     #[cfg(debug_assertions)]
     warn!("This is a dev build! Consider using a stable release.");
 
+    adopt_hybrid_dirs()?;
     warn_about_ephemeral_data();
+    Ok(())
+}
+
+/// Decide where the CA and the build logs live: see
+/// [`aurcache_common::fs::adopt_hybrid_dirs`].
+///
+/// Before the database: the 0.5 conversion writes build logs, and they belong
+/// wherever these end up.
+fn adopt_hybrid_dirs() -> std::io::Result<()> {
+    use aurcache_common::fs::{Adopted, Adoption};
+
+    for Adopted { dir, outcome } in aurcache_common::fs::adopt_hybrid_dirs(persisted)? {
+        let what = dir.describe();
+        let hybrid = dir.hybrid_path();
+        match outcome {
+            Adoption::Untouched => {}
+            Adoption::Moved { to } => info!(
+                "Moved {what} from {}, the hybrid image's place for it, to {}",
+                hybrid.display(),
+                to.display()
+            ),
+            Adoption::InRepository { configured } => info!(
+                "Using {what} in {}, the hybrid image's place for it: {} is not \
+                 persisted. Mounting a volume there moves {what} at the next start.",
+                hybrid.display(),
+                configured.display()
+            ),
+            Adoption::Conflict { configured } => warn!(
+                "Using {what} in {}; the hybrid image's, in {}, is left as it was. \
+                 Remove whichever is not wanted.",
+                configured.display(),
+                hybrid.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Whether a directory, or the nearest of its parents that exists yet, is
+/// on a volume rather than on the container's own layers.
+fn persisted(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(root_dev) = std::fs::metadata("/").map(|m| m.dev()) else {
+            return false;
+        };
+        let Ok(dir) = std::path::absolute(dir) else {
+            return false;
+        };
+        dir.ancestors()
+            .find_map(|dir| std::fs::metadata(dir).ok())
+            .is_some_and(|m| !is_ephemeral(in_container(), root_dev, m.dev()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
+    }
+}
+
+/// Whether the server runs in a container: one of this project's images,
+/// which say so, or one Docker or Podman started, which leave a file that does.
+///
+/// Erring towards "no" is the safe way round. A native service takes every
+/// directory as persisted, which it is; taken for a container, it would keep
+/// its state in the repository whenever that shares a filesystem with `/`.
+fn in_container() -> bool {
+    env::var_os("AURCACHE_CONTAINER_IMAGE").is_some()
+        || Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists()
 }
 
 /// Whether a directory will be thrown away with the container it is in.
@@ -60,8 +133,7 @@ fn warn_about_ephemeral_data() {
     {
         use std::os::unix::fs::MetadataExt;
 
-        let in_container =
-            Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists();
+        let in_container = in_container();
         let Ok(root_dev) = std::fs::metadata("/").map(|m| m.dev()) else {
             return;
         };

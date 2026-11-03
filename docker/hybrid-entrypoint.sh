@@ -39,11 +39,12 @@ export AURCACHE_URL="${AURCACHE_URL:-https://localhost:8083}"
 AURCACHE_EMBEDDED_WORKER_SECRET="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
 export AURCACHE_EMBEDDED_WORKER_SECRET
 # The worker dials the server as `localhost`, so the listener's certificate has
-# to be valid for it.
-export AURCACHE_TLS_SANS="${AURCACHE_TLS_SANS:-localhost}"
-# Auto-approval here is by token, not by shared volume; make sure a stale
-# enrollment directory cannot also grant it.
-unset AURCACHE_ENROLLMENT_DIR
+# to be valid for it -- whatever names were set for workers elsewhere.
+case ",${AURCACHE_TLS_SANS:-}," in
+*,localhost,*) ;;
+*) AURCACHE_TLS_SANS="${AURCACHE_TLS_SANS:+$AURCACHE_TLS_SANS,}localhost" ;;
+esac
+export AURCACHE_TLS_SANS
 
 # Name the embedded worker for what it is.
 #
@@ -102,9 +103,11 @@ else
     # and names a container this Podman has never heard of.
     export AURCACHE_BUILDER_NETWORK="${AURCACHE_BUILDER_NETWORK:-host}"
     # And the build directory is one path, seen the same way from both sides.
-    export BUILD_ARTIFACT_DIR=/app/builds
-    export BUILD_ARTIFACT_DIR_LOCAL=/app/builds
-    mkdir -p /app/builds
+    # Outside /app: its contents only last a build, and a mounted /app is
+    # the server's, which outlives this worker.
+    export BUILD_ARTIFACT_DIR=/var/lib/aurcache-builds
+    export BUILD_ARTIFACT_DIR_LOCAL=/var/lib/aurcache-builds
+    mkdir -p /var/lib/aurcache-builds
 fi
 
 # ---------------------------------------------------------------------------
@@ -137,7 +140,9 @@ if [ -n "$WORKER" ]; then
     rm -f "$WORKER_DATA_DIR/ca-cert.pem"
     # Root, as the pre-worker server was: it drives a root-owned socket, and
     # runs no build code itself -- each build runs in a container of its own.
-    /usr/bin/aurcache-worker-docker run &
+    # Approved by the token above. An enrollment directory set for workers
+    # beside this container is the server's to read, not this one's to write.
+    env -u AURCACHE_ENROLLMENT_DIR /usr/bin/aurcache-worker-docker run &
     PIDS+=($!)
 fi
 

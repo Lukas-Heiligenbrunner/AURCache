@@ -216,11 +216,12 @@ COPY --chmod=0755 docker/private-state.sh /usr/local/bin/aurcache-private-state
 #
 # A pre-worker compose file persists the repository (and, with SQLite, the
 # database) and nothing else, and this image has to keep building from such a
-# file unedited. So what must survive goes into the repository volume, under
-# dot directories that are never served -- the server's file server and
-# the compose files' nginx config refuse dot segments, as they do for `.staging` -- that the
-# retired-package sweep skips, and that private-state.sh closes to everyone but
-# root:
+# file unedited. So while the server's own directories for the worker CA and
+# the build logs are not on a volume, it keeps them inside the repository,
+# under dot directories that are never served -- the server's file server and
+# the compose files' nginx config refuse dot segments, as they do for
+# `.staging` -- that the retired-package sweep skips, and that only root can
+# read:
 #
 #   /app/repo/.build_logs  build logs. 0.5.0 kept them in its database; the
 #                          upgrade moves them out to files.
@@ -228,18 +229,17 @@ COPY --chmod=0755 docker/private-state.sh /usr/local/bin/aurcache-private-state
 #                          certificate. Losing it orphans every worker that
 #                          ever enrolled.
 #
-# Anywhere else they lived in the container's own layer or an anonymous volume,
-# and an anonymous volume is not as durable as it looks: `docker compose up`
-# carries it across a recreate, but `down` does not, and neither does an
-# orchestrator that recreates the container rather than updating it -- TrueNAS
-# runs `down` before every start. A leaked CA key cannot authenticate anyone as
-# a worker -- the server also requires an approved key -- so the repository
-# volume is no worse a home for it than a data directory.
+# Mount /app, as the split server's compose files do, and the next start moves
+# both to where that server keeps them; AURCACHE_CA_DIR and
+# AURCACHE_BUILD_LOG_PATH choose other places. That is the server binary's own
+# behaviour (aurcache_common::fs::adopt_hybrid_dirs), not this image's, so
+# swapping this image for the split server changes nothing but the embedded
+# worker.
 #
-# A deployment moving on to the split images keeps both by setting the same
-# variables on the server.
-ENV AURCACHE_BUILD_LOG_PATH=/app/repo/.build_logs \
-    AURCACHE_CA_DIR=/app/repo/.ca
+# Anywhere unmounted they would live in the container's own layer, lost with
+# it. A leaked CA key cannot authenticate anyone as a worker -- the server
+# also requires an approved key -- so the repository volume is no worse a home
+# for it than a data directory.
 
 # Kept in anonymous volumes, as losing them is survivable:
 #
@@ -253,6 +253,10 @@ ENV AURCACHE_BUILD_LOG_PATH=/app/repo/.build_logs \
 #                             podman-storage.conf), and the builder image with
 #                             it, so it is not pulled again on every recreate.
 VOLUME ["/var/lib/aurcache-worker", "/var/lib/containers"]
+
+# See server.Dockerfile: whatever the runtime, the server knows it is in a
+# container, and so which of its directories are unmounted.
+ENV AURCACHE_CONTAINER_IMAGE=hybrid
 
 WORKDIR /app
 CMD ["/usr/local/bin/hybrid-entrypoint"]

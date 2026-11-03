@@ -29,7 +29,7 @@ async fn main() {
     _ = dotenv();
     init_logger();
     let version = aurcache_common::version::full_version(env!("CARGO_PKG_VERSION"));
-    pre_startup_tasks(&version);
+    pre_startup_tasks(&version).expect("could not take over the hybrid image's CA and build logs");
 
     let db = init_db().await.expect("failed to initialize database");
 

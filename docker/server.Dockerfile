@@ -110,6 +110,10 @@ COPY --from=builder --chmod=0755 /app/backend/target/aurcache-sandbox /usr/local
 # /usr/local, so point the server at them.
 ENV AURCACHE_PKGBUILD_BRIDGE=/usr/local/libexec/alpm-pkgbuild-bridge \
     AURCACHE_SANDBOX=/usr/local/bin/aurcache-sandbox
+# Says the server runs in a container whatever the runtime: Docker and Podman
+# leave a file that says so, containerd (Kubernetes) does not. The server
+# tells unmounted directories apart by it (backend/aurcache/src/startup.rs).
+ENV AURCACHE_CONTAINER_IMAGE=server
 
 WORKDIR /app
 CMD ["/entrypoint.sh"]

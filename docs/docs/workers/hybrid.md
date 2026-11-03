@@ -45,13 +45,18 @@ Workers.
 
 Your compose file persists the repository (and, with SQLite, the database), and
 that is all the upgrade needs. What the image adds that must survive goes into
-the repository volume, under dot directories that are never served and that
+the repository volume while there is no other, under dot directories that are never served and that
 only root can read:
 
 | Path | What it holds |
 |---|---|
 | `/app/repo/.build_logs` | Build logs, including those your old version kept in its database |
 | `/app/repo/.ca` | The internal CA that signs every worker's certificate |
+
+That is only while nothing better is mounted. Mount `/app`, or set
+`AURCACHE_CA_DIR` or `AURCACHE_BUILD_LOG_PATH` to a directory on a volume, and
+the next start moves them there; see [Migrating](#migrating). The split server
+image behaves the same way.
 
 If you copy the repository somewhere else to serve it — `rsync` to a mirror,
 say — exclude dot directories, as you would `.staging`.
@@ -75,26 +80,39 @@ Nothing to do.
 
 ### Migrating
 
-1. Split your single service into two, following the
-   [Quick Start](../overview/quick-start.md) — server on the `aurcache-server`
-   image, worker on `aurcache-worker`.
-2. Keep your existing `/app/repo` and database volumes on the server. Nothing
-   about the repository or package history changes.
-3. Set `AURCACHE_CA_DIR=/app/repo/.ca` and
-   `AURCACHE_BUILD_LOG_PATH=/app/repo/.build_logs` on the server, where this
-   image keeps them. Without them the split server creates a new CA, which
-   every worker you enrolled would stop trusting, and finds none of the logs
-   written so far.
-4. Drop `BUILD_ARTIFACT_DIR`, the Docker socket mount, and the `artifact_cache`
-   volume — the worker uploads its packages over the API instead of through a
-   shared directory.
-5. Move `privileged: true` from the server to the worker, and give the worker a
-   tmpfs `/run`.
+Everything but the last step happens on this image, one change at a time, with
+packages building throughout. The last step only removes the embedded worker.
+
+1. **Give the server all of `/app`**, beside the volumes you have:
+
+   ```yaml
+       volumes:
+         - ./aurcache/app:/app
+         - ./aurcache/repo:/app/repo
+         - ./aurcache/db:/app/db   # SQLite only
+   ```
+
+   On the next start the server moves the CA and the build logs out of the
+   repository, into `/app/data/ca` and `/app/build_logs`, and logs each move. A
+   move interrupted by a restart picks up where it stopped. Every enrolled
+   worker keeps trusting the server, and every build keeps its log.
+
+2. **Add workers**, following the [Quick Start](../overview/quick-start.md): a
+   `builder` service on `aurcache-worker`, the `enroll` volume, and on this
+   service `enroll:/enroll:ro`, `AURCACHE_ENROLLMENT_DIR=/enroll` and
+   `AURCACHE_TLS_SANS=aurcache`. Publish port 8083 for workers on other hosts.
+   They build alongside the embedded worker, and you can watch them do it
+   before relying on them alone.
+
+3. **Swap this image for `aurcache-server`**, and drop what only the embedded
+   worker used: `privileged: true`, `BUILD_ARTIFACT_DIR`, the Docker socket and
+   the build directory mount. The server finds everything where it left it.
+   The embedded worker shows as offline; retire its row from the Workers page
+   (see [Managing workers](./managing.md)) — its history stays.
+
+Skipping step 1 loses nothing: the server keeps using the repository's
+directories, and says so at every start, until `/app` is mounted.
 
 The split worker has requirements this image does not, Linux 6.7 or newer
 among them — see [Requirements](../overview/requirements.md). On a host that
 cannot meet them (Synology, for one), stay on this image for now.
-
-The worker your hybrid container was running keeps its history; a new worker
-simply enrolls alongside it, and you can retire the old row from the Workers
-page — see [Managing workers](./managing.md).

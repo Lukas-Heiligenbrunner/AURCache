@@ -67,8 +67,11 @@ Compose setup](../setup/docker.md#what-to-persist) for what to persist.
 | OFFICIAL_REPO_CACHE_DIR    | The official repositories' databases, read to resolve dependencies | `<mirrorlist dir>/official_repo_cache` |
 | OFFICIAL_MIRRORLIST_PATH   | The mirrorlist those databases are fetched with                    | the x86_64 mirrorlist |
 
-The hybrid image sets the first two under `/app/repo` (see [Hybrid
-image](../workers/hybrid.md)).
+In a container, when the first two are not set and their defaults are not on
+a volume, the server keeps them in the repository, as `repo/.ca` and
+`repo/.build_logs`, which is what a 0.5 compose file persists. Once their
+directories are on a volume it moves them there at start; see [Hybrid
+image](../workers/hybrid.md#migrating).
 
 ## Where the server finds the AUR
 

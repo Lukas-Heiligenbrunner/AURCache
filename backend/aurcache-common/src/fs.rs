@@ -5,6 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod hybrid;
+pub use hybrid::{Adopted, Adoption, HybridDir, adopt_hybrid_dirs};
+
 /// Whether every regular file in a directory tree could be measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DirectoryMeasurement {
@@ -82,7 +85,16 @@ pub fn measure_directory(path: impl AsRef<Path>) -> DirectoryMeasurement {
 /// logger lives in without a cycle.
 #[must_use]
 pub fn build_log_root() -> PathBuf {
-    std::env::var("AURCACHE_BUILD_LOG_PATH")
+    if let Some(kept) = HybridDir::BuildLogs.in_repository().get() {
+        return kept.clone();
+    }
+    configured_build_log_root()
+}
+
+const BUILD_LOG_PATH_VAR: &str = "AURCACHE_BUILD_LOG_PATH";
+
+fn configured_build_log_root() -> PathBuf {
+    std::env::var(BUILD_LOG_PATH_VAR)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./build_logs"))
 }
@@ -94,7 +106,16 @@ pub const REPO_ROOT: &str = "./repo";
 /// certificate.
 #[must_use]
 pub fn ca_dir() -> PathBuf {
-    std::env::var("AURCACHE_CA_DIR")
+    if let Some(kept) = HybridDir::Ca.in_repository().get() {
+        return kept.clone();
+    }
+    configured_ca_dir()
+}
+
+const CA_DIR_VAR: &str = "AURCACHE_CA_DIR";
+
+fn configured_ca_dir() -> PathBuf {
+    std::env::var(CA_DIR_VAR)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./data/ca"))
 }
