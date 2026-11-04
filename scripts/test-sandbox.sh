@@ -14,6 +14,8 @@
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/common.sh
+. scripts/lib/common.sh
 
 KEEP=0
 [[ ${1:-} == --keep ]] && KEEP=1
@@ -22,8 +24,9 @@ WORKDIR=$(mktemp -d)
 trap '(( KEEP )) || rm -rf "$WORKDIR"' EXIT
 
 echo "==> building test image (Arch + devtools + sandbox)"
-cargo build --release --manifest-path backend/Cargo.toml -p aurcache-sandbox >/dev/null
-cp backend/target/release/aurcache-sandbox "$WORKDIR/"
+sandbox=$(cargo_executable aurcache-sandbox build --release \
+    --manifest-path backend/Cargo.toml -p aurcache-sandbox)
+cp "$sandbox" "$WORKDIR/"
 cp docker/nspawn-wrapper.sh packaging/patch-makechrootpkg.py packaging/sandbox-protected "$WORKDIR/"
 cp docker/testpkg/hostile-fixture/PKGBUILD "$WORKDIR/"
 

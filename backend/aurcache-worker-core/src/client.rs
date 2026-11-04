@@ -75,14 +75,55 @@ impl SendChecked for RequestBuilder {
     }
 }
 
-/// `response` if it is a success, or an error carrying the server's reason.
+/// `response` if it is a success, or a [`Refused`] carrying the server's reason.
 async fn checked(response: Response, what: &str) -> Result<Response> {
     let status = response.status();
     if status.is_success() || status == StatusCode::NOT_MODIFIED {
         return Ok(response);
     }
-    bail!("{what} rejected: {status}: {}", reason(response).await)
+    Err(Refused::new(what, status, reason(response).await).into())
 }
+
+/// The server answered a request, and the answer was no.
+///
+/// Typed, unlike a transport error, so that a caller deciding whether to ask
+/// again can tell the server's verdict from a request that never got one.
+#[derive(Debug)]
+pub struct Refused {
+    what: String,
+    pub status: StatusCode,
+    reason: String,
+}
+
+impl Refused {
+    pub(crate) fn new(what: &str, status: StatusCode, reason: impl Into<String>) -> Self {
+        Self {
+            what: what.to_string(),
+            status,
+            reason: reason.into(),
+        }
+    }
+
+    /// Whether asking again cannot change the answer: the request itself was
+    /// refused (the build is gone, or no longer this worker's), not the
+    /// server's ability to take it.
+    #[must_use]
+    pub fn is_final(&self) -> bool {
+        self.status.is_client_error()
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} rejected: {}: {}",
+            self.what, self.status, self.reason
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// The text a refusal carries.
 ///

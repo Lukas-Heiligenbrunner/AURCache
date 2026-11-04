@@ -8,12 +8,12 @@ use crate::output::{
     Progress, format_timestamp, print_done_message, print_json, print_table, render,
 };
 use crate::workers::resolve_worker;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use aurcache_client::{AurCacheClient, Build, BuildQuery};
 use aurcache_common::api::build_log::{Alignment, align};
 use aurcache_common::build_state::BuildState;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 
 pub(crate) async fn run_builds_command(
@@ -409,10 +409,21 @@ pub(crate) async fn follow_builds(
     let mut last_change = Instant::now();
     let mut last_beat = Instant::now();
     let mut seen: HashMap<BuildRef, BuildState> = HashMap::new();
+    let mut tracked = Tracked::default();
 
     loop {
-        let builds = list_scoped_builds(client, scope.package.as_deref()).await?;
-        let watched: Vec<&Build> = builds.iter().filter(|b| scope.includes(b)).collect();
+        let page = list_scoped_builds(client, scope.package.as_deref()).await?;
+        let in_flight = client.list_builds(&in_flight_query()).await?;
+        tracked.observe(&scope, page.iter().chain(&in_flight));
+        let listed: HashSet<BuildRef> = page.iter().chain(&in_flight).map(build_ref).collect();
+        for key in tracked.unlisted(&scope, &listed) {
+            let build = client
+                .get_build(&key.pkgbase, key.number)
+                .await
+                .with_context(|| format!("{key} is being followed but cannot be found"))?;
+            tracked.record(build);
+        }
+        let watched: Vec<&Build> = tracked.builds().collect();
 
         let mut changed = false;
         for build in &watched {
@@ -453,7 +464,7 @@ pub(crate) async fn follow_builds(
             return Ok(());
         }
 
-        let queue = Queue::of(&client.list_builds(&in_flight_query()).await?, &scope);
+        let queue = Queue::of(&in_flight, &scope);
 
         if !queue.building && last_change.elapsed() >= Duration::from_secs(args.stall_after) {
             for build in watched.iter().filter(|b| b.status.is_in_progress()) {
@@ -494,6 +505,50 @@ pub(crate) async fn follow_builds(
             bail!("timed out after {}s", args.timeout);
         }
         tokio::time::sleep(Duration::from_secs(WATCH_POLL_INTERVAL_SECS)).await;
+    }
+}
+
+/// The builds a watch follows, by identity.
+///
+/// A build is found on one of the listings -- the scope's page, or the queue's
+/// unfinished builds -- and once found it stays followed until it settles,
+/// wherever it has gone since: a busy queue pushes a finished build off the
+/// page within one poll, and the verdict must not change because of it.
+#[derive(Debug, Default)]
+struct Tracked(BTreeMap<BuildRef, Build>);
+
+impl Tracked {
+    /// Take in what the listings say about the builds in scope.
+    fn observe<'a>(&mut self, scope: &WatchScope, listed: impl IntoIterator<Item = &'a Build>) {
+        for build in listed {
+            if scope.includes(build) {
+                self.record(build.clone());
+            }
+        }
+    }
+
+    fn record(&mut self, build: Build) {
+        self.0.insert(build_ref(&build), build);
+    }
+
+    /// The builds to ask for by name: those named explicitly and not found
+    /// yet, and those still unfinished at the last look that no listing
+    /// shows any more -- so they have finished, off the page.
+    fn unlisted(&self, scope: &WatchScope, listed: &HashSet<BuildRef>) -> Vec<BuildRef> {
+        let named = scope
+            .explicit
+            .iter()
+            .filter(|key| !self.0.contains_key(*key));
+        let finished = self
+            .0
+            .iter()
+            .filter(|(key, build)| build.status.is_in_progress() && !listed.contains(*key))
+            .map(|(key, _)| key);
+        named.chain(finished).cloned().collect()
+    }
+
+    fn builds(&self) -> impl Iterator<Item = &Build> {
+        self.0.values()
     }
 }
 
@@ -553,7 +608,11 @@ impl WaitOpts {
         if !self.wait {
             return Ok(None);
         }
-        let builds = list_scoped_builds(client, None).await?;
+        let mut builds = list_scoped_builds(client, None).await?;
+        // Whatever is already in flight is somebody else's too, however far
+        // down the history it sits: the watch finds unfinished builds on the
+        // whole queue, not only on the page.
+        builds.extend(client.list_builds(&in_flight_query()).await?);
         Ok(Some(WatchScope::from_snapshot(&builds)))
     }
 }
@@ -653,6 +712,61 @@ pub(crate) mod tests {
                 number: 8,
             }]);
         assert!(scope.includes(&build("fonts", 8, BuildState::Failed)));
+    }
+
+    fn key(pkgbase: &str, number: i32) -> BuildRef {
+        BuildRef {
+            pkgbase: pkgbase.to_string(),
+            number,
+        }
+    }
+
+    /// On a busy queue a build can finish and drop off the page between two
+    /// polls. It stays followed, and is asked for by name to learn how it
+    /// ended -- never mistaken for a scope that has nothing left in it.
+    #[test]
+    fn a_build_that_finished_off_the_page_is_asked_for_by_name() {
+        let scope = WatchScope::from_snapshot(&[]);
+        let mut tracked = Tracked::default();
+        tracked.observe(&scope, &[build("fonts", 8, BuildState::Active)]);
+
+        // The next poll lists neither the page's copy nor an in-flight one.
+        let listed = HashSet::new();
+        assert_eq!(tracked.unlisted(&scope, &listed), vec![key("fonts", 8)]);
+
+        tracked.record(build("fonts", 8, BuildState::Failed));
+        assert!(tracked.unlisted(&scope, &listed).is_empty(), "settled");
+        assert_eq!(tracked.builds().count(), 1);
+    }
+
+    /// A build named on the command line, or reported by a trigger, is
+    /// fetched by name when no listing shows it: an old one is not on the
+    /// page, and it must not read as nothing to follow.
+    #[test]
+    fn a_named_build_no_listing_shows_is_asked_for() {
+        let scope = WatchScope::default().with_explicit([key("fonts", 3)]);
+        let tracked = Tracked::default();
+        assert_eq!(
+            tracked.unlisted(&scope, &HashSet::new()),
+            vec![key("fonts", 3)]
+        );
+    }
+
+    /// The queue's unfinished builds are a listing too, so a build too old for
+    /// the page is still found -- and one that was in flight before a trigger
+    /// is not mistaken for the trigger's own.
+    #[test]
+    fn the_queue_finds_what_the_page_misses_and_the_snapshot_covers_it() {
+        let old = build("fonts", 2, BuildState::Enqueued);
+        let watching = WatchScope::from_history(&[]);
+        let mut tracked = Tracked::default();
+        tracked.observe(&watching, [&old]);
+        assert_eq!(tracked.builds().count(), 1);
+
+        let triggered = WatchScope::from_snapshot(std::slice::from_ref(&old));
+        let mut tracked = Tracked::default();
+        tracked.observe(&triggered, [&old]);
+        assert_eq!(tracked.builds().count(), 0);
     }
 
     /// An update that reused an existing build row reports no new build, and

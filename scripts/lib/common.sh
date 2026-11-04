@@ -25,3 +25,21 @@ require_packaging_submodules() {
         exit 2
     fi
 }
+
+# Build with `cargo "$@"` and print the path of the executable target named
+# `$1`. Cargo says where it put it: a path assumed under backend/target would
+# miss a CARGO_TARGET_DIR, or find a stale binary there instead.
+cargo_executable() {
+    local name=$1
+    shift
+    local exe
+    exe=$(cargo "$@" --message-format=json | python3 -c '
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
+            and msg["target"]["name"] == sys.argv[1]:
+        print(msg["executable"])' "$name")
+    [[ -n $exe ]] || { echo "error: cargo built no executable named $name" >&2; return 1; }
+    printf '%s\n' "$exe"
+}

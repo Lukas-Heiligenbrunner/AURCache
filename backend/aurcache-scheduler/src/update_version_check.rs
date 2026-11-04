@@ -81,23 +81,38 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
 
     let aur_name_refs: Vec<&str> = aur_query_names.iter().map(String::as_str).collect();
 
+    // An AUR that cannot be reached costs this round its AUR packages and
+    // nothing else: the git packages do not depend on it. `None`, not an
+    // empty answer, which would read as every AUR package having been removed.
     let results = if aur_name_refs.is_empty() {
-        Vec::new()
+        Some(Vec::new())
     } else {
-        client
+        match client
             .multi_info_of(&aur_name_refs)
             .await
             // Context rather than a message of its own: the causes under it --
             // a connection cut short, an answer that is not JSON -- are what
             // says why, and formatting the error into a string dropped them.
-            .context("couldn't download version update")?
+            .context("couldn't download version update")
+        {
+            Ok(results) => Some(results),
+            Err(e) => {
+                error!("Skipping the AUR packages this round: {e:#}");
+                activity.emit(Event::VersionCheckFailed {
+                    error: format!("{e:#}"),
+                });
+                None
+            }
+        }
     };
     // Indexed once: the per-package loop below looks every package up by its
     // pkgbase, which a linear scan would make quadratic in the package count.
-    let by_base: HashMap<&str, _> = results
-        .iter()
-        .map(|result| (result.package_base.as_str(), result))
-        .collect();
+    let by_base: Option<HashMap<&str, _>> = results.as_ref().map(|results| {
+        results
+            .iter()
+            .map(|result| (result.package_base.as_str(), result))
+            .collect()
+    });
 
     // One pass, one answer per remote: several packages can name the same
     // upstream, and what its ref points at does not change between two of them.
@@ -120,6 +135,10 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
         };
         match &package.source_data {
             SourceData::Aur { .. } => {
+                // Unchecked this round; what was recorded last stands.
+                let Some(by_base) = &by_base else {
+                    continue;
+                };
                 let Some(result) = by_base.get(package.name.as_str()) else {
                     // Removed from the AUR. Recorded so the package page can
                     // say so: its metadata still comes from the checkout,
@@ -406,9 +425,124 @@ async fn save_package(
 }
 
 #[cfg(test)]
+#[path = "../../aurcache-utils/test_support/git.rs"]
+mod test_git;
+
+#[cfg(test)]
 mod tests {
-    use super::aur_query_name;
+    use super::{Unreadable, aur_query_name, check_versions};
+    use aurcache_activitylog::activity_utils::ActivityLog;
+    use aurcache_common::build_state::BuildState;
     use aurcache_db::lists::JsonList;
+    use aurcache_db::migration::Migrator;
+    use aurcache_db::packages::{self, GitSourceSpec, SourceData};
+    use aurcache_db::prelude::Packages;
+    use aurcache_deps::AurClient;
+    use aurcache_utils::repository::Repository;
+    use aurcache_utils::services::Services;
+    use aurcache_utils::snapshot::SnapshotStore;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection, EntityTrait};
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+
+    async fn insert(db: &DatabaseConnection, name: &str, source_data: SourceData) -> i32 {
+        packages::ActiveModel {
+            name: Set(name.to_string()),
+            status: Set(BuildState::Successful),
+            out_of_date: Set(false),
+            upstream_version: Set(Some("1.0.0-1".to_string())),
+            build_flags: Set(Default::default()),
+            platforms: Set("x86_64".parse().unwrap()),
+            source_data: Set(source_data),
+            directly_requested: Set(true),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// The git packages do not depend on the AUR, so an AUR that does not
+    /// answer must not cost them their check -- and what was recorded about
+    /// the AUR packages stays as it was, rather than reading as removed.
+    #[tokio::test]
+    async fn an_unreachable_aur_still_checks_the_git_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("demo-git.git");
+        super::test_git::create_repo(
+            &remote,
+            &[
+                (
+                    "PKGBUILD",
+                    "pkgname=demo-git\npkgver=2.0.0\npkgrel=1\narch=('x86_64')\npackage() {\n  :\n}\n",
+                ),
+                (
+                    ".SRCINFO",
+                    "pkgbase = demo-git\n\tpkgver = 2.0.0\n\tpkgrel = 1\n\tarch = x86_64\n\npkgname = demo-git\n",
+                ),
+            ],
+        );
+        let branch = git2::Repository::open(&remote)
+            .unwrap()
+            .head()
+            .unwrap()
+            .shorthand()
+            .unwrap()
+            .to_string();
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let aur = insert(
+            &db,
+            "demo",
+            SourceData::Aur {
+                name: "demo".into(),
+            },
+        )
+        .await;
+        let git = insert(
+            &db,
+            "demo-git",
+            SourceData::Git {
+                spec: GitSourceSpec {
+                    url: remote.to_string_lossy().to_string(),
+                    r#ref: branch,
+                    subfolder: String::new(),
+                },
+            },
+        )
+        .await;
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(SnapshotStore::with_checkout_root(
+                dir.path().join("checkouts"),
+            )),
+            // Nothing listens on the discard port.
+            client: Arc::new(AurClient::with_urls("http://127.0.0.1:9/rpc/v5")),
+            repo: Arc::new(Repository::new(dir.path().join("repo"))),
+            activity: ActivityLog::discarding(),
+        };
+
+        check_versions(&services, &mut Unreadable::default())
+            .await
+            .unwrap();
+
+        let git = Packages::find_by_id(git).one(&db).await.unwrap().unwrap();
+        assert!(
+            git.upstream_version
+                .as_deref()
+                .is_some_and(|v| v.starts_with("2.0.0")),
+            "{:?}",
+            git.upstream_version
+        );
+        let aur = Packages::find_by_id(aur).one(&db).await.unwrap().unwrap();
+        assert_eq!(
+            aur.aur_missing, None,
+            "an AUR that did not answer said nothing"
+        );
+        assert_eq!(aur.upstream_version.as_deref(), Some("1.0.0-1"));
+    }
 
     #[test]
     fn aur_queries_use_a_produced_name_even_with_only_one_child() {

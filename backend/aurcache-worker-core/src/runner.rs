@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::WorkerClient;
+use crate::client::{Refused, WorkerClient};
 use crate::config::CoreConfig;
 use crate::executor::{ClaimedJob, Executor};
 use crate::gate::ConcurrencyGate;
@@ -98,6 +98,36 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// How many times a completion is sent before the lease reaper is left to it.
+const COMPLETION_ATTEMPTS: u32 = 5;
+
+/// What to do after a completion report failed.
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    /// Send it again after this long.
+    Retry(Duration),
+    /// The server refused it, which no retry changes: the build is gone, or no
+    /// longer this worker's. Holding the build's slot to ask again would only
+    /// keep the next build waiting.
+    Refused,
+    /// Out of attempts.
+    Exhausted,
+}
+
+/// The decision after `attempt` (counted from 1) failed with `error`.
+fn after_failure(error: &anyhow::Error, attempt: u32) -> Next {
+    if error
+        .downcast_ref::<Refused>()
+        .is_some_and(Refused::is_final)
+    {
+        Next::Refused
+    } else if attempt < COMPLETION_ATTEMPTS {
+        Next::Retry(Duration::from_secs(2 * u64::from(attempt)))
+    } else {
+        Next::Exhausted
+    }
 }
 
 /// The mirrorlist a build of `arch` uses, given what the server offered, and
@@ -305,10 +335,12 @@ impl<E: Executor> Runner<E> {
 
     /// Send the terminal completion, retrying briefly so a transient network
     /// blip does not drop the report (which would cost the build to the lease
-    /// reaper).
+    /// reaper). Sending it again is safe: a report the server took, whose
+    /// answer was lost, is accepted again as a repeat.
     async fn report_completion(&self, build_id: i32, report: &CompleteReport) {
-        for attempt in 0..5 {
-            match self.client.complete(build_id, report).await {
+        let mut attempt = 1;
+        loop {
+            let error = match self.client.complete(build_id, report).await {
                 Ok(()) => {
                     self.mark_contact();
                     if report.outcome == BuildOutcome::Succeeded {
@@ -321,18 +353,24 @@ impl<E: Executor> Runner<E> {
                     }
                     return;
                 }
-                Err(e) => {
-                    // `{e:#}` for the cause chain, not just the outermost
-                    // context: the server's reason is what tells a lost lease
-                    // from anything else it refused.
-                    tracing::warn!("reporting completion for {build_id} failed: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
+                Err(error) => error,
+            };
+            // `{error:#}` for the cause chain, not just the outermost context:
+            // the server's reason is what tells a lost lease from anything else
+            // it refused.
+            tracing::warn!("reporting completion for {build_id} failed: {error:#}");
+            match after_failure(&error, attempt) {
+                Next::Retry(delay) => tokio::time::sleep(delay).await,
+                Next::Refused => return,
+                Next::Exhausted => {
+                    tracing::error!(
+                        "gave up reporting completion for {build_id}; the server will abandon it when its lease expires"
+                    );
+                    return;
                 }
             }
+            attempt += 1;
         }
-        tracing::error!(
-            "gave up reporting completion for {build_id}; the server will abandon it when its lease expires"
-        );
     }
 
     /// Background heartbeat + self-abort watchdog.
@@ -480,6 +518,61 @@ impl<E: Executor> Runner<E> {
             // offer this worker less work than it would take, never more.
             Err(e) => tracing::warn!("registering the new settings failed: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{COMPLETION_ATTEMPTS, Next, after_failure};
+    use crate::client::Refused;
+    use reqwest::StatusCode;
+    use std::time::Duration;
+
+    fn refused(status: StatusCode) -> anyhow::Error {
+        anyhow::Error::new(Refused::new(
+            "complete",
+            status,
+            "build 7 is no longer owned",
+        ))
+    }
+
+    /// A lost lease or a vanished build is the server's verdict; asking again
+    /// only holds the slot.
+    #[test]
+    fn a_refusal_is_not_retried() {
+        assert_eq!(
+            after_failure(&refused(StatusCode::FORBIDDEN), 1),
+            Next::Refused
+        );
+        assert_eq!(
+            after_failure(&refused(StatusCode::NOT_FOUND), 1),
+            Next::Refused
+        );
+    }
+
+    /// A server error or a request that got no answer may well go through
+    /// next time -- and a report already taken is accepted again as a repeat.
+    #[test]
+    fn a_failure_the_server_did_not_decide_is_retried() {
+        let unreachable = anyhow::anyhow!("connection refused").context("complete request");
+        assert_eq!(
+            after_failure(&unreachable, 1),
+            Next::Retry(Duration::from_secs(2))
+        );
+        assert_eq!(
+            after_failure(&refused(StatusCode::INTERNAL_SERVER_ERROR), 2),
+            Next::Retry(Duration::from_secs(4))
+        );
+    }
+
+    /// No sleep after the last attempt: nothing comes after it.
+    #[test]
+    fn the_last_attempt_ends_without_waiting() {
+        let unreachable = anyhow::anyhow!("connection refused");
+        assert_eq!(
+            after_failure(&unreachable, COMPLETION_ATTEMPTS),
+            Next::Exhausted
+        );
     }
 }
 

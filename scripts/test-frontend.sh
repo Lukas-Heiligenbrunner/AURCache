@@ -18,6 +18,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/common.sh
+. "$PROJECT_DIR/scripts/lib/common.sh"
 SEED="$PROJECT_DIR/scripts/fixtures/frontend-seed.sql"
 
 # One port, because one server: the frontend is embedded into the backend by
@@ -96,7 +98,8 @@ shot() {
 # run against a stale bundle -- which they silently did, twice, back when the
 # two were separate steps.
 echo "==> building the server, frontend and all"
-( cd "$PROJECT_DIR/backend" && cargo build --quiet -p aurcache --features aurcache-api/static )
+SERVER_BIN=$(cargo_executable aurcache build --quiet \
+    --manifest-path "$PROJECT_DIR/backend/Cargo.toml" -p aurcache --features aurcache-api/static)
 
 echo "==> starting the server"
 # A long interval keeps the scheduler's second pass outside this run. Its first
@@ -109,7 +112,7 @@ echo "==> starting the server"
 # far into the run the check happens: the fixture's online worker last checked
 # in seconds before seeding, and the default timeout is 60.
 ( cd "$WORKDIR" && exec env VERSION_CHECK_INTERVAL=86400 WORKER_LIVENESS_TIMEOUT=3600 \
-    "$PROJECT_DIR/backend/target/debug/aurcache" > "$WORKDIR/server.log" 2>&1 ) &
+    "$SERVER_BIN" > "$WORKDIR/server.log" 2>&1 ) &
 BACKEND_PID=$!
 
 for _ in $(seq 1 120); do

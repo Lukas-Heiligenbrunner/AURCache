@@ -685,17 +685,28 @@ impl Cache {
             // records so the map tracks the repository instead of growing.
             known.retain(|name, _| repo_db.contains_key(name));
         }
-        let verdicts = hash_suspects(&shared, &suspects);
+        // Removed outside the map, like the stale ones above: every concurrent
+        // reconcile and promote waits on it. The lock would not order a
+        // removal against a promote anyway, which renames before it records,
+        // and the worst either order gives is a good archive removed -- a
+        // download, never a stale file served.
+        let mut verified = Vec::new();
+        let mut gone = Vec::new();
+        for Verdict { suspect, matches } in hash_suspects(&shared, &suspects) {
+            if matches {
+                verified.push(suspect);
+            } else if remove_cached(&shared, &suspect.name) {
+                gone.push(&suspect.name);
+            }
+        }
+        removed += gone.len();
         {
             let mut known = self.verified();
-            for Verdict { suspect, matches } in verdicts {
-                let key = suspect.name.clone();
-                if matches {
-                    known.insert(key, suspect.sha256.clone());
-                } else if remove_cached(&shared, &suspect.name) {
-                    removed += 1;
-                    known.remove(&key);
-                }
+            for suspect in verified {
+                known.insert(suspect.name.clone(), suspect.sha256.clone());
+            }
+            for name in gone {
+                known.remove(name);
             }
         }
         removed

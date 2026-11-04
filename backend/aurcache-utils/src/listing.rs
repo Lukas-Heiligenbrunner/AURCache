@@ -134,8 +134,10 @@ impl BuildRow {
 /// Best-effort by design: this is diagnostic decoration, and failing to compute
 /// it must never turn a working build list into an error page.
 pub async fn annotate_waiting(db: &DatabaseConnection, rows: Vec<BuildRow>) -> Vec<BuildSummary> {
-    if rows.is_empty() {
-        return Vec::new();
+    // Only a queued build can be waiting, and the reasons come from a scan of
+    // the whole queue and the fleet: a page of history has no use for one.
+    if !rows.iter().any(|row| row.status == BuildState::Enqueued) {
+        return rows.into_iter().map(|row| row.into_summary(None)).collect();
     }
     let mut reasons = waiting_reasons(db).await;
     rows.into_iter()

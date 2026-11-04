@@ -15,6 +15,8 @@
 # Usage: scripts/test-kernel.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib/common.sh
+. scripts/lib/common.sh
 ROOT=$PWD
 
 say() { printf '==> %s\n' "$*"; }
@@ -40,21 +42,13 @@ if (( major < 6 || (major == 6 && minor < 7) )); then
 fi
 
 say "building the test binaries"
-# `--message-format=json` names each test binary, which a path guessed from
-# the target directory's hash would not do reliably.
+# Cargo names each test binary, which a path guessed from the target
+# directory's hash would not do reliably.
 binaries=()
 for target in "${TARGETS[@]}"; do
     read -r package test _ <<<"$target"
-    exe=$(cargo test --manifest-path backend/Cargo.toml -p "$package" --test "$test" \
-            --no-run --message-format=json 2>/dev/null \
-        | python3 -c '
-import json, sys
-for line in sys.stdin:
-    msg = json.loads(line)
-    if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
-            and msg["target"]["name"] == sys.argv[1]:
-        print(msg["executable"])' "$test")
-    [[ -n $exe ]] || { echo "no test binary for $package/$test" >&2; exit 1; }
+    exe=$(cargo_executable "$test" test --manifest-path backend/Cargo.toml \
+        -p "$package" --test "$test" --no-run)
     binaries+=("$exe")
 done
 
