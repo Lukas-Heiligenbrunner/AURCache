@@ -73,6 +73,7 @@ jobs:
           path: ${{ runner.temp }}/image
       - name: Install image copy tool
         run: sudo apt-get update && sudo apt-get install -y skopeo
+      # Read the OCI layout directly; do not unpack a PR-controlled tar archive.
       - name: Copy image to preview registry
         env:
           REGISTRY_TOKEN: ${{ github.token }}
@@ -85,5 +86,5 @@ jobs:
             --username "$REGISTRY_USER" --password-stdin ghcr.io
           skopeo copy --all \
             --authfile "$RUNNER_TEMP/registry-auth.json" \
-            "oci-archive:$RUNNER_TEMP/image/image.tar" "docker://$IMAGE:$TAG"
+            "oci:$RUNNER_TEMP/image" "docker://$IMAGE:$TAG"
           echo "Preview image: \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
