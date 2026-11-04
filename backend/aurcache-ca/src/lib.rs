@@ -8,16 +8,28 @@
 //! presented during the mTLS handshake.
 
 use anyhow::{Context, anyhow};
+use aurcache_common::digest::sha256_hex;
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType, IsCa, Issuer,
     KeyPair, KeyUsagePurpose, PublicKeyData,
 };
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use time::{Duration, OffsetDateTime};
+use x509_parser::pem::Pem;
 
 const CA_CERT_FILE: &str = "ca-cert.pem";
 const CA_KEY_FILE: &str = "ca-key.pem";
+/// A copy of the pair, written after it: see [`Ca::load_or_create`].
+const IDENTITY_FILE: &str = "ca-identity.json";
+
+/// How long the CA and the server certificate it issues are valid.
+const VALIDITY: Duration = Duration::days(3650);
+
+/// When a certificate issued now starts being valid: an hour back, so a peer
+/// whose clock is a little behind accepts it.
+fn not_before() -> OffsetDateTime {
+    OffsetDateTime::now_utc() - Duration::hours(1)
+}
 
 /// Where the CA certificate is stored in `dir`.
 #[must_use]
@@ -62,7 +74,6 @@ impl Ca {
     /// them, so a pair left half-written -- by an interrupted install or a
     /// rotation -- is repaired from it rather than rotating the identity.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(dir).context("creating CA directory")?;
         let ca = Self::read_identity(dir)?.map_or_else(Self::generate_ca, Ok)?;
         ca.persist(dir)?;
         Ok(ca)
@@ -74,7 +85,7 @@ impl Ca {
     }
 
     fn read_identity(dir: &Path) -> anyhow::Result<Option<Self>> {
-        let recorded = match std::fs::read(dir.join("ca-identity.json")) {
+        let recorded = match std::fs::read(dir.join(IDENTITY_FILE)) {
             Ok(bytes) => {
                 Some(serde_json::from_slice::<Self>(&bytes).context("reading CA identity")?)
             }
@@ -114,10 +125,12 @@ impl Ca {
                 installed
             }
             (Some(installed), _) => installed,
-            (None, Some(recorded)) => recorded,
+            (None, Some(recorded)) => {
+                recorded.validate()?;
+                recorded
+            }
             (None, None) => return Ok(None),
         };
-        ca.validate()?;
         Ok(Some(ca))
     }
 
@@ -125,7 +138,6 @@ impl Ca {
     pub fn restore(dir: &Path, cert_pem: String, key_pem: String) -> anyhow::Result<Self> {
         let ca = Self { cert_pem, key_pem };
         ca.validate()?;
-        std::fs::create_dir_all(dir)?;
         ca.persist(dir)?;
         Ok(ca)
     }
@@ -133,20 +145,15 @@ impl Ca {
     /// Explicitly replace the CA, invalidating certificates issued by the old CA.
     pub fn rotate(dir: &Path) -> anyhow::Result<Self> {
         let ca = Self::generate_ca()?;
-        std::fs::create_dir_all(dir)?;
         ca.persist(dir)?;
         Ok(ca)
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        use x509_parser::prelude::FromDer;
         let key = KeyPair::from_pem(&self.key_pem).context("parsing persisted CA key")?;
-        let (_, pem) = x509_parser::pem::parse_x509_pem(self.cert_pem.as_bytes())
-            .map_err(|error| anyhow!("parsing persisted CA certificate: {error}"))?;
-        if pem.label != "CERTIFICATE" {
-            anyhow::bail!("expected a CA certificate");
-        }
-        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&pem.contents)
+        let block = cert_block(&self.cert_pem).context("reading persisted CA certificate")?;
+        let cert = block
+            .parse_x509()
             .map_err(|error| anyhow!("parsing persisted CA certificate: {error}"))?;
         if cert.public_key().raw != key.subject_public_key_info() {
             anyhow::bail!("CA certificate and private key do not match");
@@ -159,12 +166,13 @@ impl Ca {
 
     fn persist(&self, dir: &Path) -> anyhow::Result<()> {
         use aurcache_common::fs::write_private;
+        std::fs::create_dir_all(dir).context("creating CA directory")?;
         // The pair first, the copy last. Interrupted between the two PEMs, the
         // pair does not match and the copy -- still the previous identity --
         // repairs it. Interrupted after both, the new pair is valid and wins.
         write_private(&key_path(dir), self.key_pem.as_bytes())?;
         write_private(&cert_path(dir), self.cert_pem.as_bytes())?;
-        write_private(&dir.join("ca-identity.json"), &serde_json::to_vec(self)?)?;
+        write_private(&dir.join(IDENTITY_FILE), &serde_json::to_vec(self)?)?;
         Ok(())
     }
 
@@ -176,8 +184,8 @@ impl Ca {
             .distinguished_name
             .push(DnType::CommonName, "AURCache Internal CA");
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        params.not_before = OffsetDateTime::now_utc() - Duration::hours(1);
-        params.not_after = OffsetDateTime::now_utc() + Duration::days(3650);
+        params.not_before = not_before();
+        params.not_after = OffsetDateTime::now_utc() + VALIDITY;
         let cert = params.self_signed(&key).context("self-signing CA")?;
         Ok(Self {
             cert_pem: cert.pem(),
@@ -208,18 +216,10 @@ impl Ca {
     /// signature and is the safe direction.
     #[must_use]
     pub fn issued(&self, cert_pem: &str) -> bool {
-        use x509_parser::prelude::FromDer;
-
-        let Ok(ca_der) = pem_to_der(&self.cert_pem) else {
+        let (Ok(ca), Ok(leaf)) = (cert_block(&self.cert_pem), cert_block(cert_pem)) else {
             return false;
         };
-        let Ok((_, ca)) = x509_parser::certificate::X509Certificate::from_der(&ca_der) else {
-            return false;
-        };
-        let Ok(leaf_der) = pem_to_der(cert_pem) else {
-            return false;
-        };
-        let Ok((_, leaf)) = x509_parser::certificate::X509Certificate::from_der(&leaf_der) else {
+        let (Ok(ca), Ok(leaf)) = (ca.parse_x509(), leaf.parse_x509()) else {
             return false;
         };
         leaf.verify_signature(Some(ca.public_key())).is_ok()
@@ -231,10 +231,6 @@ impl Ca {
     }
 
     /// Reconstruct an issuer usable for signing from the persisted CA material.
-    ///
-    /// rcgen 0.14 models this directly: the CA certificate and the key that
-    /// signs with it are one `Issuer`, where before they were a pair that every
-    /// call site had to keep together and pass in the right order.
     fn issuer(&self) -> anyhow::Result<Issuer<'static, KeyPair>> {
         let ca_key = KeyPair::from_pem(&self.key_pem).context("parsing CA key")?;
         Issuer::from_ca_cert_pem(&self.cert_pem, ca_key).context("parsing CA cert for signing")
@@ -248,8 +244,8 @@ impl Ca {
         params
             .distinguished_name
             .push(DnType::CommonName, "aurcache");
-        params.not_before = OffsetDateTime::now_utc() - Duration::hours(1);
-        params.not_after = OffsetDateTime::now_utc() + Duration::days(3650);
+        params.not_before = not_before();
+        params.not_after = OffsetDateTime::now_utc() + VALIDITY;
         let cert = params
             .signed_by(&key, &issuer)
             .context("signing server cert")?;
@@ -271,7 +267,7 @@ impl Ca {
         let mut csr =
             CertificateSigningRequestParams::from_pem(csr_pem).context("parsing worker CSR")?;
         let not_after = OffsetDateTime::now_utc() + Duration::days(validity_days);
-        csr.params.not_before = OffsetDateTime::now_utc() - Duration::hours(1);
+        csr.params.not_before = not_before();
         csr.params.not_after = not_after;
 
         let cert = csr.signed_by(&issuer).context("signing worker CSR")?;
@@ -299,31 +295,34 @@ pub fn normalize_fingerprint(fingerprint: &str) -> String {
 /// The PEM must be a `CERTIFICATE` block: a private key handed in by mistake
 /// fails here rather than producing a fingerprint nothing will ever match.
 pub fn cert_fingerprint(cert_pem: &str) -> anyhow::Result<String> {
-    let (_, doc) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
-        .map_err(|e| anyhow!("parsing PEM: {e}"))?;
-    if doc.label != "CERTIFICATE" {
-        anyhow::bail!("expected a CERTIFICATE block, found {}", doc.label);
-    }
-    Ok(sha256_hex(&doc.contents))
+    Ok(sha256_hex(&cert_block(cert_pem)?.contents))
 }
 
 /// SHA-256 fingerprint (hex, lowercase) of the public key in a CSR PEM.
 pub fn fingerprint_from_csr_pem(csr_pem: &str) -> anyhow::Result<String> {
     use x509_parser::prelude::FromDer;
-    let der = pem_to_der(csr_pem)?;
-    let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(&der)
-        .map_err(|e| anyhow!("parsing CSR: {e}"))?;
+    let block = pem_block(csr_pem)?;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(&block.contents)
+            .map_err(|e| anyhow!("parsing CSR: {e}"))?;
     Ok(sha256_hex(csr.certification_request_info.subject_pki.raw))
 }
 
-fn pem_to_der(pem: &str) -> anyhow::Result<Vec<u8>> {
-    let (_, doc) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
+/// The first block of a PEM, whatever its label.
+fn pem_block(pem: &str) -> anyhow::Result<Pem> {
+    let (_, block) = x509_parser::pem::parse_x509_pem(pem.as_bytes())
         .map_err(|e| anyhow!("parsing PEM: {e}"))?;
-    Ok(doc.contents)
+    Ok(block)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+/// The first block of a PEM, which must be a `CERTIFICATE`: a private key
+/// handed in by mistake fails here rather than being read as one.
+fn cert_block(pem: &str) -> anyhow::Result<Pem> {
+    let block = pem_block(pem)?;
+    if block.label != "CERTIFICATE" {
+        anyhow::bail!("expected a CERTIFICATE block, found {}", block.label);
+    }
+    Ok(block)
 }
 
 /// SHA-256 fingerprint (hex, lowercase) of a raw SubjectPublicKeyInfo DER slice.
@@ -343,8 +342,9 @@ mod tests {
     /// SHA-256 fingerprint (hex, lowercase) of the public key in a certificate
     /// PEM, to check an issued certificate against the CSR it was signed from.
     fn fingerprint_from_cert_pem(cert_pem: &str) -> anyhow::Result<String> {
-        let der = pem_to_der(cert_pem)?;
-        let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        let block = cert_block(cert_pem)?;
+        let cert = block
+            .parse_x509()
             .map_err(|e| anyhow!("parsing certificate: {e}"))?;
         Ok(sha256_hex(cert.tbs_certificate.subject_pki.raw))
     }
@@ -491,7 +491,7 @@ mod persistence_tests {
                 std::fs::write(key_path(dir.path()), key).unwrap();
             }
             assert!(Ca::load_or_create(dir.path()).is_err());
-            assert!(!dir.path().join("ca-identity.json").exists());
+            assert!(!dir.path().join(IDENTITY_FILE).exists());
         }
     }
 

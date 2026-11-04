@@ -528,7 +528,7 @@ async fn a_link_to_something_gone_lands_somewhere_useful(session: &Session) {
     session.open("/package/no-such-package/build/3").await;
     session
         .wait_until("the add page to explain itself", |t| {
-            t.contains("so there is no build #3 of it")
+            t.contains("No package called no-such-package is tracked here")
         })
         .await;
     assert!(
@@ -835,7 +835,7 @@ async fn a_linked_search_arrives_applied(session: &Session) {
 /// dashboard's stuck-queue card land on Builds with both queued states
 /// ticked. The counterpart to the search scenario above.
 async fn a_linked_status_filter_arrives_applied(session: &Session) {
-    session.open("/builds?s=enqueued,waiting").await;
+    session.open("/builds?s=enqueued,waiting-for-deps").await;
     session
         .wait_until("the queue filter to apply", |t| {
             t.contains("2 statuses")

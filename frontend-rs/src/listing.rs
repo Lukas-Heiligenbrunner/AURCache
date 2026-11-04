@@ -7,8 +7,9 @@
 //! already on. If the fetch itself ever becomes the problem, the pure functions
 //! here are what would move.
 
-use aurcache_client::{Build, EntityRef, Severity, SimplePackage};
+use aurcache_client::{Build, SimplePackage};
 use aurcache_common::build_state::BuildState;
+use std::cmp::Reverse;
 
 /// Which column a list is ordered by.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,16 +137,9 @@ impl StateSet {
 
     /// The held states in discriminant order, so a URL encoding is stable.
     pub fn iter(self) -> impl Iterator<Item = BuildState> {
-        [
-            BuildState::Active,
-            BuildState::Successful,
-            BuildState::Failed,
-            BuildState::Enqueued,
-            BuildState::WaitingForDeps,
-            BuildState::Publishing,
-        ]
-        .into_iter()
-        .filter(move |state| self.contains(*state))
+        BuildState::ALL
+            .into_iter()
+            .filter(move |state| self.contains(*state))
     }
 }
 
@@ -231,51 +225,43 @@ impl StatusFilter {
         }
     }
 
-    /// How this filter is spelled in a URL: the selected slugs comma-joined.
+    /// How this filter is spelled in a URL: the selected states' keys,
+    /// comma-joined, as the server's `?status=` takes them.
     ///
-    /// A URL is read and shared: `?s=failed` and `?s=enqueued,waiting` say
-    /// what `?s=2` does not. `Active` is spelled "building" because that is
-    /// the word the rest of the UI uses for it, including the Workers page
-    /// link that lands here.
+    /// A URL is read and shared: `?s=failed` and `?s=enqueued,waiting-for-deps`
+    /// say what `?s=2` does not.
     #[must_use]
     pub fn slug(self) -> String {
-        let mut parts: Vec<&'static str> = self.states.iter().map(slug_of_state).collect();
+        let mut parts: Vec<&'static str> = self.states.iter().map(BuildState::key).collect();
         if self.out_of_date {
-            parts.push("outdated");
+            parts.push(OUTDATED_SLUG);
         }
         parts.join(",")
     }
 
-    /// Parse [`Self::slug`]: an unknown slug is dropped rather than turning
-    /// the whole filter to any, and only a value with nothing recognisable
-    /// falls back to everything, so a hand-edited or outdated URL still shows
-    /// a list rather than an error page.
+    /// Parse [`Self::slug`]. An unknown slug is dropped rather than turning the
+    /// whole filter to any, so a hand-edited URL still shows a list rather than
+    /// an error page; one with nothing recognisable is everything, which is
+    /// what an empty filter already means.
     #[must_use]
     pub fn from_slug(value: &str) -> Self {
-        let mut states = StateSet::empty();
-        let mut out_of_date = false;
-        let mut recognised = false;
-        for part in value.split(',') {
-            let part = part.trim();
-            if part.is_empty() || part == "any" {
-                continue;
-            }
-            if part == "outdated" {
-                out_of_date = true;
-                recognised = true;
-            } else if let Some(state) = state_from_slug(part) {
-                states.insert(state);
-                recognised = true;
-            }
-        }
-        if recognised {
-            Self {
-                states,
-                out_of_date,
-            }
-        } else {
-            Self::ANY
-        }
+        value
+            .split(',')
+            .map(str::trim)
+            .fold(Self::ANY, |filter, part| match part {
+                OUTDATED_SLUG => Self {
+                    out_of_date: true,
+                    ..filter
+                },
+                _ => match BuildState::from_key(part) {
+                    Some(state) => {
+                        let mut states = filter.states;
+                        states.insert(state);
+                        Self { states, ..filter }
+                    }
+                    None => filter,
+                },
+            })
     }
 
     /// Whether the underlying state and out-of-date flag answer to this filter.
@@ -294,29 +280,32 @@ impl StatusFilter {
     }
 }
 
-/// The URL slug for one build state.
-fn slug_of_state(state: BuildState) -> &'static str {
-    match state {
-        BuildState::Active => "building",
-        BuildState::Successful => "successful",
-        BuildState::Failed => "failed",
-        BuildState::Enqueued => "enqueued",
-        BuildState::WaitingForDeps => "waiting",
-        BuildState::Publishing => "publishing",
+/// The out-of-date pseudo-status in a URL, beside the build states' keys.
+const OUTDATED_SLUG: &str = "outdated";
+
+/// The dropdown button text for a status filter: what is picked, or how many.
+#[must_use]
+pub fn filter_summary(status: StatusFilter) -> String {
+    match status.selected_count() {
+        0 => "Any status".to_string(),
+        // Name the one thing picked.
+        1 => status
+            .states
+            .iter()
+            .next()
+            .map_or_else(|| "Out of date".to_string(), state_label),
+        n => format!("{n} statuses"),
     }
 }
 
-/// Parse one build-state slug.
-fn state_from_slug(slug: &str) -> Option<BuildState> {
-    match slug {
-        "building" => Some(BuildState::Active),
-        "successful" => Some(BuildState::Successful),
-        "failed" => Some(BuildState::Failed),
-        "enqueued" => Some(BuildState::Enqueued),
-        "waiting" => Some(BuildState::WaitingForDeps),
-        "publishing" => Some(BuildState::Publishing),
-        _ => None,
-    }
+/// A state as a filter option names it: its label, capitalised.
+#[must_use]
+pub fn state_label(state: BuildState) -> String {
+    let label = state.label();
+    let mut chars = label.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// Case-insensitive substring match.
@@ -345,6 +334,29 @@ fn status_rank(status: BuildState) -> u8 {
     }
 }
 
+/// Every state, in the order a status sort puts them: what the status filter
+/// lists, so its options read in the same order as the column they filter.
+#[must_use]
+pub fn states_by_attention() -> [BuildState; 6] {
+    let mut states = BuildState::ALL;
+    // Stable, so states of equal rank keep their discriminant order.
+    states.sort_by_key(|state| status_rank(*state));
+    states
+}
+
+/// Sort `items` by `key` in `dir`.
+///
+/// The key is computed once per row rather than once per comparison, which
+/// matters for the lowered names most columns sort by. Both directions keep
+/// ties in the order they arrived in: descending reverses the key, not the
+/// result.
+fn by_dir<T, K: Ord>(items: &mut [T], dir: SortDir, mut key: impl FnMut(&T) -> K) {
+    match dir {
+        SortDir::Asc => items.sort_by_cached_key(key),
+        SortDir::Desc => items.sort_by_cached_key(|item| Reverse(key(item))),
+    }
+}
+
 pub fn filter_packages<'a>(
     packages: impl IntoIterator<Item = &'a SimplePackage>,
     query: &str,
@@ -362,40 +374,24 @@ pub fn filter_packages<'a>(
 }
 
 pub fn sort_packages(packages: &mut [SimplePackage], sort: Sort) {
-    // Every column but status and size orders by name: a package row carries
-    // no timestamp, worker, duration or peak memory of its own, so those
-    // headers stay interchangeable by falling back to the name rather than
-    // presenting an ordering that has nothing to do with the column. The
-    // lowered name is computed once per row rather than once per comparison,
-    // and `Reverse` keeps ties in place exactly as the old per-comparison
-    // `.reverse()` did.
-    if !matches!(sort.key, SortKey::Status | SortKey::Size) {
-        match sort.dir {
-            SortDir::Asc => packages.sort_by_cached_key(|p| p.name.to_lowercase()),
-            SortDir::Desc => {
-                packages.sort_by_cached_key(|p| std::cmp::Reverse(p.name.to_lowercase()));
-            }
+    match sort.key {
+        // An out-of-date package is a package needing attention, so it ranks
+        // with the unhealthy ones rather than with the successes.
+        SortKey::Status => by_dir(packages, sort.dir, |p| {
+            (status_rank(p.status), !p.out_of_date)
+        }),
+        // `Option`'s own ordering is what this wants: `None` sorts below every
+        // `Some`, so unrecorded sizes group at one end rather than among the
+        // small ones, and land last under the descending order a Size column
+        // opens in.
+        SortKey::Size => by_dir(packages, sort.dir, |p| p.total_size),
+        // A package row carries no timestamp, worker, duration or peak memory
+        // of its own, so those headers fall back to the name rather than
+        // presenting an ordering that has nothing to do with the column.
+        SortKey::Name | SortKey::Time | SortKey::Worker | SortKey::Duration | SortKey::Memory => {
+            by_dir(packages, sort.dir, |p| p.name.to_lowercase());
         }
-        return;
     }
-    packages.sort_by(|a, b| {
-        let ordering = match sort.key {
-            // An out-of-date package is a package needing attention, so it
-            // ranks with the unhealthy ones rather than with the successes.
-            SortKey::Status => (status_rank(a.status), !a.out_of_date)
-                .cmp(&(status_rank(b.status), !b.out_of_date)),
-            // `Option`'s own ordering is what this wants: `None` sorts below
-            // every `Some`, so unrecorded sizes group at one end rather than
-            // among the small ones, and land last under the descending order a
-            // Size column opens in. (Size is the only other key that reaches
-            // here; the rest returned above.)
-            _ => a.total_size.cmp(&b.total_size),
-        };
-        match sort.dir {
-            SortDir::Asc => ordering,
-            SortDir::Desc => ordering.reverse(),
-        }
-    });
 }
 
 pub fn filter_builds(builds: &[Build], query: &str, status: StatusFilter) -> Vec<Build> {
@@ -430,84 +426,305 @@ fn build_id(build: &Build) -> String {
 }
 
 pub fn sort_builds(builds: &mut [Build], sort: Sort) {
-    // The string-keyed columns lower once per row rather than once per
-    // comparison. The cached keys mirror the old comparator arm for arm --
-    // including newest-first ties -- with `Reverse` standing in for the
-    // per-comparison `.reverse()`, so ties keep their order in both
-    // directions exactly as before.
     match sort.key {
-        SortKey::Name => {
-            match sort.dir {
-                // A package's own builds are then newest-first, so the groups
-                // read as histories rather than as an arbitrary jumble.
-                SortDir::Asc => builds.sort_by_cached_key(|b| {
-                    (b.pkg_name.to_lowercase(), std::cmp::Reverse(b.number))
-                }),
-                SortDir::Desc => builds.sort_by_cached_key(|b| {
-                    std::cmp::Reverse((b.pkg_name.to_lowercase(), std::cmp::Reverse(b.number)))
-                }),
-            }
-            return;
-        }
+        // A package's own builds are then newest-first, so the groups read as
+        // histories rather than as an arbitrary jumble.
+        SortKey::Name => by_dir(builds, sort.dir, |b| {
+            (b.pkg_name.to_lowercase(), Reverse(b.number))
+        }),
         // Unclaimed builds have no worker. `None` sorts before `Some`, so
-        // ascending puts the queue first and descending puts it last --
-        // either way they group together rather than scattering.
-        SortKey::Worker => {
-            match sort.dir {
-                // Within one worker, newest first, as the name grouping does.
-                SortDir::Asc => builds.sort_by_cached_key(|b| {
-                    (
-                        b.worker_name.as_deref().map(str::to_lowercase),
-                        std::cmp::Reverse(b.number),
-                    )
-                }),
-                // The whole key reversed, not each part: reversing only the
-                // name inside the `Option` would keep the queue first.
-                SortDir::Desc => builds.sort_by_cached_key(|b| {
-                    std::cmp::Reverse((
-                        b.worker_name.as_deref().map(str::to_lowercase),
-                        std::cmp::Reverse(b.number),
-                    ))
-                }),
-            }
-            return;
-        }
-        _ => {}
+        // ascending puts the queue first and descending puts it last -- either
+        // way they group together rather than scattering. The whole key is
+        // reversed, not each part: reversing only the name inside the `Option`
+        // would keep the queue first. Within one worker, newest first.
+        SortKey::Worker => by_dir(builds, sort.dir, |b| {
+            (
+                b.worker_name.as_deref().map(str::to_lowercase),
+                Reverse(b.number),
+            )
+        }),
+        SortKey::Status => by_dir(builds, sort.dir, |b| status_rank(b.status)),
+        SortKey::Time => by_dir(builds, sort.dir, |b| b.start_time),
+        SortKey::Size => by_dir(builds, sort.dir, |b| b.size),
+        // A build still running has no end yet, so no duration. `None` sorts
+        // before `Some`, which under the descending order a Duration column
+        // opens in puts the unfinished builds last, after the longest -- the
+        // interesting end first. Ties are newest first for a stable readout.
+        SortKey::Duration => by_dir(builds, sort.dir, |b| (b.elapsed(), Reverse(b.number))),
+        // As with size, unrecorded peaks group at one end: `None` under every
+        // `Some`, and last under the descending order a Memory column opens in.
+        SortKey::Memory => by_dir(builds, sort.dir, |b| (b.peak_memory, Reverse(b.number))),
     }
-    builds.sort_by(|a, b| {
-        let ordering = match sort.key {
-            SortKey::Name | SortKey::Worker => {
-                unreachable!("string-keyed columns return above")
-            }
-            SortKey::Status => status_rank(a.status).cmp(&status_rank(b.status)),
-            SortKey::Time => a.start_time.cmp(&b.start_time),
-            SortKey::Size => a.size.cmp(&b.size),
-            // A build still running has no end yet, so no duration. `None`
-            // sorts before `Some`, which under the descending order a Duration
-            // column opens in puts the unfinished builds last, after the
-            // longest — the interesting end first.
-            SortKey::Duration => a
-                .elapsed()
-                .cmp(&b.elapsed())
-                // Ties are ordered newest first for a stable readout.
-                .then(b.number.cmp(&a.number)),
-            // As with size, unrecorded peaks group at one end: `None` under
-            // every `Some`, and last under the descending order a Memory
-            // column opens in.
-            SortKey::Memory => a
-                .peak_memory
-                .cmp(&b.peak_memory)
-                .then(b.number.cmp(&a.number)),
-        };
-        match sort.dir {
-            SortDir::Asc => ordering,
-            SortDir::Desc => ordering.reverse(),
+}
+
+/// How many rows a page holds.
+pub const PAGE_SIZE: usize = 100;
+
+/// One page of `items`, with the page number that was actually used.
+///
+/// The page is clamped rather than trusted. Narrowing a filter while on a later
+/// page leaves the requested page past the end of a now-shorter list, and an
+/// unclamped slice would render an empty table with no indication that the rows
+/// are simply somewhere else.
+#[must_use]
+pub fn paginate<T: Clone>(items: &[T], page: usize) -> Page<T> {
+    let info = PageInfo::at(page, items.len());
+    Page {
+        items: items[info.first..info.first + info.count].to_vec(),
+        info,
+    }
+}
+
+/// One page of a list, and where it sits in the whole.
+///
+/// Comparable so memoized pipelines can hold it: [`use_memo`] only keeps a
+/// value it can tell apart from the last one.
+///
+/// [`use_memo`]: dioxus::prelude::use_memo
+#[derive(PartialEq)]
+pub struct Page<T> {
+    pub items: Vec<T>,
+    pub info: PageInfo,
+}
+
+/// Where a page sits in a list: everything the pager shows, without the rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PageInfo {
+    /// Zero-based, and clamped to the list that actually exists.
+    pub index: usize,
+    /// At least one, so "page 1 of 1" is what an empty list reads as.
+    pub pages: usize,
+    /// Index of the first row on this page, for the human-readable range.
+    pub first: usize,
+    /// How many rows this page holds.
+    pub count: usize,
+    pub total: usize,
+}
+
+impl PageInfo {
+    /// Page `page` of a list of `total` rows, clamped to the last page there
+    /// is. Every field follows from that one clamped index, so the range and
+    /// the page number cannot disagree.
+    #[must_use]
+    pub fn at(page: usize, total: usize) -> Self {
+        let pages = total.div_ceil(PAGE_SIZE).max(1);
+        let index = page.min(pages - 1);
+        let first = index * PAGE_SIZE;
+        Self {
+            index,
+            pages,
+            first,
+            count: (total - first).min(PAGE_SIZE),
+            total,
         }
-    });
+    }
+}
+
+impl SortKey {
+    /// The spelling used in a URL.
+    #[must_use]
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Status => "status",
+            Self::Time => "time",
+            Self::Size => "size",
+            Self::Worker => "worker",
+            Self::Duration => "duration",
+            Self::Memory => "memory",
+        }
+    }
+
+    fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "name" => Some(Self::Name),
+            "status" => Some(Self::Status),
+            "time" => Some(Self::Time),
+            "size" => Some(Self::Size),
+            "worker" => Some(Self::Worker),
+            "duration" => Some(Self::Duration),
+            "memory" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+}
+
+impl SortDir {
+    #[must_use]
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+
+    fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "asc" => Some(Self::Asc),
+            "desc" => Some(Self::Desc),
+            _ => None,
+        }
+    }
+}
+
+/// The filter and sort of a list, carried in the URL's query string.
+///
+/// A spread query segment (`?:..view`), so the *whole* query is this type and
+/// its encoding is ours. That is what makes it usable at all: dioxus writes a
+/// named parameter as `name=` whether or not it has a value, so `?:status`
+/// alone put a dangling `?status=` on every unfiltered URL. Owning the string
+/// means a default view writes nothing.
+///
+/// One `?` survives, because the generated `Display` emits it before this type
+/// is consulted (`router-macro/src/query.rs`, `write!(f, "?{}", ...)`), so an
+/// unfiltered list is `/packages?`. That is DioxusLabs/dioxus#5792, and #5793
+/// is the one-line fix; when it lands the trailing `?` disappears with no
+/// change here. `an_empty_search_leaves_no_trace_in_the_url` allows it and
+/// nothing else.
+///
+/// Values are comma-joined slugs, since a URL is read and shared:
+/// `?s=failed&o=name-desc` and `?s=enqueued,waiting-for-deps` say what `?s=2`
+/// does not.
+/// Neither `&` nor `=` is in dioxus's `QUERY_ASCII_SET`, so they survive
+/// unescaped and the query stays legible.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ViewParams {
+    pub status: Option<StatusFilter>,
+    /// `None` means "the list's own default order", so the common view carries
+    /// no `o=` at all rather than spelling out what it would have done anyway.
+    pub sort: Option<Sort>,
+    pub dependencies: bool,
+}
+
+impl ViewParams {
+    /// Build from live control state, dropping anything that matches the
+    /// list's default so an untouched list has a clean URL.
+    #[must_use]
+    pub fn from_state(
+        status: StatusFilter,
+        sort: Sort,
+        default_sort: Sort,
+        dependencies: bool,
+    ) -> Self {
+        Self {
+            status: (!status.is_any()).then_some(status),
+            sort: (sort != default_sort).then_some(sort),
+            dependencies,
+        }
+    }
+
+    /// The sort to apply, given what this list would use by default.
+    #[must_use]
+    pub fn sort_or(&self, default_sort: Sort) -> Sort {
+        self.sort.unwrap_or(default_sort)
+    }
+
+    #[must_use]
+    pub fn status_filter(&self) -> StatusFilter {
+        self.status.unwrap_or(StatusFilter::ANY)
+    }
+
+    /// A view filtered to one status and nothing else, for links into a list.
+    ///
+    /// `dependencies: true`: ignored by the Builds list, which has no such
+    /// toggle, but load-bearing for the Packages list -- a dashboard card can
+    /// include a dependency package (a failed build blocks its parent
+    /// regardless of who asked for it), and the link this builds has to show
+    /// the same rows the card counted, or "View all" lands on a list missing
+    /// the very package that sent the reader there.
+    #[must_use]
+    pub fn with_status(status: BuildState) -> Self {
+        Self {
+            status: Some(StatusFilter::with_state(status)),
+            dependencies: true,
+            ..Self::default()
+        }
+    }
+
+    /// A view filtered to these statuses and nothing else, for links into a
+    /// list — the stuck queue lands on Builds with both queued states ticked.
+    #[must_use]
+    pub fn with_states(statuses: &[BuildState]) -> Self {
+        Self {
+            status: Some(StatusFilter::with_states(statuses)),
+            ..Self::default()
+        }
+    }
+
+    /// A view filtered to out-of-date packages and nothing else.
+    ///
+    /// `dependencies: true`, for the same reason as [`Self::with_status`]: a
+    /// dependency package can be out of date too.
+    #[must_use]
+    pub fn with_out_of_date() -> Self {
+        Self {
+            status: Some(StatusFilter::OUTDATED),
+            dependencies: true,
+            ..Self::default()
+        }
+    }
+
+    /// A view sorted by this column and nothing else, for links into a list.
+    #[must_use]
+    pub fn with_sort(key: SortKey, dir: SortDir) -> Self {
+        Self {
+            sort: Some(Sort { key, dir }),
+            ..Self::default()
+        }
+    }
+}
+
+impl std::fmt::Display for ViewParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut sep = "";
+        if let Some(status) = self.status
+            && !status.is_any()
+        {
+            write!(f, "s={}", status.slug())?;
+            sep = "&";
+        }
+        if let Some(sort) = self.sort {
+            write!(f, "{sep}o={}-{}", sort.key.slug(), sort.dir.slug())?;
+            sep = "&";
+        }
+        if self.dependencies {
+            write!(f, "{sep}d=1")?;
+        }
+        Ok(())
+    }
+}
+
+impl From<&str> for ViewParams {
+    /// Parse what [`Display`] writes. Unrecognised keys and values are ignored
+    /// rather than rejected: a hand-edited or outdated URL should still show a
+    /// list, and `FromQuery` has nowhere to report an error to anyway.
+    fn from(query: &str) -> Self {
+        let mut view = Self::default();
+        for (key, value) in query.split('&').filter_map(|p| p.split_once('=')) {
+            match key {
+                "s" => {
+                    let filter = StatusFilter::from_slug(value);
+                    view.status = (!filter.is_any()).then_some(filter);
+                }
+                "o" => {
+                    if let Some((key, dir)) = value.split_once('-')
+                        && let (Some(key), Some(dir)) =
+                            (SortKey::from_slug(key), SortDir::from_slug(dir))
+                    {
+                        view.sort = Some(Sort { key, dir });
+                    }
+                }
+                "d" => view.dependencies = value == "1",
+                _ => {}
+            }
+        }
+        view
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// A default view writes nothing, which is what keeps `/packages?` from
     /// becoming `/packages?s=any&o=name-asc&d=0`.
@@ -551,7 +768,6 @@ mod tests {
                 status: Some(StatusFilter::OUTDATED),
                 sort: None,
                 dependencies: false,
-                ..ViewParams::default()
             },
             ViewParams::with_states(&[BuildState::Enqueued, BuildState::WaitingForDeps]),
             ViewParams {
@@ -561,25 +777,7 @@ mod tests {
                 }),
                 sort: None,
                 dependencies: false,
-                ..ViewParams::default()
             },
-            // The log's own dimensions, which share the same query encoding.
-            ViewParams::for_logs(Some(Severity::Warning), false, None),
-            ViewParams::for_logs(Some(Severity::Error), true, None),
-            ViewParams::for_logs(None, false, None).with_kind(Some("build.started".to_string())),
-            ViewParams::about(aurcache_client::PackageRef::from("hello"))
-                .with_kind(Some("build.queued".to_string())),
-            ViewParams::for_logs(None, true, None),
-            ViewParams::about(aurcache_client::PackageRef::from("gtk+")),
-            ViewParams::about(aurcache_client::BuildRef {
-                pkgbase: "hello".to_string(),
-                number: 7,
-            }),
-            ViewParams::for_logs(
-                Some(Severity::Error),
-                true,
-                Some(aurcache_client::WorkerRef::from("builder-01").into()),
-            ),
             ViewParams {
                 status: Some(StatusFilter::with_state(BuildState::Failed)),
                 sort: Some(Sort {
@@ -587,24 +785,11 @@ mod tests {
                     dir: SortDir::Desc,
                 }),
                 dependencies: true,
-                ..ViewParams::default()
             },
         ] {
             let encoded = view.to_string();
             assert_eq!(ViewParams::from(encoded.as_str()), view, "{encoded:?}");
         }
-    }
-
-    /// A pkgbase may contain `+`, which some query parsers read as a space;
-    /// no reference contains a space, so one is always a `+`.
-    #[test]
-    fn a_plus_read_back_as_a_space_is_still_a_plus() {
-        let view = ViewParams::from("e=pkg:gtk 3");
-        assert_eq!(
-            view.about,
-            Some(aurcache_client::PackageRef::from("gtk+3").into())
-        );
-        assert_eq!(ViewParams::from("e=nonsense").about, None);
     }
 
     /// A hand-edited or outdated URL shows a list rather than an error: unknown
@@ -628,14 +813,13 @@ mod tests {
         assert_eq!(ViewParams::from("s=bogus"), ViewParams::default());
         // A set round-trips as comma-joined slugs.
         assert_eq!(
-            ViewParams::from("s=enqueued,waiting").status,
+            ViewParams::from("s=enqueued,waiting-for-deps").status,
             Some(StatusFilter::with_states(&[
                 BuildState::Enqueued,
                 BuildState::WaitingForDeps
             ]))
         );
     }
-    use super::*;
 
     fn package(name: &str, status: BuildState, out_of_date: bool) -> SimplePackage {
         SimplePackage {
@@ -719,14 +903,14 @@ mod tests {
         let first = paginate(&items, 0);
         assert_eq!(first.items.len(), PAGE_SIZE);
         assert_eq!(first.items[0], 0);
-        assert_eq!(first.index, 0);
-        assert_eq!(first.pages, 3);
-        assert_eq!(first.first, 0);
-        assert_eq!(first.total, 250);
+        assert_eq!(first.info.index, 0);
+        assert_eq!(first.info.pages, 3);
+        assert_eq!(first.info.first, 0);
+        assert_eq!(first.info.total, 250);
 
         let second = paginate(&items, 1);
         assert_eq!(second.items[0], PAGE_SIZE);
-        assert_eq!(second.first, PAGE_SIZE);
+        assert_eq!(second.info.first, PAGE_SIZE);
 
         // The last page is the remainder, not a short read of a full one.
         let last = paginate(&items, 2);
@@ -742,9 +926,20 @@ mod tests {
         let items: Vec<usize> = (0..5).collect();
         let page = paginate(&items, 7);
 
-        assert_eq!(page.index, 0);
-        assert_eq!(page.pages, 1);
+        assert_eq!(page.info.index, 0);
+        assert_eq!(page.info.pages, 1);
         assert_eq!(page.items.len(), 5);
+    }
+
+    /// A page past the end is described from the clamped page throughout: the
+    /// range and the page number come from one index, so they cannot disagree.
+    #[test]
+    fn a_page_past_the_end_is_described_as_the_last_one() {
+        let info = PageInfo::at(9, 250);
+        assert_eq!(info.index, 2);
+        assert_eq!(info.first, 200);
+        assert_eq!(info.count, 50);
+        assert_eq!(info.pages, 3);
     }
 
     /// An empty list is one empty page, so the pager reads "1 of 1" rather
@@ -753,10 +948,10 @@ mod tests {
     fn an_empty_list_is_a_single_empty_page() {
         let page = paginate::<usize>(&[], 3);
 
-        assert_eq!(page.pages, 1);
-        assert_eq!(page.index, 0);
+        assert_eq!(page.info.pages, 1);
+        assert_eq!(page.info.index, 0);
         assert!(page.items.is_empty());
-        assert_eq!(page.total, 0);
+        assert_eq!(page.info.total, 0);
     }
 
     /// The list shows `package/number`, so that is what typing it must match.
@@ -1148,8 +1343,8 @@ mod tests {
         }
         // Sets join with commas, in a stable order.
         let set = StatusFilter::with_states(&[BuildState::Enqueued, BuildState::WaitingForDeps]);
-        assert_eq!(set.slug(), "enqueued,waiting");
-        assert_eq!(StatusFilter::from_slug("enqueued,waiting"), set);
+        assert_eq!(set.slug(), "enqueued,waiting-for-deps");
+        assert_eq!(StatusFilter::from_slug("enqueued,waiting-for-deps"), set);
         // The flag joins the states.
         let combined = StatusFilter {
             states: StateSet::from_slice(&[BuildState::Failed]),
@@ -1196,6 +1391,28 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_option_is_its_state_label_capitalised() {
+        assert_eq!(state_label(BuildState::Active), "Building");
+        assert_eq!(state_label(BuildState::WaitingForDeps), "Waiting for deps");
+    }
+
+    /// The filter lists its states in the order a status sort shows them.
+    #[test]
+    fn the_status_filter_lists_states_by_attention() {
+        assert_eq!(
+            states_by_attention(),
+            [
+                BuildState::Failed,
+                BuildState::Active,
+                BuildState::Publishing,
+                BuildState::WaitingForDeps,
+                BuildState::Enqueued,
+                BuildState::Successful,
+            ]
+        );
+    }
+
+    #[test]
     fn the_dropdown_button_names_one_choice_and_counts_the_rest() {
         assert_eq!(filter_summary(StatusFilter::ANY), "Any status");
         assert_eq!(
@@ -1211,653 +1428,4 @@ mod tests {
             "2 statuses"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Shared controls
-// ---------------------------------------------------------------------------
-
-use crate::routes::Route;
-use aurcache_common::build_state::BuildState as State;
-use dioxus::prelude::*;
-
-/// A list card's title, with an optional action on the right.
-///
-/// Shared so the two lists cannot drift: the packages header sat in a flex row
-/// with a button and the builds header was a bare `h2`, which made one block a
-/// button-height taller than the other. `min-h-8` matches a `btn-sm`, so the
-/// header occupies the same height whether or not it has an action.
-#[component]
-pub fn ListHeader(title: String, children: Element) -> Element {
-    rsx! {
-        div { class: "flex items-center gap-2 min-h-8",
-            h2 { class: "card-title", "{title}" }
-            div { class: "flex-1" }
-            {children}
-        }
-    }
-}
-
-/// How long the box has to be still before the address bar follows it.
-///
-/// The list filters on every keystroke; only the URL waits. Browsers rate-limit
-/// history writes — Safari at roughly a hundred per thirty seconds — and typing
-/// a word is easily a dozen.
-const URL_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
-
-/// A search term that lives in the URL fragment, so a search can be linked to.
-///
-/// Seeded from the route on the way in and written back as it changes, always
-/// with `replace` rather than `push`: one history entry per keystroke would turn
-/// Back into a backspace.
-///
-/// `to_route` builds the route for a given term, which is all that differs
-/// between the pages doing this — keeping it in one place is what stops the
-/// fragment meaning something different on each.
-///
-/// `sync` is a parameter rather than the caller skipping this hook, because a
-/// hook that is sometimes called breaks the order Dioxus identifies them by.
-/// The packages list passes `false` when it is rendered behind the add dialog,
-/// which owns the fragment there.
-pub fn use_url_search(
-    initial: String,
-    sync: bool,
-    // Not a `fn` pointer: the builds list has a status filter to carry through
-    // the same URL, so the route a term maps to depends on more than the term.
-    to_route: impl Fn(String) -> Route + Clone + 'static,
-) -> Signal<String> {
-    let term = use_signal(|| initial);
-
-    // A timer per keystroke rather than one writer looping for the life of the
-    // screen: an idle list then costs nothing, where a loop would wake every
-    // debounce interval whether or not anything was typed.
-    use_effect(move || {
-        if !sync {
-            return;
-        }
-        // Reads `term`, so it re-runs when the box changes and not on every
-        // unrelated render.
-        let value = term();
-        let to_route = to_route.clone();
-        spawn(async move {
-            gloo_timers::future::sleep(URL_DEBOUNCE).await;
-            // Only the last keystroke of a burst writes: the earlier timers find
-            // the box has moved on and do nothing.
-            if *term.peek() == value {
-                navigator().replace(to_route(value));
-            }
-        });
-    });
-
-    term
-}
-
-/// Search box and status filter, shared by both lists.
-///
-/// `children` is rendered inline after the status filter, for a list that has
-/// one more control to sit beside it — the packages list puts its "show
-/// dependencies" toggle there. Nothing passes it on the builds list.
-#[component]
-pub fn ListControls(
-    query: Signal<String>,
-    status: Signal<StatusFilter>,
-    placeholder: String,
-    shown: usize,
-    total: usize,
-    /// Whether the "Out of date" pseudo-status is offered. Packages have the
-    /// backing flag; builds do not.
-    show_outdated: bool,
-    children: Element,
-) -> Element {
-    let mut query = query;
-    let mut status = status;
-
-    rsx! {
-        div { class: "flex flex-wrap items-center gap-2",
-            input {
-                class: "input input-bordered input-sm w-full sm:w-64",
-                r#type: "search",
-                placeholder,
-                value: "{query}",
-                aria_label: "Filter by name",
-                oninput: move |e| query.set(e.value()),
-            }
-            div { class: "dropdown",
-                div {
-                    tabindex: "0",
-                    role: "button",
-                    class: "btn btn-sm btn-outline",
-                    aria_label: "Filter by status",
-                    "{filter_summary(status())}"
-                }
-                ul {
-                    tabindex: "0",
-                    class: "dropdown-content menu bg-base-100 rounded-box z-[1] w-56 p-2 shadow",
-                    if show_outdated {
-                        li {
-                            label { class: "label cursor-pointer gap-2",
-                                input {
-                                    r#type: "checkbox",
-                                    class: "checkbox checkbox-sm",
-                                    checked: status().out_of_date,
-                                    onchange: move |_| status.set(status().toggled_outdated()),
-                                }
-                                span { class: "label-text", "Out of date" }
-                            }
-                        }
-                    }
-                    for state in [
-                        State::Failed,
-                        State::Active,
-                        State::Publishing,
-                        State::WaitingForDeps,
-                        State::Enqueued,
-                        State::Successful,
-                    ] {
-                        li { key: "{state.as_i32()}",
-                            label { class: "label cursor-pointer gap-2",
-                                input {
-                                    r#type: "checkbox",
-                                    class: "checkbox checkbox-sm",
-                                    checked: status().states.contains(state),
-                                    onchange: move |_| status.set(status().toggled_state(state)),
-                                }
-                                span { class: "label-text", "{state_label(state)}" }
-                            }
-                        }
-                    }
-                }
-            }
-            {children}
-            div { class: "flex-1" }
-            // Only worth saying when a filter is actually hiding something.
-            if shown != total {
-                span { class: "text-sm opacity-60", "{shown} of {total}" }
-            }
-        }
-    }
-}
-
-fn state_label(state: State) -> &'static str {
-    match state {
-        State::Active => "Building",
-        State::Successful => "Successful",
-        State::Failed => "Failed",
-        State::Enqueued => "Enqueued",
-        State::WaitingForDeps => "Waiting for deps",
-        State::Publishing => "Publishing",
-    }
-}
-
-/// The dropdown button text for a filter: what is picked, or how many.
-fn filter_summary(status: StatusFilter) -> String {
-    if status.is_any() {
-        return "Any status".to_string();
-    }
-    // Name the one thing picked; count the rest.
-    let mut labels: Vec<&'static str> = status.states.iter().map(state_label).collect();
-    if status.out_of_date {
-        labels.push("Out of date");
-    }
-    match labels.as_slice() {
-        [] => "Any status".to_string(),
-        [only] => (*only).to_string(),
-        _ => format!("{} statuses", status.selected_count()),
-    }
-}
-
-/// A column header that sorts the list when clicked.
-#[component]
-pub fn SortableHeader(
-    label: String,
-    column: SortKey,
-    sort: Signal<Sort>,
-    class: String,
-) -> Element {
-    let mut sort = sort;
-    let active = sort().key == column;
-    // Conveys the ordering to assistive tech, which the arrow only shows
-    // visually.
-    let aria_sort = if active {
-        match sort().dir {
-            SortDir::Asc => "ascending",
-            SortDir::Desc => "descending",
-        }
-    } else {
-        "none"
-    };
-
-    rsx! {
-        th { class,
-            button {
-                // `inline-flex`, not `flex`: a block-level flex container fills
-                // the cell and packs its label at the left, so a `text-right`
-                // header (Size) sorted the same as the values below it but did
-                // not line up with them. Inline-level means the cell's own
-                // text-align places it.
-                class: "inline-flex items-center gap-1 hover:opacity-100 opacity-90",
-                onclick: move |_| sort.set(sort().toggled(column)),
-                aria_sort,
-                "{label}"
-                if active {
-                    span { class: "text-xs opacity-70", "{sort().dir.arrow()}" }
-                }
-            }
-        }
-    }
-}
-
-/// How many rows a page holds.
-///
-/// 100 because that is what both lists previously fetched — the behaviour
-/// people are used to — except that it was a ceiling with nothing beyond it
-/// rather than the first page of everything.
-pub const PAGE_SIZE: usize = 100;
-
-/// A list's table. daisyUI's cell padding spends a fifth of a phone's width on
-/// two columns, so it is halved below `md`.
-pub const LIST_TABLE: &str = "table table-zebra max-md:[&_td]:px-2 max-md:[&_th]:px-2";
-
-/// One page of `items`, with the page number that was actually used.
-///
-/// The page is clamped rather than trusted. Narrowing a filter while on a later
-/// page leaves the requested page past the end of a now-shorter list, and an
-/// unclamped slice would render an empty table with no indication that the rows
-/// are simply somewhere else.
-#[must_use]
-pub fn paginate<T: Clone>(items: &[T], page: usize) -> Page<T> {
-    let pages = items.len().div_ceil(PAGE_SIZE).max(1);
-    let index = page.min(pages - 1);
-    let start = index * PAGE_SIZE;
-    let end = (start + PAGE_SIZE).min(items.len());
-    Page {
-        items: items[start..end].to_vec(),
-        index,
-        pages,
-        first: start,
-        total: items.len(),
-    }
-}
-
-/// One page of a list, and where it sits in the whole.
-///
-/// Comparable so memoized pipelines can hold it: [`use_memo`] only keeps a
-/// value it can tell apart from the last one.
-#[derive(PartialEq)]
-pub struct Page<T> {
-    pub items: Vec<T>,
-    /// Zero-based, and clamped to the list that actually exists.
-    pub index: usize,
-    /// At least one, so "page 1 of 1" is what an empty list reads as.
-    pub pages: usize,
-    /// Index of the first row on this page, for the human-readable range.
-    pub first: usize,
-    pub total: usize,
-}
-
-/// Page controls, shown only when there is more than one page.
-///
-/// Takes plain numbers rather than the [`Page`] itself: a component's props
-/// must be `Clone + PartialEq`, and a generic payload would impose that on
-/// every list this is used from for no benefit — it only ever renders counts.
-#[component]
-pub fn Pager(
-    page: Signal<usize>,
-    index: usize,
-    pages: usize,
-    first: usize,
-    count: usize,
-    total: usize,
-) -> Element {
-    let mut page = page;
-    if pages <= 1 {
-        return rsx! {};
-    }
-    let (from, to) = (first + 1, first + count);
-
-    rsx! {
-        div { class: "flex flex-wrap items-center gap-2 mt-2",
-            span { class: "text-sm opacity-60", "Showing {from}\u{2013}{to} of {total}" }
-            div { class: "flex-1" }
-            div { class: "join",
-                button {
-                    class: "btn btn-sm join-item",
-                    disabled: index == 0,
-                    // Not `page -= 1`: the rendered page is clamped, so the
-                    // signal can be further along than what is on screen, and
-                    // stepping back from the stale value would appear to do
-                    // nothing.
-                    onclick: move |_| page.set(index.saturating_sub(1)),
-                    aria_label: "Previous page",
-                    "\u{2039}"
-                }
-                button { class: "btn btn-sm join-item no-animation", disabled: true,
-                    "Page {index + 1} of {pages}"
-                }
-                button {
-                    class: "btn btn-sm join-item",
-                    disabled: index + 1 >= pages,
-                    onclick: move |_| page.set(index + 1),
-                    aria_label: "Next page",
-                    "\u{203a}"
-                }
-            }
-        }
-    }
-}
-
-impl SortKey {
-    /// The spelling used in a URL.
-    #[must_use]
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Status => "status",
-            Self::Time => "time",
-            Self::Size => "size",
-            Self::Worker => "worker",
-            Self::Duration => "duration",
-            Self::Memory => "memory",
-        }
-    }
-
-    fn from_slug(slug: &str) -> Option<Self> {
-        match slug {
-            "name" => Some(Self::Name),
-            "status" => Some(Self::Status),
-            "time" => Some(Self::Time),
-            "size" => Some(Self::Size),
-            "worker" => Some(Self::Worker),
-            "duration" => Some(Self::Duration),
-            "memory" => Some(Self::Memory),
-            _ => None,
-        }
-    }
-}
-
-impl SortDir {
-    #[must_use]
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::Asc => "asc",
-            Self::Desc => "desc",
-        }
-    }
-
-    fn from_slug(slug: &str) -> Option<Self> {
-        match slug {
-            "asc" => Some(Self::Asc),
-            "desc" => Some(Self::Desc),
-            _ => None,
-        }
-    }
-}
-
-/// The filter and sort of a list, carried in the URL's query string.
-///
-/// A spread query segment (`?:..view`), so the *whole* query is this type and
-/// its encoding is ours. That is what makes it usable at all: dioxus writes a
-/// named parameter as `name=` whether or not it has a value, so `?:status`
-/// alone put a dangling `?status=` on every unfiltered URL. Owning the string
-/// means a default view writes nothing.
-///
-/// One `?` survives, because the generated `Display` emits it before this type
-/// is consulted (`router-macro/src/query.rs`, `write!(f, "?{}", ...)`), so an
-/// unfiltered list is `/packages?`. That is DioxusLabs/dioxus#5792, and #5793
-/// is the one-line fix; when it lands the trailing `?` disappears with no
-/// change here. `an_empty_search_leaves_no_trace_in_the_url` allows it and
-/// nothing else.
-///
-/// Values are comma-joined slugs, since a URL is read and shared:
-/// `?s=failed&o=name-desc` and `?s=enqueued,waiting` say what `?s=2` does not.
-/// Neither `&` nor `=` is in dioxus's `QUERY_ASCII_SET`, so they survive
-/// unescaped and the query stays legible.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct ViewParams {
-    pub status: Option<StatusFilter>,
-    /// `None` means "the list's own default order", so the common view carries
-    /// no `o=` at all rather than spelling out what it would have done anyway.
-    pub sort: Option<Sort>,
-    pub dependencies: bool,
-    /// Logs only: show this severity and worse. `None` is the whole log.
-    pub severity: Option<Severity>,
-    /// Logs only: only what happened since the server last started.
-    pub since_boot: bool,
-    /// Logs only: only entries naming this, in any role.
-    pub about: Option<EntityRef>,
-    /// Logs only: only entries of this kind.
-    pub kind: Option<String>,
-}
-
-impl ViewParams {
-    /// Build from live control state, dropping anything that matches the
-    /// list's default so an untouched list has a clean URL.
-    #[must_use]
-    pub fn from_state(
-        status: StatusFilter,
-        sort: Sort,
-        default_sort: Sort,
-        dependencies: bool,
-    ) -> Self {
-        Self {
-            status: (!status.is_any()).then_some(status),
-            sort: (sort != default_sort).then_some(sort),
-            dependencies,
-            ..Self::default()
-        }
-    }
-
-    /// Build from the log's own controls. A separate constructor because the
-    /// log shares none of the other lists' dimensions -- it has no status and
-    /// no sort, and its filters are applied by the server rather than here.
-    #[must_use]
-    pub fn for_logs(
-        severity: Option<Severity>,
-        since_boot: bool,
-        about: Option<EntityRef>,
-    ) -> Self {
-        Self {
-            // `Info` is every severity there is, so it is not a filter; keeping
-            // it out of the URL is what stops an untouched log carrying one.
-            severity: severity.filter(|&s| s != Severity::Info),
-            since_boot,
-            about,
-            ..Self::default()
-        }
-    }
-
-    /// The same view, narrowed to one kind of entry as well.
-    #[must_use]
-    pub fn with_kind(mut self, kind: Option<String>) -> Self {
-        self.kind = kind.filter(|kind| !kind.is_empty());
-        self
-    }
-
-    /// The log, narrowed to what names `entity`: where a page links to "its"
-    /// entries.
-    #[must_use]
-    pub fn about(entity: impl Into<EntityRef>) -> Self {
-        Self::for_logs(None, false, Some(entity.into()))
-    }
-
-    /// The sort to apply, given what this list would use by default.
-    #[must_use]
-    pub fn sort_or(&self, default_sort: Sort) -> Sort {
-        self.sort.unwrap_or(default_sort)
-    }
-
-    #[must_use]
-    pub fn status_filter(&self) -> StatusFilter {
-        self.status.unwrap_or(StatusFilter::ANY)
-    }
-
-    /// A view filtered to one status and nothing else, for links into a list.
-    ///
-    /// `dependencies: true`: ignored by the Builds list, which has no such
-    /// toggle, but load-bearing for the Packages list -- a dashboard card can
-    /// include a dependency package (a failed build blocks its parent
-    /// regardless of who asked for it), and the link this builds has to show
-    /// the same rows the card counted, or "View all" lands on a list missing
-    /// the very package that sent the reader there.
-    #[must_use]
-    pub fn with_status(status: BuildState) -> Self {
-        Self {
-            status: Some(StatusFilter::with_state(status)),
-            dependencies: true,
-            ..Self::default()
-        }
-    }
-
-    /// A view filtered to these statuses and nothing else, for links into a
-    /// list — the stuck queue lands on Builds with both queued states ticked.
-    #[must_use]
-    pub fn with_states(statuses: &[BuildState]) -> Self {
-        Self {
-            status: Some(StatusFilter::with_states(statuses)),
-            ..Self::default()
-        }
-    }
-
-    /// A view filtered to out-of-date packages and nothing else.
-    ///
-    /// `dependencies: true`, for the same reason as [`Self::with_status`]: a
-    /// dependency package can be out of date too.
-    #[must_use]
-    pub fn with_out_of_date() -> Self {
-        Self {
-            status: Some(StatusFilter::OUTDATED),
-            dependencies: true,
-            ..Self::default()
-        }
-    }
-
-    /// A view sorted by this column and nothing else, for links into a list.
-    #[must_use]
-    pub fn with_sort(key: SortKey, dir: SortDir) -> Self {
-        Self {
-            sort: Some(Sort { key, dir }),
-            ..Self::default()
-        }
-    }
-}
-
-impl std::fmt::Display for ViewParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut sep = "";
-        if let Some(status) = self.status
-            && !status.is_any()
-        {
-            write!(f, "s={}", status.slug())?;
-            sep = "&";
-        }
-        if let Some(sort) = self.sort {
-            write!(f, "{sep}o={}-{}", sort.key.slug(), sort.dir.slug())?;
-            sep = "&";
-        }
-        if self.dependencies {
-            write!(f, "{sep}d=1")?;
-            sep = "&";
-        }
-        if let Some(severity) = self.severity {
-            write!(f, "{sep}v={}", severity.slug())?;
-            sep = "&";
-        }
-        if self.since_boot {
-            write!(f, "{sep}b=1")?;
-            sep = "&";
-        }
-        if let Some(about) = &self.about {
-            write!(f, "{sep}e={about}")?;
-            sep = "&";
-        }
-        // Kinds are `domain.verb_object`: nothing in them needs escaping.
-        if let Some(kind) = &self.kind {
-            write!(f, "{sep}k={kind}")?;
-        }
-        Ok(())
-    }
-}
-
-impl From<&str> for ViewParams {
-    /// Parse what [`Display`] writes. Unrecognised keys and values are ignored
-    /// rather than rejected: a hand-edited or outdated URL should still show a
-    /// list, and `FromQuery` has nowhere to report an error to anyway.
-    fn from(query: &str) -> Self {
-        let mut view = Self::default();
-        for (key, value) in query.split('&').filter_map(|p| p.split_once('=')) {
-            match key {
-                "s" => {
-                    let filter = StatusFilter::from_slug(value);
-                    view.status = (!filter.is_any()).then_some(filter);
-                }
-                "o" => {
-                    if let Some((key, dir)) = value.split_once('-')
-                        && let (Some(key), Some(dir)) =
-                            (SortKey::from_slug(key), SortDir::from_slug(dir))
-                    {
-                        view.sort = Some(Sort { key, dir });
-                    }
-                }
-                "d" => view.dependencies = value == "1",
-                "v" => {
-                    view.severity = Severity::from_slug(value).filter(|&s| s != Severity::Info);
-                }
-                "b" => view.since_boot = value == "1",
-                // A pkgbase may hold `+`, which a query parser may already
-                // have turned into a space. No reference can contain a space,
-                // so turning one back is always right.
-                "e" => view.about = value.replace("%2B", "+").replace(' ', "+").parse().ok(),
-                "k" => view.kind = Some(value.to_string()).filter(|kind| !kind.is_empty()),
-                _ => {}
-            }
-        }
-        view
-    }
-}
-
-/// Keep the URL in step with the filter and sort controls.
-///
-/// `replace`, never `push`, for the same reason the search box uses it: a
-/// person narrowing a list is refining one view, not walking a trail, and Back
-/// should leave the list rather than undo a dropdown one notch at a time. That
-/// is also why this is one hook rather than one per control -- every change
-/// rewrites the whole route from live state, so the term and the controls
-/// cannot overwrite each other's half of the URL.
-///
-/// `to_route` reads the control signals itself, so this only has to fire when
-/// one of them changes; the term is read with `peek` because the search box
-/// already has its own debounced writer and subscribing here would race it.
-///
-/// `sync` matches `use_url_search`: the packages list passes `false` behind the
-/// add dialog, which owns the URL there. A parameter rather than the caller
-/// skipping the hook, because Dioxus identifies hooks by order.
-///
-/// The term is `None` on screens with no search box (the logs page): `Option`
-/// rather than a dummy signal, so no caller has to fabricate state the hook
-/// never reads.
-pub fn use_url_view(
-    term: Option<Signal<String>>,
-    sync: bool,
-    to_route: impl Fn(String) -> Route + Clone + 'static,
-) {
-    let read_term = move || term.map(|term| term.peek().clone()).unwrap_or_default();
-    // Seeded with the route we arrived on, *not* `None`. Starting empty made
-    // the first effect run navigate to the URL the page was already showing;
-    // that re-entered the router on mount and the app intermittently failed to
-    // come up at all. Nothing is written until a control actually moves.
-    let seed = to_route.clone();
-    let mut previous = use_signal(move || seed(read_term()));
-    use_effect(move || {
-        if !sync {
-            return;
-        }
-        let route = to_route(term.map(|term| term.peek().clone()).unwrap_or_default());
-        // Unchanged means an unrelated render rather than a control moving, and
-        // replacing again would be a wasted navigation.
-        if *previous.peek() == route {
-            return;
-        }
-        previous.set(route.clone());
-        navigator().replace(route);
-    });
 }

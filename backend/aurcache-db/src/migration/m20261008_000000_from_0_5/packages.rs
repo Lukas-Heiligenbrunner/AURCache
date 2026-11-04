@@ -1,23 +1,17 @@
 //! Package-level conversions of a 0.5.0 database: one row per package base,
-//! one package per file, at most one pending build per package and platform,
-//! and the dependency edges 0.5.0 never recorded queued for the server.
+//! one package per file, and the dependency edges 0.5.0 never recorded queued
+//! for the server.
 
-use crate::builds;
 use crate::packages;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter};
+use sea_orm::{ConnectionTrait, FromQueryResult};
 use sea_orm_migration::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use tar::{Archive, Builder};
-
-const ACTIVE_BUILD_STATUS: i32 = 0;
-const FAILED_BUILD_STATUS: i32 = 2;
-const ENQUEUED_BUILD_STATUS: i32 = 3;
-const WAITING_FOR_DEPS_STATUS: i32 = 4;
 
 /// A package as 0.5.0 stored it, as far as these conversions read it.
 #[derive(FromQueryResult)]
@@ -287,76 +281,6 @@ pub(super) async fn drop_file_links(manager: &SchemaManager<'_>) -> Result<(), D
         .await
 }
 
-pub(super) async fn mark_duplicate_pending_builds_failed(
-    db: &impl ConnectionTrait,
-) -> Result<(), DbErr> {
-    use sea_orm::QuerySelect;
-
-    // (id, pkg_id, platform, status, start_time)
-    type PendingBuildRow = (i32, i32, String, Option<i32>, Option<i64>);
-
-    // Before putting a unique index on active/pending builds, mark any duplicate
-    // as failed. Select only the columns this migration needs (via a tuple query)
-    // rather than the full `builds` entity, so later columns added to the entity
-    // (e.g. worker leasing fields) don't make this historical migration select
-    // columns that don't exist yet at this point in the chain.
-    let mut pending: Vec<PendingBuildRow> = builds::Entity::find()
-        .select_only()
-        .column(builds::Column::Id)
-        .column(builds::Column::PkgId)
-        .column(builds::Column::Platform)
-        .column(builds::Column::Status)
-        .column(builds::Column::StartTime)
-        .filter(builds::Column::Status.is_in([
-            Some(ACTIVE_BUILD_STATUS),
-            Some(ENQUEUED_BUILD_STATUS),
-            Some(WAITING_FOR_DEPS_STATUS),
-        ]))
-        .into_tuple()
-        .all(db)
-        .await?;
-
-    // Sort to determine winner per (pkg_id, platform):
-    // active builds first, then enqueued, then waiting, then most recent start_time, then highest id.
-    pending.sort_by(|a, b| {
-        let priority = |s: Option<i32>| match s {
-            Some(x) if x == ACTIVE_BUILD_STATUS => 0,
-            Some(x) if x == ENQUEUED_BUILD_STATUS => 1,
-            Some(x) if x == WAITING_FOR_DEPS_STATUS => 2,
-            _ => 3,
-        };
-        priority(a.3)
-            .cmp(&priority(b.3))
-            .then(b.4.unwrap_or(0).cmp(&a.4.unwrap_or(0)))
-            .then(b.0.cmp(&a.0))
-    });
-
-    let mut seen = HashSet::new();
-    let to_fail: Vec<i32> = pending
-        .into_iter()
-        .filter_map(|(id, pkg_id, platform, _status, _start_time)| {
-            if seen.insert((pkg_id, platform)) {
-                None
-            } else {
-                Some(id)
-            }
-        })
-        .collect();
-
-    if !to_fail.is_empty() {
-        builds::Entity::update_many()
-            .col_expr(
-                builds::Column::Status,
-                Expr::value(Some(FAILED_BUILD_STATUS)),
-            )
-            .filter(builds::Column::Id.is_in(to_fail))
-            .exec(db)
-            .await?;
-    }
-
-    Ok(())
-}
-
 const OLD_PACKAGER: &str = "Unknown Packager";
 const NEW_PACKAGER: &str = "AURCache <aurcache@localhost>";
 
@@ -484,9 +408,6 @@ fn rewrite_db_archive(
     Ok(patched)
 }
 
-/// For each existing AUR package that has no rows in the `dependencies` table,
-/// query the AUR RPC for its dependencies, insert placeholder package records
-/// for any missing AUR deps (recursively), and create the dependency links.
 /// Queue the dependency backfill the server runs at its next start: 0.5.0
 /// recorded no dependencies, and resolving them takes the server's own
 /// resolver and source checkouts, which a migration has neither of.

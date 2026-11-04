@@ -1,22 +1,26 @@
 //! How a spawned build container reaches the AURCache package repository.
 //!
 //! Builds resolve previously-built packages through the `[repo]` section of the
-//! job's `pacman.conf`, which the **server** renders from `AURCACHE_PUBLIC_URL`.
-//! The executor therefore cannot rewrite that URL — it can only arrange for the
-//! URL to be reachable from inside the container it spawns.
+//! job's `pacman.conf`. The server sends it as a template, and this worker
+//! fills in the host it dials the server on (`AURCACHE_URL`), or what
+//! `AURCACHE_REPO_HOST` or `AURCACHE_REPO_URL` say instead (see
+//! `aurcache_worker_core::repo`). That address is right from where this
+//! process runs; what is left here is making it mean the same thing from
+//! inside the container it spawns.
 //!
 //! That is why the default shares this process's network namespace. In the
-//! hybrid image the server, the worker and the repository are one container, so
-//! `AURCACHE_PUBLIC_URL` defaults to `http://localhost:8081`; a build container
-//! on the default bridge would resolve `localhost` to *itself* and fail to find
-//! any AURCache-built dependency, while reporting only a confusing pacman
-//! error. Sharing the namespace makes `localhost` mean what the URL intends.
+//! hybrid image the server, the worker and the repository are one container,
+//! and the worker reaches the server on `localhost`; a build container on the
+//! default bridge would resolve `localhost` to *itself* and fail to find any
+//! AURCache-built dependency, while reporting only a confusing pacman error.
+//! Sharing the namespace makes `localhost` mean what the URL intends.
 //!
 //! The trade is that the build container can then reach anything this process
 //! can reach on loopback, including the worker protocol port. That port demands
 //! a client certificate the build does not have, but it is exposure worth
 //! naming; a deployment that would rather not have it sets
-//! `AURCACHE_BUILDER_NETWORK` and a matching `AURCACHE_PUBLIC_URL`.
+//! `AURCACHE_BUILDER_NETWORK` and an `AURCACHE_REPO_URL` that resolves on that
+//! network.
 
 /// How to attach a spawned build container to the network.
 #[derive(Clone, Debug, PartialEq, Eq)]

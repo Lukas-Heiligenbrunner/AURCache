@@ -5,7 +5,7 @@
 //! images go under Cargo's target directory rather than `/tmp`, which is often
 //! a size-limited tmpfs.
 
-use aurcache_chroot::{Backing, Owner, Pool, PoolConfig, QgroupId, Resize};
+use aurcache_chroot::{Allocation, Backing, Owner, Pool, PoolConfig, QgroupId, Resize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +74,7 @@ fn config(scratch: &Scratch, total: u64) -> PoolConfig {
     PoolConfig {
         backing: Backing::Image {
             path: scratch.0.join("pool.img"),
-            reserve: false,
+            allocation: Allocation::Sparse,
         },
         mountpoint: scratch.0.join("pool"),
         total,

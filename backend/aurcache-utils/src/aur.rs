@@ -50,18 +50,6 @@ pub async fn query_aur(
     Ok(results)
 }
 
-/// Retrieve AUR package information by its name.
-/// Returns `None` if the package is not found.
-pub async fn get_package_info(
-    client: &AurClient,
-    pkg_name: &str,
-) -> anyhow::Result<Option<aurcache_deps::Package>> {
-    client
-        .info_of(pkg_name)
-        .await
-        .map_err(|e| anyhow!("failed to get package info: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::package_matches_terms;

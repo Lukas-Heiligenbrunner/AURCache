@@ -217,6 +217,22 @@ async fn the_new_constraints_hold() {
         fails("INSERT INTO dependencies (dependent_id, dependee_id) VALUES (1, 3)").await,
         "a second edge between the same packages"
     );
+    // One file name per platform: an `arch=any` package built for two
+    // platforms has the same name in each.
+    db.execute_unprepared(
+        "INSERT INTO files (filename, platform, package_id) VALUES \
+         ('hello-1.1-1-any.pkg.tar.zst', 'x86_64', 1), ('hello-1.1-1-any.pkg.tar.zst', 'aarch64', 1)",
+    )
+    .await
+    .unwrap();
+    assert!(
+        fails(
+            "INSERT INTO files (filename, platform, package_id) \
+             VALUES ('hello-1.1-1-any.pkg.tar.zst', 'x86_64', 1)"
+        )
+        .await,
+        "the same file name twice on one platform"
+    );
     db.execute_unprepared("INSERT INTO api_tokens (username, token_hash) VALUES ('a', 'h')")
         .await
         .unwrap();
@@ -242,8 +258,7 @@ async fn the_new_constraints_hold() {
     }
 }
 
-/// The name is what `seaql_migrations` records and what an instance that ran
-/// the old chain had its rows replaced with, so it must not drift.
+/// The name is what `seaql_migrations` records, so it must not drift.
 #[test]
 fn the_migration_is_recorded_under_its_own_name() {
     use sea_orm_migration::MigrationName;

@@ -5,27 +5,54 @@
 //! constructors are the vocabulary for that report; how the build itself ran is
 //! the executor's business.
 
-use crate::protocol::{PackagesRefused, Timeout, TimeoutSource};
+use crate::protocol::{PackagesRefused, Stop, Timeout, TimeoutSource};
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use std::process::ExitStatus;
+use std::time::Duration;
 
-/// Map a build process exit status into a terminal report.
+/// How a build's process ended, as far as its executor could tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// It exited with this code.
+    Code(i64),
+    /// A signal ended it, so there is no code.
+    Signal,
+    /// The executor learned nothing: a container that vanished without a
+    /// status.
+    Unknown,
+}
+
+impl From<ExitStatus> for Exit {
+    fn from(status: ExitStatus) -> Self {
+        status
+            .code()
+            .map_or(Self::Signal, |code| Self::Code(i64::from(code)))
+    }
+}
+
+/// The terminal report for a build whose process ended: `stop` when the
+/// worker stopped it, after `elapsed`, and otherwise what `exit` says.
+///
+/// One mapping for every executor, so a build ends for the same reason
+/// whichever one ran it. A code is only ever the package's: a timeout is the
+/// worker's own [`Stop`], never inferred from an exit code, so a build that
+/// itself exits 124 is a failure like any other.
 #[must_use]
-pub fn classify_exit(status: ExitStatus, canceled: bool) -> CompleteReport {
-    if canceled {
-        return canceled_report(status.code());
-    }
-    if status.success() {
-        return success();
-    }
-    let code = status.code();
-    let reason = match code {
-        // Process-specific: a bare wait-status code has no timeout convention.
-        Some(124) => "build timed out (exit 124)".to_string(),
-        Some(c) => exit_code_reason(i64::from(c)),
-        None => "build terminated by signal".to_string(),
+pub fn ended(stop: Option<Stop>, elapsed: Duration, exit: Exit) -> CompleteReport {
+    let code = match exit {
+        Exit::Code(code) => Some(code),
+        Exit::Signal | Exit::Unknown => None,
     };
-    failure(code, reason)
+    match stop {
+        Some(Stop::TimedOut(limit)) => timed_out(elapsed, limit),
+        Some(Stop::Canceled) => canceled_report(code.and_then(|c| i32::try_from(c).ok())),
+        None => match exit {
+            Exit::Code(0) => success(),
+            Exit::Code(code) => failure(i32::try_from(code).ok(), exit_code_reason(code)),
+            Exit::Signal => failure(None, "build terminated by signal".to_string()),
+            Exit::Unknown => interrupted("build exited without a status"),
+        },
+    }
 }
 
 /// A terminal report for a build that succeeded, with nothing measured.
@@ -38,15 +65,8 @@ pub fn success() -> CompleteReport {
     }
 }
 
-/// The failure reason for a bare non-zero exit code.
-///
-/// Shared by every executor that learns the outcome as a code rather than an
-/// [`ExitStatus`]: the OOM wording and the generic shape are stated once, so a
-/// change to either cannot update one executor and silently miss the other.
-/// (The `None` arms stay per-executor — a signal-killed process and a
-/// status-less container exit mean different things.)
-#[must_use]
-pub fn exit_code_reason(code: i64) -> String {
+/// The failure reason for a non-zero exit code.
+fn exit_code_reason(code: i64) -> String {
     match code {
         137 => "build killed (OOM, exit 137)".to_string(),
         c => format!("build failed (exit {c})"),
@@ -79,24 +99,26 @@ fn canceled_report(exit_code: Option<i32>) -> CompleteReport {
     }
 }
 
-/// A terminal report for a build the worker killed after `secs`, for running
-/// past `limit`. Says whose limit it was: raising the wrong one changes
-/// nothing.
-#[must_use]
-pub fn timeout_failure(secs: u64, limit: Timeout) -> CompleteReport {
+/// A terminal report for a build the worker killed after `elapsed`, for
+/// running past `limit`. Says whose limit it was: raising the wrong one
+/// changes nothing.
+fn timed_out(elapsed: Duration, limit: Timeout) -> CompleteReport {
     let whose = match limit.set_by {
         TimeoutSource::Worker => "this worker's build timeout",
         TimeoutSource::Server => "the package's job timeout",
     };
     // A whole number of minutes or more reads with its unit; anything else
     // is a bare count of seconds, which needs one.
-    let mut limit = aurcache_common::units::format_duration(limit.secs);
+    let mut limit = aurcache_common::units::format_duration(limit.limit.as_secs());
     if limit.bytes().all(|b| b.is_ascii_digit()) {
         limit.push('s');
     }
     failure(
         Some(124),
-        format!("build timed out after {secs}s ({whose}, {limit})"),
+        format!(
+            "build timed out after {}s ({whose}, {limit})",
+            elapsed.as_secs()
+        ),
     )
 }
 
@@ -138,48 +160,66 @@ pub fn describe(job: &JobDescriptor) -> String {
 mod tests {
     use super::*;
 
+    const fn secs(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
+    fn timed_out_reason(elapsed: u64, limit: u64, set_by: TimeoutSource) -> String {
+        let limit = Timeout {
+            limit: secs(limit),
+            set_by,
+        };
+        ended(Some(Stop::TimedOut(limit)), secs(elapsed), Exit::Signal)
+            .reason
+            .unwrap()
+    }
+
     /// Raising the wrong limit changes nothing, so the report says which.
     #[test]
     fn a_timeout_names_the_limit_that_ended_it() {
-        let server = Timeout {
-            secs: 3600,
-            set_by: TimeoutSource::Server,
-        };
-        let reason = timeout_failure(3601, server).reason.unwrap();
         assert_eq!(
-            reason,
+            timed_out_reason(3601, 3600, TimeoutSource::Server),
             "build timed out after 3601s (the package's job timeout, 1h)"
         );
-        let worker = Timeout {
-            secs: 3 * 3600,
-            set_by: TimeoutSource::Worker,
-        };
-        let reason = timeout_failure(10801, worker).reason.unwrap();
+        let reason = timed_out_reason(10801, 3 * 3600, TimeoutSource::Worker);
         assert!(
             reason.contains("this worker's build timeout, 3h"),
             "{reason}"
         );
-        let short = Timeout {
-            secs: 90,
-            set_by: TimeoutSource::Server,
-        };
-        let reason = timeout_failure(90, short).reason.unwrap();
+        let reason = timed_out_reason(90, 90, TimeoutSource::Server);
         assert!(reason.ends_with("job timeout, 90s)"), "{reason}");
     }
 
     #[test]
     fn classifies_success() {
-        let r = classify_exit(fake_status(0), false);
+        let r = ended(None, secs(1), fake_status(0).into());
         assert_eq!(r.outcome, BuildOutcome::Succeeded);
         assert_eq!(r.exit_code, Some(0));
     }
 
     #[test]
     fn classifies_oom_as_terminal_failure() {
-        let r = classify_exit(fake_status(137), false);
+        let r = ended(None, secs(1), fake_status(137).into());
         assert_eq!(r.outcome, BuildOutcome::Failed);
         assert_eq!(r.exit_code, Some(137));
         assert!(r.reason.unwrap().contains("OOM"));
+    }
+
+    /// Only the worker's own stop is a timeout: a package whose build exits
+    /// 124 (a `timeout` in its test suite, say) failed.
+    #[test]
+    fn exit_124_is_a_failure_like_any_other() {
+        let r = ended(None, secs(1), Exit::Code(124));
+        assert_eq!(r.outcome, BuildOutcome::Failed);
+        assert_eq!(r.reason.as_deref(), Some("build failed (exit 124)"));
+    }
+
+    /// A container that vanished without a status is the worker's to
+    /// explain, not the package's.
+    #[test]
+    fn no_status_is_an_interruption() {
+        let r = ended(None, secs(1), Exit::Unknown);
+        assert_eq!(r.outcome, BuildOutcome::Interrupted);
     }
 
     #[test]
@@ -197,9 +237,14 @@ mod tests {
         );
     }
 
+    /// Whatever the process did on its way out, a stop the worker made is
+    /// what is reported.
     #[test]
     fn classifies_cancel() {
-        let r = classify_exit(fake_status(1), true);
+        let r = ended(Some(Stop::Canceled), secs(1), fake_status(1).into());
+        assert_eq!(r.outcome, BuildOutcome::Canceled);
+        assert_eq!(r.exit_code, Some(1));
+        let r = ended(Some(Stop::Canceled), secs(1), Exit::Signal);
         assert_eq!(r.outcome, BuildOutcome::Canceled);
     }
 

@@ -54,12 +54,8 @@ where
     Ok(())
 }
 
-fn append_entry<W: Write>(
-    builder: &mut Builder<W>,
-    dir_name: &str,
-    file_name: &str,
-    content: &str,
-) -> anyhow::Result<()> {
+/// Append the directory of a package's entry.
+fn append_dir<W: Write>(builder: &mut Builder<W>, dir_name: &str) -> anyhow::Result<()> {
     let mut header = Header::new_gnu();
     header.set_path(dir_name)?;
     header.set_entry_type(tar::EntryType::Directory);
@@ -67,7 +63,16 @@ fn append_entry<W: Write>(
     header.set_size(0);
     header.set_cksum();
     builder.append(&header, io::empty())?;
+    Ok(())
+}
 
+/// Append one file of a package's entry, in its directory.
+fn append_file<W: Write>(
+    builder: &mut Builder<W>,
+    dir_name: &str,
+    file_name: &str,
+    content: &str,
+) -> anyhow::Result<()> {
     let mut header = Header::new_gnu();
     header.set_path(format!("{dir_name}/{file_name}"))?;
     header.set_size(content.len() as u64);
@@ -102,19 +107,16 @@ pub fn write_updated_databases(
 
     rewrite_archive(db, db_out, superseded, |builder| {
         for entry in add {
-            append_entry(builder, &entry.dir_name, "desc", &entry.desc)?;
+            append_dir(builder, &entry.dir_name)?;
+            append_file(builder, &entry.dir_name, "desc", &entry.desc)?;
         }
         Ok(())
     })?;
     rewrite_archive(files, files_out, superseded, |builder| {
         for entry in add {
-            append_entry(builder, &entry.dir_name, "desc", &entry.desc)?;
-            let mut header = Header::new_gnu();
-            header.set_path(format!("{}/files", entry.dir_name))?;
-            header.set_size(entry.files.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder.append(&header, entry.files.as_bytes())?;
+            append_dir(builder, &entry.dir_name)?;
+            append_file(builder, &entry.dir_name, "desc", &entry.desc)?;
+            append_file(builder, &entry.dir_name, "files", &entry.files)?;
         }
         Ok(())
     })

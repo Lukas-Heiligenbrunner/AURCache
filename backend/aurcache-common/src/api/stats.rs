@@ -2,9 +2,9 @@ use crate::api::builds::BuildSummary;
 use crate::api::log::LogEntry;
 use crate::api::package::SimplePackage;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct ListStats {
     pub total_builds: u32,
@@ -43,7 +43,8 @@ pub struct ListStats {
 /// starting on Monday is still visible on Friday.
 pub const RECENT_DAYS: i64 = 7;
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct GraphDataPoint {
     pub month: i32,
@@ -56,7 +57,8 @@ pub struct GraphDataPoint {
     pub successful: i32,
 }
 
-#[derive(Deserialize, ToSchema, Serialize)]
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct UserInfo {
     pub username: Option<String>,
@@ -64,7 +66,8 @@ pub struct UserInfo {
 }
 
 /// A personal API token, as regenerating one answers.
-#[derive(Deserialize, ToSchema, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiTokenResponse {
     /// The new token, in plain text. Only ever returned here: the server keeps
     /// its hash.
@@ -82,7 +85,8 @@ pub const LONGEST_WINDOW_DAYS: i64 = 30;
 /// Each section is `Option`: `None` when its query failed, so one bad query
 /// never blanks the page — the card renders its own inline error and the rest
 /// render normally.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DashboardView {
     /// Directly requested packages, newest first.
     pub recent_packages: Option<Vec<SimplePackage>>,
@@ -106,7 +110,8 @@ pub struct DashboardView {
 
 /// Out-of-date packages that nothing will rebuild on its own, plus how many
 /// others are out of date but already handled (queued or auto-rebuilding).
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct OutOfDateSlice {
     pub needs_hand: Vec<SimplePackage>,
     pub handled: u64,
@@ -114,7 +119,8 @@ pub struct OutOfDateSlice {
 
 /// The stuck queue: how deep it is in total, and the oldest entries oldest
 /// first (capped — the depth counts past the cap).
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct QueueSlice {
     pub depth: u64,
     pub oldest: Vec<BuildSummary>,
@@ -124,7 +130,8 @@ pub struct QueueSlice {
 ///
 /// `previous_secs` is `None` when there is no earlier successful build on
 /// that platform, never `0`.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LongBuild {
     pub build: BuildSummary,
     pub previous_secs: Option<u64>,

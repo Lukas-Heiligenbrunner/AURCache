@@ -95,6 +95,17 @@ pub struct Qgroups {
     dir: PathBuf,
 }
 
+/// A btrfs filesystem's quota mode, as sysfs names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaMode {
+    /// Simple quotas (`squota`): what the pool runs.
+    Simple,
+    /// Full qgroups (`qgroup`), with their own accounting.
+    Full,
+    /// Enabled once and since turned off.
+    Disabled,
+}
+
 impl Qgroups {
     /// The qgroups of the filesystem with this UUID.
     #[must_use]
@@ -108,12 +119,17 @@ impl Qgroups {
         Self { dir }
     }
 
-    /// `squota`, `qgroup` or `disabled`; `None` if quotas were never enabled.
+    /// The filesystem's quota mode; `None` if quotas were never enabled, or
+    /// the kernel names one this does not know.
     #[must_use]
-    pub fn mode(&self) -> Option<String> {
-        std::fs::read_to_string(self.dir.join("mode"))
-            .ok()
-            .map(|m| m.trim().to_string())
+    pub fn mode(&self) -> Option<QuotaMode> {
+        let mode = std::fs::read_to_string(self.dir.join("mode")).ok()?;
+        match mode.trim() {
+            "squota" => Some(QuotaMode::Simple),
+            "qgroup" => Some(QuotaMode::Full),
+            "disabled" => Some(QuotaMode::Disabled),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -192,7 +208,7 @@ mod tests {
         std::fs::write(dir.join("mode"), "squota\n").unwrap();
 
         let qgroups = Qgroups::at(dir.clone());
-        assert_eq!(qgroups.mode().as_deref(), Some("squota"));
+        assert_eq!(qgroups.mode(), Some(QuotaMode::Simple));
         assert_eq!(
             qgroups.usage(QgroupId::build(42)),
             Some(Usage {

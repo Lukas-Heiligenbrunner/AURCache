@@ -112,7 +112,7 @@ async fn a_tracked_package_resolves_locally_and_costs_no_rpc_call() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Local {
             pkgbase: "mydep-git".to_string()
         })
@@ -144,7 +144,7 @@ async fn a_preferred_package_beats_a_better_ranked_one() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Local {
             pkgbase: "mydep-git".to_string()
         })
@@ -173,7 +173,7 @@ async fn ranking_decides_when_nothing_is_preferred() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Local {
             pkgbase: "mydep".to_string()
         })
@@ -200,7 +200,7 @@ async fn a_preferred_package_that_no_longer_provides_the_name_is_dropped() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Local {
             pkgbase: "mydep".to_string()
         })
@@ -229,16 +229,19 @@ async fn a_preference_does_not_outrank_the_official_repositories() {
         .await
         .unwrap();
 
-    assert_eq!(resolved.get("git"), Some(&DependencyResolution::Available));
+    assert_eq!(
+        resolved.found.get("git"),
+        Some(&DependencyResolution::Available)
+    );
 }
 
 /// Stage 1 wins over stage 2, and how a candidate claims the name does not
 /// enter into it.
 ///
-/// The reported bug: `git-git` declares `provides=('git')`, so once it was
-/// tracked it captured every dependency on `git` -- including over the `git`
-/// in `extra`, which carries the name. Resolving a name to a package is what
-/// makes that package tracked, so one bad answer used to become permanent.
+/// `git-git` declares `provides=('git')`, so once tracked it must not capture
+/// every dependency on `git` over the `git` in `extra`, which carries the
+/// name. Resolving a name to a package is what makes that package tracked, so
+/// one bad answer would otherwise become permanent.
 #[tokio::test]
 async fn the_official_repositories_beat_a_tracked_package_that_provides_the_name() {
     let server = MockServer::start().await;
@@ -262,7 +265,7 @@ async fn the_official_repositories_beat_a_tracked_package_that_provides_the_name
         .unwrap();
 
     assert_eq!(
-        resolved.get("git"),
+        resolved.found.get("git"),
         Some(&DependencyResolution::Available),
         "a tracked provider must not capture a name the repositories carry"
     );
@@ -291,7 +294,7 @@ async fn a_dependency_in_the_official_repositories_costs_no_rpc_call() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Available)
     );
     let seen = server.received_requests().await.unwrap();
@@ -324,7 +327,7 @@ async fn a_provided_dependency_also_costs_no_rpc_call() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("mydep"),
+        resolved.found.get("mydep"),
         Some(&DependencyResolution::Available)
     );
     assert!(server.received_requests().await.unwrap().is_empty());
@@ -394,11 +397,11 @@ async fn only_the_unresolved_names_reach_the_aur() {
         .unwrap();
 
     assert_eq!(
-        resolved.get("known"),
+        resolved.found.get("known"),
         Some(&DependencyResolution::Available)
     );
     assert_eq!(
-        resolved.get("stranger"),
+        resolved.found.get("stranger"),
         Some(&DependencyResolution::Aur {
             pkgbase: "stranger".to_string()
         })
@@ -440,7 +443,7 @@ async fn a_name_nothing_provides_is_reported_as_unresolved() {
         .await
         .unwrap();
 
-    assert!(resolved.get("libjpeg6").is_none());
+    assert!(!resolved.found.contains_key("libjpeg6"));
     assert_eq!(resolved.unresolved, vec!["libjpeg6".to_string()]);
 }
 

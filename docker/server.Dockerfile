@@ -15,7 +15,6 @@ ARG AURCACHE_GIT_DIRTY
 ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA} \
     AURCACHE_GIT_TAG=${AURCACHE_GIT_TAG} \
     AURCACHE_GIT_DIRTY=${AURCACHE_GIT_DIRTY}
-# Install necessary tools and dependencies
 
 # The official rust image keeps cargo and the toolchain under /usr/local/cargo,
 # which a cache mount would *hide* on the first, cold build -- so the cache home
@@ -28,8 +27,8 @@ ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA} \
 # being fetched once each. The `-root` cache id stays private to this Debian
 # builder stage -- the Arch packager stages keep their own (`-packager`), so
 # nothing either family builds into the shared home is ever run by the other.
-# (rustup stays on the shipped layer, as today: its std downloads are already
-# layer-cached per architecture.)
+# rustup stays on the image's layer: its std downloads are already
+# layer-cached per architecture.
 ENV CARGO_HOME=/opt/cargo-cache \
     PATH="/opt/cargo-cache/bin:${PATH}"
 # The frontend compiles to wasm. Its JS glue comes from a build dependency of
@@ -52,16 +51,13 @@ COPY frontend-rs /app/frontend-rs/
 COPY assets/icons/icon.svg /app/assets/icons/icon.svg
 WORKDIR /app/backend
 
-# Which architecture to cross-compile for. `TARGETPLATFORM` is what buildx sets
-# per target in a multi-platform build, so it is the default; `TARGET_ARCH`
-# stays as an explicit override for the publish workflow, which builds one
-# architecture at a time and names it itself. build-rust.sh accepts either
-# spelling and rejects anything it does not recognise.
+# Which architecture to cross-compile for: buildx sets `TARGETPLATFORM` per
+# target in a multi-platform build. common.sh is the PKGBUILDs' own helpers,
+# which build-rust.sh takes the target triples from.
 ARG TARGETPLATFORM
-ARG TARGET_ARCH=
-ADD docker/build-rust.sh /root
+COPY docker/build-rust.sh packaging/common.sh /root/
 RUN --mount=type=cache,target=/opt/cargo-cache,id=cargo-downloads-root \
-    bash /root/build-rust.sh "${TARGET_ARCH:-$TARGETPLATFORM}"
+    bash /root/build-rust.sh "$TARGETPLATFORM"
 
 # No `--platform` here: buildx already builds this stage for the target, and
 # pinning it to a build arg meant the runtime base and the binary above could

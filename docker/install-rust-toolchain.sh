@@ -9,7 +9,7 @@
 # left one behind -- every RUN that needs the toolchain calls this first, and
 # on a warm cache it changes nothing.
 #
-# The packager always runs on amd64 (see worker.Dockerfile), so every target
+# The packager always runs on amd64 (see arch.Dockerfile), so every target
 # architecture shares the one x86_64 toolchain in that mount, and their builds
 # run at the same time. rustup is not safe to run concurrently on one home: a
 # component installs with a `rename(2)` over a shared `<hash>.partial` file

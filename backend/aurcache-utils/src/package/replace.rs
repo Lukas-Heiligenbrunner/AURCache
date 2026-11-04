@@ -5,19 +5,20 @@
 //! which prefer what a package already depends on.
 
 use crate::package::live_check::live_check;
+use crate::package::source_facts::{SourceFacts, pkg_deps};
 use crate::pkg::satisfies_constraint;
 use crate::services::Services;
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::package::{
     CandidateSource, DependencyCandidate, DependencyOptions, ReplacementVerdict,
 };
-use aurcache_db::helpers::builds::latest_successful_version_any_platform;
-use aurcache_db::lists::json_list;
+use aurcache_db::helpers::builds::latest_successful_version;
+use aurcache_db::lists::JsonList;
 use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{dependencies, packages};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, ModelTrait,
-    QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    ModelTrait, QueryFilter, QuerySelect, Set,
 };
 use std::fmt;
 
@@ -46,13 +47,27 @@ impl fmt::Display for ReplaceError {
 
 impl std::error::Error for ReplaceError {}
 
-/// The package named `pkgbase`.
-async fn package(db: &DatabaseConnection, pkgbase: &str) -> Result<packages::Model, ReplaceError> {
+impl From<DbErr> for ReplaceError {
+    fn from(error: DbErr) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+/// The package named `pkgbase`, if there is one.
+async fn find_package(
+    db: &DatabaseConnection,
+    pkgbase: &str,
+) -> Result<Option<packages::Model>, DbErr> {
     Packages::find()
         .filter(packages::Column::Name.eq(pkgbase))
         .one(db)
         .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?
+}
+
+/// The package named `pkgbase`.
+async fn package(db: &DatabaseConnection, pkgbase: &str) -> Result<packages::Model, ReplaceError> {
+    find_package(db, pkgbase)
+        .await?
         .ok_or_else(|| ReplaceError::NotFound(format!("no package '{pkgbase}'")))
 }
 
@@ -66,11 +81,18 @@ async fn package(db: &DatabaseConnection, pkgbase: &str) -> Result<packages::Mod
 /// Fields, not the row: the options dialog matches over a narrowed fetch
 /// ([`NamesRow`]) that never loads the rest of the columns -- source blobs,
 /// patches.
-fn provided_names(name: &str, split_packages: Option<&str>, provides: Option<&str>) -> Vec<String> {
-    let mut names: Vec<String> =
-        crate::pkg::self_provided_names(name, &json_list(split_packages), &json_list(provides))
-            .into_iter()
-            .collect();
+fn provided_names(
+    name: &str,
+    split_packages: Option<&JsonList>,
+    provides: Option<&JsonList>,
+) -> Vec<String> {
+    let mut names: Vec<String> = crate::pkg::self_provided_names(
+        name,
+        JsonList::entries(split_packages),
+        JsonList::entries(provides),
+    )
+    .into_iter()
+    .collect();
     names.sort_unstable();
     names
 }
@@ -81,16 +103,16 @@ fn provided_names(name: &str, split_packages: Option<&str>, provides: Option<&st
 struct NamesRow {
     id: i32,
     name: String,
-    split_packages: Option<String>,
-    provides: Option<String>,
+    split_packages: Option<JsonList>,
+    provides: Option<JsonList>,
 }
 
 impl NamesRow {
     fn names(&self) -> Vec<String> {
         provided_names(
             &self.name,
-            self.split_packages.as_deref(),
-            self.provides.as_deref(),
+            self.split_packages.as_ref(),
+            self.provides.as_ref(),
         )
     }
 }
@@ -126,8 +148,7 @@ async fn dependency_edge(
         .filter(dependencies::Column::DependentId.eq(dependent.id))
         .filter(dependencies::Column::DependeeId.eq(current.id))
         .one(db)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?
+        .await?
         .ok_or_else(|| {
             ReplaceError::NotFound(format!(
                 "{} does not depend on {}",
@@ -153,21 +174,20 @@ async fn declared_names_for_edge(
     dependent: &packages::Model,
     current: &packages::Model,
 ) -> Result<Vec<String>, ReplaceError> {
-    let sourceinfo = services
-        .store
-        .sourceinfo(&dependent.source_data, dependent.patch.as_deref())
-        .await
-        .map_err(ReplaceError::Unreachable)?;
-    let deps = aurcache_deps::deps_from_srcinfo(
-        &sourceinfo,
-        &crate::pkg::architectures(&dependent.platforms),
-    );
+    let SourceFacts { deps, .. } = pkg_deps(
+        &services.store,
+        &dependent.source_data,
+        dependent.patch.as_deref(),
+        &dependent.platforms,
+    )
+    .await
+    .map_err(ReplaceError::Unreachable)?;
     let declared = crate::pkg::DependencySet::of(&deps).map_err(ReplaceError::Internal)?;
 
     let answers = provided_names(
         &current.name,
-        current.split_packages.as_deref(),
-        current.provides.as_deref(),
+        current.split_packages.as_ref(),
+        current.provides.as_ref(),
     );
     Ok(declared
         .names
@@ -222,8 +242,7 @@ pub async fn options(
         .column(packages::Column::Provides)
         .into_model()
         .all(&services.db)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?;
+        .await?;
     let mut tracked_matches: Vec<&NamesRow> = tracked
         .iter()
         .filter(|package| package.id != current.id && package.id != dependent.id)
@@ -244,9 +263,7 @@ pub async fn options(
         // One indexed point lookup per match, not a batched scan: matches
         // are a handful of rows, and "latest" means newest end time, which
         // no GROUP BY over ids reproduces.
-        let version = latest_successful_version_any_platform(&services.db, package.id)
-            .await
-            .map_err(|e| ReplaceError::Internal(e.into()))?;
+        let version = latest_successful_version(&services.db, package.id, None).await?;
         candidates.push(DependencyCandidate {
             pkgbase: package.name.clone(),
             source: CandidateSource::Tracked,
@@ -328,9 +345,7 @@ pub async fn replace(
                     )));
                 }
             }
-            edge.delete(&services.db)
-                .await
-                .map_err(|e| ReplaceError::Internal(e.into()))?;
+            edge.delete(&services.db).await?;
             services.activity.emit_by(
                 Event::DepsDropped {
                     dependent: dependent.name.as_str().into(),
@@ -361,8 +376,8 @@ pub async fn replace(
             let package = ensure_replacement_exists(services, &dependent, &replacement).await?;
             let answers = provided_names(
                 &package.name,
-                package.split_packages.as_deref(),
-                package.provides.as_deref(),
+                package.split_packages.as_ref(),
+                package.provides.as_ref(),
             );
             if !declared_names.iter().any(|name| answers.contains(name)) {
                 return Err(ReplaceError::Refused(format!(
@@ -371,9 +386,7 @@ pub async fn replace(
                 )));
             }
 
-            repoint_edge(&services.db, edge, package.id)
-                .await
-                .map_err(|e| ReplaceError::Internal(e.into()))?;
+            repoint_edge(&services.db, edge, package.id).await?;
             services.activity.emit_by(
                 Event::DepsReplaced {
                     dependent: dependent.name.as_str().into(),
@@ -390,13 +403,9 @@ pub async fn replace(
     // held it up is no longer its dependency, or obliged to wait because the
     // replacement has not been built yet. Before `live_check`, which may delete
     // the old dependency and everything that hung off it.
-    let unblocked = crate::worker_complete::resync_pending_builds(&services.db, dependent.id)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?;
-    for build in aurcache_db::helpers::builds::build_refs(&services.db, &unblocked)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?
-    {
+    let unblocked =
+        crate::worker_complete::resync_pending_builds(&services.db, dependent.id).await?;
+    for build in aurcache_db::helpers::builds::build_refs(&services.db, &unblocked).await? {
         services
             .activity
             .emit_by(Event::BuildUnblocked { build, by: None }, user.clone());
@@ -461,12 +470,7 @@ async fn ensure_replacement_exists(
     dependent: &packages::Model,
     replacement: &str,
 ) -> Result<packages::Model, ReplaceError> {
-    if let Some(package) = Packages::find()
-        .filter(packages::Column::Name.eq(replacement))
-        .one(&services.db)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?
-    {
+    if let Some(package) = find_package(&services.db, replacement).await? {
         return Ok(package);
     }
 
@@ -474,11 +478,8 @@ async fn ensure_replacement_exists(
         .await
         .map_err(ReplaceError::Unreachable)?;
 
-    Packages::find()
-        .filter(packages::Column::Name.eq(replacement))
-        .one(&services.db)
-        .await
-        .map_err(|e| ReplaceError::Internal(e.into()))?
+    find_package(&services.db, replacement)
+        .await?
         .ok_or_else(|| {
             ReplaceError::NotFound(format!("'{replacement}' could not be added from the AUR"))
         })
@@ -493,6 +494,7 @@ mod dependency_tests {
     use crate::repository::Repository;
     use crate::snapshot::SnapshotStore;
     use aurcache_common::build_state::BuildState;
+    use aurcache_db::lists::JsonList;
     use aurcache_db::migration::Migrator;
     use aurcache_db::packages::SourceData;
     use aurcache_db::prelude::{Dependencies, Packages};
@@ -502,7 +504,6 @@ mod dependency_tests {
         QueryFilter, Set, TryIntoModel,
     };
     use sea_orm_migration::MigratorTrait;
-    use serde_json::json;
 
     async fn memory_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -556,20 +557,16 @@ mod dependency_tests {
         assert_eq!(
             provided_names(
                 &package.name,
-                package.split_packages.as_deref(),
-                package.provides.as_deref()
+                package.split_packages.as_ref(),
+                package.provides.as_ref()
             ),
             vec!["libfoo"]
         );
 
-        let split_packages = Some(json!(["libfoo-docs"]).to_string());
-        let provides = Some(json!(["libfoo.so=1", "foo-compat"]).to_string());
+        let split_packages = JsonList::new(["libfoo-docs"]);
+        let provides = JsonList::new(["libfoo.so=1", "foo-compat"]);
         assert_eq!(
-            provided_names(
-                &package.name,
-                split_packages.as_deref(),
-                provides.as_deref()
-            ),
+            provided_names(&package.name, Some(&split_packages), Some(&provides)),
             vec!["foo-compat", "libfoo", "libfoo-docs", "libfoo.so"],
             "a versioned `provides` contributes the name, not the whole entry"
         );

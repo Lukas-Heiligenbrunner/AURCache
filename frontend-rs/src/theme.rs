@@ -157,9 +157,7 @@ pub fn resolve(choice: &str, prefers_dark: bool) -> &str {
 // ---------------------------------------------------------------------------
 
 fn stored_choice() -> String {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(STORAGE_KEY).ok().flatten())
+    crate::storage::get(STORAGE_KEY)
         .map_or_else(|| SYSTEM.to_string(), |v| normalise(Some(&v)).to_string())
 }
 
@@ -171,12 +169,10 @@ fn prefers_dark() -> bool {
 
 /// Write the choice and apply it to the document.
 fn apply(choice: &str) {
+    crate::storage::set(STORAGE_KEY, choice);
     let Some(window) = web_sys::window() else {
         return;
     };
-    if let Ok(Some(storage)) = window.local_storage() {
-        let _ = storage.set_item(STORAGE_KEY, choice);
-    }
     if let Some(root) = window.document().and_then(|d| d.document_element()) {
         let _ = root.set_attribute("data-theme", resolve(choice, prefers_dark()));
     }

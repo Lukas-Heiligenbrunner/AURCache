@@ -7,8 +7,8 @@
 //! device.
 
 use crate::cmd::{privileged, query};
-use crate::qgroup::{QgroupId, Qgroups, TOTAL, Usage};
-use crate::volumes::CacheVolumes;
+use crate::qgroup::{QgroupId, Qgroups, QuotaMode, TOTAL, Usage};
+use crate::volumes::{self, CacheVolumes};
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -55,15 +55,27 @@ const MOUNT_OPTIONS: &str = "noatime,compress=zstd:1,commit=120";
 /// What backs the pool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Backing {
-    /// An image file, loop-mounted. Sparse unless `reserve`, in which case it
-    /// is allocated in full and mounted without `discard`, so its space stays
-    /// the pool's.
-    Image { path: PathBuf, reserve: bool },
+    /// An image file, loop-mounted.
+    Image {
+        path: PathBuf,
+        allocation: Allocation,
+    },
     /// A block device -- a zvol, a partition -- formatted the first time.
     Device(PathBuf),
     /// An existing btrfs filesystem, mounted at the pool's mount point and
     /// dedicated to it: quotas apply filesystem-wide.
     Mount,
+}
+
+/// How an image's space is taken from the filesystem holding it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Allocation {
+    /// Only what the pool holds, and handed back (`discard`) as the pool
+    /// frees it.
+    Sparse,
+    /// Allocated in full up front, and mounted without `discard`, so its space
+    /// stays the pool's.
+    Reserved,
 }
 
 /// Who owns something the pool makes for the worker.
@@ -200,16 +212,16 @@ impl Pool {
         let mut loop_device = None;
         match &backing {
             Backing::Mount => check_dedicated_mount(&mountpoint).await?,
-            Backing::Image { path, reserve } => {
+            Backing::Image { path, allocation } => {
                 if !is_mountpoint(&mountpoint) {
                     // Formatted and checked as a file: neither needs a loop
                     // device.
-                    match prepare_image(path, size_for(total), *reserve).await? {
+                    match prepare_image(path, size_for(total), *allocation).await? {
                         Image::Created => mkfs(path).await?,
                         Image::Existing => check_ours(path).await?,
                     }
                     ensure_free_loop_node().await?;
-                    mount(path, &mountpoint, !reserve, true, owner).await?;
+                    mount(path, &mountpoint, &backing, owner).await?;
                 }
                 loop_device = attached_loop(path).await;
                 if let Some(device) = &loop_device {
@@ -224,7 +236,7 @@ impl Pool {
                         None => mkfs(device).await?,
                         Some(_) => check_ours(device).await?,
                     }
-                    mount(device, &mountpoint, true, false, owner).await?;
+                    mount(device, &mountpoint, &backing, owner).await?;
                 }
             }
         }
@@ -339,12 +351,12 @@ impl Pool {
     }
 
     async fn enable_quotas(&self) -> Result<()> {
-        match self.qgroups.mode().as_deref() {
-            Some("squota") => Ok(()),
+        match self.qgroups.mode() {
+            Some(QuotaMode::Simple) => Ok(()),
             // Full qgroups on an existing mount: its operator turned them on,
             // and switching them to simple quotas throws their accounting
             // away. That is theirs to do.
-            Some("qgroup") => bail!(
+            Some(QuotaMode::Full) => bail!(
                 "{} has full btrfs quotas enabled; the pool needs simple quotas. Run \
                  `btrfs quota disable {0}` and let the worker enable simple quotas",
                 self.mountpoint.display()
@@ -387,14 +399,15 @@ impl Pool {
         self.btrfs(&["qgroup", "limit", &total.to_string(), &TOTAL.to_string()])
             .await?;
         *self.oversized.lock().expect("not poisoned") = None;
-        let (Backing::Image { path, reserve }, Some(device)) = (&self.backing, &self.loop_device)
+        let (Backing::Image { path, allocation }, Some(device)) =
+            (&self.backing, &self.loop_device)
         else {
             return self.resize_filesystem(total).await;
         };
         let want = size_for(total);
         let have = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if want > have {
-            size_image(path, want, *reserve)?;
+            size_image(path, want, *allocation)?;
             privileged(&["losetup".as_ref(), "-c".as_ref(), device.as_os_str()]).await?;
             self.btrfs(&["filesystem", "resize", "max"]).await?;
             tracing::info!(
@@ -534,7 +547,7 @@ impl Pool {
     pub fn host_free(&self) -> Option<u64> {
         let Backing::Image {
             path,
-            reserve: false,
+            allocation: Allocation::Sparse,
         } = &self.backing
         else {
             return None;
@@ -569,28 +582,11 @@ impl Pool {
         if path.exists() {
             return Ok(path);
         }
-        self.btrfs_paths(&["subvolume", "create"], &[&path]).await?;
-        let made = async {
-            privileged(&[
-                "chown".as_ref(),
-                owner.chown_spec().as_ref(),
-                path.as_os_str(),
-            ])
-            .await?;
-            privileged(&[
-                "chmod".as_ref(),
-                format!("{mode:o}").as_ref(),
-                path.as_os_str(),
-            ])
-            .await?;
-            self.charge_to_total(&path).await
-        };
-        if let Err(e) = made.await {
-            // Never leave one behind that is not counted: the next start would
-            // find it and take it as it is.
-            let _ = self.btrfs_paths(&["subvolume", "delete"], &[&path]).await;
-            return Err(e).with_context(|| format!("preparing {}", path.display()));
-        }
+        let made = path.clone();
+        let fs = self.mountpoint.clone();
+        tokio::task::spawn_blocking(move || volumes::create_counted(&made, owner, mode, &fs))
+            .await
+            .context("joining the subvolume's creation")??;
         Ok(path)
     }
 
@@ -1628,24 +1624,18 @@ async fn mkfs(device: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Mount `source` at `mountpoint`. With `via_loop`, `source` is an image
-/// file, attached to a loop device by the mount itself.
+/// Mount `source`, the image or device of `backing`, at `mountpoint`. An image
+/// is attached to a loop device by the mount itself.
 ///
 /// Letting `mount` attach it, rather than `losetup` beforehand, is what sets
 /// the loop device's autoclear flag: it detaches when the last mount of it
 /// goes -- including when a container holding the mount is torn down, which
 /// otherwise leaves the device attached to a deleted image for good, its
 /// space held and its number taken.
-async fn mount(
-    source: &Path,
-    mountpoint: &Path,
-    discard: bool,
-    via_loop: bool,
-    owner: Owner,
-) -> Result<()> {
+async fn mount(source: &Path, mountpoint: &Path, backing: &Backing, owner: Owner) -> Result<()> {
     std::fs::create_dir_all(mountpoint)
         .with_context(|| format!("creating {}", mountpoint.display()))?;
-    let options = mount_options(discard, via_loop);
+    let options = mount_options(backing);
     privileged(&[
         "mount".as_ref(),
         "-o".as_ref(),
@@ -1666,18 +1656,24 @@ async fn mount(
     Ok(())
 }
 
-/// The options a pool is mounted with.
-fn mount_options(discard: bool, via_loop: bool) -> String {
-    let mut options = MOUNT_OPTIONS.to_string();
+/// The options a pool on `backing` is mounted with.
+fn mount_options(backing: &Backing) -> String {
     // `discard=async` hands space the pool frees back to what holds it. Not
     // for a reserved image, whose point is keeping that space.
-    if discard {
-        options.push_str(",discard=async");
-    }
-    if via_loop {
-        options.push_str(",loop");
-    }
-    options
+    let extra = match backing {
+        Backing::Image {
+            allocation: Allocation::Sparse,
+            ..
+        } => ",discard=async,loop",
+        Backing::Image {
+            allocation: Allocation::Reserved,
+            ..
+        } => ",loop",
+        Backing::Device(_) => ",discard=async",
+        // Mounted by its operator, never here.
+        Backing::Mount => "",
+    };
+    format!("{MOUNT_OPTIONS}{extra}")
 }
 
 /// One device of a btrfs filesystem, as `btrfs filesystem show` lists it.
@@ -1811,18 +1807,12 @@ fn parse_uuids(show: &str) -> Option<SubvolumeUuids> {
     })
 }
 
-/// A subvolume's id; its own qgroup is `0/<id>`.
+/// [`volumes::subvolume_id`], off the async threads.
 async fn subvolume_id(path: &Path) -> Result<u64> {
-    let out = query(&[
-        "btrfs".as_ref(),
-        "inspect-internal".as_ref(),
-        "rootid".as_ref(),
-        path.as_os_str(),
-    ])
-    .await?;
-    out.trim()
-        .parse()
-        .with_context(|| format!("subvolume id of {}: {out:?}", path.display()))
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || volumes::subvolume_id(&path))
+        .await
+        .context("joining the subvolume id query")?
 }
 
 /// What [`prepare_image`] found at the image's path.
@@ -1834,7 +1824,7 @@ enum Image {
 }
 
 /// Create the image if it is missing.
-async fn prepare_image(path: &Path, size: u64, reserve: bool) -> Result<Image> {
+async fn prepare_image(path: &Path, size: u64, allocation: Allocation) -> Result<Image> {
     if path.exists() {
         return Ok(Image::Existing);
     }
@@ -1844,19 +1834,19 @@ async fn prepare_image(path: &Path, size: u64, reserve: bool) -> Result<Image> {
     // file, and a new file inherits it from its directory. Elsewhere the
     // attribute does not exist, which is fine.
     let _ = query(&["chattr".as_ref(), "+C".as_ref(), dir.as_os_str()]).await;
-    size_image(path, size, reserve)?;
+    size_image(path, size, allocation)?;
     Ok(Image::Created)
 }
 
-/// Make the image `size` bytes: sparse, or allocated in full when reserving.
-fn size_image(path: &Path, size: u64, reserve: bool) -> Result<()> {
+/// Make the image `size` bytes, allocated as `allocation` says.
+fn size_image(path: &Path, size: u64, allocation: Allocation) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    if reserve {
+    if allocation == Allocation::Reserved {
         use std::os::fd::AsRawFd;
         let len = libc::off_t::try_from(size).context("image size")?;
         // SAFETY: a valid descriptor and an in-range length; `fallocate` has
@@ -1990,9 +1980,16 @@ mod tests {
 
     #[test]
     fn a_pool_image_is_mounted_through_a_loop_device_of_its_own() {
-        assert!(mount_options(true, true).ends_with(",discard=async,loop"));
-        assert!(!mount_options(false, false).contains("discard"));
-        assert!(!mount_options(false, false).contains("loop"));
+        let image = |allocation| Backing::Image {
+            path: PathBuf::from("/pool.img"),
+            allocation,
+        };
+        assert!(mount_options(&image(Allocation::Sparse)).ends_with(",discard=async,loop"));
+        // A reserved image keeps its space: nothing is discarded back.
+        let reserved = mount_options(&image(Allocation::Reserved));
+        assert!(reserved.ends_with(",loop") && !reserved.contains("discard"));
+        let device = mount_options(&Backing::Device(PathBuf::from("/dev/zd0")));
+        assert!(device.ends_with(",discard=async") && !device.contains("loop"));
     }
 
     #[test]

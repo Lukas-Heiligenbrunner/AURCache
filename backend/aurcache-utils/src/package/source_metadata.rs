@@ -1,11 +1,11 @@
 //! Package metadata read from the source checkout rather than the AUR.
 //!
-//! The AUR RPC used to supply this, which cost a network round trip on a quota
-//! of 4000 calls a day. Everything here is already on disk: the version-check
-//! scheduler clones every package's repository on every pass, for every source
-//! type, to resolve VCS sources.
+//! The AUR RPC would cost a network round trip on a quota of 4000 calls a day,
+//! and everything here is already on disk: the version-check scheduler clones
+//! every package's repository on every pass, for every source type, to
+//! resolve VCS sources.
 //!
-//! Reading it locally also fixes two things the RPC could not:
+//! Reading it locally also gives two things the RPC could not:
 //!
 //! - **Git-sourced packages get metadata at all.** They have no AUR entry, so
 //!   their page showed no description, licenses or maintainer.
@@ -13,14 +13,15 @@
 //!   rather than the AUR's copy of it.
 
 use alpm_srcinfo::SourceInfoV1;
+use aurcache_db::lists::Licenses;
 
 /// What a checkout can tell us about a package, beyond its dependencies.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SourceMetadata {
     pub description: Option<String>,
     pub project_url: Option<String>,
-    /// Joined with ", " for display; `.SRCINFO` may list several.
-    pub licenses: Option<String>,
+    /// `.SRCINFO` may list several.
+    pub licenses: Option<Licenses>,
     pub maintainer: Option<String>,
     /// Unix seconds of the repository's first commit — when the package was
     /// first submitted.
@@ -58,13 +59,8 @@ pub fn from_sourceinfo(sourceinfo: &SourceInfoV1) -> SourceMetadata {
     SourceMetadata {
         description,
         project_url: base.url.as_ref().map(ToString::to_string),
-        licenses: (!base.licenses.is_empty()).then(|| {
-            base.licenses
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        }),
+        licenses: (!base.licenses.is_empty())
+            .then(|| Licenses::new(base.licenses.iter().map(ToString::to_string))),
         maintainer: None,
         first_submitted: None,
         last_modified: None,

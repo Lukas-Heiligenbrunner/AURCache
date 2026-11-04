@@ -28,12 +28,18 @@ pub struct BuildDirs {
 /// Fully-resolved configuration for the container executor.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Settings shared with every executor.
-    pub core: CoreConfig,
     /// Image each build container is created from (`BUILDER_IMAGE`).
     pub builder_image: String,
     /// Shared build directory, host and local views.
     pub dirs: BuildDirs,
+    /// The declared settings, as read from the worker's resolution of them.
+    pub tunables: Tunables,
+}
+
+/// The limits each build container gets: the two settings this executor
+/// declares, read whole from the declared settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tunables {
     /// CPU limit in milli-CPUs, `0` for unlimited (`CPU_LIMIT`).
     pub cpu_limit: u64,
     /// Memory limit in MB, negative for unlimited (`MEMORY_LIMIT`).
@@ -47,14 +53,30 @@ const PLATFORMS: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
 /// The default builder image, matching the pre-worker default.
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
 
+/// The protocol configuration for this executor, its settings declared
+/// beside the protocol's so registration reports one table.
+#[must_use]
+pub fn core_from_env() -> CoreConfig {
+    let mut core = CoreConfig::from_env(crate::settings::docker_settings());
+    // Every platform unless told otherwise, as the pre-worker builder did:
+    // each build runs in an image pulled for its platform, and the host's
+    // binfmt runs a foreign one. Checking for the handlers instead would
+    // stop builds that used to work, since a container rarely sees them.
+    if env_opt("WORKER_ARCHES").is_none() {
+        core.arches = PLATFORMS.iter().map(ToString::to_string).collect();
+    }
+    core
+}
+
 impl Config {
-    /// Build a [`Config`] from the process environment.
+    /// Build a [`Config`] from the process environment and `settings`, the
+    /// worker's resolution of its declared ones.
     ///
     /// Returns `None` when `BUILD_ARTIFACT_DIR` is unset: without a host path
     /// for the bind mount there is nothing this executor can do, and guessing
     /// one would produce containers that silently build into nowhere.
     #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(settings: &WorkerSettings) -> Option<Self> {
         let host = env_opt("BUILD_ARTIFACT_DIR").map(PathBuf::from)?;
         let local = env_opt("BUILD_ARTIFACT_DIR_LOCAL")
             .map(PathBuf::from)
@@ -63,58 +85,44 @@ impl Config {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join("builds")
             });
-
-        let mut core = CoreConfig::from_env();
-        // Every platform unless told otherwise, as the pre-worker builder did:
-        // each build runs in an image pulled for its platform, and the host's
-        // binfmt runs a foreign one. Checking for the handlers instead would
-        // stop builds that used to work, since a container rarely sees them.
-        if env_opt("WORKER_ARCHES").is_none() {
-            core.arches = PLATFORMS.iter().map(ToString::to_string).collect();
-        }
-        // Declared beside the protocol settings, so registration reports one
-        // table and the limits below read from the values the server is shown.
-        let settings =
-            std::mem::take(&mut core.settings).extended(crate::settings::docker_settings());
-        let mut cfg = Self {
-            core: core.with_settings(settings),
+        Some(Self {
             builder_image: env_opt("BUILDER_IMAGE")
                 .unwrap_or_else(|| DEFAULT_BUILDER_IMAGE.to_string()),
             dirs: BuildDirs { host, local },
-            // Filled in from the settings just below, by the same code that
-            // fills them in again whenever the server delivers new values.
-            cpu_limit: 0,
-            memory_limit: 0,
-        };
-        cfg.read_settings();
-        Some(cfg)
+            tunables: Tunables::from_settings(settings),
+        })
     }
 
-    /// The same configuration with `settings` in force: the protocol's
-    /// declared fields and the two limits read again from them, and nothing
-    /// else touched -- the image and the build directory are the machine's.
+    /// The same configuration with `settings` in force: the limits read
+    /// again from them, and nothing else touched -- the image and the build
+    /// directory are the machine's.
     #[must_use]
-    pub fn with_settings(&self, settings: WorkerSettings) -> Self {
-        let mut cfg = Self {
-            core: self.core.with_settings(settings),
+    pub fn with_settings(&self, settings: &WorkerSettings) -> Self {
+        Self {
+            tunables: Tunables::from_settings(settings),
             ..self.clone()
-        };
-        cfg.read_settings();
-        cfg
+        }
     }
+}
 
-    /// Read the limits from `core.settings`.
-    fn read_settings(&mut self) {
-        let settings = &self.core.settings;
-        // Negative is unlimited for memory, as it always was; the declared
-        // minimum of 0 keeps a negative CPU limit from ever getting here.
-        self.cpu_limit = settings
-            .integer(keys::CPU_LIMIT)
-            .and_then(|v| u64::try_from(v).ok())
-            .unwrap_or(0);
-        self.memory_limit = settings
-            .integer(keys::MEMORY_LIMIT)
-            .unwrap_or(crate::settings::DEFAULT_MEMORY_LIMIT);
+impl Tunables {
+    /// Read the limits from `settings`.
+    #[must_use]
+    pub fn from_settings(settings: &WorkerSettings) -> Self {
+        Self {
+            // The declared minimum of 0 keeps a negative CPU limit from ever
+            // getting here.
+            cpu_limit: u64::try_from(
+                settings
+                    .integer(keys::CPU_LIMIT)
+                    .unwrap_or(crate::settings::DEFAULT_CPU_LIMIT),
+            )
+            .unwrap_or_default(),
+            // Negative is unlimited for memory, as it always was.
+            memory_limit: settings
+                .integer(keys::MEMORY_LIMIT)
+                .unwrap_or(crate::settings::DEFAULT_MEMORY_LIMIT),
+        }
     }
 
     /// Docker's `NanoCpus`, or `None` for unlimited.
@@ -142,16 +150,10 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn cfg(cpu: u64, mem: i64) -> Config {
-        Config {
-            core: CoreConfig::from_env(),
-            builder_image: DEFAULT_BUILDER_IMAGE.to_string(),
-            dirs: BuildDirs {
-                host: PathBuf::from("/h"),
-                local: PathBuf::from("/l"),
-            },
-            cpu_limit: cpu,
-            memory_limit: mem,
+    const fn cfg(cpu_limit: u64, memory_limit: i64) -> Tunables {
+        Tunables {
+            cpu_limit,
+            memory_limit,
         }
     }
 
@@ -197,16 +199,17 @@ mod tests {
         let declared =
             WorkerSettings::from_env(aurcache_worker_core::settings::protocol_settings())
                 .extended(crate::settings::docker_settings());
-        let base = cfg(0, -1).with_settings(declared);
+        assert_eq!(Tunables::from_settings(&declared), cfg(0, -1));
 
-        let set = base.with_settings(base.core.settings.with_snapshot(&snapshot(&[
+        let set = declared.with_snapshot(&snapshot(&[
             ("cpu_limit", "1500"),
             ("memory_limit", "2048"),
-        ])));
-        assert_eq!(set.nano_cpus(), Some(1_500_000_000));
-        assert_eq!(set.memory_bytes(), Some(2048 * 1024 * 1024));
+        ]));
+        let limits = Tunables::from_settings(&set);
+        assert_eq!(limits.nano_cpus(), Some(1_500_000_000));
+        assert_eq!(limits.memory_bytes(), Some(2048 * 1024 * 1024));
 
-        let removed = set.with_settings(set.core.settings.with_snapshot(&snapshot(&[])));
+        let removed = Tunables::from_settings(&set.with_snapshot(&snapshot(&[])));
         assert_eq!(removed.nano_cpus(), None);
         assert_eq!(removed.memory_bytes(), None);
     }

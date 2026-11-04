@@ -132,7 +132,7 @@ fn SideMenu() -> Element {
                         icon: rsx! { BuildsIcon {} },
                     }
                     MenuLink {
-                        to: Route::Logs { view: crate::listing::ViewParams::default() },
+                        to: Route::Logs { view: crate::screens::LogView::default() },
                         label: MenuEntry::Logs.label(),
                         active: active == Some(MenuEntry::Logs),
                         icon: rsx! { LogsIcon {} },
@@ -252,34 +252,24 @@ fn PreferencesDialog(open: Signal<bool>) -> Element {
     let mut open = open;
 
     rsx! {
-        div {
-            class: if open() { "modal modal-open" } else { "modal" },
-            role: "dialog",
-            aria_modal: "true",
-            aria_label: "UI preferences",
-            div { class: "modal-box",
-                h3 { class: "font-bold text-lg", "UI preferences" }
-                p { class: "text-sm opacity-60",
-                    "Stored in this browser, not on the server."
-                }
-                div { class: "pt-2",
-                    ThemePicker {}
-                    DateStylePicker {}
-                }
-                div { class: "modal-action",
-                    button {
-                        class: "btn btn-sm",
-                        onclick: move |_| open.set(false),
-                        "Done"
-                    }
-                }
+        crate::widgets::Modal {
+            open: open(),
+            label: "UI preferences",
+            on_close: move |()| open.set(false),
+            h3 { class: "font-bold text-lg", "UI preferences" }
+            p { class: "text-sm opacity-60",
+                "Stored in this browser, not on the server."
             }
-            // Clicking away closes it, which is what the backdrop is for.
-            button {
-                class: "modal-backdrop",
-                onclick: move |_| open.set(false),
-                aria_label: "Close preferences",
-                "Close"
+            div { class: "pt-2",
+                ThemePicker {}
+                DateStylePicker {}
+            }
+            div { class: "modal-action",
+                button {
+                    class: "btn btn-sm",
+                    onclick: move |_| open.set(false),
+                    "Done"
+                }
             }
         }
     }
@@ -303,8 +293,8 @@ fn ExternalMenuLink(href: String, label: String) -> Element {
 // ---------------------------------------------------------------------------
 // Icons
 //
-// Inline SVG paths rather than asset files: the prototype has no asset
-// pipeline, and inlining keeps the menu to one dependency-free module. Each is
+// Inline SVG paths rather than asset files: inlining keeps the menu to one
+// dependency-free module, with nothing to fetch before it can draw. Each is
 // 20x20 on a 24-unit grid, stroked in `currentColor` so it follows the theme
 // and the active-row colour without a second rule.
 // ---------------------------------------------------------------------------

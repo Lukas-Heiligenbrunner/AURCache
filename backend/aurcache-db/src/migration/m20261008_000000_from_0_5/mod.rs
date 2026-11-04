@@ -59,7 +59,7 @@ impl MigrationTrait for Migration {
         packages::drop_file_links(manager).await?;
         builds::fail_unknown_statuses(manager).await?;
         builds::delete_unknown_platforms(manager).await?;
-        packages::mark_duplicate_pending_builds_failed(db).await?;
+        builds::fail_duplicate_pending_builds(manager).await?;
         builds::hold_pending_builds(manager).await?;
         builds::number_builds(manager).await?;
         builds::fill_start_times(manager).await?;

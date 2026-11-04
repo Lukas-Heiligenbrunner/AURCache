@@ -14,6 +14,7 @@
 
 use crate::package::update::{announce_unblocked, resync_graph};
 use crate::services::Services;
+use aurcache_activitylog::events::Event;
 use aurcache_db::helpers::operations::{self, KIND_DEPENDENCY_BACKFILL};
 use aurcache_db::packages::{self, SourceData};
 use aurcache_db::prelude::Packages;
@@ -23,6 +24,11 @@ use sea_orm::{
 };
 use serde::Serialize;
 use std::time::Duration;
+use tokio::sync::watch;
+
+/// How long the server waits, as it starts, for the AUR to name the package
+/// bases of 0.5.0's packages before it asks again in the background.
+const CANONICALIZE_WAIT: Duration = Duration::from_secs(60);
 
 /// How long the backfill waits for the official databases before it lets the
 /// builds 0.5.0 left pending go without their dependencies recorded.
@@ -54,6 +60,71 @@ pub enum Backfill {
     NotQueued,
     /// It ran to the end; the failures are in its operation.
     Ran,
+}
+
+/// Queue whatever should be building and has no build, after the backfill an
+/// upgrade from 0.5.0 queued when there is one -- until it has recorded what a
+/// package from 0.5.0 depends on, every one reads as ready to build.
+///
+/// The backfill runs in the background, after naming 0.5.0's packages after
+/// their bases: as the server starts for a while, then for as long as it
+/// takes. The receiver turns `true` once there is no backfill to wait for,
+/// which is what the version check waits on: until then it would ask the AUR
+/// by names that are no package base and report those packages removed.
+pub async fn start(services: &Services) -> watch::Receiver<bool> {
+    let queued = queued(&services.db).await.unwrap_or_else(|e| {
+        tracing::warn!("Could not tell whether a dependency backfill is queued: {e:#}");
+        false
+    });
+    let (backfilled, done) = watch::channel(!queued);
+    if !queued {
+        enqueue_missing(services).await;
+        return done;
+    }
+
+    let named = match tokio::time::timeout(CANONICALIZE_WAIT, canonicalize_names(services)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            warn_unnamed(&e);
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                "The AUR did not answer for the package bases of 0.5.0's packages in time"
+            );
+            false
+        }
+    };
+    let services = services.clone();
+    tokio::spawn(async move {
+        if !named && let Err(e) = canonicalize_names(&services).await {
+            warn_unnamed(&e);
+        }
+        let outcome = backfill_dependencies(&services).await;
+        backfilled.send_replace(true);
+        match outcome {
+            Ok(Backfill::Ran) => enqueue_missing(&services).await,
+            Ok(Backfill::NotQueued) => {}
+            Err(e) => tracing::error!("Dependency backfill stopped: {e:#}"),
+        }
+    });
+    done
+}
+
+fn warn_unnamed(e: &anyhow::Error) {
+    tracing::warn!("Could not ask the AUR for the package bases of 0.5.0's packages: {e:#}");
+}
+
+/// Give a build to anything that should be building and has none: a package
+/// added while the server was down, or whose build row was lost.
+async fn enqueue_missing(services: &Services) {
+    if let Err(e) =
+        super::enqueue::enqueue_missing_buildable_packages(&services.db, &services.activity).await
+    {
+        services.activity.emit(Event::StartupEnqueueFailed {
+            error: format!("{e:#}"),
+        });
+    }
 }
 
 /// Whether the upgrade from 0.5.0 queued a backfill that has not finished.

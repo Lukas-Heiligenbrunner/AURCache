@@ -58,9 +58,7 @@ pub fn Dashboard() -> Element {
         div { class: "space-y-4",
             match &*stats.read_unchecked() {
                 None => rsx! {
-                    div { class: "flex justify-center p-8",
-                        span { class: "loading loading-spinner loading-lg" }
-                    }
+                    crate::widgets::Spinner {}
                 },
                 Some(Err(e)) => rsx! {
                     div { class: "alert alert-error", span { "Could not load statistics: {e}" } }
@@ -93,9 +91,7 @@ pub fn Dashboard() -> Element {
                         }
                         match &*graph.read_unchecked() {
                             None => rsx! {
-                                div { class: "flex justify-center p-8",
-                                    span { class: "loading loading-spinner loading-lg" }
-                                }
+                                crate::widgets::Spinner {}
                             },
                             Some(Err(e)) => rsx! {
                                 div { class: "alert alert-error", span { "Could not load the graph: {e}" } }
@@ -463,7 +459,7 @@ fn RecentProblemsCard(problems: Option<Vec<LogEntry>>) -> Element {
         return rsx! {
             Card {
                 title: "Recent problems",
-                to: Route::Logs { view: ViewParams::for_logs(None, false, None) },
+                to: Route::Logs { view: crate::screens::LogView::new(None, false, None) },
                 div { class: "opacity-60", "No warnings or errors" }
             }
         };
@@ -472,7 +468,7 @@ fn RecentProblemsCard(problems: Option<Vec<LogEntry>>) -> Element {
         Card {
             title: "Recent problems",
             to: Route::Logs {
-                view: ViewParams::for_logs(Some(Severity::Warning), false, None),
+                view: crate::screens::LogView::new(Some(Severity::Warning), false, None),
             },
             div { class: "divide-y divide-base-300",
                 for entry in problems {
@@ -1167,7 +1163,7 @@ mod tests {
         assert!(queued.contains("s=enqueued,waiting"), "{queued}");
 
         let problems = Route::Logs {
-            view: ViewParams::for_logs(Some(Severity::Warning), false, None),
+            view: crate::screens::LogView::new(Some(Severity::Warning), false, None),
         }
         .to_string();
         assert!(problems.contains("v=warning"), "{problems}");

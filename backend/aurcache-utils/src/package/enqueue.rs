@@ -187,7 +187,8 @@ async fn trigger_build_for_package(
     pkg: &packages::Model,
     pending: Pending,
 ) -> anyhow::Result<usize> {
-    let version = pkg.upstream_version.clone().unwrap_or_default();
+    // The builds record a version not yet known as the empty string.
+    let version = pkg.upstream_version.as_deref().unwrap_or_default();
     let mut queued = 0;
     let mut inserted = vec![];
 
@@ -196,7 +197,7 @@ async fn trigger_build_for_package(
             db,
             pkg.id,
             *platform,
-            &version,
+            version,
             aurcache_db::helpers::time::now_secs(),
             pending,
             aurcache_common::build_state::BuildTrigger::User,
@@ -218,7 +219,7 @@ async fn trigger_build_for_package(
             pkg: pkg.name.as_str().into(),
             cause: QueueCause::First,
             builds: inserted,
-            version: Some(version).filter(|version| !version.is_empty()),
+            version: pkg.upstream_version.clone(),
             retried: None,
             needed_by: None,
         });

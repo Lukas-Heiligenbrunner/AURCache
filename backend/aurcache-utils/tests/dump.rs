@@ -47,7 +47,7 @@ async fn package(
             name: name.to_string(),
         }),
         directly_requested: Set(directly_requested),
-        split_packages: Set(Some(r#"["a","b"]"#.to_string())),
+        split_packages: Set(Some(r#"["a","b"]"#.parse().unwrap())),
         patch: Set(patch.map(str::to_string)),
         ..Default::default()
     }
@@ -513,7 +513,7 @@ async fn settings_are_restored_against_the_right_package() {
     let pkg_id = package(&source, "hello", true, None).await;
     for (key, value, scope) in [
         ("version_check_interval", "600", None),
-        ("build_flags", "--nocheck", Some(pkg_id)),
+        ("max_artifact_size", "40G", Some(pkg_id)),
     ] {
         settings::ActiveModel {
             key: Set(key.to_string()),
@@ -540,7 +540,7 @@ async fn settings_are_restored_against_the_right_package() {
         .find(|r| r.key == "version_check_interval")
         .unwrap();
     assert_eq!(settings::package_of(global.pkg_id), None);
-    let scoped = rows.iter().find(|r| r.key == "build_flags").unwrap();
+    let scoped = rows.iter().find(|r| r.key == "max_artifact_size").unwrap();
     assert_eq!(
         settings::package_of(scoped.pkg_id),
         Some(new_id),
@@ -548,12 +548,12 @@ async fn settings_are_restored_against_the_right_package() {
     );
 }
 
-/// A setting that has since been retired is not restored from an older dump:
-/// the migration removed its rows, and nothing reads it.
+/// A setting this version does not know is not restored: nothing would read
+/// its row.
 #[tokio::test]
-async fn a_retired_setting_is_not_restored() {
+async fn an_unknown_setting_is_not_restored() {
     let source = db().await;
-    // Written after the migrations ran, as an older server would have stored it.
+    // Written after the migrations ran, which remove it.
     for key in ["cpu_limit", "version_check_interval"] {
         settings::ActiveModel {
             key: Set(key.to_string()),
@@ -571,7 +571,7 @@ async fn a_retired_setting_is_not_restored() {
     let loaded = load_dump(&bytes).unwrap();
     assert!(
         loaded.settings.global.contains_key("cpu_limit"),
-        "the dump should carry it, as an older one would"
+        "the dump should carry it"
     );
     aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &RestoreOptions::default())
         .await
@@ -635,15 +635,15 @@ async fn a_package_whose_source_fails_is_reported_as_failed() {
 
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     aurcache_utils::restore::apply(
-        &Services::new(
-            target.clone(),
-            store.clone(),
-            Arc::new(client),
-            Arc::new(aurcache_utils::repository::Repository::new(
+        &Services {
+            db: target.clone(),
+            store: store.clone(),
+            client: Arc::new(client),
+            repo: Arc::new(aurcache_utils::repository::Repository::new(
                 tempfile::tempdir().unwrap().keep(),
             )),
-            ActivityLog::discarding(),
-        ),
+            activity: ActivityLog::discarding(),
+        },
         &tempfile::tempdir().unwrap().keep(),
         loaded,
         RestoreOptions::default(),
@@ -740,15 +740,15 @@ async fn a_restored_package_is_queued_to_build() {
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     aurcache_utils::restore::apply(
-        &Services::new(
-            target.clone(),
-            Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
+        &Services {
+            db: target.clone(),
+            store: Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
                 tempfile::tempdir().unwrap().keep(),
             )),
-            Arc::new(client),
-            Arc::new(test_repo()),
-            ActivityLog::discarding(),
-        ),
+            client: Arc::new(client),
+            repo: Arc::new(test_repo()),
+            activity: ActivityLog::discarding(),
+        },
         &tempfile::tempdir().unwrap().keep(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
@@ -1069,15 +1069,15 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
 
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     aurcache_utils::restore::apply(
-        &Services::new(
-            target.clone(),
-            store.clone(),
-            Arc::new(client),
-            Arc::new(aurcache_utils::repository::Repository::new(
+        &Services {
+            db: target.clone(),
+            store: store.clone(),
+            client: Arc::new(client),
+            repo: Arc::new(aurcache_utils::repository::Repository::new(
                 tempfile::tempdir().unwrap().keep(),
             )),
-            ActivityLog::discarding(),
-        ),
+            activity: ActivityLog::discarding(),
+        },
         target_ca.path(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
@@ -1137,15 +1137,15 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
 
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     aurcache_utils::restore::apply(
-        &Services::new(
-            target.clone(),
-            store.clone(),
-            Arc::new(client),
-            Arc::new(aurcache_utils::repository::Repository::new(
+        &Services {
+            db: target.clone(),
+            store: store.clone(),
+            client: Arc::new(client),
+            repo: Arc::new(aurcache_utils::repository::Repository::new(
                 tempfile::tempdir().unwrap().keep(),
             )),
-            ActivityLog::discarding(),
-        ),
+            activity: ActivityLog::discarding(),
+        },
         target_ca.path(),
         load_dump(&bytes).unwrap(),
         RestoreOptions {
@@ -1414,15 +1414,15 @@ async fn a_dependency_only_package_survives_the_restore() {
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
     aurcache_utils::restore::apply(
-        &Services::new(
-            target.clone(),
-            Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
+        &Services {
+            db: target.clone(),
+            store: Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
                 tempfile::tempdir().unwrap().keep(),
             )),
-            Arc::new(client),
-            Arc::new(test_repo()),
-            ActivityLog::discarding(),
-        ),
+            client: Arc::new(client),
+            repo: Arc::new(test_repo()),
+            activity: ActivityLog::discarding(),
+        },
         &tempfile::tempdir().unwrap().keep(),
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),

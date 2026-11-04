@@ -14,6 +14,14 @@
 # Web UI / API : http://localhost:8080   (plain HTTP; put a reverse proxy in front for TLS)
 # Pacman repo  : http://localhost:8081   (add as a [repo] Server in pacman.conf)
 #
+# The host ports are AURCACHE_PORT, AURCACHE_MIRROR_PORT and
+# AURCACHE_WORKER_PORT (8080, 8081, 8083 by default). A second, separate stack
+# beside a dev server or an e2e run is this file under another project name,
+# which keeps its volumes apart too:
+#
+#     AURCACHE_PORT=8090 AURCACHE_MIRROR_PORT=8091 AURCACHE_WORKER_PORT=8093 \
+#         docker compose -p aurcache-local -f compose/docker-compose.yaml up -d
+#
 # For more local build throughput, raise the worker's concurrency on its page
 # in AURCache (or WORKER_CONCURRENCY_DEFAULT below): each build already uses
 # every core, so concurrency buys builds at once, not faster builds.
@@ -32,11 +40,11 @@ services:
     #   context: ..
     #   dockerfile: docker/server.Dockerfile
     ports:
-      - "8080:8080"   # Web UI + API (plain HTTP; front with a reverse proxy for TLS)
+      - "${AURCACHE_PORT:-8080}:8080"   # Web UI + API (plain HTTP; front with a reverse proxy for TLS)
       # No 8081 here: the `repo` service below publishes nginx on that host
       # port instead. Rocket's builtin file handler keeps listening on 8081
       # inside this container for non-compose deployments.
-      - "8083:8083"   # Remote-worker protocol (HTTPS + mutual TLS)
+      - "${AURCACHE_WORKER_PORT:-8083}:8083"   # Remote-worker protocol (HTTPS + mutual TLS)
     environment:
       - LOG_LEVEL=info
       # The timezone cron schedules (the auto-update one) are read in. The
@@ -50,7 +58,7 @@ services:
       - AURCACHE_TLS_SANS=aurcache,localhost
       # Public base URL pacman clients (and workers) use to fetch built packages.
       # Set this to your host's address/domain for remote pacman clients.
-      - AURCACHE_PUBLIC_URL=http://localhost:8081
+      - AURCACHE_PUBLIC_URL=http://localhost:${AURCACHE_MIRROR_PORT:-8081}
       # Bundled enrollment: auto-approve any worker that can write to the shared
       # `enroll` volume (mounted read-only here). No secret, no approval click.
       - AURCACHE_ENROLLMENT_DIR=/enroll
@@ -87,7 +95,7 @@ services:
     # publish-rename protocol is unchanged.
     image: nginx:alpine
     ports:
-      - "8081:80"   # Pacman repository (plain HTTP, for `pacman -Sy`)
+      - "${AURCACHE_MIRROR_PORT:-8081}:80"   # Pacman repository (plain HTTP, for `pacman -Sy`)
     volumes:
       - aurcache_data:/app:ro   # read the repository (served from /app/repo)
     configs:
@@ -104,7 +112,8 @@ services:
     # Prefer a published image; uncomment to build locally instead:
     # build:
     #   context: ..
-    #   dockerfile: docker/worker.Dockerfile
+    #   dockerfile: docker/arch.Dockerfile
+    #   target: worker
     depends_on:
       - aurcache
     environment:
@@ -115,6 +124,10 @@ services:
       # Same shared volume as the server -> this worker is auto-approved. This is
       # also the worker's default path, shown here for clarity.
       - AURCACHE_ENROLLMENT_DIR=/enroll
+      # Where this worker fetches AURCache-built dependencies: the server's own
+      # file handler, over the internal network. The public URL above has the
+      # host's port, which nothing listens on in here once it is not 8081.
+      - AURCACHE_REPO_URL=http://aurcache:8081
       # How many packages this worker builds in parallel. `_DEFAULT` makes it a
       # starting point you can change from the worker's page in AURCache; the
       # plain WORKER_CONCURRENCY would pin it here.
@@ -158,9 +171,11 @@ services:
     image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
     profiles: ["arm"]
     platform: linux/arm64
-    build:
-      context: ..
-      dockerfile: docker/worker.Dockerfile
+    # Prefer a published image; uncomment to build locally instead:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/arch.Dockerfile
+    #   target: worker
     depends_on:
       - aurcache
       - binfmt
@@ -168,6 +183,7 @@ services:
       - RUST_LOG=info
       - AURCACHE_URL=https://aurcache:8083
       - AURCACHE_ENROLLMENT_DIR=/enroll
+      - AURCACHE_REPO_URL=http://aurcache:8081
       # This worker builds aarch64 natively (from the emulated container's POV).
       - WORKER_ARCHES=aarch64
       # Emulated builds are slow; keep concurrency low.

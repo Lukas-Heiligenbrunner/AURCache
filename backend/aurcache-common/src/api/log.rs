@@ -197,6 +197,11 @@ impl FromStr for WorkerRef {
 
 impl BuildRef {
     /// Parse a CLI or URL identity (`pkgbase/number`) without an entity namespace.
+    ///
+    /// One argument rather than two, so `builds get hello/3` reads the way the
+    /// UI and the URLs write it. The separator is `/` because a pkgbase cannot
+    /// contain one -- and because `#` would have to be quoted in most shells,
+    /// and `:` already means an epoch in a version.
     pub fn parse_id(raw: &str) -> Result<Self, String> {
         let (pkgbase, number) = raw
             .rsplit_once('/')
@@ -277,6 +282,7 @@ deserialize_from_string!(PackageRef, WorkerRef, BuildRef, EntityRef);
 // The schema is the wire form: one string, whatever the Rust type is.
 macro_rules! string_schema {
     ($($t:ty => $example:literal),* $(,)?) => {$(
+        #[cfg(feature = "openapi")]
         impl utoipa::PartialSchema for $t {
             fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
                 use utoipa::openapi::schema::{ObjectBuilder, Type};
@@ -288,6 +294,7 @@ macro_rules! string_schema {
             }
         }
 
+        #[cfg(feature = "openapi")]
         impl utoipa::ToSchema for $t {}
     )*};
 }
@@ -300,7 +307,8 @@ string_schema! {
 }
 
 /// One entry, as the API returns it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LogEntry {
     pub id: i32,
     /// Stable identity of what happened, `domain.verb_object`.
@@ -323,7 +331,8 @@ pub struct LogEntry {
 }
 
 /// One page of the log, and how long the filtered log is.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LogPage {
     pub entries: Vec<LogEntry>,
     pub total: u64,
@@ -462,5 +471,40 @@ mod tests {
                 .unwrap(),
             build
         );
+    }
+
+    #[test]
+    fn a_build_id_is_a_package_and_a_number() {
+        let parsed = BuildRef::parse_id("hello/3").expect("parses");
+        assert_eq!(parsed.pkgbase, "hello");
+        assert_eq!(parsed.number, 3);
+    }
+
+    /// Package names contain the characters the AUR allows, none of which is a
+    /// slash -- so the last slash is always the separator.
+    #[test]
+    fn awkward_package_names_survive_a_build_id() {
+        for (input, pkgbase) in [
+            ("aewm++/1", "aewm++"),
+            ("2048.c/12", "2048.c"),
+            ("python-3.11/7", "python-3.11"),
+            ("1337/2", "1337"),
+        ] {
+            let parsed = BuildRef::parse_id(input).expect(input);
+            assert_eq!(parsed.pkgbase, pkgbase, "{input}");
+        }
+    }
+
+    /// A bare number is not a build: silently guessing what it meant would
+    /// resolve to a different build than the caller intended.
+    #[test]
+    fn a_build_id_needs_both_halves() {
+        assert!(BuildRef::parse_id("417").is_err());
+        assert!(BuildRef::parse_id("hello").is_err());
+        assert!(BuildRef::parse_id("/3").is_err());
+        assert!(BuildRef::parse_id("hello/").is_err());
+        assert!(BuildRef::parse_id("hello/x").is_err());
+        // Numbering starts at 1, so 0 is not a build.
+        assert!(BuildRef::parse_id("hello/0").is_err());
     }
 }

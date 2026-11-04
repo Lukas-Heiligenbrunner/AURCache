@@ -57,50 +57,7 @@ impl CacheVolumes {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        privileged_blocking(&[
-            "btrfs".as_ref(),
-            "subvolume".as_ref(),
-            "create".as_ref(),
-            path.as_os_str(),
-        ])?;
-        let made = (|| {
-            privileged_blocking(&[
-                "chown".as_ref(),
-                owner.chown_spec().as_ref(),
-                path.as_os_str(),
-            ])?;
-            privileged_blocking(&[
-                "chmod".as_ref(),
-                format!("{mode:o}").as_ref(),
-                path.as_os_str(),
-            ])?;
-            let id = subvolume_id(path)?;
-            // Its own writes are charged to its own group, which counts toward
-            // nothing until it is under the total. Made inside the cache
-            // subvolume, which is under the total, the kernel may already
-            // have put it there (it did on 7.2): that answers `File exists`.
-            let assigned = privileged_blocking(&[
-                "btrfs".as_ref(),
-                "qgroup".as_ref(),
-                "assign".as_ref(),
-                "--no-rescan".as_ref(),
-                QgroupId::subvolume(id).to_string().as_ref(),
-                TOTAL.to_string().as_ref(),
-                self.root.as_os_str(),
-            ]);
-            match assigned {
-                Ok(_) => {}
-                Err(e) if format!("{e:#}").contains("File exists") => {}
-                Err(e) => return Err(e),
-            }
-            anyhow::Ok(())
-        })();
-        if let Err(e) = made {
-            // Never left in place uncounted: the next call would take it as is.
-            let _ = self.delete(path);
-            return Err(e).with_context(|| format!("preparing {}", path.display()));
-        }
-        Ok(())
+        create_counted(path, owner, mode, &self.root)
     }
 
     /// Whether `path` is a subvolume -- an entry made by [`Self::ensure`] --
@@ -130,19 +87,7 @@ impl CacheVolumes {
         if !self.is_volume(path) {
             bail!("{} is not a cache subvolume", path.display());
         }
-        self.delete(path)
-    }
-
-    fn delete(&self, path: &Path) -> Result<()> {
-        privileged_blocking(&[
-            "btrfs".as_ref(),
-            "subvolume".as_ref(),
-            "delete".as_ref(),
-            // A build could make subvolumes of its own below its tree.
-            "--recursive".as_ref(),
-            path.as_os_str(),
-        ])
-        .map(drop)
+        delete(path)
     }
 
     fn check_inside(&self, path: &Path) -> Result<()> {
@@ -185,7 +130,73 @@ pub(crate) fn fs_type(path: &Path) -> Option<i64> {
     Some(buf.f_type as i64)
 }
 
-fn subvolume_id(path: &Path) -> Result<u64> {
+/// Make `path` a subvolume owned by `owner` with `mode`, counted against the
+/// pool's total. `fs` is any path on the pool, for the qgroup commands.
+///
+/// Never left in place uncounted -- whoever finds it next would take it as it
+/// is -- so a failure after the create deletes it again.
+pub(crate) fn create_counted(path: &Path, owner: Owner, mode: u32, fs: &Path) -> Result<()> {
+    privileged_blocking(&[
+        "btrfs".as_ref(),
+        "subvolume".as_ref(),
+        "create".as_ref(),
+        path.as_os_str(),
+    ])?;
+    let made = (|| {
+        privileged_blocking(&[
+            "chown".as_ref(),
+            owner.chown_spec().as_ref(),
+            path.as_os_str(),
+        ])?;
+        privileged_blocking(&[
+            "chmod".as_ref(),
+            format!("{mode:o}").as_ref(),
+            path.as_os_str(),
+        ])?;
+        let id = subvolume_id(path)?;
+        // Its own writes are charged to its own group, which counts toward
+        // nothing until it is under the total. Made inside a subvolume that is
+        // under the total, the kernel may already have put it there (it did on
+        // 7.2): that answers `File exists`, and is what was asked for.
+        let assigned = privileged_blocking(&[
+            "btrfs".as_ref(),
+            "qgroup".as_ref(),
+            "assign".as_ref(),
+            // Simple quotas never rescan, and a rescan request is an error on
+            // them.
+            "--no-rescan".as_ref(),
+            QgroupId::subvolume(id).to_string().as_ref(),
+            TOTAL.to_string().as_ref(),
+            fs.as_os_str(),
+        ]);
+        match assigned {
+            Ok(_) => Ok(()),
+            Err(e) if format!("{e:#}").contains("File exists") => Ok(()),
+            Err(e) => Err(e),
+        }
+    })();
+    if let Err(e) = made {
+        let _ = delete(path);
+        return Err(e).with_context(|| format!("preparing {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Delete the subvolume at `path` and any below it.
+fn delete(path: &Path) -> Result<()> {
+    privileged_blocking(&[
+        "btrfs".as_ref(),
+        "subvolume".as_ref(),
+        "delete".as_ref(),
+        // A build could make subvolumes of its own below its tree.
+        "--recursive".as_ref(),
+        path.as_os_str(),
+    ])
+    .map(drop)
+}
+
+/// A subvolume's id; its own qgroup is `0/<id>`.
+pub(crate) fn subvolume_id(path: &Path) -> Result<u64> {
     let out = query_blocking(&[
         OsStr::new("btrfs"),
         "inspect-internal".as_ref(),

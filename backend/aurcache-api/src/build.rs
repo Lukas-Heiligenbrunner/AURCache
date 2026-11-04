@@ -3,34 +3,27 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::{Request, State, delete, get, post};
 
-use crate::models::authenticated::Authenticated;
-use crate::models::builds::BuildSummary;
+use crate::auth::Authenticated;
 use crate::utils::error::{ApiError, err};
 use crate::utils::pagination::page_offset;
-use crate::worker::liveness_timeout_secs;
-use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, QueueCause};
-use aurcache_common::api::builds::{DiskUsage, KeptBuild};
+use aurcache_common::api::builds::BuildSummary;
 use aurcache_common::api::log::BuildRef;
-use aurcache_common::api::waiting::WaitingReason;
 use aurcache_common::build_state::{BuildState, BuildTrigger};
-use aurcache_db::helpers::worker_jobs;
 use aurcache_db::prelude::Builds;
-use aurcache_db::{builds, packages, workers};
-use aurcache_utils::build_logger::{
-    build_log_path, build_log_size, read_build_output, remove_build_log,
-};
+use aurcache_db::{builds, packages};
+use aurcache_utils::build_delete::Delete;
+use aurcache_utils::build_logger::{build_log_path, build_log_size, read_build_output};
 use aurcache_utils::cancel::Cancel;
+use aurcache_utils::listing::{BuildRow, annotate_waiting, build_row_select, waiting_reasons};
 use aurcache_utils::package::update::{package_update, queued};
 use rocket::fs::NamedFile;
 use rocket::http::{ContentType, Header};
 use rocket::response::Responder;
-use sea_orm::FromQueryResult;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, JoinType, Order, QueryFilter, QueryOrder,
     QuerySelect, RelationTrait, Select,
 };
-use std::collections::HashMap;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
@@ -92,8 +85,7 @@ pub async fn build_output(
     // A build with no log file is not an error: it may have produced nothing
     // yet, or its log may have been removed. Callers render the difference.
     let bytes = read_build_output(pkgbase, number, offset.unwrap_or(0), limit)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
+        .await?
         .unwrap_or_default();
 
     Ok((ContentType::Plain, bytes))
@@ -212,7 +204,11 @@ pub async fn list_package_builds(
     status: Option<&str>,
     _a: Authenticated,
 ) -> Result<Json<Vec<BuildSummary>>, ApiError> {
-    let pkg = Some(crate::package::package_id(db.inner(), pkgbase).await?);
+    let pkg = Some(
+        crate::package::package_by_pkgbase(db.inner(), pkgbase)
+            .await?
+            .id,
+    );
     let filter = BuildFilter::new(pkg, worker, status)?;
     list_builds_impl(db.inner(), &filter, limit, page).await
 }
@@ -251,9 +247,8 @@ async fn list_builds_impl(
     limit: Option<u64>,
     page: Option<u64>,
 ) -> Result<Json<Vec<BuildSummary>>, ApiError> {
-    // Every row has a start time since the dashboard-indexes migration
-    // backfilled legacy NULLs, so the bare column orders identically on both
-    // backends and the `start_time` index serves it.
+    // Every row has a start time, so the bare column orders identically on
+    // both backends and the `start_time` index serves it.
     let mut query = build_row_select()
         .order_by(builds::Column::StartTime, Order::Desc)
         .limit(limit)
@@ -267,138 +262,9 @@ async fn list_builds_impl(
     if !filter.states.is_empty() {
         query = query.filter(builds::Column::Status.is_in(filter.states.iter().copied()));
     }
-    let rows = query
-        .into_model::<BuildRow>()
-        .all(db)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let rows = query.into_model::<BuildRow>().all(db).await?;
 
     Ok(Json(annotate_waiting(db, rows).await))
-}
-
-/// The build-list projection shared by the list, single-build and dashboard routes.
-///
-/// Every listed build has the same fields, so there is one place the shape of a
-/// [`BuildRow`] is described.
-pub(crate) fn build_row_select() -> Select<Builds> {
-    Builds::find()
-        .join_rev(JoinType::InnerJoin, packages::Relation::Builds.def())
-        .select_only()
-        .column_as(builds::Column::Id, "id")
-        .column_as(builds::Column::Number, "number")
-        .column(builds::Column::Status)
-        .column_as(packages::Column::Name, "pkg_name")
-        .column(builds::Column::Version)
-        .column(builds::Column::EndTime)
-        .column(builds::Column::StartTime)
-        .column(builds::Column::Platform)
-        .column(builds::Column::Size)
-        .column(builds::Column::PeakMemory)
-        .column(builds::Column::DiskChroot)
-        .column(builds::Column::DiskWorkdir)
-        .column(builds::Column::DiskSources)
-        .column(builds::Column::DiskBuildTree)
-        .column(builds::Column::KeptPath)
-        .column(builds::Column::KeptUntil)
-        .column(builds::Column::KeptTree)
-        // Left, so a queued build -- which has no worker yet -- still lists.
-        .join(JoinType::LeftJoin, builds::Relation::Workers.def())
-        .column_as(workers::Column::Name, "worker_name")
-}
-
-/// A listed build as queried, including the row id the response omits.
-///
-/// Waiting reasons are keyed by row id internally, so the id has to survive as
-/// far as the annotation — but no further.
-#[derive(FromQueryResult)]
-pub(crate) struct BuildRow {
-    id: i32,
-    number: i32,
-    pkg_name: String,
-    version: String,
-    status: BuildState,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-    platform: String,
-    size: Option<i64>,
-    peak_memory: Option<i64>,
-    disk_chroot: Option<i64>,
-    disk_workdir: Option<i64>,
-    disk_sources: Option<i64>,
-    disk_build_tree: Option<i64>,
-    kept_path: Option<String>,
-    kept_until: Option<i64>,
-    kept_tree: Option<String>,
-    worker_name: Option<String>,
-}
-
-impl BuildRow {
-    fn into_summary(self, waiting_reason: Option<WaitingReason>) -> BuildSummary {
-        BuildSummary {
-            number: self.number,
-            pkg_name: self.pkg_name,
-            version: self.version,
-            status: self.status,
-            start_time: self.start_time,
-            end_time: self.end_time,
-            platform: self.platform,
-            size: self.size,
-            peak_memory: self.peak_memory,
-            disk_usage: Some(DiskUsage {
-                chroot: self.disk_chroot,
-                workdir: self.disk_workdir,
-                sources: self.disk_sources,
-                build_tree: self.disk_build_tree,
-            })
-            .filter(|usage| !usage.is_empty()),
-            kept: self
-                .kept_path
-                .zip(self.kept_until)
-                .map(|(path, until)| KeptBuild {
-                    path,
-                    until,
-                    tree: self.kept_tree,
-                }),
-            worker_name: self.worker_name,
-            // Filled only by the detail route, which knows it is rendering one
-            // build; the lists would pay a stat per row for fields they do not
-            // show. See the field's docs for how `None` differs from `0`.
-            log_size: None,
-            waiting_reason,
-        }
-    }
-}
-
-/// Attach [`WaitingReason`]s to any listed build that no approved worker can
-/// currently claim, so a stalled build is distinguishable from a queued one.
-///
-/// Best-effort by design: this is diagnostic decoration, and failing to compute
-/// it must never turn a working build list into an error page.
-pub(crate) async fn annotate_waiting(
-    db: &DatabaseConnection,
-    rows: Vec<BuildRow>,
-) -> Vec<BuildSummary> {
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    let mut reasons = waiting_reasons(db).await;
-    rows.into_iter()
-        .map(|row| {
-            let reason = reasons.remove(&row.id);
-            row.into_summary(reason)
-        })
-        .collect()
-}
-
-/// Why each queued build is waiting, by row id; empty when that cannot be
-/// computed.
-async fn waiting_reasons(db: &DatabaseConnection) -> HashMap<i32, WaitingReason> {
-    worker_jobs::waiting_reasons(db, liveness_timeout_secs())
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("could not compute build waiting reasons: {e}");
-            HashMap::new()
-        })
 }
 
 /// Scope a build select to one public build identity — `<pkgbase>/<number>`.
@@ -445,8 +311,7 @@ async fn build_by_number(
         number,
     )
     .one(db)
-    .await
-    .map_err(|e| err(Status::InternalServerError, e))?
+    .await?
     .ok_or_else(|| err(Status::NotFound, format!("no build {pkgbase}/{number}")))
 }
 
@@ -459,8 +324,7 @@ async fn build_row_by_number(
     build_identity(build_row_select(), pkgbase, number)
         .into_model::<BuildRow>()
         .one(db)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
+        .await?
         .ok_or_else(|| err(Status::NotFound, format!("no build {pkgbase}/{number}")))
 }
 
@@ -510,30 +374,24 @@ pub async fn get_build(
 )]
 #[delete("/package/<pkgbase>/build/<number>")]
 pub async fn delete_build(
-    db: &State<DatabaseConnection>,
+    services: &State<Services>,
     pkgbase: &str,
     number: i32,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<(), ApiError> {
-    let db = db.inner();
+    let db = &services.db;
 
     let build = build_by_number(db, pkgbase, number).await?;
-    // A worker holds an active build's lease and a publishing one is being
-    // moved into the repository; removing the row under either leaves that
-    // work pointing at nothing.
-    if matches!(build.status, BuildState::Active | BuildState::Publishing) {
-        return Err(err(
-            Status::Conflict,
-            format!("build {pkgbase}/{number} is running; cancel it first"),
-        ));
+    match aurcache_utils::build_delete::delete_build(db, pkgbase, &build).await? {
+        Delete::Deleted => {}
+        Delete::Running => {
+            return Err(err(
+                Status::Conflict,
+                format!("build {pkgbase}/{number} is running; cancel it first"),
+            ));
+        }
     }
-
-    aurcache_db::helpers::builds::delete_build(db, &build)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
-    remove_build_log(pkgbase, number).await;
-    al.emit_by(
+    services.activity.emit_by(
         Event::BuildDeleted {
             build: BuildRef {
                 pkgbase: pkgbase.to_string(),
@@ -559,17 +417,14 @@ pub async fn delete_build(
 )]
 #[post("/package/<pkgbase>/build/<number>/cancel")]
 pub async fn cancel_build(
-    db: &State<DatabaseConnection>,
+    services: &State<Services>,
     pkgbase: &str,
     number: i32,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<(), ApiError> {
-    let build = build_by_number(db.inner(), pkgbase, number).await?;
-    match aurcache_utils::cancel::cancel_build(db.inner(), pkgbase, &build)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-    {
+    let db = &services.db;
+    let build = build_by_number(db, pkgbase, number).await?;
+    match aurcache_utils::cancel::cancel_build(db, pkgbase, &build).await? {
         Cancel::Cancelled => {}
         Cancel::Settled => {
             return Err(err(
@@ -578,7 +433,7 @@ pub async fn cancel_build(
             ));
         }
     }
-    al.emit_by(
+    services.activity.emit_by(
         Event::BuildCancelled {
             build: BuildRef {
                 pkgbase: pkgbase.to_string(),
@@ -606,21 +461,13 @@ pub async fn retry_build(
     pkgbase: &str,
     number: i32,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<Json<i32>, ApiError> {
     let db = &services.db;
 
     // The build being retried tells us which platform and package to rebuild.
     let old_build = build_by_number(db, pkgbase, number).await?;
     let platform = old_build.platform;
-    let pkg_id = old_build.pkg_id;
-
-    // Fetch the package details
-    let package = packages::Entity::find_by_id(pkg_id)
-        .one(db)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-        .ok_or_else(|| err(Status::NotFound, "no package with that id"))?;
+    let package = crate::package::package_by_id(db, old_build.pkg_id).await?;
 
     // Route retries through the same path as "Force Rebuild": this re-fetches
     // the .SRCINFO, resolves AUR dependencies again, and syncs the dependency
@@ -635,7 +482,7 @@ pub async fn retry_build(
         // applies is the caller's to fix.
         .map_err(|e| err(Status::BadRequest, e))?;
     // "Retry" on a build that worked asks for it again: a rebuild.
-    al.emit_by(
+    services.activity.emit_by(
         queued(
             pkgbase,
             QueueCause::after(old_build.status == BuildState::Failed),

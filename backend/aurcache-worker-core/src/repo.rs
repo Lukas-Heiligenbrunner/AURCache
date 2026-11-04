@@ -13,26 +13,132 @@
 use aurcache_common::repo::host_from_url;
 use aurcache_common::worker::REPO_HOST_PLACEHOLDER;
 
-/// Render the server's template for this worker.
-///
-/// An empty result means no `[repo]` section: either the server publishes no
-/// repository, or no host could be determined. Emitting a section containing an
-/// unresolved placeholder would be worse — pacman would fail on a URL nobody
-/// wrote, instead of simply not knowing the repository.
-///
-/// `override_host` corresponds to `AURCACHE_REPO_HOST`, for deployments where
-/// the address a worker uses for the protocol is not the address it should use
-/// for the repository.
-///
-/// `override_url` corresponds to `AURCACHE_REPO_URL` and replaces the base URL
-/// outright — scheme, host, port and path. The host-only override assumes every
-/// worker reaches the repository on the same scheme, port and path as every
-/// other, which is the server's single `AURCACHE_PUBLIC_URL`; a worker behind a
-/// reverse proxy (`https://aur.example.com/repo`) beside one on the compose
-/// network (`http://aurcache:8081`) breaks that assumption. It wins over
-/// `override_host`, being the same knob with a longer reach.
-#[must_use]
-pub fn render(
+/// The `[repo]` section this worker's builds resolve AURCache packages
+/// through: rendered once, at enrollment, from the server's template.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoSection {
+    /// The section as `pacman.conf` takes it.
+    text: String,
+    /// Where it points, when that is a URL the worker can fetch from too.
+    location: Option<Location>,
+}
+
+/// Where a `[repo]` section points: its name, which names the database
+/// pacman fetches (`[repo]` is `repo.db`), and its `Server =` URL, `$arch`
+/// left in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Location {
+    name: String,
+    server: url::Url,
+}
+
+/// A host and the port actually dialled on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    /// A domain, or an address -- an IPv6 one without its brackets, ready for
+    /// resolution.
+    pub host: String,
+    pub port: u16,
+}
+
+impl Endpoint {
+    /// The endpoint `url` is dialled on: its explicit port, else the
+    /// scheme's default -- what an HTTP client connects to.
+    #[must_use]
+    pub fn of(url: &url::Url) -> Option<Self> {
+        let host = match url.host()? {
+            url::Host::Domain(domain) => domain.to_string(),
+            url::Host::Ipv4(addr) => addr.to_string(),
+            url::Host::Ipv6(addr) => addr.to_string(),
+        };
+        Some(Self {
+            host,
+            port: url.port_or_known_default()?,
+        })
+    }
+}
+
+impl RepoSection {
+    /// Render the server's template for this worker; `None` when there is no
+    /// section to give builds.
+    ///
+    /// That is either the server publishing no repository, or no host that
+    /// could be determined. Emitting a section containing an unresolved
+    /// placeholder would be worse -- pacman would fail on a URL nobody wrote,
+    /// instead of simply not knowing the repository.
+    ///
+    /// `override_host` corresponds to `AURCACHE_REPO_HOST`, for deployments
+    /// where the address a worker uses for the protocol is not the address it
+    /// should use for the repository.
+    ///
+    /// `override_url` corresponds to `AURCACHE_REPO_URL` and replaces the base
+    /// URL outright -- scheme, host, port and path. The host-only override
+    /// assumes every worker reaches the repository on the same scheme, port
+    /// and path as every other, which is the server's single
+    /// `AURCACHE_PUBLIC_URL`; a worker behind a reverse proxy
+    /// (`https://aur.example.com/repo`) beside one on the compose network
+    /// (`http://aurcache:8081`) breaks that assumption. It wins over
+    /// `override_host`, being the same knob with a longer reach.
+    #[must_use]
+    pub fn render(
+        template: &str,
+        server_url: &str,
+        override_host: Option<&str>,
+        override_url: Option<&str>,
+    ) -> Option<Self> {
+        Self::parse(render(template, server_url, override_host, override_url))
+    }
+
+    /// A rendered section; `None` for a blank one.
+    #[must_use]
+    pub fn parse(text: String) -> Option<Self> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let location = location(&text);
+        Some(Self { text, location })
+    }
+
+    /// The section as `pacman.conf` takes it.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The `Server =` URL, `$arch` left in, when it is one the worker can
+    /// fetch from.
+    #[must_use]
+    pub fn server(&self) -> Option<&url::Url> {
+        self.location.as_ref().map(|location| &location.server)
+    }
+
+    /// Where builds reach the repository, for the firewall to leave open.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<Endpoint> {
+        Endpoint::of(self.server()?)
+    }
+
+    /// URL of the repository database for one arch.
+    ///
+    /// pacman fetches `<Server>/<section-name>.db`, so the DB filename comes
+    /// from the section header rather than being hardcoded -- a section
+    /// renamed elsewhere keeps working. `$arch` is substituted wherever it
+    /// appears before appending `<name>.db`. A `None` result means "no
+    /// reconciliation", never a URL nobody wrote.
+    #[must_use]
+    pub fn db_url(&self, arch: &str) -> Option<String> {
+        let Location { name, server } = self.location.as_ref()?;
+        let mut url = server.clone();
+        let base = url.path().replace("$arch", arch);
+        let base = base.trim_end_matches('/');
+        url.set_path(&format!("{base}/{name}.db"));
+        Some(url.to_string())
+    }
+}
+
+/// Render the server's template for this worker: see [`RepoSection::render`].
+/// An empty result means no `[repo]` section.
+fn render(
     template: &str,
     server_url: &str,
     override_host: Option<&str>,
@@ -83,24 +189,17 @@ fn with_base_url(template: &str, base: &str) -> String {
     out
 }
 
-/// URL of the repository database for one arch, given a rendered `[repo]`
-/// section.
+/// Where a rendered section points.
 ///
-/// pacman fetches `<Server>/<section-name>.db`, so the DB filename comes from
-/// the section header (`[repo]` behaves as `repo.db`) rather than being
-/// hardcoded — a section renamed elsewhere keeps working. `$arch` is
-/// substituted wherever it appears before appending `<name>.db`.
+/// The name and the server line belong together: the DB filename comes from
+/// the header of the section *containing* the `Server =` line, not from the
+/// first header anywhere in the text. Pairing them independently misresolves
+/// the moment another section (e.g. `[options]`) precedes it.
 ///
 /// Parsed as a proper URL rather than patched by string: only an `http(s)`
 /// URL with a host is accepted, and a query string or fragment is rejected
-/// because the `<name>.db` suffix would have to be guessed past it. A `None`
-/// result means "no reconciliation", never a URL nobody wrote.
-#[must_use]
-pub fn repo_db_url(section: &str, arch: &str) -> Option<String> {
-    // The name and the server line belong together: the DB filename comes
-    // from the header of the section *containing* the `Server =` line, not
-    // from the first header anywhere in the file. Pairing them independently
-    // misresolves the moment another section (e.g. `[options]`) precedes it.
+/// because the `<name>.db` suffix would have to be guessed past it.
+fn location(section: &str) -> Option<Location> {
     let mut name: Option<&str> = None;
     let mut server: Option<&str> = None;
     for line in section.lines() {
@@ -122,33 +221,32 @@ pub fn repo_db_url(section: &str, arch: &str) -> Option<String> {
         }
     }
     let (name, server) = (name?, server?);
-    let mut url = url::Url::parse(server).ok()?;
-    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+    let server = url::Url::parse(server).ok()?;
+    if !matches!(server.scheme(), "http" | "https") || server.host().is_none() {
         return None;
     }
-    if url.query().is_some() || url.fragment().is_some() {
+    if server.query().is_some() || server.fragment().is_some() {
         return None;
     }
-    let base = url.path().replace("$arch", arch);
-    let base = base.trim_end_matches('/');
-    url.set_path(&format!("{base}/{name}.db"));
-    Some(url.to_string())
+    Some(Location {
+        name: name.to_string(),
+        server,
+    })
 }
 
-/// Append a rendered `[repo]` section to a job's `pacman.conf`.
-///
-/// An empty section is appended as nothing.
+/// Append this worker's `[repo]` section, if it has one, to a job's
+/// `pacman.conf`.
 #[must_use]
-pub fn append_to_pacman_conf(pacman_conf: &str, section: &str) -> String {
-    if section.trim().is_empty() {
+pub fn append_to_pacman_conf(pacman_conf: &str, section: Option<&RepoSection>) -> String {
+    let Some(section) = section else {
         return pacman_conf.to_string();
-    }
+    };
     let mut out = pacman_conf.to_string();
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out.push('\n');
-    out.push_str(section);
+    out.push_str(section.text());
     out
 }
 
@@ -286,10 +384,58 @@ mod tests {
         assert!(render("", "https://aurcache:8083", None, None).is_empty());
     }
 
+    /// What the sections in the tests below resolve to.
+    fn repo_db_url(section: &str, arch: &str) -> Option<String> {
+        RepoSection::parse(section.to_string())?.db_url(arch)
+    }
+
+    #[test]
+    fn a_blank_rendering_is_no_section() {
+        assert_eq!(RepoSection::parse("  \n".to_string()), None);
+        assert_eq!(
+            RepoSection::render("", "https://aurcache:8083", None, None),
+            None
+        );
+    }
+
+    /// A section pacman can use is still appended when the worker cannot
+    /// fetch from where it points; only the reconcile goes without.
+    #[test]
+    fn a_section_the_worker_cannot_fetch_from_is_still_a_section() {
+        let section = RepoSection::parse("[repo]\nServer = http://h/$arch?token=1\n".into())
+            .expect("a section");
+        assert_eq!(section.db_url("x86_64"), None);
+        assert_eq!(section.endpoint(), None);
+        assert!(append_to_pacman_conf("[options]\n", Some(&section)).contains("token=1"));
+    }
+
+    /// The firewall leaves open the port builds reach the repository on.
+    #[test]
+    fn the_endpoint_is_the_servers_host_and_port() {
+        let at = |text: &str| RepoSection::parse(text.to_string()).unwrap().endpoint();
+        let endpoint = |host: &str, port| Endpoint {
+            host: host.to_string(),
+            port,
+        };
+        assert_eq!(
+            at("[repo]\nServer = http://aurcache:8081/$arch\n"),
+            Some(endpoint("aurcache", 8081))
+        );
+        assert_eq!(
+            at("[repo]\nServer = https://aur.example.com/repo/$arch\n"),
+            Some(endpoint("aur.example.com", 443))
+        );
+        assert_eq!(
+            at("[repo]\nServer = http://[::1]:8081/$arch\n"),
+            Some(endpoint("::1", 8081))
+        );
+    }
+
     #[test]
     fn appending_leaves_the_config_alone_when_there_is_no_section() {
-        assert_eq!(append_to_pacman_conf("[options]\n", ""), "[options]\n");
-        let with = append_to_pacman_conf("[options]", "[repo]\n");
+        assert_eq!(append_to_pacman_conf("[options]\n", None), "[options]\n");
+        let section = RepoSection::parse("[repo]\n".to_string());
+        let with = append_to_pacman_conf("[options]", section.as_ref());
         assert!(with.starts_with("[options]\n"));
         assert!(with.ends_with("[repo]\n"));
     }

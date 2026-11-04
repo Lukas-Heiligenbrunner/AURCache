@@ -24,15 +24,6 @@ impl DirectoryMeasurement {
             Self::Incomplete { .. } => None,
         }
     }
-
-    /// The measured lower bound, including when part of the tree was unreadable.
-    #[must_use]
-    pub const fn known_bytes(self) -> u64 {
-        match self {
-            Self::Complete { bytes } => bytes,
-            Self::Incomplete { known_bytes } => known_bytes,
-        }
-    }
 }
 
 /// Measure regular files iteratively, without following symlinks.
@@ -240,7 +231,9 @@ mod tests {
         fs::write(tmp.path().join("real/data"), vec![b'x'; 1_000_000]).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("real"), tmp.path().join("link")).unwrap();
 
-        let total = measure_directory(tmp.path()).known_bytes();
+        let total = measure_directory(tmp.path())
+            .total()
+            .expect("every entry is readable");
         assert!(
             total < 1_000_000 + 2_000,
             "symlinked directory contents leaked into total: {total}"
@@ -279,7 +272,9 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("b"), tmp.path().join("a")).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("a"), tmp.path().join("b")).unwrap();
 
-        let total = measure_directory(tmp.path()).known_bytes();
+        let total = measure_directory(tmp.path())
+            .total()
+            .expect("every entry is readable");
         assert!(
             total < 4096,
             "loop should be counted once, not resolved: {total}"
@@ -288,7 +283,7 @@ mod tests {
 
     /// The best-effort contract: an unreadable subtree costs only itself. The
     /// readable sibling is still counted, rather than the whole walk collapsing
-    /// to zero the way a `Result` plus `unwrap_or(0)` used to make it.
+    /// to zero.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_subtree_does_not_zero_the_total() {
@@ -305,7 +300,10 @@ mod tests {
 
         // Running as root defeats the permission bits, so `locked` may or may
         // not be counted; what must hold either way is that `readable` is.
-        let total = measure_directory(tmp.path()).known_bytes();
+        let total = match measure_directory(tmp.path()) {
+            DirectoryMeasurement::Complete { bytes } => bytes,
+            DirectoryMeasurement::Incomplete { known_bytes } => known_bytes,
+        };
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             total >= 1000,

@@ -31,8 +31,7 @@ pub struct Model {
     /// Worker software version reported at enrollment/heartbeat.
     pub version: Option<String>,
     /// Which build strategy the worker runs -- `chroot`, `docker`. Free-form,
-    /// so a new executor needs no migration. `None` for a worker that enrolled
-    /// before the column existed.
+    /// so a new executor needs no migration. `None` when none was reported.
     pub kind: Option<String>,
     /// Exact pkgbase names this worker is specially provisioned
     /// for (credentials, licensed toolchain, scratch space). A package named by

@@ -9,10 +9,9 @@ use aurcache_common::worker::BuildOutcome;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build;
-use crate::cache::Cache;
 use crate::chroot;
-use crate::chroots::Chroots;
 use crate::config::Config;
+use crate::executor::Shared;
 
 /// Build the PKGBUILD in `path` locally and report where the artifacts landed.
 pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<()> {
@@ -29,25 +28,14 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     // repositories are the right ones. `makepkg.conf` is still left to the
     // chroot's own, matching what a served build gets.
     let pacman_conf = existing("/etc/pacman.conf")?;
-    let chroots = Chroots::new(
-        cfg.pool_config(),
-        std::time::Duration::from_secs(cfg.chroot_refresh_interval),
-        cfg.keep_failed.map(std::time::Duration::from_secs),
-        cfg.cache_owner(),
-    );
+    let shared = Shared::new(cfg);
+    let chroots = &shared.chroots;
     chroots.open().await?;
     chroots
         .refresh(&pacman_conf, None)
         .await
         .context("preparing base chroot")?;
-    let cache = Cache::new(
-        &cfg.cache_dir,
-        cfg.cache_max_size,
-        cfg.cache_ttl,
-        cfg.pkgcache_max_size,
-        cfg.pkgcache_ttl,
-    )
-    .with_volumes(chroots.cache_volumes().await);
+    let cache = shared.cache(cfg.tunables.cache).await;
     let pkgbase = pkgdir
         .file_name()
         .and_then(|s| s.to_str())
@@ -62,7 +50,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     let status = chroots
         .with_lease(
             crate::chroots::ONE_SHOT_BUILD_ID,
-            Some(cfg.build_disk_max),
+            Some(cfg.tunables.build_disk_max),
             async |lease| {
                 let argv = build::build_command(
                     lease.chroot_dir(),
@@ -85,7 +73,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
         )
         .await?;
 
-    let report = report::classify_exit(status, false);
+    let report = report::ended(None, std::time::Duration::ZERO, status.into());
     if report.outcome == BuildOutcome::Succeeded {
         let artifacts = artifacts::discover_artifacts(&pkgdir);
         tracing::info!("Build succeeded: {} artifact(s)", artifacts.len());

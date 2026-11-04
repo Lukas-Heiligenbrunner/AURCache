@@ -30,8 +30,8 @@ The worker auto-enrolls through the shared `enroll` volume — being able to wri
 to a volume the server reads is what proves it is trusted, so there is no token
 to configure and no approval to click.
 
-See the [Quick Start](../overview/quick-start.md) for the same setup with
-PostgreSQL.
+See the [Quick Start](../overview/quick-start.md#with-postgresql) for the same
+setup with PostgreSQL.
 
 ## What to persist
 
@@ -96,19 +96,11 @@ through as a device and name it in `WORKER_POOL`:
 
 ## Generating these files
 
-`aurcli setup compose --role bundle|backend|worker` writes the file for
-each of these topologies, with the same comments and the same defaults, and
-`--database postgres|sqlite` chooses the server's database, and
-`--[no-]postgres-upgrade` whether PostgreSQL gets an upgrade step (both asked
-for when omitted). A file with a worker also asks what backs its
-[storage pool](../workers/storage-pool.md#setting-it-up-with-the-cli), or takes
-`--pool-image`, `--pool-device PATH` or `--pool-mount PATH`. It needs
-no server and no token, so it is available before anything is running — useful
-for a system that deploys from a pasted compose file, such as TrueNAS, Portainer
-or Unraid. See [Quick Start](../overview/quick-start.md#for-truenas-portainer-unraid).
-
-On a machine with Docker to hand, `aurcli setup server` and
-`aurcli setup worker` skip the file and run the containers directly.
+`aurcli setup compose --role bundle|backend|worker` writes the file for each of
+these topologies, with the same comments and the same defaults, and needs no
+server and no token. `aurcli setup server` and `aurcli setup worker` skip the
+file and run the containers directly. See [Setup and
+health](../cli/setup.md#a-compose-file-instead).
 
 ## More workers
 

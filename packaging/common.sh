@@ -1,14 +1,11 @@
 # shellcheck shell=bash
 # Shared PKGBUILD helpers: how to build this repo's Rust binaries for $CARCH.
 #
-# Sourced by both PKGBUILDs rather than duplicated, so the two cannot disagree
-# about targets, flags or where the output lands.
+# Sourced by every PKGBUILD rather than duplicated, so they cannot disagree
+# about targets, flags or where the output lands. The image builds source it
+# too, for the same triples (docker/build-aurcache-packages.sh,
+# docker/build-rust.sh).
 
-# Arch has no cross-compilation feature -- no `--target`, nothing in devtools --
-# but `CARCH` is a plain shell variable makepkg sources and uses for the package
-# name, so setting it and cross-compiling inside build() produces a correctly
-# labelled package. That is a convention, not a supported mode, which is why it
-# is written down here rather than assumed.
 # Whether $CARCH is the machine we are running on.
 #
 # Not a plain string compare: Arch calls 32-bit ARM `armv7h` while `uname -m`

@@ -15,7 +15,7 @@
 //! See `design/implemented/structured-logs.md`.
 
 use aurcache_common::api::activity::Severity;
-use aurcache_common::api::log::{LogEntry, LogPage, NS_BUILD, NS_PACKAGE, NS_WORKER};
+use aurcache_common::api::log::{LogEntry, LogPage};
 use aurcache_db::prelude::{LogEntities, Logs};
 use aurcache_db::{log_entities, logs};
 use sea_orm::{
@@ -177,7 +177,3 @@ fn render(row: logs::Model) -> LogEntry {
         user: row.user,
     }
 }
-
-/// Namespaces, re-exported so a caller building a filter does not have to reach
-/// into the common crate for them.
-pub const NAMESPACES: [&str; 3] = [NS_PACKAGE, NS_WORKER, NS_BUILD];

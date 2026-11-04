@@ -7,15 +7,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use aurcache_worker::agent;
 use aurcache_worker::config::Config;
 use aurcache_worker::executor::ChrootExecutor;
+use aurcache_worker::settings::chroot_settings;
 use aurcache_worker::{build, credentials, oneshot};
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
-use aurcache_worker_core::runner::{Registration, Runner};
+use aurcache_worker_core::runner::Runner;
 use aurcache_worker_core::{config::CoreConfig, enroll};
 
 #[derive(Parser)]
@@ -44,22 +44,18 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    aurcache_worker_core::init_tracing();
 
     let cli = Cli::parse();
-    let cfg = Arc::new(Config::from_env());
+    let core = CoreConfig::from_env(chroot_settings());
+    let cfg = Config::from_env(&core);
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Prepare => {
-            let identity = Identity::load_or_create(&cfg.core.data_dir)?;
+            let identity = Identity::load_or_create(&core.data_dir)?;
             println!("Worker fingerprint: {}", identity.fingerprint);
-            println!("Name: {}", cfg.core.name);
-            println!("Arches: {}", cfg.core.arches.join(","));
+            println!("Name: {}", core.name);
+            println!("Arches: {}", core.arches.join(","));
             Ok(())
         }
         Command::BuildOnce { path, flags } => {
@@ -68,7 +64,7 @@ async fn main() -> Result<()> {
         }
         Command::Run => {
             build::check_script().await?;
-            run(cfg).await
+            run(core, cfg).await
         }
     }
 }
@@ -101,18 +97,19 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
-async fn run(cfg: Arc<Config>) -> Result<()> {
+async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // What a previous run left in the storage pool is swept when the
     // executor opens it, before anything can claim work.
 
-    let identity = Identity::load_or_create(&cfg.core.data_dir)?;
+    let identity = Identity::load_or_create(&core.data_dir)?;
     announce_build_credential(&cfg).await;
 
     // After the key is ensured, so a first start has one to load rather than
     // needing a restart. Held for the worker's lifetime: dropping it kills the
-    // agent, so no stray agent outlives us holding a credential.
+    // agent, so no stray agent outlives us holding a credential. The key is
+    // read once, here: replacing it takes effect at the next restart.
     let _agent = match agent::start(
-        &cfg.core.data_dir,
+        &core.data_dir,
         credentials::resolve(&cfg).path(),
         &cfg.build_user,
     )
@@ -137,7 +134,6 @@ async fn run(cfg: Arc<Config>) -> Result<()> {
             None
         }
     };
-    let core: Arc<CoreConfig> = Arc::new(cfg.core.clone());
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
@@ -149,8 +145,8 @@ async fn run(cfg: Arc<Config>) -> Result<()> {
     // the server. Best-effort like the credential announcement: a worker that
     // cannot set the rule still builds, but says so loudly.
     match aurcache_worker::build_firewall::ensure(
-        &cfg.core.aurcache_url,
-        client.repo_section(),
+        &core.aurcache_url,
+        client.repo(),
         &cfg.build_user,
     ) {
         Ok(()) => tracing::info!("Build user firewalled off the worker-protocol port"),
@@ -160,13 +156,6 @@ async fn run(cfg: Arc<Config>) -> Result<()> {
         ),
     }
 
-    let executor = Arc::new(ChrootExecutor::new(cfg).await);
-    // What the runner registers again with when delivered values change what
-    // the server schedules this worker by.
-    let registration = Registration {
-        csr_pem: identity.generate_csr(&core.name)?,
-        kind: ChrootExecutor::KIND,
-    };
-    let runner = Runner::new(core, Arc::new(client), executor, registration);
-    runner.run().await
+    let executor = ChrootExecutor::new(cfg).await;
+    Runner::new(core, client, executor).run().await
 }

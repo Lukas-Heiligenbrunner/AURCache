@@ -1,10 +1,8 @@
 //! Canonical filesystem locations for pacman mirrorlists.
 //!
 //! Everything that reads or writes a mirrorlist resolves its path through here,
-//! so the writers and readers cannot drift apart. They previously did: startup
-//! wrote `./repo/mirrorlist` while official-repo dependency resolution read
-//! `./config/pacman_x86_64/mirrorlist`, which made every package with
-//! dependencies fail to add.
+//! so the writers and readers cannot drift apart: a reader looking somewhere
+//! else than the writer fails every package with dependencies.
 //!
 //! These live in this crate rather than `aurcache-utils` because
 //! `aurcache-db`'s dependency-backfill migration constructs an [`AurClient`],

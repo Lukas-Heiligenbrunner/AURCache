@@ -1,6 +1,5 @@
 use crate::api::waiting::WaitingReason;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Disk a build used on its worker, in bytes as stored -- after the pool's
 /// compression -- when the build ended.
@@ -8,7 +7,8 @@ use utoipa::ToSchema;
 /// Each part is `None` when it was not measured, which is not the same as `0`:
 /// a package that keeps no build tree has no `build_tree` figure at all. A
 /// total over the parts is only meaningful when every part it adds is known.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DiskUsage {
     /// What the build wrote into its chroot: mostly the dependencies it
     /// installed. The base chroot it started from is not counted.
@@ -36,7 +36,8 @@ impl DiskUsage {
 
 /// A failed build's chroot, kept on its worker for inspection instead of
 /// deleted (`WORKER_KEEP_FAILED`).
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct KeptBuild {
     /// Where the chroot is on the worker, `<pool>/kept-<id>`; entered with
     /// `systemd-nspawn -D`, with the workdir beside it at `<pool>/kept-<id>.data`.
@@ -51,7 +52,8 @@ pub struct KeptBuild {
     pub tree: Option<String>,
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct BuildSummary {
     /// This build's number within its package, counting from 1.

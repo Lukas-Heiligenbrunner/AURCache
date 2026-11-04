@@ -4,13 +4,14 @@ use crate::backend::build_api;
 use crate::custom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::embed::CustomHandler;
-use crate::models::authenticated::OauthEnabled;
-use crate::utils::config::{ALLOWED_USERS_ENV, allowed_users, oauth_config_from_env};
+pub use crate::utils::config::OAuthSettings;
+use crate::utils::config::{ALLOWED_USERS_ENV, allowed_users, oauth_from_env};
 use crate::utils::failed_requests::{FailedRequests, plain_status};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::services::Services;
 use aurcache_utils::snapshot::SnapshotStore;
+use aurcache_utils::worker_enroll::EnrollmentPolicy;
 use rocket::config::SecretKey;
 use rocket::fairing::AdHoc;
 use rocket::http::private::cookie::Key;
@@ -89,6 +90,60 @@ pub struct CaDirectory(pub std::path::PathBuf);
 #[derive(Debug, Clone)]
 pub struct ServerVersion(pub String);
 
+/// The API's OpenAPI document, served at `/docs` and `/redoc`.
+#[derive(OpenApi)]
+#[openapi(
+    nest(
+        (path = "/api", api = AURApi, tags = ["AUR"]),
+        (path = "/api", api = crate::auth::AuthApi, tags = ["Auth"]),
+        (path = "/api", api = crate::build::BuildApi, tags = ["Build"]),
+        (path = "/api", api = crate::health::HealthApi, tags = ["Health"]),
+        (path = "/api", api = crate::repo::RepoApi, tags = ["Repo"]),
+        (path = "/api", api = crate::package::PackageApi, tags = ["Package"]),
+        (path = "/api", api = crate::stats::StatsApi, tags = ["Stats"]),
+        (path = "/api", api = crate::dump::DumpApi, tags = ["Dump"]),
+        (path = "/api", api = crate::log::LogApi, tags = ["Log"]),
+        (path = "/api", api = crate::settings::SettingsApi, tags = ["Settings"]),
+        (path = "/api", api = crate::worker::WorkerApi, tags = ["Worker"]),
+    ),
+    tags(
+        (name = "AUR", description = "AUR management endpoints."),
+        (name = "Build", description = "Build management endpoints."),
+        (name = "Auth", description = "Authentication"),
+        (name = "Health", description = "Health endpoints"),
+        (name = "Package", description = "Package management endpoints."),
+        (name = "Stats", description = "Statistics endpoints."),
+        (name = "Repo", description = "How the pacman repository is published."),
+        (name = "Dump", description = "Exporting and restoring the instance's authored state."),
+        (name = "Log", description = "The activity log."),
+        (name = "Settings", description = "Settings endpoints."),
+        (name = "Worker", description = "Remote build worker protocol and management."),
+    ),
+    modifiers(&SecurityAddon)
+)]
+pub struct ApiDoc;
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let (Some(components), Ok(oauth)) = (openapi.components.as_mut(), oauth_from_env()) else {
+            return;
+        };
+        let oauth_config = oauth.config;
+        components.add_security_scheme(
+            "openid_connect",
+            SecurityScheme::OAuth2(OAuth2::new([Flow::AuthorizationCode(
+                AuthorizationCode::new(
+                    oauth_config.provider().auth_uri(),
+                    oauth_config.provider().token_uri(),
+                    Scopes::new(),
+                ),
+            )])),
+        );
+    }
+}
+
 /// Start the human-facing API/UI listener.
 ///
 /// `services` carries the process-wide [`SnapshotStore`]; it must be the same
@@ -104,65 +159,13 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
             ..Default::default()
         };
 
-        #[derive(OpenApi)]
-        #[openapi(
-            nest(
-                (path = "/api", api = AURApi, tags = ["AUR"]),
-                (path = "/api", api = crate::auth::AuthApi, tags = ["Auth"]),
-                (path = "/api", api = crate::build::BuildApi, tags = ["Build"]),
-                (path = "/api", api = crate::health::HealthApi, tags = ["Health"]),
-                (path = "/api", api = crate::repo::RepoApi, tags = ["Repo"]),
-                (path = "/api", api = crate::package::PackageApi, tags = ["Package"]),
-                (path = "/api", api = crate::stats::StatsApi, tags = ["Stats"]),
-                (path = "/api", api = crate::dump::DumpApi, tags = ["Dump"]),
-                (path = "/api", api = crate::log::LogApi, tags = ["Log"]),
-                (path = "/api", api = crate::settings::SettingsApi, tags = ["Settings"]),
-                (path = "/api", api = crate::worker::WorkerApi, tags = ["Worker"]),
-            ),
-            tags(
-                (name = "AUR", description = "AUR management endpoints."),
-                (name = "Build", description = "Build management endpoints."),
-                (name = "Auth", description = "Authentication"),
-                (name = "Health", description = "Health endpoints"),
-                (name = "Package", description = "Package management endpoints."),
-                (name = "Stats", description = "Statistics endpoints."),
-                (name = "Activity", description = "Activity endpoints."),
-                (name = "Settings", description = "Settings endpoints."),
-                (name = "Worker", description = "Remote build worker protocol and management."),
-            ),
-            modifiers(&SecurityAddon)
-        )]
-        struct ApiDoc;
-
-        struct SecurityAddon;
-
-        impl Modify for SecurityAddon {
-            fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-                let (Some(components), Ok(oauth_config)) =
-                    (openapi.components.as_mut(), oauth_config_from_env())
-                else {
-                    return;
-                };
-                components.add_security_scheme(
-                    "openid_connect",
-                    SecurityScheme::OAuth2(OAuth2::new([Flow::AuthorizationCode(
-                        AuthorizationCode::new(
-                            oauth_config.provider().auth_uri(),
-                            oauth_config.provider().token_uri(),
-                            Scopes::new(),
-                        ),
-                    )])),
-                );
-            }
-        }
-
-        let oauth_config = oauth_config_from_env();
+        let oauth = oauth_from_env().ok();
 
         // An allowlist restricts who may *sign in*, so it does nothing at all
         // without OAuth: every request is already authenticated when OAuth is
         // off. Said out loud, because the mistake looks exactly like a working
         // restriction from the outside -- the server simply lets everyone in.
-        if oauth_config.is_err() && allowed_users().is_some() {
+        if oauth.is_none() && allowed_users().is_some() {
             tracing::warn!(
                 "{ALLOWED_USERS_ENV} is set but OAuth is not configured, so it restricts nothing \
                  and this instance is open to everyone. Configure the OAUTH_* variables to \
@@ -194,8 +197,7 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
             .attach(FailedRequests)
             .register("/", catchers![plain_status])
             .manage(services.db.clone())
-            .manage(OauthEnabled(oauth_config.is_ok()))
-            .manage(services.activity.clone())
+            .manage::<Option<OAuthSettings>>(oauth.as_ref().map(|oauth| oauth.settings.clone()))
             // Also managed on their own: a route that needs one of them says
             // so, rather than asking for the bundle and using a field.
             .manage(Arc::clone(&services.store))
@@ -207,7 +209,8 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
             .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
             .mount("/", Redoc::with_url("/redoc", ApiDoc::openapi()));
 
-        if let Ok(oauth_config) = oauth_config {
+        if let Some(oauth) = oauth {
+            let oauth_config = oauth.config;
             rock = rock
                 .mount("/api/", routes![oauth_login, oauth_callback])
                 .attach(AdHoc::on_ignite("OAuth Config", |rocket| async {
@@ -282,6 +285,7 @@ pub fn init_worker_api(
             .manage(store)
             .manage(repo)
             .manage(crate::worker::AgreedProtocols::default())
+            .manage(EnrollmentPolicy::from_env())
             .mount("/api/", crate::worker::worker_protocol_routes())
             .launch()
             .await;
@@ -323,4 +327,29 @@ pub fn init_repo(repo: Arc<Repository>) -> JoinHandle<()> {
             Err(err) => error!("Rocket had an error: {err}"),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use utoipa::OpenApi as _;
+
+    /// The document `/docs` serves builds, and carries the routes whose
+    /// bodies are not JSON -- the ones easiest to leave out.
+    #[test]
+    fn the_openapi_document_describes_restore() {
+        let spec = ApiDoc::openapi();
+        let restore = spec
+            .paths
+            .paths
+            .get("/api/restore")
+            .and_then(|item| item.post.as_ref())
+            .expect("POST /api/restore is documented");
+        assert!(restore.request_body.is_some(), "restore documents its body");
+        assert!(
+            spec.paths.paths.contains_key("/api/restore/{id}"),
+            "restore progress is documented"
+        );
+        serde_json::to_string(&spec).expect("the document serialises");
+    }
 }

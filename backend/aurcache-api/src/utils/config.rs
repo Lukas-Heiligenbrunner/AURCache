@@ -4,11 +4,32 @@ use std::env;
 /// Env var naming the OAuth users allowed to sign in.
 pub const ALLOWED_USERS_ENV: &str = "OAUTH_ALLOWED_USERS";
 
-pub fn oauth_config_from_env() -> anyhow::Result<OAuthConfig> {
-    // ensure OAUTH_USERINFO_URI is also available
-    env::var("OAUTH_USERINFO_URI")?;
+/// Sign-in with OAuth, as the environment configures it. Read once, at startup.
+pub struct OAuth {
+    /// For the `rocket_oauth2` fairing, which runs the redirect and the token
+    /// exchange.
+    pub config: OAuthConfig,
+    pub settings: OAuthSettings,
+}
 
-    Ok(OAuthConfig::new(
+/// What signing a user in needs beyond the token exchange.
+///
+/// Managed as `Option<OAuthSettings>`, `None` on an instance without OAuth:
+/// one value that cannot say "on" without saying how, and that the
+/// [`Authenticated`](crate::auth::Authenticated) guard refuses to do without.
+#[derive(Debug, Clone)]
+pub struct OAuthSettings {
+    /// Where the callback asks who the user is (`OAUTH_USERINFO_URI`).
+    pub userinfo_uri: String,
+    /// See [`allowed_users`].
+    pub allowed_users: Option<Vec<String>>,
+}
+
+/// Sign-in as the `OAUTH_*` variables configure it, or an error naming the
+/// first one missing.
+pub fn oauth_from_env() -> anyhow::Result<OAuth> {
+    let userinfo_uri = env::var("OAUTH_USERINFO_URI")?;
+    let config = OAuthConfig::new(
         StaticProvider {
             auth_uri: env::var("OAUTH_AUTH_URI")?.into(),
             token_uri: env::var("OAUTH_TOKEN_URI")?.into(),
@@ -16,7 +37,14 @@ pub fn oauth_config_from_env() -> anyhow::Result<OAuthConfig> {
         env::var("OAUTH_CLIENT_ID")?,
         env::var("OAUTH_CLIENT_SECRET")?,
         Some(env::var("OAUTH_REDIRECT_URI")?),
-    ))
+    );
+    Ok(OAuth {
+        config,
+        settings: OAuthSettings {
+            userinfo_uri,
+            allowed_users: allowed_users(),
+        },
+    })
 }
 
 /// The sign-in allowlist, or `None` when the deployment has not set one.

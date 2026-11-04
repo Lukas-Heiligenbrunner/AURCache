@@ -4,12 +4,13 @@
 use crate::cli::{
     ComposeArgs, OutputFormat, SetupCommand, SetupServerArgs, SetupWorkerArgs, WorkerKnobs,
 };
-use crate::output::print_json;
+use crate::output::render;
+use crate::url::is_loopback;
 use crate::{compose, config, setup};
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_common::repo::host_from_url;
 use dialoguer::{Confirm, Select};
-use serde_json::json;
+use serde::Serialize;
 use std::path::Path;
 
 impl WorkerKnobs {
@@ -91,26 +92,36 @@ pub(crate) fn run_setup_command(format: OutputFormat, command: SetupCommand) -> 
     }
 }
 
+/// What `setup compose` wrote.
+#[derive(Serialize)]
+pub(crate) struct WrittenCompose<'a> {
+    path: &'a str,
+    role: compose::ComposeRole,
+    /// `None` for a worker file, which has no server.
+    database: Option<compose::DatabaseKind>,
+    /// `None` without PostgreSQL.
+    postgres_upgrade: Option<bool>,
+}
+
 pub(crate) fn run_setup_compose(format: OutputFormat, args: ComposeArgs) -> Result<()> {
     let database = compose_database(&args, config::is_interactive())?;
-    let defaults = compose::ComposeParams::default();
     let mut worker = args
         .worker
         .to_env(args.role.has_worker() && config::is_interactive())?;
     // Only a worker on its own joins a server by address: a bundled one
     // reaches the server beside it by service name.
     if !args.role.has_server() {
-        worker.url.clone_from(&args.server_url);
-        worker.ca_fingerprint.clone_from(&args.ca_fingerprint);
+        worker.url = args.join.server_url;
+        worker.ca_fingerprint = args.join.ca_fingerprint;
     }
     let params = compose::ComposeParams {
         role: args.role,
         database: database.clone(),
-        server_image: args.common.server_image.unwrap_or(defaults.server_image),
-        worker_image: args.common.worker_image.unwrap_or(defaults.worker_image),
-        public_url: args.public_url.unwrap_or(defaults.public_url),
+        server_image: args.common.server_image,
+        worker_image: args.common.worker_image,
+        public_url: args.server.public_url,
         log_level: args.common.log_level,
-        tls_sans: args.tls_sans.unwrap_or(defaults.tls_sans),
+        tls_sans: args.server.tls_sans,
         worker,
     };
     let rendered = compose::render_compose(&params);
@@ -129,93 +140,76 @@ pub(crate) fn run_setup_compose(format: OutputFormat, args: ComposeArgs) -> Resu
     }
     std::fs::write(path, &rendered).with_context(|| format!("failed to write {target}"))?;
 
-    match format {
-        OutputFormat::Json => print_json(&json!({
-            "path": target,
-            "role": format!("{:?}", args.role).to_lowercase(),
-            "database": args.role.has_server().then_some(match database {
-                compose::ComposeDatabase::Sqlite => "sqlite",
-                compose::ComposeDatabase::Postgres { .. } => "postgres",
-            }),
-            "postgres_upgrade": match database {
-                compose::ComposeDatabase::Postgres { upgrade_step, .. } => Some(upgrade_step),
-                compose::ComposeDatabase::Sqlite => None,
-            },
-        })),
-        OutputFormat::Text => {
-            println!("wrote {target}");
-            println!();
-            println!("Start it with:");
-            println!("  docker compose -f {target} up -d");
-            Ok(())
-        }
-    }
+    let written = WrittenCompose {
+        path: &target,
+        role: args.role,
+        database: args.role.has_server().then_some(match database {
+            compose::ComposeDatabase::Sqlite => compose::DatabaseKind::Sqlite,
+            compose::ComposeDatabase::Postgres { .. } => compose::DatabaseKind::Postgres,
+        }),
+        postgres_upgrade: match database {
+            compose::ComposeDatabase::Postgres { upgrade_step, .. } => Some(upgrade_step),
+            compose::ComposeDatabase::Sqlite => None,
+        },
+    };
+    render(format, &written, |written| {
+        println!("wrote {}", written.path);
+        println!();
+        println!("Start it with:");
+        println!("  docker compose -f {} up -d", written.path);
+    })
 }
 
 pub(crate) fn run_setup_server(format: OutputFormat, args: SetupServerArgs) -> Result<()> {
-    let defaults = compose::ComposeParams::default();
-    let image = args.common.server_image.unwrap_or(defaults.server_image);
-    let public_url = args.public_url.unwrap_or(defaults.public_url);
-    let tls_sans = args.tls_sans.unwrap_or(defaults.tls_sans);
+    let run = setup::server_run(&setup::ServerRunSpec {
+        image: args.common.server_image,
+        public_url: args.server.public_url,
+        tls_sans: args.server.tls_sans,
+        log_level: args.common.log_level,
+        extra: args.run.docker_args,
+    });
 
-    let run = setup::server_run(
-        &image,
-        &public_url,
-        &args.common.log_level,
-        &tls_sans,
-        &args.docker_args,
-    );
-
-    if args.dry_run {
+    if args.run.dry_run {
         return report_dry_run(format, &run);
     }
 
-    setup::ensure_local_objects(true)?;
+    setup::ensure_local_objects()?;
     setup::execute(&run)?;
 
-    match format {
-        OutputFormat::Json => print_json(&run),
-        OutputFormat::Text => {
-            println!();
-            println!("Server started. Next:");
-            println!("  aurcli setup worker      # a build worker on this machine");
-            println!("  aurcli doctor            # check it came up");
-            Ok(())
-        }
-    }
+    render(format, &run, |_| {
+        println!();
+        println!("Server started. Next:");
+        println!("  aurcli setup worker      # a build worker on this machine");
+        println!("  aurcli doctor            # check it came up");
+    })
 }
 
 pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> Result<()> {
-    let defaults = compose::ComposeParams::default();
-    let image = args.common.worker_image.unwrap_or(defaults.worker_image);
+    let mut env = args
+        .worker
+        .to_env(config::is_interactive() && !args.run.dry_run)?;
+    env.ca_fingerprint = args.join.ca_fingerprint;
 
     // A worker beside the server takes the bundled shortcut: shared network,
     // shared enrollment volume, no approval step. One pointed anywhere else
     // cannot, and has to establish trust explicitly.
-    let local = match &args.server_url {
-        None => true,
-        Some(url) => host_from_url(url).is_some_and(setup::is_local_host),
-    };
-
-    let mut env = args
-        .worker
-        .to_env(config::is_interactive() && !args.dry_run)?;
-    env.ca_fingerprint.clone_from(&args.ca_fingerprint);
-    let env = if local {
-        setup::local_worker_env(env)
-    } else {
-        let server_url = args
-            .server_url
-            .clone()
-            .expect("a non-local worker always has a server URL");
-        if env.ca_fingerprint.is_none() && env.enrollment_token.is_none() {
-            eprintln!(
-                "Warning: no --ca-fingerprint and no --enrollment-token. The worker will \
-                 trust the server on first contact, and will wait for you to approve it \
-                 on the Workers page."
-            );
+    let remote = args
+        .join
+        .server_url
+        .filter(|url| !host_from_url(url).is_some_and(is_loopback));
+    let local = remote.is_none();
+    let env = match &remote {
+        None => env.beside_server(),
+        Some(server_url) => {
+            if env.ca_fingerprint.is_none() && env.enrollment_token.is_none() {
+                eprintln!(
+                    "Warning: no --ca-fingerprint and no --enrollment-token. The worker will \
+                     trust the server on first contact, and will wait for you to approve it \
+                     on the Workers page."
+                );
+            }
+            setup::remote_worker_env(env, server_url)
         }
-        setup::remote_worker_env(env, &server_url)
     };
 
     // Each worker on a host needs its own identity volume, so the default
@@ -225,54 +219,47 @@ pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> R
         .unwrap_or_else(|| format!("{}_data", args.container_name.replace('-', "_")));
 
     let run = setup::worker_run(&setup::WorkerRunSpec {
-        image,
+        image: args.common.worker_image,
         container_name: args.container_name,
         env,
         log_level: args.common.log_level,
         join_network: local,
         data_volume,
-        extra: args.docker_args,
+        extra: args.run.docker_args,
     });
 
-    if args.dry_run {
+    if args.run.dry_run {
         return report_dry_run(format, &run);
     }
 
-    setup::ensure_local_objects(local)?;
+    // A remote worker joins neither the network nor the enrollment volume, so
+    // it needs neither to exist.
+    if local {
+        setup::ensure_local_objects()?;
+    }
     setup::execute(&run)?;
 
-    match format {
-        OutputFormat::Json => print_json(&run),
-        OutputFormat::Text => {
-            println!();
-            if local {
-                println!(
-                    "Worker started, and approves itself through the shared enrollment volume."
-                );
-            } else {
-                println!("Worker started. Approve it once it appears:");
-                println!("  aurcli worker list");
-            }
-            println!("  aurcli doctor            # check it connected");
-            println!();
-            println!(
-                "Its chroots, builds and caches live in one storage pool in the data volume, \
-                 up to WORKER_DISK_MAX (200G by default). If Docker keeps its volumes on ZFS, \
-                 see the docs' worker configuration, \"Tuning an image on ZFS\"."
-            );
-            Ok(())
+    render(format, &run, |_| {
+        println!();
+        if local {
+            println!("Worker started, and approves itself through the shared enrollment volume.");
+        } else {
+            println!("Worker started. Approve it once it appears:");
+            println!("  aurcli worker list");
         }
-    }
+        println!("  aurcli doctor            # check it connected");
+        println!();
+        println!(
+            "Its chroots, builds and caches live in one storage pool in the data volume, \
+             up to WORKER_DISK_MAX ({} by default). If Docker keeps its volumes on ZFS, \
+             see the docs' \"Storage pool\" page, \"Tuning an image on ZFS\".",
+            compose::DEFAULT_DISK_MAX
+        );
+    })
 }
 
 pub(crate) fn report_dry_run(format: OutputFormat, run: &setup::DockerRun) -> Result<()> {
-    match format {
-        OutputFormat::Json => print_json(run),
-        OutputFormat::Text => {
-            println!("{}", run.command_line());
-            Ok(())
-        }
-    }
+    render(format, run, |run| println!("{}", run.command_line()))
 }
 
 /// The database a compose file's server uses: the one named on the command
@@ -286,9 +273,9 @@ pub(crate) fn compose_database(
     args: &ComposeArgs,
     interactive: bool,
 ) -> Result<compose::ComposeDatabase> {
-    let upgrade_flag = args.postgres_upgrade || args.no_postgres_upgrade;
+    let upgrade = args.postgres_upgrade();
     if !args.role.has_server() {
-        if args.database.is_some() || args.db_password.is_some() || upgrade_flag {
+        if args.database.is_some() || args.db_password.is_some() || upgrade.is_some() {
             bail!(
                 "a worker file has no database; --database, --db-password and \
                  --[no-]postgres-upgrade are for a server"
@@ -309,7 +296,7 @@ pub(crate) fn compose_database(
             if args.db_password.is_some() {
                 bail!("--db-password is for --database postgres; SQLite has no password");
             }
-            if upgrade_flag {
+            if upgrade.is_some() {
                 bail!("--[no-]postgres-upgrade is for --database postgres");
             }
             Ok(compose::ComposeDatabase::Sqlite)
@@ -323,12 +310,10 @@ pub(crate) fn compose_database(
                 ),
                 None => generate_password()?,
             };
-            let upgrade_step = if args.postgres_upgrade {
-                true
-            } else if args.no_postgres_upgrade || !interactive {
-                false
-            } else {
-                prompt_postgres_upgrade()?
+            let upgrade_step = match upgrade {
+                Some(choice) => choice,
+                None if interactive => prompt_postgres_upgrade()?,
+                None => false,
             };
             Ok(compose::ComposeDatabase::Postgres {
                 password,

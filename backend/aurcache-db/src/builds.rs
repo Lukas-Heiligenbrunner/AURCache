@@ -60,9 +60,9 @@ pub struct Model {
     ///
     /// The record of what the build was *made from*, as against
     /// [`crate::package_vcs_sources`], which is what the version check last
-    /// *saw*. `None` is unknown -- a build that predates this, or one whose
-    /// sources could not be resolved -- and never means "nothing changed".
-    pub vcs_sources: Option<String>,
+    /// *saw*. `None` is unknown -- the sources could not be resolved -- and
+    /// never means "nothing changed".
+    pub vcs_sources: Option<crate::lists::VcsCommits>,
     /// A failed build's chroot, kept on its worker for inspection: where
     /// (`<pool>/kept-<id>`) and until when (epoch seconds). `None` for every
     /// build that did not fail in a keepable way, and on a worker with

@@ -59,19 +59,14 @@ jobs:
             echo "tag=unknown" >> "$GITHUB_OUTPUT"
           fi
 
+      # A pull request builds without pushing, which still checks that every
+      # architecture builds. A release is `latest` as well.
       - name: Build server with the local publishing script
         if: steps.vars.outputs.tag != 'unknown'
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.tag }}
         run: |
           args=(--images server --tag "$IMAGE_TAG")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--tag latest); fi
           if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then args+=(--push); fi
           ./scripts/build-images.sh "${args[@]}" "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-
-      - name: Tag the multi-platform release as latest
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          IMAGE_TAG: ${{ steps.vars.outputs.tag }}
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/aurcache-server"
-          docker buildx imagetools create "$image:$IMAGE_TAG" --tag "$image:latest"

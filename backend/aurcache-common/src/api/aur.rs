@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// One AUR package, as the search endpoint reports it.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiPackage {
     pub name: String,
     pub version: String,

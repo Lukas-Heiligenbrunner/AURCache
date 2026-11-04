@@ -1,28 +1,26 @@
-use crate::models::authenticated::Authenticated;
-use crate::models::operations::ActiveOperation;
-use crate::models::package::{
-    AddPackage, PackagePatch, SourceFileContent, SourceFileList, SourceFileUpdate,
-    SourcePreviewFileRequest, SourcePreviewRequest, UpdatePackage,
-};
-use crate::models::package::{
-    AddPackages, AurNotFoundPackage, AurPackage, BulkAddAccepted, BulkAddEntry, BulkAddOutcome,
-    BulkAddProgress, ExtendedPackage, PackageDependency, PackageFile, PackageSource, SimplePackage,
-};
-use crate::models::package::{DependencyOptions, ReplaceDependency};
+use crate::auth::Authenticated;
 use crate::utils::error::{ApiError, err};
 use crate::utils::operation::{self, Counts, Recorder};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, QueueCause};
-use aurcache_common::build_state::{BuildState, BuildTrigger};
-use aurcache_db::helpers::builds::{
-    latest_successful_version_any_platform, latest_successful_version_expr,
+use aurcache_common::api::operations::{ActiveOperation, OperationProgress};
+use aurcache_common::api::package::{
+    AddPackage, PackagePatch, SourceFileContent, SourceFileList, SourceFileUpdate,
+    SourcePreviewFileRequest, SourcePreviewRequest, UpdatePackage,
 };
-use aurcache_db::helpers::files::total_artifact_size_expr;
+use aurcache_common::api::package::{
+    AddPackages, AurNotFoundPackage, AurPackage, BulkAddAccepted, BulkAddEntry, BulkAddOutcome,
+    BulkAddProgress, ExtendedPackage, PackageDependency, PackageFile, PackageSource, SimplePackage,
+};
+use aurcache_common::api::package::{DependencyOptions, ReplaceDependency};
+use aurcache_common::build_state::{BuildState, BuildTrigger};
+use aurcache_db::helpers::builds::{latest_successful_version, latest_successful_version_expr};
 use aurcache_db::helpers::operations;
 use aurcache_db::lists::{BuildFlags, Platforms};
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Dependencies, Files, Packages};
 use aurcache_db::{dependencies, files, packages};
+use aurcache_utils::listing::package_row_select;
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::replace::{self, ReplaceError};
@@ -41,15 +39,10 @@ use rocket::{State, delete, get, patch, post, put};
 use sea_orm::{
     ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
 };
-use sea_orm::{DatabaseConnection, JoinType, Order, Select};
+use sea_orm::{DatabaseConnection, JoinType, Order};
 use std::str::FromStr;
 use std::sync::Arc;
 use utoipa::OpenApi;
-
-/// The row id of the package named `pkgbase`.
-pub(crate) async fn package_id(db: &DatabaseConnection, pkgbase: &str) -> Result<i32, ApiError> {
-    Ok(package_by_pkgbase(db, pkgbase).await?.id)
-}
 
 /// Resolve a package by its pkgbase, the public identifier.
 ///
@@ -59,16 +52,27 @@ pub(crate) async fn package_id(db: &DatabaseConnection, pkgbase: &str) -> Result
 /// AUR), so a route taking either would resolve those names to whatever rows
 /// happened to hold those ids — a wrong-package bug rather than a not-found
 /// error. Hence no id fallback.
-async fn package_by_pkgbase(
+pub(crate) async fn package_by_pkgbase(
     db: &DatabaseConnection,
     pkgbase: &str,
 ) -> Result<packages::Model, ApiError> {
     Packages::find()
         .filter(packages::Column::Name.eq(pkgbase))
         .one(db)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
+        .await?
         .ok_or_else(|| err(Status::NotFound, format!("no package '{pkgbase}'")))
+}
+
+/// Resolve a package by its row id, for the routes that reach it through a
+/// build.
+pub(crate) async fn package_by_id(
+    db: &DatabaseConnection,
+    id: i32,
+) -> Result<packages::Model, ApiError> {
+    Packages::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or_else(|| err(Status::NotFound, format!("no package with id {id}")))
 }
 
 #[derive(OpenApi)]
@@ -166,7 +170,6 @@ pub async fn packages_add_endpoint(
     services: &State<Services>,
     input: Json<AddPackages>,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<status::Accepted<Json<BulkAddAccepted>>, ApiError> {
     let input = input.into_inner();
     if input.sources.is_empty() {
@@ -176,16 +179,11 @@ pub async fn packages_add_endpoint(
     let build_flags = parse_build_flags(input.build_flags)?;
     let total = i32::try_from(input.sources.len()).unwrap_or(i32::MAX);
 
-    let job_id = operations::create(&services.db, operations::KIND_BULK_ADD, total)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
-
     let services_task = services.inner().clone();
-    operation::spawn(
-        services.db.clone(),
-        al.inner().clone(),
-        job_id,
+    let job_id = operation::start(
+        services,
         operations::KIND_BULK_ADD,
+        total,
         move |progress| async move {
             aurcache_utils::package::bulk_add::bulk_add(
                 &services_task,
@@ -197,17 +195,16 @@ pub async fn packages_add_endpoint(
             .await;
         },
         BulkAddRecorder {
-            activity: al.inner().clone(),
+            activity: services.activity.clone(),
             username: a.username,
             counts: Counts::default(),
         },
-    );
+    )
+    .await?;
 
-    Ok(status::Accepted(Json(BulkAddAccepted {
-        job_id,
-        accepted: total,
-    })))
+    Ok(status::Accepted(Json(BulkAddAccepted { job_id, total })))
 }
+
 /// Every long-running operation still in flight.
 ///
 /// A bulk add or a restore outlives the request that started it and the page
@@ -226,16 +223,14 @@ pub async fn active_operations(
     db: &State<DatabaseConnection>,
     _a: Authenticated,
 ) -> Result<Json<Vec<ActiveOperation>>, ApiError> {
-    let running = operations::active(db.inner())
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let running = operations::active(db.inner()).await?;
 
     Ok(Json(running))
 }
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Progress of a bulk add", body = BulkAddProgress),
+            (status = 200, description = "Progress of a bulk add", body = OperationProgress<BulkAddEntry>),
             (status = 404, description = "No such job"),
     ),
     params(
@@ -256,22 +251,14 @@ pub async fn bulk_add_progress(
     after: Option<usize>,
     _a: Authenticated,
 ) -> Result<Json<BulkAddProgress>, ApiError> {
-    let job = operations::get(db.inner(), id)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-        .filter(|job| job.kind == operations::KIND_BULK_ADD)
-        .ok_or_else(|| err(Status::NotFound, format!("no bulk add {id}")))?;
-
-    let entries = operations::entries_after(&job.log, after.unwrap_or(0));
-
-    Ok(Json(BulkAddProgress {
-        id: job.id,
-        total: job.total,
-        completed: job.completed,
-        failed: job.failed,
-        finished: job.finished_at.is_some(),
-        entries,
-    }))
+    operation::progress(
+        db.inner(),
+        id,
+        operations::KIND_BULK_ADD,
+        after.unwrap_or(0),
+    )
+    .await
+    .map(Json)
 }
 
 #[utoipa::path(
@@ -284,7 +271,6 @@ pub async fn package_add_endpoint(
     services: &State<Services>,
     input: Json<AddPackage>,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<(), ApiError> {
     let input = input.into_inner();
     let platforms = parse_platforms(input.platforms)?;
@@ -304,7 +290,7 @@ pub async fn package_add_endpoint(
     // untyped `anyhow` error we cannot tell apart from an internal one.
     .map_err(|e| err(Status::BadRequest, e))?;
 
-    al.emit_by(
+    services.activity.emit_by(
         Event::PackageAdded {
             pkg: new_pkg_name.into(),
         },
@@ -369,9 +355,7 @@ pub async fn package_update_entity_endpoint(
     if let Some(patch) = input.patch {
         proposed.patch = patch;
     }
-    edit_package(services, &pkg, &proposed)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    edit_package(services, &pkg, &proposed).await?;
     if !fields.is_empty() {
         services.activity.emit_by(
             Event::PackageChanged {
@@ -404,10 +388,7 @@ pub async fn package_source_files(
 
     let pkg = package_by_pkgbase(db, pkgbase).await?;
 
-    let files = store
-        .list_files(&pkg.source_data)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let files = store.list_files(&pkg.source_data).await?;
     // A patch that no longer parses marks nothing here; opening the file is
     // where that is reported.
     let patched = pkg
@@ -480,20 +461,15 @@ pub async fn package_source_file_update(
         .patch
         .as_deref()
         .map(SourcePatch::parse)
-        .transpose()
-        .map_err(|e| err(Status::InternalServerError, e))?
+        .transpose()?
         .unwrap_or_default();
     patch.merge_file(&input.path, &original, &input.content);
 
-    let new_patch = patch
-        .stored()
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let new_patch = patch.stored()?;
 
     let mut proposed = pkg.clone();
     proposed.patch = new_patch;
-    edit_package(services, &pkg, &proposed)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    edit_package(services, &pkg, &proposed).await?;
     services.activity.emit_by(
         Event::SourceEdited {
             pkg: pkg.name.as_str().into(),
@@ -516,10 +492,7 @@ pub async fn package_source_preview_files(
     input: Json<SourcePreviewRequest>,
     _a: Authenticated,
 ) -> Result<Json<SourceFileList>, ApiError> {
-    let files = store
-        .list_files(&input.source)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let files = store.list_files(&input.source).await?;
 
     Ok(Json(SourceFileList {
         files,
@@ -567,7 +540,6 @@ pub async fn package_update_endpoint(
     pkgbase: &str,
     input: Json<UpdatePackage>,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<Json<Vec<i32>>, ApiError> {
     let db = &services.db;
 
@@ -590,7 +562,7 @@ pub async fn package_update_endpoint(
         // patch that no longer applies are all caller-visible conditions.
         .map_err(|e| err(Status::BadRequest, e))?;
 
-    al.emit_by(
+    services.activity.emit_by(
         queued(&package_name, cause, &results, None, None),
         a.username,
     );
@@ -616,7 +588,6 @@ pub async fn package_del(
     services: &State<Services>,
     pkgbase: &str,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<(), ApiError> {
     let db = &services.db;
 
@@ -625,11 +596,9 @@ pub async fn package_del(
 
     // Deletes the package -- checkout included -- only if nothing depends on
     // it; otherwise it merely stops being requested and keeps everything.
-    package_remove(db, &services.store, &services.repo, pkg.id)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    package_remove(db, &services.store, &services.repo, pkg.id).await?;
 
-    al.emit_by(
+    services.activity.emit_by(
         Event::PackageDeleted {
             pkg: pkg.name.into(),
         },
@@ -658,29 +627,9 @@ pub async fn package_list(
 ) -> Result<Json<Vec<SimplePackage>>, ApiError> {
     let db = db.inner();
 
-    list_packages(db, limit, page, dependencies.unwrap_or(false))
-        .await
-        .map(Json)
-        .map_err(|e| err(Status::InternalServerError, e))
-}
-
-/// The package-list projection shared by the list and dashboard routes.
-///
-/// Every listed package has the same fields, so there is one place the shape
-/// of a [`SimplePackage`] is described.
-pub(crate) fn package_row_select() -> Select<Packages> {
-    Packages::find()
-        .select_only()
-        .column(packages::Column::Name)
-        .column(packages::Column::Status)
-        .column(packages::Column::OutOfDate)
-        .column(packages::Column::UpstreamVersion)
-        .column(packages::Column::DirectlyRequested)
-        // No COALESCE to an empty string: a package with no build has no
-        // version, and `null` says that where `""` is indistinguishable from a
-        // build that produced a blank one.
-        .column_as(latest_successful_version_expr(), "built_version")
-        .column_as(total_artifact_size_expr(), "total_size")
+    Ok(Json(
+        list_packages(db, limit, page, dependencies.unwrap_or(false)).await?,
+    ))
 }
 
 /// List packages, by default only the ones somebody asked for.
@@ -806,33 +755,28 @@ pub async fn get_package(
 
     // Independent reads over one pooled connection: serial awaits would pay
     // each round trip in turn for queries that share only the package id.
-    let (built_version, dependencies, dependents, files) = tokio::join!(
-        latest_successful_version_any_platform(db, pkg.id),
+    let (built_version, dependencies, dependents, files) = tokio::try_join!(
+        latest_successful_version(db, pkg.id, None),
         list_package_relations(db, pkg.id, RelationDirection::Dependencies),
         list_package_relations(db, pkg.id, RelationDirection::Dependents),
         package_files(db, pkg.id),
-    );
-    let built_version = built_version.map_err(|e| err(Status::InternalServerError, e))?;
-    let dependencies = dependencies.map_err(|e| err(Status::InternalServerError, e))?;
-    let dependents = dependents.map_err(|e| err(Status::InternalServerError, e))?;
-    let files = files.map_err(|e| err(Status::InternalServerError, e))?;
+    )?;
 
     let has_patch = pkg.patch.is_some();
 
     let package_source = package_source(&pkg)?;
 
-    // Borrowed: the stored string is not used after this, only the parse.
     let split_packages: Option<Vec<String>> = pkg
         .split_packages
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok());
+        .as_ref()
+        .map(|names| names.as_slice().to_vec());
 
     let ext_pkg = ExtendedPackage {
         // Mirrored from the package's checkout, so a git-sourced package
         // describes itself as fully as an AUR one.
         description: pkg.source_description.clone(),
         project_url: pkg.source_project_url.clone(),
-        licenses: pkg.source_licenses.clone(),
+        licenses: pkg.source_licenses.as_ref().map(ToString::to_string),
         maintainer: pkg.source_maintainer.clone(),
         first_submitted: pkg.source_first_submitted,
         last_modified: pkg.source_last_modified,
@@ -860,8 +804,8 @@ pub async fn get_package(
 /// The `PackageSource` for a package row, resolved entirely from persisted
 /// fields — no AUR lookup happens on this path. The version-check scheduler
 /// mirrors what it needs onto the row, and `package::add` fills it in
-/// immediately; the AUR call this used to make was ~128ms of a ~130ms response
-/// and one of the AUR's 4000 daily calls per page view.
+/// immediately. An AUR call here would be ~128ms of a ~130ms response, and one
+/// of the AUR's 4000 daily calls per page view.
 fn package_source(pkg: &packages::Model) -> Result<PackageSource, ApiError> {
     match &pkg.source_data {
         // The last check did not find it in the AUR. Its page still renders --

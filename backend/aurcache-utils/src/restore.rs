@@ -34,16 +34,17 @@ use aurcache_common::api::dump::{
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
+use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
-use aurcache_db::{packages, settings};
 use flate2::read::GzDecoder;
 use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tokio::sync::mpsc::Sender;
 
-use crate::package::add::{provides_json, split_packages_json};
+use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
 use crate::repository::Repository;
 use crate::services::Services;
+use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
 use aurcache_activitylog::events::{Event, RestoreStep};
 
@@ -333,14 +334,7 @@ pub async fn apply(
         Err(e) => {
             // The transaction rolled back, so nothing was written; say so
             // against the dump as a whole rather than blaming one package.
-            let _ = progress
-                .send(RestoreEntry {
-                    pkgbase: String::new(),
-                    outcome: RestoreOutcome::Failed {
-                        error: format!("nothing was imported: {e:#}"),
-                    },
-                })
-                .await;
+            report_failure(&progress, "", format!("nothing was imported: {e:#}")).await;
             return;
         }
     };
@@ -356,16 +350,12 @@ pub async fn apply(
         Ok(true) => services.activity.emit(Event::RestoreCaReplaced {}),
         Ok(false) => {}
         Err(e) => {
-            let _ = progress
-                .send(RestoreEntry {
-                    pkgbase: String::new(),
-                    outcome: RestoreOutcome::Failed {
-                        error: format!(
-                            "the packages were imported, but the secrets were not: {e:#}"
-                        ),
-                    },
-                })
-                .await;
+            report_failure(
+                &progress,
+                "",
+                format!("the packages were imported, but the secrets were not: {e:#}"),
+            )
+            .await;
         }
     }
 
@@ -383,18 +373,16 @@ pub async fn apply(
                 step: RestoreStep::Source,
                 error: format!("{e:#}"),
             });
-            let _ = progress
-                .send(RestoreEntry {
-                    pkgbase: pkgbase.clone(),
-                    outcome: RestoreOutcome::Failed {
-                        error: format!(
-                            "imported, but its source could not be read, so other packages \
+            report_failure(
+                &progress,
+                pkgbase,
+                format!(
+                    "imported, but its source could not be read, so other packages \
                          will not find it by its split package names or what it provides: {e:#}. \
                          Fix the source and restore again with --on-existing overwrite."
-                        ),
-                    },
-                })
-                .await;
+                ),
+            )
+            .await;
             unresolved.insert(pkgbase.clone());
         }
     }
@@ -420,17 +408,15 @@ pub async fn apply(
                 step: RestoreStep::Dependencies,
                 error: format!("{e:#}"),
             });
-            let _ = progress
-                .send(RestoreEntry {
-                    pkgbase: pkgbase.clone(),
-                    outcome: RestoreOutcome::Failed {
-                        error: format!(
-                            "imported, but its dependencies could not be resolved, so it will not \
+            report_failure(
+                &progress,
+                pkgbase,
+                format!(
+                    "imported, but its dependencies could not be resolved, so it will not \
                          build until they are: {e:#}"
-                        ),
-                    },
-                })
-                .await;
+                ),
+            )
+            .await;
         }
     }
 
@@ -451,18 +437,29 @@ pub async fn apply(
     if let Err(e) =
         crate::package::enqueue::enqueue_missing_buildable_packages(db, &services.activity).await
     {
-        let _ = progress
-            .send(RestoreEntry {
-                pkgbase: String::new(),
-                outcome: RestoreOutcome::Failed {
-                    error: format!(
-                        "the packages were imported, but their builds were not queued: {e:#}. \
+        report_failure(
+            &progress,
+            "",
+            format!(
+                "the packages were imported, but their builds were not queued: {e:#}. \
                          Restarting the server queues them."
-                    ),
-                },
-            })
-            .await;
+            ),
+        )
+        .await;
     }
+}
+
+/// Report that restoring `pkgbase` failed -- the dump as a whole when empty.
+///
+/// A closed channel is ignored: nobody watching is a normal state, and the
+/// restore carries on regardless.
+async fn report_failure(progress: &Sender<RestoreEntry>, pkgbase: &str, error: String) {
+    let _ = progress
+        .send(RestoreEntry {
+            pkgbase: pkgbase.to_string(),
+            outcome: RestoreOutcome::Failed { error },
+        })
+        .await;
 }
 
 /// Install the dump's CA and token hashes, when asked to.
@@ -804,104 +801,60 @@ async fn insert_row<C: sea_orm::ConnectionTrait>(
     package: &DumpPackage,
     patch: Option<String>,
 ) -> anyhow::Result<i32> {
-    Ok(packages::ActiveModel {
+    let mut active = packages::ActiveModel {
         name: Set(pkgbase.to_string()),
         // Nothing is built for it here yet, which is what the add path
         // records for a new package too.
         status: Set(BuildState::Enqueued),
         out_of_date: Set(false),
-        platforms: Set(platforms(package)),
-        build_flags: Set(build_flags(package)),
-        source_data: Set(package.source_data.clone()),
-        directly_requested: Set(package.directly_requested),
-        patch: Set(patch),
         ..Default::default()
-    }
-    .insert(db)
-    .await?
-    .id)
+    };
+    apply_config(&mut active, package, patch);
+    Ok(active.insert(db).await?.id)
 }
 
 /// Settings, keyed back from pkgbase onto row ids.
 ///
-/// One read for every row the restore touches, then one batched insert for
-/// the missing keys and one write per changed value: the per-key
-/// select-then-write this replaces needed two round trips per setting
-/// (~50 for a full dump), and rewrote rows whose value already matched.
+/// Only the settings this version knows, and a package value only for one a
+/// package may override: anything else is a row nothing would read.
 async fn write_settings<C: sea_orm::ConnectionTrait>(
     db: &C,
     dump: &LoadedDump,
     ids: &BTreeMap<String, i32>,
 ) -> anyhow::Result<()> {
-    /// One value the dump sets, where it applies.
-    struct Desired<'a> {
-        /// The stored `pkg_id`; see [`settings::scope`].
-        scope: i32,
-        key: &'a str,
-        value: &'a str,
-    }
-    let mut desired: Vec<Desired> = Vec::new();
-    for (key, value) in &dump.settings.global {
-        desired.push(Desired {
-            scope: settings::scope(None),
-            key,
-            value,
-        });
-    }
+    let change = |pkg_id: Option<i32>, key: &str, value: &str| {
+        let setting = Setting::from_key(key)?;
+        (pkg_id.is_none() || setting.meta().scope == Scope::Package).then(|| Change {
+            setting,
+            pkg_id,
+            value: Some(value.to_string()),
+        })
+    };
+    let mut changes: Vec<Change> = dump
+        .settings
+        .global
+        .iter()
+        .filter_map(|(key, value)| change(None, key, value))
+        .collect();
     for (pkgbase, values) in &dump.settings.packages {
         // Validation guarantees the package is in the dump; this only skips one
         // that was left alone by `Skip`, whose own settings are already right.
-        let Some(id) = ids.get(pkgbase) else { continue };
-        for (key, value) in values {
-            desired.push(Desired {
-                scope: settings::scope(Some(*id)),
-                key,
-                value,
-            });
-        }
+        let Some(&id) = ids.get(pkgbase) else {
+            continue;
+        };
+        changes.extend(
+            values
+                .iter()
+                .filter_map(|(key, value)| change(Some(id), key, value)),
+        );
     }
-    // A dump from before a setting was retired still carries it; restoring it
-    // would bring back a row the migration removed and nothing reads.
-    desired.retain(|d| !aurcache_common::settings::RETIRED_SETTING_KEYS.contains(&d.key));
-    // Nor a package value for a setting packages cannot override: nothing
-    // would read it.
-    desired.retain(|d| {
-        d.scope == settings::scope(None)
-            || Setting::from_key(d.key).is_none_or(|s| s.meta().scope == Scope::Package)
-    });
-
-    let scopes: HashSet<i32> = desired.iter().map(|d| d.scope).collect();
-    let mut existing: BTreeMap<(i32, String), settings::Model> = settings::Entity::find()
-        .filter(settings::Column::PkgId.is_in(scopes))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|row| ((row.pkg_id, row.key.clone()), row))
-        .collect();
-
-    let mut missing = Vec::new();
-    for Desired { scope, key, value } in desired {
-        match existing.remove(&(scope, key.to_string())) {
-            // The settings table carries no timestamps, so a row that already
-            // holds the restored value is done: rewriting it changes nothing.
-            Some(row) if row.value.as_deref() == Some(value) => {}
-            Some(row) => {
-                let mut active: settings::ActiveModel = row.into();
-                active.value = Set(Some(value.to_string()));
-                active.update(db).await?;
-            }
-            None => missing.push(settings::ActiveModel {
-                key: Set(key.to_string()),
-                value: Set(Some(value.to_string())),
-                pkg_id: Set(scope),
-                ..Default::default()
-            }),
-        }
+    match crate::settings::write(db, changes).await? {
+        crate::settings::Write::Written => Ok(()),
+        crate::settings::Write::GlobalOnly(setting) => anyhow::bail!(
+            "{} applies to the whole server and cannot be set per package",
+            setting.meta().key
+        ),
     }
-    if !missing.is_empty() {
-        settings::Entity::insert_many(missing).exec(db).await?;
-    }
-    Ok(())
 }
 
 /// Read a package's source and record what a dependency can find it by.
@@ -917,17 +870,22 @@ async fn fill_source_facts(
     let Some(row) = package_row(db, pkgbase).await? else {
         return Ok(());
     };
-    let sourceinfo = store
-        .sourceinfo(&row.source_data, row.patch.as_deref())
-        .await?;
-    let deps =
-        aurcache_deps::deps_from_srcinfo(&sourceinfo, &crate::pkg::architectures(&row.platforms));
+    let SourceFacts { sourceinfo, deps } = pkg_deps(
+        store,
+        &row.source_data,
+        row.patch.as_deref(),
+        &row.platforms,
+    )
+    .await?;
 
-    let mut active: packages::ActiveModel = row.into();
-    active.split_packages = Set(split_packages_json(pkgbase, &deps.pkgnames)?);
-    active.provides = Set(provides_json(&deps.provides)?);
-    active.upstream_version = Set(Some(sourceinfo.base.version.to_string()));
-    active.update(db).await?;
+    record_source_names(db, row.id, pkgbase, &deps).await?;
+    packages::ActiveModel {
+        id: Set(row.id),
+        upstream_version: Set(Some(sourceinfo.base.version.to_string())),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
     Ok(())
 }
 

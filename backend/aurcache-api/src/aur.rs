@@ -1,7 +1,7 @@
-use crate::models::aur::ApiPackage;
-use crate::models::authenticated::Authenticated;
+use crate::auth::Authenticated;
 use crate::utils::error::{ApiError, err};
-use aurcache_utils::aur::api::{get_package_info, query_aur};
+use aurcache_common::api::aur::ApiPackage;
+use aurcache_utils::aur::query_aur;
 use aurcache_utils::services::Services;
 use rocket::http::Status;
 use rocket::serde::json::Json;
@@ -33,9 +33,12 @@ pub async fn search(
     // cannot drift apart again.
     let result = if query.chars().count() < 3 {
         // Iterate over the Option, giving either a single result or an empty list.
-        get_package_info(&services.client, query)
+        services
+            .client
+            .info_of(query)
             .await
             .map(|pkg| pkg.into_iter().collect::<Vec<_>>())
+            .map_err(|e| anyhow::anyhow!("failed to get package info: {e}"))
     } else {
         query_aur(&services.client, query).await
     };

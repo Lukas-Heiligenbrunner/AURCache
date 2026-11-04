@@ -667,7 +667,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "utoipa",
 ]
 
 [[package]]
@@ -696,8 +695,6 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
- "sha2 0.11.1",
- "subtle",
  "tempfile",
  "tokio",
  "tracing",
@@ -713,11 +710,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aurcache-common",
- "hex",
  "rcgen",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "tempfile",
  "time",
  "tracing",
@@ -765,16 +760,19 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_urlencoded",
 ]
 
 [[package]]
 name = "aurcache-common"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "jiff",
  "sea-orm",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "utoipa",
 ]
@@ -875,6 +873,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "subtle",
  "tar",
  "tempfile",
  "tokio",
@@ -913,7 +912,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "url",
  "zstd",
 ]
@@ -937,6 +935,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -951,8 +950,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
- "tracing",
- "tracing-subscriber",
  "zstd",
 ]
 
@@ -967,7 +964,6 @@ dependencies = [
  "futures",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4307,6 +4303,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.6",

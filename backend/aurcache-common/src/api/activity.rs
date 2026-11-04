@@ -1,7 +1,6 @@
 //! How much attention a log entry deserves.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// How much attention an entry deserves.
 ///
@@ -10,7 +9,8 @@ use utoipa::ToSchema;
 /// added" are not one event with a field. Stored as the number its variants are ordered by, so "this severity and
 /// worse" is `severity >= n` -- one indexable comparison rather than a list of
 /// kinds the query would have to know.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
     feature = "db",

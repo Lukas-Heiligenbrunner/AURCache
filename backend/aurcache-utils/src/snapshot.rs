@@ -12,7 +12,7 @@ use lru::LruCache;
 use sea_orm::DatabaseConnection;
 use tokio::sync::Mutex;
 
-use crate::git::checkout::EmptyRepository;
+use crate::git::EmptyRepository;
 use crate::patch::SourcePatch;
 use crate::pkgbuild::fix_source_urls;
 
@@ -355,8 +355,7 @@ impl SnapshotStore {
     /// history from git.
     ///
     /// Everything here is already on disk — this store cloned the repository
-    /// to resolve the source in the first place — so it replaces what used to
-    /// be a live AUR lookup per request.
+    /// to resolve the source in the first place — so no AUR lookup is needed.
     pub async fn source_metadata(
         &self,
         source_data: &SourceData,
@@ -370,9 +369,8 @@ impl SnapshotStore {
     /// resolve.
     ///
     /// The version check needs all three: the `.SRCINFO` and `PKGBUILD` to
-    /// sync VCS sources, and the metadata to mirror onto the row. Asking for
-    /// them separately meant two `get_or_fetch` round trips per package per
-    /// pass — cheap, since the second is served from cache, but pointless.
+    /// sync VCS sources, and the metadata to mirror onto the row, and one
+    /// `get_or_fetch` per package per pass serves them all.
     pub async fn sourceinfo_and_metadata(
         &self,
         source_data: &SourceData,
@@ -856,7 +854,7 @@ async fn checkout_and_parse(
     path: &Path,
     network: bool,
 ) -> anyhow::Result<CheckedOutSource> {
-    use crate::git::checkout::checkout_or_fetch_repo_ref;
+    use crate::git::checkout_or_fetch_repo_ref;
     use crate::pkgbuild::parse_pkgbuild;
 
     let GitCoordinates {

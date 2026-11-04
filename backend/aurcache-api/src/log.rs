@@ -1,4 +1,4 @@
-use crate::models::authenticated::Authenticated;
+use crate::auth::Authenticated;
 use crate::utils::error::{ApiError, err};
 use crate::utils::pagination::clamp_limit;
 use aurcache_activitylog::activity_utils::Severity;
@@ -68,7 +68,6 @@ pub async fn log(
     };
     let page = LogStore::new(db.inner().clone())
         .page(limit, offset.unwrap_or(0), &filter)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+        .await?;
     Ok(Json(page))
 }

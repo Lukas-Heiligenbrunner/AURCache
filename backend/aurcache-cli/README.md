@@ -70,5 +70,6 @@ missing, and `aurcli worker approve <id>` admits a remote worker.
 calls an API path with no dedicated subcommand. `--format json` makes the
 typed commands machine-readable.
 
-The full walkthrough lives in the
-[quick-start](https://lukas-heiligenbrunner.github.io/AURCache/docs/overview/quick-start).
+The full walkthrough lives in the docs'
+[Setup and health](https://lukas-heiligenbrunner.github.io/AURCache/docs/cli/setup)
+page.

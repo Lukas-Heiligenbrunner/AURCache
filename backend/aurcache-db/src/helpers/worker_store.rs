@@ -3,16 +3,17 @@
 
 use crate::helpers::time::now_secs;
 use crate::lists::WorkerList;
-use crate::prelude::{WorkerSettings, Workers};
-use crate::{worker_settings, workers};
+use crate::prelude::{Builds, WorkerSettings, Workers};
+use crate::{builds, worker_settings, workers};
 use aurcache_common::api::worker::ApprovalStatus;
+use aurcache_common::build_state::BuildState;
 use sea_orm::ActiveValue::Set;
-use sea_orm::sea_query::{Expr, OnConflict, Query};
+use sea_orm::sea_query::{Expr, ExprTrait, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    TransactionSession, TransactionTrait,
+    QuerySelect, TransactionSession, TransactionTrait,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Everything a worker reports about itself at registration.
 ///
@@ -49,57 +50,40 @@ pub async fn register_worker<C: ConnectionTrait>(
     db: &C,
     reg: &WorkerRegistration<'_>,
 ) -> Result<workers::Model, DbErr> {
-    let now = now_secs();
     // Insert-if-absent keyed on the unique cert_fingerprint. On conflict we keep
     // the existing row (status/approval preserved) and refresh what the worker
     // reported.
-    let insert = Query::insert()
-        .into_table(workers::Entity)
-        .columns([
-            workers::Column::Name,
-            workers::Column::Status,
-            workers::Column::CertFingerprint,
-            workers::Column::Arches,
-            workers::Column::LastSeen,
-            workers::Column::Version,
-            workers::Column::Kind,
-            workers::Column::PackageAffinity,
-            workers::Column::Priority,
-            workers::Column::Concurrency,
-            workers::Column::SettingsDeclaration,
-        ])
-        .values([
-            reg.name.into(),
-            ApprovalStatus::Pending.into(),
-            reg.fingerprint.into(),
-            WorkerList::new(reg.arches).to_string().into(),
-            now.into(),
-            reg.version.into(),
-            reg.kind.into(),
-            WorkerList::new(reg.package_affinity).to_string().into(),
-            reg.priority.into(),
-            reg.concurrency.into(),
-            reg.settings_declaration.into(),
-        ])
-        .map_err(|e| DbErr::Custom(e.to_string()))?
-        .on_conflict(
-            OnConflict::column(workers::Column::CertFingerprint)
-                .update_columns([
-                    workers::Column::Name,
-                    workers::Column::Arches,
-                    workers::Column::LastSeen,
-                    workers::Column::Version,
-                    workers::Column::Kind,
-                    workers::Column::PackageAffinity,
-                    workers::Column::Priority,
-                    workers::Column::Concurrency,
-                    workers::Column::SettingsDeclaration,
-                ])
-                .to_owned(),
-        )
-        .to_owned();
-
-    db.execute(&insert).await?;
+    Workers::insert(workers::ActiveModel {
+        name: Set(reg.name.to_string()),
+        status: Set(ApprovalStatus::Pending),
+        cert_fingerprint: Set(reg.fingerprint.to_string()),
+        arches: Set(WorkerList::new(reg.arches)),
+        last_seen: Set(Some(now_secs())),
+        version: Set(Some(reg.version.to_string())),
+        kind: Set(Some(reg.kind.to_string())),
+        package_affinity: Set(WorkerList::new(reg.package_affinity)),
+        priority: Set(reg.priority),
+        concurrency: Set(reg.concurrency),
+        settings_declaration: Set(reg.settings_declaration.to_string()),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::column(workers::Column::CertFingerprint)
+            .update_columns([
+                workers::Column::Name,
+                workers::Column::Arches,
+                workers::Column::LastSeen,
+                workers::Column::Version,
+                workers::Column::Kind,
+                workers::Column::PackageAffinity,
+                workers::Column::Priority,
+                workers::Column::Concurrency,
+                workers::Column::SettingsDeclaration,
+            ])
+            .to_owned(),
+    )
+    .exec(db)
+    .await?;
 
     find_worker_by_fingerprint(db, reg.fingerprint)
         .await?
@@ -148,13 +132,10 @@ pub async fn rekey_embedded<C: ConnectionTrait>(db: &C, fingerprint: &str) -> Re
 /// Mark `id` as the embedded worker, and no other row.
 pub async fn mark_embedded<C: ConnectionTrait>(db: &C, id: i32) -> Result<(), DbErr> {
     Workers::update_many()
-        .col_expr(workers::Column::Embedded, Expr::value(false))
-        .filter(workers::Column::Id.ne(id))
-        .exec(db)
-        .await?;
-    Workers::update_many()
-        .col_expr(workers::Column::Embedded, Expr::value(true))
-        .filter(workers::Column::Id.eq(id))
+        .col_expr(
+            workers::Column::Embedded,
+            Expr::col(workers::Column::Id).eq(id),
+        )
         .exec(db)
         .await?;
     Ok(())
@@ -179,28 +160,22 @@ pub async fn find_worker_by_fingerprint<C: ConnectionTrait>(
         .await
 }
 
-/// Load a worker as an `ActiveModel` ready to be mutated and updated.
+/// Change worker `id` through `change`, returning the row as written.
 ///
 /// `None` when the row is gone. Absence is an `Option`, not a `DbErr::Custom`:
 /// a caller holding a stale id made a client error, and the endpoints map this
 /// to 404 — a database-shaped error for it would surface as a 500 and mask
 /// real server faults in monitoring.
-async fn load_for_update<C: ConnectionTrait>(
+async fn update_worker<C: ConnectionTrait>(
     db: &C,
     id: i32,
-) -> Result<Option<workers::ActiveModel>, DbErr> {
-    Ok(Workers::find_by_id(id).one(db).await?.map(Into::into))
-}
-
-async fn set_status<C: ConnectionTrait>(
-    db: &C,
-    id: i32,
-    status: ApprovalStatus,
+    change: impl FnOnce(&mut workers::ActiveModel),
 ) -> Result<Option<workers::Model>, DbErr> {
-    let Some(mut active) = load_for_update(db, id).await? else {
+    let Some(row) = Workers::find_by_id(id).one(db).await? else {
         return Ok(None);
     };
-    active.status = Set(status);
+    let mut active: workers::ActiveModel = row.into();
+    change(&mut active);
     Ok(Some(active.update(db).await?))
 }
 
@@ -213,12 +188,11 @@ pub async fn store_signed_cert<C: ConnectionTrait>(
     signed_cert: &str,
     not_after: i64,
 ) -> Result<Option<workers::Model>, DbErr> {
-    let Some(mut active) = load_for_update(db, id).await? else {
-        return Ok(None);
-    };
-    active.signed_cert = Set(Some(signed_cert.to_string()));
-    active.not_after = Set(Some(not_after));
-    Ok(Some(active.update(db).await?))
+    update_worker(db, id, |worker| {
+        worker.signed_cert = Set(Some(signed_cert.to_string()));
+        worker.not_after = Set(Some(not_after));
+    })
+    .await
 }
 
 /// Approve a worker so it may claim jobs. The signed certificate is issued at
@@ -227,7 +201,10 @@ pub async fn approve_worker<C: ConnectionTrait>(
     db: &C,
     id: i32,
 ) -> Result<Option<workers::Model>, DbErr> {
-    set_status(db, id, ApprovalStatus::Approved).await
+    update_worker(db, id, |worker| {
+        worker.status = Set(ApprovalStatus::Approved);
+    })
+    .await
 }
 
 /// Revoke a worker: it is immediately refused at the auth guard, its package
@@ -243,15 +220,17 @@ pub async fn revoke_worker<C: ConnectionTrait + sea_orm::TransactionTrait>(
     id: i32,
     max_attempts: i32,
 ) -> Result<Option<Revoked>, DbErr> {
-    let Some(mut active) = load_for_update(db, id).await? else {
+    let Some(worker) = update_worker(db, id, |worker| {
+        worker.status = Set(ApprovalStatus::Revoked);
+        // Pausing is how a machine is emptied before it is retired, and it
+        // belongs to that retirement: a machine approved again later is
+        // expected to build, not to come back still refusing work.
+        worker.paused = Set(false);
+    })
+    .await?
+    else {
         return Ok(None);
     };
-    active.status = Set(ApprovalStatus::Revoked);
-    // Pausing is how a machine is emptied before it is retired, and it
-    // belongs to that retirement: a machine approved again later is expected
-    // to build, not to come back still refusing work.
-    active.paused = Set(false);
-    let worker = active.update(db).await?;
     let abandoned =
         crate::helpers::worker_jobs::abandon_worker_builds(db, id, max_attempts).await?;
     Ok(Some(Revoked { worker, abandoned }))
@@ -267,11 +246,7 @@ pub async fn set_paused<C: ConnectionTrait>(
     id: i32,
     paused: bool,
 ) -> Result<Option<workers::Model>, DbErr> {
-    let Some(mut active) = load_for_update(db, id).await? else {
-        return Ok(None);
-    };
-    active.paused = Set(paused);
-    Ok(Some(active.update(db).await?))
+    update_worker(db, id, |worker| worker.paused = Set(paused)).await
 }
 
 /// A revoked worker, and the builds taken back from it.
@@ -281,6 +256,62 @@ pub struct Revoked {
     /// The builds it held, now failed, each with a fresh attempt in its place
     /// unless its package is gone.
     pub abandoned: Vec<crate::helpers::worker_jobs::Abandoned>,
+}
+
+/// How many builds a worker is running, and how its finished ones went.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BuildTally {
+    pub active: i32,
+    pub successful: i32,
+    pub failed: i32,
+}
+
+/// Tally every worker's builds, by worker id, in one grouped query.
+///
+/// One query rather than three per worker: the workers page is a list, and a
+/// count per row per outcome is how a list page starts issuing dozens of
+/// queries to render.
+pub async fn build_tallies<C: ConnectionTrait>(db: &C) -> Result<HashMap<i32, BuildTally>, DbErr> {
+    /// One row per (worker, status).
+    #[derive(sea_orm::FromQueryResult)]
+    struct StatusCount {
+        worker_id: Option<i32>,
+        status: BuildState,
+        count: i64,
+    }
+
+    let rows = Builds::find()
+        .select_only()
+        .column(builds::Column::WorkerId)
+        .column(builds::Column::Status)
+        .column_as(builds::Column::Id.count(), "count")
+        .filter(builds::Column::WorkerId.is_not_null())
+        .group_by(builds::Column::WorkerId)
+        .group_by(builds::Column::Status)
+        .into_model::<StatusCount>()
+        .all(db)
+        .await?;
+
+    let mut tallies: HashMap<i32, BuildTally> = HashMap::new();
+    for row in rows {
+        let Some(worker_id) = row.worker_id else {
+            continue;
+        };
+        // Saturating because these are display counts: a repository with more
+        // than two billion builds of one worker should render a big number,
+        // not panic the list.
+        let count = i32::try_from(row.count).unwrap_or(i32::MAX);
+        let tally = tallies.entry(worker_id).or_default();
+        match row.status {
+            BuildState::Active => tally.active = count,
+            BuildState::Successful => tally.successful = count,
+            BuildState::Failed => tally.failed = count,
+            // Queued builds belong to no worker yet, and a publishing one is
+            // counted once it has settled.
+            BuildState::Enqueued | BuildState::WaitingForDeps | BuildState::Publishing => {}
+        }
+    }
+    Ok(tallies)
 }
 
 /// List all workers in name order.
@@ -1082,9 +1113,11 @@ mod tests {
         assert_eq!(untouched.cert_fingerprint, "fp-remote");
         assert!(!untouched.embedded);
 
-        set_status(&db, first.id, ApprovalStatus::Revoked)
-            .await
-            .unwrap();
+        update_worker(&db, first.id, |worker| {
+            worker.status = Set(ApprovalStatus::Revoked);
+        })
+        .await
+        .unwrap();
         rekey_embedded(&db, "fp-3").await.unwrap();
         let revoked = find_worker(&db, first.id).await.unwrap().unwrap();
         assert_eq!(revoked.cert_fingerprint, "fp-3");

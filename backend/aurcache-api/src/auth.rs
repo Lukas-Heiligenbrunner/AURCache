@@ -1,30 +1,92 @@
 use anyhow::Context;
-use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
-use aurcache_common::api::stats::ApiTokenResponse;
+use aurcache_common::api::stats::{ApiTokenResponse, UserInfo};
 use aurcache_db::api_tokens;
 use aurcache_db::prelude::ApiTokens;
+use aurcache_utils::services::Services;
 use rand::rngs::SysRng;
 use rand_core::TryRng;
-use rocket::get;
 use rocket::http::{Cookie, CookieJar, SameSite, Status};
+use rocket::request::{FromRequest, Outcome};
 use rocket::response::Redirect;
 use rocket::response::status::Unauthorized;
 use rocket::serde::json::Json;
-use rocket::{State, post};
+use rocket::{Request, State, get, post};
 use rocket_oauth2::{OAuth2, TokenResponse};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
-use sha2::{Digest, Sha256};
 use tracing::{debug, error};
 use utoipa::OpenApi;
 
-use crate::models::authenticated::Authenticated;
-use crate::utils::config::{allowed_users, is_user_allowed};
+use crate::utils::config::{OAuthSettings, is_user_allowed};
 use crate::utils::error::{ApiError, err};
 
 #[derive(OpenApi)]
-#[openapi(paths(oauth_login, oauth_callback, regenerate_api_token_endpoint))]
+#[openapi(paths(oauth_login, oauth_callback, regenerate_api_token_endpoint, user_info))]
 pub struct AuthApi;
+
+/// Request guard: the caller is signed in, or this instance has no sign-in.
+///
+/// Whether there is sign-in is the managed `Option<OAuthSettings>`, which
+/// `init_api` always manages. A server that does not is refused rather than
+/// read as "OAuth off": guessing open would let everyone in on a mistake that
+/// looks, from the outside, exactly like a working instance.
+#[derive(Debug)]
+pub struct Authenticated {
+    pub username: Option<String>,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for Authenticated {
+    type Error = &'static str;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let Some(oauth) = req.rocket().state::<Option<OAuthSettings>>() else {
+            return Outcome::Error((
+                Status::InternalServerError,
+                "no sign-in configuration is managed",
+            ));
+        };
+        if oauth.is_none() {
+            return Outcome::Success(Self { username: None });
+        }
+
+        // A valid session cookie authenticates on its own; the username
+        // cookie is only used to label the session.
+        if req.cookies().get_private("token").is_some() {
+            let username = req
+                .cookies()
+                .get_private("username")
+                .map(|cookie| cookie.value().to_string());
+            return Outcome::Success(Self { username });
+        }
+
+        // The scheme is case-insensitive (RFC 7235); some clients send
+        // `bearer` or `BEARER`.
+        let bearer_token = req
+            .headers()
+            .get_one("Authorization")
+            .and_then(|value| value.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map(|(_, token)| token.trim())
+            .filter(|token| !token.is_empty());
+
+        let Some(bearer_token) = bearer_token else {
+            return Outcome::Error((Status::Unauthorized, "no session and no bearer token"));
+        };
+
+        let Some(db) = req.rocket().state::<DatabaseConnection>() else {
+            return Outcome::Error((Status::InternalServerError, "no database is managed"));
+        };
+
+        match username_for_api_token(db, bearer_token).await {
+            Ok(Some(username)) => Outcome::Success(Self {
+                username: Some(username),
+            }),
+            Ok(None) => Outcome::Error((Status::Unauthorized, "unknown API token")),
+            Err(_) => Outcome::Error((Status::InternalServerError, "could not look up the token")),
+        }
+    }
+}
 
 #[derive(serde::Deserialize, Debug)]
 pub struct OauthUserInfo {
@@ -45,14 +107,13 @@ pub struct OauthUserInfo {
 // security here. A fast, unsalted hash just lets us look up the token by its
 // digest without storing the secret itself in the DB.
 pub fn hash_api_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+    aurcache_common::digest::sha256_hex(token.as_bytes())
 }
 
 fn generate_api_token() -> anyhow::Result<String> {
     let mut bytes = [0_u8; 32];
-    // `SysRng` is rand 0.10's name for what was `OsRng`, and reading from it is
-    // now fallible: the OS can refuse entropy. Refusing to mint a token is the
-    // only safe answer -- a token from a degraded source is worse than none --
+    // Reading from `SysRng` is fallible: the OS can refuse entropy. Refusing
+    // to mint a token is the only safe answer -- a token from a degraded source is worse than none --
     // so the failure is returned for the endpoint to report instead of
     // panicking the server.
     SysRng
@@ -139,8 +200,13 @@ pub fn oauth_login(
 pub async fn oauth_callback(
     token: TokenResponse<OauthUserInfo>,
     cookies: &CookieJar<'_>,
-    al: &State<ActivityLog>,
+    oauth: &State<Option<OAuthSettings>>,
+    services: &State<Services>,
 ) -> Result<Redirect, Unauthorized<String>> {
+    // Mounted only when OAuth is configured, so this is never `None` in practice.
+    let Some(oauth) = oauth.inner() else {
+        return Err(Unauthorized("OAuth is not configured".to_string()));
+    };
     // One process-wide client: building one per login buys nothing (no
     // per-request configuration) and costs a connection pool each time.
     static OAUTH_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -150,7 +216,7 @@ pub async fn oauth_callback(
             .expect("default reqwest client builds")
     });
     let user_info: OauthUserInfo = client
-        .get(std::env::var("OAUTH_USERINFO_URI").map_err(|e| Unauthorized(e.to_string()))?)
+        .get(&oauth.userinfo_uri)
         .bearer_auth(token.access_token())
         .send()
         .await
@@ -169,11 +235,11 @@ pub async fn oauth_callback(
     // function returns, and `Authenticated` treats the mere presence of the
     // `token` cookie as a valid session -- so setting it before the check would
     // hand a refused user a working session along with their rejection.
-    if !is_user_allowed(allowed_users().as_deref(), email) {
+    if !is_user_allowed(oauth.allowed_users.as_deref(), email) {
         // Logged at warn: on a server that restricts sign-in, someone being
         // turned away is worth seeing, and the operator locking themselves out
         // by a typo in the list looks identical from the browser.
-        al.emit(Event::SignInRefused {
+        services.activity.emit(Event::SignInRefused {
             user: format!("{real_name} ({})", email.unwrap_or("no email reported")),
         });
         return Err(Unauthorized(
@@ -207,25 +273,83 @@ pub async fn oauth_callback(
 )]
 #[post("/token/regenerate")]
 pub async fn regenerate_api_token_endpoint(
-    db: &State<DatabaseConnection>,
+    services: &State<Services>,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<Json<ApiTokenResponse>, ApiError> {
     let username = a
         .username
         .ok_or_else(|| err(Status::Unauthorized, "No authenticated user available"))?;
     // A failure here is the server's (database, entropy), not the caller's:
     // answering 401 would log the user out for a fault on our side.
-    let token = regenerate_api_token(db, &username)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
-    al.emit_by(Event::TokenRegenerated {}, Some(username));
+    let token = regenerate_api_token(&services.db, &username).await?;
+    services
+        .activity
+        .emit_by(Event::TokenRegenerated {}, Some(username));
     Ok(Json(ApiTokenResponse { token }))
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Get infos about the signed in user", body = UserInfo),
+    )
+)]
+#[get("/userinfo")]
+pub async fn user_info(
+    db: &State<DatabaseConnection>,
+    a: Authenticated,
+) -> Result<Json<UserInfo>, ApiError> {
+    let username = a.username;
+    let has_api_token = match &username {
+        Some(username) => has_api_token(db, username).await?,
+        None => false,
+    };
+    Ok(Json(UserInfo {
+        username,
+        has_api_token,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OauthUserInfo, has_api_token, regenerate_api_token, username_for_api_token};
+    use super::{
+        Authenticated, OauthUserInfo, has_api_token, regenerate_api_token, username_for_api_token,
+    };
+    use crate::utils::config::OAuthSettings;
+    use rocket::http::Status;
+    use rocket::local::asynchronous::Client;
+
+    #[rocket::get("/whoami")]
+    fn whoami(a: Authenticated) -> String {
+        a.username.unwrap_or_default()
+    }
+
+    async fn status_of(rocket: rocket::Rocket<rocket::Build>) -> Status {
+        let client = Client::untracked(rocket.mount("/", rocket::routes![whoami]))
+            .await
+            .unwrap();
+        client.get("/whoami").dispatch().await.status()
+    }
+
+    /// A server that never said whether sign-in is on refuses, rather than
+    /// reading the silence as "off" and letting everyone in.
+    #[tokio::test]
+    async fn sign_in_left_unmanaged_refuses() {
+        assert_eq!(
+            status_of(rocket::build()).await,
+            Status::InternalServerError
+        );
+    }
+
+    #[tokio::test]
+    async fn no_oauth_lets_everyone_in_and_oauth_asks_for_a_token() {
+        let off = rocket::build().manage::<Option<OAuthSettings>>(None);
+        assert_eq!(status_of(off).await, Status::Ok);
+        let on = rocket::build().manage(Some(OAuthSettings {
+            userinfo_uri: "https://id.example.com/userinfo".to_string(),
+            allowed_users: None,
+        }));
+        assert_eq!(status_of(on).await, Status::Unauthorized);
+    }
 
     /// A provider that does not return `email` must still sign users in. The
     /// field was added for the allowlist, and making it required would have

@@ -13,24 +13,17 @@
 
 use crate::dates::RelativeDate;
 use crate::format::now_secs;
-use crate::listing::{LIST_TABLE, ListHeader, ViewParams};
+use crate::list_controls::{LIST_TABLE, ListHeader, WIDE_ONLY, WIDEST_ONLY};
+use crate::listing::ViewParams;
 use crate::routes::Route;
 use aurcache_client::{ApprovalStatus, Worker, WorkerJoinInfo};
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-/// Columns that only appear once there is room for them.
-const WIDE_ONLY: &str = "hidden lg:table-cell";
-/// Columns a phone drops: what they say moves under the worker's name.
-const MEDIUM_UP: &str = "hidden md:table-cell";
-
 #[component]
 pub fn Workers() -> Element {
-    let mut reload = use_signal(|| 0u32);
-    let workers = use_resource(move || async move {
-        // Read so an approve or revoke refetches the list.
-        let _ = reload();
+    let mut workers = use_resource(move || async move {
         crate::api::client()?
             .list_workers()
             .await
@@ -48,8 +41,7 @@ pub fn Workers() -> Element {
     // a package here is a link to it, one that does not is plain text. The set
     // refreshes with the list (so approve/revoke refetch it) and when a package
     // lands (so a reservation made for it links right away).
-    let known_packages = use_resource(move || async move {
-        let _ = reload();
+    let mut known_packages = use_resource(move || async move {
         crate::api::client()?
             .list_packages(&aurcache_client::PackageQuery {
                 dependencies: aurcache_client::DependencySelection::Include,
@@ -67,7 +59,7 @@ pub fn Workers() -> Element {
 
     // Every action is the same shape, and every one must refetch: the server
     // decides what a worker becomes, and the row has to show what it decided.
-    let act = move |(id, action): (i32, WorkerAction)| async move {
+    let act = move |WorkerRequest { id, action }: WorkerRequest| async move {
         busy.set(Some(id));
         status.set(None);
         let outcome = action.perform(id).await;
@@ -75,7 +67,8 @@ pub fn Workers() -> Element {
         match outcome {
             Ok(()) => {
                 status.set(Some(Ok(action.done().to_string())));
-                reload += 1;
+                workers.restart();
+                known_packages.restart();
             }
             Err(e) => status.set(Some(Err(e))),
         }
@@ -97,11 +90,7 @@ pub fn Workers() -> Element {
                 }
 
                 match &*workers.read_unchecked() {
-                    None => rsx! {
-                        div { class: "flex justify-center p-8",
-                            span { class: "loading loading-spinner loading-lg" }
-                        }
-                    },
+                    None => rsx! { crate::widgets::Spinner {} },
                     Some(Err(e)) => rsx! {
                         div { class: "alert alert-error", span { "Could not load workers: {e}" } }
                     },
@@ -274,7 +263,7 @@ fn WorkersTable(
     fleet: Vec<Worker>,
     /// The worker with an action in flight, if any.
     busy: Option<i32>,
-    act: EventHandler<(i32, WorkerAction)>,
+    act: EventHandler<WorkerRequest>,
     /// Package names that resolve to a real package. A reservation naming one
     /// is a link; any other reservation stays plain text. `None` while the
     /// package list is still loading or failed — plain text is the fallback
@@ -307,13 +296,13 @@ fn WorkersTable(
                     tr {
                         th { "Worker" }
                         th { "Status" }
-                        th { class: "{MEDIUM_UP}", "Now" }
-                        th { class: "{WIDE_ONLY}", "Builds" }
-                        th { class: "{MEDIUM_UP}", "Architectures" }
-                        th { class: "{WIDE_ONLY}", "Reserved for" }
-                        th { class: "{WIDE_ONLY}", "Priority" }
-                        th { class: "{WIDE_ONLY}", "Type" }
-                        th { class: "{WIDE_ONLY}", "Last seen" }
+                        th { class: "{WIDE_ONLY}", "Now" }
+                        th { class: "{WIDEST_ONLY}", "Builds" }
+                        th { class: "{WIDE_ONLY}", "Architectures" }
+                        th { class: "{WIDEST_ONLY}", "Reserved for" }
+                        th { class: "{WIDEST_ONLY}", "Priority" }
+                        th { class: "{WIDEST_ONLY}", "Type" }
+                        th { class: "{WIDEST_ONLY}", "Last seen" }
                         th { "" }
                     }
                 }
@@ -370,12 +359,12 @@ fn WorkersTable(
                                     }
                                 }
                             }
-                            td { class: "{MEDIUM_UP}", Liveness { worker: worker.clone() } }
-                            td { class: "{WIDE_ONLY}",
+                            td { class: "{WIDE_ONLY}", Liveness { worker: worker.clone() } }
+                            td { class: "{WIDEST_ONLY}",
                                 Record { worker: worker.clone(), fleet_finished }
                             }
-                            td { class: "{MEDIUM_UP} text-sm", {architectures(worker)} }
-                            td { class: "{WIDE_ONLY}",
+                            td { class: "{WIDE_ONLY} text-sm", {architectures(worker)} }
+                            td { class: "{WIDEST_ONLY}",
                                 if worker.package_affinity.is_empty() {
                                     span { class: "opacity-40", "—" }
                                 } else {
@@ -396,7 +385,7 @@ fn WorkersTable(
                                     }
                                 }
                             }
-                            td { class: "{WIDE_ONLY} text-sm",
+                            td { class: "{WIDEST_ONLY} text-sm",
                                 if worker.priority == 0 {
                                     // Zero is the default, meaning no
                                     // preference. Printing it suggests the
@@ -409,10 +398,10 @@ fn WorkersTable(
                                     }
                                 }
                             }
-                            td { class: "{WIDE_ONLY}",
+                            td { class: "{WIDEST_ONLY}",
                                 KindBadge { worker: worker.clone() }
                             }
-                            td { class: "{WIDE_ONLY} text-sm opacity-70",
+                            td { class: "{WIDEST_ONLY} text-sm opacity-70",
                                 if worker.last_seen.is_some() {
                                     RelativeDate { ts: worker.last_seen, now }
                                 } else {
@@ -446,7 +435,7 @@ fn WorkersTable(
 /// first time. Revoke disappears once revoked, because there is nothing left to
 /// take away.
 #[component]
-fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerAction)>) -> Element {
+fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<WorkerRequest>) -> Element {
     let id = worker.id;
     rsx! {
         // Stacked on a phone, where side by side they took the width the
@@ -459,7 +448,7 @@ fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerActio
                 button {
                     class: "btn btn-primary btn-xs",
                     disabled: busy,
-                    onclick: move |_| act.call((id, WorkerAction::Approve)),
+                    onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Approve }),
                     if worker.status.is_retired() { "Reinstate" } else { "Approve" }
                 }
             }
@@ -469,7 +458,7 @@ fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerActio
                         class: "btn btn-ghost btn-xs",
                         disabled: busy,
                         title: WorkerAction::Resume.hint(),
-                        onclick: move |_| act.call((id, WorkerAction::Resume)),
+                        onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Resume }),
                         "Resume intake"
                     }
                 } else {
@@ -477,7 +466,7 @@ fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerActio
                         class: "btn btn-ghost btn-xs",
                         disabled: busy,
                         title: WorkerAction::Pause.hint(),
-                        onclick: move |_| act.call((id, WorkerAction::Pause)),
+                        onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Pause }),
                         "Stop intake"
                     }
                 }
@@ -487,12 +476,19 @@ fn WorkerActions(worker: Worker, busy: bool, act: EventHandler<(i32, WorkerActio
                     class: "btn btn-ghost btn-xs",
                     disabled: busy,
                     title: WorkerAction::Revoke.hint(),
-                    onclick: move |_| act.call((id, WorkerAction::Revoke)),
+                    onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Revoke }),
                     "Revoke"
                 }
             }
         }
     }
+}
+
+/// One action asked of one worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkerRequest {
+    pub(crate) id: i32,
+    pub(crate) action: WorkerAction,
 }
 
 /// Something an operator does to a worker from the fleet list or its page.

@@ -64,39 +64,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every built-in default has to read back as its own kind: it is at once
-    /// what the worker runs and what the server is told the fallback is.
     #[test]
-    fn built_in_defaults_are_valid_for_their_kind() {
-        for spec in docker_settings() {
-            if let Some(written) = spec.default.as_written() {
-                assert!(
-                    spec.kind.validate(&written).is_ok(),
-                    "{}'s default {written:?} is not a valid {:?}",
-                    spec.key,
-                    spec.kind
-                );
-            }
-        }
-    }
-
-    /// Keys and variables are what the server stores values under and what an
-    /// operator renames to hand a setting over, so a duplicate of either would
-    /// be two settings quietly sharing one slot.
-    #[test]
-    fn keys_and_variables_are_unique_across_both_tables() {
+    fn the_whole_table_checks_out() {
         let all: Vec<_> = aurcache_worker_core::settings::protocol_settings()
             .into_iter()
             .chain(docker_settings())
             .collect();
-        let keys: HashSet<_> = all.iter().map(|spec| spec.key).collect();
-        assert_eq!(keys.len(), all.len(), "a setting key is declared twice");
-        let vars: HashSet<_> = all.iter().map(|spec| spec.env_var).collect();
-        assert_eq!(
-            vars.len(),
-            all.len(),
-            "an environment variable is declared twice"
-        );
+        aurcache_worker_core::settings::check_table(&all);
     }
 
     /// The security boundary, asserted rather than left to review: the image a

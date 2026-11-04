@@ -368,15 +368,15 @@ fn services(env: &TestEnv) -> Services {
         env.checkout_dir.path().to_path_buf(),
         env.aur_root.path().to_string_lossy().to_string(),
     );
-    Services::new(
-        env.db.clone(),
-        Arc::new(store),
-        env.client.clone(),
-        Arc::new(aurcache_utils::repository::Repository::new(
+    Services {
+        db: env.db.clone(),
+        store: Arc::new(store),
+        client: env.client.clone(),
+        repo: Arc::new(aurcache_utils::repository::Repository::new(
             tempfile::tempdir().unwrap().keep(),
         )),
-        ActivityLog::discarding(),
-    )
+        activity: ActivityLog::discarding(),
+    }
 }
 
 async fn add_pkg_via_rpc(env: &TestEnv, name: &str) -> anyhow::Result<String> {
@@ -990,7 +990,7 @@ async fn scenario_j_local_queued_provider_prevents_aur_dependency_addition() {
         }),
         directly_requested: Set(false),
         split_packages: Set(None),
-        provides: Set(Some(r#"["virtual-dep"]"#.to_string())),
+        provides: Set(Some(r#"["virtual-dep"]"#.parse().unwrap())),
         ..Default::default()
     }
     .save(&env.db)

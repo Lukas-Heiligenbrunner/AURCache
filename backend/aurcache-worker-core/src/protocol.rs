@@ -1,12 +1,13 @@
-//! Server interactions every executor performs around a build: streaming logs,
-//! observing a remote cancel request, and uploading the results.
+//! Server interactions every executor performs around a build: logging,
+//! deciding when it has to stop, and uploading the results.
 
 use anyhow::{Context, Result};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::JobDescriptor;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::artifacts;
 use crate::client::WorkerClient;
@@ -51,15 +52,6 @@ pub async fn report_warning(client: &WorkerClient, build_id: Option<i32>, messag
     }
 }
 
-/// Whether the server has asked for this build to stop. An unreachable server
-/// has not: the lease, not this poll, decides when a build is abandoned.
-pub async fn cancel_requested(client: &WorkerClient, build_id: i32) -> bool {
-    client
-        .job_status(build_id)
-        .await
-        .is_ok_and(|s| s.cancel_requested)
-}
-
 /// Why a running build is being stopped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -72,7 +64,7 @@ pub enum Stop {
 /// How long a build may run, and whose limit that is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timeout {
-    pub secs: u64,
+    pub limit: Duration,
     pub set_by: TimeoutSource,
 }
 
@@ -87,54 +79,45 @@ pub enum TimeoutSource {
 
 impl Timeout {
     /// The shorter of this worker's build timeout and the one the server
-    /// sent with the job, or none when neither sets one. `0` is no limit,
-    /// from either side.
+    /// sent with the job, or none when neither sets one. `0` from the server
+    /// is no limit.
     #[must_use]
-    pub fn for_job(own_secs: u64, job: &JobDescriptor) -> Option<Self> {
-        let limit = |secs: u64, set_by| (secs > 0).then_some(Self { secs, set_by });
-        let own = limit(own_secs, TimeoutSource::Worker);
-        let server = job
-            .timeout_secs
-            .and_then(|secs| limit(secs, TimeoutSource::Server));
+    pub fn for_job(own: Option<Duration>, job: &JobDescriptor) -> Option<Self> {
+        let own = own.map(|limit| Self {
+            limit,
+            set_by: TimeoutSource::Worker,
+        });
+        let server = job.timeout_secs.filter(|&secs| secs > 0).map(|secs| Self {
+            limit: Duration::from_secs(secs),
+            set_by: TimeoutSource::Server,
+        });
         match (own, server) {
-            (Some(own), Some(server)) if server.secs < own.secs => Some(server),
+            (Some(own), Some(server)) if server.limit < own.limit => Some(server),
             (own, server) => own.or(server),
         }
     }
 }
 
-/// Decides, while a build runs, whether it has to be stopped -- the same way
-/// for every executor, so a build ends for the same reason whichever one ran
-/// it.
-pub struct StopWatch<'a> {
+/// Decides, while a build runs, when it has to be stopped -- the same way for
+/// every executor, so a build ends for the same reason whichever one ran it.
+///
+/// A cancel arrives through the token: the runner trips it when the
+/// heartbeat's answer names the build, or when the server has been out of
+/// reach past the lease.
+pub struct StopWatch {
     started: Instant,
     timeout: Option<Timeout>,
-    /// Set when this worker has given up on the build itself.
-    cancel: &'a AtomicBool,
-    build_id: i32,
-    last_poll: Instant,
+    cancel: CancellationToken,
 }
 
-impl<'a> StopWatch<'a> {
-    /// How often a running build is looked at: [`Self::check`] belongs on a
-    /// timer of this period.
-    pub const TICK: Duration = Duration::from_secs(5);
-
-    /// How often the server is asked about a cancel. With N builds running, a
-    /// round trip per tick is N requests every five seconds for no gain:
-    /// cancel latency is dominated by build granularity anyway.
-    const POLL: Duration = Duration::from_secs(30);
-
+impl StopWatch {
     /// Start timing a build that has just started.
     #[must_use]
-    pub fn start(timeout: Option<Timeout>, cancel: &'a AtomicBool, build_id: i32) -> Self {
-        let now = Instant::now();
+    pub fn start(timeout: Option<Timeout>, cancel: CancellationToken) -> Self {
         Self {
-            started: now,
+            started: Instant::now(),
             timeout,
             cancel,
-            build_id,
-            last_poll: now,
         }
     }
 
@@ -144,25 +127,27 @@ impl<'a> StopWatch<'a> {
         self.started.elapsed()
     }
 
-    /// Whether to stop the build now, and why.
+    /// Resolves when the build has to stop, with why; never, for a build
+    /// with no limit that nobody cancels.
     ///
-    /// A cancel wins over a timeout reached at the same tick: the build is
-    /// reported as what was asked for, and the server, which has already moved
-    /// a cancelled build on, would refuse a timeout report for it.
-    pub async fn check(&mut self, client: &WorkerClient) -> Option<Stop> {
-        // `>=`: a timeout of N means N seconds, not N+1.
-        let elapsed = self.elapsed().as_secs();
-        let timed_out = self.timeout.filter(|limit| elapsed >= limit.secs);
-        if self.cancel.load(Ordering::SeqCst) {
-            return Some(Stop::Canceled);
-        }
-        if timed_out.is_none() && self.last_poll.elapsed() >= Self::POLL {
-            self.last_poll = Instant::now();
-            if cancel_requested(client, self.build_id).await {
-                return Some(Stop::Canceled);
+    /// A cancel wins over a timeout reached at the same moment: the build is
+    /// reported as what was asked for, and the server, which has already
+    /// moved a cancelled build on, would refuse a timeout report for it.
+    pub async fn stopped(&self) -> Stop {
+        let timed_out = async {
+            match self.timeout {
+                Some(timeout) => {
+                    tokio::time::sleep_until(self.started + timeout.limit).await;
+                    Stop::TimedOut(timeout)
+                }
+                None => std::future::pending().await,
             }
+        };
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => Stop::Canceled,
+            stop = timed_out => stop,
         }
-        timed_out.map(Stop::TimedOut)
     }
 }
 
@@ -248,39 +233,69 @@ mod tests {
     }
 
     const fn limit(secs: u64, set_by: TimeoutSource) -> Timeout {
-        Timeout { secs, set_by }
+        Timeout {
+            limit: Duration::from_secs(secs),
+            set_by,
+        }
+    }
+
+    const fn secs(secs: u64) -> Duration {
+        Duration::from_secs(secs)
     }
 
     #[test]
     fn the_shorter_limit_wins_whichever_side_sets_it() {
         use TimeoutSource::{Server, Worker};
         assert_eq!(
-            Timeout::for_job(3 * 3600, &job(Some(3600))),
+            Timeout::for_job(Some(secs(3 * 3600)), &job(Some(3600))),
             Some(limit(3600, Server))
         );
         assert_eq!(
-            Timeout::for_job(1800, &job(Some(3600))),
+            Timeout::for_job(Some(secs(1800)), &job(Some(3600))),
             Some(limit(1800, Worker))
         );
     }
 
-    /// `0` on either side is no limit, not an instant one; a server that
-    /// sends none leaves the worker's alone.
+    /// No limit from one side leaves the other's; `0` from the server is no
+    /// limit, not an instant one.
     #[test]
     fn no_limit_from_one_side_leaves_the_other() {
         use TimeoutSource::{Server, Worker};
         assert_eq!(
-            Timeout::for_job(0, &job(Some(3600))),
+            Timeout::for_job(None, &job(Some(3600))),
             Some(limit(3600, Server))
         );
         assert_eq!(
-            Timeout::for_job(1800, &job(Some(0))),
+            Timeout::for_job(Some(secs(1800)), &job(Some(0))),
             Some(limit(1800, Worker))
         );
         assert_eq!(
-            Timeout::for_job(1800, &job(None)),
+            Timeout::for_job(Some(secs(1800)), &job(None)),
             Some(limit(1800, Worker))
         );
-        assert_eq!(Timeout::for_job(0, &job(None)), None);
+        assert_eq!(Timeout::for_job(None, &job(None)), None);
+    }
+
+    /// The limit is the limit: not a tick later.
+    #[tokio::test(start_paused = true)]
+    async fn a_build_stops_when_its_limit_is_reached() {
+        let timeout = limit(90, TimeoutSource::Server);
+        let watch = StopWatch::start(Some(timeout), CancellationToken::new());
+        assert_eq!(watch.stopped().await, Stop::TimedOut(timeout));
+        assert_eq!(watch.elapsed(), Duration::from_secs(90));
+    }
+
+    /// A cancel lands at once, and wins over a limit already reached.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancel_stops_the_build_and_wins_over_the_limit() {
+        let cancel = CancellationToken::new();
+        let watch = StopWatch::start(Some(limit(60, TimeoutSource::Worker)), cancel.clone());
+        tokio::time::advance(Duration::from_secs(10)).await;
+        cancel.cancel();
+        assert_eq!(watch.stopped().await, Stop::Canceled);
+        assert_eq!(watch.elapsed(), Duration::from_secs(10));
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(watch.stopped().await, Stop::Canceled);
     }
 }

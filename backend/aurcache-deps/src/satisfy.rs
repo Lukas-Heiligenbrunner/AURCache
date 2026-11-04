@@ -5,7 +5,7 @@
 //! decides which candidate wins -- an exact name above a split package above a
 //! `provides` entry. (The official repositories only ever answer yes or no,
 //! through `OfficialRepos::holds`; an AUR `provides` search ranks with
-//! `provider_rank`.)
+//! `ProviderRank`.)
 
 use std::collections::{HashMap, HashSet};
 

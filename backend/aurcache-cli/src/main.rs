@@ -15,11 +15,12 @@ mod workers;
 
 use crate::builds::run_builds_command;
 use crate::cli::{
-    Cli, Command, ConfigCommand, OutputFormat, RawArgs, RepoCommand, RepoConfigArgs, TokenCommand,
+    ApiCommand, Cli, Command, ConfigCommand, OutputFormat, RawArgs, RepoCommand, RepoConfigArgs,
+    TokenCommand,
 };
 use crate::dump::{dump_command, restore_command};
 use crate::output::{
-    print_graph, print_health, print_json, print_raw_response, print_search_results, print_stats,
+    option_text, print_graph, print_health, print_raw_response, print_search_results, print_stats,
     print_user_info, render,
 };
 use crate::packages::run_packages_command;
@@ -29,7 +30,8 @@ use anyhow::{Context, Result};
 use aurcache_client::{AurCacheClient, Method};
 use clap::{CommandFactory, Parser};
 use config::{
-    load_config, resolve_runtime_config, save_config, set_token, set_url, summarize_config,
+    ClientConfig, load_config, resolve_runtime_config, save_config, set_token, set_url,
+    summarize_config,
 };
 use serde_json::Value;
 
@@ -53,17 +55,16 @@ async fn main() -> Result<()> {
         // Also offline: the whole point is standing up an instance that does
         // not exist yet, so there is nothing to authenticate against.
         Command::Setup { command } => run_setup_command(format, *command),
-        command => {
+        Command::Api(command) => {
             let runtime = resolve_runtime_config(cli.url, cli.token)?;
-            let used_token = runtime.token.clone();
             let client = AurCacheClient::new(runtime.url.clone(), runtime.token)?;
             match run(&client, format, command.clone()).await {
                 Err(err) if aurcache_client::is_unauthorized(&err) && config::is_interactive() => {
                     eprintln!("{err}");
-                    warn_if_token_from_env(used_token.as_deref());
                     eprintln!("Please re-enter your AURCache API token to continue.");
                     let token = config::prompt_and_save_token(load_config()?)?;
-                    let client = AurCacheClient::new(runtime.url, Some(token))?;
+                    warn_if_env_token_wins();
+                    let client = AurCacheClient::new(runtime.url, token)?;
                     run(&client, format, command).await
                 }
                 result => result,
@@ -72,63 +73,38 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Warns the user if the token that was just rejected came from the
-/// `AURCACHE_TOKEN` environment variable. Env vars take precedence over the
-/// config file (see `resolve_runtime_config`), so saving a freshly prompted
-/// token there won't actually fix anything next run unless the stale
-/// environment variable is also updated or unset.
-fn warn_if_token_from_env(used_token: Option<&str>) {
-    if let (Some(used), Ok(env_token)) = (used_token, std::env::var("AURCACHE_TOKEN"))
-        && used == env_token
-    {
+/// Warn, after a token was saved to the config file, that it will not be used
+/// while `AURCACHE_TOKEN` is set: the environment takes precedence over the
+/// file (see `resolve_runtime_config`).
+fn warn_if_env_token_wins() {
+    if std::env::var_os("AURCACHE_TOKEN").is_some() {
         eprintln!(
-            "Warning: that token came from the AURCACHE_TOKEN environment variable. \
-             The new token will be saved to the config file, but AURCACHE_TOKEN still \
-             takes precedence over it, so this will keep failing until you update or \
-             unset that environment variable."
+            "Note: the new token was saved to the config file, but the \
+             AURCACHE_TOKEN environment variable is set and takes precedence \
+             over it. Update or unset that environment variable to use the new \
+             token."
         );
     }
 }
 
-async fn run(client: &AurCacheClient, format: OutputFormat, command: Command) -> Result<()> {
+async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand) -> Result<()> {
     match command {
-        Command::Health => run_health(client, format).await,
-        Command::Doctor => doctor::run_doctor(client, format).await,
-        Command::Repo { .. } | Command::Completions { .. } | Command::Setup { .. } => {
-            unreachable!("offline commands are handled before client setup")
-        }
-        Command::UserInfo => render_user_info(client, format).await,
-        Command::Stats => render_stats(client, format).await,
-        Command::Graph => render_graph(client, format).await,
-        Command::Search { query } => render_search_results(client, format, &query).await,
-        Command::Token { command } => run_token_command(client, format, command).await,
-        Command::Config { .. } => unreachable!("config commands are handled before client setup"),
-        Command::Pkg { command } => run_packages_command(client, format, command).await,
-        Command::Dump {
+        ApiCommand::Health => run_health(client, format).await,
+        ApiCommand::Doctor => doctor::run_doctor(client, format).await,
+        ApiCommand::UserInfo => render_user_info(client, format).await,
+        ApiCommand::Stats => render_stats(client, format).await,
+        ApiCommand::Graph => render_graph(client, format).await,
+        ApiCommand::Search { query } => render_search_results(client, format, &query).await,
+        ApiCommand::Token { command } => run_token_command(client, format, command).await,
+        ApiCommand::Pkg { command } => run_packages_command(client, format, command).await,
+        ApiCommand::Dump {
             output,
             include_secrets,
         } => dump_command(client, format, output, include_secrets).await,
-        Command::Restore {
-            archive,
-            dry_run,
-            on_existing,
-            clear,
-            secrets,
-        } => {
-            restore_command(
-                client,
-                format,
-                &archive,
-                dry_run,
-                on_existing,
-                clear,
-                secrets,
-            )
-            .await
-        }
-        Command::Builds { command } => run_builds_command(client, format, command).await,
-        Command::Worker { command } => run_worker_command(client, format, command).await,
-        Command::Raw(args) => run_raw_command(client, args).await,
+        ApiCommand::Restore(args) => restore_command(client, format, args).await,
+        ApiCommand::Builds { command } => run_builds_command(client, format, command).await,
+        ApiCommand::Worker { command } => run_worker_command(client, format, command).await,
+        ApiCommand::Raw(args) => run_raw_command(client, args).await,
     }
 }
 
@@ -182,32 +158,25 @@ async fn run_repo_config(
         published.as_deref(),
     )?;
 
-    if args.install {
-        let installed = repo::install_stanza(&args.pacman_conf, &config)?;
-        return match format {
-            OutputFormat::Json => print_json(&installed),
-            OutputFormat::Text => {
-                if installed.changed {
-                    println!("added [{}] to {}", config.name, installed.path);
-                    println!("  sudo pacman -Sy");
-                } else {
-                    println!(
-                        "[{}] is already configured in {}",
-                        config.name, installed.path
-                    );
-                }
-                Ok(())
+    if !args.install {
+        return render(format, &config, repo::print_repo_config);
+    }
+    let installed = repo::Installed {
+        path: &args.pacman_conf,
+        outcome: repo::install_stanza(&args.pacman_conf, &config)?,
+    };
+    render(format, &installed, |installed| {
+        let path = installed.path.display();
+        match installed.outcome {
+            repo::Install::AlreadyPresent => {
+                println!("[{}] is already configured in {path}", config.name);
             }
-        };
-    }
-
-    match format {
-        OutputFormat::Json => print_json(&config),
-        OutputFormat::Text => {
-            repo::print_repo_config(&config);
-            Ok(())
+            repo::Install::Appended | repo::Install::AppendedWithSudo => {
+                println!("added [{}] to {path}", config.name);
+                println!("  sudo pacman -Sy");
+            }
         }
-    }
+    })
 }
 
 fn run_completions(shell: clap_complete::Shell) {
@@ -219,8 +188,10 @@ fn run_completions(shell: clap_complete::Shell) {
 fn run_config_command(format: OutputFormat, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Show => show_config(format),
-        ConfigCommand::SetUrl { url } => save_url_config(format, url),
-        ConfigCommand::SetToken { token } => save_token_config(format, token),
+        ConfigCommand::SetUrl { url } => save_setting(format, set_url(load_config()?, url)?, "url"),
+        ConfigCommand::SetToken { token } => {
+            save_setting(format, set_token(load_config()?, token)?, "token")
+        }
     }
 }
 
@@ -265,26 +236,11 @@ async fn run_token_command(
 
             // Persist the new token to the config file so subsequent CLI
             // invocations keep working without requiring the user to run
-            // `config set-token` themselves. If AURCACHE_TOKEN is set, it
-            // still takes precedence at runtime, so warn about that too.
+            // `config set-token` themselves.
             let config = set_token(load_config()?, Some(response.token.clone()))?;
             save_config(&config)?;
-            if std::env::var("AURCACHE_TOKEN").is_ok() {
-                eprintln!(
-                    "Note: the new token was saved to the config file, but the \
-                     AURCACHE_TOKEN environment variable is set and will keep \
-                     taking precedence over it. Update or unset that environment \
-                     variable to actually use the new token."
-                );
-            }
-
-            match format {
-                OutputFormat::Json => print_json(&response),
-                OutputFormat::Text => {
-                    println!("{}", response.token);
-                    Ok(())
-                }
-            }
+            warn_if_env_token_wins();
+            render(format, &response, |response| println!("{}", response.token))
         }
     }
 }
@@ -304,39 +260,19 @@ async fn run_raw_command(client: &AurCacheClient, args: RawArgs) -> Result<()> {
 
 fn show_config(format: OutputFormat) -> Result<()> {
     let summary = summarize_config(&load_config()?)?;
-    match format {
-        OutputFormat::Json => print_json(&summary),
-        OutputFormat::Text => {
-            println!("path: {}", summary.path);
-            println!("url: {}", summary.url.unwrap_or_else(|| "-".to_string()));
-            println!("token: {}", summary.token_state);
-            Ok(())
-        }
-    }
+    render(format, &summary, |summary| {
+        println!("path: {}", summary.path);
+        println!("url: {}", option_text(summary.url.as_deref()));
+        println!("token: {}", summary.token_state);
+    })
 }
 
-fn save_url_config(format: OutputFormat, url: Option<String>) -> Result<()> {
-    let config = set_url(load_config()?, url)?;
+/// Save `config`, after `name` was changed in it.
+fn save_setting(format: OutputFormat, config: ClientConfig, name: &str) -> Result<()> {
     save_config(&config)?;
-    match format {
-        OutputFormat::Json => print_json(&summarize_config(&config)?),
-        OutputFormat::Text => {
-            println!("saved url to config");
-            Ok(())
-        }
-    }
-}
-
-fn save_token_config(format: OutputFormat, token: Option<String>) -> Result<()> {
-    let config = set_token(load_config()?, token)?;
-    save_config(&config)?;
-    match format {
-        OutputFormat::Json => print_json(&summarize_config(&config)?),
-        OutputFormat::Text => {
-            println!("saved token to config");
-            Ok(())
-        }
-    }
+    render(format, &summarize_config(&config)?, |_| {
+        println!("saved {name} to config");
+    })
 }
 
 fn parse_json_body(body: &str) -> Result<Value> {

@@ -185,7 +185,7 @@ impl Fleet {
     /// True when some approved worker has claimed affinity for this package, in
     /// which case only those workers may build it.
     fn reserved(&self, pkg: &str) -> bool {
-        self.affinity.get(pkg).is_some_and(|ws| !ws.is_empty())
+        self.affinity.contains_key(pkg)
     }
 
     fn affine(&self, worker_id: i32, pkg: &str) -> bool {
@@ -207,11 +207,6 @@ impl Fleet {
         Self::arch_ok(w, platform) && (!self.reserved(pkg) || self.affine(w.id, pkg))
     }
 
-    /// Whether this worker was seen recently enough to count as up.
-    fn live(w: &WorkerCap, now: i64, liveness_timeout: i64) -> bool {
-        is_live(w.last_seen, now, liveness_timeout)
-    }
-
     /// Whether this worker could pick a job up *right now*: up, not paused,
     /// and not already at its concurrency limit.
     ///
@@ -219,7 +214,7 @@ impl Fleet {
     /// paused worker will never take the job, so a lower-priority one must
     /// not wait for it.
     fn available(w: &WorkerCap, now: i64, liveness_timeout: i64) -> bool {
-        Self::live(w, now, liveness_timeout) && !w.paused && w.active < w.concurrency
+        is_live(w.last_seen, now, liveness_timeout) && !w.paused && w.active < w.concurrency
     }
 
     /// Whether a strictly higher-priority worker could take this job right now.
@@ -254,6 +249,8 @@ struct ClaimRank {
     not_affine: bool,
     queued_at: i64,
     id: i32,
+    /// Never compared: the id is unique.
+    pkg_id: i32,
 }
 
 /// Whether a worker last seen at `last_seen` counts as up at `now`.
@@ -303,95 +300,87 @@ pub async fn claim_job<C: ConnectionTrait + sea_orm::TransactionTrait>(
 ) -> Result<Option<builds::Model>, DbErr> {
     // It reads the fleet and the queue before the claim writes.
     let txn = crate::helpers::txn::begin_write(db).await?;
-    let result: Result<_, DbErr> = async {
-        let db = &txn;
-        let fleet = Fleet::load(db).await?;
-        // Not approved (or vanished mid-request): nothing is claimable. Paused:
-        // nothing new, by the operator's request -- which is the whole of pause.
-        let Some(me) = fleet.worker(worker_id).filter(|me| !me.paused) else {
-            return Ok(None);
-        };
+    let fleet = Fleet::load(&txn).await?;
+    // Not approved (or vanished mid-request): nothing is claimable. Paused:
+    // nothing new, by the operator's request -- which is the whole of pause.
+    let Some(me) = fleet.worker(worker_id).filter(|me| !me.paused) else {
+        return Ok(None);
+    };
 
-        let candidates: Vec<QueuedBuild> = QueuedBuild::queued(db).await?;
-        if candidates.is_empty() {
-            return Ok(None);
-        }
-
-        // Packages this worker already has in flight. `ACTIVE` alone: a build that
-        // has moved on to `PUBLISHING` has ended its lease, and its worker has
-        // finished with the sources — the same predicate the rest of lease policing
-        // uses.
-        let busy_pkgs: HashSet<i32> = Builds::find()
-            .select_only()
-            .column(builds::Column::PkgId)
-            .filter(builds::Column::Status.eq(BuildState::Active))
-            .filter(builds::Column::WorkerId.eq(worker_id))
-            .into_tuple::<i32>()
-            .all(db)
-            .await?
-            .into_iter()
-            .collect();
-
-        let names = package_names(db, &candidates).await?;
-
-        let now = now_secs();
-        let mut ranked: Vec<ClaimRank> = Vec::new();
-        for build in &candidates {
-            let Some(pkg) = names.get(&build.pkg_id) else {
-                continue;
-            };
-            // Leave it queued rather than parking it here: another worker has its
-            // own `SRCDEST` and can take it now.
-            if busy_pkgs.contains(&build.pkg_id) {
-                continue;
-            }
-            let platform = build.platform.as_str();
-            if !fleet.capable(me, platform, pkg) {
-                continue;
-            }
-            let age = now - build.start_time.unwrap_or(now);
-            if age < spill_delay_secs
-                && fleet.blocked(me, platform, pkg, now, liveness_timeout_secs)
-            {
-                continue;
-            }
-            ranked.push(ClaimRank {
-                not_affine: !fleet.affine(me.id, pkg),
-                queued_at: build.start_time.unwrap_or(0),
-                id: build.id,
-            });
-        }
-        ranked.sort_unstable();
-
-        for ClaimRank { id, .. } in ranked {
-            let res = Builds::update_many()
-                .col_expr(builds::Column::Status, BuildState::Active.into())
-                .col_expr(builds::Column::WorkerId, worker_id.into())
-                .col_expr(
-                    builds::Column::LeaseExpiresAt,
-                    (now + lease_ttl_secs).into(),
-                )
-                .col_expr(builds::Column::StartTime, now.into())
-                .filter(builds::Column::Id.eq(id))
-                .filter(builds::Column::Status.eq(BuildState::Enqueued))
-                .exec(db)
-                .await?;
-            if res.rows_affected == 1 {
-                // Only after the claim above has actually won: that update is the
-                // compare-and-swap deciding which worker gets the build, so doing
-                // this first would announce a build that another worker took.
-                if let Some(pkg_id) = candidates.iter().find(|b| b.id == id).map(|b| b.pkg_id) {
-                    refresh_package_status(db, pkg_id).await?;
-                }
-                return Builds::find_by_id(id).one(db).await;
-            }
-        }
-        Ok(None)
+    let candidates: Vec<QueuedBuild> = QueuedBuild::queued(&txn).await?;
+    if candidates.is_empty() {
+        return Ok(None);
     }
-    .await;
-    let result = result?;
-    txn.commit().await?;
-    Ok(result)
+
+    // Packages this worker already has in flight. `ACTIVE` alone: a build that
+    // has moved on to `PUBLISHING` has ended its lease, and its worker has
+    // finished with the sources — the same predicate the rest of lease policing
+    // uses.
+    let busy_pkgs: HashSet<i32> = Builds::find()
+        .select_only()
+        .column(builds::Column::PkgId)
+        .filter(builds::Column::Status.eq(BuildState::Active))
+        .filter(builds::Column::WorkerId.eq(worker_id))
+        .into_tuple::<i32>()
+        .all(&txn)
+        .await?
+        .into_iter()
+        .collect();
+
+    let names = package_names(&txn, &candidates).await?;
+
+    let now = now_secs();
+    let mut ranked: Vec<ClaimRank> = Vec::new();
+    for build in &candidates {
+        let Some(pkg) = names.get(&build.pkg_id) else {
+            continue;
+        };
+        // Leave it queued rather than parking it here: another worker has its
+        // own `SRCDEST` and can take it now.
+        if busy_pkgs.contains(&build.pkg_id) {
+            continue;
+        }
+        let platform = build.platform.as_str();
+        if !fleet.capable(me, platform, pkg) {
+            continue;
+        }
+        let age = now - build.start_time.unwrap_or(now);
+        if age < spill_delay_secs && fleet.blocked(me, platform, pkg, now, liveness_timeout_secs) {
+            continue;
+        }
+        ranked.push(ClaimRank {
+            not_affine: !fleet.affine(me.id, pkg),
+            queued_at: build.start_time.unwrap_or(0),
+            id: build.id,
+            pkg_id: build.pkg_id,
+        });
+    }
+    ranked.sort_unstable();
+
+    for ClaimRank { id, pkg_id, .. } in ranked {
+        let res = Builds::update_many()
+            .col_expr(builds::Column::Status, BuildState::Active.into())
+            .col_expr(builds::Column::WorkerId, worker_id.into())
+            .col_expr(
+                builds::Column::LeaseExpiresAt,
+                (now + lease_ttl_secs).into(),
+            )
+            .col_expr(builds::Column::StartTime, now.into())
+            .filter(builds::Column::Id.eq(id))
+            .filter(builds::Column::Status.eq(BuildState::Enqueued))
+            .exec(&txn)
+            .await?;
+        if res.rows_affected == 1 {
+            // Only after the claim above has actually won: that update is the
+            // compare-and-swap deciding which worker gets the build, so doing
+            // this first would announce a build that another worker took.
+            refresh_package_status(&txn, pkg_id).await?;
+            let claimed = Builds::find_by_id(id).one(&txn).await?;
+            txn.commit().await?;
+            return Ok(claimed);
+        }
+    }
+    Ok(None)
 }
 
 /// Result of processing a heartbeat: builds that were reconciled away from the
@@ -432,14 +421,20 @@ pub async fn heartbeat<C: ConnectionTrait + TransactionTrait>(
         .await?;
 
     // Renewed in one statement, not one per build: the filters are the same
-    // per row (owner, still active), so an `IN` set is exactly equivalent —
-    // including the old code's not checking `rows_affected` here. A worker
-    // owns a handful of builds, so this is tidiness rather than rescue.
+    // per row (owner, still active), so an `IN` set is exactly equivalent.
     let mut renew = Vec::new();
     for build in owned {
         let id = build.id;
         if active_build_ids.contains(&id) {
             renew.push(id);
+        } else if build
+            .start_time
+            .is_some_and(|claimed| claimed > now - lease_ttl_secs)
+        {
+            // Claimed within its first lease: a worker reports a build only
+            // once the claim's answer reaches it, and a heartbeat can overtake
+            // that answer. Left to the lease the claim gave it; the reaper
+            // takes it back if the answer never arrives.
         } else {
             outcome
                 .dropped
@@ -557,7 +552,7 @@ pub async fn abandon_build<C: ConnectionTrait + TransactionTrait>(
     max_attempts: i32,
 ) -> Result<Option<Abandoned>, DbErr> {
     let now = now_secs();
-    let txn = db.begin().await?;
+    let txn = crate::helpers::txn::begin_write(db).await?;
 
     // 1. The CAS. 0 rows is "someone else resolved it in the gap" and the whole
     //    thing stops here.
@@ -579,7 +574,6 @@ pub async fn abandon_build<C: ConnectionTrait + TransactionTrait>(
     // 3. The derived budget: trailing consecutive TimeoutRetry rows that ended
     //    in abandonment. Limited to `max_attempts` — once the run reaches the
     //    budget the answer is "spent", and the walk never has to look further.
-    let mut futile_run = 0i32;
     let recent: Vec<builds::Model> = Builds::find()
         .filter(builds::Column::PkgId.eq(observed.pkg_id))
         .filter(builds::Column::Platform.eq(observed.platform.as_str()))
@@ -587,21 +581,19 @@ pub async fn abandon_build<C: ConnectionTrait + TransactionTrait>(
         .limit(max_attempts.max(1) as u64)
         .all(&txn)
         .await?;
-    for row in &recent {
-        if row.trigger == BuildTrigger::TimeoutRetry
-            && row.end_reason.is_some_and(EndReason::spends_retry)
-        {
-            futile_run += 1;
-        } else {
-            break;
-        }
-    }
+    let futile_run = recent
+        .iter()
+        .take_while(|row| {
+            row.trigger == BuildTrigger::TimeoutRetry
+                && row.end_reason.is_some_and(EndReason::spends_retry)
+        })
+        .count();
 
     // 4. Insert (or adopt) the fresh build, while the budget allows. An
     //    existing pending build -- a concurrent auto-update queued one once
     //    this row stopped conflicting -- stands in for it.
     let mut retry = Retry::Spent;
-    if futile_run < max_attempts
+    if futile_run < usize::try_from(max_attempts).unwrap_or(0)
         && let Some(pkg) = &pkg
     {
         let enqueue = crate::helpers::build_enqueue::enqueue_build_if_missing(
@@ -671,40 +663,30 @@ pub async fn waiting_reasons<C: ConnectionTrait>(
             .filter(|w| fleet.capable(w, platform, pkg))
             .collect();
 
-        let reason = if capable.is_empty() {
-            if fleet.reserved(pkg) {
-                // Reserved, and nothing that can take it: name the holders so an
-                // operator knows which machine to bring back or revoke.
-                WaitingReason::Affinity {
-                    workers: fleet.affinity_holders(pkg),
-                }
-            } else {
-                WaitingReason::Arch {
-                    arch: platform.to_string(),
-                }
-            }
-        } else if capable
+        let live: Vec<&WorkerCap> = capable
             .iter()
-            .any(|w| Fleet::live(w, now, liveness_timeout_secs) && !w.paused)
-        {
+            .copied()
+            .filter(|w| is_live(w.last_seen, now, liveness_timeout_secs))
+            .collect();
+
+        let reason = if live.iter().any(|w| !w.paused) {
             // Someone capable is alive and taking work; this is just a queue.
             continue;
-        } else if capable
-            .iter()
-            .any(|w| Fleet::live(w, now, liveness_timeout_secs))
-        {
+        } else if !live.is_empty() {
             // Up, but every one of them was asked to take nothing new. Named,
             // because resuming one of them is the remedy.
-            let mut workers: Vec<String> = capable
-                .iter()
-                .filter(|w| Fleet::live(w, now, liveness_timeout_secs))
-                .map(|w| w.name.clone())
-                .collect();
+            let mut workers: Vec<String> = live.iter().map(|w| w.name.clone()).collect();
             workers.sort();
             WaitingReason::Paused { workers }
         } else if fleet.reserved(pkg) {
+            // Reserved, and nothing up that can take it: name the holders so an
+            // operator knows which machine to bring back or revoke.
             WaitingReason::Affinity {
                 workers: fleet.affinity_holders(pkg),
+            }
+        } else if capable.is_empty() {
+            WaitingReason::Arch {
+                arch: platform.to_string(),
             }
         } else {
             WaitingReason::Offline
@@ -1121,9 +1103,8 @@ mod tests {
     }
 
     /// The package's own status has to follow the build's, because that is the
-    /// one the packages list renders. It used to be written on enqueue and
-    /// again on completion, with nothing in between -- so for the whole
-    /// duration of a build the package claimed to be waiting for it to start.
+    /// one the packages list renders: written only on enqueue and completion,
+    /// the package would claim to be waiting for the whole of its build.
     #[tokio::test]
     async fn a_failed_package_refresh_rolls_back_the_claim() {
         let db = setup().await;
@@ -1872,6 +1853,7 @@ mod tests {
         enqueue(&db, 31, "x86_64", 100).await;
         claim_job(&db, 5, 60, SPILL, LIVENESS).await.unwrap();
         claim_job(&db, 5, 60, SPILL, LIVENESS).await.unwrap();
+        claimed_long_ago(&db, 31).await;
 
         // Report only build 30 as active -> 31 was dropped: failed, with a
         // fresh attempt in its place.
@@ -1895,6 +1877,40 @@ mod tests {
         assert_eq!(b31.end_reason, Some(EndReason::Dropped));
         // Kept: the record of who ran the attempt.
         assert_eq!(b31.worker_id, Some(5));
+    }
+
+    /// A heartbeat can reach the server before the answer to a claim reaches
+    /// the worker, which then cannot list the build yet. That build is not
+    /// dropped: it keeps the lease its claim gave it.
+    #[tokio::test]
+    async fn a_heartbeat_overtaking_a_claim_leaves_the_build_alone() {
+        let db = setup().await;
+        worker(
+            &db,
+            W {
+                id: 5,
+                ..W::default()
+            },
+        )
+        .await;
+        enqueue(&db, 30, "x86_64", 100).await;
+        claim_job(&db, 5, 60, SPILL, LIVENESS).await.unwrap();
+
+        let out = heartbeat(&db, 5, &[], 60, 3).await.unwrap();
+        assert!(out.dropped.is_empty(), "{:?}", out.dropped);
+        let b30 = Builds::find_by_id(30).one(&db).await.unwrap().unwrap();
+        assert_eq!(b30.status, BuildState::Active);
+        assert_eq!(b30.worker_id, Some(5));
+    }
+
+    /// Moves a claimed build's claim back past its first lease.
+    async fn claimed_long_ago(db: &DatabaseConnection, build_id: i32) {
+        Builds::update_many()
+            .col_expr(builds::Column::StartTime, (now_secs() - 3600).into())
+            .filter(builds::Column::Id.eq(build_id))
+            .exec(db)
+            .await
+            .unwrap();
     }
 
     /// A build being published has no lease: its worker handed it over and no

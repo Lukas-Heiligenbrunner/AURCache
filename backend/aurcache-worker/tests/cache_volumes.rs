@@ -6,8 +6,8 @@
 //! asked to: `AURCACHE_POOL_TESTS=1 cargo test -p aurcache-worker --test
 //! cache_volumes`. Its image goes under Cargo's target directory, not `/tmp`.
 
-use aurcache_chroot::{Backing, Owner, PoolConfig};
-use aurcache_worker::cache::Cache;
+use aurcache_chroot::{Allocation, Backing, Owner, PoolConfig};
+use aurcache_worker::cache::{Cache, CacheLimits};
 use aurcache_worker::chroots::Chroots;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -58,7 +58,7 @@ async fn cache_entries_are_subvolumes_that_eviction_deletes() {
         PoolConfig {
             backing: Backing::Image {
                 path: scratch.0.join("pool.img"),
-                reserve: false,
+                allocation: Allocation::Sparse,
             },
             mountpoint: mountpoint.clone(),
             total: 2048 * MIB,
@@ -72,8 +72,14 @@ async fn cache_entries_are_subvolumes_that_eviction_deletes() {
     let volumes = chroots.cache_volumes().await.expect("the pool is open");
 
     // A 1-byte source budget, so anything cached is over it; no TTL.
-    let cache =
-        Cache::new(&mountpoint.join("cache"), 1, 0, 0, 0).with_volumes(Some(volumes.clone()));
+    let cache = Cache::new(
+        &mountpoint.join("cache"),
+        CacheLimits {
+            sources_max_size: 1,
+            ..CacheLimits::default()
+        },
+    )
+    .with_volumes(Some(volumes.clone()));
     let (c, v) = (cache.clone(), volumes.clone());
     tokio::task::spawn_blocking(move || {
         let srcdest = c.srcdest("hello").expect("a source cache");

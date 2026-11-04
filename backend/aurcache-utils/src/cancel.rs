@@ -3,10 +3,9 @@
 use crate::build_logger::append_build_output;
 use aurcache_common::build_state::{BuildState, EndReason};
 use aurcache_db::builds;
-use aurcache_db::helpers::builds::refresh_package_status;
+use aurcache_db::helpers::builds::{Transition, transition};
 use aurcache_db::helpers::time::now_secs;
-use aurcache_db::prelude::Builds;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, TransactionTrait};
+use sea_orm::DatabaseConnection;
 use tracing::warn;
 
 /// What [`cancel_build`] did.
@@ -48,23 +47,16 @@ pub async fn cancel_build(
     pkgbase: &str,
     build: &builds::Model,
 ) -> anyhow::Result<Cancel> {
-    let txn = db.begin().await?;
-    let cas = Builds::update_many()
-        .col_expr(builds::Column::Status, BuildState::Failed.into())
-        .col_expr(builds::Column::EndTime, Some(now_secs()).into())
-        .col_expr(builds::Column::EndReason, Some(EndReason::Canceled).into())
-        .col_expr(builds::Column::LeaseExpiresAt, Option::<i64>::None.into())
-        .filter(builds::Column::Id.eq(build.id))
-        .filter(builds::Column::Status.is_in(CANCELLABLE))
-        .exec(&txn)
-        .await?;
-    if cas.rows_affected == 0 {
-        txn.rollback().await?;
+    let moved = transition(db, build, &CANCELLABLE, BuildState::Failed, |update| {
+        update
+            .col_expr(builds::Column::EndTime, Some(now_secs()).into())
+            .col_expr(builds::Column::EndReason, Some(EndReason::Canceled).into())
+            .col_expr(builds::Column::LeaseExpiresAt, Option::<i64>::None.into())
+    })
+    .await?;
+    if moved == Transition::Unchanged {
         return Ok(Cancel::Settled);
     }
-
-    refresh_package_status(&txn, build.pkg_id).await?;
-    txn.commit().await?;
 
     // The row is terminal now; appending the reason is best-effort and last.
     if let Err(e) = append_build_output(pkgbase, build.number, "Cancelled by operator.\n").await {

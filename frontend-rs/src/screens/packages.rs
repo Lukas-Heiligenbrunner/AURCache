@@ -4,22 +4,20 @@
 //! redeclaring it, so a change to a response shape becomes a compile error
 //! here instead of a silent drift between two hand-maintained models.
 
+use crate::action::use_action;
 use crate::api::client;
-use crate::listing::{
-    LIST_TABLE, ListControls, ListHeader, Page, Pager, Sort, SortDir, SortKey, SortableHeader,
-    ViewParams, filter_packages, paginate, sort_packages, use_url_search, use_url_view,
+use crate::format::format_size;
+use crate::list_controls::{
+    LIST_TABLE, ListControls, ListHeader, Pager, Rows, Selection, SortableHeader, WIDE_ONLY,
+    WIDEST_ONLY, use_rows, use_url_search, use_url_view,
 };
+use crate::listing::{Sort, SortDir, SortKey, ViewParams, filter_packages, sort_packages};
 use crate::routes::Route;
 use crate::status::StatusBadge;
+use crate::widgets::{LinkRow, RowLink, Spinner};
 use aurcache_client::SimplePackage;
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
-
-/// Columns that only appear once there is room for them.
-const WIDE_ONLY: &str = "hidden md:table-cell";
-/// Columns that wait for a laptop-sized screen: an unfolded phone has room for
-/// everything else.
-const WIDEST_ONLY: &str = "hidden lg:table-cell";
 
 /// Everything, dependencies included, filtered down in the browser.
 ///
@@ -28,9 +26,8 @@ const WIDEST_ONLY: &str = "hidden lg:table-cell";
 /// consistent. Fetching only what is shown would mean a round trip per toggle
 /// and a "N of M" whose M is a page rather than a repository.
 ///
-/// No limit, deliberately. This asked for 100 with no way to reach a second
-/// page, so a repository larger than that silently showed a subset — and the
-/// dependency closure is usually the larger part of one.
+/// No limit, deliberately: a capped fetch would silently show a subset, and the
+/// dependency closure is usually the larger part of a repository.
 async fn load_packages() -> Result<Vec<SimplePackage>, String> {
     client()?
         .list_packages(&aurcache_client::PackageQuery {
@@ -63,7 +60,7 @@ pub fn Packages(
     // rather than waiting out that timer — the dialog is a sibling of this
     // list, so it cannot restart the resource itself.
     let building = matches!(&*packages.read_unchecked(), Some(Ok(list))
-        if list.iter().any(|p| Some(p.status).is_some_and(BuildState::is_in_progress)));
+        if list.iter().any(|p| p.status.is_in_progress()));
     crate::poll::use_poll(packages, building);
     crate::poll::use_refetch_on_package_change(packages);
 
@@ -85,45 +82,24 @@ pub fn Packages(
         q,
     };
     let query = use_url_search(q, sync_url, to_route);
-    use_url_view(Some(query), sync_url, to_route);
+    use_url_view(sync_url, move || to_route(query.peek().clone()));
     let mut page = use_signal(|| 0usize);
 
-    // The scope/filter/sort/paginate pipeline, memoized like the builds
-    // screen's: it re-runs only when its inputs change, not on every render
-    // a poll tick or a parent causes.
-    let rows = use_memo(move || {
-        let query = query();
-        let status = status();
-        let sort = sort();
-        let page = page();
+    let rows = use_rows(packages, page, move |list| {
         let show_all = show_dependencies();
-        match packages.read().as_ref() {
-            None => Rows::Loading,
-            Some(Err(e)) => Rows::Failed(e.clone()),
-            Some(Ok(list)) => {
-                let dependencies = list.iter().filter(|p| !p.directly_requested).count();
-                // The toggle narrows first, so `total` is the size of the
-                // list being searched rather than of the fetch. Otherwise the
-                // count beside the search box would report packages the page
-                // is not showing.
-                let total = if show_all {
-                    list.len()
-                } else {
-                    list.len() - dependencies
-                };
-                let in_scope = list.iter().filter(|pkg| show_all || pkg.directly_requested);
-                let mut shown = filter_packages(in_scope, &query, status);
-                sort_packages(&mut shown, sort);
-                // Sorted first, so a page is a slice of the order on screen
-                // rather than of the order it arrived in.
-                Rows::Ready {
-                    found: shown.len(),
-                    total,
-                    dependencies,
-                    current: paginate(&shown, page),
-                }
-            }
-        }
+        let in_scope = list.iter().filter(|pkg| show_all || pkg.directly_requested);
+        // The toggle narrows first, so `total` is the size of the list being
+        // searched rather than of the fetch. Otherwise the count beside the
+        // search box would report packages the page is not showing.
+        let total = in_scope.clone().count();
+        let mut shown = filter_packages(in_scope, &query(), status());
+        sort_packages(&mut shown, sort());
+        Selection { shown, total }
+    });
+    // What the toggle would reveal, and whether to offer it at all.
+    let dependencies = use_memo(move || match packages.read().as_ref() {
+        Some(Ok(list)) => list.iter().filter(|p| !p.directly_requested).count(),
+        _ => 0,
     });
 
     // Anything that changes which rows exist puts you back at the start.
@@ -145,11 +121,7 @@ pub fn Packages(
                 }
 
                 match &*rows.read() {
-                    Rows::Loading => rsx! {
-                        div { class: "flex justify-center p-8",
-                            span { class: "loading loading-spinner loading-lg" }
-                        }
-                    },
+                    Rows::Loading => rsx! { Spinner {} },
                     Rows::Failed(e) => rsx! {
                         div { class: "alert alert-error",
                             span { "Could not load packages: {e}" }
@@ -158,10 +130,11 @@ pub fn Packages(
                     // Empty fetch, not an empty scope: with the toggle off and
                     // only dependencies fetched, `total` is 0 but there are
                     // packages, so that case reads "nothing matches" below.
-                    Rows::Ready { total: 0, dependencies: 0, .. } => rsx! {
+                    Rows::Ready { total: 0, .. } if dependencies() == 0 => rsx! {
                         div { class: "alert", span { "No packages yet." } }
                     },
-                    Rows::Ready { found, total, dependencies, current } => {
+                    Rows::Ready { found, total, current } => {
+                        let dependencies = dependencies();
                         rsx! {
                         ListControls {
                             query,
@@ -174,7 +147,7 @@ pub fn Packages(
                             // are dependencies to reveal — a checkbox that
                             // changes nothing invites the reader to wonder
                             // what it is for.
-                            if *dependencies > 0 {
+                            if dependencies > 0 {
                                 label { class: "label cursor-pointer gap-2 py-0",
                                     input {
                                         r#type: "checkbox",
@@ -209,46 +182,22 @@ pub fn Packages(
                                 }
                                 tbody {
                                     for pkg in current.items.iter() {
-                                        tr {
+                                        LinkRow {
                                             key: "{pkg.name}",
-                                            class: "hover cursor-pointer",
-                                            // The whole row is the target, but
-                                            // the name stays a real link so the
-                                            // address is copyable, middle-click
-                                            // opens a tab, and keyboard users
-                                            // have something to focus — none of
-                                            // which a bare row handler gives.
-                                            onclick: {
-                                                let pkgbase = pkg.name.clone();
-                                                move |_| {
-                                                    navigator().push(Route::Package {
-                                                        pkgbase: pkgbase.clone(),
-                                                    });
-                                                }
-                                            },
+                                            // pkgbase is the public identifier.
+                                            to: Route::Package { pkgbase: pkg.name.clone() },
                                             td {
-                                                Link {
+                                                RowLink {
                                                     // Monospace, matching the
                                                     // package page's heading:
                                                     // a pkgbase is an identifier
                                                     // and reads as one.
-                                                    //
-                                                    // Not `link link-primary`:
-                                                    // when everything in the row
-                                                    // navigates, underlining one
-                                                    // cell implies the rest does
-                                                    // not.
-                                                    // `anywhere` lets the column shrink
-                                                    // below a long name on a phone; a
-                                                    // name that fits is not broken.
+                                                    // `anywhere` lets the column
+                                                    // shrink below a long name on
+                                                    // a phone; a name that fits
+                                                    // is not broken.
                                                     class: "font-mono [overflow-wrap:anywhere]",
-                                                    // pkgbase is the public identifier.
                                                     to: Route::Package { pkgbase: pkg.name.clone() },
-                                                    // Otherwise the click reaches
-                                                    // the row too and pushes the
-                                                    // same route twice, leaving a
-                                                    // duplicate history entry.
-                                                    onclick: move |e: MouseEvent| e.stop_propagation(),
                                                     "{pkg.name}"
                                                 }
                                                 // Only meaningful while both
@@ -273,7 +222,11 @@ pub fn Packages(
                                                 {pkg.upstream_version.clone().unwrap_or_else(|| "—".into())}
                                             }
                                             td { class: "{WIDE_ONLY} text-right font-mono text-sm opacity-70 whitespace-nowrap",
-                                                {package_size(pkg)}
+                                                // A dash covers both "nothing
+                                                // built yet" and "a size is
+                                                // missing"; the status column
+                                                // says which.
+                                                {format_size(pkg.total_size)}
                                             }
                                             td { StatusBadge { status: pkg.status, out_of_date: pkg.out_of_date } }
                                             td { class: "{WIDE_ONLY} text-right",
@@ -289,18 +242,11 @@ pub fn Packages(
                             }
                         }
                         }
-                        Pager {
-                            page,
-                            index: current.index,
-                            pages: current.pages,
-                            first: current.first,
-                            count: current.items.len(),
-                            total: current.total,
-                        }
+                        Pager { page, info: current.info }
                         // The pager already says "of N" once there is more
                         // than one page; this is for the case where there is
                         // not, so a short list still says how short.
-                        if current.pages <= 1 {
+                        if current.info.pages <= 1 {
                             div { class: "text-sm opacity-60 pt-2", "{total} packages" }
                         }
                     }
@@ -309,30 +255,6 @@ pub fn Packages(
             }
         }
     }
-}
-
-/// The scope/filter/sort/paginate pipeline's output, memoized in the component.
-/// Same shape as the builds screen's, plus the dependency count the toggle's
-/// checkbox carries. Comparable because [`use_memo`] demands it.
-#[derive(PartialEq)]
-enum Rows {
-    Loading,
-    Failed(String),
-    Ready {
-        found: usize,
-        total: usize,
-        dependencies: usize,
-        current: Page<SimplePackage>,
-    },
-}
-
-/// A package's combined artifact size for the list column.
-///
-/// A dash covers both "nothing built yet" and "a size is missing" — the server
-/// sends `None` for either, and the status column already says which of the two
-/// this row is.
-fn package_size(pkg: &SimplePackage) -> String {
-    crate::format::format_size(pkg.total_size)
 }
 
 /// What a package's row offers to do about its current state.
@@ -396,8 +318,7 @@ pub fn row_action(status: BuildState, out_of_date: bool) -> Option<Action> {
 /// The row's button, or nothing.
 #[component]
 fn RowAction(pkgbase: String, action: Option<Action>, on_changed: EventHandler<()>) -> Element {
-    let mut busy = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
+    let request = use_action();
 
     let Some(action) = action else {
         return rsx! {};
@@ -405,7 +326,7 @@ fn RowAction(pkgbase: String, action: Option<Action>, on_changed: EventHandler<(
 
     rsx! {
         div { class: "flex items-center justify-end gap-2",
-            if let Some(message) = error() {
+            if let Some(message) = request.error() {
                 span { class: "text-xs text-error", title: "{message}", "failed" }
             }
             button {
@@ -415,43 +336,40 @@ fn RowAction(pkgbase: String, action: Option<Action>, on_changed: EventHandler<(
                 // sideways and shifted the status badges of every row -- a list
                 // that moves while you are clicking it.
                 class: "btn btn-ghost btn-xs relative",
-                disabled: busy(),
+                disabled: request.busy(),
                 // A button inside a clickable row has to claim its own click,
                 // or pressing it also navigates away.
                 onclick: move |e: MouseEvent| {
                     e.stop_propagation();
                     let pkgbase = pkgbase.clone();
                     async move {
-                        busy.set(true);
-                        error.set(None);
-                        let outcome = match client() {
-                            Ok(client) => client
-                                .update_package(
-                                    &pkgbase,
-                                    &aurcache_client::UpdatePackage { force: action.force() },
-                                )
-                                .await
-                                .map_err(|e| e.to_string()),
-                            Err(e) => Err(e),
-                        };
-                        match outcome {
-                            // The list is how the new state becomes visible:
-                            // the row's action changes as soon as the build is
-                            // queued, which is the feedback that it worked.
-                            Ok(_) => on_changed.call(()),
-                            Err(e) => error.set(Some(e)),
+                        let queued = request
+                            .run(async {
+                                client()?
+                                    .update_package(
+                                        &pkgbase,
+                                        &aurcache_client::UpdatePackage { force: action.force() },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await;
+                        // The list is how the new state becomes visible: the
+                        // row's action changes as soon as the build is queued,
+                        // which is the feedback that it worked.
+                        if queued.is_some() {
+                            on_changed.call(());
                         }
-                        busy.set(false);
                     }
                 },
-                if busy() {
+                if request.busy() {
                     span { class: "loading loading-spinner loading-xs absolute inset-0 m-auto" }
                 }
                 // Hidden rather than removed: it still occupies its space, so
                 // the button stays exactly as wide as its label whatever it is
                 // doing. That holds for any label without a reserved width to
                 // keep in step with the longest one.
-                span { class: if busy() { "invisible" } else { "" }, {action.label()} }
+                span { class: if request.busy() { "invisible" } else { "" }, {action.label()} }
             }
         }
     }

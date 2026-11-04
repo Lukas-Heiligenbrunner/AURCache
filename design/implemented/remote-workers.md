@@ -179,7 +179,7 @@ approved** (never crashing while `pending`). How it gets approved varies:
    auto-signs any CSR whose fingerprint is present. **No secret at all** —
    authorization is volume write access, which a network-only actor cannot get.
 2. **Remote pre-approved fingerprint.** Operator puts the worker's public
-   fingerprint in `AURCACHE_PREAPPROVED_WORKERS=fp[:name:arches],…`; the matching
+   fingerprint in `AURCACHE_PREAPPROVED_WORKERS=fp,…`; the matching
    CSR is auto-signed. Safe to commit (public value).
 3. **Interactive UI/CLI approval.** Same worker start; admin approves later; the
    worker's retry loop picks it up with no restart.
@@ -444,7 +444,7 @@ re-derived from scratch.
 |---|---|
 | `AURCACHE_PUBLIC_URL` | externally reachable base URL for source + `[repo]` |
 | `AURCACHE_ENROLLMENT_DIR` | shared enroll volume path (default `/enroll`) enabling capability auto-approve |
-| `AURCACHE_PREAPPROVED_WORKERS` | `fp[:name:arches],…` fingerprints auto-approved at startup |
+| `AURCACHE_PREAPPROVED_WORKERS` | `fp,…` fingerprints auto-approved at startup |
 | `AURCACHE_ENROLLMENT_TOKEN` | fallback shared-secret auto-approve |
 | `MIRRORLIST_SERVERS_X86_64` | existing; overrides x86_64 mirrorlist |
 | `LEASE_TTL` / `REAP_INTERVAL` / `MAX_ATTEMPTS` | build-liveness reaper tuning (60s / 20s / 3) |

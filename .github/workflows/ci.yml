@@ -85,18 +85,21 @@ jobs:
           as_root AURCACHE_SANDBOX_DISABLE=landlock "$tests" pkgbuild snapshot \
             --skip a_parse_cannot_open_a_tcp_connection
 
-      # The Dockerfiles build a subset of the workspace, not all of it. Cargo
-      # unifies features across whatever is selected, and `cargo test --all`
-      # also pulls in dev-dependencies -- so a crate can under-declare a
-      # feature, compile fine here, and still fail in the image. Checking the
-      # exact package sets the Dockerfiles use is what catches that.
-      - name: Check Docker build shapes
+      # The packages and images build a subset of the workspace at a time, not
+      # all of it. Cargo unifies features across whatever is selected, and
+      # `cargo test --all` also pulls in dev-dependencies -- so a crate can
+      # under-declare a feature, compile fine here, and still fail in a
+      # package build. Checking each exact invocation is what catches that.
+      - name: Check package build shapes
         run: |
-          # docker/worker.Dockerfile
-          cargo check -p aurcache-worker -p aurcache-sandbox
-          # docker/hybrid.Dockerfile
-          cargo check -p aurcache -p aurcache-worker -p aurcache-worker-docker -p aurcache-sandbox
-          # docker/build-rust.sh
+          # The PKGBUILDs under packaging/aurcache-*, one `cargo build` each
+          # (docker/arch.Dockerfile builds the first four).
+          cargo check -p aurcache-sandbox
+          cargo check -p aurcache-worker
+          cargo check --features aurcache-api/static -p aurcache
+          cargo check -p aurcache-worker-docker
+          cargo check -p aurcache-cli
+          # docker/build-rust.sh (docker/server.Dockerfile)
           cargo check --features static
 
       # `aurcache-common` exists so a browser frontend can share the API shapes

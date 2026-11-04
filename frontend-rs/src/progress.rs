@@ -1,9 +1,8 @@
 //! Package adds that outlive the dialog which started them.
 //!
 //! Adding a package can take a while — the server resolves dependencies and
-//! reaches the AUR for each one — and the dialog used to sit there spinning
-//! until it finished, with the rest of the site unreachable behind it. Nothing
-//! required that: the bulk add returns a job id immediately and its progress is
+//! reaches the AUR for each one — and a dialog waiting for it would leave the
+//! rest of the site unreachable behind it. Nothing requires that: the bulk add returns a job id immediately and its progress is
 //! a stored log read by offset, explicitly so an observer can attach late or go
 //! away without the job noticing.
 //!
@@ -20,7 +19,8 @@ use std::time::Duration;
 
 use crate::listing::ViewParams;
 use aurcache_client::{
-    AddPackageRequest, AddPackagesRequest, BulkAddOutcome, RestoreOutcome, SourceData, source_label,
+    AddPackageRequest, AddPackagesRequest, BulkAddEntry, BulkAddOutcome, OperationProgress,
+    RestoreEntry, RestoreOutcome, SourceData, source_label,
 };
 use dioxus::prelude::*;
 
@@ -387,9 +387,7 @@ async fn poll_bulk_add(jobs: Signal<Vec<Job>>, id: u64, operation: i32) {
 ///
 /// `labels` names the sources in the order this browser sent them, when it was
 /// this browser: the job works through them in order, so once N outcomes are
-/// in, the one in flight is the N-th. A job picked up from the operations list
-/// has none, and takes its total from the server instead -- a job can only be
-/// followed after it started, so the server is the authority on how big it is.
+/// in, the one in flight is the N-th.
 async fn follow_bulk_add(
     jobs: Signal<Vec<Job>>,
     id: u64,
@@ -397,6 +395,95 @@ async fn follow_bulk_add(
     operation: i32,
     labels: Option<&[String]>,
 ) {
+    let record = |job: &mut Job, entry: BulkAddEntry| {
+        let pkgbase = entry.pkgbase;
+        match entry.outcome {
+            BulkAddOutcome::Added => job.succeeded.push(Succeeded {
+                label: entry.name,
+                outcome: "added".to_string(),
+                pkgbase,
+            }),
+            // Distinguished from added: nothing changed, which is a different
+            // answer to "did that work" than a fresh add.
+            BulkAddOutcome::Existed => job.succeeded.push(Succeeded {
+                label: entry.name,
+                outcome: "already here".to_string(),
+                pkgbase,
+            }),
+            BulkAddOutcome::Failed { error } => {
+                job.failed.push(Failed::of(entry.name, error));
+                return false;
+            }
+        }
+        true
+    };
+    follow_operation(
+        jobs,
+        id,
+        "add",
+        |seen| client.bulk_add_progress(operation, seen),
+        record,
+        labels,
+    )
+    .await;
+}
+
+/// Follow a running restore.
+async fn poll_restore(jobs: Signal<Vec<Job>>, id: u64, operation: i32) {
+    let Some(client) = job_client(jobs, id) else {
+        return;
+    };
+    let record = |job: &mut Job, entry: RestoreEntry| {
+        // A restore reports the pkgbase as its label, so it is both.
+        let landed_as = |outcome: &str| Succeeded {
+            label: entry.pkgbase.clone(),
+            outcome: outcome.to_string(),
+            pkgbase: Some(entry.pkgbase.clone()),
+        };
+        let landed = match entry.outcome {
+            RestoreOutcome::Imported => landed_as("imported"),
+            RestoreOutcome::Skipped => landed_as("skipped"),
+            RestoreOutcome::Overwritten => landed_as("overwritten"),
+            RestoreOutcome::PatchAdopted => landed_as("patch adopted"),
+            RestoreOutcome::Failed { error } => {
+                job.failed.push(Failed::of(entry.pkgbase, error));
+                return false;
+            }
+        };
+        // "skipped" changed nothing, but the others did; a spare re-fetch for
+        // a skip is cheaper than telling them apart here.
+        job.succeeded.push(landed);
+        true
+    };
+    follow_operation(
+        jobs,
+        id,
+        "restore",
+        |seen| client.restore_progress(operation, seen),
+        record,
+        None,
+    )
+    .await;
+}
+
+/// Poll an operation until it finishes, taking each new entry into job `id`.
+///
+/// `record` takes one entry and says whether a package landed, which tells an
+/// open package list to re-fetch now rather than on its next tick. `labels`
+/// names what is in flight, when this browser started the job; a job picked
+/// up from the operations list has none, and takes its total from the server
+/// instead -- a job can only be followed after it started, so the server is
+/// the authority on how big it is.
+async fn follow_operation<E, Fut>(
+    jobs: Signal<Vec<Job>>,
+    id: u64,
+    what: &str,
+    mut poll: impl FnMut(usize) -> Fut,
+    mut record: impl FnMut(&mut Job, E) -> bool,
+    labels: Option<&[String]>,
+) where
+    Fut: Future<Output = anyhow::Result<OperationProgress<E>>>,
+{
     let mut seen = 0_usize;
     let mut failures = 0_u32;
     loop {
@@ -404,14 +491,13 @@ async fn follow_bulk_add(
             return;
         }
 
-        let progress = match client.bulk_add_progress(operation, seen).await {
+        let progress = match poll(seen).await {
             Ok(progress) => {
                 failures = 0;
                 progress
             }
             Err(e) => {
-                if note_poll_failure(jobs, id, "add", &mut failures, e.to_string())
-                    == Tracking::Lost
+                if note_poll_failure(jobs, id, what, &mut failures, e.to_string()) == Tracking::Lost
                 {
                     return;
                 }
@@ -422,26 +508,9 @@ async fn follow_bulk_add(
 
         seen += progress.entries.len();
         for entry in progress.entries {
-            let landed = !matches!(entry.outcome, BulkAddOutcome::Failed { .. });
-            let pkgbase = entry.pkgbase.clone();
-            update_job(jobs, id, |job| match entry.outcome {
-                BulkAddOutcome::Added => job.succeeded.push(Succeeded {
-                    label: entry.name,
-                    outcome: "added".to_string(),
-                    pkgbase,
-                }),
-                // Distinguished from added: nothing changed, which is a
-                // different answer to "did that work" than a fresh add.
-                BulkAddOutcome::Existed => job.succeeded.push(Succeeded {
-                    label: entry.name,
-                    outcome: "already here".to_string(),
-                    pkgbase,
-                }),
-                BulkAddOutcome::Failed { error } => job.failed.push(Failed::of(entry.name, error)),
-            });
+            let mut landed = false;
+            update_job(jobs, id, |job| landed = record(job, entry));
             if landed {
-                // A package the list, if someone has it open, does not know
-                // about yet. Let it re-fetch now rather than on its next tick.
                 crate::poll::packages_changed();
             }
         }
@@ -461,80 +530,6 @@ async fn follow_bulk_add(
         if let Some(labels) = labels {
             let current = labels.get(seen).cloned();
             update_job(jobs, id, |job| job.current = current);
-        }
-        gloo_timers::future::sleep(POLL_INTERVAL).await;
-    }
-}
-
-/// Follow a running restore.
-///
-/// The same loop as an add's, against the restore endpoint and its own
-/// vocabulary. Kept as a second function rather than made generic over the
-/// entry type: the two share a transport and nothing else, and one function
-/// covering both would be a match on the kind in every branch anyway.
-async fn poll_restore(jobs: Signal<Vec<Job>>, id: u64, operation: i32) {
-    let Some(client) = job_client(jobs, id) else {
-        return;
-    };
-
-    let mut seen = 0_usize;
-    let mut failures = 0_u32;
-    loop {
-        if !still_watched(jobs, id) {
-            return;
-        }
-
-        let progress = match client.restore_progress(operation, seen).await {
-            Ok(progress) => {
-                failures = 0;
-                progress
-            }
-            Err(e) => {
-                if note_poll_failure(jobs, id, "restore", &mut failures, e.to_string())
-                    == Tracking::Lost
-                {
-                    return;
-                }
-                gloo_timers::future::sleep(POLL_INTERVAL * failures).await;
-                continue;
-            }
-        };
-
-        seen += progress.entries.len();
-        for entry in progress.entries {
-            // "skipped" changed nothing, but the others did; a spare re-fetch
-            // for a skip is cheaper than branching four ways here.
-            let landed = !matches!(entry.outcome, RestoreOutcome::Failed { .. });
-            // A restore reports the pkgbase as its label, so it is both.
-            let pkgbase = entry.pkgbase.clone();
-            let landed_as = move |outcome: &str| Succeeded {
-                label: pkgbase.clone(),
-                outcome: outcome.to_string(),
-                pkgbase: Some(pkgbase.clone()),
-            };
-            update_job(jobs, id, |job| match entry.outcome {
-                RestoreOutcome::Imported => job.succeeded.push(landed_as("imported")),
-                RestoreOutcome::Skipped => job.succeeded.push(landed_as("skipped")),
-                RestoreOutcome::Overwritten => job.succeeded.push(landed_as("overwritten")),
-                RestoreOutcome::PatchAdopted => job.succeeded.push(landed_as("patch adopted")),
-                RestoreOutcome::Failed { error } => {
-                    job.failed.push(Failed::of(entry.pkgbase, error));
-                }
-            });
-            if landed {
-                crate::poll::packages_changed();
-            }
-        }
-
-        let total = usize::try_from(progress.total).unwrap_or(0);
-        update_job(jobs, id, |job| job.total = total);
-
-        if progress.finished {
-            update_job(jobs, id, |job| {
-                job.current = None;
-                job.finished = true;
-            });
-            return;
         }
         gloo_timers::future::sleep(POLL_INTERVAL).await;
     }

@@ -1,18 +1,15 @@
 use aurcache_activitylog::activity_utils::ActivityLog;
 use std::env;
 use std::path::{Path, PathBuf};
-use tokio::fs;
 
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::source::SourceData;
 use aurcache_db::helpers::operations;
 use aurcache_db::prelude::Packages;
-use aurcache_utils::job_config::{self, mirrorlist_dir, native_arch};
 use aurcache_utils::publish;
 use aurcache_utils::repository::{REPO_ROOT, Repository};
 use aurcache_utils::snapshot::SnapshotStore;
-use pacman_mirrors::platforms::Platform;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -129,130 +126,23 @@ const fn is_ephemeral(in_container: bool, root_dev: u64, data_dev: u64) -> bool 
 /// `docker volume prune` or a service rescheduled onto another Swarm node --
 /// a failure that looks like success until it does not.
 fn warn_about_ephemeral_data() {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
+    let ephemeral: Vec<String> = [
+        PathBuf::from(REPO_ROOT),
+        aurcache_common::fs::build_log_root(),
+        aurcache_common::fs::ca_dir(),
+    ]
+    .into_iter()
+    .filter(|dir| !persisted(dir))
+    .map(|dir| dir.display().to_string())
+    .collect();
 
-        let in_container = in_container();
-        let Ok(root_dev) = std::fs::metadata("/").map(|m| m.dev()) else {
-            return;
-        };
-
-        let ephemeral: Vec<String> = [
-            PathBuf::from(REPO_ROOT),
-            aurcache_common::fs::build_log_root(),
-            aurcache_common::fs::ca_dir(),
-        ]
-        .into_iter()
-        .filter(|dir| {
-            std::fs::metadata(dir)
-                .map(|m| is_ephemeral(in_container, root_dev, m.dev()))
-                .unwrap_or(false)
-        })
-        .map(|dir| dir.display().to_string())
-        .collect();
-
-        if !ephemeral.is_empty() {
-            warn!(
-                "Not persisted, and lost when this container is replaced: {}. \
-                 Mount /app (or these paths individually) to keep them.",
-                ephemeral.join(", ")
-            );
-        }
-    }
-}
-
-/// Copy a mounted `mirrorlist` into this host's `mirrorlist.<arch>` slot.
-///
-/// Mirrorlists are stored per-architecture, but mounting a single file is the
-/// convenient thing to do, and what a 0.5 deployment has. Adopting at boot
-/// means every reader deals only with the arch-keyed layout instead of each
-/// carrying a fallback.
-///
-/// The copy is unconditional, so editing the mounted file takes effect on the
-/// next boot with no staleness bookkeeping to get wrong. Re-copying identical
-/// bytes costs nothing at this size, which is a better trade than tracking
-/// provenance hashes to avoid it.
-///
-/// Safe to clobber the target because mirror ranking stands down whenever a
-/// mount owns that architecture's slot (see `aurcache_scheduler::mirror_ranking`),
-/// so nothing else writes the file this would overwrite.
-///
-/// Best-effort — failure just leaves the mirrorlist unpopulated, which every
-/// caller already tolerates.
-async fn adopt_shared_mirrorlist() {
-    let Some(shared) = job_config::mounted_mirrorlist() else {
-        return;
-    };
-    let target = job_config::mirrorlist_path(native_arch());
-    match fs::copy(&shared, &target).await {
-        Ok(_) => info!(
-            "Adopted mounted mirrorlist {} as {}",
-            shared.display(),
-            target.display()
-        ),
-        Err(e) => warn!(
-            "Failed to adopt mounted mirrorlist {}: {e}",
-            shared.display()
-        ),
-    }
-}
-
-/// Housekeeping once the database is up.
-///
-/// Builds in flight are left as they are. Builds run on workers, which carry on
-/// through a server restart: an `ACTIVE` build is still building, and the lease
-/// reaper deals with one whose worker really is gone; an `ENQUEUED` build is
-/// still waiting for one. Failing them here -- what this did when builds ran
-/// inside the server -- failed every build under way on every redeploy.
-pub async fn post_startup_tasks(db: &DatabaseConnection) -> anyhow::Result<()> {
-    close_orphaned_operations(db).await;
-
-    let mirrorlist_dir = mirrorlist_dir();
-    if let Err(e) = fs::create_dir_all(&mirrorlist_dir).await {
+    if !ephemeral.is_empty() {
         warn!(
-            "Failed to create mirrorlist dir {}: {e}",
-            mirrorlist_dir.display()
+            "Not persisted, and lost when this container is replaced: {}. \
+             Mount /app (or these paths individually) to keep them.",
+            ephemeral.join(", ")
         );
     }
-    // A single mounted `mirrorlist` is the convenient thing for an operator to
-    // provide. Adopt it into this host's slot so every reader can assume
-    // `mirrorlist.<arch>` and no fallback logic is needed anywhere else.
-    adopt_shared_mirrorlist().await;
-
-    // `MIRRORLIST_SERVERS_<ARCH>` for any architecture AURCache builds for, not
-    // x86_64 alone. Arch and Arch Linux ARM do not share a URL layout --
-    // `$repo/os/$arch` against `$arch/$repo` -- so an ARM mirrorlist cannot be
-    // derived from the x86_64 one by substituting the architecture; it has to
-    // be configured separately or not at all.
-    for platform in Platform::ALL {
-        let arch = platform.as_str();
-        let Some(servers) = env::var(mirrorlist_env_var(arch))
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-        else {
-            continue;
-        };
-        let path = job_config::mirrorlist_path(arch);
-        let mirrorlist = servers
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("Server = {s}\n"))
-            .collect::<String>();
-        fs::write(&path, mirrorlist).await?;
-        info!(
-            "Wrote {arch} mirrorlist from {} to {}",
-            mirrorlist_env_var(arch),
-            path.display()
-        );
-    }
-
-    if let Err(e) = aurcache_scheduler::mirror_ranking::seed_mirrorlist().await {
-        warn!("Failed to write an initial mirrorlist: {e:#}");
-    }
-
-    Ok(())
 }
 
 /// Remove source checkouts left behind by packages that no longer exist.
@@ -345,33 +235,11 @@ pub async fn resume_publishing(
 }
 
 /// See [`operations::close_orphaned`]; this only reports what it did.
-async fn close_orphaned_operations(db: &DatabaseConnection) {
+pub async fn close_orphaned_operations(db: &DatabaseConnection) {
     match operations::close_orphaned(db).await {
         Ok(0) => {}
         Ok(closed) => warn!("Closed {closed} operation(s) left running by a restart"),
         Err(e) => warn!("could not close interrupted operations: {e}"),
-    }
-}
-
-/// The environment variable naming an architecture's mirrorlist servers.
-///
-/// `x86_64` -> `MIRRORLIST_SERVERS_X86_64`, which is the name deployments
-/// already set, so generalising costs no existing configuration.
-fn mirrorlist_env_var(arch: &str) -> String {
-    format!("MIRRORLIST_SERVERS_{}", arch.to_uppercase())
-}
-
-#[cfg(test)]
-mod mirrorlist_env_tests {
-    use super::mirrorlist_env_var;
-
-    /// The x86_64 name is the one already documented and deployed; the others
-    /// follow the same rule rather than being spelled out by hand.
-    #[test]
-    fn env_var_names_follow_the_architecture() {
-        assert_eq!(mirrorlist_env_var("x86_64"), "MIRRORLIST_SERVERS_X86_64");
-        assert_eq!(mirrorlist_env_var("aarch64"), "MIRRORLIST_SERVERS_AARCH64");
-        assert_eq!(mirrorlist_env_var("armv7h"), "MIRRORLIST_SERVERS_ARMV7H");
     }
 }
 

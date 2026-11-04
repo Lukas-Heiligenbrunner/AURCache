@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use aurcache_common::fs::write_private;
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -23,7 +24,37 @@ pub struct RuntimeConfig {
 pub struct ConfigSummary {
     pub path: String,
     pub url: Option<String>,
-    pub token_state: &'static str,
+    pub token_state: TokenState,
+}
+
+/// What the config file holds for a token. Empty is a token of its own: what
+/// a server with authentication disabled takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenState {
+    NotSet,
+    Empty,
+    Set,
+}
+
+impl TokenState {
+    fn of(token: Option<&str>) -> Self {
+        match token {
+            None => Self::NotSet,
+            Some("") => Self::Empty,
+            Some(_) => Self::Set,
+        }
+    }
+}
+
+impl std::fmt::Display for TokenState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotSet => "not_set",
+            Self::Empty => "empty",
+            Self::Set => "set",
+        })
+    }
 }
 
 pub fn config_path() -> Result<PathBuf> {
@@ -55,11 +86,6 @@ pub fn save_config(config: &ClientConfig) -> Result<()> {
         .with_context(|| format!("failed to write config file {}", path.display()))
 }
 
-/// Write `contents` readable by this user alone: the config holds the API
-/// token. Created that way rather than chmod'ed after, and an existing file's
-/// mode is tightened too -- one written before this was world-readable.
-use aurcache_common::fs::write_private;
-
 pub fn resolve_runtime_config(
     cli_url: Option<String>,
     cli_token: Option<String>,
@@ -72,7 +98,7 @@ pub fn resolve_runtime_config(
     }
     Ok(RuntimeConfig {
         url: url.value,
-        token: token.value.filter(|token| !token.is_empty()),
+        token: usable_token(&token.value),
     })
 }
 
@@ -100,16 +126,20 @@ pub fn stored_token(cli_token: Option<String>) -> Result<Option<String>> {
         Some(token) => Some(token),
         None => load_config()?.token,
     };
-    Ok(token
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty()))
+    Ok(token.as_deref().and_then(usable_token))
+}
+
+/// A token as it is sent: trimmed, and absent when empty, since an empty
+/// token is how a server with authentication disabled is reached.
+fn usable_token(token: &str) -> Option<String> {
+    Some(token.trim().to_string()).filter(|token| !token.is_empty())
 }
 
 pub fn summarize_config(config: &ClientConfig) -> Result<ConfigSummary> {
     Ok(ConfigSummary {
         path: config_path()?.display().to_string(),
         url: config.url.clone(),
-        token_state: token_state(config.token.as_deref()),
+        token_state: TokenState::of(config.token.as_deref()),
     })
 }
 
@@ -126,15 +156,20 @@ pub fn set_url(mut config: ClientConfig, url: Option<String>) -> Result<ClientCo
 }
 
 pub fn set_token(mut config: ClientConfig, token: Option<String>) -> Result<ClientConfig> {
-    let token = match token {
-        Some(token) => token.trim().to_string(),
+    config.token = Some(read_token(token)?);
+    Ok(config)
+}
+
+/// The token given, or one asked for when none was, trimmed as it is saved.
+fn read_token(given: Option<String>) -> Result<String> {
+    let token = match given {
+        Some(token) => token,
         None => {
             ensure_interactive("AURCache token")?;
             prompt_for_token()?
         }
     };
-    config.token = Some(token);
-    Ok(config)
+    Ok(token.trim().to_string())
 }
 
 /// Whether there is a person to ask. The prompts are drawn on stderr, so
@@ -152,10 +187,11 @@ pub fn is_interactive() -> bool {
 /// Used when a request fails authentication and we want to give the user a
 /// chance to fix their credentials without re-running the command from
 /// scratch.
-pub fn prompt_and_save_token(config: ClientConfig) -> Result<String> {
-    let config = set_token(config, None)?;
+pub fn prompt_and_save_token(mut config: ClientConfig) -> Result<Option<String>> {
+    let token = read_token(None)?;
+    config.token = Some(token.clone());
     save_config(&config)?;
-    Ok(config.token.unwrap_or_default())
+    Ok(usable_token(&token))
 }
 
 fn prompt_for_url() -> Result<String> {
@@ -210,35 +246,18 @@ fn resolve_url(cli_url: Option<String>, config: &mut ClientConfig) -> Result<Res
     Ok(Resolved::prompted(prompted))
 }
 
-fn resolve_token(
-    cli_token: Option<String>,
-    config: &mut ClientConfig,
-) -> Result<Resolved<Option<String>>> {
-    match cli_token {
-        Some(token) => Ok(Resolved::given(Some(token.trim().to_string()))),
-        None => match config.token.clone() {
-            Some(token) => Ok(Resolved::given(Some(token.trim().to_string()))),
-            None => {
-                ensure_interactive("AURCache token")?;
-                let prompted = prompt_for_token()?;
-                config.token = Some(prompted.clone());
-                Ok(Resolved::prompted(Some(prompted)))
-            }
-        },
+fn resolve_token(cli_token: Option<String>, config: &mut ClientConfig) -> Result<Resolved<String>> {
+    if let Some(token) = cli_token.or_else(|| config.token.clone()) {
+        return Ok(Resolved::given(token));
     }
+    let prompted = read_token(None)?;
+    config.token = Some(prompted.clone());
+    Ok(Resolved::prompted(prompted))
 }
 
 fn normalize_url(url: Option<String>) -> Option<String> {
     url.map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
-}
-
-fn token_state(token: Option<&str>) -> &'static str {
-    match token {
-        None => "not_set",
-        Some("") => "empty",
-        Some(_) => "set",
-    }
 }
 
 fn ensure_interactive(field_name: &str) -> Result<()> {
@@ -253,7 +272,7 @@ fn ensure_interactive(field_name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientConfig, set_token, summarize_config};
+    use super::{ClientConfig, TokenState, set_token, summarize_config};
 
     #[test]
     fn explicit_empty_token_is_preserved() {
@@ -268,6 +287,6 @@ mod tests {
             token: Some(String::new()),
         })
         .unwrap();
-        assert_eq!(summary.token_state, "empty");
+        assert_eq!(summary.token_state, TokenState::Empty);
     }
 }

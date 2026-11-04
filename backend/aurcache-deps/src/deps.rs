@@ -8,10 +8,7 @@ use crate::model::{Dependency, Package, PkgDeps};
 /// architectures the package is actually built for.
 ///
 /// A PKGBUILD may declare `depends_aarch64` separately from `depends`, so the
-/// answer genuinely differs per architecture. This used to be hardcoded to
-/// x86_64, which meant a package built only for aarch64 had its dependency
-/// graph computed from an architecture it is never built on — missing what it
-/// needs and requiring what it does not.
+/// answer genuinely differs per architecture.
 ///
 /// The result is the union across `architectures`: the graph is stored once
 /// per package, not once per platform, so it has to cover every platform the
@@ -37,24 +34,16 @@ pub fn deps_from_srcinfo(
         .flat_map(|arch| source_info.packages_for_architecture(arch.clone()))
         .collect::<Vec<_>>();
 
-    PkgDeps {
-        depends: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.dependencies.iter().map(ToString::to_string)),
-        ),
-        make_depends: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.make_dependencies.iter().map(ToString::to_string)),
-        ),
-        pkgnames: collect_unique_strings(packages.iter().map(|pkg| pkg.name.to_string())),
-        provides: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.provides.iter().map(ToString::to_string)),
-        ),
-    }
+    pkg_deps(&packages, |pkg| PackageLists {
+        depends: pkg.dependencies.iter().map(ToString::to_string).collect(),
+        make_depends: pkg
+            .make_dependencies
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        name: pkg.name.to_string(),
+        provides: pkg.provides.iter().map(ToString::to_string).collect(),
+    })
 }
 
 /// Split a pacman-style dependency string into its name and constraint:
@@ -64,32 +53,41 @@ pub fn deps_from_srcinfo(
 /// `>=`, `<=`, `=`, `>`, and `<`.
 pub fn parse_dep(dep: &str) -> Dependency<'_> {
     let dep = dep.trim();
-    for &op in &[">=", "<=", "=", ">", "<"] {
-        if let Some(pos) = dep.find(op) {
-            return Dependency::new(dep[..pos].trim(), dep[pos..].trim());
-        }
+    // The first operator character starts the constraint, whichever of the
+    // five operators it begins.
+    match dep.find(['<', '>', '=']) {
+        Some(pos) => Dependency::new(dep[..pos].trim(), dep[pos..].trim()),
+        None => Dependency::unversioned(dep),
     }
-    Dependency::unversioned(dep)
 }
 
 pub(crate) fn deps_from_packages(packages: &[Package]) -> PkgDeps {
+    pkg_deps(packages, |pkg| PackageLists {
+        depends: pkg.depends.clone().unwrap_or_default(),
+        make_depends: pkg.make_depends.clone().unwrap_or_default(),
+        name: pkg.name.clone(),
+        provides: pkg.provides.clone().unwrap_or_default(),
+    })
+}
+
+/// What one package of a pkgbase declares, whatever it was read from.
+struct PackageLists {
+    depends: Vec<String>,
+    make_depends: Vec<String>,
+    name: String,
+    provides: Vec<String>,
+}
+
+/// A pkgbase's dependencies: the union over its packages, each entry once.
+fn pkg_deps<P>(packages: &[P], lists: impl Fn(&P) -> PackageLists) -> PkgDeps {
+    let lists: Vec<PackageLists> = packages.iter().map(lists).collect();
     PkgDeps {
-        depends: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.depends.iter().flatten().cloned()),
-        ),
+        depends: collect_unique_strings(lists.iter().flat_map(|l| l.depends.iter().cloned())),
         make_depends: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.make_depends.iter().flatten().cloned()),
+            lists.iter().flat_map(|l| l.make_depends.iter().cloned()),
         ),
-        pkgnames: collect_unique_strings(packages.iter().map(|pkg| pkg.name.clone())),
-        provides: collect_unique_strings(
-            packages
-                .iter()
-                .flat_map(|pkg| pkg.provides.iter().flatten().cloned()),
-        ),
+        pkgnames: collect_unique_strings(lists.iter().map(|l| l.name.clone())),
+        provides: collect_unique_strings(lists.iter().flat_map(|l| l.provides.iter().cloned())),
     }
 }
 
@@ -206,8 +204,8 @@ pkgname = demo
             x86.depends
         );
 
-        // The case the hardcoded x86_64 got wrong: a package built only for
-        // aarch64 was described by an architecture it is never built on.
+        // A package built only for aarch64 is described by aarch64, not by
+        // an architecture it is never built on.
         let arm = deps_from_srcinfo(&info, &[SystemArchitecture::Aarch64]);
         assert!(
             arm.depends.contains(&"arm-only".to_string()),

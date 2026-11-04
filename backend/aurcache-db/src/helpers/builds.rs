@@ -1,6 +1,6 @@
 //! Build-row queries shared across the update, dependency and completion paths.
 
-use crate::lists::Platforms;
+use crate::lists::{Platforms, VcsCommits};
 use crate::prelude::Builds;
 use crate::{builds, packages};
 use aurcache_common::build_state::BuildState;
@@ -29,21 +29,29 @@ fn recency() -> Expr {
     .into()
 }
 
-/// The most recent *successful* build row selection, by [`recency`],
-/// projecting one column.
+/// The most recent *successful* build row selection, by [`recency`], on
+/// `platform` or on any, projecting one column.
 ///
 /// The column is a parameter rather than a second `select_only` at the call
 /// site: stacking `select_only` reads as resetting the projection, and the
 /// next reader *will* "fix" it into returning two columns for a one-tuple.
-fn newest_success_query(pkg_id: i32, column: builds::Column) -> Select<Builds> {
-    Builds::find()
+fn newest_success_query(
+    pkg_id: i32,
+    platform: Option<Platform>,
+    column: builds::Column,
+) -> Select<Builds> {
+    let query = Builds::find()
         .select_only()
         .column(column)
         .filter(builds::Column::PkgId.eq(pkg_id))
         .filter(builds::Column::Status.eq(BuildState::Successful))
         .order_by(recency(), Order::Desc)
         .order_by(builds::Column::Id, Order::Desc)
-        .limit(1)
+        .limit(1);
+    match platform {
+        Some(platform) => query.filter(builds::Column::Platform.eq(platform)),
+        None => query,
+    }
 }
 
 /// A version as read from `builds.version`, which is NOT NULL DEFAULT '': a
@@ -54,7 +62,8 @@ fn known_version(version: String) -> Option<String> {
 }
 
 /// The version of the most recently *successful* build of `pkg_id` on
-/// `platform`.
+/// `platform`, or on any platform -- the package page is not scoped to one, so
+/// the newest success over all of them stands for the package.
 ///
 /// `None` when no such build exists. Used to decide whether a dependency is
 /// already satisfied by an existing build, which both the completion path
@@ -64,10 +73,9 @@ fn known_version(version: String) -> Option<String> {
 pub async fn latest_successful_version<C: ConnectionTrait>(
     db: &C,
     pkg_id: i32,
-    platform: Platform,
+    platform: Option<Platform>,
 ) -> Result<Option<String>, DbErr> {
-    newest_success_query(pkg_id, builds::Column::Version)
-        .filter(builds::Column::Platform.eq(platform))
+    newest_success_query(pkg_id, platform, builds::Column::Version)
         .into_tuple::<(String,)>()
         .one(db)
         .await
@@ -79,18 +87,16 @@ pub async fn latest_successful_version<C: ConnectionTrait>(
 ///
 /// The one answer to "is this dependency ready?". Two paths ask it — a build
 /// finishing and deciding whether to promote its dependents, and a build being
-/// queued and deciding whether it may start — and they used to run separate
-/// queries that ordered differently: one by `end_time` alone, the other by
-/// `end_time` with `start_time` as the tie-break. A build with no recorded end
-/// time could therefore be picked by one and not the other, so the same
-/// dependency read as ready to the queue and not ready to the builder.
+/// queued and deciding whether it may start — and one query keeps them from
+/// ordering differently: a build with no recorded end time picked by one and
+/// not the other would read as ready to the queue and not to the builder.
 pub async fn dependency_satisfied<C: ConnectionTrait>(
     db: &C,
     dependee_id: i32,
     platform: Platform,
     constraint: &str,
 ) -> Result<bool, DbErr> {
-    Ok(latest_successful_version(db, dependee_id, platform)
+    Ok(latest_successful_version(db, dependee_id, Some(platform))
         .await?
         .is_some_and(|version| aurcache_deps::satisfies_constraint(&version, constraint)))
 }
@@ -127,25 +133,9 @@ pub async fn pending_build<C: ConnectionTrait>(
         .await
 }
 
-/// The version of the most recently *successful* build of `pkg_id` across all
-/// platforms.
-///
-/// Same shape as [`latest_successful_version`], but the package page is not
-/// scoped to one platform, so the newest success over any of them stands for
-/// the package.
-pub async fn latest_successful_version_any_platform<C: ConnectionTrait>(
-    db: &C,
-    pkg_id: i32,
-) -> Result<Option<String>, DbErr> {
-    newest_success_query(pkg_id, builds::Column::Version)
-        .into_tuple::<(String,)>()
-        .one(db)
-        .await
-        .map(|row| row.and_then(|(version,)| known_version(version)))
-}
-
-/// What the most recently *successful* build of `pkg_id` was made from:
-/// `source_url -> commit`, empty when nothing is recorded.
+/// What the most recently *successful* build of `pkg_id` on `platform`, or on
+/// any platform, was made from: `source_url -> commit`, empty when nothing is
+/// recorded.
 ///
 /// The baseline for "has upstream moved since we built it?". It has to be a
 /// successful build: one that failed at a commit says nothing about what is in
@@ -153,42 +143,24 @@ pub async fn latest_successful_version_any_platform<C: ConnectionTrait>(
 /// quietly sitting at a commit nothing ever produced -- the same trap
 /// [`latest_successful_version`] exists to avoid for versions.
 ///
-/// Empty means *unknown*, never "unchanged": a package built before this was
-/// recorded, or whose sources could not be resolved, falls back to the version
-/// check's own watermark rather than being declared up to date. Unparseable
-/// JSON is treated the same way, since a stored string nobody can read is not
-/// evidence either.
+/// Empty means *unknown*, never "unchanged": a package whose sources could not
+/// be resolved falls back to the version check's own watermark rather than
+/// being declared up to date. Unparseable JSON is treated the same way (see
+/// [`VcsCommits`]).
 pub async fn latest_successful_build_vcs_sources<C: ConnectionTrait>(
-    db: &C,
-    pkg_id: i32,
-) -> Result<BTreeMap<String, String>, DbErr> {
-    latest_successful_build_vcs_sources_on(db, pkg_id, None).await
-}
-
-/// The successful source baseline on one architecture, or across all for summaries.
-pub async fn latest_successful_build_vcs_sources_on<C: ConnectionTrait>(
     db: &C,
     pkg_id: i32,
     platform: Option<Platform>,
 ) -> Result<BTreeMap<String, String>, DbErr> {
-    let query = newest_success_query(pkg_id, builds::Column::VcsSources);
-    let query = if let Some(platform) = platform {
-        query.filter(builds::Column::Platform.eq(platform))
-    } else {
-        query
-    };
-    let recorded = query
-        .into_tuple::<Option<String>>()
-        .one(db)
-        .await?
-        .flatten();
-    let Some(json) = recorded else {
-        return Ok(BTreeMap::new());
-    };
-    Ok(serde_json::from_str(&json).unwrap_or_else(|e| {
-        tracing::warn!("build of package {pkg_id} has unreadable vcs_sources: {e}");
-        BTreeMap::new()
-    }))
+    Ok(
+        newest_success_query(pkg_id, platform, builds::Column::VcsSources)
+            .into_tuple::<Option<VcsCommits>>()
+            .one(db)
+            .await?
+            .flatten()
+            .map(VcsCommits::into_map)
+            .unwrap_or_default(),
+    )
 }
 
 /// Record what a build's VCS sources were at, replacing whatever was there --
@@ -203,13 +175,9 @@ pub async fn record_build_vcs_sources<C: ConnectionTrait>(
     build_id: i32,
     commits: &BTreeMap<String, String>,
 ) -> Result<(), DbErr> {
-    let json = if commits.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(commits).map_err(|e| DbErr::Custom(e.to_string()))?)
-    };
+    let recorded = (!commits.is_empty()).then(|| VcsCommits::new(commits.clone()));
     Builds::update_many()
-        .col_expr(builds::Column::VcsSources, json.into())
+        .col_expr(builds::Column::VcsSources, recorded.into())
         .filter(builds::Column::Id.eq(build_id))
         .exec(db)
         .await?;
@@ -219,7 +187,7 @@ pub async fn record_build_vcs_sources<C: ConnectionTrait>(
 /// The repository version of the package row in the *enclosing* query, as a
 /// correlated scalar subquery.
 ///
-/// The same "successful builds only" rule as [`latest_successful_version_any_platform`],
+/// The same "successful builds only" rule as [`latest_successful_version`],
 /// expressed as a column so that a package listing reports it for every row
 /// without one query per package.
 ///
@@ -340,6 +308,46 @@ pub async fn delete_build<C: ConnectionTrait + sea_orm::TransactionTrait>(
     sea_orm::TransactionSession::commit(txn).await
 }
 
+/// What [`transition`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    /// The build was in one of the expected states, and is now in the new one.
+    Moved,
+    /// The build had already left them; nothing was written.
+    Unchanged,
+}
+
+/// Move `build` from any of `from` to `to`; its package's status follows, in
+/// the same transaction.
+///
+/// A compare-and-swap on the status: a build that moved on since the caller
+/// read it -- completed, cancelled, reclaimed -- is left alone, and the answer
+/// is [`Transition::Unchanged`]. `update` sets the columns that change along
+/// with the status, and may narrow the guard further.
+pub async fn transition<C: ConnectionTrait + sea_orm::TransactionTrait>(
+    db: &C,
+    build: &builds::Model,
+    from: &[BuildState],
+    to: BuildState,
+    update: impl FnOnce(sea_orm::UpdateMany<Builds>) -> sea_orm::UpdateMany<Builds>,
+) -> Result<Transition, DbErr> {
+    use sea_orm::TransactionSession;
+
+    let txn = db.begin().await?;
+    let res = update(Builds::update_many().col_expr(builds::Column::Status, to.into()))
+        .filter(builds::Column::Id.eq(build.id))
+        .filter(builds::Column::Status.is_in(from.iter().copied()))
+        .exec(&txn)
+        .await?;
+    if res.rows_affected == 0 {
+        txn.rollback().await?;
+        return Ok(Transition::Unchanged);
+    }
+    refresh_package_status(&txn, build.pkg_id).await?;
+    txn.commit().await?;
+    Ok(Transition::Moved)
+}
+
 /// Name builds the way everything outside the database does: by package and
 /// number, for row ids that mean nothing to anyone else.
 ///
@@ -369,8 +377,7 @@ pub async fn build_refs<C: ConnectionTrait>(db: &C, ids: &[i32]) -> Result<Vec<B
 #[cfg(test)]
 mod tests {
     use super::{
-        latest_successful_build_vcs_sources, latest_successful_version_any_platform,
-        record_build_vcs_sources,
+        latest_successful_build_vcs_sources, latest_successful_version, record_build_vcs_sources,
     };
     use crate::migration::Migrator;
     use aurcache_common::build_state::BuildState;
@@ -443,12 +450,7 @@ mod tests {
         let db = setup().await;
         build(&db, 6, BuildState::Failed, "1.4.1-1", 100).await;
 
-        assert_eq!(
-            latest_successful_version_any_platform(&db, 1)
-                .await
-                .unwrap(),
-            None
-        );
+        assert_eq!(latest_successful_version(&db, 1, None).await.unwrap(), None);
     }
 
     /// And a failed *newer* attempt does not hide the older success: the
@@ -460,7 +462,7 @@ mod tests {
         build(&db, 6, BuildState::Failed, "1.4.1-1", 200).await;
 
         assert_eq!(
-            latest_successful_version_any_platform(&db, 1)
+            latest_successful_version(&db, 1, None)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -476,7 +478,7 @@ mod tests {
         build(&db, 6, BuildState::Successful, "1.4.1-1", 100).await;
 
         assert_eq!(
-            latest_successful_version_any_platform(&db, 1)
+            latest_successful_version(&db, 1, None)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -501,7 +503,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            latest_successful_build_vcs_sources(&db, 1).await.unwrap(),
+            latest_successful_build_vcs_sources(&db, 1, None)
+                .await
+                .unwrap(),
             sources(&[(&url(), "aaa")]),
             "the failed attempt's commit must not become the baseline"
         );
@@ -515,7 +519,7 @@ mod tests {
         build(&db, 5, BuildState::Successful, "r1.aaa-1", 100).await;
 
         assert!(
-            latest_successful_build_vcs_sources(&db, 1)
+            latest_successful_build_vcs_sources(&db, 1, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -537,14 +541,18 @@ mod tests {
         ]);
         record_build_vcs_sources(&db, id, &two).await.unwrap();
         assert_eq!(
-            latest_successful_build_vcs_sources(&db, 1).await.unwrap(),
+            latest_successful_build_vcs_sources(&db, 1, None)
+                .await
+                .unwrap(),
             two
         );
 
         let one = sources(&[("git+https://example.test/a.git", "a2")]);
         record_build_vcs_sources(&db, id, &one).await.unwrap();
         assert_eq!(
-            latest_successful_build_vcs_sources(&db, 1).await.unwrap(),
+            latest_successful_build_vcs_sources(&db, 1, None)
+                .await
+                .unwrap(),
             one,
             "re-recording replaces the set rather than merging into it"
         );
@@ -566,7 +574,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            latest_successful_build_vcs_sources(&db, 1)
+            latest_successful_build_vcs_sources(&db, 1, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -587,7 +595,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            latest_successful_build_vcs_sources(&db, 1)
+            latest_successful_build_vcs_sources(&db, 1, None)
                 .await
                 .unwrap()
                 .is_empty()
@@ -653,7 +661,7 @@ mod tests {
         use sea_orm::{DatabaseBackend, QueryTrait};
 
         for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
-            let select = super::newest_success_query(1, builds::Column::Version)
+            let select = super::newest_success_query(1, None, builds::Column::Version)
                 .build(backend)
                 .to_string();
             let subquery = match backend {

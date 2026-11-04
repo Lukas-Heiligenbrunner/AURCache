@@ -75,9 +75,6 @@ pub fn start_lease_reaper(db: DatabaseConnection, activity: ActivityLog) -> Join
     })
 }
 
-/// The names of the workers that held these builds, for the entry that says
-/// they went silent. Best-effort: a worker row that cannot be read is left out
-/// rather than holding the entry back.
 /// How long each running build may take: its package's job timeout -- the
 /// server's, unless the package sets its own -- plus `grace`.
 async fn build_ages(db: &DatabaseConnection, grace: i64) -> anyhow::Result<BuildAges> {
@@ -103,6 +100,9 @@ async fn build_ages(db: &DatabaseConnection, grace: i64) -> anyhow::Result<Build
     Ok(ages)
 }
 
+/// The names of the workers that held these builds, for the entry that says
+/// they went silent. Best-effort: a worker row that cannot be read is left out
+/// rather than holding the entry back.
 async fn worker_names(db: &DatabaseConnection, abandoned: &[Abandoned]) -> Vec<WorkerRef> {
     let mut ids: Vec<i32> = abandoned.iter().filter_map(|a| a.worker_id).collect();
     ids.sort_unstable();

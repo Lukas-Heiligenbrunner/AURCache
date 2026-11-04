@@ -10,12 +10,15 @@
 //! credential handling. New deployments should use `aurcache-worker`.
 
 use anyhow::{Context, Result, anyhow};
-use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
+use aurcache_common::worker::{BuildOutcome, CompleteReport};
+use aurcache_worker_core::artifacts;
+use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
-use aurcache_worker_core::executor::Executor;
-use aurcache_worker_core::protocol::{Stop, StopWatch, Timeout, log, upload_artifacts};
+use aurcache_worker_core::executor::{ClaimedJob, Executor};
+use aurcache_worker_core::live::Live;
+use aurcache_worker_core::protocol::{log, upload_artifacts};
+use aurcache_worker_core::report::{self, Exit};
 use aurcache_worker_core::settings::WorkerSettings;
-use aurcache_worker_core::{artifacts, report};
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, EndpointSettings, HostConfig, NetworkingConfig};
 use bollard::query_parameters::{
@@ -24,9 +27,7 @@ use bollard::query_parameters::{
 };
 use futures::StreamExt;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::Arc;
 
 use crate::commands;
 use crate::config::{BuildDirs, Config};
@@ -44,10 +45,10 @@ const BUILD_USER: &str = "ab";
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
-    /// The configuration in force, replaced whole when the server delivers
-    /// values. Each build takes the one current when it starts and keeps it,
-    /// so a container is never created under one limit and timed by another.
-    cfg: RwLock<Arc<Config>>,
+    /// The configuration in force. Each build takes the one current when it
+    /// starts and keeps it, so a container is never created under one limit
+    /// and timed by another.
+    cfg: Live<Config>,
     docker: Docker,
     /// How spawned build containers are attached to the network, so the repo
     /// URL in the job's pacman.conf resolves from inside them.
@@ -56,7 +57,7 @@ pub struct DockerExecutor {
 
 impl DockerExecutor {
     /// Connect to the Docker daemon over the mounted socket.
-    pub async fn connect(cfg: Arc<Config>) -> Result<Self> {
+    pub async fn connect(cfg: Config) -> Result<Self> {
         let docker = Docker::connect_with_unix_defaults()?;
         docker.ping().await.map_err(|e| {
             anyhow!(
@@ -72,22 +73,10 @@ impl DockerExecutor {
         );
         tracing::info!("build containers will use network: {network:?}");
         Ok(Self {
-            cfg: RwLock::new(cfg),
+            cfg: Live::new(cfg),
             docker,
             network,
         })
-    }
-
-    /// The configuration in force now.
-    fn current(&self) -> Arc<Config> {
-        // Poisoned only by a panic mid-assignment of an `Arc`, which leaves
-        // either the old value or the new one -- both usable.
-        Arc::clone(
-            &self
-                .cfg
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
     }
 
     /// Local and container-visible paths for one build's shared directory.
@@ -149,11 +138,9 @@ impl DockerExecutor {
         &self,
         cfg: &Config,
         client: &Arc<WorkerClient>,
-        job: &JobDescriptor,
-        mirrorlist: Option<&str>,
-        cancel: &AtomicBool,
+        claimed: &ClaimedJob,
     ) -> Result<CompleteReport> {
-        let dirs = self.job_dirs(cfg, job.build_id);
+        let dirs = self.job_dirs(cfg, claimed.job.build_id);
 
         // A crash mid-job could have left a tree behind under this id.
         let _ = std::fs::remove_dir_all(&dirs.local);
@@ -171,9 +158,7 @@ impl DockerExecutor {
         // Removed on every path, not just the happy one: any early return in
         // `build_in` -- a failed download, pull, container or upload -- would
         // otherwise leave the whole directory behind.
-        let outcome = self
-            .build_in(cfg, client, job, mirrorlist, cancel, &dirs)
-            .await;
+        let outcome = self.build_in(cfg, client, claimed, &dirs).await;
         let _ = std::fs::remove_dir_all(&dirs.local);
         outcome
     }
@@ -183,11 +168,10 @@ impl DockerExecutor {
         &self,
         cfg: &Config,
         client: &Arc<WorkerClient>,
-        job: &JobDescriptor,
-        mirrorlist: Option<&str>,
-        cancel: &AtomicBool,
+        claimed: &ClaimedJob,
         dirs: &BuildDirs,
     ) -> Result<CompleteReport> {
+        let job = &claimed.job;
         let build_id = job.build_id;
         let BuildDirs {
             host: host_dir,
@@ -205,7 +189,7 @@ impl DockerExecutor {
 
         // Bind-mounted rather than written in: see wrap_with_config.
         let mut binds = vec![format!("{}:{CONTAINER_PKGDEST}", host_dir.display())];
-        if let Some(list) = mirrorlist {
+        if let Some(list) = &claimed.mirrorlist {
             let path = local_dir.join("mirrorlist");
             std::fs::write(&path, list).with_context(|| format!("writing {}", path.display()))?;
             binds.push(format!(
@@ -218,10 +202,8 @@ impl DockerExecutor {
         // host this worker reaches the server on. Read-only, as 0.5.0 mounted
         // it: a `pacman -Syu` that upgrades pacman finds it differs from the
         // packaged file and leaves a `.pacnew` beside it rather than writing.
-        let pacman_conf = aurcache_worker_core::repo::append_to_pacman_conf(
-            &job.pacman_conf,
-            client.repo_section(),
-        );
+        let pacman_conf =
+            aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
         let path = local_dir.join("pacman.conf");
         std::fs::write(&path, &pacman_conf)
             .with_context(|| format!("writing {}", path.display()))?;
@@ -256,14 +238,14 @@ impl DockerExecutor {
             ]),
             host_config: Some(HostConfig {
                 auto_remove: Some(false),
-                nano_cpus: cfg.nano_cpus(),
+                nano_cpus: cfg.tunables.nano_cpus(),
                 // Both, and equal: `MEMORY_LIMIT` is RAM and swap together,
                 // which Docker spells as a `MemorySwap` total equal to the
                 // `Memory` limit -- no swap beyond it. `MemorySwap` alone is
                 // refused ("you should always set the Memory limit when using
                 // Memoryswap limit"), which is how this limit went unapplied.
-                memory: cfg.memory_bytes(),
-                memory_swap: cfg.memory_bytes(),
+                memory: cfg.tunables.memory_bytes(),
+                memory_swap: cfg.tunables.memory_bytes(),
                 binds: Some(binds),
                 network_mode: self.network.network_mode(),
                 ..Default::default()
@@ -299,9 +281,7 @@ impl DockerExecutor {
             .await
             .context("creating build container")?;
 
-        let result = self
-            .run_container(cfg, client, job, &created.id, cancel)
-            .await;
+        let result = self.run_container(client, claimed, &created.id).await;
 
         // Always remove the container, whatever happened to the build.
         let _ = self
@@ -326,13 +306,11 @@ impl DockerExecutor {
     /// cancellation and the build's timeout.
     async fn run_container(
         &self,
-        cfg: &Config,
         client: &Arc<WorkerClient>,
-        job: &JobDescriptor,
+        claimed: &ClaimedJob,
         container_id: &str,
-        cancel: &AtomicBool,
     ) -> Result<CompleteReport> {
-        let build_id = job.build_id;
+        let build_id = claimed.job.build_id;
         let attached = self
             .docker
             .attach_container(
@@ -353,31 +331,31 @@ impl DockerExecutor {
             .context("starting build container")?;
 
         // Pump container output into the build log.
+        let build_log = BuildLog::open(Arc::clone(client), build_id);
         let mut output = attached.output;
-        let log_client = Arc::clone(client);
-        let mut pump = tokio::spawn(async move {
+        let tx = build_log.sender();
+        let pump = tokio::spawn(async move {
             while let Some(Ok(chunk)) = output.next().await {
-                log(&log_client, build_id, &chunk.to_string()).await;
+                if tx.send(chunk.to_string()).await.is_err() {
+                    break;
+                }
             }
         });
 
-        let timeout = Timeout::for_job(cfg.core.build_timeout, job);
-        let mut watch = StopWatch::start(timeout, cancel, build_id);
+        let watch = claimed.watch();
         let mut wait = self.docker.wait_container(
             container_id,
             None::<bollard::query_parameters::WaitContainerOptions>,
         );
-        let mut stopped = None;
-        let mut exit_code: Option<i64> = None;
-
-        loop {
-            tokio::select! {
-                next = wait.next() => match next {
-                    Some(Ok(res)) => { exit_code = Some(res.status_code); break; }
+        // What the container said as it ended; nothing, when it was stopped.
+        let mut exit = Exit::Unknown;
+        let stop = tokio::select! {
+            next = wait.next() => {
+                exit = match next {
+                    Some(Ok(res)) => Exit::Code(res.status_code),
                     // A non-zero exit surfaces here as an error carrying the code.
                     Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => {
-                        exit_code = Some(code);
-                        break;
+                        Exit::Code(code)
                     }
                     Some(Err(e)) => {
                         // The pump would otherwise stay detached against a
@@ -385,61 +363,23 @@ impl DockerExecutor {
                         pump.abort();
                         return Err(e).context("waiting for build container");
                     }
-                    None => break,
-                },
-                () = tokio::time::sleep(StopWatch::TICK) => {
-                    stopped = watch.check(client).await;
-                    if stopped.is_none() {
-                        continue;
-                    }
-                    let _ = self.docker.kill_container(
-                        container_id,
-                        None::<bollard::query_parameters::KillContainerOptions>,
-                    ).await;
-                    break;
-                }
+                    None => Exit::Unknown,
+                };
+                None
             }
-        }
-
-        // Drained, not aborted: the pump holds whatever the build printed
-        // last, which is exactly what a failure report needs. After a kill
-        // the stream may never close on its own, so a killed build waits a
-        // bounded time — the same shape as the chroot path's
-        // `KILLED_OUTPUT_GRACE`.
-        const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(30);
-        if stopped.is_some() {
-            if tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut pump)
-                .await
-                .is_err()
-            {
-                pump.abort();
-                tracing::warn!(
-                    "build {build_id} was killed but its output is still open after {}s; reporting it ended regardless",
-                    OUTPUT_DRAIN_GRACE.as_secs()
-                );
+            stop = watch.stopped() => {
+                let _ = self.docker.kill_container(
+                    container_id,
+                    None::<bollard::query_parameters::KillContainerOptions>,
+                ).await;
+                Some(stop)
             }
-        } else {
-            let _ = pump.await;
-        }
+        };
 
-        if let Some(Stop::TimedOut(limit)) = stopped {
-            return Ok(report::timeout_failure(watch.elapsed().as_secs(), limit));
-        }
-        if stopped == Some(Stop::Canceled) {
-            return Ok(report::canceled());
-        }
+        build_log.close(vec![pump], stop).await;
         // The legacy container builder samples neither the build tree nor the
         // sources it was made from, so nothing is measured on either path.
-        Ok(match exit_code {
-            Some(0) => report::success(),
-            Some(code) => CompleteReport {
-                outcome: BuildOutcome::Failed,
-                exit_code: i32::try_from(code).ok(),
-                reason: Some(report::exit_code_reason(code)),
-                ..CompleteReport::default()
-            },
-            None => report::interrupted("build container exited without a status"),
-        })
+        Ok(report::ended(stop, watch.elapsed(), exit))
     }
 }
 
@@ -449,43 +389,30 @@ impl Executor for DockerExecutor {
     async fn run_job(
         &self,
         client: Arc<WorkerClient>,
-        job: JobDescriptor,
-        mirrorlist: Option<String>,
-        cancel: Arc<AtomicBool>,
-    ) -> CompleteReport {
+        claimed: ClaimedJob,
+    ) -> Result<CompleteReport> {
         // Once, here: everything this build does reads this copy.
-        let cfg = self.current();
-        match self
-            .build(&cfg, &client, &job, mirrorlist.as_deref(), &cancel)
-            .await
-        {
-            Ok(report) => report,
-            Err(e) => {
-                let report = report::from_error(&e);
-                let reason = report.reason.as_deref().unwrap_or_default();
-                log(&client, job.build_id, &format!("\n[worker] {reason}\n")).await;
-                report
-            }
-        }
+        let cfg = self.cfg.current();
+        self.build(&cfg, &client, &claimed).await
     }
 
     fn describe_self(&self) -> String {
         format!(
             "legacy container ({}) [deprecated]",
-            self.current().builder_image
+            self.cfg.current().builder_image
         )
     }
 
     /// Nothing here needs the machine's say beyond what the declaration
     /// already checks: Docker enforces whatever limit it is given. So every
     /// value is taken, for the next build.
-    async fn reconfigure(&self, settings: WorkerSettings) -> WorkerSettings {
-        let next = self.current().with_settings(settings);
-        let settings = next.core.settings.clone();
-        *self
-            .cfg
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(next);
+    async fn reconfigure(
+        &self,
+        settings: WorkerSettings,
+        _previous: &WorkerSettings,
+    ) -> WorkerSettings {
+        self.cfg
+            .replace(self.cfg.current().with_settings(&settings));
         settings
     }
 }

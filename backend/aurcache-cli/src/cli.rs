@@ -37,12 +37,10 @@ pub(crate) struct Cli {
     pub(crate) command: Command,
 }
 
+/// Every command. The ones listed here run offline: they need no server, or
+/// only its address, and someone with no token yet can still run them.
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum Command {
-    /// Check whether the server is healthy, and report its version.
-    Health,
-    /// Diagnose why builds are not running.
-    Doctor,
     /// Stand up a server and/or workers.
     Setup {
         // Boxed: these argument structs are much larger than any other variant,
@@ -61,6 +59,22 @@ pub(crate) enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Manage CLI configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    #[command(flatten)]
+    Api(ApiCommand),
+}
+
+/// The commands that talk to a server, and so need a client and a token.
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum ApiCommand {
+    /// Check whether the server is healthy, and report its version.
+    Health,
+    /// Diagnose why builds are not running.
+    Doctor,
     /// Inspect the authenticated user.
     UserInfo,
     /// Get dashboard statistics.
@@ -76,11 +90,6 @@ pub(crate) enum Command {
     Token {
         #[command(subcommand)]
         command: TokenCommand,
-    },
-    /// Manage CLI configuration.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
     },
     /// Manage packages.
     Pkg {
@@ -100,24 +109,7 @@ pub(crate) enum Command {
         include_secrets: bool,
     },
     /// Restore an instance from a dump.
-    Restore {
-        /// The `.tar.gz` to read.
-        archive: PathBuf,
-        /// Report what would happen and change nothing.
-        #[arg(long)]
-        dry_run: bool,
-        /// What to do about a package that already exists here.
-        #[arg(long, value_enum, default_value_t = OnExisting::Skip)]
-        on_existing: OnExisting,
-        /// Replace what is here rather than adding to it. Destructive: every
-        /// package, setting and worker this instance has is removed first.
-        #[arg(long)]
-        clear: bool,
-        /// Take the dump's CA, worker certificates and token hashes. Replacing
-        /// the CA invalidates every certificate this server's workers hold.
-        #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
-        secrets: Secrets,
-    },
+    Restore(RestoreArgs),
     /// Manage builds.
     Builds {
         #[command(subcommand)]
@@ -130,6 +122,26 @@ pub(crate) enum Command {
     },
     /// Call an arbitrary API path.
     Raw(RawArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct RestoreArgs {
+    /// The `.tar.gz` to read.
+    pub(crate) archive: PathBuf,
+    /// Report what would happen and change nothing.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    /// What to do about a package that already exists here.
+    #[arg(long, value_enum, default_value_t = OnExisting::Skip)]
+    pub(crate) on_existing: OnExisting,
+    /// Replace what is here rather than adding to it. Destructive: every
+    /// package, setting and worker this instance has is removed first.
+    #[arg(long)]
+    pub(crate) clear: bool,
+    /// Take the dump's CA, worker certificates and token hashes. Replacing
+    /// the CA invalidates every certificate this server's workers hold.
+    #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
+    pub(crate) secrets: Secrets,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -227,14 +239,16 @@ pub(crate) struct ComposeArgs {
     /// raised (the `ixsystems/postgres-upgrade` image TrueNAS apps use). Asked
     /// for when neither this nor `--no-postgres-upgrade` is given, and left
     /// out when there is no terminal to ask on.
-    #[arg(long, conflicts_with = "no_postgres_upgrade")]
-    pub(crate) postgres_upgrade: bool,
+    #[arg(long = "postgres-upgrade", conflicts_with = "no_postgres_upgrade")]
+    with_postgres_upgrade: bool,
 
     /// Leave the PostgreSQL upgrade step out without being asked.
-    #[arg(long)]
-    pub(crate) no_postgres_upgrade: bool,
+    #[arg(long = "no-postgres-upgrade")]
+    no_postgres_upgrade: bool,
 
-    /// Where to write it. `-` writes to stdout.
+    /// Where to write it. `-` writes to stdout. Defaults to the role's
+    /// conventional name: `docker-compose.yaml` for the bundle,
+    /// `docker-compose.backend.yaml` or `docker-compose.worker.yaml` otherwise.
     #[arg(long, short = 'o')]
     pub(crate) output: Option<String>,
 
@@ -242,26 +256,11 @@ pub(crate) struct ComposeArgs {
     #[arg(long)]
     pub(crate) force: bool,
 
-    /// Base URL pacman clients use to fetch built packages.
-    #[arg(long)]
-    pub(crate) public_url: Option<String>,
+    #[command(flatten)]
+    pub(crate) server: ServerKnobs,
 
-    /// Host names the server's TLS certificate must be valid for.
-    #[arg(long)]
-    pub(crate) tls_sans: Option<String>,
-
-    /// For `--role worker`: worker-protocol URL of the server to join, e.g.
-    /// `https://aurcache.example.com:8083`. Left as that placeholder when
-    /// omitted.
-    #[arg(long)]
-    pub(crate) server_url: Option<String>,
-
-    /// For `--role worker`: SHA-256 of the server's CA, from its startup log
-    /// line "Worker CA fingerprint (pin this on workers)". Left as a
-    /// placeholder when omitted, which the worker refuses until it is filled
-    /// in or removed.
-    #[arg(long)]
-    pub(crate) ca_fingerprint: Option<String>,
+    #[command(flatten)]
+    pub(crate) join: ServerJoin,
 
     #[command(flatten)]
     pub(crate) worker: WorkerKnobs,
@@ -270,23 +269,24 @@ pub(crate) struct ComposeArgs {
     pub(crate) common: SetupCommon,
 }
 
+impl ComposeArgs {
+    /// Whether the PostgreSQL upgrade step was asked for, refused, or neither.
+    pub(crate) fn postgres_upgrade(&self) -> Option<bool> {
+        match (self.with_postgres_upgrade, self.no_postgres_upgrade) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Args, Debug, Clone)]
 pub(crate) struct SetupServerArgs {
-    /// Print the `docker run` command instead of running it.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
+    #[command(flatten)]
+    pub(crate) server: ServerKnobs,
 
-    /// Base URL pacman clients use to fetch built packages.
-    #[arg(long)]
-    pub(crate) public_url: Option<String>,
-
-    /// Host names the server's TLS certificate must be valid for.
-    #[arg(long)]
-    pub(crate) tls_sans: Option<String>,
-
-    /// Extra arguments passed to `docker run`, before the image.
-    #[arg(last = true)]
-    pub(crate) docker_args: Vec<String>,
+    #[command(flatten)]
+    pub(crate) run: DockerRunArgs,
 
     #[command(flatten)]
     pub(crate) common: SetupCommon,
@@ -294,21 +294,8 @@ pub(crate) struct SetupServerArgs {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct SetupWorkerArgs {
-    /// Print the `docker run` command instead of running it.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-
-    /// Worker-protocol URL of the server to join, e.g.
-    /// `https://aurcache.example.com:8083`. Defaults to a server on this
-    /// machine, which is also what makes the worker auto-approved.
-    #[arg(long)]
-    pub(crate) server_url: Option<String>,
-
-    /// SHA-256 of the server's CA, from its startup log line
-    /// "Worker CA fingerprint (pin this on workers)". Strongly recommended for
-    /// a server reached over anything but a trusted network.
-    #[arg(long)]
-    pub(crate) ca_fingerprint: Option<String>,
+    #[command(flatten)]
+    pub(crate) join: ServerJoin,
 
     /// Container name. Give each worker on a host its own.
     #[arg(long, default_value = setup::WORKER_CONTAINER)]
@@ -320,15 +307,57 @@ pub(crate) struct SetupWorkerArgs {
     #[arg(long)]
     pub(crate) data_volume: Option<String>,
 
-    /// Extra arguments passed to `docker run`, before the image.
-    #[arg(last = true)]
-    pub(crate) docker_args: Vec<String>,
+    #[command(flatten)]
+    pub(crate) run: DockerRunArgs,
 
     #[command(flatten)]
     pub(crate) worker: WorkerKnobs,
 
     #[command(flatten)]
     pub(crate) common: SetupCommon,
+}
+
+/// How the server is reached, shared by `setup compose` and `setup server`.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ServerKnobs {
+    /// Base URL pacman clients use to fetch built packages.
+    #[arg(long, default_value = compose::DEFAULT_PUBLIC_URL)]
+    pub(crate) public_url: String,
+
+    /// Host names the server's TLS certificate must be valid for.
+    #[arg(long, default_value = compose::DEFAULT_TLS_SANS)]
+    pub(crate) tls_sans: String,
+}
+
+/// The server a worker joins, shared by `setup compose` and `setup worker`.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ServerJoin {
+    /// Worker-protocol URL of the server to join, e.g.
+    /// `https://aurcache.example.com:8083`. For `setup worker` it defaults to a
+    /// server on this machine, which is also what makes the worker
+    /// auto-approved; a `--role worker` file is left with that example address.
+    #[arg(long)]
+    pub(crate) server_url: Option<String>,
+
+    /// SHA-256 of the server's CA, from its startup log line
+    /// "Worker CA fingerprint (pin this on workers)". Strongly recommended for
+    /// a server reached over anything but a trusted network. A `--role worker`
+    /// file without it holds a placeholder, which the worker refuses until it
+    /// is filled in or removed.
+    #[arg(long)]
+    pub(crate) ca_fingerprint: Option<String>,
+}
+
+/// What `setup server` and `setup worker` do with the `docker run` they build.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct DockerRunArgs {
+    /// Print the `docker run` command instead of running it.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Extra arguments passed to `docker run`, before the image.
+    #[arg(last = true)]
+    pub(crate) docker_args: Vec<String>,
 }
 
 /// Worker settings shared by `setup compose` and `setup worker`.
@@ -380,22 +409,31 @@ pub(crate) struct WorkerKnobs {
     #[arg(long, conflicts_with_all = ["pool_device", "pool_mount"])]
     pub(crate) disk_reserve: bool,
 
-    /// Everything the worker may store -- base chroot, builds, caches -- e.g.
-    /// `500G` (`WORKER_DISK_MAX`, 200G by default). With a device or a mount,
-    /// leave about 5% of it, and at least 2G, free.
-    #[arg(long, value_name = "SIZE", value_parser = parse_size_value)]
+    // Not a doc comment, so that the help can name the default from its one
+    // definition.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_size_value,
+        help = format!(
+            "Everything the worker may store -- base chroot, builds, caches -- e.g. \
+             `500G` (`WORKER_DISK_MAX`, {} by default). With a device or a mount, \
+             leave about 5% of it, and at least 2G, free",
+            compose::DEFAULT_DISK_MAX
+        )
+    )]
     pub(crate) disk_max: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct SetupCommon {
     /// Server image to run.
-    #[arg(long)]
-    pub(crate) server_image: Option<String>,
+    #[arg(long, default_value = compose::SERVER_IMAGE)]
+    pub(crate) server_image: String,
 
     /// Worker image to run.
-    #[arg(long)]
-    pub(crate) worker_image: Option<String>,
+    #[arg(long, default_value = compose::WORKER_IMAGE)]
+    pub(crate) worker_image: String,
 
     /// Log level for the containers.
     #[arg(long, default_value = "info")]
@@ -486,7 +524,13 @@ pub(crate) enum PackagesCommand {
         #[command(subcommand)]
         command: DependencyCommand,
     },
-    /// Remove the direct-request flag from one or more packages.
+    /// Stop requesting packages, and delete what nothing needs any more.
+    ///
+    /// Each package stops being directly requested. It is then deleted --
+    /// builds, artifacts and their repository entries, logs, source checkout
+    /// -- together with every dependency of it that no requested package still
+    /// needs. A package a requested package still depends on, directly or
+    /// through others, is kept as a dependency.
     Rm {
         /// Package names (pkgbase). Accepts several, so the names printed by
         /// `pkg list -q` can be passed straight through.
@@ -889,72 +933,16 @@ pub(crate) fn parse_key_val(input: &str) -> Result<(String, String), String> {
     Ok((key.to_string(), value.to_string()))
 }
 
-/// A build named the way the rest of the system names it: `<pkgbase>/<number>`.
-///
-/// Parsed from one argument rather than two so `builds show hello/3` reads the
-/// way the UI and the URLs write it. The separator is `/` because a pkgbase
-/// cannot contain one — and because `#` would have to be quoted in most
-/// shells, and `:` already means an epoch in a version.
 pub(crate) use aurcache_client::BuildRef;
-
-#[cfg(test)]
-mod build_ref_tests {
-    use super::BuildRef;
-
-    #[test]
-    fn a_reference_is_a_package_and_a_number() {
-        let parsed = BuildRef::parse_id("hello/3").expect("parses");
-        assert_eq!(parsed.pkgbase, "hello");
-        assert_eq!(parsed.number, 3);
-    }
-
-    /// Package names contain the characters the AUR allows, none of which is a
-    /// slash — so the last slash is always the separator.
-    #[test]
-    fn awkward_package_names_survive() {
-        for (input, pkgbase) in [
-            ("aewm++/1", "aewm++"),
-            ("2048.c/12", "2048.c"),
-            ("python-3.11/7", "python-3.11"),
-            ("1337/2", "1337"),
-        ] {
-            let parsed = BuildRef::parse_id(input).expect(input);
-            assert_eq!(parsed.pkgbase, pkgbase, "{input}");
-        }
-    }
-
-    /// A bare number is the old id form, and silently guessing what it meant
-    /// would resolve to a different build than the caller intended.
-    #[test]
-    fn a_bare_number_is_rejected() {
-        assert!(BuildRef::parse_id("417").is_err());
-        assert!(BuildRef::parse_id("hello").is_err());
-        assert!(BuildRef::parse_id("/3").is_err());
-        assert!(BuildRef::parse_id("hello/").is_err());
-        assert!(BuildRef::parse_id("hello/x").is_err());
-        // Numbering starts at 1, so 0 is not a build.
-        assert!(BuildRef::parse_id("hello/0").is_err());
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ClientConfig;
 
     #[test]
     fn parse_key_val_requires_separator() {
         assert!(parse_key_val("limit=10").is_ok());
         assert!(parse_key_val("missing").is_err());
-    }
-
-    #[test]
-    fn empty_token_can_exist_in_config() {
-        let config = ClientConfig {
-            url: Some("http://localhost:8080/api".to_string()),
-            token: Some(String::new()),
-        };
-        assert_eq!(config.token.as_deref(), Some(""));
     }
 
     #[test]
@@ -1012,18 +1000,18 @@ mod tests {
     #[test]
     fn rm_takes_the_names_list_prints() {
         let cli = Cli::parse_from(["aurcli", "pkg", "list", "-q"]);
-        let Command::Pkg {
+        let Command::Api(ApiCommand::Pkg {
             command: PackagesCommand::List(args),
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected pkg list");
         };
         assert!(args.quiet);
 
         let cli = Cli::parse_from(["aurcli", "pkg", "rm", "paru", "yay"]);
-        let Command::Pkg {
+        let Command::Api(ApiCommand::Pkg {
             command: PackagesCommand::Rm { pkgbases },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected pkg rm");
         };
@@ -1035,14 +1023,14 @@ mod tests {
     #[test]
     fn pause_waits_only_when_asked() {
         let cli = Cli::parse_from(["aurcli", "worker", "pause", "4", "--wait"]);
-        let Command::Worker {
+        let Command::Api(ApiCommand::Worker {
             command:
                 WorkerCommand::Pause {
                     id: 4,
                     wait: true,
                     wait_timeout: None,
                 },
-        } = cli.command
+        }) = cli.command
         else {
             panic!("parsed as {:?}", cli.command);
         };
@@ -1057,12 +1045,12 @@ mod tests {
         ]);
         assert!(matches!(
             cli.command,
-            Command::Worker {
+            Command::Api(ApiCommand::Worker {
                 command: WorkerCommand::Pause {
                     wait_timeout: Some(600),
                     ..
                 }
-            }
+            })
         ));
         assert!(
             Cli::try_parse_from(["aurcli", "worker", "pause", "4", "--wait-timeout", "600"])
@@ -1084,9 +1072,9 @@ mod tests {
             "--status",
             "active,publishing",
         ]);
-        let Command::Builds {
+        let Command::Api(ApiCommand::Builds {
             command: BuildsCommand::List(args),
-        } = cli.command
+        }) = cli.command
         else {
             panic!("parsed as {:?}", cli.command);
         };
@@ -1145,7 +1133,7 @@ mod tests {
     #[test]
     fn doctor_takes_no_arguments() {
         let cli = Cli::parse_from(["aurcli", "doctor"]);
-        assert!(matches!(cli.command, Command::Doctor));
+        assert!(matches!(cli.command, Command::Api(ApiCommand::Doctor)));
     }
 
     #[test]
@@ -1166,7 +1154,7 @@ mod tests {
         let SetupCommand::Worker(args) = *command else {
             panic!("expected worker");
         };
-        assert!(args.dry_run);
+        assert!(args.run.dry_run);
         assert_eq!(args.worker.arches, vec!["aarch64", "armv7h"]);
     }
 
@@ -1180,7 +1168,7 @@ mod tests {
         let SetupCommand::Server(args) = *command else {
             panic!("expected server");
         };
-        assert_eq!(args.docker_args, vec!["--pull=always"]);
+        assert_eq!(args.run.docker_args, vec!["--pull=always"]);
     }
 
     #[test]
@@ -1208,9 +1196,9 @@ mod tests {
             "--patch",
             "./other.conf",
         ]);
-        let Command::Pkg {
+        let Command::Api(ApiCommand::Pkg {
             command: PackagesCommand::Patch(args),
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected packages patch");
         };
@@ -1242,9 +1230,9 @@ mod tests {
             "--patch",
             "PKGBUILD=./file",
         ]);
-        let Command::Pkg {
+        let Command::Api(ApiCommand::Pkg {
             command: PackagesCommand::Patch(args),
-        } = cli.command
+        }) = cli.command
         else {
             panic!("expected packages patch");
         };

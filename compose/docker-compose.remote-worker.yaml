@@ -19,7 +19,7 @@
 #   2. Approving THIS worker — pick ONE:
 #      a) Pre-approve its cert fingerprint on the server (recommended). The
 #         worker prints its fingerprint on first start; add it to the server's
-#             AURCACHE_PREAPPROVED_WORKERS=<fingerprint>:arm-box:aarch64
+#             AURCACHE_PREAPPROVED_WORKERS=<fingerprint>[,<fingerprint>...]
 #      b) Share an enrollment token: set the same value in the server's
 #         AURCACHE_ENROLLMENT_TOKEN and this worker's AURCACHE_ENROLLMENT_TOKEN.
 #      c) Just approve it once in the web UI (Workers page).

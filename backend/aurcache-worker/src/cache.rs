@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 /// The part of a `repo.db` that tells us whether a cached archive is current,
@@ -26,14 +26,44 @@ pub struct RepoDbEntry {
     pub sha256: String,
 }
 
+/// What the two cache pools may hold, and for how long. A zero turns its
+/// bound off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CacheLimits {
+    /// Bytes the sources (`SRCDEST`) may use.
+    pub sources_max_size: u64,
+    /// How long an unused source stays.
+    pub sources_ttl: Duration,
+    /// Bytes the shared pacman package cache may use. Kept separate from the
+    /// source budget: the two pools have very different sizes and refill
+    /// costs, and a shared budget would let large VCS checkouts starve the
+    /// package cache (or vice versa).
+    pub packages_max_size: u64,
+    /// How long a cached package stays. Off by default because a cached
+    /// package's mtime is its *download* time -- pacman does not touch it on
+    /// a cache hit -- so age-evicting would discard a package used daily
+    /// simply for being old.
+    pub packages_ttl: Duration,
+}
+
+/// Repository DB entries verified against the shared package cache:
+/// filename -> the `repo.db` sha256 it was last verified against.
+///
+/// The wrinkle this records is narrow: the shared cache is written only by
+/// this worker (chroots mount it read-only), so a cached AURCache file can
+/// only go stale when its `repo.db` entry changes, and that a straightforward
+/// comparison catches -- no stat and no hashing for an unchanged file.
+type Verified = Arc<Mutex<HashMap<String, String>>>;
+
 /// Handle to the on-disk cache layout.
+///
+/// Clones share what has been verified, so the worker holds one and each job
+/// a clone of it with the limits in force.
 #[derive(Clone, Debug)]
 pub struct Cache {
     root: PathBuf,
-    max_size: u64,
-    ttl: Duration,
-    pkg_max_size: u64,
-    pkg_ttl: Duration,
+    limits: CacheLimits,
+    verified: Verified,
     /// Present when the cache is the storage pool's: then each package's
     /// sources and each kept build tree is a subvolume of its own, measured by
     /// its quota group and removed by deleting it. Entries from before that --
@@ -63,21 +93,27 @@ pub struct CacheEntry {
 }
 
 impl Cache {
-    pub fn new(
-        root: &Path,
-        max_size: u64,
-        ttl_secs: u64,
-        pkg_max_size: u64,
-        pkg_ttl_secs: u64,
-    ) -> Self {
+    #[must_use]
+    pub fn new(root: &Path, limits: CacheLimits) -> Self {
         Self {
             root: root.to_path_buf(),
-            max_size,
-            ttl: Duration::from_secs(ttl_secs),
-            pkg_max_size,
-            pkg_ttl: Duration::from_secs(pkg_ttl_secs),
+            limits,
+            verified: Verified::default(),
             volumes: None,
         }
+    }
+
+    /// The same cache with `limits` in force.
+    #[must_use]
+    pub fn with_limits(mut self, limits: CacheLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    fn verified(&self) -> MutexGuard<'_, HashMap<String, String>> {
+        self.verified
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Make new entries subvolumes in the pool; see [`Cache::volumes`].
@@ -561,18 +597,18 @@ impl Cache {
         // promoted without a DB to name it is recorded as *not* verified, so a
         // later reconcile of the same name hashes it from scratch.
         {
-            let mut known = verified_lock();
+            let mut known = self.verified();
             match repo_db {
                 Some(want) => {
                     for name in &promoted_names {
                         if let Some(entry) = want.get(name) {
-                            known.insert((shared.clone(), name.clone()), entry.sha256.clone());
+                            known.insert(name.clone(), entry.sha256.clone());
                         }
                     }
                 }
                 None => {
                     for name in &promoted_names {
-                        known.remove(&(shared.clone(), name.clone()));
+                        known.remove(name);
                     }
                 }
             }
@@ -607,18 +643,15 @@ impl Cache {
             return 0;
         };
         // Decided under one short hold, then stated outside it: `metadata` is
-        // a syscall per entry and holding the process-global map across the
+        // a syscall per entry and holding the shared map across the
         // whole walk serialises every concurrent reconcile for no reason.
         // A concurrent reconcile can only duplicate a stat or a removal,
         // both idempotent, never corrupt the map.
         let todo: Vec<(String, RepoDbEntry)> = {
-            let known = verified_lock();
+            let known = self.verified();
             repo_db
                 .iter()
-                .filter(|(name, entry)| {
-                    let key = (shared.clone(), (*name).clone());
-                    !known.get(&key).is_some_and(|seen| *seen == entry.sha256)
-                })
+                .filter(|(name, entry)| !known.get(*name).is_some_and(|seen| *seen == entry.sha256))
                 .map(|(name, entry)| (name.clone(), entry.clone()))
                 .collect()
         };
@@ -641,22 +674,22 @@ impl Cache {
             }
         }
         {
-            let mut known = verified_lock();
+            let mut known = self.verified();
             for suspect in absent {
-                known.insert((shared.clone(), suspect.name), suspect.sha256);
+                known.insert(suspect.name, suspect.sha256);
             }
             for name in stale {
-                known.remove(&(shared.clone(), name));
+                known.remove(&name);
             }
             // Files no longer published are not consulted anymore; drop their
             // records so the map tracks the repository instead of growing.
-            known.retain(|key, _| repo_db.contains_key(&key.1));
+            known.retain(|name, _| repo_db.contains_key(name));
         }
         let verdicts = hash_suspects(&shared, &suspects);
         {
-            let mut known = verified_lock();
+            let mut known = self.verified();
             for Verdict { suspect, matches } in verdicts {
-                let key = (shared.clone(), suspect.name.clone());
+                let key = suspect.name.clone();
                 if matches {
                     known.insert(key, suspect.sha256.clone());
                 } else if remove_cached(&shared, &suspect.name) {
@@ -686,8 +719,8 @@ impl Cache {
         let entries = scan_pkgcache(&dir);
         let plan = plan_eviction(
             &entries,
-            self.pkg_max_size,
-            self.pkg_ttl,
+            self.limits.packages_max_size,
+            self.limits.packages_ttl,
             SystemTime::now(),
             &[],
         );
@@ -856,7 +889,13 @@ impl Cache {
     pub fn evict(&self, in_use: &[String]) -> Vec<String> {
         sweep_set_aside(&self.root.join("srcdest"));
         let entries = self.scan_srcdest();
-        let plan = plan_eviction(&entries, self.max_size, self.ttl, SystemTime::now(), in_use);
+        let plan = plan_eviction(
+            &entries,
+            self.limits.sources_max_size,
+            self.limits.sources_ttl,
+            SystemTime::now(),
+            in_use,
+        );
         for pkgbase in &plan {
             self.wipe_srcdest(pkgbase);
             tracing::info!("evicted cache entry {pkgbase}");
@@ -906,24 +945,6 @@ fn wipe_dir(path: &Path, what: &str) {
 /// and not a detached signature, which is evicted with its package).
 fn is_package_artifact(name: &str) -> bool {
     name.contains(".pkg.tar") && !name.ends_with(".part") && !name.ends_with(".sig")
-}
-
-/// Repository DB entries verified against the shared package cache:
-/// `(cache dir, filename) -> last-verified `repo.db` sha256`.
-///
-/// Keyed on the cache dir as well as the name so the tests, which stack many
-/// caches in one process, never see each other's records. The wrinkle this
-/// records is narrow: the shared cache is written only by this worker
-/// (chroots mount it read-only), so a cached AURCache file can only go stale
-/// when its `repo.db` entry changes, and that a straightforward comparison
-/// catches — no stat and no hashing for an unchanged file.
-static VERIFIED: OnceLock<Mutex<HashMap<(PathBuf, String), String>>> = OnceLock::new();
-
-fn verified_lock() -> MutexGuard<'static, HashMap<(PathBuf, String), String>> {
-    VERIFIED
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Many files by fiat; hashing this many without threads is the one case where
@@ -1332,7 +1353,7 @@ mod tests {
     #[test]
     fn wiping_a_srcdest_takes_the_checkouts_that_borrowed_from_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = Cache::new(tmp.path(), 0, 0, 0, 0);
+        let c = Cache::new(tmp.path(), CacheLimits::default());
         let srcdest = c.srcdest("fonts-git").unwrap();
         let src = tree_with_checkouts(&c, "x86_64", "fonts-git");
         c.write_size_stamp("x86_64", "fonts-git", 5_000);
@@ -1362,7 +1383,7 @@ mod tests {
     #[test]
     fn wiping_a_srcdest_reaches_every_platform_and_only_that_package() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = Cache::new(tmp.path(), 0, 0, 0, 0);
+        let c = Cache::new(tmp.path(), CacheLimits::default());
         let x86 = tree_with_checkouts(&c, "x86_64", "fonts-git");
         let arm = tree_with_checkouts(&c, "aarch64", "fonts-git");
         let other = tree_with_checkouts(&c, "x86_64", "other-git");
@@ -1386,7 +1407,7 @@ mod tests {
     #[test]
     fn wiping_borrowed_checkouts_counts_what_it_took() {
         let tmp = tempfile::tempdir().unwrap();
-        let c = Cache::new(tmp.path(), 0, 0, 0, 0);
+        let c = Cache::new(tmp.path(), CacheLimits::default());
         let src = tree_with_checkouts(&c, "x86_64", "fonts-git");
 
         let n = c.wipe_borrowed_checkouts("fonts-git");
@@ -1457,7 +1478,13 @@ mod pkgcache_tests {
     use super::*;
 
     fn cache(dir: &Path, pkg_max: u64) -> Cache {
-        Cache::new(dir, 0, 0, pkg_max, 0)
+        Cache::new(
+            dir,
+            CacheLimits {
+                packages_max_size: pkg_max,
+                ..CacheLimits::default()
+            },
+        )
     }
 
     fn write(path: &Path, bytes: usize) {
@@ -1799,7 +1826,14 @@ mod pkgcache_tests {
     fn source_budget_does_not_evict_packages() {
         let tmp = tempfile::tempdir().unwrap();
         // Source budget of 1 byte, package budget generous.
-        let c = Cache::new(tmp.path(), 1, 0, 10_000, 0);
+        let c = Cache::new(
+            tmp.path(),
+            CacheLimits {
+                sources_max_size: 1,
+                packages_max_size: 10_000,
+                ..CacheLimits::default()
+            },
+        );
         let shared = c.pacman_pkg().unwrap();
         write(&shared.join("a-1.0-1-x86_64.pkg.tar.zst"), 100);
 
@@ -1821,8 +1855,7 @@ mod pkgcache_tests {
     }
 
     fn sha_of(bytes: &[u8]) -> String {
-        use sha2::Digest;
-        hex::encode(sha2::Sha256::digest(bytes))
+        aurcache_common::digest::sha256_hex(bytes)
     }
 
     fn make_db(entries: &[(&str, u64, &str)]) -> RepoDb {

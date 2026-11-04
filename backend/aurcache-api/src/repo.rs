@@ -3,7 +3,7 @@ use rocket::get;
 use rocket::serde::json::Json;
 use utoipa::OpenApi;
 
-use crate::models::authenticated::Authenticated;
+use crate::auth::Authenticated;
 
 #[derive(OpenApi)]
 #[openapi(paths(repo_info), components(schemas(RepoInfo)))]

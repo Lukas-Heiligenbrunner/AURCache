@@ -15,6 +15,8 @@ pub mod pool;
 pub mod qgroup;
 pub mod volumes;
 
-pub use pool::{Backing, BuildUsage, BuildVolumes, KeptBuild, Owner, Pool, PoolConfig, Resize};
-pub use qgroup::{QgroupId, Usage};
+pub use pool::{
+    Allocation, Backing, BuildUsage, BuildVolumes, KeptBuild, Owner, Pool, PoolConfig, Resize,
+};
+pub use qgroup::{QgroupId, QuotaMode, Usage};
 pub use volumes::CacheVolumes;

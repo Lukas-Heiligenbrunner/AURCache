@@ -289,17 +289,13 @@ pub fn DateOnly(ts: Option<i64>) -> Element {
 }
 
 fn stored_override() -> Option<DateStyle> {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(STORAGE_KEY).ok().flatten())
+    crate::storage::get(STORAGE_KEY)
         .filter(|value| !value.trim().is_empty())
         .map(|value| DateStyle::from_id(&value))
 }
 
 fn store_override(style: DateStyle) {
-    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = storage.set_item(STORAGE_KEY, &style.id());
-    }
+    crate::storage::set(STORAGE_KEY, &style.id());
 }
 
 /// The style in force, shared by every screen that shows a date.

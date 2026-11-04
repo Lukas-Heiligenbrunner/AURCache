@@ -13,7 +13,6 @@ sea-orm = {workspace = true}
 serde = { workspace = true }
 serde_json = { workspace = true }
 jiff = {workspace = true}
-subtle = {workspace = true}
 
 aurcache-deps = {path = "../aurcache-deps"}
 
@@ -27,7 +26,6 @@ reqwest = { workspace = true, features = ["blocking", "gzip", "json"] }
 hex = "0.4.3"
 rand = "0.10"
 rand_core = "0.10"
-sha2 = "0.11"
 
 
 aurcache-db = {path = "../aurcache-db"}
@@ -35,7 +33,7 @@ aurcache-ca = {path = "../aurcache-ca"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-utils = {path = "../aurcache-utils"}
 pacman-mirrors = {path = "../pacman-mirrors"}
-aurcache-common = {path = "../aurcache-common"}
+aurcache-common = {path = "../aurcache-common", features = ["openapi", "digest"]}
 rocket_async_compression = "0.6.1"
 
 [features]
@@ -50,8 +48,7 @@ static = ["dep:rust-embed", "dep:wasm-bindgen-cli-support"]
 wasm-bindgen-cli-support = { version = "=0.2.129", optional = true }
 
 [dev-dependencies]
-# Lets the routing tests assert that client and server share one type per
-# API shape, rather than two structs that silently drift apart.
+# The version test reads the answer the way the CLI and the browser do.
 aurcache-client = { path = "../aurcache-client" }
 sea-orm-migration = {version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 tempfile = { workspace = true }

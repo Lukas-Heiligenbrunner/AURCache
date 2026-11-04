@@ -112,12 +112,9 @@ pub const PACMAN_CONF: &str = "/etc/pacman.conf";
 #[must_use]
 pub fn has_section(conf: &str, name: &str) -> bool {
     let header = format!("[{name}]");
-    conf.lines().any(|line| {
-        let line = line.trim();
-        // A commented-out section is not a section: someone who disabled it
-        // gets it back, rather than a confusing "already configured".
-        !line.starts_with('#') && line == header
-    })
+    // Matched whole, so a commented-out section is not a section: someone who
+    // disabled it gets it back, rather than a confusing "already configured".
+    conf.lines().any(|line| line.trim() == header)
 }
 
 /// `conf` with `block` appended, separated by exactly one blank line.
@@ -144,7 +141,7 @@ pub fn append_stanza(conf: &str, block: &str) -> String {
 /// user owns, then never prompts for a password. Only a `PermissionDenied`
 /// falls back to `sudo`, which prompts on the terminal — a process cannot raise
 /// its own privileges, but it can hand the work to one that has them.
-pub fn install_stanza(path: &Path, config: &RepoConfig) -> Result<Installed> {
+pub fn install_stanza(path: &Path, config: &RepoConfig) -> Result<Install> {
     let existing = match fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -157,27 +154,15 @@ pub fn install_stanza(path: &Path, config: &RepoConfig) -> Result<Installed> {
     };
 
     if has_section(&existing, &config.name) {
-        return Ok(Installed {
-            path: path.display().to_string(),
-            changed: false,
-            elevated: false,
-        });
+        return Ok(Install::AlreadyPresent);
     }
 
     let updated = append_stanza(&existing, &config.block);
     match fs::write(path, &updated) {
-        Ok(()) => Ok(Installed {
-            path: path.display().to_string(),
-            changed: true,
-            elevated: false,
-        }),
+        Ok(()) => Ok(Install::Appended),
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
             append_via_sudo(path, &config.block)?;
-            Ok(Installed {
-                path: path.display().to_string(),
-                changed: true,
-                elevated: true,
-            })
+            Ok(Install::AppendedWithSudo)
         }
         Err(e) => Err(anyhow::Error::new(e))
             .with_context(|| format!("failed to write {}", path.display())),
@@ -222,14 +207,23 @@ fn append_via_sudo(path: &Path, block: &str) -> Result<()> {
     Ok(())
 }
 
+/// What `--install` did, and to which file.
 #[derive(Debug, Clone, Serialize)]
-pub struct Installed {
-    pub path: String,
-    /// False when the section was already present, which is the common case on
-    /// a second run.
-    pub changed: bool,
-    /// Whether it needed `sudo`.
-    pub elevated: bool,
+pub struct Installed<'a> {
+    pub path: &'a Path,
+    pub outcome: Install,
+}
+
+/// What `--install` did to `pacman.conf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Install {
+    /// The section was there already, which is the common case on a second
+    /// run.
+    AlreadyPresent,
+    Appended,
+    /// Appended through `sudo`, the file not being writable as is.
+    AppendedWithSudo,
 }
 
 /// Print the stanza on stdout and the what-to-do-with-it on stderr.
@@ -247,7 +241,8 @@ pub fn print_repo_config(config: &RepoConfig) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_REPO_NAME, append_stanza, has_section, install_stanza, repo_config, repo_server_url,
+        DEFAULT_REPO_NAME, Install, append_stanza, has_section, install_stanza, repo_config,
+        repo_server_url,
     };
 
     #[test]
@@ -363,10 +358,7 @@ mod tests {
         std::fs::write(&path, "[options]\nHoldPkg = pacman\n").unwrap();
 
         let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
-        let result = install_stanza(&path, &config).unwrap();
-
-        assert!(result.changed);
-        assert!(!result.elevated);
+        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("[repo]"), "{written}");
         assert!(
@@ -383,16 +375,19 @@ mod tests {
         std::fs::write(&path, "[options]\n").unwrap();
 
         let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
-        assert!(install_stanza(&path, &config).unwrap().changed);
+        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
         let once = std::fs::read_to_string(&path).unwrap();
 
-        assert!(!install_stanza(&path, &config).unwrap().changed);
+        assert_eq!(
+            install_stanza(&path, &config).unwrap(),
+            Install::AlreadyPresent
+        );
         assert_eq!(once, std::fs::read_to_string(&path).unwrap());
         assert_eq!(once.matches("[repo]").count(), 1, "{once}");
     }
 
-    /// The bug this exists to fix: a deployment publishing on a non-default
-    /// port was previously given 8081 regardless.
+    /// A deployment publishing on a non-default port is given that port, not
+    /// 8081.
     #[test]
     fn the_servers_port_and_path_are_taken_over_the_default() {
         let config = repo_config(

@@ -85,7 +85,13 @@ const SEARCH_CACHE_ENTRIES: usize = 16;
 /// the set of everything containing those characters -- narrowing from it would
 /// claim almost nothing matches.
 #[derive(Default)]
-struct SearchCache(Vec<(String, Vec<CachedResult>)>);
+struct SearchCache(Vec<CachedSearch>);
+
+/// One completed search: what was asked, lowered, and what came back.
+struct CachedSearch {
+    query: String,
+    results: Vec<CachedResult>,
+}
 
 /// One cached search result with its match keys precomputed.
 ///
@@ -126,9 +132,8 @@ impl CachedResult {
 
     /// How well this result answers what was typed: exact name first, then
     /// prefix, then fewest missed query terms, with description-only matches
-    /// last. For a single term that is exactly the old substring split; for
-    /// several it is what puts the package holding every word in its name
-    /// ahead of one holding only some of them there. The single copy of
+    /// last. For several terms it is what puts the package holding every word
+    /// in its name ahead of one holding only some of them there. The single copy of
     /// this ordering — [`rank_results`] for fresh network results goes
     /// through here too, so the two cannot drift apart.
     ///
@@ -164,12 +169,13 @@ impl SearchCache {
     /// error, so a set we hold is never a partial one.
     fn narrow(&self, query: &str) -> Option<Vec<SearchResult>> {
         let query = query.trim().to_lowercase();
-        let (_, results) = self
+        let base = self
             .0
             .iter()
-            .filter(|(cached, _)| query.starts_with(cached))
-            .max_by_key(|(cached, _)| cached.len())?;
-        let mut narrowed: Vec<&CachedResult> = results
+            .filter(|cached| query.starts_with(&cached.query))
+            .max_by_key(|cached| cached.query.len())?;
+        let mut narrowed: Vec<&CachedResult> = base
+            .results
             .iter()
             .filter(|result| result.matches(&query))
             .collect();
@@ -189,8 +195,9 @@ impl SearchCache {
     /// every result twice per keystroke just to ask is the waste.
     fn has_answer(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
-        self.0.iter().any(|(cached, results)| {
-            query.starts_with(cached) && results.iter().any(|result| result.matches(&query))
+        self.0.iter().any(|cached| {
+            query.starts_with(&cached.query)
+                && cached.results.iter().any(|result| result.matches(&query))
         })
     }
 
@@ -204,13 +211,13 @@ impl SearchCache {
         if query.len() <= EXACT_LOOKUP_MAX {
             return;
         }
-        self.0.retain(|(cached, _)| cached != &query);
+        self.0.retain(|cached| cached.query != query);
         self.0.insert(
             0,
-            (
+            CachedSearch {
                 query,
-                results.iter().cloned().map(CachedResult::new).collect(),
-            ),
+                results: results.iter().cloned().map(CachedResult::new).collect(),
+            },
         );
         self.0.truncate(SEARCH_CACHE_ENTRIES);
     }
@@ -239,10 +246,9 @@ fn query_terms(query: &str) -> Vec<String> {
 /// typed, then everything else.
 fn rank_results(query: &str, results: &mut [SearchResult]) {
     let query = query.trim().to_lowercase();
-    // Through `CachedResult` rather than a second copy of the ordering: each
-    // name is lowered once here, where the old sort key re-lowered it on
-    // every comparison (`sort_by_key` evaluates the key per comparison, not
-    // once per element).
+    // Through `CachedResult` rather than a second copy of the ordering, and so
+    // each name is lowered once rather than on every comparison
+    // (`sort_by_key` evaluates the key per comparison, not once per element).
     let mut cached: Vec<CachedResult> = results.iter().cloned().map(CachedResult::new).collect();
     cached.sort_by_key(|result| result.rank(&query));
     for (slot, entry) in results.iter_mut().zip(cached) {
@@ -342,10 +348,13 @@ fn use_package_search(
         if let Some(narrowed) = cache.read().narrow(&q) {
             return (q, Ok(narrowed));
         }
-        let found = match crate::api::client() {
-            Ok(client) => client.search(&q).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
+        let found = async {
+            crate::api::client()?
+                .search(&q)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
         let found = match found {
             Ok(mut found) => {
                 cache.write().insert(&q, &found);
@@ -363,7 +372,8 @@ fn AddPackageDialog(q: String) -> Element {
     // The one field: a package name or a git remote, told apart by their shape.
     // Seeded from `?q=` and written back as it changes, so a search can be
     // linked to — `/packages/add?q=hello` opens with the results already up.
-    let mut entry = crate::listing::use_url_search(q.clone(), true, |q| Route::PackageAdd { q });
+    let mut entry =
+        crate::list_controls::use_url_search(q.clone(), true, |q| Route::PackageAdd { q });
     // Starts equal to the entry so a URL-seeded search runs immediately, rather
     // than waiting for a keystroke that may never come.
     let mut debounced = use_signal(|| q);
@@ -516,217 +526,205 @@ fn AddPackageDialog(q: String) -> Element {
     };
 
     rsx! {
-        div { class: "modal modal-open",
+        crate::widgets::Modal {
+            open: true,
+            label: "Add packages",
+            on_close: move |()| close(()),
             // The editor needs room for two panes; without it the file list
             // and the text would each get half of a narrow column.
-            div {
-                class: "modal-box {dialog_width(editing_sources())}",
-                // Escape closes, which is what a dialog is expected to do.
-                // Handled here rather than on the entry field so it still works
-                // once focus has moved to a result or the queue -- keydown
-                // bubbles from whatever inside has focus.
-                onkeydown: move |e: KeyboardEvent| {
-                    if e.key() == Key::Escape {
-                        close(());
+            class: dialog_width(editing_sources()),
+            h3 { class: "font-bold text-lg", "Add packages" }
+
+            div { class: "py-4 space-y-3",
+                label { class: "form-control w-full",
+                    span { class: "label-text text-sm",
+                        "AUR package name or git URL"
                     }
-                },
-                h3 { class: "font-bold text-lg", "Add packages" }
+                    input {
+                        r#type: "text",
+                        class: "input input-bordered w-full font-mono text-sm",
+                        placeholder: "hello   ·   https://github.com/user/repo.git",
+                        // `autofocus` only fires on a full page load, not
+                        // when client-side navigation opens this dialog,
+                        // so take focus explicitly when the field mounts.
+                        // It remounts on every open, so this runs each time.
+                        onmounted: move |e| async move {
+                            let _ = e.set_focus(true).await;
+                        },
+                        value: "{entry}",
+                        oninput: move |e| {
+                            let typed = e.value();
+                            entry.set(typed.clone());
 
-                div { class: "py-4 space-y-3",
-                    label { class: "form-control w-full",
-                        span { class: "label-text text-sm",
-                            "AUR package name or git URL"
-                        }
-                        input {
-                            r#type: "text",
-                            class: "input input-bordered w-full font-mono text-sm",
-                            placeholder: "hello   ·   https://github.com/user/repo.git",
-                            // `autofocus` only fires on a full page load, not
-                            // when client-side navigation opens this dialog,
-                            // so take focus explicitly when the field mounts.
-                            // It remounts on every open, so this runs each time.
-                            onmounted: move |e| async move {
-                                let _ = e.set_focus(true).await;
-                            },
-                            value: "{entry}",
-                            oninput: move |e| {
-                                let typed = e.value();
-                                entry.set(typed.clone());
+                            // Nothing to throttle when no request is going
+                            // out. The debounce exists to stop a keystroke
+                            // becoming an AUR request someone else pays
+                            // for, and a query an earlier search already
+                            // covers is answered from memory -- which is
+                            // most of typing, since a query grows a
+                            // character at a time. Waiting there only made
+                            // the list lag behind the field for no reason.
+                            let answerable = typed.trim().is_empty()
+                                || looks_like_git_url(typed.trim())
+                                || cache.read().has_answer(&typed);
+                            if answerable {
+                                debounced.set(typed);
+                                return;
+                            }
 
-                                // Nothing to throttle when no request is going
-                                // out. The debounce exists to stop a keystroke
-                                // becoming an AUR request someone else pays
-                                // for, and a query an earlier search already
-                                // covers is answered from memory -- which is
-                                // most of typing, since a query grows a
-                                // character at a time. Waiting there only made
-                                // the list lag behind the field for no reason.
-                                let answerable = typed.trim().is_empty()
-                                    || looks_like_git_url(typed.trim())
-                                    || cache.read().has_answer(&typed);
-                                if answerable {
+                            // Each keystroke starts its own timer and then
+                            // checks whether it is still the latest; the
+                            // stale ones fall through without touching
+                            // anything.
+                            spawn(async move {
+                                let wait = if typed.trim().len() <= EXACT_LOOKUP_MAX {
+                                    EXACT_LOOKUP_DEBOUNCE
+                                } else {
+                                    SEARCH_DEBOUNCE
+                                };
+                                gloo_timers::future::sleep(wait).await;
+                                if entry() == typed {
                                     debounced.set(typed);
-                                    return;
                                 }
-
-                                // Each keystroke starts its own timer and then
-                                // checks whether it is still the latest; the
-                                // stale ones fall through without touching
-                                // anything.
-                                spawn(async move {
-                                    let wait = if typed.trim().len() <= EXACT_LOOKUP_MAX {
-                                        EXACT_LOOKUP_DEBOUNCE
-                                    } else {
-                                        SEARCH_DEBOUNCE
-                                    };
-                                    gloo_timers::future::sleep(wait).await;
-                                    if entry() == typed {
-                                        debounced.set(typed);
-                                    }
-                                });
-                            },
-                            // Enter submits. Adding one known package is the
-                            // common case by far, and it should not take a
-                            // detour through the queue to do it. Building a
-                            // queue is done by clicking results, which is how
-                            // one gets built anyway.
-                            onkeydown: move |e: KeyboardEvent| {
-                                if e.key() == Key::Enter {
-                                    spawn(submit(()));
-                                }
-                            },
-                        }
-                    }
-
-                    if is_git() {
-                        // Only asked for once the entry is a remote. An AUR
-                        // package has neither, and showing them greyed out on
-                        // every add would be two dead fields most of the time.
-                        div { class: "flex gap-3 flex-wrap items-end",
-                            label { class: "form-control flex-1 min-w-32",
-                                span { class: "label-text text-sm", "Ref" }
-                                input {
-                                    r#type: "text",
-                                    class: "input input-bordered w-full font-mono text-sm",
-                                    placeholder: "master",
-                                    value: "{git_ref}",
-                                    oninput: move |e| git_ref.set(e.value()),
-                                }
+                            });
+                        },
+                        // Enter submits. Adding one known package is the
+                        // common case by far, and it should not take a
+                        // detour through the queue to do it. Building a
+                        // queue is done by clicking results, which is how
+                        // one gets built anyway.
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                spawn(submit(()));
                             }
-                            label { class: "form-control flex-1 min-w-32",
-                                span { class: "label-text text-sm", "Subfolder" }
-                                input {
-                                    r#type: "text",
-                                    class: "input input-bordered w-full font-mono text-sm",
-                                    placeholder: "repository root",
-                                    value: "{git_subfolder}",
-                                    oninput: move |e| git_subfolder.set(e.value()),
-                                }
-                            }
-                            button {
-                                class: "btn btn-sm",
-                                disabled: entered_source().is_none_or(|s| already_taken(&s)),
-                                onclick: move |_| queue_git_remote(),
-                                "Add to list"
-                            }
-                        }
-                    } else {
-                        SearchResults {
-                            query: entry(),
-                            // Cloned out of the resource so the borrow ends
-                            // here rather than living as long as the child's
-                            // props.
-                            results: results
-                                .read_unchecked()
-                                .as_ref()
-                                .map(|(_, found)| found.clone()),
-                            searching: results
-                                .read_unchecked()
-                                .as_ref()
-                                .is_none_or(|(answered, _)| answered.trim() != entry().trim()),
-                            taken: taken.read().clone(),
-                            onpick: move |name: String| queue_search_result(name),
-                        }
-                    }
-
-                    QueuedList {
-                        queued: queued(),
-                        onremove: move |label: String| {
-                            queued.retain(|s| source_label(s) != label);
                         },
                     }
-
-                    // Only for a single source, and only before anything is
-                    // sent. The paths name files inside one source, so with two
-                    // queued there is no way to say which they belong to —
-                    // `--patch` on the CLI refuses the same case for the same
-                    // reason.
-                    if let Some(source) = single_source(&sources_to_add()) {
-                        if editing_sources() {
-                            AddSourceEditor {
-                                source: source.clone(),
-                                patched,
-                                onsubmit: move |()| {
-                                    editing_sources.set(false);
-                                    spawn(submit(()));
-                                },
-                                oncancel: move |()| editing_sources.set(false),
-                            }
-                        } else {
-                            div {
-                                button {
-                                    class: "btn btn-sm btn-ghost",
-                                    onclick: move |_| editing_sources.set(true),
-                                    "Edit sources before adding"
-                                }
-                                // The reason this exists at all: a package whose
-                                // PKGBUILD does not parse cannot be added and
-                                // then fixed, because the add never completes.
-                                p { class: "text-xs opacity-50 pt-1",
-                                    "Fix a PKGBUILD that does not parse, before it is ever parsed."
-                                }
-                            }
-                        }
-                    }
-
-                    div {
-                        span { class: "label-text text-sm", "Platforms" }
-                        PlatformChecklist {
-                            selected: platforms_selected(),
-                            onchange: move |next| platforms_selected.set(next),
-                            size: "checkbox-sm",
-                        }
-                        // Whether a package builds for an architecture is the
-                        // PKGBUILD's business, not ours, so this offers rather
-                        // than promises. They apply to everything queued.
-                        p { class: "text-xs opacity-50 pt-1",
-                            "Applied to every package above. Which of these actually work depends on each package's PKGBUILD."
-                        }
-                    }
-
                 }
 
-                div { class: "modal-action",
-                    // Leaving mid-run would drop the future doing the adding,
-                    // part way through a queue, with no record of where it got
-                    // to. The run is bounded and reports progress beside this.
-                    button {
-                        class: "btn btn-ghost",
-                        onclick: move |_| close(()),
-                        "Cancel"
+                if is_git() {
+                    // Only asked for once the entry is a remote. An AUR
+                    // package has neither, and showing them greyed out on
+                    // every add would be two dead fields most of the time.
+                    div { class: "flex gap-3 flex-wrap items-end",
+                        label { class: "form-control flex-1 min-w-32",
+                            span { class: "label-text text-sm", "Ref" }
+                            input {
+                                r#type: "text",
+                                class: "input input-bordered w-full font-mono text-sm",
+                                placeholder: "master",
+                                value: "{git_ref}",
+                                oninput: move |e| git_ref.set(e.value()),
+                            }
+                        }
+                        label { class: "form-control flex-1 min-w-32",
+                            span { class: "label-text text-sm", "Subfolder" }
+                            input {
+                                r#type: "text",
+                                class: "input input-bordered w-full font-mono text-sm",
+                                placeholder: "repository root",
+                                value: "{git_subfolder}",
+                                oninput: move |e| git_subfolder.set(e.value()),
+                            }
+                        }
+                        button {
+                            class: "btn btn-sm",
+                            disabled: entered_source().is_none_or(|s| already_taken(&s)),
+                            onclick: move |_| queue_git_remote(),
+                            "Add to list"
+                        }
                     }
-                    button {
-                        class: "btn btn-primary",
-                        disabled: !ready,
-                        onclick: move |_| submit(()),
-                        {add_button_label(sources_to_add().len())}
+                } else {
+                    SearchResults {
+                        query: entry(),
+                        // Cloned out of the resource so the borrow ends
+                        // here rather than living as long as the child's
+                        // props.
+                        results: results
+                            .read_unchecked()
+                            .as_ref()
+                            .map(|(_, found)| found.clone()),
+                        searching: results
+                            .read_unchecked()
+                            .as_ref()
+                            .is_none_or(|(answered, _)| answered.trim() != entry().trim()),
+                        taken: taken.read().clone(),
+                        onpick: move |name: String| queue_search_result(name),
                     }
+                }
+
+                QueuedList {
+                    queued: queued(),
+                    onremove: move |label: String| {
+                        queued.retain(|s| source_label(s) != label);
+                    },
+                }
+
+                // Only for a single source, and only before anything is
+                // sent. The paths name files inside one source, so with two
+                // queued there is no way to say which they belong to —
+                // `--patch` on the CLI refuses the same case for the same
+                // reason.
+                if let Some(source) = single_source(&sources_to_add()) {
+                    if editing_sources() {
+                        AddSourceEditor {
+                            source: source.clone(),
+                            patched,
+                            onsubmit: move |()| {
+                                editing_sources.set(false);
+                                spawn(submit(()));
+                            },
+                            oncancel: move |()| editing_sources.set(false),
+                        }
+                    } else {
+                        div {
+                            button {
+                                class: "btn btn-sm btn-ghost",
+                                onclick: move |_| editing_sources.set(true),
+                                "Edit sources before adding"
+                            }
+                            // The reason this exists at all: a package whose
+                            // PKGBUILD does not parse cannot be added and
+                            // then fixed, because the add never completes.
+                            p { class: "text-xs opacity-50 pt-1",
+                                "Fix a PKGBUILD that does not parse, before it is ever parsed."
+                            }
+                        }
+                    }
+                }
+
+                div {
+                    span { class: "label-text text-sm", "Platforms" }
+                    PlatformChecklist {
+                        selected: platforms_selected(),
+                        onchange: move |next| platforms_selected.set(next),
+                        size: "checkbox-sm",
+                    }
+                    // Whether a package builds for an architecture is the
+                    // PKGBUILD's business, not ours, so this offers rather
+                    // than promises. They apply to everything queued.
+                    p { class: "text-xs opacity-50 pt-1",
+                        "Applied to every package above. Which of these actually work depends on each package's PKGBUILD."
+                    }
+                }
+
+            }
+
+            div { class: "modal-action",
+                // Leaving mid-run would drop the future doing the adding,
+                // part way through a queue, with no record of where it got
+                // to. The run is bounded and reports progress beside this.
+                button {
+                    class: "btn btn-ghost",
+                    onclick: move |_| close(()),
+                    "Cancel"
+                }
+                button {
+                    class: "btn btn-primary",
+                    disabled: !ready,
+                    onclick: move |_| submit(()),
+                    {add_button_label(sources_to_add().len())}
                 }
             }
-            // Clicking away closes, which is what a dimmed backdrop implies.
-            // No colour of its own: `.modal` already dims the page behind it,
-            // and a second translucent layer on top darkened it twice.
-            div { class: "modal-backdrop", onclick: move |_| close(()) }
         }
     }
 }

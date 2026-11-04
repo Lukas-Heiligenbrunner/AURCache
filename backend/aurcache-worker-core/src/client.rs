@@ -9,11 +9,12 @@
 //!   for all job endpoints.
 
 use crate::protocol::PackagesRefused;
+use crate::repo::RepoSection;
 use anyhow::{Context, Result, bail};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::{
-    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, JobStatus,
-    RegisterRequest, RegisterStatus, WorkerLogReport,
+    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, RegisterRequest,
+    RegisterStatus, WorkerLogReport,
 };
 use percent_encoding::{AsciiSet, CONTROLS};
 use reqwest::{Body, Certificate, Client, Identity, RequestBuilder, Response, StatusCode};
@@ -120,10 +121,11 @@ pub struct WorkerClient {
     /// longer than thirty seconds while bytes were still flowing.
     upload_http: Client,
     base: String,
-    /// `[repo]` section rendered for this worker from the server's template,
-    /// set once enrollment completes. Empty when this server publishes no
-    /// repository, or no host could be determined.
-    repo_section: String,
+    /// The `[repo]` section rendered for this worker from the server's
+    /// template. `None` when this server publishes no repository, or no host
+    /// could be determined -- and always on an enrollment client, which has
+    /// no build to give it.
+    repo: Option<RepoSection>,
     /// The last registration the server accepted from this client, sent again
     /// when the server asks for it (see [`Self::exchange`]).
     registration: std::sync::Mutex<Option<RegisterRequest>>,
@@ -178,15 +180,10 @@ fn ca_fingerprint(pem: &str) -> Result<String> {
 }
 
 impl WorkerClient {
-    /// Record the `[repo]` section this worker should append to job configs.
-    pub fn set_repo_section(&mut self, section: String) {
-        self.repo_section = section;
-    }
-
-    /// The `[repo]` section for this worker; empty when there is none.
+    /// The `[repo]` section this worker appends to job configs, if any.
     #[must_use]
-    pub fn repo_section(&self) -> &str {
-        &self.repo_section
+    pub fn repo(&self) -> Option<&RepoSection> {
+        self.repo.as_ref()
     }
 
     /// Build an enrollment client that trusts only the pinned CA and carries no
@@ -201,7 +198,7 @@ impl WorkerClient {
             .build()
             .context("building enrollment client")?;
         Ok(Self {
-            repo_section: String::new(),
+            repo: None,
             // An enrolling worker has no job to upload for.
             upload_http: http.clone(),
             http,
@@ -211,7 +208,22 @@ impl WorkerClient {
     }
 
     /// Build an authenticated mTLS client presenting the worker certificate.
-    pub fn authenticated(base: &str, ca_pem: &str, cert_pem: &str, key_pem: &str) -> Result<Self> {
+    ///
+    /// `registration` is the one the server accepted, sent again whenever it
+    /// asks this worker to register; `repo` the section its builds use. Both
+    /// are required here rather than set afterwards, so no path to a client
+    /// can leave either out.
+    pub fn authenticated(
+        base: &str,
+        identity: &ClientIdentity<'_>,
+        registration: RegisterRequest,
+        repo: Option<RepoSection>,
+    ) -> Result<Self> {
+        let ClientIdentity {
+            ca_pem,
+            cert_pem,
+            key_pem,
+        } = *identity;
         let ca = Certificate::from_pem(ca_pem.as_bytes()).context("parsing CA cert")?;
         let mut identity_pem = cert_pem.as_bytes().to_vec();
         identity_pem.extend_from_slice(key_pem.as_bytes());
@@ -233,11 +245,11 @@ impl WorkerClient {
             .build()
             .context("building authenticated upload client")?;
         Ok(Self {
-            repo_section: String::new(),
+            repo,
             upload_http,
             http,
             base: base.to_string(),
-            registration: std::sync::Mutex::new(None),
+            registration: std::sync::Mutex::new(Some(registration)),
         })
     }
 
@@ -270,13 +282,23 @@ impl WorkerClient {
         Ok(status)
     }
 
-    /// Take `req` as the registration to send again when the server asks: the
-    /// one this worker registered with, before this client existed.
-    pub fn remember_registration(&self, req: RegisterRequest) {
+    /// Take `req` as the registration to send again when the server asks.
+    fn remember_registration(&self, req: RegisterRequest) {
         *self
             .registration
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(req);
+    }
+
+    /// The certificate request of the registration this client holds, for
+    /// registering again with changed settings.
+    #[must_use]
+    pub fn registered_csr(&self) -> Option<String> {
+        self.registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|req| req.csr_pem.clone())
     }
 
     /// Send a request on the authenticated plane.
@@ -334,21 +356,12 @@ impl WorkerClient {
     /// Claim the next job for the given arches, or `None` if the queue is empty.
     pub async fn claim(&self, req: &ClaimRequest) -> Result<Option<JobDescriptor>> {
         let resp = self
-            .exchange(self.http.post(self.url("/jobs/claim")).json(req), "claim")
+            .exchange_checked(self.http.post(self.url("/jobs/claim")).json(req), "claim")
             .await?;
         match resp.status() {
             StatusCode::OK => Ok(Some(resp.json().await.context("decoding job")?)),
             StatusCode::NO_CONTENT => Ok(None),
-            other => {
-                // A body that will not read is its own failure, not an empty
-                // explanation: without this a truncated error renders as
-                // `claim failed (500): ` with no hint that the explanation
-                // itself is what failed.
-                match resp.text().await {
-                    Ok(body) => bail!("claim failed ({other}): {body}"),
-                    Err(e) => bail!("claim failed ({other}); body unreadable: {e:#}"),
-                }
-            }
+            other => bail!("claim answered {other}, neither a job nor none"),
         }
     }
 
@@ -458,9 +471,7 @@ impl WorkerClient {
 
     /// Send a liveness heartbeat listing the builds still running, and return
     /// the server's answer: the builds it wants this worker to stop (abandoned,
-    /// or cancelled by an operator).
-    ///
-    /// Send a heartbeat, and read what the server wants stopped or changed.
+    /// or cancelled by an operator), and settings it wants changed.
     pub async fn heartbeat(&self, hb: &Heartbeat) -> Result<HeartbeatResponse> {
         let resp = self
             .exchange_checked(self.http.post(self.url("/heartbeat")).json(hb), "heartbeat")
@@ -468,17 +479,6 @@ impl WorkerClient {
         // An answer that cannot be read is a failed heartbeat: it must not
         // refresh the lease watchdog.
         resp.json().await.context("decoding heartbeat answer")
-    }
-
-    /// Poll whether a build has been asked to cancel.
-    pub async fn job_status(&self, build_id: i32) -> Result<JobStatus> {
-        let resp = self
-            .exchange_checked(
-                self.http.get(self.url(&format!("/jobs/{build_id}/status"))),
-                "job status",
-            )
-            .await?;
-        resp.json().await.context("decoding job status")
     }
 
     /// Conditional GET of a resource outside the `/api/worker` mount — the
@@ -531,6 +531,17 @@ impl WorkerClient {
             last_modified,
         })
     }
+}
+
+/// The certificates a worker presents and trusts on the authenticated plane.
+#[derive(Clone, Copy)]
+pub struct ClientIdentity<'a> {
+    /// The server's CA, pinned at enrollment.
+    pub ca_pem: &'a str,
+    /// This worker's certificate, signed by that CA.
+    pub cert_pem: &'a str,
+    /// This worker's private key.
+    pub key_pem: &'a str,
 }
 
 /// Result of a conditional GET: a `None` body means the server sent `304`, so

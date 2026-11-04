@@ -138,26 +138,13 @@ pub(crate) async fn retry_build_command(
     build: BuildRef,
     wait: WaitOpts,
 ) -> Result<()> {
-    let scope = if wait.wait {
-        Some(snapshot_builds(client, None).await?)
-    } else {
-        None
-    };
+    let scope = wait.snapshot(client).await?;
     let number = client.retry_build(&build.pkgbase, build.number).await?;
-    match format {
-        OutputFormat::Json => print_json(&number)?,
-        OutputFormat::Text => println!("enqueued build: {}/{number}", build.pkgbase),
-    }
-    let Some(scope) = scope else {
-        return Ok(());
-    };
-    let scope = scope
-        .with_explicit([BuildRef {
-            pkgbase: build.pkgbase.clone(),
-            number,
-        }])
-        .adopting(&build.pkgbase);
-    follow_builds(client, Progress(format), &wait.as_watch_args(), scope).await
+    render(format, &number, |number| {
+        println!("enqueued build: {}/{number}", build.pkgbase);
+    })?;
+    let scope = scope.map(|scope| scope.triggered(&build.pkgbase, [number]));
+    follow_trigger(client, format, &wait, scope).await
 }
 
 pub(crate) async fn cancel_build_command(
@@ -192,7 +179,7 @@ pub(crate) fn print_build_list(builds: &[Build]) {
                 // accepts, so a row can be copied straight into another
                 // command. It already names the package, so there is no
                 // separate column for that.
-                format!("{}/{}", build.pkg_name, build.number),
+                build_id(build),
                 build.platform.clone(),
                 build.status.label().to_string(),
                 build.version.clone(),
@@ -215,7 +202,7 @@ pub(crate) fn print_build_list(builds: &[Build]) {
 }
 
 pub(crate) fn print_build(build: &Build) {
-    println!("build: {}/{}", build.pkg_name, build.number);
+    println!("build: {}", build_id(build));
     println!("platform: {}", build.platform);
     println!("status: {}", build.status.label());
     println!("version: {}", build.version);
@@ -229,6 +216,23 @@ pub(crate) fn build_ref(build: &Build) -> BuildRef {
         pkgbase: build.pkg_name.clone(),
         number: build.number,
     }
+}
+
+/// A build as every command names it, `hello/3`: the form the argument parser
+/// accepts, so it can be copied into another command.
+pub(crate) fn build_id(build: &Build) -> String {
+    format!("{}/{}", build.pkg_name, build.number)
+}
+
+/// `hello/3: waiting for dependencies — <reason>`, the line a watch prints
+/// about one build.
+fn status_line(build: &Build) -> String {
+    let reason = build
+        .waiting_reason
+        .as_ref()
+        .map(|r| format!(" — {r}"))
+        .unwrap_or_default();
+    format!("{}: {}{reason}", build_id(build), build.status.label())
 }
 
 /// Which builds one invocation is answerable for.
@@ -257,6 +261,9 @@ pub(crate) struct WatchScope {
     /// a trigger that reused an existing build row rather than creating one
     /// still has to wait for it.
     adopt: HashSet<String>,
+    /// Only builds of this package, for `builds watch --package`. The rest of
+    /// the queue is still looked at to tell a stall from a wait.
+    package: Option<String>,
 }
 
 impl WatchScope {
@@ -287,12 +294,37 @@ impl WatchScope {
         self
     }
 
-    pub(crate) fn adopting(mut self, pkgbase: &str) -> Self {
+    /// What a trigger on `pkgbase` reported queuing. The numbers pin those
+    /// builds into scope whatever state they have reached by now. The response
+    /// omits a build left waiting on a dependency, and an update can reuse an
+    /// existing row, so the package's unfinished builds are adopted too.
+    pub(crate) fn triggered(
+        mut self,
+        pkgbase: &str,
+        numbers: impl IntoIterator<Item = i32>,
+    ) -> Self {
+        self.explicit
+            .extend(numbers.into_iter().map(|number| BuildRef {
+                pkgbase: pkgbase.to_string(),
+                number,
+            }));
         self.adopt.insert(pkgbase.to_string());
         self
     }
 
+    pub(crate) fn only_package(mut self, package: Option<String>) -> Self {
+        self.package = package;
+        self
+    }
+
     pub(crate) fn includes(&self, build: &Build) -> bool {
+        if self
+            .package
+            .as_ref()
+            .is_some_and(|package| *package != build.pkg_name)
+        {
+            return false;
+        }
         let key = build_ref(build);
         if self.explicit.contains(&key) {
             return true;
@@ -315,8 +347,10 @@ pub(crate) async fn watch_builds_command(
     args: WatchArgs,
 ) -> Result<()> {
     let progress = Progress(format);
-    let builds = list_watched_builds(client, args.package.as_deref()).await?;
-    let scope = WatchScope::from_history(&builds).with_explicit(args.builds.iter().cloned());
+    let builds = list_scoped_builds(client, args.package.as_deref()).await?;
+    let scope = WatchScope::from_history(&builds)
+        .with_explicit(args.builds.iter().cloned())
+        .only_package(args.package.clone());
 
     // Said once, rather than as a burst of transition lines for builds that
     // transitioned before anyone was watching. Failures among them are named
@@ -342,6 +376,20 @@ pub(crate) async fn watch_builds_command(
     follow_builds(client, progress, &args, scope).await
 }
 
+/// Follow what a trigger queued, when `--wait` asked for it: `scope` is what
+/// [`WaitOpts::snapshot`] took before the trigger fired.
+pub(crate) async fn follow_trigger(
+    client: &AurCacheClient,
+    format: OutputFormat,
+    wait: &WaitOpts,
+    scope: Option<WatchScope>,
+) -> Result<()> {
+    match scope {
+        Some(scope) => follow_builds(client, Progress(format), &wait.as_watch_args(), scope).await,
+        None => Ok(()),
+    }
+}
+
 /// Poll until every build in scope has settled.
 ///
 /// Stall detection deliberately looks at the *whole* queue rather than the
@@ -363,26 +411,15 @@ pub(crate) async fn follow_builds(
     let mut seen: HashMap<BuildRef, BuildState> = HashMap::new();
 
     loop {
-        let builds = list_watched_builds(client, args.package.as_deref()).await?;
-        let (watched, rest): (Vec<&Build>, Vec<&Build>) =
-            builds.iter().partition(|b| scope.includes(b));
+        let builds = list_scoped_builds(client, scope.package.as_deref()).await?;
+        let watched: Vec<&Build> = builds.iter().filter(|b| scope.includes(b)).collect();
 
         let mut changed = false;
         for build in &watched {
             let key = build_ref(build);
             if seen.get(&key) != Some(&build.status) {
                 let elapsed = start.elapsed().as_secs();
-                let reason = build
-                    .waiting_reason
-                    .as_ref()
-                    .map(|r| format!(" — {r}"))
-                    .unwrap_or_default();
-                progress.line(&format!(
-                    "[{elapsed:>4}s] {}/{}: {}{reason}",
-                    build.pkg_name,
-                    build.number,
-                    build.status.label(),
-                ));
+                progress.line(&format!("[{elapsed:>4}s] {}", status_line(build)));
                 seen.insert(key, build.status);
                 changed = true;
             }
@@ -399,7 +436,7 @@ pub(crate) async fn follow_builds(
             let failed: Vec<String> = watched
                 .iter()
                 .filter(|b| b.status == BuildState::Failed)
-                .map(|b| format!("{}/{}", b.pkg_name, b.number))
+                .map(|b| build_id(b))
                 .collect();
             if !failed.is_empty() {
                 bail!("build failed: {}", failed.join(", "));
@@ -416,21 +453,11 @@ pub(crate) async fn follow_builds(
             return Ok(());
         }
 
-        let anything_running = builds.iter().any(|b| b.status == BuildState::Active);
+        let queue = Queue::of(&client.list_builds(&in_flight_query()).await?, &scope);
 
-        if !anything_running && last_change.elapsed() >= Duration::from_secs(args.stall_after) {
+        if !queue.building && last_change.elapsed() >= Duration::from_secs(args.stall_after) {
             for build in watched.iter().filter(|b| b.status.is_in_progress()) {
-                let reason = build
-                    .waiting_reason
-                    .as_ref()
-                    .map(|r| format!(" — {r}"))
-                    .unwrap_or_default();
-                eprintln!(
-                    "  {}/{}: {}{reason}",
-                    build.pkg_name,
-                    build.number,
-                    build.status.label()
-                );
+                eprintln!("  {}", status_line(build));
             }
             bail!(
                 "no progress for {}s and nothing is building; the queue cannot advance",
@@ -455,7 +482,7 @@ pub(crate) async fn follow_builds(
                 // Only work still in flight: that the server has a hundred
                 // finished builds on record is not news, but that something
                 // else is running explains why ours is waiting.
-                match rest.iter().filter(|b| b.status.is_in_progress()).count() {
+                match queue.others_in_flight {
                     0 => String::new(),
                     other => format!(" ({other} other build(s) in flight, not followed)"),
                 }
@@ -470,36 +497,65 @@ pub(crate) async fn follow_builds(
     }
 }
 
-/// One page of builds, optionally narrowed to a package.
+/// What the whole queue says about a watch: whether anything at all is
+/// building, and how much is in flight outside the scope.
+#[derive(Debug, PartialEq, Eq)]
+struct Queue {
+    building: bool,
+    others_in_flight: usize,
+}
+
+impl Queue {
+    fn of(in_flight: &[Build], scope: &WatchScope) -> Self {
+        Self {
+            building: in_flight.iter().any(|b| b.status == BuildState::Active),
+            others_in_flight: in_flight.iter().filter(|b| !scope.includes(b)).count(),
+        }
+    }
+}
+
+/// Every unfinished build on the server, of any package: what tells a stall
+/// from a wait. Unpaged, since a build left off the page could be the one
+/// that is building.
+fn in_flight_query() -> BuildQuery {
+    BuildQuery {
+        states: BuildState::IN_PROGRESS.to_vec(),
+        ..BuildQuery::default()
+    }
+}
+
+/// The page a scope is looked for in, narrowed to `package` by the server so
+/// that other packages' builds cannot push its own off the page.
 ///
 /// The page bounds how far back the scope can see, which is why the scope is
 /// taken as a set of identities rather than by counting: an old build dropping
 /// off the end of the page must not change the verdict.
-pub(crate) async fn list_watched_builds(
+fn scoped_query(package: Option<&str>) -> BuildQuery {
+    BuildQuery {
+        pkgbase: package.map(str::to_string),
+        limit: Some(100),
+        ..BuildQuery::default()
+    }
+}
+
+pub(crate) async fn list_scoped_builds(
     client: &AurCacheClient,
     package: Option<&str>,
 ) -> Result<Vec<Build>> {
-    Ok(client
-        .list_builds(&aurcache_client::BuildQuery {
-            limit: Some(100),
-            ..Default::default()
-        })
-        .await?
-        .into_iter()
-        .filter(|b| package.is_none_or(|name| b.pkg_name == name))
-        .collect())
+    client.list_builds(&scoped_query(package)).await
 }
 
-/// The listing a `--wait` trigger takes *before* it fires, which is the whole
-/// reason `--wait` can report on a build that finished before the trigger
-/// returned.
-pub(crate) async fn snapshot_builds(
-    client: &AurCacheClient,
-    package: Option<&str>,
-) -> Result<WatchScope> {
-    Ok(WatchScope::from_snapshot(
-        &list_watched_builds(client, package).await?,
-    ))
+impl WaitOpts {
+    /// The listing a `--wait` trigger takes *before* it fires, which is the
+    /// whole reason `--wait` can report on a build that finished before the
+    /// trigger returned. `None` without `--wait`.
+    pub(crate) async fn snapshot(&self, client: &AurCacheClient) -> Result<Option<WatchScope>> {
+        if !self.wait {
+            return Ok(None);
+        }
+        let builds = list_scoped_builds(client, None).await?;
+        Ok(Some(WatchScope::from_snapshot(&builds)))
+    }
 }
 
 #[cfg(test)]
@@ -527,32 +583,26 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) const ACTIVE: BuildState = BuildState::Active;
-
-    pub(crate) const FAILED: BuildState = BuildState::Failed;
-
-    pub(crate) const SUCCESSFUL: BuildState = BuildState::Successful;
-
     /// `builds watch` reports on what it watched. A build that was already over
     /// before it looked is history it cannot speak for -- and on a long-lived
-    /// instance every listing is mostly history, which is what used to make the
+    /// instance every listing is mostly history, which would otherwise make the
     /// exit code a statement about last week.
     #[test]
     fn watch_follows_what_is_in_flight_and_not_old_builds() {
         let history = [
-            build("fonts", 5, FAILED),
-            build("fonts", 6, FAILED),
-            build("fonts", 7, SUCCESSFUL),
+            build("fonts", 5, BuildState::Failed),
+            build("fonts", 6, BuildState::Failed),
+            build("fonts", 7, BuildState::Successful),
         ];
         let scope = WatchScope::from_history(&history);
 
         assert!(!history.iter().any(|b| scope.includes(b)));
         assert!(
-            scope.includes(&build("fonts", 8, ACTIVE)),
+            scope.includes(&build("fonts", 8, BuildState::Active)),
             "a build that appears later is this watch's business"
         );
         assert!(
-            scope.includes(&build("fonts", 9, FAILED)),
+            scope.includes(&build("fonts", 9, BuildState::Failed)),
             "including one that has already failed by the time we see it: it \
              failed while we were watching"
         );
@@ -562,9 +612,9 @@ pub(crate) mod tests {
     /// named: it is happening now.
     #[test]
     fn watch_follows_a_build_that_was_already_running() {
-        let scope = WatchScope::from_history(&[build("fonts", 8, ACTIVE)]);
-        assert!(scope.includes(&build("fonts", 8, ACTIVE)));
-        assert!(scope.includes(&build("fonts", 8, FAILED)));
+        let scope = WatchScope::from_history(&[build("fonts", 8, BuildState::Active)]);
+        assert!(scope.includes(&build("fonts", 8, BuildState::Active)));
+        assert!(scope.includes(&build("fonts", 8, BuildState::Failed)));
     }
 
     /// The race `--wait` exists for: the trigger queues a build that fails
@@ -572,19 +622,22 @@ pub(crate) mod tests {
     /// old failed build and cannot tell; a snapshot taken beforehand can.
     #[test]
     fn wait_catches_a_build_that_failed_before_the_trigger_returned() {
-        let before = [build("fonts", 7, SUCCESSFUL), build("other", 2, ACTIVE)];
+        let before = [
+            build("fonts", 7, BuildState::Successful),
+            build("other", 2, BuildState::Active),
+        ];
         let scope = WatchScope::from_snapshot(&before);
 
         assert!(
-            scope.includes(&build("fonts", 8, FAILED)),
+            scope.includes(&build("fonts", 8, BuildState::Failed)),
             "queued and failed inside the gap, and still ours"
         );
         assert!(
-            !scope.includes(&build("fonts", 7, SUCCESSFUL)),
+            !scope.includes(&build("fonts", 7, BuildState::Successful)),
             "what was already there is not"
         );
         assert!(
-            !scope.includes(&build("other", 2, FAILED)),
+            !scope.includes(&build("other", 2, BuildState::Failed)),
             "nor is a build that was running before we triggered anything: a \
              stranger's failure is not this trigger's verdict"
         );
@@ -594,12 +647,12 @@ pub(crate) mod tests {
     /// does not depend on how fast it ran.
     #[test]
     fn explicitly_named_builds_are_followed_however_they_are_found() {
-        let scope =
-            WatchScope::from_history(&[build("fonts", 8, FAILED)]).with_explicit([BuildRef {
+        let scope = WatchScope::from_history(&[build("fonts", 8, BuildState::Failed)])
+            .with_explicit([BuildRef {
                 pkgbase: "fonts".to_string(),
                 number: 8,
             }]);
-        assert!(scope.includes(&build("fonts", 8, FAILED)));
+        assert!(scope.includes(&build("fonts", 8, BuildState::Failed)));
     }
 
     /// An update that reused an existing build row reports no new build, and
@@ -608,17 +661,50 @@ pub(crate) mod tests {
     #[test]
     fn a_reused_build_is_adopted_for_the_triggered_package_only() {
         let before = [
-            build("fonts", 7, SUCCESSFUL),
-            build("fonts", 8, ACTIVE),
-            build("other", 3, ACTIVE),
+            build("fonts", 7, BuildState::Successful),
+            build("fonts", 8, BuildState::Active),
+            build("other", 3, BuildState::Active),
         ];
-        let scope = WatchScope::from_snapshot(&before).adopting("fonts");
+        let scope = WatchScope::from_snapshot(&before).triggered("fonts", []);
 
-        assert!(scope.includes(&build("fonts", 8, ACTIVE)));
-        assert!(!scope.includes(&build("other", 3, ACTIVE)));
+        assert!(scope.includes(&build("fonts", 8, BuildState::Active)));
+        assert!(!scope.includes(&build("other", 3, BuildState::Active)));
         assert!(
-            !scope.includes(&build("fonts", 7, SUCCESSFUL)),
+            !scope.includes(&build("fonts", 7, BuildState::Successful)),
             "adoption is for work still in flight, not for the package's history"
         );
+    }
+
+    /// `--package` narrows what is followed, not what is looked at: a
+    /// dependency building under another name keeps the queue moving, so the
+    /// package's build waiting on it is not a stall.
+    #[test]
+    fn a_dependency_building_under_another_name_is_not_a_stall() {
+        let scope = WatchScope::from_history(&[]).only_package(Some("app".to_string()));
+        let in_flight = [
+            build("app", 2, BuildState::WaitingForDeps),
+            build("dep", 5, BuildState::Active),
+        ];
+        assert!(scope.includes(&in_flight[0]));
+        assert!(!scope.includes(&in_flight[1]));
+        assert_eq!(
+            Queue::of(&in_flight, &scope),
+            Queue {
+                building: true,
+                others_in_flight: 1,
+            }
+        );
+    }
+
+    /// The package filter goes to the server for the scope, so the package's
+    /// builds cannot fall off a page full of others; the queue is listed
+    /// whole, by state rather than by page.
+    #[test]
+    fn only_the_scope_is_narrowed_to_the_package() {
+        assert_eq!(scoped_query(Some("app")).pkgbase.as_deref(), Some("app"));
+        let queue = in_flight_query();
+        assert_eq!(queue.pkgbase, None);
+        assert_eq!(queue.limit, None);
+        assert_eq!(queue.states, BuildState::IN_PROGRESS);
     }
 }

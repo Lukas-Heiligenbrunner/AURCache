@@ -22,7 +22,8 @@ services:
   aurcache:
     build:
       context: ..
-      dockerfile: docker/hybrid.Dockerfile
+      dockerfile: docker/arch.Dockerfile
+      target: hybrid
     ports:
       - "${AURCACHE_PORT:-8080}:8080"          # Web UI + API
       - "${AURCACHE_MIRROR_PORT:-8081}:8081"   # Pacman repo

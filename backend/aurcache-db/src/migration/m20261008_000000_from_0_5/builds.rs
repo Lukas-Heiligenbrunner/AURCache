@@ -1,11 +1,13 @@
 //! Build-level conversions of a 0.5.0 database: a status and a number for
-//! every build, its log in a file, and what it produced measured.
+//! every build, at most one pending per package and platform, its log in a
+//! file, what it produced measured, and the package statuses derived from
+//! them.
 
 use aurcache_common::build_state::{BuildState, BuildTrigger, EndReason};
 use aurcache_common::fs::{REPO_ROOT, build_log_path};
 use sea_orm::{ConnectionTrait, FromQueryResult, Statement};
 use sea_orm_migration::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(DeriveIden)]
@@ -65,6 +67,72 @@ pub(super) async fn delete_unknown_platforms(manager: &SchemaManager<'_>) -> Res
                         .add(Expr::col(Builds::Platform).is_null())
                         .add(Expr::col(Builds::Platform).is_not_in(known)),
                 )
+                .to_owned(),
+        )
+        .await
+}
+
+/// Fail all but one of the builds 0.5.0 left pending for each package and
+/// platform, which the unique index on pending builds is about to forbid.
+///
+/// The one kept is the furthest along -- running, then queued, then waiting
+/// -- and then the one started last.
+pub(super) async fn fail_duplicate_pending_builds(
+    manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    #[derive(FromQueryResult)]
+    struct Pending {
+        id: i32,
+        pkg_id: i32,
+        platform: String,
+        status: i32,
+        start_time: Option<i64>,
+    }
+    const PRECEDENCE: [BuildState; 3] = [
+        BuildState::Active,
+        BuildState::Enqueued,
+        BuildState::WaitingForDeps,
+    ];
+    let db = manager.get_connection();
+    let mut pending = Pending::find_by_statement(
+        db.get_database_backend().build(
+            Query::select()
+                .columns([
+                    Builds::Id,
+                    Builds::PkgId,
+                    Builds::Platform,
+                    Builds::Status,
+                    Builds::StartTime,
+                ])
+                .from(Builds::Table)
+                .and_where(Expr::col(Builds::Status).is_in(PRECEDENCE.map(BuildState::as_i32))),
+        ),
+    )
+    .all(db)
+    .await?;
+
+    let rank = |status: i32| PRECEDENCE.iter().position(|state| state.as_i32() == status);
+    pending.sort_by(|a, b| {
+        rank(a.status)
+            .cmp(&rank(b.status))
+            .then(b.start_time.unwrap_or(0).cmp(&a.start_time.unwrap_or(0)))
+            .then(b.id.cmp(&a.id))
+    });
+    let mut seen = HashSet::new();
+    let to_fail: Vec<i32> = pending
+        .into_iter()
+        .filter(|build| !seen.insert((build.pkg_id, build.platform.clone())))
+        .map(|build| build.id)
+        .collect();
+    if to_fail.is_empty() {
+        return Ok(());
+    }
+    manager
+        .exec_stmt(
+            Query::update()
+                .table(Builds::Table)
+                .value(Builds::Status, BuildState::Failed.as_i32())
+                .and_where(Expr::col(Builds::Id).is_in(to_fail))
                 .to_owned(),
         )
         .await
@@ -339,24 +407,100 @@ pub(super) async fn delete_orphans(manager: &SchemaManager<'_>) -> Result<(), Db
 }
 
 /// Derive every package's status from its builds, as everything that changes
-/// a build's status does from now on.
+/// a build's status does from now on: from the newest build on each platform
+/// the package is built for, the most active first, then a failure, then a
+/// success. A package with no build on any of them keeps the status it has.
+///
+/// Its own copy of `aurcache_db::helpers::builds::refresh_package_status`,
+/// reading only the columns it names: that one reads through the entities,
+/// which gain every column later versions add.
 pub(super) async fn derive_package_statuses(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     #[derive(FromQueryResult)]
     struct Package {
         id: i32,
+        platforms: Option<String>,
     }
+    #[derive(FromQueryResult)]
+    struct Newest {
+        pkg_id: i32,
+        platform: String,
+        status: i32,
+    }
+    const PRECEDENCE: [BuildState; 6] = [
+        BuildState::Active,
+        BuildState::Publishing,
+        BuildState::Enqueued,
+        BuildState::WaitingForDeps,
+        BuildState::Failed,
+        BuildState::Successful,
+    ];
     let db = manager.get_connection();
-    let ids = Package::find_by_statement(
-        db.get_database_backend().build(
+    let backend = db.get_database_backend();
+    let packages = Package::find_by_statement(
+        backend.build(
             Query::select()
-                .column(Alias::new("id"))
+                .columns([Alias::new("id"), Alias::new("platforms")])
                 .from(Alias::new("packages")),
         ),
     )
     .all(db)
     .await?;
-    for Package { id } in ids {
-        crate::helpers::builds::refresh_package_status(db, id).await?;
+
+    // The newest build per package and platform: the one whose number is
+    // the highest of that package and platform.
+    let latest = Alias::new("latest");
+    let newest_number = Query::select()
+        .expr(Expr::col((latest.clone(), Builds::Number)).max())
+        .from_as(Builds::Table, latest.clone())
+        .and_where(
+            Expr::col((latest.clone(), Builds::PkgId)).equals((Builds::Table, Builds::PkgId)),
+        )
+        .and_where(Expr::col((latest, Builds::Platform)).equals((Builds::Table, Builds::Platform)))
+        .to_owned();
+    let newest = Newest::find_by_statement(
+        backend.build(
+            Query::select()
+                .columns([Builds::PkgId, Builds::Platform, Builds::Status])
+                .from(Builds::Table)
+                .and_where(Expr::col((Builds::Table, Builds::Number)).in_subquery(newest_number)),
+        ),
+    )
+    .all(db)
+    .await?;
+    let mut by_package: HashMap<i32, Vec<Newest>> = HashMap::new();
+    for build in newest {
+        by_package.entry(build.pkg_id).or_default().push(build);
+    }
+
+    let rank = |status: i32| PRECEDENCE.iter().position(|state| state.as_i32() == status);
+    for package in packages {
+        let Some(builds) = by_package.get(&package.id) else {
+            continue;
+        };
+        let configured: Vec<&str> = package
+            .platforms
+            .as_deref()
+            .unwrap_or_default()
+            .split(';')
+            .map(str::trim)
+            .collect();
+        let Some(status) = builds
+            .iter()
+            .filter(|build| configured.contains(&build.platform.as_str()))
+            .map(|build| build.status)
+            .min_by_key(|status| rank(*status))
+        else {
+            continue;
+        };
+        manager
+            .exec_stmt(
+                Query::update()
+                    .table(Alias::new("packages"))
+                    .value(Alias::new("status"), status)
+                    .and_where(Expr::col(Alias::new("id")).eq(package.id))
+                    .to_owned(),
+            )
+            .await?;
     }
     Ok(())
 }

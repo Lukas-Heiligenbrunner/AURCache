@@ -1,20 +1,12 @@
 //! Append-only file storage for a build's log output.
 //!
-//! Logs used to live in `builds.output` and grow by `SET output = output || $1`.
-//! That reads as an O(1) append and is anything but: under MVCC the whole value
-//! is detoasted, decompressed, concatenated, recompressed and written as a new
-//! row version, leaving the old one for VACUUM. Measured against a 30 MB value,
-//! twenty appends took 3.7 s where twenty appends to an empty value took 0.3 ms
-//! -- four orders of magnitude, paid on every flush, growing with the log. A
-//! large build wrote gigabytes to store megabytes.
-//!
-//! A file appends in O(new bytes) and is read back by seeking to an offset, so
-//! both directions become proportional to what actually changed. Byte offsets
-//! are also unambiguous in a way the old line offsets were not: `substr` on
-//! `text` counts codepoints and has to decode UTF-8 from the start to find the
-//! Nth one, which measured 6x slower than slicing bytes even before the
-//! transfer cost. And it removes the one dialect branch that lived in a query
-//! path rather than a migration.
+//! A file rather than a database column: appending to a text column
+//! (`SET output = output || $1`) rewrites the whole value under MVCC, so each
+//! flush costs the size of the log so far rather than of what it adds. A file
+//! appends in O(new bytes) and is read back by seeking to a byte offset, so
+//! both directions are proportional to what actually changed -- and a byte
+//! offset needs no UTF-8 decoding from the start to find, as a codepoint
+//! offset into `text` would.
 
 use std::io::SeekFrom;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -96,8 +88,8 @@ pub async fn build_log_size(pkgbase: &str, number: i32) -> Option<u64> {
 /// Delete every log belonging to one package.
 ///
 /// One directory removal, which is the practical payoff of naming logs after
-/// the build identity rather than the id: the old layout needed the ids of
-/// every build read out before its rows were deleted.
+/// the build identity rather than the id: no build's id has to be read out
+/// before its rows are deleted.
 ///
 /// Best-effort and never fatal: the rows are going away regardless, and a log
 /// left behind is wasted bytes rather than a correctness problem. Deleting the

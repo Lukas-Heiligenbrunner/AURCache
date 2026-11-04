@@ -751,7 +751,7 @@ mod tests {
             PoolConfig {
                 backing: Backing::Image {
                     path: "/nonexistent/pool.img".into(),
-                    reserve: false,
+                    allocation: aurcache_chroot::Allocation::Sparse,
                 },
                 mountpoint: "/nonexistent".into(),
                 total: 0,

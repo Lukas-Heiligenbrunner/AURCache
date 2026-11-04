@@ -5,7 +5,10 @@
 //! backup, or putting one back.
 
 use crate::screens::settings::Section;
-use aurcache_client::{ExistingPackagePolicy, RestoreEntry, RestoreOutcome, SecretsPolicy};
+use crate::widgets::Modal;
+use aurcache_client::{
+    ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretsPolicy,
+};
 use dioxus::html::{FileData, HasFileData};
 use dioxus::prelude::*;
 
@@ -57,67 +60,67 @@ pub fn BackupSection() -> Element {
 fn DumpDialog(open: Signal<bool>) -> Element {
     let mut with_secrets = use_signal(|| false);
 
-    let close = move |_| {
+    let mut close = move || {
         open.set(false);
         with_secrets.set(false);
     };
 
     rsx! {
-        div { class: if open() { "modal modal-open" } else { "modal" },
-            div { class: "modal-box",
-                h3 { class: "font-bold text-lg", "Export configuration" }
-                div { class: "py-4 space-y-3",
-                    label { class: "flex items-start gap-3 cursor-pointer",
-                        input {
-                            r#type: "checkbox",
-                            class: "checkbox checkbox-sm mt-0.5",
-                            aria_label: "Include secrets",
-                            checked: with_secrets(),
-                            onchange: move |e| with_secrets.set(e.checked()),
-                        }
-                        div {
-                            div { class: "text-sm", "Include secrets" }
-                            div { class: "text-xs opacity-60",
-                                "The CA private key, the certificates your workers hold, and \
-                                 API token hashes. Restoring these makes a move invisible to \
-                                 your workers: they reconnect instead of re-enrolling."
-                            }
-                        }
+        Modal {
+            open: open(),
+            label: "Export configuration",
+            on_close: move |()| close(),
+            h3 { class: "font-bold text-lg", "Export configuration" }
+            div { class: "py-4 space-y-3",
+                label { class: "flex items-start gap-3 cursor-pointer",
+                    input {
+                        r#type: "checkbox",
+                        class: "checkbox checkbox-sm mt-0.5",
+                        aria_label: "Include secrets",
+                        checked: with_secrets(),
+                        onchange: move |e| with_secrets.set(e.checked()),
                     }
-                    // Shown only once the box is ticked. A warning that is
-                    // always on screen is one nobody reads by the time it
-                    // matters.
-                    if with_secrets() {
-                        div { class: "alert alert-warning text-sm",
-                            div {
-                                div { class: "font-semibold", "This file is a credential." }
-                                div { class: "text-xs",
-                                    "Anyone holding it can act as a build worker for this \
-                                     server, for as long as this CA lives. Keep it as you \
-                                     would keep a private key."
-                                }
-                            }
+                    div {
+                        div { class: "text-sm", "Include secrets" }
+                        div { class: "text-xs opacity-60",
+                            "The CA private key, the certificates your workers hold, and \
+                             API token hashes. Restoring these makes a move invisible to \
+                             your workers: they reconnect instead of re-enrolling."
                         }
                     }
                 }
-                div { class: "modal-action",
-                    button { class: "btn btn-ghost", onclick: close, "Cancel" }
-                    a {
-                        class: if with_secrets() { "btn btn-warning" } else { "btn btn-primary" },
-                        href: if with_secrets() {
-                            "/api/dump?include_secrets=true"
-                        } else {
-                            "/api/dump"
-                        },
-                        // The server names the file; this only asks the browser
-                        // to save rather than navigate.
-                        download: "",
-                        onclick: close,
-                        if with_secrets() { "Download with secrets" } else { "Download" }
+                // Shown only once the box is ticked. A warning that is
+                // always on screen is one nobody reads by the time it
+                // matters.
+                if with_secrets() {
+                    div { class: "alert alert-warning text-sm",
+                        div {
+                            div { class: "font-semibold", "This file is a credential." }
+                            div { class: "text-xs",
+                                "Anyone holding it can act as a build worker for this \
+                                 server, for as long as this CA lives. Keep it as you \
+                                 would keep a private key."
+                            }
+                        }
                     }
                 }
             }
-            div { class: "modal-backdrop", onclick: close }
+            div { class: "modal-action",
+                button { class: "btn btn-ghost", onclick: move |_| close(), "Cancel" }
+                a {
+                    class: if with_secrets() { "btn btn-warning" } else { "btn btn-primary" },
+                    href: if with_secrets() {
+                        "/api/dump?include_secrets=true"
+                    } else {
+                        "/api/dump"
+                    },
+                    // The server names the file; this only asks the browser
+                    // to save rather than navigate.
+                    download: "",
+                    onclick: move |_| close(),
+                    if with_secrets() { "Download with secrets" } else { "Download" }
+                }
+            }
         }
     }
 }
@@ -149,7 +152,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         busy.set(false);
     };
 
-    let close = move |_| {
+    let mut close = move || {
         open.set(false);
         reset();
     };
@@ -205,10 +208,13 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         } else {
             SecretsPolicy::Ignore
         };
-        match client
-            .restore(bytes(), dry_run, on_existing(), clear(), secrets_policy)
-            .await
-        {
+        let options = RestoreOptions {
+            dry_run,
+            on_existing: on_existing(),
+            clear: clear(),
+            secrets: secrets_policy,
+        };
+        match client.restore(bytes(), &options).await {
             Ok(accepted) => {
                 if dry_run {
                     preview.set(accepted.preview);
@@ -245,74 +251,76 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
     };
 
     rsx! {
-        div { class: if open() { "modal modal-open" } else { "modal" },
-            div { class: "modal-box max-w-2xl",
-                h3 { class: "font-bold text-lg", "Restore from a dump" }
-                div { class: "py-4 space-y-4",
-                    // The drop target is also the picker: one region that
-                    // accepts a file however you happen to give it one.
-                    label {
-                        class: if hovering() {
-                            "flex flex-col items-center justify-center gap-1 border-2 border-dashed border-primary bg-primary/10 rounded-box py-6 cursor-pointer"
-                        } else {
-                            "flex flex-col items-center justify-center gap-1 border-2 border-dashed border-base-300 rounded-box py-6 cursor-pointer hover:border-base-content/40"
-                        },
-                        ondragover: move |e| {
-                            // Without this the browser navigates to the file
-                            // instead of offering it to the page.
-                            e.prevent_default();
-                            hovering.set(true);
-                        },
-                        ondragleave: move |_| hovering.set(false),
-                        ondrop: move |e| async move {
-                            // Without this the browser navigates to the file
-                            // instead of offering it to the page.
-                            e.prevent_default();
+        Modal {
+            open: open(),
+            label: "Restore from a dump",
+            on_close: move |()| close(),
+            locked: busy(),
+            class: "max-w-2xl",
+            h3 { class: "font-bold text-lg", "Restore from a dump" }
+            div { class: "py-4 space-y-4",
+                // The drop target is also the picker: one region that
+                // accepts a file however you happen to give it one.
+                label {
+                    class: if hovering() {
+                        "flex flex-col items-center justify-center gap-1 border-2 border-dashed border-primary bg-primary/10 rounded-box py-6 cursor-pointer"
+                    } else {
+                        "flex flex-col items-center justify-center gap-1 border-2 border-dashed border-base-300 rounded-box py-6 cursor-pointer hover:border-base-content/40"
+                    },
+                    ondragover: move |e| {
+                        // Without this the browser navigates to the file
+                        // instead of offering it to the page.
+                        e.prevent_default();
+                        hovering.set(true);
+                    },
+                    ondragleave: move |_| hovering.set(false),
+                    ondrop: move |e| async move {
+                        // Without this the browser navigates to the file
+                        // instead of offering it to the page.
+                        e.prevent_default();
+                        take_file(e.files()).await;
+                    },
+                    input {
+                        r#type: "file",
+                        class: "hidden",
+                        accept: ".gz,.tar.gz,application/gzip",
+                        onchange: move |e| async move {
                             take_file(e.files()).await;
                         },
-                        input {
-                            r#type: "file",
-                            class: "hidden",
-                            accept: ".gz,.tar.gz,application/gzip",
-                            onchange: move |e| async move {
-                                take_file(e.files()).await;
-                            },
-                        }
-                        if file_name().is_empty() {
-                            span { class: "text-sm", "Drop a dump here, or click to choose one" }
-                            span { class: "text-xs opacity-60", "aurcache-dump-….tar.gz" }
-                        } else {
-                            span { class: "font-mono text-sm break-all", "{file_name()}" }
-                            span { class: "text-xs opacity-60", "Click to choose a different file" }
-                        }
                     }
-
-                    RestoreOptionsForm { on_existing, clear, secrets }
-
-                    if let Some(message) = error() {
-                        div { class: "alert alert-error text-sm", span { "{message}" } }
-                    }
-                    if !preview().is_empty() {
-                        RestoreReport { entries: preview(), blocked: blocked() }
+                    if file_name().is_empty() {
+                        span { class: "text-sm", "Drop a dump here, or click to choose one" }
+                        span { class: "text-xs opacity-60", "aurcache-dump-….tar.gz" }
+                    } else {
+                        span { class: "font-mono text-sm break-all", "{file_name()}" }
+                        span { class: "text-xs opacity-60", "Click to choose a different file" }
                     }
                 }
-                div { class: "modal-action",
-                    button { class: "btn btn-ghost", disabled: busy(), onclick: close, "Close" }
-                    button {
-                        class: "btn",
-                        disabled: busy() || bytes().is_empty(),
-                        onclick: move |_| run(true),
-                        "Preview"
-                    }
-                    button {
-                        class: if clear() { "btn btn-warning" } else { "btn btn-primary" },
-                        disabled: busy() || bytes().is_empty() || blocked(),
-                        onclick: move |_| run(false),
-                        if busy() { "Working…" } else if clear() { "Replace everything" } else { "Restore" }
-                    }
+
+                RestoreOptionsForm { on_existing, clear, secrets }
+
+                if let Some(message) = error() {
+                    div { class: "alert alert-error text-sm", span { "{message}" } }
+                }
+                if !preview().is_empty() {
+                    RestoreReport { entries: preview(), blocked: blocked() }
                 }
             }
-            div { class: "modal-backdrop", onclick: close }
+            div { class: "modal-action",
+                button { class: "btn btn-ghost", disabled: busy(), onclick: move |_| close(), "Close" }
+                button {
+                    class: "btn",
+                    disabled: busy() || bytes().is_empty(),
+                    onclick: move |_| run(true),
+                    "Preview"
+                }
+                button {
+                    class: if clear() { "btn btn-warning" } else { "btn btn-primary" },
+                    disabled: busy() || bytes().is_empty() || blocked(),
+                    onclick: move |_| run(false),
+                    if busy() { "Working…" } else if clear() { "Replace everything" } else { "Restore" }
+                }
+            }
         }
     }
 }

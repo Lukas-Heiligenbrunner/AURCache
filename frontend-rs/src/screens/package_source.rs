@@ -1,6 +1,7 @@
 //! Editing a package's source files.
 
 use crate::routes::Route;
+use crate::widgets::{ConfirmDialog, Consequence, Modal};
 use aurcache_client::SourceFileContent;
 use dioxus::prelude::*;
 
@@ -35,17 +36,25 @@ fn shown_content(content: &SourceFileContent) -> &str {
         .unwrap_or(&content.original_content)
 }
 
+/// What the open file's draft is, measured against what it was opened from.
+/// All false while no file is open.
+#[derive(Clone, Copy, Default)]
+struct FileState {
+    /// The draft differs from what the editor opened with.
+    edited: bool,
+    /// The file carries a patch that applied.
+    patched: bool,
+    /// The stored patch no longer applies.
+    broken: bool,
+    /// The draft differs from the pristine upstream file.
+    differs_from_upstream: bool,
+    /// A patch is stored for the file, applying or not.
+    has_patch: bool,
+}
+
 #[component]
 pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
-    // `use_reactive` so the fetch follows the route; see the note on the
-    // package screen for what a captured name does when the parameter changes.
-    let mut package = use_resource(use_reactive(&pkgbase, |pkgbase| async move {
-        crate::api::client()?
-            .get_package(&pkgbase)
-            .await
-            .map_err(|e| e.to_string())
-    }));
-
+    // `use_reactive` so the fetch follows the route, as the scope's own does.
     let files = use_resource(use_reactive(&pkgbase, |pkgbase| async move {
         let client = crate::api::client()?;
         client
@@ -98,18 +107,23 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
         },
     ));
 
-    let edited = loaded
-        .read()
-        .as_ref()
-        .is_some_and(|c| draft() != shown_content(c));
-    let patched = loaded
-        .read()
-        .as_ref()
-        .is_some_and(|c| c.patched_content.is_some());
-    let broken = loaded
-        .read()
-        .as_ref()
-        .is_some_and(|c| c.patch_error.is_some());
+    let state = match loaded.read().as_ref() {
+        Some(c) => FileState {
+            edited: draft() != shown_content(c),
+            patched: c.patched_content.is_some(),
+            broken: c.patch_error.is_some(),
+            differs_from_upstream: draft() != c.original_content,
+            has_patch: c.stored_patch.is_some(),
+        },
+        None => FileState::default(),
+    };
+    let FileState {
+        edited,
+        patched,
+        broken,
+        differs_from_upstream: can_revert_to_upstream,
+        has_patch,
+    } = state;
     let can_save = (edited || broken) && !(editor.loading)();
     // Two ways back, because there are two things an edit can be measured
     // against. The saved version is what the editor opened with: the patched
@@ -117,37 +131,12 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
     // drops every local change, saved or not, and a save then removes the
     // patch.
     let can_revert_to_saved = edited;
-    let can_revert_to_upstream = loaded
-        .read()
-        .as_ref()
-        .is_some_and(|c| draft() != c.original_content);
-    let has_patch = loaded
-        .read()
-        .as_ref()
-        .is_some_and(|c| c.stored_patch.is_some());
 
     // The Save & Rebuild handler takes `pkgbase` itself; the discard dialog,
     // rendered after it, needs its own copy.
     let pkgbase_for_discard = pkgbase.clone();
 
     rsx! {
-        div { class: "space-y-4",
-        // The package's own header stays, so editing its sources happens in
-        // sight of what is being edited rather than on a bare page. It carries
-        // the trail, so the breadcrumb sits in the same place on every
-        // package-scoped page.
-        match &*package.read_unchecked() {
-            Some(Ok(pkg)) => rsx! {
-                crate::screens::PackageHeader {
-                    pkg: pkg.clone(),
-                    trail: vec![("Sources".to_string(), None)],
-                    on_rebuilt: move |()| package.restart(),
-                }
-            },
-            // Its absence must not block the editor: the files are what this
-            // page is for, and they load independently.
-            _ => rsx! {},
-        }
         crate::source_editor::SourcePane {
             title: pkgbase.clone(),
             files: match &*files.read_unchecked() {
@@ -263,18 +252,18 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
                             let pkgbase = pkgbase.clone();
                             async move {
                                 let Some(path) = selected() else { return };
-                                let client = match crate::api::client() {
-                                    Ok(client) => client,
-                                    Err(e) => {
-                                        error.set(Some(e));
-                                        return;
-                                    }
-                                };
-                                match client.put_source_file(&pkgbase, &path, &draft()).await {
+                                let saved = async {
+                                    crate::api::client()?
+                                        .put_source_file(&pkgbase, &path, &draft())
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                }
+                                .await;
+                                match saved {
                                     Ok(()) => {
                                         navigator().push(Route::Package { pkgbase: pkgbase.clone() });
                                     }
-                                    Err(e) => error.set(Some(e.to_string())),
+                                    Err(e) => error.set(Some(e)),
                                 }
                             }
                         }
@@ -365,120 +354,92 @@ pub fn SourceEditor(pkgbase: String, initial_path: Option<String>) -> Element {
         // Opening another file replaces the draft, so unsaved edits ask first.
         // "Stay" is the default and what clicking away means.
         if let Some(next) = pending_file() {
-            div {
-                class: "modal modal-open",
-                role: "dialog",
-                aria_modal: "true",
-                aria_label: "Discard unsaved changes",
-                div { class: "modal-box",
-                    h3 { class: "font-bold text-lg", "Discard changes?" }
-                    p { class: "text-sm opacity-70 pt-2",
-                        {format!(
-                            "{} has edits that are not saved. Opening {next} discards them.",
-                            selected().unwrap_or_default()
-                        )}
+            ConfirmDialog {
+                open: true,
+                label: "Discard unsaved changes",
+                title: "Discard changes?",
+                cancel: "Stay",
+                confirm: "Discard and continue",
+                consequence: Consequence::Discards,
+                on_cancel: move |()| pending_file.set(None),
+                on_confirm: {
+                    let pkgbase = pkgbase_for_discard;
+                    move |()| {
+                        let Some(path) = pending_file.take() else { return };
+                        let pkgbase = pkgbase.clone();
+                        spawn(async move { open_file(pkgbase, path).await });
                     }
-                    div { class: "modal-action",
-                        button {
-                            class: "btn btn-sm",
-                            onclick: move |_| pending_file.set(None),
-                            "Stay"
-                        }
-                        button {
-                            class: "btn btn-warning btn-sm",
-                            onclick: {
-                                let pkgbase = pkgbase_for_discard;
-                                move |_| {
-                                    let Some(path) = pending_file.take() else { return };
-                                    let pkgbase = pkgbase.clone();
-                                    spawn(async move { open_file(pkgbase, path).await });
-                                }
-                            },
-                            "Discard and continue"
-                        }
-                    }
-                }
-                button {
-                    class: "modal-backdrop",
-                    onclick: move |_| pending_file.set(None),
-                    aria_label: "Stay",
-                    "Close"
-                }
+                },
+                {format!(
+                    "{} has edits that are not saved. Opening {next} discards them.",
+                    selected().unwrap_or_default()
+                )}
             }
         }
         if show_patch() {
             if let Some(c) = loaded.read().as_ref()
                 && let Some(patch) = c.stored_patch.clone()
             {
-                div {
-                    class: "modal modal-open",
-                    role: "dialog",
-                    aria_modal: "true",
-                    aria_label: "Stored patch",
-                    div { class: "modal-box max-w-3xl",
-                        h3 { class: "font-bold text-lg", "Stored patch" }
-                        p { class: "text-xs opacity-60 font-mono break-all", "{c.path}" }
-                        if let Some(err) = patch_copy_error() {
-                            div { class: "alert alert-error text-sm mt-2",
-                                span { "{err}" }
-                            }
+                Modal {
+                    open: true,
+                    label: "Stored patch",
+                    on_close: move |()| {
+                        show_patch.set(false);
+                        patch_copy_error.set(None);
+                    },
+                    class: "max-w-3xl",
+                    h3 { class: "font-bold text-lg", "Stored patch" }
+                    p { class: "text-xs opacity-60 font-mono break-all", "{c.path}" }
+                    if let Some(err) = patch_copy_error() {
+                        div { class: "alert alert-error text-sm mt-2",
+                            span { "{err}" }
                         }
-                        pre { class: "max-h-[60vh] overflow-auto text-xs font-mono mt-3",
-                            for (index, line) in patch.lines().enumerate() {
-                                div {
-                                    key: "{index}",
-                                    class: "whitespace-pre-wrap {DiffLineKind::of(line).classes()}",
-                                    "{line}"
-                                }
-                            }
-                        }
-                        div { class: "modal-action",
-                            {
-                                let patch_for_copy = patch;
-                                rsx! {
-                                    button {
-                                        class: "btn btn-sm",
-                                        disabled: patch_copied(),
-                                        onclick: move |_| {
-                                            let patch = patch_for_copy.clone();
-                                            async move {
-                                                match crate::clipboard::copy_text(&patch).await {
-                                                    Ok(()) => {
-                                                        patch_copied.set(true);
-                                                        patch_copy_error.set(None);
-                                                        gloo_timers::future::TimeoutFuture::new(2000).await;
-                                                        patch_copied.set(false);
-                                                    }
-                                                    Err(e) => patch_copy_error.set(Some(e.message("the patch"))),
-                                                }
-                                            }
-                                        },
-                                        if patch_copied() { "Copied" } else { "Copy" }
-                                    }
-                                }
-                            }
-                            button {
-                                class: "btn btn-sm",
-                                onclick: move |_| {
-                                    show_patch.set(false);
-                                    patch_copy_error.set(None);
-                                },
-                                "Close"
+                    }
+                    pre { class: "max-h-[60vh] overflow-auto text-xs font-mono mt-3",
+                        for (index, line) in patch.lines().enumerate() {
+                            div {
+                                key: "{index}",
+                                class: "whitespace-pre-wrap {DiffLineKind::of(line).classes()}",
+                                "{line}"
                             }
                         }
                     }
-                    button {
-                        class: "modal-backdrop",
-                        onclick: move |_| {
-                            show_patch.set(false);
-                            patch_copy_error.set(None);
-                        },
-                        aria_label: "Close stored patch",
-                        "Close"
+                    div { class: "modal-action",
+                        {
+                            let patch_for_copy = patch;
+                            rsx! {
+                                button {
+                                    class: "btn btn-sm",
+                                    disabled: patch_copied(),
+                                    onclick: move |_| {
+                                        let patch = patch_for_copy.clone();
+                                        async move {
+                                            match crate::clipboard::copy_text(&patch).await {
+                                                Ok(()) => {
+                                                    patch_copied.set(true);
+                                                    patch_copy_error.set(None);
+                                                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                                                    patch_copied.set(false);
+                                                }
+                                                Err(e) => patch_copy_error.set(Some(e.message("the patch"))),
+                                            }
+                                        }
+                                    },
+                                    if patch_copied() { "Copied" } else { "Copy" }
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn btn-sm",
+                            onclick: move |_| {
+                                show_patch.set(false);
+                                patch_copy_error.set(None);
+                            },
+                            "Close"
+                        }
                     }
                 }
             }
-        }
         }
     }
 }

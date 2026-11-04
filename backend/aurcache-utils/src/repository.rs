@@ -148,7 +148,7 @@ impl Changes {
     }
 }
 
-/// One change to the repository, holding its lock (the `_lock` field). See
+/// One change to the repository, holding its lock (the `lock` field). See
 /// [`Repository::begin`].
 ///
 /// Reading what the repository publishes, to decide what to change, goes
@@ -160,7 +160,8 @@ pub struct Update<'a> {
     id: u64,
     /// The repository lock: the guard of [`Repository`]'s mutex, taken by
     /// [`Repository::begin`] and released when the update is committed or
-    /// dropped. Never read, only held -- hence the underscore.
+    /// dropped. Shared with the blocking tasks the commit runs, so that the
+    /// lock outlives one whose awaiting future is cancelled.
     ///
     /// It is exclusive *write* access to the repository, which is three things
     /// kept in step:
@@ -190,7 +191,7 @@ pub struct Update<'a> {
     /// and are written by its uploads without the lock; every other table; and
     /// anything outside this process -- it is an in-process mutex, so a second
     /// server on the same repository, or a hand edit, is not serialized.
-    _lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
+    lock: Lock,
     /// What the change adds and retires, applied by [`Update::commit`].
     changes: Changes,
 }
@@ -245,12 +246,6 @@ impl Update<'_> {
         Ok(rows.into_iter().map(|row| self.published(row)).collect())
     }
 
-    /// The recorded changes, leaving none behind, for [`Update::commit`] to
-    /// apply.
-    fn take_changes(&mut self) -> Changes {
-        std::mem::take(&mut self.changes)
-    }
-
     fn published(&self, row: files::Model) -> PublishedFile {
         PublishedFile {
             update: self.id,
@@ -299,7 +294,7 @@ impl Update<'_> {
         T: Send,
     {
         let root = self.repo.root().to_path_buf();
-        let changes = Arc::new(self.take_changes());
+        let changes = Arc::new(std::mem::take(&mut self.changes));
         if let Some(addition) = changes.add.iter().find(|a| !a.staged.starts_with(&root)) {
             anyhow::bail!(
                 "{} is not staged under {}",
@@ -310,11 +305,10 @@ impl Update<'_> {
         let plan = {
             let root = root.clone();
             let changes = Arc::clone(&changes);
-            let lock = Arc::clone(&self._lock);
+            let lock = Arc::clone(&self.lock);
             tokio::task::spawn_blocking(move || {
                 let _lock = lock;
-                let prepared = prepare(&root, &changes)?;
-                Finalization::prepare(&root, &changes, &prepared)
+                Finalization::stage(&root, &changes)
             })
             .await??
         };
@@ -368,7 +362,7 @@ impl Update<'_> {
             }
         };
         self.repo
-            .finalize(db, plan, Arc::clone(&self._lock))
+            .finalize(db, plan, Arc::clone(&self.lock))
             .await
             .map_err(|error| anyhow::Error::new(FinalizationPending(error)))?;
         Ok(committed)
@@ -422,20 +416,9 @@ mod plan_row {
     }
 }
 
-/// The new databases for one platform, written beside the current ones.
-struct Prepared {
-    db: PathBuf,
-    db_next: PathBuf,
-    files: PathBuf,
-    files_next: PathBuf,
-}
-
-impl Prepared {
-    fn discard(&self) {
-        let _ = std::fs::remove_file(&self.db_next);
-        let _ = std::fs::remove_file(&self.files_next);
-    }
-}
+/// The repository lock, held: see [`Update`]'s field of that name. Shared, so
+/// a blocking task can hold it too.
+type Lock = Arc<tokio::sync::OwnedMutexGuard<()>>;
 
 impl Repository {
     #[must_use]
@@ -488,6 +471,15 @@ impl Repository {
         self.staging_root().join(build_id.to_string())
     }
 
+    /// Remove a build's [`Repository::staging_dir`], once nothing in it is
+    /// going to be published.
+    ///
+    /// Best-effort: the directory is often gone already, and one that cannot
+    /// be removed holds nothing anything reads again.
+    pub async fn discard_staging(&self, build_id: i32) {
+        let _ = tokio::fs::remove_dir_all(self.staging_dir(build_id)).await;
+    }
+
     /// The directory every build's [`Repository::staging_dir`] is in.
     #[must_use]
     pub fn staging_root(&self) -> PathBuf {
@@ -509,27 +501,28 @@ impl Repository {
     /// change able to interleave. Dropping it without committing changes
     /// nothing.
     pub async fn begin(&self, db: &DatabaseConnection) -> anyhow::Result<Update<'_>> {
-        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        let lock = self.lock().await;
         self.recover_locked(db, Arc::clone(&lock)).await?;
         Ok(Update {
             repo: self,
             id: self.updates.fetch_add(1, Ordering::Relaxed),
-            _lock: lock,
+            lock,
             changes: Changes::default(),
         })
     }
 
     /// Finish a previously committed update before accepting more repository work.
     pub async fn recover(&self, db: &DatabaseConnection) -> anyhow::Result<()> {
-        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        let lock = self.lock().await;
         self.recover_locked(db, lock).await
     }
 
-    async fn recover_locked(
-        &self,
-        db: &DatabaseConnection,
-        lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
-    ) -> anyhow::Result<()> {
+    /// Wait for the repository lock.
+    async fn lock(&self) -> Lock {
+        Arc::new(Arc::clone(&self.lock).lock_owned().await)
+    }
+
+    async fn recover_locked(&self, db: &DatabaseConnection, lock: Lock) -> anyhow::Result<()> {
         if let Some(serialized) = plan_row::read(db).await? {
             let plan: Finalization = serde_json::from_str(&serialized)?;
             self.finalize(db, plan, lock)
@@ -543,7 +536,7 @@ impl Repository {
         &self,
         db: &DatabaseConnection,
         plan: Finalization,
-        lock: Arc<tokio::sync::OwnedMutexGuard<()>>,
+        lock: Lock,
     ) -> anyhow::Result<()> {
         let log = self.log.clone();
         let task_lock = Arc::clone(&lock);
@@ -581,7 +574,7 @@ impl Repository {
         now: Instant,
         grace: Duration,
     ) -> anyhow::Result<usize> {
-        let lock = Arc::new(Arc::clone(&self.lock).lock_owned().await);
+        let lock = self.lock().await;
         self.recover_locked(db, Arc::clone(&lock)).await?;
         let root = self.root.clone();
         let known = std::mem::take(&mut *self.retired_times());
@@ -622,59 +615,6 @@ impl Repository {
     }
 }
 
-/// Step 1: the new databases of every platform the changes touch, beside the
-/// current ones. Dot-named, so never served; discarded if anything fails.
-fn prepare(root: &Path, changes: &Changes) -> anyhow::Result<Vec<Prepared>> {
-    let mut prepared = Vec::new();
-    for platform in changes.platforms() {
-        let dir = Repository::platform_dir(root, platform);
-        let result = (|| {
-            std::fs::create_dir_all(&dir)?;
-            let p = Prepared {
-                db: dir.join(DB_ARCHIVE),
-                db_next: dir.join(format!(".{DB_ARCHIVE}.next")),
-                files: dir.join(FILES_ARCHIVE),
-                files_next: dir.join(format!(".{FILES_ARCHIVE}.next")),
-            };
-            let remove: Vec<String> = changes
-                .retire
-                .iter()
-                .filter(|r| r.platform == platform)
-                .map(|r| r.filename.clone())
-                .collect();
-            let add: Vec<PackageEntry> = changes
-                .add
-                .iter()
-                .filter(|a| a.platform == platform)
-                .map(|a| a.entry.clone())
-                .collect();
-            let written = pacman_repo_utils::write_updated_databases(
-                &p.db,
-                &p.files,
-                &remove,
-                &add,
-                &p.db_next,
-                &p.files_next,
-            );
-            if let Err(e) = written {
-                p.discard();
-                return Err(e);
-            }
-            Ok(p)
-        })();
-        match result {
-            Ok(p) => prepared.push(p),
-            Err(e) => {
-                for p in &prepared {
-                    p.discard();
-                }
-                return Err(e.context(format!("preparing the {platform} databases")));
-            }
-        }
-    }
-    Ok(prepared)
-}
-
 /// A durable filesystem plan, recorded in the same transaction as its SQL changes.
 #[derive(Serialize, Deserialize)]
 struct Finalization {
@@ -689,72 +629,117 @@ struct FileMove {
 }
 
 impl Finalization {
-    fn prepare(root: &Path, changes: &Changes, prepared: &[Prepared]) -> anyhow::Result<Self> {
+    /// Everything the update will move into place, made ready beside where it
+    /// goes and synced to disk, before anything is committed: each package
+    /// file and its signature linked out of staging, then each touched
+    /// platform's new databases written beside the current ones. All of it is
+    /// private -- staging and dot-named files are never served -- and all of it
+    /// is removed again if any step fails.
+    ///
+    /// The packages are planned before the databases, so a replay moves them
+    /// in first: a database never lists a file that is not there yet.
+    fn stage(root: &Path, changes: &Changes) -> anyhow::Result<Self> {
         let mut plan = Self {
             moves: Vec::new(),
             retired: Vec::new(),
         };
-        let result = (|| {
-            let mut added = HashSet::new();
-            for addition in &changes.add {
-                let filename = addition.entry.filename.as_str();
-                let dir = Repository::platform_dir(root, addition.platform);
-                added.insert((addition.platform, filename));
-                // Preserve uploads until publication (including dependent promotion)
-                // finishes. Recovery can then safely retry a still-PUBLISHING build.
-                for source in [
-                    addition.staged.clone(),
-                    with_suffix(&addition.staged, ".sig"),
-                ] {
-                    if source != addition.staged && !source.exists() {
-                        continue;
-                    }
-                    let pending = with_suffix(&source, ".publishing");
-                    if pending.exists() {
-                        std::fs::remove_file(&pending)?;
-                    }
-                    link_or_copy(&source, &pending)?;
-                    let destination = if source == addition.staged {
-                        dir.join(filename)
-                    } else {
-                        dir.join(format!("{filename}.sig"))
-                    };
-                    plan.moves.push(FileMove {
-                        source: pending.clone(),
-                        destination,
-                    });
-                    std::fs::File::open(&pending)?.sync_all()?;
-                    std::fs::File::open(pending.parent().expect("staged sibling"))?.sync_all()?;
-                }
-            }
-            for p in prepared {
-                for (source, destination) in [(&p.db_next, &p.db), (&p.files_next, &p.files)] {
-                    std::fs::File::open(source)?.sync_all()?;
-                    std::fs::File::open(source.parent().expect("database sibling"))?.sync_all()?;
-                    plan.moves.push(FileMove {
-                        source: source.clone(),
-                        destination: destination.clone(),
-                    });
-                }
-            }
-            for Retirement { platform, filename } in &changes.retire {
-                if added.contains(&(*platform, filename.as_str())) {
-                    continue;
-                }
-                let path = Repository::platform_dir(root, *platform).join(filename);
-                plan.retired.push(with_suffix(&path, ".sig"));
-                plan.retired.push(path);
-            }
-            Ok::<_, anyhow::Error>(())
-        })();
-        if let Err(error) = result {
+        if let Err(error) = plan.stage_all(root, changes) {
             plan.discard();
-            for p in prepared {
-                p.discard();
-            }
             return Err(error);
         }
         Ok(plan)
+    }
+
+    fn stage_all(&mut self, root: &Path, changes: &Changes) -> anyhow::Result<()> {
+        let mut added = HashSet::new();
+        for addition in &changes.add {
+            let filename = addition.entry.filename.as_str();
+            let dir = Repository::platform_dir(root, addition.platform);
+            added.insert((addition.platform, filename));
+            let sig = with_suffix(&addition.staged, ".sig");
+            let signature = sig.exists().then(|| (sig, format!("{filename}.sig")));
+            for (source, name) in
+                std::iter::once((addition.staged.clone(), filename.to_string())).chain(signature)
+            {
+                self.stage_file(&source, dir.join(name))?;
+            }
+        }
+        for platform in changes.platforms() {
+            self.stage_databases(root, changes, platform)
+                .map_err(|e| e.context(format!("preparing the {platform} databases")))?;
+        }
+        for Retirement { platform, filename } in &changes.retire {
+            if added.contains(&(*platform, filename.as_str())) {
+                continue;
+            }
+            let path = Repository::platform_dir(root, *platform).join(filename);
+            self.retired.push(with_suffix(&path, ".sig"));
+            self.retired.push(path);
+        }
+        Ok(())
+    }
+
+    /// Plan moving `source` to `destination`, through a second name beside
+    /// it. The upload itself stays where it is until publication (including
+    /// dependent promotion) finishes, so recovery can safely retry a build
+    /// still `PUBLISHING`.
+    fn stage_file(&mut self, source: &Path, destination: PathBuf) -> anyhow::Result<()> {
+        let pending = with_suffix(source, ".publishing");
+        if pending.exists() {
+            std::fs::remove_file(&pending)?;
+        }
+        link_or_copy(source, &pending)?;
+        self.moves.push(FileMove {
+            source: pending.clone(),
+            destination,
+        });
+        sync(&pending)
+    }
+
+    /// Plan replacing `platform`'s databases with new ones, written beside
+    /// them from their current contents and the changes.
+    fn stage_databases(
+        &mut self,
+        root: &Path,
+        changes: &Changes,
+        platform: Platform,
+    ) -> anyhow::Result<()> {
+        let dir = Repository::platform_dir(root, platform);
+        std::fs::create_dir_all(&dir)?;
+        let db = dir.join(DB_ARCHIVE);
+        let db_next = dir.join(format!(".{DB_ARCHIVE}.next"));
+        let files = dir.join(FILES_ARCHIVE);
+        let files_next = dir.join(format!(".{FILES_ARCHIVE}.next"));
+        // Planned before they are written, so that a write failing halfway
+        // is cleaned up with the rest.
+        for (source, destination) in [(&db_next, &db), (&files_next, &files)] {
+            self.moves.push(FileMove {
+                source: source.clone(),
+                destination: destination.clone(),
+            });
+        }
+        let remove: Vec<String> = changes
+            .retire
+            .iter()
+            .filter(|r| r.platform == platform)
+            .map(|r| r.filename.clone())
+            .collect();
+        let add: Vec<PackageEntry> = changes
+            .add
+            .iter()
+            .filter(|a| a.platform == platform)
+            .map(|a| a.entry.clone())
+            .collect();
+        pacman_repo_utils::write_updated_databases(
+            &db,
+            &files,
+            &remove,
+            &add,
+            &db_next,
+            &files_next,
+        )?;
+        sync(&db_next)?;
+        sync(&files_next)
     }
 
     /// Remove replacements that have never been committed to SQL.
@@ -909,6 +894,13 @@ fn link_or_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
             std::fs::copy(source, destination).map(|_| ())
         }
     }
+}
+
+/// Flush `path`, and the directory entry naming it, to disk.
+fn sync(path: &Path) -> anyhow::Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    std::fs::File::open(path.parent().expect("a file in a directory"))?.sync_all()?;
+    Ok(())
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {

@@ -11,15 +11,17 @@ use reqwest::Url;
 pub use aurcache_common::api::activity::Severity;
 pub use aurcache_common::api::builds::BuildSummary as Build;
 pub use aurcache_common::api::dump::{
-    ExistingPackagePolicy, RestoreAccepted, RestoreEntry, RestoreOutcome, RestoreProgress,
-    SecretsPolicy,
+    ExistingPackagePolicy, RestoreAccepted, RestoreEntry, RestoreOptions, RestoreOutcome,
+    RestoreProgress, SecretsPolicy,
 };
 pub use aurcache_common::api::events::{Event, KINDS, Kind, Segment, kind_label};
 pub use aurcache_common::api::info::{ServerInfo, Timezone};
 pub use aurcache_common::api::log::{
     BuildRef, EntityRef, LogEntry, LogFilter, LogPage, PackageRef, WorkerRef,
 };
-pub use aurcache_common::api::operations::{ActiveOperation, kind as operation_kind};
+pub use aurcache_common::api::operations::{
+    ActiveOperation, OperationProgress, kind as operation_kind,
+};
 pub use aurcache_common::api::package::{
     AddPackages as AddPackagesRequest, BulkAddAccepted, BulkAddEntry, BulkAddOutcome,
     BulkAddProgress, ExtendedPackage, PackageDependency, PackageFile, SimplePackage,
@@ -30,9 +32,8 @@ pub use aurcache_common::api::package::{
 pub use aurcache_common::api::package::{
     CandidateSource, DependencyCandidate, DependencyOptions, ReplaceDependency, ReplacementVerdict,
 };
-// The add and preview requests are the server's own shapes rather than copies:
-// they were duplicated here, so a field added to one was silently absent from
-// the other.
+// The add and preview requests are the server's own shapes rather than copies,
+// so a field added to one cannot be silently absent from the other.
 pub use aurcache_common::api::package::{
     AddPackage as AddPackageRequest, SourcePreviewFileRequest, SourcePreviewRequest,
 };
@@ -62,8 +63,8 @@ pub use reqwest::Method;
 
 /// Search result returned from the AUR search proxy endpoint.
 ///
-/// The server's own shape rather than a copy of it: this was a duplicate
-/// declaration, so a field added to one silently did not exist on the other.
+/// The server's own shape rather than a copy of it, so a field added to one
+/// cannot silently be missing from the other.
 pub use aurcache_common::api::aur::ApiPackage as SearchResult;
 
 /// Where a request for the API actually landed.
@@ -100,9 +101,8 @@ const CLIENT_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// browser frontend keeps a single process-wide client.
 #[derive(Clone)]
 pub struct AurCacheClient {
-    base_url: String,
-    /// The base as a parsed URL (with trailing slash), so per-request paths
-    /// join onto it instead of rebuilding and re-parsing the string on every
+    /// The API base as a parsed URL (with trailing slash), so per-request paths
+    /// join onto it instead of rebuilding and re-parsing a string on every
     /// call — including the 1s/5s poll loops.
     base: reqwest::Url,
     token: Option<String>,
@@ -130,17 +130,16 @@ impl AurCacheClient {
         // per request (the same reason the worker protocol client keeps a
         // deadline-free upload client).
         //
-        // Set per request in `send`, which is the only form reqwest's wasm
-        // client offers; natively the builder sets it too, for the few raw
-        // requests (`probe_api`) that do not go through `send`. The browser's
-        // fetch has no separate connect phase to bound.
+        // The total is set per request in `send`, which is the only form
+        // reqwest's wasm client offers; natively the builder bounds the
+        // connect phase as well, which the browser's fetch has no separate
+        // handle on.
         let builder = reqwest::Client::builder();
         #[cfg(not(target_arch = "wasm32"))]
         let builder = builder
             .connect_timeout(CLIENT_CONNECT_TIMEOUT)
             .timeout(CLIENT_REQUEST_TIMEOUT);
         Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
             base,
             token,
             client: builder.build().context("failed to build HTTP client")?,
@@ -168,13 +167,12 @@ impl AurCacheClient {
     /// on other ports, and this is where that host comes from.
     #[must_use]
     pub fn base_url(&self) -> &str {
-        &self.base_url
+        self.base.as_str().trim_end_matches('/')
     }
 
     /// How this instance publishes its pacman repository.
     pub async fn repo_info(&self) -> Result<RepoInfo> {
-        self.request_json::<RepoInfo, Value>(Method::GET, "/repo/info", &[], None)
-            .await
+        self.get("/repo/info").await
     }
 
     /// Calls the health endpoint and returns success when the instance is healthy.
@@ -183,7 +181,7 @@ impl AurCacheClient {
             ApiReachability::Api => Ok(()),
             ApiReachability::NotApi { detail } => Err(anyhow::anyhow!(
                 "{} answered, but {detail}: that is the web UI, not the API",
-                endpoint_url(&self.base_url, "/health")
+                self.url("/health")?
             )),
         }
     }
@@ -191,12 +189,12 @@ impl AurCacheClient {
     /// Ask the health endpoint whether this URL is the API, and where the
     /// request ended up if it is not.
     pub async fn probe_api(&self) -> Result<ApiReachability> {
-        let requested = endpoint_url(&self.base_url, "/health");
+        let requested = self.url("/health")?;
         let response = self
-            .send::<Value>(Method::GET, "/health", &[], None)
+            .send(Method::GET, "/health", NO_QUERY, Body::<()>::Empty, None)
             .await?;
         let response = self.success_or_notify(response).await?;
-        let landed_on = response.url().to_string();
+        let landed_on = response.url().clone();
         if !same_endpoint(&requested, &landed_on) {
             return Ok(ApiReachability::NotApi {
                 detail: format!("the request was redirected to {landed_on}"),
@@ -224,83 +222,57 @@ impl AurCacheClient {
     /// rather than its own crate version, so the two agree about what is
     /// running.
     pub async fn server_info(&self) -> Result<ServerInfo> {
-        self.request_json::<ServerInfo, Value>(Method::GET, "/version", &[], None)
-            .await
+        self.get("/version").await
     }
 
     /// Fetches information about the currently authenticated user.
     pub async fn user_info(&self) -> Result<UserInfo> {
-        self.request_json::<UserInfo, Value>(Method::GET, "/userinfo", &[], None)
-            .await
+        self.get("/userinfo").await
     }
 
     /// Fetches aggregate dashboard statistics.
     pub async fn stats(&self) -> Result<ListStats> {
-        self.request_json::<ListStats, Value>(Method::GET, "/stats", &[], None)
-            .await
+        self.get("/stats").await
     }
 
     /// Fetches monthly dashboard graph datapoints.
     pub async fn graph(&self) -> Result<Vec<GraphDataPoint>> {
-        self.request_json::<Vec<GraphDataPoint>, Value>(Method::GET, "/graph", &[], None)
-            .await
+        self.get("/graph").await
     }
 
     /// Fetches every dashboard card in one response, beside `stats`/`graph`.
     pub async fn dashboard(&self) -> Result<DashboardView> {
-        self.request_json::<DashboardView, Value>(Method::GET, "/stats/dashboard", &[], None)
-            .await
+        self.get("/stats/dashboard").await
     }
 
     /// Searches for packages through the AUR-backed search endpoint.
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
-        self.request_json::<Vec<SearchResult>, Value>(
-            Method::GET,
-            "/search",
-            &[("query".to_string(), query.to_string())],
-            None,
-        )
-        .await
+        #[derive(Serialize)]
+        struct Search<'a> {
+            query: &'a str,
+        }
+        self.get_query("/search", &Search { query }).await
     }
 
     /// Regenerates the authenticated user's API token.
     pub async fn regenerate_api_token(&self) -> Result<ApiTokenResponse> {
-        self.request_json::<ApiTokenResponse, Value>(Method::POST, "/token/regenerate", &[], None)
+        self.request_json(Method::POST, "/token/regenerate", NO_QUERY, None::<&()>)
             .await
     }
 
     /// List packages using pagination and an explicit dependency selection.
     pub async fn list_packages(&self, query: &PackageQuery) -> Result<Vec<SimplePackage>> {
-        let query = Query::default()
-            .opt("limit", query.limit)
-            .opt("page", query.page)
-            .opt(
-                "dependencies",
-                (query.dependencies == DependencySelection::Include).then_some(true),
-            );
-        self.request_json::<Vec<SimplePackage>, Value>(
-            Method::GET,
-            "/packages/list",
-            query.pairs(),
-            None,
-        )
-        .await
+        self.get_query("/packages/list", query).await
     }
 
     /// Fetches the details of one package, by pkgbase.
     pub async fn get_package(&self, pkgbase: &str) -> Result<ExtendedPackage> {
-        self.request_json::<ExtendedPackage, Value>(
-            Method::GET,
-            &format!("/package/{pkgbase}"),
-            &[],
-            None,
-        )
-        .await
+        self.get(&format!("/package/{pkgbase}")).await
     }
 
     /// Adds a package using the supplied request payload.
     pub async fn add_package(&self, body: &AddPackageRequest) -> Result<()> {
-        self.request_empty(Method::POST, "/package", &[], Some(body))
+        self.request_empty(Method::POST, "/package", NO_QUERY, Some(body))
             .await
     }
 
@@ -313,7 +285,7 @@ impl AurCacheClient {
     /// resolution alone. Poll [`Self::bulk_add_progress`] with the returned id
     /// to follow it, or do not -- the work does not depend on being watched.
     pub async fn add_packages(&self, body: &AddPackagesRequest) -> Result<BulkAddAccepted> {
-        self.request_json(Method::POST, "/packages", &[], Some(body))
+        self.request_json(Method::POST, "/packages", NO_QUERY, Some(body))
             .await
     }
 
@@ -324,13 +296,8 @@ impl AurCacheClient {
     /// pass zero to get the run from the beginning, including whatever happened
     /// before this caller started watching.
     pub async fn bulk_add_progress(&self, job_id: i32, after: usize) -> Result<BulkAddProgress> {
-        self.request_json::<BulkAddProgress, ()>(
-            Method::GET,
-            &format!("/packages/bulk/{job_id}"),
-            &[("after".to_string(), after.to_string())],
-            None,
-        )
-        .await
+        self.get_query(&format!("/packages/bulk/{job_id}"), &After { after })
+            .await
     }
 
     /// Triggers an update check for the given package.
@@ -341,7 +308,7 @@ impl AurCacheClient {
         self.request_json(
             Method::POST,
             &format!("/package/{pkgbase}/update"),
-            &[],
+            NO_QUERY,
             Some(body),
         )
         .await
@@ -352,7 +319,7 @@ impl AurCacheClient {
         self.request_empty(
             Method::PATCH,
             &format!("/package/{pkgbase}"),
-            &[],
+            NO_QUERY,
             Some(body),
         )
         .await
@@ -364,12 +331,9 @@ impl AurCacheClient {
         pkgbase: &str,
         dependency: &str,
     ) -> Result<DependencyOptions> {
-        self.request_json::<DependencyOptions, Value>(
-            Method::GET,
-            &format!("/package/{pkgbase}/dependency/{dependency}/options"),
-            &[],
-            None,
-        )
+        self.get(&format!(
+            "/package/{pkgbase}/dependency/{dependency}/options"
+        ))
         .await
     }
 
@@ -387,7 +351,7 @@ impl AurCacheClient {
         self.request_empty(
             Method::PUT,
             &format!("/package/{pkgbase}/dependency/{dependency}"),
-            &[],
+            NO_QUERY,
             Some(&ReplaceDependency {
                 replacement: replacement.map(ToString::to_string),
             }),
@@ -397,26 +361,11 @@ impl AurCacheClient {
 
     /// Removes the direct-request flag from the given package.
     pub async fn delete_package(&self, pkgbase: &str) -> Result<()> {
-        self.request_empty::<Value>(Method::DELETE, &format!("/package/{pkgbase}"), &[], None)
-            .await
+        self.delete(&format!("/package/{pkgbase}")).await
     }
 
-    /// Lists builds, newest first, optionally of one package only.
     /// Lists builds, newest first, narrowed by `query`.
     pub async fn list_builds(&self, query: &BuildQuery) -> Result<Vec<Build>> {
-        let states = (!query.states.is_empty()).then(|| {
-            query
-                .states
-                .iter()
-                .map(|state| state.key())
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-        let params = Query::default()
-            .opt("limit", query.limit)
-            .opt("page", query.page)
-            .opt("worker", query.worker)
-            .opt("status", states);
         // Builds for one package are a sub-resource, not a query filter: a
         // pkgbase may contain `+`, which is literal in a path but decodes to a
         // space in a query value.
@@ -424,31 +373,22 @@ impl AurCacheClient {
             Some(pkgbase) => format!("/package/{pkgbase}/builds"),
             None => "/builds".to_string(),
         };
-        self.request_json::<Vec<Build>, Value>(Method::GET, &path, params.pairs(), None)
-            .await
+        self.get_query(&path, query).await
     }
 
     /// Lists the files in a package's source tree.
     pub async fn list_source_files(&self, pkgbase: &str) -> Result<SourceFileList> {
-        self.request_json::<SourceFileList, Value>(
-            Method::GET,
-            &format!("/package/{pkgbase}/source/files"),
-            &[],
-            None,
-        )
-        .await
+        self.get(&format!("/package/{pkgbase}/source/files")).await
     }
 
     /// Reads one source file, pristine and patched.
     pub async fn get_source_file(&self, pkgbase: &str, path: &str) -> Result<SourceFileContent> {
-        let query = Query::default().opt("path", Some(path));
-        self.request_json::<SourceFileContent, Value>(
-            Method::GET,
-            &format!("/package/{pkgbase}/source/file"),
-            query.pairs(),
-            None,
-        )
-        .await
+        #[derive(Serialize)]
+        struct File<'a> {
+            path: &'a str,
+        }
+        self.get_query(&format!("/package/{pkgbase}/source/file"), &File { path })
+            .await
     }
 
     /// Replaces one source file's content. The server stores the difference
@@ -462,7 +402,7 @@ impl AurCacheClient {
         self.request_empty(
             Method::PUT,
             &format!("/package/{pkgbase}/source/file"),
-            &[],
+            NO_QUERY,
             Some(&body),
         )
         .await
@@ -470,13 +410,8 @@ impl AurCacheClient {
 
     /// Fetch one build by its public identity, `<pkgbase>/<number>`.
     pub async fn get_build(&self, pkgbase: &str, number: i32) -> Result<Build> {
-        self.request_json::<Build, Value>(
-            Method::GET,
-            &format!("/package/{pkgbase}/build/{number}"),
-            &[],
-            None,
-        )
-        .await
+        self.get(&format!("/package/{pkgbase}/build/{number}"))
+            .await
     }
 
     /// Long-running operations still in flight.
@@ -485,8 +420,7 @@ impl AurCacheClient {
     /// a browser finds one again -- after a reload, or from a tab that never
     /// started it.
     pub async fn active_operations(&self) -> Result<Vec<ActiveOperation>> {
-        self.request_json::<Vec<ActiveOperation>, Value>(Method::GET, "/operations", &[], None)
-            .await
+        self.get("/operations").await
     }
 
     /// Fetches one page of a build's raw log output, decoded lossily to text.
@@ -528,12 +462,18 @@ impl AurCacheClient {
         offset: Option<u64>,
         limit: Option<u64>,
     ) -> Result<Vec<u8>> {
-        let query = Query::default().opt("offset", offset).opt("limit", limit);
-        self.request_bytes::<Value>(
+        #[derive(Serialize)]
+        struct Page {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            offset: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            limit: Option<u64>,
+        }
+        self.request_bytes(
             Method::GET,
             &format!("/package/{pkgbase}/build/{number}/output"),
-            query.pairs(),
-            None,
+            &Page { offset, limit },
+            None::<&()>,
         )
         .await
     }
@@ -541,35 +481,25 @@ impl AurCacheClient {
     /// Re-runs the given build, returning the new build's number within the
     /// same package.
     pub async fn retry_build(&self, pkgbase: &str, number: i32) -> Result<i32> {
-        self.request_json::<i32, Value>(
+        self.request_json(
             Method::POST,
             &format!("/package/{pkgbase}/build/{number}/retry"),
-            &[],
-            None,
+            NO_QUERY,
+            None::<&()>,
         )
         .await
     }
 
     /// Requests cancellation of the given build.
     pub async fn cancel_build(&self, pkgbase: &str, number: i32) -> Result<()> {
-        self.request_empty::<Value>(
-            Method::POST,
-            &format!("/package/{pkgbase}/build/{number}/cancel"),
-            &[],
-            None,
-        )
-        .await
+        self.post_empty(&format!("/package/{pkgbase}/build/{number}/cancel"))
+            .await
     }
 
     /// Deletes the given build record.
     pub async fn delete_build(&self, pkgbase: &str, number: i32) -> Result<()> {
-        self.request_empty::<Value>(
-            Method::DELETE,
-            &format!("/package/{pkgbase}/build/{number}"),
-            &[],
-            None,
-        )
-        .await
+        self.delete(&format!("/package/{pkgbase}/build/{number}"))
+            .await
     }
 
     /// Lists the files of a source that has not been added yet.
@@ -581,7 +511,7 @@ impl AurCacheClient {
         self.request_json(
             Method::POST,
             "/package/source/preview/files",
-            &[],
+            NO_QUERY,
             Some(&SourcePreviewRequest {
                 source: source.clone(),
             }),
@@ -598,7 +528,7 @@ impl AurCacheClient {
         self.request_json(
             Method::POST,
             "/package/source/preview/file",
-            &[],
+            NO_QUERY,
             Some(&SourcePreviewFileRequest {
                 source: source.clone(),
                 path: path.to_string(),
@@ -612,13 +542,7 @@ impl AurCacheClient {
     /// Pass a `pkgbase` for the per-package view, where a setting the package
     /// does not override reports the global value it inherits.
     pub async fn settings(&self, pkgbase: Option<&str>) -> Result<ApplicationSettings> {
-        self.request_json::<ApplicationSettings, Value>(
-            Method::GET,
-            &self.settings_path(pkgbase, None),
-            &[],
-            None,
-        )
-        .await
+        self.get(&settings_path(pkgbase, None)).await
     }
 
     /// Reads one setting: the value in force, and where it came from.
@@ -627,13 +551,7 @@ impl AurCacheClient {
     /// response — the config files are large text blobs, and sending both of
     /// them with every settings fetch would be wasteful.
     pub async fn get_setting(&self, pkgbase: Option<&str>, key: &str) -> Result<SettingResponse> {
-        self.request_json::<SettingResponse, Value>(
-            Method::GET,
-            &self.settings_path(pkgbase, Some(key)),
-            &[],
-            None,
-        )
-        .await
+        self.get(&settings_path(pkgbase, Some(key))).await
     }
 
     /// Stores a value for one setting, overriding whatever it inherits.
@@ -644,8 +562,8 @@ impl AurCacheClient {
     pub async fn patch_setting(&self, pkgbase: Option<&str>, key: &str, value: &str) -> Result<()> {
         self.request_empty(
             Method::PATCH,
-            &self.settings_path(pkgbase, Some(key)),
-            &[],
+            &settings_path(pkgbase, Some(key)),
+            NO_QUERY,
             Some(&SettingValue {
                 value: value.to_string(),
             }),
@@ -659,8 +577,8 @@ impl AurCacheClient {
     pub async fn preview_schedule(&self, key: &str, value: &str) -> Result<SchedulePreview> {
         self.request_json(
             Method::POST,
-            &format!("{}/schedule", self.settings_path(None, Some(key))),
-            &[],
+            &format!("{}/schedule", settings_path(None, Some(key))),
+            NO_QUERY,
             Some(&SettingValue {
                 value: value.to_string(),
             }),
@@ -670,27 +588,7 @@ impl AurCacheClient {
 
     /// Drops this scope's stored value, so the setting inherits again.
     pub async fn reset_setting(&self, pkgbase: Option<&str>, key: &str) -> Result<()> {
-        self.request_empty::<Value>(
-            Method::DELETE,
-            &self.settings_path(pkgbase, Some(key)),
-            &[],
-            None,
-        )
-        .await
-    }
-
-    /// Settings are a sub-resource of the package in the per-package scope, so
-    /// every one of the calls above has the same two shapes.
-    fn settings_path(&self, pkgbase: Option<&str>, key: Option<&str>) -> String {
-        let mut path = match pkgbase {
-            Some(pkgbase) => format!("/package/{pkgbase}/settings"),
-            None => "/settings".to_string(),
-        };
-        if let Some(key) = key {
-            path.push('/');
-            path.push_str(key);
-        }
-        path
+        self.delete(&settings_path(pkgbase, Some(key))).await
     }
 
     /// One page of the log, newest first, with how long the filtered log is.
@@ -704,22 +602,38 @@ impl AurCacheClient {
         offset: Option<u64>,
         filter: &LogFilter,
     ) -> Result<LogPage> {
-        let query = Query::default()
-            .opt("limit", limit)
-            .opt("offset", offset)
-            .opt("severity", filter.severity.map(|s| s.slug().to_string()))
-            .opt("since_boot", filter.since_boot.then_some(true))
-            .opt("kind", filter.kind.clone())
-            .opt("entity", filter.entity.as_ref().map(ToString::to_string))
-            .opt("role", filter.role.clone());
-        self.request_json::<LogPage, Value>(Method::GET, "/log", query.pairs(), None)
-            .await
+        #[derive(Serialize)]
+        struct Log<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            limit: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            offset: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            severity: Option<&'static str>,
+            #[serde(skip_serializing_if = "std::ops::Not::not")]
+            since_boot: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            kind: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            entity: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            role: Option<&'a str>,
+        }
+        let query = Log {
+            limit,
+            offset,
+            severity: filter.severity.map(Severity::slug),
+            since_boot: filter.since_boot,
+            kind: filter.kind.as_deref(),
+            entity: filter.entity.as_ref().map(ToString::to_string),
+            role: filter.role.as_deref(),
+        };
+        self.get_query("/log", &query).await
     }
 
     /// Lists all enrolled remote build workers and their status.
     pub async fn list_workers(&self) -> Result<Vec<Worker>> {
-        self.request_json::<Vec<Worker>, Value>(Method::GET, "/workers", &[], None)
-            .await
+        self.get("/workers").await
     }
 
     /// What one worker declares it can be configured with, and what it reports
@@ -728,13 +642,7 @@ impl AurCacheClient {
     /// Apart from [`Self::list_workers`] because it is fetched for the one
     /// worker being looked at, while the list is polled for the whole fleet.
     pub async fn worker_config(&self, id: i32) -> Result<WorkerConfigView> {
-        self.request_json::<WorkerConfigView, Value>(
-            Method::GET,
-            &format!("/workers/{id}/config"),
-            &[],
-            None,
-        )
-        .await
+        self.get(&format!("/workers/{id}/config")).await
     }
 
     /// Saves values for several of a worker's settings as one change, and
@@ -748,7 +656,7 @@ impl AurCacheClient {
         self.request_json(
             Method::PATCH,
             &format!("/workers/{id}/config"),
-            &[],
+            NO_QUERY,
             Some(update),
         )
         .await
@@ -756,49 +664,75 @@ impl AurCacheClient {
 
     /// The image and worker-protocol port a new worker's `docker run` needs.
     pub async fn worker_join_info(&self) -> Result<WorkerJoinInfo> {
-        self.request_json::<WorkerJoinInfo, Value>(Method::GET, "/workers/join-info", &[], None)
-            .await
+        self.get("/workers/join-info").await
     }
 
     /// Approves a pending worker, signing its CSR so it can build.
     pub async fn approve_worker(&self, id: i32) -> Result<()> {
-        self.request_empty::<Value>(Method::POST, &format!("/workers/{id}/approve"), &[], None)
-            .await
+        self.post_empty(&format!("/workers/{id}/approve")).await
     }
 
     /// Asks a worker to take no new builds and let the ones it holds finish.
     pub async fn pause_worker(&self, id: i32) -> Result<()> {
-        self.request_empty::<Value>(Method::POST, &format!("/workers/{id}/pause"), &[], None)
-            .await
+        self.post_empty(&format!("/workers/{id}/pause")).await
     }
 
     /// Lets a paused worker take builds again.
     pub async fn resume_worker(&self, id: i32) -> Result<()> {
-        self.request_empty::<Value>(Method::POST, &format!("/workers/{id}/resume"), &[], None)
-            .await
+        self.post_empty(&format!("/workers/{id}/resume")).await
     }
 
     /// Revokes a worker, immediately refusing its certificate on the next call.
     pub async fn revoke_worker(&self, id: i32) -> Result<()> {
-        self.request_empty::<Value>(Method::POST, &format!("/workers/{id}/revoke"), &[], None)
+        self.post_empty(&format!("/workers/{id}/revoke")).await
+    }
+
+    /// `GET path`, decoded as JSON.
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.request_json(Method::GET, path, NO_QUERY, None::<&()>)
+            .await
+    }
+
+    /// `GET path?query`, decoded as JSON.
+    pub async fn get_query<T, Q>(&self, path: &str, query: &Q) -> Result<T>
+    where
+        T: DeserializeOwned,
+        Q: Serialize + ?Sized,
+    {
+        self.request_json(Method::GET, path, query, None::<&()>)
+            .await
+    }
+
+    /// `POST path` with no body, for an endpoint that answers with none.
+    pub async fn post_empty(&self, path: &str) -> Result<()> {
+        self.request_empty(Method::POST, path, NO_QUERY, None::<&()>)
+            .await
+    }
+
+    /// `DELETE path`, for an endpoint that answers with no body.
+    pub async fn delete(&self, path: &str) -> Result<()> {
+        self.request_empty(Method::DELETE, path, NO_QUERY, None::<&()>)
             .await
     }
 
     /// Sends a request and decodes the response body as JSON.
     ///
     /// This is intended for endpoints that are not yet wrapped by a typed helper.
-    pub async fn request_json<T, B>(
+    pub async fn request_json<T, Q, B>(
         &self,
         method: Method,
         path: &str,
-        query: &[(String, String)],
+        query: &Q,
         body: Option<&B>,
     ) -> Result<T>
     where
         T: DeserializeOwned,
+        Q: Serialize + ?Sized,
         B: Serialize + ?Sized,
     {
-        let response = self.send(method, path, query, body).await?;
+        let response = self
+            .send(method, path, query, Body::json(body), None)
+            .await?;
         let response = self.success_or_notify(response).await?;
         Self::decode_json(response, path).await
     }
@@ -817,33 +751,39 @@ impl AurCacheClient {
     }
 
     /// Sends a request that is expected to return no meaningful response body.
-    pub async fn request_empty<B>(
+    pub async fn request_empty<Q, B>(
         &self,
         method: Method,
         path: &str,
-        query: &[(String, String)],
+        query: &Q,
         body: Option<&B>,
     ) -> Result<()>
     where
+        Q: Serialize + ?Sized,
         B: Serialize + ?Sized,
     {
-        let response = self.send(method, path, query, body).await?;
+        let response = self
+            .send(method, path, query, Body::json(body), None)
+            .await?;
         self.success_or_notify(response).await?;
         Ok(())
     }
 
     /// Sends a request and returns the raw response body as text.
-    pub async fn request_text<B>(
+    pub async fn request_text<Q, B>(
         &self,
         method: Method,
         path: &str,
-        query: &[(String, String)],
+        query: &Q,
         body: Option<&B>,
     ) -> Result<String>
     where
+        Q: Serialize + ?Sized,
         B: Serialize + ?Sized,
     {
-        let response = self.send(method, path, query, body).await?;
+        let response = self
+            .send(method, path, query, Body::json(body), None)
+            .await?;
         let response = self.success_or_notify(response).await?;
         response
             .text()
@@ -855,20 +795,27 @@ impl AurCacheClient {
     ///
     /// Separate from [`Self::request_text`] because a dump is a `.tar.gz`:
     /// decoding it as UTF-8 would corrupt it.
-    pub async fn request_bytes<B>(
+    pub async fn request_bytes<Q, B>(
         &self,
         method: Method,
         path: &str,
-        query: &[(String, String)],
+        query: &Q,
         body: Option<&B>,
     ) -> Result<Vec<u8>>
     where
+        Q: Serialize + ?Sized,
         B: Serialize + ?Sized,
     {
         // A binary body is a dump, as large as the restore upload, so it gets
         // the upload's deadline rather than the one for API round trips.
         let response = self
-            .send_with_timeout(method, path, query, body, Some(CLIENT_UPLOAD_TIMEOUT))
+            .send(
+                method,
+                path,
+                query,
+                Body::json(body),
+                Some(CLIENT_UPLOAD_TIMEOUT),
+            )
             .await?;
         let response = self.success_or_notify(response).await?;
         Ok(response
@@ -885,43 +832,44 @@ impl AurCacheClient {
     pub async fn restore(
         &self,
         archive: bytes::Bytes,
-        dry_run: bool,
-        on_existing: ExistingPackagePolicy,
-        clear: bool,
-        secrets: SecretsPolicy,
+        options: &RestoreOptions,
     ) -> Result<RestoreAccepted> {
-        let mut url = self.base.join("restore").context("invalid restore URL")?;
-        url.query_pairs_mut()
-            .append_pair("dry_run", &dry_run.to_string())
-            .append_pair("on_existing", on_existing.as_str())
-            .append_pair("clear", &clear.to_string())
-            .append_pair("secrets", secrets.as_str());
-        let response = self
-            .client
-            .post(url)
-            .timeout(CLIENT_UPLOAD_TIMEOUT)
-            .header(reqwest::header::CONTENT_TYPE, "application/gzip")
-            .body(archive);
-        let response = match &self.token {
-            Some(token) => response.bearer_auth(token),
-            None => response,
+        /// The query spelling of [`RestoreOptions`], which is not its JSON one.
+        #[derive(Serialize)]
+        struct Restore {
+            dry_run: bool,
+            on_existing: &'static str,
+            clear: bool,
+            secrets: &'static str,
+        }
+        let query = Restore {
+            dry_run: options.dry_run,
+            on_existing: options.on_existing.as_str(),
+            clear: options.clear,
+            secrets: options.secrets.as_str(),
+        };
+        let body = Body::<()>::Raw {
+            bytes: archive,
+            content_type: "application/gzip",
         };
         let response = self
-            .success_or_notify(response.send().await.context("request failed")?)
+            .send(
+                Method::POST,
+                "/restore",
+                &query,
+                body,
+                Some(CLIENT_UPLOAD_TIMEOUT),
+            )
             .await?;
+        let response = self.success_or_notify(response).await?;
         Self::decode_json(response, "/restore").await
     }
 
     /// Read a restore's progress, returning only entries after the first
     /// `after` of them.
     pub async fn restore_progress(&self, job_id: i32, after: usize) -> Result<RestoreProgress> {
-        self.request_json::<RestoreProgress, ()>(
-            Method::GET,
-            &format!("/restore/{job_id}"),
-            &[("after".to_string(), after.to_string())],
-            None,
-        )
-        .await
+        self.get_query(&format!("/restore/{job_id}"), &After { after })
+            .await
     }
 
     /// Download a lite export of the server's authored state.
@@ -930,66 +878,56 @@ impl AurCacheClient {
     /// the API token hashes. The resulting file can mint worker identities this
     /// server accepts; treat it as a credential.
     pub async fn dump(&self, include_secrets: bool) -> Result<Vec<u8>> {
-        self.request_bytes::<()>(
-            Method::GET,
-            "/dump",
-            &[("include_secrets".to_string(), include_secrets.to_string())],
-            None,
-        )
-        .await
-    }
-
-    async fn send<B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &[(String, String)],
-        body: Option<&B>,
-    ) -> Result<Response>
-    where
-        B: Serialize + ?Sized,
-    {
-        self.send_with_timeout(method, path, query, body, None)
+        #[derive(Serialize)]
+        struct Dump {
+            include_secrets: bool,
+        }
+        self.request_bytes(Method::GET, "/dump", &Dump { include_secrets }, None::<&()>)
             .await
     }
 
-    /// [`Self::send`], with the default total deadline replaced by `timeout`
-    /// when one is given.
-    async fn send_with_timeout<B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &[(String, String)],
-        body: Option<&B>,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<Response>
-    where
-        B: Serialize + ?Sized,
-    {
-        // Absolute URLs pass through (as `endpoint_url` also allows); relative
-        // paths join the parsed base instead of re-parsing a rebuilt string.
-        let mut url = if path.starts_with("http://") || path.starts_with("https://") {
-            reqwest::Url::parse(path)
+    /// `path` against the API base. Absolute URLs pass through.
+    fn url(&self, path: &str) -> Result<Url> {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            Url::parse(path)
         } else {
             self.base.join(path.trim_start_matches('/'))
         }
-        .with_context(|| format!("invalid URL for path {path}"))?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            for (key, value) in query {
-                pairs.append_pair(key, value);
-            }
-        }
+        .with_context(|| format!("invalid URL for path {path}"))
+    }
 
-        let mut request = self.client.request(method, url);
-        request = request.timeout(timeout.unwrap_or(CLIENT_REQUEST_TIMEOUT));
+    /// Send one request, with the token, and the default total deadline
+    /// replaced by `timeout` when one is given.
+    async fn send<Q, B>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &Q,
+        body: Body<'_, B>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Response>
+    where
+        Q: Serialize + ?Sized,
+        B: Serialize + ?Sized,
+    {
+        let mut request = self
+            .client
+            .request(method, self.url(path)?)
+            .query(query)
+            .timeout(timeout.unwrap_or(CLIENT_REQUEST_TIMEOUT));
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-
+        request = match body {
+            Body::Empty => request,
+            Body::Json(body) => request.json(body),
+            Body::Raw {
+                bytes,
+                content_type,
+            } => request
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(bytes),
+        };
         request.send().await.context("request failed")
     }
 
@@ -1031,16 +969,11 @@ pub fn is_unauthorized(error: &anyhow::Error) -> bool {
 /// and a trailing slash is not a different endpoint by any useful definition.
 /// Textual comparison calls both a redirect and reports a correct URL as the
 /// web UI.
-fn same_endpoint(requested: &str, landed_on: &str) -> bool {
-    match (Url::parse(requested), Url::parse(landed_on)) {
-        (Ok(a), Ok(b)) => {
-            a.scheme() == b.scheme()
-                && a.host_str() == b.host_str()
-                && a.port_or_known_default() == b.port_or_known_default()
-                && a.path().trim_end_matches('/') == b.path().trim_end_matches('/')
-        }
-        _ => requested.trim_end_matches('/') == landed_on.trim_end_matches('/'),
-    }
+fn same_endpoint(requested: &Url, landed_on: &Url) -> bool {
+    requested.scheme() == landed_on.scheme()
+        && requested.host_str() == landed_on.host_str()
+        && requested.port_or_known_default() == landed_on.port_or_known_default()
+        && requested.path().trim_end_matches('/') == landed_on.path().trim_end_matches('/')
 }
 
 /// Why a JSON decode failed, in terms the caller can act on.
@@ -1060,48 +993,78 @@ fn json_decode_context(path: &str, body: &str) -> String {
     }
 }
 
-fn endpoint_url(base_url: &str, path: &str) -> String {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        path.to_string()
-    } else {
-        format!(
-            "{}/{}",
-            base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        )
+/// The query of a request that has none.
+const NO_QUERY: &[(&str, &str)] = &[];
+
+/// A progress poll: the entries after the first `after`.
+#[derive(Serialize)]
+struct After {
+    after: usize,
+}
+
+/// What a request carries.
+enum Body<'a, B: ?Sized> {
+    Empty,
+    Json(&'a B),
+    /// Bytes sent as they are, such as a dump.
+    Raw {
+        bytes: bytes::Bytes,
+        content_type: &'static str,
+    },
+}
+
+impl<'a, B: ?Sized> Body<'a, B> {
+    fn json(body: Option<&'a B>) -> Self {
+        body.map_or(Self::Empty, Self::Json)
     }
+}
+
+/// Settings are a sub-resource of the package in the per-package scope, so
+/// every settings call has the same two shapes.
+fn settings_path(pkgbase: Option<&str>, key: Option<&str>) -> String {
+    let mut path = match pkgbase {
+        Some(pkgbase) => format!("/package/{pkgbase}/settings"),
+        None => "/settings".to_string(),
+    };
+    if let Some(key) = key {
+        path.push('/');
+        path.push_str(key);
+    }
+    path
 }
 
 /// Which builds [`AurCacheClient::list_builds`] returns. Every field
 /// left unset matches everything.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Serialised as the query string, but for `pkgbase`, which is the path.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BuildQuery {
     /// Builds of this package only.
+    #[serde(skip)]
     pub pkgbase: Option<String>,
     /// Builds this worker (by id) ran, or is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<i32>,
     /// Builds in one of these states. Empty is every state.
+    #[serde(
+        rename = "status",
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "state_keys"
+    )]
     pub states: Vec<aurcache_common::build_state::BuildState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u64>,
 }
 
-/// Accumulates the `?key=value` pairs of a request, skipping absent values.
-#[derive(Default)]
-struct Query(Vec<(String, String)>);
-
-impl Query {
-    /// Append `key=value` if `value` is `Some`.
-    fn opt<T: ToString>(mut self, key: &str, value: Option<T>) -> Self {
-        if let Some(value) = value {
-            self.0.push((key.to_string(), value.to_string()));
-        }
-        self
-    }
-
-    fn pairs(&self) -> &[(String, String)] {
-        &self.0
-    }
+/// States as the server takes them: their keys, comma-separated.
+fn state_keys<S: serde::Serializer>(
+    states: &[aurcache_common::build_state::BuildState],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let keys: Vec<&str> = states.iter().map(|state| state.key()).collect();
+    serializer.serialize_str(&keys.join(","))
 }
 
 async fn ensure_success(response: Response) -> Result<Response> {
@@ -1222,17 +1185,38 @@ pub enum DependencySelection {
     Include,
 }
 
-/// Package listing filters and pagination.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+impl DependencySelection {
+    const fn is_requested_only(&self) -> bool {
+        matches!(self, Self::RequestedOnly)
+    }
+}
+
+/// The server's `dependencies=true`; leaving it out lists requested packages
+/// only.
+impl Serialize for DependencySelection {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bool(*self == Self::Include)
+    }
+}
+
+/// Package listing filters and pagination, serialised as the query string.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PackageQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<u64>,
+    #[serde(skip_serializing_if = "DependencySelection::is_requested_only")]
     pub dependencies: DependencySelection,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiError, endpoint_url};
+    use super::{ApiError, AurCacheClient, BuildQuery, DependencySelection, PackageQuery};
+    use aurcache_common::build_state::BuildState;
 
     /// The web UI answers with HTML and a 200, so the decode is where the
     /// mistake first becomes visible -- and "expected value at line 1 column 1"
@@ -1263,25 +1247,64 @@ mod tests {
     /// UI.
     #[test]
     fn a_trailing_slash_is_the_same_endpoint() {
-        assert!(super::same_endpoint(
+        let same =
+            |a: &str, b: &str| super::same_endpoint(&a.parse().unwrap(), &b.parse().unwrap());
+        assert!(same(
             "http://host:8080/api/health",
             "http://host:8080/api/health/"
         ));
-        assert!(super::same_endpoint(
+        assert!(same(
             "http://host:8080/api/health",
             "http://host:8080/api/health?"
         ));
-        assert!(!super::same_endpoint(
+        assert!(!same(
             "http://host:8080/health",
             "http://host:8080/api/login"
         ));
     }
 
+    /// The base keeps its `/api` prefix whichever way its slashes are written.
     #[test]
-    fn endpoint_url_trims_slashes() {
+    fn paths_join_onto_the_base() {
+        let client = AurCacheClient::new("http://localhost:8080/api/".to_string(), None).unwrap();
         assert_eq!(
-            endpoint_url("http://localhost:8080/api/", "/packages/list"),
+            client.url("/packages/list").unwrap().as_str(),
             "http://localhost:8080/api/packages/list"
+        );
+        assert_eq!(client.base_url(), "http://localhost:8080/api");
+    }
+
+    /// The query strings the server's routes take: absent fields left out,
+    /// states as comma-separated keys, and the pkgbase kept for the path.
+    #[test]
+    fn list_queries_serialise_as_the_routes_read_them() {
+        let builds = BuildQuery {
+            pkgbase: Some("aewm++".to_string()),
+            worker: Some(3),
+            states: vec![BuildState::Active, BuildState::Failed],
+            limit: Some(10),
+            page: None,
+        };
+        assert_eq!(
+            serde_urlencoded::to_string(&builds).unwrap(),
+            "worker=3&status=active%2Cfailed&limit=10"
+        );
+        assert_eq!(
+            serde_urlencoded::to_string(BuildQuery::default()).unwrap(),
+            ""
+        );
+        let packages = PackageQuery {
+            limit: None,
+            page: Some(2),
+            dependencies: DependencySelection::Include,
+        };
+        assert_eq!(
+            serde_urlencoded::to_string(&packages).unwrap(),
+            "page=2&dependencies=true"
+        );
+        assert_eq!(
+            serde_urlencoded::to_string(PackageQuery::default()).unwrap(),
+            ""
         );
     }
 

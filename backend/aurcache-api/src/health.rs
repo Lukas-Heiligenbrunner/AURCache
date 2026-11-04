@@ -27,7 +27,7 @@ pub async fn health(db: &State<DatabaseConnection>) -> Result<(), Status> {
     // reading. It goes to the logs, not the wire: a health poller only needs
     // the status code, and the success case must stay an empty 200 (the
     // client distinguishes the API from the web UI by its empty body).
-    if let Err(e) = check_health(db).await {
+    if let Err(e) = db.ping().await {
         tracing::error!("health check failed: {e:#}");
         return Err(Status::InternalServerError);
     }
@@ -71,11 +71,4 @@ fn local_timezone() -> Timezone {
         name,
         utc_offset: jiff::Zoned::now().offset().seconds(),
     }
-}
-
-async fn check_health(db: &DatabaseConnection) -> anyhow::Result<()> {
-    // Check database connection.
-    db.ping().await?;
-
-    Ok(())
 }

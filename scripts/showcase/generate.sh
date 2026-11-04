@@ -3,7 +3,7 @@
 # Builds the showcase snapshot: an instance holding the AUR's most popular
 # packages and about a year of believable build history, saved under
 # scripts/showcase/snapshot/ so screenshots (and anyone wanting a populated
-# instance to look at) can start from it in seconds. restore.sh is the fast
+# instance to look at) can start from it in seconds. restore.py is the fast
 # path; this is the slow one, run only to refresh the data.
 #
 #   ./scripts/showcase/generate.sh

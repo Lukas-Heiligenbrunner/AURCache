@@ -21,7 +21,6 @@ ARG AURCACHE_GIT_DIRTY
 ENV LATEST_COMMIT_SHA=${LATEST_COMMIT_SHA} \
     AURCACHE_GIT_TAG=${AURCACHE_GIT_TAG} \
     AURCACHE_GIT_DIRTY=${AURCACHE_GIT_DIRTY}
-# Install necessary tools and dependencies
 
 # The official rust image keeps cargo and the toolchain under /usr/local/cargo,
 # which a cache mount would *hide* on the first, cold build -- so the cache home

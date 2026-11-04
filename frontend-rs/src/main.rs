@@ -3,20 +3,19 @@
 //! Shares the API types with the server through `aurcache-common` rather than
 //! redeclaring them, so a change to a response shape becomes a compile error
 //! here instead of a silent drift between two hand-maintained models.
-//!
-//! The port is partial. Routes that are not implemented render a "not ported"
-//! card, so the gap is visible rather than hidden.
 
 // `rsx!` turns `"{value}"` interpolation into a `format!`, and the lint reads
 // that expansion as redundant. Its suggested `.to_string()` is not valid where
 // a text node is expected, so every hit is a false positive from macro output.
 #![allow(clippy::useless_format)]
 
+mod action;
 mod api;
 mod build_log;
 mod clipboard;
 mod dates;
 mod format;
+mod list_controls;
 mod listing;
 mod log_tail;
 mod notice;
@@ -29,7 +28,9 @@ mod setting_editor;
 mod shell;
 mod source_editor;
 mod status;
+mod storage;
 mod theme;
+mod widgets;
 
 use dioxus::prelude::*;
 use routes::Route;

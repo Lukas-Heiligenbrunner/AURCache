@@ -1,4 +1,4 @@
-use crate::models::authenticated::Authenticated;
+use crate::auth::Authenticated;
 use rocket::http::uri::Segments;
 use rocket::http::uri::fmt::Path;
 use rocket::http::{ContentType, Method, Status};

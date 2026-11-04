@@ -15,7 +15,7 @@ use aurcache_common::build_state::BuildState;
 use aurcache_common::build_state::EndReason;
 use aurcache_common::worker::{BuildOutcome, CompleteReport};
 use aurcache_db::helpers::build_enqueue::{Demotion, demote_enqueued_build, promote_waiting_build};
-use aurcache_db::helpers::builds::refresh_package_status;
+use aurcache_db::helpers::builds::{Transition, transition};
 use aurcache_db::helpers::time::now_secs;
 use aurcache_db::helpers::worker_jobs;
 use aurcache_db::prelude::{Builds, Dependencies, Packages};
@@ -23,8 +23,8 @@ use aurcache_db::{builds, dependencies};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::DatabaseConnection;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, TransactionSession,
-    TransactionTrait,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbErr, EntityTrait,
+    QueryFilter, QuerySelect, TransactionTrait,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -130,60 +130,42 @@ fn check_owned(worker_id: i32, build: &builds::Model) -> Result<(), CompletionEr
     Ok(())
 }
 
-/// Record the peak memory a worker reported for a build.
+/// Record what the worker measured of a build: its peak memory, the disk it
+/// used part by part, and the failed chroot it kept for inspection.
 ///
 /// Written before the success/failure branch, because a build that was
-/// OOM-killed is exactly when the number is worth having and that build will
-/// never reach the success path.
+/// OOM-killed or ran out of disk is exactly when the figures are worth having,
+/// and that build will never reach the success path.
 ///
 /// Best-effort rather than compare-and-swap: unlike the version and the size,
 /// this publishes nothing and decides nothing, so a build whose lease was
 /// reclaimed mid-flight is not worth failing a completion over. A stale write
 /// records a measurement that did happen, for a build that did run.
-pub async fn record_peak_memory<C: ConnectionTrait>(
+pub async fn record_measurements<C: ConnectionTrait>(
     db: &C,
     build_id: i32,
-    peak_memory_bytes: i64,
+    report: &CompleteReport,
 ) -> Result<(), DbErr> {
+    let mut measured = <builds::ActiveModel as Default>::default();
+    if let Some(peak) = report.peak_memory_bytes {
+        measured.peak_memory = Set(Some(peak));
+    }
+    if let Some(usage) = report.disk_usage.as_ref().filter(|u| !u.is_empty()) {
+        measured.disk_chroot = Set(usage.chroot);
+        measured.disk_workdir = Set(usage.workdir);
+        measured.disk_sources = Set(usage.sources);
+        measured.disk_build_tree = Set(usage.build_tree);
+    }
+    if let Some(kept) = &report.kept {
+        measured.kept_path = Set(Some(kept.path.clone()));
+        measured.kept_until = Set(Some(kept.until));
+        measured.kept_tree = Set(kept.tree.clone());
+    }
+    if !measured.is_changed() {
+        return Ok(());
+    }
     Builds::update_many()
-        .col_expr(builds::Column::PeakMemory, Some(peak_memory_bytes).into())
-        .filter(builds::Column::Id.eq(build_id))
-        .exec(db)
-        .await?;
-    Ok(())
-}
-
-/// Record the disk a build used on its worker, part by part. Best-effort, for
-/// the same reason as [`record_peak_memory`], and for a failed build too: one
-/// that ran out of disk is the one whose figures matter most.
-pub async fn record_disk_usage<C: ConnectionTrait>(
-    db: &C,
-    build_id: i32,
-    usage: &aurcache_common::api::builds::DiskUsage,
-) -> Result<(), DbErr> {
-    Builds::update_many()
-        .col_expr(builds::Column::DiskChroot, usage.chroot.into())
-        .col_expr(builds::Column::DiskWorkdir, usage.workdir.into())
-        .col_expr(builds::Column::DiskSources, usage.sources.into())
-        .col_expr(builds::Column::DiskBuildTree, usage.build_tree.into())
-        .filter(builds::Column::Id.eq(build_id))
-        .exec(db)
-        .await?;
-    Ok(())
-}
-
-/// Record the failed chroot the worker kept for inspection, where and until
-/// when. Best-effort, for the same reason as [`record_peak_memory`]: a stale
-/// write records a keep that did happen, for a build that did run.
-pub async fn record_kept<C: ConnectionTrait>(
-    db: &C,
-    build_id: i32,
-    kept: &aurcache_common::api::builds::KeptBuild,
-) -> Result<(), DbErr> {
-    Builds::update_many()
-        .col_expr(builds::Column::KeptPath, Some(kept.path.clone()).into())
-        .col_expr(builds::Column::KeptUntil, Some(kept.until).into())
-        .col_expr(builds::Column::KeptTree, kept.tree.clone().into())
+        .set(measured)
         .filter(builds::Column::Id.eq(build_id))
         .exec(db)
         .await?;
@@ -221,28 +203,20 @@ async fn release<C: ConnectionTrait + TransactionTrait>(
     ended_at: Option<i64>,
 ) -> Result<(), CompletionError> {
     let build = find_build(db, build_id).await?;
-
-    let txn = db.begin().await?;
-    let mut update = Builds::update_many()
-        .col_expr(builds::Column::Status, status.into())
-        .col_expr(builds::Column::LeaseExpiresAt, Option::<i64>::None.into());
-    if let Some(ended_at) = ended_at {
-        update = update.col_expr(builds::Column::EndTime, Some(ended_at).into());
+    let moved = transition(db, &build, &[BuildState::Active], status, |update| {
+        let update = update
+            .col_expr(builds::Column::LeaseExpiresAt, Option::<i64>::None.into())
+            .filter(builds::Column::WorkerId.eq(worker_id));
+        match ended_at {
+            Some(ended_at) => update.col_expr(builds::Column::EndTime, Some(ended_at).into()),
+            None => update,
+        }
+    })
+    .await?;
+    match moved {
+        Transition::Moved => Ok(()),
+        Transition::Unchanged => Err(lease_lost(build_id, worker_id)),
     }
-    let res = update
-        .filter(builds::Column::Id.eq(build_id))
-        .filter(builds::Column::Status.eq(BuildState::Active))
-        .filter(builds::Column::WorkerId.eq(worker_id))
-        .exec(&txn)
-        .await?;
-    if res.rows_affected == 0 {
-        txn.rollback().await?;
-        return Err(lease_lost(build_id, worker_id));
-    }
-
-    refresh_package_status(&txn, build.pkg_id).await?;
-    txn.commit().await?;
-    Ok(())
 }
 
 /// Take a finished build over from the worker that built it, to publish.
@@ -409,6 +383,43 @@ async fn promote_dependent<C: ConnectionTrait + TransactionTrait>(
         }))
 }
 
+/// Why a completion report changes nothing: it is about a build this worker
+/// ran that has already moved on, so the worker's earlier request got through
+/// and only its answer was lost. Answered 200 without changing anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// A cancelled or interrupted report, acknowledging an abort the server
+    /// carried out: an operator's Stop, or the reaper abandoning the build.
+    Abort,
+    /// A success repeating a completion that was accepted: the build is being
+    /// published, was published, or failed to publish -- which fails with no
+    /// end reason, unlike a cancel or an abandonment.
+    Success,
+}
+
+/// Whether `report` repeats one `worker_id` already made about `build`.
+///
+/// A real ownership check: without it, any authenticated worker that guessed
+/// an id could remove another worker's staging directory.
+fn repeat(build: &builds::Model, report: &CompleteReport, worker_id: i32) -> Option<Repeat> {
+    if build.worker_id != Some(worker_id) {
+        return None;
+    }
+    let failed = build.status == BuildState::Failed;
+    let aborted = matches!(
+        report.outcome,
+        BuildOutcome::Canceled | BuildOutcome::Interrupted
+    );
+    if aborted && failed {
+        return Some(Repeat::Abort);
+    }
+    let accepted = matches!(
+        build.status,
+        BuildState::Publishing | BuildState::Successful
+    ) || (failed && build.end_reason.is_none());
+    (report.outcome == BuildOutcome::Succeeded && accepted).then_some(Repeat::Success)
+}
+
 /// Accept a completion, including retries, publication and staging cleanup.
 pub async fn complete(
     db: &DatabaseConnection,
@@ -420,38 +431,13 @@ pub async fn complete(
 ) -> Result<Completion, CompletionError> {
     let build = find_build(db, build_id).await?;
 
-    // A report about a build this worker ran that has already moved on is a
-    // repeat, and is answered 200 without changing anything: the worker's
-    // earlier request got through and only its answer was lost.
-    //
-    // * A cancelled report acknowledges an abort the server carried out
-    //   (operator Stop, or the reaper abandoning the build).
-    // * A success repeats a completion that was accepted: the build is being
-    //   published, was published, or failed to publish -- which fails with no
-    //   end reason, unlike a cancel or an abandonment.
-    //
-    // A real ownership check: without it, any authenticated worker that
-    // guessed an id could remove another worker's staging directory.
-    if build.worker_id == Some(worker_model.id) {
-        let failed = build.status == BuildState::Failed;
-        // An interruption the server already abandoned the build for is the
-        // same: the build left this worker's hands either way.
-        let acknowledged_abort = matches!(
-            report.outcome,
-            BuildOutcome::Canceled | BuildOutcome::Interrupted
-        ) && failed;
-        let repeated_success = report.outcome == BuildOutcome::Succeeded
-            && (matches!(
-                build.status,
-                BuildState::Publishing | BuildState::Successful
-            ) || (failed && build.end_reason.is_none()));
-        if acknowledged_abort {
-            let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+    match repeat(&build, &report, worker_model.id) {
+        Some(Repeat::Abort) => {
+            repo.discard_staging(build_id).await;
             return Ok(Completion::AlreadyAccepted);
         }
-        if repeated_success {
-            return Ok(Completion::AlreadyAccepted);
-        }
+        Some(Repeat::Success) => return Ok(Completion::AlreadyAccepted),
+        None => {}
     }
 
     check_owned_active(worker_model.id, &build)?;
@@ -481,20 +467,8 @@ pub async fn complete(
 
     // Before the branch below: an OOM-killed build never reaches the success
     // path, and that is the build whose memory figure matters most.
-    if let Some(peak) = report.peak_memory_bytes
-        && let Err(e) = record_peak_memory(db, build_id, peak).await
-    {
-        record_failed("peak memory", e.to_string());
-    }
-    if let Some(usage) = report.disk_usage.as_ref().filter(|u| !u.is_empty())
-        && let Err(e) = record_disk_usage(db, build_id, usage).await
-    {
-        record_failed("disk usage", e.to_string());
-    }
-    if let Some(kept) = report.kept.as_ref()
-        && let Err(e) = record_kept(db, build_id, kept).await
-    {
-        record_failed("kept chroot", e.to_string());
+    if let Err(e) = record_measurements(db, build_id, &report).await {
+        record_failed("measurements", e.to_string());
     }
 
     if report.outcome == BuildOutcome::Succeeded {
@@ -549,7 +523,7 @@ pub async fn complete(
         .await?
         .ok_or_else(|| lease_lost(build_id, worker_model.id))?;
         crate::abandoned::report(db, activity, &[abandoned]).await;
-        let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+        repo.discard_staging(build_id).await;
         return Ok(Completion::Accepted);
     }
     // Refused like a success above when the lease was lost in the meantime.
@@ -561,7 +535,7 @@ pub async fn complete(
             reason: report.reason.clone(),
         });
     }
-    let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+    repo.discard_staging(build_id).await;
     Ok(Completion::Accepted)
 }
 
@@ -619,9 +593,11 @@ mod tests {
         pkg(&db, 1).await;
         build(&db, 1, 1, BuildState::Active, "1").await;
 
-        record_peak_memory(&db, 1, 6 * 1024 * 1024 * 1024)
-            .await
-            .unwrap();
+        let report = CompleteReport {
+            peak_memory_bytes: Some(6 * 1024 * 1024 * 1024),
+            ..CompleteReport::default()
+        };
+        record_measurements(&db, 1, &report).await.unwrap();
         complete_failure(&db, 1, 1).await.unwrap();
 
         let row = Builds::find_by_id(1).one(&db).await.unwrap().unwrap();
@@ -643,7 +619,11 @@ mod tests {
             sources: Some(9),
             build_tree: None,
         };
-        record_disk_usage(&db, 1, &usage).await.unwrap();
+        let report = CompleteReport {
+            disk_usage: Some(usage),
+            ..CompleteReport::default()
+        };
+        record_measurements(&db, 1, &report).await.unwrap();
 
         let row = Builds::find_by_id(1).one(&db).await.unwrap().unwrap();
         assert_eq!(row.disk_chroot, Some(700));
@@ -665,7 +645,11 @@ mod tests {
             until: 1_800_000_000,
             tree: Some("/pool/kept-1.build".to_string()),
         };
-        record_kept(&db, 1, &kept).await.unwrap();
+        let report = CompleteReport {
+            kept: Some(kept),
+            ..CompleteReport::default()
+        };
+        record_measurements(&db, 1, &report).await.unwrap();
         complete_failure(&db, 1, 1).await.unwrap();
 
         let row = Builds::find_by_id(1).one(&db).await.unwrap().unwrap();

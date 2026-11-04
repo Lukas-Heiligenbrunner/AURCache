@@ -36,7 +36,6 @@
 use crate::worker_config::{ConfigSnapshot, EffectiveConfig, SettingDecl};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use utoipa::ToSchema;
 
 /// The worker protocols the types in this module implement, oldest to newest.
 ///
@@ -47,7 +46,8 @@ pub const PROTOCOLS: ProtocolRange = ProtocolRange { min: 1, max: 1 };
 ///
 /// A range rather than a set: a peer that speaks 1 and 3 but not 2 is not a
 /// case worth designing for.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ProtocolRange {
     pub min: u32,
     pub max: u32,
@@ -74,7 +74,8 @@ impl std::fmt::Display for ProtocolRange {
 
 /// Enrollment request a worker sends on first contact (no client cert yet),
 /// and again every time it starts.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterRequest {
     /// The protocols this worker speaks. The server answers with the newest
     /// one it speaks too, in [`RegisterStatus::protocol`], or refuses the
@@ -118,7 +119,8 @@ pub struct RegisterRequest {
 }
 
 /// Enrollment status returned while a worker polls for approval.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterStatus {
     /// Where the worker stands in the approval workflow. A status the worker
     /// does not know reads as `pending`: keep waiting.
@@ -160,7 +162,8 @@ pub const REPO_HOST_PLACEHOLDER: &str = "%AURCACHE_HOST%";
 /// The checksum is one the *server* produced and sent alongside a mirrorlist;
 /// the worker only echoes it back. Nothing on the worker side computes a
 /// digest, so the two ends cannot disagree about the algorithm.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum MirrorlistPreference {
     /// The worker takes the server's, and holds these checksums keyed by
@@ -177,7 +180,8 @@ pub enum MirrorlistPreference {
 }
 
 /// What the server says about a build's mirrorlist.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "offer")]
 pub enum MirrorlistOffer {
     /// Use this list, and echo its checksum back on the next claim.
@@ -197,7 +201,8 @@ pub enum MirrorlistOffer {
 /// What it can build is not in here: routing reads the worker's arches,
 /// affinity and priority from its registration, so that every worker's claim
 /// is weighed against the same declarations.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ClaimRequest {
     /// What the worker already holds, so the server can skip resending an
     /// unchanged mirrorlist.
@@ -208,7 +213,8 @@ pub struct ClaimRequest {
 ///
 /// Sources are downloaded separately (`GET /jobs/{id}/source`); this carries the
 /// self-contained build configuration.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobDescriptor {
     pub build_id: i32,
     pub pkgbase: String,
@@ -265,7 +271,8 @@ pub struct JobDescriptor {
 }
 
 /// One `git+` source of a build, as the worker needs to find it.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobVcsSource {
     /// The raw `.SRCINFO` source string, which is the key the server records
     /// the answer under.
@@ -278,7 +285,8 @@ pub struct JobVcsSource {
 
 /// Periodic liveness signal. Carries the set of builds the worker is actively
 /// running so the server can renew their leases and abandon any it dropped.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Heartbeat {
     pub active_build_ids: Vec<i32>,
     pub version: String,
@@ -305,7 +313,8 @@ pub struct Heartbeat {
 /// it is the one channel back the pull-only worker has. A non-empty `cancel` is
 /// the server saying "these builds are no longer ACTIVE under you — stop
 /// them"; the worker aborts them on its next 5 s tick.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct HeartbeatResponse {
     /// Build ids this worker should stop running.
     pub cancel: Vec<i32>,
@@ -315,7 +324,8 @@ pub struct HeartbeatResponse {
 }
 
 /// How a build ended, as its worker saw it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BuildOutcome {
     Succeeded,
@@ -339,7 +349,8 @@ pub enum BuildOutcome {
 }
 
 /// Terminal report for a single build.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteReport {
     pub outcome: BuildOutcome,
     /// Exit code of the build process (e.g. 137 for an OOM kill), when known.
@@ -370,7 +381,8 @@ pub struct CompleteReport {
 }
 
 /// Worker's poll response for cancel on a specific job.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct JobStatus {
     pub cancel_requested: bool,
 }
@@ -382,7 +394,8 @@ pub struct JobStatus {
 /// catalogue the server can be expected to keep in step with release for
 /// release, so the server files every one under one of two kinds
 /// (`worker.warning`, `worker.error`) and keeps this as the sentence.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WorkerLogReport {
     /// A severity the server does not know reads as a warning.
     #[serde(deserialize_with = "severity_or_warning")]

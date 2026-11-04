@@ -1,11 +1,11 @@
-use crate::models::authenticated::Authenticated;
-use crate::models::settings::{SettingResponse, SettingValue};
+use crate::auth::Authenticated;
 use crate::utils::error::{ApiError, err};
-use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::settings::SchedulePreview;
-use aurcache_common::settings::{ApplicationSettings, Scope, Setting};
+use aurcache_common::api::settings::{SettingResponse, SettingValue};
+use aurcache_common::settings::{ApplicationSettings, Setting};
 use aurcache_utils::scheduled::{Job, preview};
+use aurcache_utils::services::Services;
 use aurcache_utils::settings as store;
 use rocket::http::Status;
 use rocket::serde::json::Json;
@@ -45,11 +45,7 @@ async fn settings_impl(
     db: &DatabaseConnection,
     pkg_id: Option<i32>,
 ) -> Result<Json<ApplicationSettings>, ApiError> {
-    Ok(Json(
-        store::all(db, pkg_id)
-            .await
-            .map_err(|e| err(Status::InternalServerError, e))?,
-    ))
+    Ok(Json(store::all(db, pkg_id).await?))
 }
 
 async fn setting_get_impl(
@@ -58,9 +54,7 @@ async fn setting_get_impl(
     pkg_id: Option<i32>,
 ) -> Result<Json<SettingResponse>, ApiError> {
     let setting = parse_setting(key)?;
-    let entry = store::raw(db, setting, pkg_id)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let entry = store::raw(db, setting, pkg_id).await?;
     Ok(Json(SettingResponse {
         value: entry.value,
         source: entry.source,
@@ -74,26 +68,10 @@ async fn setting_patch_impl(
     value: String,
 ) -> Result<(), ApiError> {
     let setting = parse_setting(key)?;
-    // Removing such a value stays allowed below: it is how a stray row goes.
-    if pkg_id.is_some() && setting.meta().scope == Scope::Global {
-        return Err(err(
-            Status::BadRequest,
-            format!("{key} applies to the whole server and cannot be set per package"),
-        ));
-    }
     setting
         .validate(&value)
         .map_err(|e| err(Status::BadRequest, e))?;
-    store::write(
-        db,
-        [store::Change {
-            setting,
-            pkg_id,
-            value: Some(value),
-        }],
-    )
-    .await
-    .map_err(|e| err(Status::InternalServerError, e))
+    write(db, setting, pkg_id, Some(value)).await
 }
 
 async fn setting_reset_impl(
@@ -101,17 +79,31 @@ async fn setting_reset_impl(
     key: &str,
     pkg_id: Option<i32>,
 ) -> Result<(), ApiError> {
-    let setting = parse_setting(key)?;
-    store::write(
-        db,
-        [store::Change {
-            setting,
-            pkg_id,
-            value: None,
-        }],
-    )
-    .await
-    .map_err(|e| err(Status::InternalServerError, e))
+    write(db, parse_setting(key)?, pkg_id, None).await
+}
+
+/// Store one value, or remove it with `None`.
+async fn write(
+    db: &DatabaseConnection,
+    setting: Setting,
+    pkg_id: Option<i32>,
+    value: Option<String>,
+) -> Result<(), ApiError> {
+    let change = store::Change {
+        setting,
+        pkg_id,
+        value,
+    };
+    match store::write(db, [change]).await? {
+        store::Write::Written => Ok(()),
+        store::Write::GlobalOnly(setting) => Err(err(
+            Status::BadRequest,
+            format!(
+                "{} applies to the whole server and cannot be set per package",
+                setting.meta().key
+            ),
+        )),
+    }
 }
 
 /// Fetch every setting with its effective value and source.
@@ -135,7 +127,11 @@ pub async fn package_settings(
     pkgbase: &str,
     _a: Authenticated,
 ) -> Result<Json<ApplicationSettings>, ApiError> {
-    let pkg_id = Some(crate::package::package_id(db.inner(), pkgbase).await?);
+    let pkg_id = Some(
+        crate::package::package_by_pkgbase(db.inner(), pkgbase)
+            .await?
+            .id,
+    );
     settings_impl(db.inner(), pkg_id).await
 }
 
@@ -174,7 +170,11 @@ pub async fn package_setting_get(
     key: &str,
     _a: Authenticated,
 ) -> Result<Json<SettingResponse>, ApiError> {
-    let pkg_id = Some(crate::package::package_id(db.inner(), pkgbase).await?);
+    let pkg_id = Some(
+        crate::package::package_by_pkgbase(db.inner(), pkgbase)
+            .await?
+            .id,
+    );
     setting_get_impl(db.inner(), key, pkg_id).await
 }
 
@@ -193,10 +193,10 @@ pub async fn setting_patch(
     key: &str,
     input: Json<SettingValue>,
     a: Authenticated,
-    al: &State<ActivityLog>,
+    services: &State<Services>,
 ) -> Result<(), ApiError> {
     setting_patch_impl(db.inner(), key, None, input.into_inner().value).await?;
-    al.emit_by(
+    services.activity.emit_by(
         Event::SettingChanged {
             key: key.to_string(),
             pkg: None,
@@ -225,11 +225,15 @@ pub async fn package_setting_patch(
     key: &str,
     input: Json<SettingValue>,
     a: Authenticated,
-    al: &State<ActivityLog>,
+    services: &State<Services>,
 ) -> Result<(), ApiError> {
-    let pkg_id = Some(crate::package::package_id(db.inner(), pkgbase).await?);
+    let pkg_id = Some(
+        crate::package::package_by_pkgbase(db.inner(), pkgbase)
+            .await?
+            .id,
+    );
     setting_patch_impl(db.inner(), key, pkg_id, input.into_inner().value).await?;
-    al.emit_by(
+    services.activity.emit_by(
         Event::SettingChanged {
             key: key.to_string(),
             pkg: Some(pkgbase.into()),
@@ -252,10 +256,10 @@ pub async fn setting_reset(
     db: &State<DatabaseConnection>,
     key: &str,
     a: Authenticated,
-    al: &State<ActivityLog>,
+    services: &State<Services>,
 ) -> Result<(), ApiError> {
     setting_reset_impl(db.inner(), key, None).await?;
-    al.emit_by(
+    services.activity.emit_by(
         Event::SettingReset {
             key: key.to_string(),
             pkg: None,
@@ -282,11 +286,15 @@ pub async fn package_setting_reset(
     pkgbase: &str,
     key: &str,
     a: Authenticated,
-    al: &State<ActivityLog>,
+    services: &State<Services>,
 ) -> Result<(), ApiError> {
-    let pkg_id = Some(crate::package::package_id(db.inner(), pkgbase).await?);
+    let pkg_id = Some(
+        crate::package::package_by_pkgbase(db.inner(), pkgbase)
+            .await?
+            .id,
+    );
     setting_reset_impl(db.inner(), key, pkg_id).await?;
-    al.emit_by(
+    services.activity.emit_by(
         Event::SettingReset {
             key: key.to_string(),
             pkg: Some(pkgbase.into()),

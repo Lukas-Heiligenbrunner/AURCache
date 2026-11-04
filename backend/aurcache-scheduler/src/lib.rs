@@ -1,7 +1,7 @@
 pub mod activity_retention;
 pub mod auto_update;
 pub mod lease_reaper;
-pub mod mirror_ranking;
+pub mod mirrorlist;
 pub mod official_repos;
 pub mod retired_packages;
 pub mod update_version_check;

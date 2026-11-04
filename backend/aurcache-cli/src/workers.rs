@@ -1,7 +1,10 @@
 //! `workers`: the fleet, approving and revoking, draining, configuring.
 
+use crate::builds::build_id;
 use crate::cli::{OutputFormat, WorkerCommand};
-use crate::output::{format_timestamp, print_done_message, print_table, render};
+use crate::output::{
+    format_timestamp, join_or_dash, option_text, print_done_message, print_table, render,
+};
 use anyhow::{Context, Result, bail};
 use aurcache_client::{
     AurCacheClient, Build, BuildQuery, Worker, WorkerConfigUpdate, WorkerConfigView,
@@ -71,21 +74,9 @@ pub(crate) async fn wait_for_drain(
         states: vec![BuildState::Active],
         ..BuildQuery::default()
     };
-    // Checked again here, by the name the list carries: a server older than
-    // these filters ignores them and lists every build, and waiting on other
-    // workers' builds would never end.
-    let name = client
-        .list_workers()
-        .await?
-        .into_iter()
-        .find(|w| w.id == id)
-        .map(|w| w.name)
-        .with_context(|| format!("no worker {id}"))?;
     let mut last = None;
     loop {
-        let mut running = client.list_builds(&query).await?;
-        running
-            .retain(|b| b.status == BuildState::Active && b.worker_name.as_deref() == Some(&name));
+        let running = client.list_builds(&query).await?;
         if running.is_empty() {
             return Ok(());
         }
@@ -119,10 +110,7 @@ pub(crate) fn drain_progress(id: i32, running: &[Build]) -> String {
 
 /// `hello/3, world/1`, sorted so that the line only changes when the builds do.
 pub(crate) fn build_refs(builds: &[Build]) -> String {
-    let mut refs: Vec<_> = builds
-        .iter()
-        .map(|b| format!("{}/{}", b.pkg_name, b.number))
-        .collect();
+    let mut refs: Vec<_> = builds.iter().map(build_id).collect();
     refs.sort();
     refs.join(", ")
 }
@@ -237,14 +225,9 @@ pub(crate) fn print_worker_config(view: &WorkerConfigView) {
             });
             vec![
                 decl.key.clone(),
-                running
-                    .and_then(|r| r.value.clone())
-                    .unwrap_or_else(|| "-".to_string()),
+                option_text(running.and_then(|r| r.value.as_deref())),
                 source.to_string(),
-                view.values
-                    .get(&decl.key)
-                    .cloned()
-                    .unwrap_or_else(|| "-".to_string()),
+                option_text(view.values.get(&decl.key).map(String::as_str)),
                 status.to_string(),
             ]
         })
@@ -262,15 +245,6 @@ pub(crate) fn print_worker_config(view: &WorkerConfigView) {
         Some(view.revision.as_str()) != effective.and_then(|e| e.received_revision.as_deref());
     if pending && !view.values.is_empty() {
         println!("The worker has not picked up the latest save yet.");
-    }
-}
-
-/// A list as comma-separated text, or a dash when there is nothing in it.
-pub(crate) fn or_dash(items: &[String]) -> String {
-    if items.is_empty() {
-        "-".to_string()
-    } else {
-        items.join(",")
     }
 }
 
@@ -297,9 +271,9 @@ pub(crate) fn print_worker_list(workers: &[Worker]) {
                 // Which build strategy: `chroot`, `docker`, or whatever a
                 // future executor calls itself. A dash for a worker that
                 // enrolled before workers reported one.
-                w.kind.clone().unwrap_or_else(|| "-".to_string()),
-                or_dash(&w.arches),
-                or_dash(&w.package_affinity),
+                option_text(w.kind.as_deref()),
+                join_or_dash(&w.arches),
+                join_or_dash(&w.package_affinity),
                 if w.priority == 0 {
                     // Zero is the default and means "no preference"; printing
                     // it would suggest the fleet had been tuned when it has not.
@@ -307,7 +281,7 @@ pub(crate) fn print_worker_list(workers: &[Worker]) {
                 } else {
                     w.priority.to_string()
                 },
-                w.version.clone().unwrap_or_else(|| "-".to_string()),
+                option_text(w.version.as_deref()),
                 format_timestamp(w.last_seen),
                 fp,
             ]
@@ -371,19 +345,20 @@ mod worker_config_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builds::tests::{ACTIVE, build};
+    use crate::builds::tests::build;
+    use aurcache_common::build_state::BuildState::Active;
 
     /// The progress line only changes when the set of builds does, whatever
     /// order the server lists them in.
     #[test]
     fn drain_progress_names_what_is_still_running() {
-        let one = [build("hello", 3, ACTIVE)];
+        let one = [build("hello", 3, Active)];
         assert_eq!(
             drain_progress(4, &one),
             "waiting for worker 4 to finish 1 build: hello/3"
         );
-        let two = [build("world", 1, ACTIVE), build("hello", 3, ACTIVE)];
-        let swapped = [build("hello", 3, ACTIVE), build("world", 1, ACTIVE)];
+        let two = [build("world", 1, Active), build("hello", 3, Active)];
+        let swapped = [build("hello", 3, Active), build("world", 1, Active)];
         assert_eq!(drain_progress(4, &two), drain_progress(4, &swapped));
         assert!(drain_progress(4, &two).contains("2 builds: hello/3, world/1"));
     }

@@ -53,21 +53,22 @@ pub enum Route {
         // so it can be linked to and Back closes it.
         #[route("/packages/add#:q")]
         PackageAdd { q: String },
-        #[route("/package/:pkgbase")]
-        Package { pkgbase: String },
-        #[route("/package/:pkgbase/builds")]
-        PackageBuilds { pkgbase: String },
-        #[route("/package/:pkgbase/build/:number")]
-        Build { pkgbase: String, number: i32 },
-        // Named for what it holds. It was "settings" while it also carried
-        // platforms, flags and removal; those live on the package page now,
-        // and two config files are not a settings page.
-        #[route("/package/:pkgbase/config-files")]
-        PackageConfigFiles { pkgbase: String },
-        // `:..path` is a catch-all: source paths contain slashes, so a single
-        // segment would only ever match files at the top level.
-        #[route("/package/:pkgbase/source/:..path")]
-        PackageSource { pkgbase: String, path: Vec<String> },
+        // Every page about one package shares the scope's fetch of it and
+        // the header naming it.
+        #[layout(PackageScope)]
+            #[route("/package/:pkgbase")]
+            Package { pkgbase: String },
+            #[route("/package/:pkgbase/builds")]
+            PackageBuilds { pkgbase: String },
+            #[route("/package/:pkgbase/build/:number")]
+            Build { pkgbase: String, number: i32 },
+            #[route("/package/:pkgbase/config-files")]
+            PackageConfigFiles { pkgbase: String },
+            // `:..path` is a catch-all: source paths contain slashes, so a
+            // single segment would only ever match files at the top level.
+            #[route("/package/:pkgbase/source/:..path")]
+            PackageSource { pkgbase: String, path: Vec<String> },
+        #[end_layout]
 
         #[route("/workers")]
         Workers {},
@@ -88,15 +89,14 @@ pub enum Route {
         // cannot be mistaken for a name by the catch-all above.
         #[route("/workers/by-cert/:fingerprint")]
         WorkerByFingerprint { fingerprint: String },
-        // Renamed from Activities once it carried failures as well as actions.
-        // The old path still lands: a bookmark predates the rename.
-        #[redirect("/activities", || Route::Logs { view: ViewParams::default() })]
+        // `/activities` is the upstream UI's name for this page.
+        #[redirect("/activities", || Route::Logs { view: LogView::default() })]
         #[route("/logs?:..view")]
-        Logs { view: ViewParams },
+        Logs { view: LogView },
         #[route("/settings")]
         Settings {},
-        // Under Settings because that is the only way in: it left the sidebar
-        // once the section it belongs to was the one place that linked it.
+        // Under Settings because that is the only way in. `/config-files` is
+        // the upstream UI's path for it.
         #[redirect("/config-files", || Route::ConfigFiles {})]
         #[route("/settings/config-files")]
         ConfigFiles {},
@@ -136,6 +136,18 @@ impl MenuEntry {
 }
 
 impl Route {
+    /// The package a package-scoped page is about.
+    pub fn pkgbase(&self) -> Option<&str> {
+        match self {
+            Self::Package { pkgbase }
+            | Self::PackageBuilds { pkgbase }
+            | Self::Build { pkgbase, .. }
+            | Self::PackageConfigFiles { pkgbase }
+            | Self::PackageSource { pkgbase, .. } => Some(pkgbase),
+            _ => None,
+        }
+    }
+
     /// Which menu entry should be highlighted while this route is open.
     ///
     /// `None` for routes with no home in the menu, so nothing is highlighted
@@ -261,10 +273,9 @@ mod tests {
         );
     }
 
-    /// Activity became Logs when it started carrying failures as well as
-    /// actions. A bookmark of the old path still has to land on them.
+    /// The upstream UI's path for the log still lands on it.
     #[test]
-    fn the_old_activities_path_still_arrives() {
+    fn the_upstream_activities_path_still_arrives() {
         assert_eq!(entry_for("/activities"), Some(MenuEntry::Logs));
         assert_eq!(entry_for("/logs"), Some(MenuEntry::Logs));
     }
@@ -274,7 +285,7 @@ mod tests {
     #[test]
     fn log_filters_ride_the_query() {
         let bare = Route::Logs {
-            view: ViewParams::default(),
+            view: LogView::default(),
         }
         .to_string();
         assert!(
@@ -283,17 +294,17 @@ mod tests {
         );
 
         let filtered = Route::Logs {
-            view: ViewParams::for_logs(Some(Severity::Warning), true, None),
+            view: LogView::new(Some(Severity::Warning), true, None),
         }
         .to_string();
         assert!(filtered.contains("v=warning"), "{filtered}");
         assert!(filtered.contains("b=1"), "{filtered}");
     }
 
-    /// The config files moved under Settings when they left the sidebar. A
-    /// bookmark of the old path still has to land on them.
+    /// The config files live under Settings; the upstream UI's path for them
+    /// still lands there.
     #[test]
-    fn the_old_config_files_path_still_arrives() {
+    fn the_upstream_config_files_path_still_arrives() {
         assert_eq!(Route::ConfigFiles {}.to_string(), "/settings/config-files");
         assert_eq!(entry_for("/config-files"), Some(MenuEntry::Settings));
         assert_eq!(
@@ -302,11 +313,21 @@ mod tests {
         );
     }
 
-    /// `/` is the landing route, and hash routing depends on it: an empty
-    /// fragment is turned into `/`, so this is what a first visit renders.
+    /// `/` is the landing route: what a first visit renders.
     #[test]
     fn the_index_route_is_the_dashboard() {
         assert_eq!(entry_for("/"), Some(MenuEntry::Dashboard));
+    }
+
+    /// The package page's own URL has no trailing slash: links to it are
+    /// written that way everywhere.
+    #[test]
+    fn the_package_page_is_the_bare_package_path() {
+        let route = Route::Package {
+            pkgbase: "hello".into(),
+        };
+        assert_eq!(route.to_string(), "/package/hello");
+        assert_eq!(Route::from_str("/package/hello").ok(), Some(route));
     }
 
     /// Nothing in the menu corresponds to a bad URL, so nothing is highlighted.
@@ -378,10 +399,10 @@ mod tests {
                 fingerprint: "0f1e2d3c4b5a".into(),
             },
             Route::Logs {
-                view: ViewParams::default(),
+                view: LogView::default(),
             },
             Route::Logs {
-                view: ViewParams::for_logs(Some(Severity::Warning), true, None),
+                view: LogView::new(Some(Severity::Warning), true, None),
             },
             Route::Settings {},
             Route::ConfigFiles {},

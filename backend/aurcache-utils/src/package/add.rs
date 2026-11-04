@@ -1,6 +1,9 @@
+use crate::package::bulk_add::apply_resolved_base;
+use crate::package::dependency_resolution::{PackageCandidate, TrackedPackages};
 use crate::package::edges::{Declaration, Dependee, resolve_edges};
 use crate::package::enqueue::trigger_initial_builds;
 use crate::package::metadata::refresh_source_metadata;
+use crate::package::source_facts::{SourceFacts, pkg_deps, provides_json, split_packages_json};
 use crate::patch::SourcePatch;
 use crate::services::Services;
 use crate::snapshot::SnapshotStore;
@@ -8,7 +11,7 @@ use anyhow::{anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
-use aurcache_db::helpers::dependency_resolution::{PackageCandidate, TrackedPackages};
+use aurcache_db::lists::JsonList;
 use aurcache_db::lists::{BuildFlags, Platforms};
 use aurcache_db::packages;
 use aurcache_db::packages::SourceData;
@@ -38,9 +41,19 @@ impl AddContext {
         }
     }
 
-    /// The architectures whose dependencies the packages need.
-    fn architectures(&self) -> Vec<alpm_types::SystemArchitecture> {
-        crate::pkg::architectures(&self.platforms)
+    /// The context a caller asked for, with the defaults for what it left out:
+    /// x86_64, and makepkg's non-interactive flags.
+    pub(crate) fn new(platforms: Option<Vec<Platform>>, build_flags: Option<Vec<String>>) -> Self {
+        // Platform names are validated where they enter as strings (the API's
+        // `Platform::from_str`); by the time they are `Platform` values there is
+        // nothing left to check.
+        Self {
+            platforms: Platforms::new(platforms.unwrap_or_else(|| vec![Platform::X86_64])),
+            build_flags: build_flags.map_or_else(
+                || BuildFlags::new(["--noconfirm", "--noprogressbar", "--nocolor"]),
+                BuildFlags::new,
+            ),
+        }
     }
 }
 
@@ -60,8 +73,8 @@ struct PlannedPackage {
     version: String,
     source_data: SourceData,
     patch: Option<String>,
-    split_packages: Option<String>,
-    provides: Option<String>,
+    split_packages: Option<JsonList>,
+    provides: Option<JsonList>,
     /// Only the package the user actually asked for; dependencies are not.
     directly_requested: bool,
 }
@@ -98,9 +111,8 @@ struct PlannedEdge {
 /// transaction would hold a write lock across the network — on SQLite that
 /// blocks worker claims and build status updates for the duration. Planning
 /// first keeps the transaction short *and* makes the add atomic: a failure
-/// part-way through leaves nothing behind, where previously each package was
-/// committed as it was resolved and a later failure left orphan rows that went
-/// on to satisfy dependencies for subsequent adds.
+/// part-way through leaves nothing behind, rather than orphan rows that would
+/// go on to satisfy dependencies for later adds.
 #[derive(Default)]
 struct AddPlan {
     /// Dependency-first, so inserting in order satisfies edges as they appear.
@@ -123,47 +135,12 @@ impl AddPlan {
     }
 }
 
-pub(crate) fn build_add_context(
-    platforms: Option<Vec<Platform>>,
-    build_flags: Option<Vec<String>>,
-) -> AddContext {
-    // Platform names are validated where they enter as strings (the API's
-    // `Platform::from_str`); by the time they are `Platform` values there is
-    // nothing left to check.
-    AddContext {
-        platforms: Platforms::new(platforms.unwrap_or_else(|| vec![Platform::X86_64])),
-        build_flags: build_flags.map_or_else(
-            || BuildFlags::new(["--noconfirm", "--noprogressbar", "--nocolor"]),
-            BuildFlags::new,
-        ),
-    }
-}
-
 pub(crate) async fn package_exists(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<bool> {
     Ok(Packages::find()
         .filter(packages::Column::Name.eq(pkgbase))
         .one(db)
         .await?
         .is_some())
-}
-
-async fn resolve_aur_pkgbase(
-    client: &aurcache_deps::AurClient,
-    package_name: &str,
-) -> anyhow::Result<String> {
-    let pkg_name = package_name.trim();
-    let bases = client
-        .resolve_bases(&[pkg_name])
-        .await
-        .map_err(|e| anyhow!("AUR lookup failed: {e}"))?;
-
-    // If the name resolves to a pkgbase via RPC (e.g. "czkawka-cli" → "czkawka")
-    // use that; otherwise assume the input already *is* the pkgbase (e.g. "czkawka"
-    // when it has no child package of the same name).
-    Ok(bases
-        .get(pkg_name)
-        .cloned()
-        .unwrap_or_else(|| pkg_name.to_string()))
 }
 
 /// Build a [`SourcePatch`] from a caller-supplied map of full file contents
@@ -188,7 +165,7 @@ async fn resolve_srcinfo_to_spec(
     store: &SnapshotStore,
     source_data: &SourceData,
     patched_files: Option<BTreeMap<String, String>>,
-    architectures: &[alpm_types::SystemArchitecture],
+    platforms: &Platforms,
 ) -> anyhow::Result<PackageInsertSpec> {
     let patch = match patched_files {
         Some(files) => build_patch_from_files(store, source_data, files).await?,
@@ -198,8 +175,8 @@ async fn resolve_srcinfo_to_spec(
     // Resolve dependencies/version off of the (possibly initial-patched)
     // source, so a patch supplied to fix an otherwise-unparseable PKGBUILD
     // (e.g. ogdf) is taken into account right away.
-    let sourceinfo = store.sourceinfo(source_data, patch.as_deref()).await?;
-    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo, architectures);
+    let SourceFacts { sourceinfo, deps } =
+        pkg_deps(store, source_data, patch.as_deref(), platforms).await?;
     let pkgbase = sourceinfo.base.name.to_string();
 
     Ok(PackageInsertSpec {
@@ -317,7 +294,7 @@ pub async fn package_add(
     source_data: SourceData,
     patched_files: Option<BTreeMap<String, String>>,
 ) -> anyhow::Result<String> {
-    let context = build_add_context(platforms, build_flags);
+    let context = AddContext::new(platforms, build_flags);
     let source_data = resolve_source_pkgbase(&services.client, source_data).await?;
     add_resolved_source(services, &context, source_data, patched_files)
         .await
@@ -345,9 +322,21 @@ pub(crate) async fn resolve_source_pkgbase(
     source_data: SourceData,
 ) -> anyhow::Result<SourceData> {
     Ok(match source_data {
-        SourceData::Aur { name } => SourceData::Aur {
-            name: resolve_aur_pkgbase(client, &name).await?,
-        },
+        SourceData::Aur { name } => {
+            // A name the AUR does not resolve is assumed to be the pkgbase
+            // already (e.g. "czkawka", which has no package of that name).
+            let name = name.trim();
+            let bases = client
+                .resolve_bases(&[name])
+                .await
+                .map_err(|e| anyhow!("AUR lookup failed: {e}"))?;
+            apply_resolved_base(
+                SourceData::Aur {
+                    name: name.to_string(),
+                },
+                &bases,
+            )
+        }
         SourceData::Git { spec } => SourceData::Git { spec },
         SourceData::Upload { .. } => bail!("Upload sources are not yet supported"),
     })
@@ -370,7 +359,7 @@ pub(crate) async fn add_resolved_source(
         &services.store,
         &source_data,
         patched_files,
-        &context.architectures(),
+        &context.platforms,
     )
     .await?;
     finalize_package_add(services, context, package_spec).await
@@ -401,7 +390,7 @@ async fn plan_dependency_recursive(
         name: pkgbase.to_string(),
     };
     let package_spec =
-        resolve_srcinfo_to_spec(store, &source_data, None, &context.architectures()).await?;
+        resolve_srcinfo_to_spec(store, &source_data, None, &context.platforms).await?;
     plan_package_with_deps(plan_context, package_spec, visited, plan).await
 }
 
@@ -509,8 +498,8 @@ async fn plan_package_with_deps(
         });
     }
 
-    let split_packages = split_packages_json(&package_spec.pkgbase, &package_spec.pkgnames)?;
-    let provides = provides_json(&package_spec.provides)?;
+    let split_packages = split_packages_json(&package_spec.pkgbase, &package_spec.pkgnames);
+    let provides = provides_json(&package_spec.provides);
 
     // Pushed after its dependencies, keeping the plan dependency-first.
     plan.packages.push(PlannedPackage {
@@ -596,23 +585,4 @@ async fn persist_plan(
 
     txn.commit().await?;
     Ok(added_order)
-}
-
-pub(crate) fn split_packages_json(
-    pkgbase: &str,
-    pkgnames: &[String],
-) -> anyhow::Result<Option<String>> {
-    if pkgnames.len() <= 1 && pkgnames.first().is_none_or(|name| name == pkgbase) {
-        return Ok(None);
-    }
-
-    Ok(Some(serde_json::to_string(pkgnames)?))
-}
-
-pub(crate) fn provides_json(provides: &[String]) -> anyhow::Result<Option<String>> {
-    if provides.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(serde_json::to_string(provides)?))
 }

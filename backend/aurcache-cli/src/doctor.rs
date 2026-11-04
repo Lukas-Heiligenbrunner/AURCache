@@ -187,7 +187,7 @@ pub fn check_queue(builds: &[Build]) -> Check {
         .filter_map(|b| {
             b.waiting_reason
                 .as_ref()
-                .map(|reason| format!("{}/{}: {reason}", b.pkg_name, b.number))
+                .map(|reason| format!("{}: {reason}", crate::builds::build_id(b)))
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -313,10 +313,7 @@ pub async fn run_doctor(client: &AurCacheClient, format: OutputFormat) -> Result
 }
 
 fn finish(format: OutputFormat, report: Report) -> Result<()> {
-    match format {
-        OutputFormat::Json => crate::output::print_json(&report)?,
-        OutputFormat::Text => print_report(&report),
-    }
+    crate::output::render(format, &report, print_report)?;
 
     if report.ok {
         Ok(())
@@ -389,20 +386,8 @@ mod tests {
 
     fn build(number: i32, status: BuildState, waiting_reason: Option<WaitingReason>) -> Build {
         Build {
-            number,
-            pkg_name: "hello".to_string(),
-            version: "1.0-1".to_string(),
-            status,
-            start_time: None,
-            end_time: None,
-            platform: "x86_64".to_string(),
-            size: None,
-            peak_memory: None,
-            disk_usage: None,
-            kept: None,
-            worker_name: None,
-            log_size: None,
             waiting_reason,
+            ..crate::builds::tests::build("hello", number, status)
         }
     }
 

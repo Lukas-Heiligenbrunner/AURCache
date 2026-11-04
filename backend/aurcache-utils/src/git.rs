@@ -200,9 +200,9 @@ pub fn checkout_or_fetch_repo_ref(
 /// then `refs/heads/<name>`, then `refs/tags/<name>`.
 ///
 /// There is deliberately no `HEAD` fallback. `HEAD` is only a candidate when
-/// it was asked for: an unknown ref used to fall through to the remote's
-/// `HEAD`, so a mistyped branch/tag — or a `#tag=<sha>` pin — silently
-/// tracked the default branch tip and rebuilt on every upstream commit.
+/// it was asked for: falling through to the remote's `HEAD` for an unknown ref
+/// would make a mistyped branch/tag — or a `#tag=<sha>` pin — silently track
+/// the default branch tip and rebuild on every upstream commit.
 fn ls_remote_candidates(git_ref: &str) -> Vec<String> {
     if git_ref == "HEAD" {
         return vec!["HEAD".to_string()];
@@ -411,9 +411,9 @@ mod tests {
     }
 
     /// The default branch is whatever the remote says it is — not necessarily
-    /// `master` or `main`. Resolving `HEAD` used to try a hardcoded list of
-    /// those two names, so a repo using anything else fell through to whatever
-    /// the stale local ref happened to be.
+    /// `master` or `main`. Resolving `HEAD` through a hardcoded list of those
+    /// two names would leave a repo using anything else on whatever the stale
+    /// local ref happened to be.
     #[test]
     fn reused_checkout_follows_an_unconventionally_named_default_branch() {
         let upstream_dir = tempfile::tempdir().unwrap();
@@ -498,9 +498,9 @@ mod tests {
         );
     }
 
-    /// An unknown ref must not fall through to HEAD: it used to resolve the
-    /// default branch tip, so a mistyped branch/tag — or a `#tag=<sha>` pin —
-    /// silently tracked upstream and rebuilt on every commit.
+    /// An unknown ref must not fall through to HEAD: resolving the default
+    /// branch tip instead, a mistyped branch/tag — or a `#tag=<sha>` pin —
+    /// would silently track upstream and rebuild on every commit.
     #[test]
     fn unknown_refs_do_not_fall_back_to_head() {
         for git_ref in [

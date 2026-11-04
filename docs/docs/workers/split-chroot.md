@@ -338,12 +338,12 @@ accept.
 
 ## Disk quota and the storage pool
 
+The pool's own variables (`WORKER_POOL`, `WORKER_DISK_MAX`,
+`WORKER_BUILD_DISK_MAX`, `WORKER_DISK_RESERVE`, `WORKER_CHROOT_DIR`) are listed
+in [Storage pool](./storage-pool.md).
+
 | Variable | Type | Description | Default |
 |---|---|---|---|
-| `WORKER_BUILD_DISK_MAX` | Size | Disk one build may write: its chroot, its sources, the packages it makes | `50G` |
-| `WORKER_DISK_MAX` | Size | Everything the worker stores in its pool: the base chroot, the caches and every running build | `200G` |
-| `WORKER_POOL` | Path | What backs the pool: unset for an image file, a block device, or a dedicated btrfs mount | unset |
-| `WORKER_DISK_RESERVE` | Bool | Allocate the whole image up front instead of as builds write | `false` |
 | `WORKER_KEEP_FAILED` | Duration | How long a failed build's chroot is kept for inspection | unset (keeps nothing) |
 
 Every chroot, build and cache lives in the worker's **storage pool**, a btrfs

@@ -1,9 +1,9 @@
 use crate::source::{GitSourceSpec, SourceData};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use utoipa::ToSchema;
 
-#[derive(Deserialize, Serialize, ToSchema, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AddPackage {
     pub platforms: Option<Vec<String>>,
     pub build_flags: Option<Vec<String>>,
@@ -17,13 +17,15 @@ pub struct AddPackage {
 }
 
 /// Ask for a package's update check, and a build when it finds one.
-#[derive(Deserialize, Serialize, ToSchema, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UpdatePackage {
     /// Build even when the version did not change.
     pub force: bool,
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SourceFileList {
     pub files: Vec<String>,
     /// The files the package's stored patch changes, so a file list can mark
@@ -37,7 +39,8 @@ pub struct SourceFileList {
 /// The pristine content is always included so the UI can fall back to it
 /// (and offer a "revert" action) even if the stored patch no longer applies
 /// cleanly to the current upstream source.
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SourceFileContent {
     pub path: String,
     pub original_content: String,
@@ -57,7 +60,8 @@ pub struct SourceFileContent {
     pub stored_patch: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, ToSchema)]
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SourceFileUpdate {
     pub path: String,
     pub content: String,
@@ -66,13 +70,15 @@ pub struct SourceFileUpdate {
 /// Request body for the pre-add source preview endpoints: identifies a
 /// not-yet-added source so its (pristine) files can be listed/read before
 /// `POST /package` is ever called.
-#[derive(Deserialize, Serialize, ToSchema, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SourcePreviewRequest {
     pub source: SourceData,
 }
 
 /// Request body to read a single pristine file of a not-yet-added source.
-#[derive(Deserialize, Serialize, ToSchema, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SourcePreviewFileRequest {
     pub source: SourceData,
     pub path: String,
@@ -84,7 +90,8 @@ pub struct SourcePreviewFileRequest {
 /// only what it changes. Only what an operator configures is here: the name,
 /// status and versions belong to the add, build and version-check flows, and a
 /// package renamed from outside would lose its logs, artifacts and edges.
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PackagePatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_flags: Option<Vec<String>>,
@@ -114,7 +121,8 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct SimplePackage {
     pub name: String,
@@ -143,7 +151,8 @@ pub struct SimplePackage {
     pub total_size: Option<i64>,
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ExtendedPackage {
     pub name: String,
     pub directly_requested: bool,
@@ -154,7 +163,7 @@ pub struct ExtendedPackage {
     pub selected_build_flags: Option<Vec<String>>,
     /// `None` while it is still unknown, matching [`SimplePackage`]. Coercing
     /// it to `""` here would make one field mean two things depending on the
-    /// route, which is what it used to do.
+    /// route.
     pub upstream_version: Option<String>,
     pub package_source: PackageSource,
     pub split_packages: Option<Vec<String>>,
@@ -190,7 +199,8 @@ pub struct ExtendedPackage {
 /// resolved to its pkgbase in one batched RPC request instead of one per
 /// package. Targeting is shared across the batch -- a restore applies the same
 /// platforms and flags to everything it puts back.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AddPackages {
     pub platforms: Option<Vec<String>>,
     pub build_flags: Option<Vec<String>>,
@@ -202,15 +212,17 @@ pub struct AddPackages {
 /// The work is not done when this is sent -- it has barely started. Poll
 /// [`BulkAddProgress`] with the id to watch it, or do not: the job does not
 /// depend on anyone watching.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkAddAccepted {
     pub job_id: i32,
     /// How many sources were taken on. Not how many will succeed.
-    pub accepted: i32,
+    pub total: i32,
 }
 
 /// How one package in a bulk add turned out.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum BulkAddOutcome {
     /// Added, along with any dependencies it pulled in.
@@ -223,7 +235,8 @@ pub enum BulkAddOutcome {
 }
 
 /// One line of a bulk add's progress.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BulkAddEntry {
     /// The source as the caller named it, so a failure can be matched back to
     /// the request even when the name never resolved to a pkgbase.
@@ -241,23 +254,11 @@ pub struct BulkAddEntry {
 }
 
 /// A bulk add's state, and the entries after the offset the caller asked from.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
-pub struct BulkAddProgress {
-    pub id: i32,
-    pub total: i32,
-    pub completed: i32,
-    pub failed: i32,
-    /// Whether the job has stopped -- successfully or not. A job whose server
-    /// restarted mid-run is finished too, with the unreached packages recorded
-    /// as failures rather than left pending forever.
-    pub finished: bool,
-    /// Entries from the requested offset onwards, so a caller polling only ever
-    /// receives what it has not already seen.
-    pub entries: Vec<BulkAddEntry>,
-}
+pub type BulkAddProgress = crate::api::operations::OperationProgress<BulkAddEntry>;
 
 /// One built artifact in the repository.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PackageFile {
     /// The artifact's filename, which is also its path under the platform's
     /// repository directory.
@@ -272,7 +273,8 @@ pub struct PackageFile {
     pub size: Option<i64>,
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PackageDependency {
     pub name: String,
     /// What this relation requires, e.g. `>=1.3`. Empty when unconstrained.
@@ -291,7 +293,8 @@ pub struct PackageDependency {
     pub satisfied: bool,
 }
 
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "package_type", rename_all = "PascalCase")]
 pub enum PackageSource {
     Aur(AurPackage),
@@ -301,13 +304,16 @@ pub enum PackageSource {
 }
 
 // todo upload package
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadPackage {}
 
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AurNotFoundPackage {}
 
-#[derive(Deserialize, ToSchema, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AurPackage {
     pub name: String,
     /// Whether the AUR reports the package as flagged out of date by a user.
@@ -320,7 +326,8 @@ pub struct AurPackage {
 }
 
 /// Where a replacement candidate was found.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CandidateSource {
     /// Already tracked by this instance.
@@ -330,7 +337,8 @@ pub enum CandidateSource {
 }
 
 /// Whether a candidate meets what the edge being replaced recorded.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReplacementVerdict {
     /// Its version meets the constraint, or there is no constraint.
@@ -344,7 +352,8 @@ pub enum ReplacementVerdict {
 }
 
 /// One dependency edge, and what could take its place.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DependencyOptions {
     /// The package whose dependency this is.
     pub dependent: String,
@@ -380,7 +389,8 @@ pub struct DependencyOptions {
 }
 
 /// One package that could take over a dependency edge.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DependencyCandidate {
     pub pkgbase: String,
     pub source: CandidateSource,
@@ -392,7 +402,8 @@ pub struct DependencyCandidate {
 }
 
 /// Point a dependency edge at something else.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ReplaceDependency {
     /// The package base to depend on instead. `None` drops the edge, which is
     /// accepted only when the official repositories publish every declared

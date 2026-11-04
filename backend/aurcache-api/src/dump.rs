@@ -1,7 +1,7 @@
 //! Downloading a lite export of the instance's authored state.
 
+use crate::auth::Authenticated;
 use crate::init::{CaDirectory, ServerVersion};
-use crate::models::authenticated::Authenticated;
 use crate::utils::error::{ApiError, err};
 use crate::utils::operation::{self, Counts, Recorder};
 use aurcache_activitylog::activity_utils::ActivityLog;
@@ -10,6 +10,7 @@ use aurcache_common::api::dump::{
     ExistingPackagePolicy, RestoreAccepted, RestoreEntry, RestoreOptions, RestoreOutcome,
     RestoreProgress, SecretsPolicy,
 };
+use aurcache_common::api::operations::OperationProgress;
 use aurcache_db::helpers::operations;
 use aurcache_utils::services::Services;
 use rocket::FromForm;
@@ -31,7 +32,7 @@ use utoipa::OpenApi;
 const MAX_DUMP_SIZE: rocket::data::ByteUnit = rocket::data::ByteUnit::Mebibyte(64);
 
 #[derive(OpenApi)]
-#[openapi(paths(dump, restore_progress))]
+#[openapi(paths(dump, restore, restore_progress))]
 pub struct DumpApi;
 
 /// The archive, with the filename a browser should save it under.
@@ -65,12 +66,11 @@ fn dump_file_name(created_at: i64) -> String {
 /// alongside ordinary backups.
 #[get("/dump?<include_secrets>")]
 pub async fn dump(
-    db: &State<DatabaseConnection>,
+    services: &State<Services>,
     version: &State<ServerVersion>,
     ca_dir: &State<CaDirectory>,
     include_secrets: Option<bool>,
     a: Authenticated,
-    al: &State<ActivityLog>,
 ) -> Result<DumpArchive, ApiError> {
     let with_secrets = include_secrets.unwrap_or(false);
     if with_secrets {
@@ -86,21 +86,19 @@ pub async fn dump(
         );
     }
     let dump = aurcache_utils::dump::build_dump(
-        db.inner(),
+        &services.db,
         &version.0,
         with_secrets.then(|| ca_dir.0.as_path()),
     )
-    .await
-    .map_err(|e| err(Status::InternalServerError, e))?;
-    al.emit_by(
+    .await?;
+    services.activity.emit_by(
         Event::DumpExported {
             secrets: with_secrets,
         },
         a.username.clone(),
     );
     let created_at = dump.manifest.created_at;
-    let bytes = aurcache_utils::dump::write_archive(&dump)
-        .map_err(|e| err(Status::InternalServerError, e))?;
+    let bytes = aurcache_utils::dump::write_archive(&dump)?;
 
     Ok(DumpArchive {
         body: bytes,
@@ -128,19 +126,22 @@ where
 /// Four options that arrive together and are consumed together, as
 /// [`RestoreOptions`] -- a `FromForm` keeps them that way instead of spreading
 /// them across the signature.
-#[derive(FromForm)]
+#[derive(FromForm, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RestoreQuery {
+    /// Report what would happen, and change nothing.
     dry_run: Option<bool>,
+    /// What to do with a package that is already here: `skip` (the default),
+    /// `overwrite` or `merge-patches`.
     on_existing: Option<String>,
+    /// Remove every package, setting and worker first.
     clear: Option<bool>,
+    /// What to do with the secrets a dump carries: `ignore` (the default) or
+    /// `copy`.
     secrets: Option<String>,
 }
 
 /// Restore a dump, returning before it has finished.
-///
-/// Not in the OpenAPI document: the body is a raw archive, which utoipa cannot
-/// describe from a `Data` argument. The worker's upload routes are left out for
-/// the same reason.
 ///
 /// The whole archive is validated first, so a dump that would be refused is
 /// refused before anything is written. A dry run answers with what it *would*
@@ -149,6 +150,15 @@ pub struct RestoreQuery {
 /// Otherwise the rows are written in one transaction and the slow half -- one
 /// source read per package, then the dependency graph -- runs detached, with
 /// progress recorded the way a bulk add's is.
+#[utoipa::path(
+    request_body(content = Vec<u8>, description = "A dump, as `GET /dump` wrote it", content_type = "application/gzip"),
+    params(RestoreQuery),
+    responses(
+            (status = 202, description = "Restore started, or for a dry run what it would do", body = RestoreAccepted),
+            (status = 400, description = "Not a dump this server can read, or an unknown policy"),
+            (status = 413, description = "Larger than any dump this server reads"),
+    )
+)]
 #[post("/restore?<query..>", data = "<archive>")]
 pub async fn restore(
     services: &State<Services>,
@@ -186,9 +196,7 @@ pub async fn restore(
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
 
     if options.dry_run {
-        let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options)
-            .await
-            .map_err(|e| err(Status::InternalServerError, e))?;
+        let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
         return Ok(status::Accepted(Json(RestoreAccepted {
             job_id: None,
             total,
@@ -196,17 +204,12 @@ pub async fn restore(
         })));
     }
 
-    let job_id = operations::create(&services.db, operations::KIND_RESTORE, total)
-        .await
-        .map_err(|e| err(Status::InternalServerError, e))?;
-
     let services_task = services.inner().clone();
     let ca_dir_task = ca_dir.inner().clone();
-    operation::spawn(
-        services.db.clone(),
-        services.activity.clone(),
-        job_id,
+    let job_id = operation::start(
+        services,
         operations::KIND_RESTORE,
+        total,
         move |progress| async move {
             aurcache_utils::restore::apply(
                 &services_task,
@@ -223,7 +226,8 @@ pub async fn restore(
             succeeded: HashSet::new(),
             failed: HashSet::new(),
         },
-    );
+    )
+    .await?;
 
     Ok(status::Accepted(Json(RestoreAccepted {
         job_id: Some(job_id),
@@ -272,7 +276,7 @@ impl Recorder<RestoreEntry> for RestoreRecorder {
 
 #[utoipa::path(
     responses(
-            (status = 200, description = "Progress of a restore", body = RestoreProgress),
+            (status = 200, description = "Progress of a restore", body = OperationProgress<RestoreEntry>),
             (status = 404, description = "No such restore"),
     ),
     params(
@@ -288,20 +292,9 @@ pub async fn restore_progress(
     after: Option<usize>,
     _a: Authenticated,
 ) -> Result<Json<RestoreProgress>, ApiError> {
-    let job = operations::get(db.inner(), id)
+    operation::progress(db.inner(), id, operations::KIND_RESTORE, after.unwrap_or(0))
         .await
-        .map_err(|e| err(Status::InternalServerError, e))?
-        .filter(|job| job.kind == operations::KIND_RESTORE)
-        .ok_or_else(|| err(Status::NotFound, format!("no restore {id}")))?;
-
-    Ok(Json(RestoreProgress {
-        id: job.id,
-        total: job.total,
-        completed: job.completed,
-        failed: job.failed,
-        finished: job.finished_at.is_some(),
-        entries: operations::entries_after(&job.log, after.unwrap_or(0)),
-    }))
+        .map(Json)
 }
 
 #[cfg(test)]

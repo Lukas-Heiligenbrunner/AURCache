@@ -14,33 +14,27 @@ use aurcache_common::worker::{
 };
 use aurcache_common::worker_config::{ConfigSnapshot, EffectiveConfig};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::client::WorkerClient;
 use crate::config::CoreConfig;
-use crate::executor::Executor;
+use crate::executor::{ClaimedJob, Executor};
 use crate::gate::ConcurrencyGate;
+use crate::live::Live;
+use crate::protocol::{Timeout, log};
 use crate::report;
 
-/// What a worker needs to register again while it runs.
-///
-/// Registration carries its concurrency, priority and package affinity, which
-/// the server's scheduler reads from the worker's row. When delivered values
-/// change any of them, the worker registers again with what it now runs, so
-/// neither end has to know that the `concurrency` setting and the registered
-/// concurrency are the same thing.
-pub struct Registration {
-    /// A certificate request for the worker's own key, as enrollment made
-    /// one. The server only signs it if it holds no usable certificate.
-    pub csr_pem: String,
-    /// The executor's kind, as [`Executor::KIND`] names it.
-    pub kind: &'static str,
-}
-
 /// The fields of a registration the server schedules by.
+///
+/// Registration carries the worker's concurrency, priority and package
+/// affinity, which the server's scheduler reads from the worker's row. When
+/// delivered values change any of them, the worker registers again with what
+/// it now runs, so neither end has to know that the `concurrency` setting and
+/// the registered concurrency are the same thing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Routing {
     packages: Vec<String>,
@@ -51,24 +45,23 @@ struct Routing {
 impl Routing {
     fn of(cfg: &CoreConfig) -> Self {
         Self {
-            packages: cfg.packages.clone(),
-            priority: cfg.priority,
-            concurrency: cfg.concurrency,
+            packages: cfg.tunables.packages.clone(),
+            priority: cfg.tunables.priority,
+            concurrency: cfg.tunables.concurrency,
         }
     }
 }
 
 /// Shared runtime state for the worker loop.
 pub struct Runner<E: Executor> {
-    /// The configuration in force, replaced whole when the server delivers
-    /// values. Read through [`Self::cfg`], which hands out the current one: a
-    /// loop iteration or a job works with one copy from start to end.
-    cfg: RwLock<Arc<CoreConfig>>,
+    /// The configuration in force: a loop iteration or a job works with one
+    /// copy from start to end.
+    cfg: Live<CoreConfig>,
     client: Arc<WorkerClient>,
     executor: Arc<E>,
-    registration: Registration,
-    /// Build ids claimed and not yet reported (reported in each heartbeat).
-    active: Mutex<HashMap<i32, Arc<AtomicBool>>>,
+    /// Build ids claimed and not yet reported (reported in each heartbeat),
+    /// with what stops each.
+    active: Mutex<HashMap<i32, CancellationToken>>,
     /// Unix seconds of the last successful server contact.
     last_contact: AtomicU64,
     /// Bounds concurrent builds, and follows the `concurrency` setting.
@@ -149,20 +142,15 @@ fn resolve_mirrorlist(
 
 impl<E: Executor> Runner<E> {
     /// `cfg` must be what the worker registered with at enrollment, which is
-    /// what the server is taken to hold until this registers again.
-    pub fn new(
-        cfg: Arc<CoreConfig>,
-        client: Arc<WorkerClient>,
-        executor: Arc<E>,
-        registration: Registration,
-    ) -> Arc<Self> {
+    /// what the server is taken to hold until this registers again; `client`
+    /// is the one enrollment returned, which holds that registration.
+    pub fn new(cfg: CoreConfig, client: WorkerClient, executor: E) -> Arc<Self> {
         Arc::new(Self {
-            gate: ConcurrencyGate::new(cfg.concurrency),
+            gate: ConcurrencyGate::new(cfg.tunables.concurrency),
             registered: Mutex::new(Routing::of(&cfg)),
-            cfg: RwLock::new(cfg),
-            client,
-            executor,
-            registration,
+            cfg: Live::new(cfg),
+            client: Arc::new(client),
+            executor: Arc::new(executor),
             active: Mutex::new(HashMap::new()),
             last_contact: AtomicU64::new(now_secs()),
             mirrorlists: Mutex::new(BTreeMap::new()),
@@ -172,23 +160,16 @@ impl<E: Executor> Runner<E> {
 
     /// The configuration in force now.
     fn cfg(&self) -> Arc<CoreConfig> {
-        // Poisoned only by a panic mid-assignment of an `Arc`, which leaves
-        // either the old value or the new one -- both usable.
-        Arc::clone(
-            &self
-                .cfg
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        self.cfg.current()
     }
 
     fn mark_contact(&self) {
         self.last_contact.store(now_secs(), Ordering::Relaxed);
     }
 
-    /// Seconds since the last successful server contact.
-    fn since_contact(&self) -> u64 {
-        now_secs().saturating_sub(self.last_contact.load(Ordering::Relaxed))
+    /// Time since the last successful server contact.
+    fn since_contact(&self) -> Duration {
+        Duration::from_secs(now_secs().saturating_sub(self.last_contact.load(Ordering::Relaxed)))
     }
 
     /// Run forever: heartbeat in the background, claim + build in the foreground.
@@ -208,7 +189,7 @@ impl<E: Executor> Runner<E> {
             "Worker '{}' online: arches={:?} concurrency={} executor={}",
             cfg.name,
             cfg.arches,
-            cfg.concurrency,
+            cfg.tunables.concurrency,
             self.executor.describe_self()
         );
 
@@ -224,7 +205,7 @@ impl<E: Executor> Runner<E> {
             let claimed = self.active.lock().await.len();
             if !self.executor.ready_for_work(claimed).await {
                 drop(permit);
-                tokio::time::sleep(Duration::from_secs(cfg.poll_interval)).await;
+                tokio::time::sleep(cfg.tunables.poll_interval).await;
                 continue;
             }
 
@@ -234,30 +215,34 @@ impl<E: Executor> Runner<E> {
             match self.client.claim(&claim).await {
                 Ok(Some(job)) => {
                     self.mark_contact();
-                    let mirrorlist = self.job_mirrorlist(&cfg, &job).await;
+                    let claimed = ClaimedJob {
+                        mirrorlist: self.job_mirrorlist(&cfg, &job).await,
+                        timeout: Timeout::for_job(cfg.tunables.build_timeout, &job),
+                        cancel: CancellationToken::new(),
+                        job,
+                    };
                     // Counted here rather than in the task: the next
                     // readiness check may run before the task does, and
                     // must see this job.
-                    let cancel = Arc::new(AtomicBool::new(false));
                     self.active
                         .lock()
                         .await
-                        .insert(job.build_id, Arc::clone(&cancel));
+                        .insert(claimed.job.build_id, claimed.cancel.clone());
                     let this = Arc::clone(&self);
                     tokio::spawn(async move {
-                        this.run_one(job, mirrorlist, cancel).await;
+                        this.run_one(claimed).await;
                         drop(permit);
                     });
                 }
                 Ok(None) => {
                     self.mark_contact();
                     drop(permit);
-                    tokio::time::sleep(Duration::from_secs(cfg.poll_interval)).await;
+                    tokio::time::sleep(cfg.tunables.poll_interval).await;
                 }
                 Err(e) => {
                     tracing::warn!("claim failed: {e}");
                     drop(permit);
-                    tokio::time::sleep(Duration::from_secs(cfg.poll_interval)).await;
+                    tokio::time::sleep(cfg.tunables.poll_interval).await;
                 }
             }
         }
@@ -294,28 +279,23 @@ impl<E: Executor> Runner<E> {
     }
 
     /// Execute a single job with panic-safe, always-emitted completion.
-    async fn run_one(
-        self: &Arc<Self>,
-        job: JobDescriptor,
-        mirrorlist: Option<String>,
-        cancel: Arc<AtomicBool>,
-    ) {
-        let build_id = job.build_id;
-        tracing::info!("Building {}", report::describe(&job));
+    async fn run_one(self: &Arc<Self>, claimed: ClaimedJob) {
+        let build_id = claimed.job.build_id;
+        tracing::info!("Building {}", report::describe(&claimed.job));
 
         // Panic-wrap so a task panic still yields a terminal completion.
         let executor = Arc::clone(&self.executor);
         let client = Arc::clone(&self.client);
-        let cancel_for_build = Arc::clone(&cancel);
-        let result = tokio::spawn(async move {
-            executor
-                .run_job(client, job, mirrorlist, cancel_for_build)
-                .await
-        })
-        .await;
+        let result = tokio::spawn(async move { executor.run_job(client, claimed).await }).await;
 
         let report = match result {
-            Ok(report) => report,
+            Ok(Ok(report)) => report,
+            Ok(Err(e)) => {
+                let report = report::from_error(&e);
+                let reason = report.reason.as_deref().unwrap_or_default();
+                log(&self.client, build_id, &format!("\n[worker] {reason}\n")).await;
+                report
+            }
             Err(e) => report::interrupted(format!("worker task panicked: {e}")),
         };
 
@@ -358,7 +338,7 @@ impl<E: Executor> Runner<E> {
     /// Background heartbeat + self-abort watchdog.
     async fn heartbeat_loop(self: Arc<Self>) {
         loop {
-            let interval = Duration::from_secs(self.cfg().heartbeat_interval.max(1));
+            let interval = self.cfg().heartbeat_interval.max(Duration::from_secs(1));
             tokio::time::sleep(interval).await;
             self.beat().await;
         }
@@ -396,13 +376,15 @@ impl<E: Executor> Runner<E> {
                     *self.reported_config.lock().await = Some(effective);
                 }
                 // The server's abort list: any of our builds that were
-                // abandoned (lease lost) or cancelled by an operator. Set
-                // each flag; the build's next 5 s tick then aborts it.
+                // abandoned (lease lost) or cancelled by an operator. This is
+                // how a build learns it: the per-build status route answers
+                // from the same condition, so polling it too would only say
+                // this again.
                 if !resp.cancel.is_empty() {
                     let guard = self.active.lock().await;
                     for id in &resp.cancel {
-                        if let Some(flag) = guard.get(id) {
-                            flag.store(true, Ordering::SeqCst);
+                        if let Some(cancel) = guard.get(id) {
+                            cancel.cancel();
                             tracing::warn!("server asked to stop build #{id}; aborting");
                         }
                     }
@@ -421,13 +403,13 @@ impl<E: Executor> Runner<E> {
         if !active_build_ids.is_empty() && self.since_contact() > cfg.lease_ttl {
             tracing::error!(
                 "server unreachable for {}s (> lease {}s); self-aborting {} build(s)",
-                self.since_contact(),
-                cfg.lease_ttl,
+                self.since_contact().as_secs(),
+                cfg.lease_ttl.as_secs(),
                 active_build_ids.len()
             );
             let guard = self.active.lock().await;
-            for flag in guard.values() {
-                flag.store(true, Ordering::SeqCst);
+            for cancel in guard.values() {
+                cancel.cancel();
             }
         }
     }
@@ -442,8 +424,11 @@ impl<E: Executor> Runner<E> {
     async fn apply(&self, snapshot: &ConfigSnapshot) {
         let current = self.cfg();
         let candidate = current.settings.with_snapshot(snapshot);
-        let settings = self.executor.reconfigure(candidate).await;
-        let next = Arc::new(current.with_settings(settings));
+        let settings = self
+            .executor
+            .reconfigure(candidate, &current.settings)
+            .await;
+        let next = current.with_settings(settings);
 
         let changed = next
             .settings
@@ -456,11 +441,8 @@ impl<E: Executor> Runner<E> {
                 changed.join(", ")
             );
         }
-        self.gate.set_target(next.concurrency);
-        *self
-            .cfg
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        self.gate.set_target(next.tunables.concurrency);
+        self.cfg.replace(next);
     }
 
     /// Register again if what the worker schedules by has changed since the
@@ -476,11 +458,13 @@ impl<E: Executor> Runner<E> {
         if *registered == routing {
             return;
         }
-        let request = crate::enroll::register_request(
-            &cfg,
-            self.registration.csr_pem.clone(),
-            self.registration.kind,
-        );
+        // The certificate request enrollment made: the server only signs it
+        // if it holds no usable certificate.
+        let Some(csr_pem) = self.client.registered_csr() else {
+            tracing::error!("this worker's client holds no registration to send again");
+            return;
+        };
+        let request = crate::enroll::register_request(&cfg, csr_pem, E::KIND);
         match self.client.register(&request).await {
             Ok(_) => {
                 tracing::info!(

@@ -2,7 +2,6 @@ pub mod build_enqueue;
 pub mod builds;
 pub mod collation;
 pub mod dbtype;
-pub mod dependency_resolution;
 pub mod files;
 pub mod operations;
 pub mod time;

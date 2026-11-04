@@ -1,5 +1,5 @@
 use crate::logger::init_logger;
-use crate::startup::{post_startup_tasks, pre_startup_tasks};
+use crate::startup::pre_startup_tasks;
 use aurcache_activitylog::activity_utils as activitylog;
 use aurcache_activitylog::events::Event;
 use aurcache_api::init::{CaDirectory, ServerVersion, init_api, init_repo, init_worker_api};
@@ -8,7 +8,7 @@ use aurcache_deps::AurClient;
 use aurcache_scheduler::activity_retention::start_activity_retention;
 use aurcache_scheduler::auto_update::start_auto_update_job;
 use aurcache_scheduler::lease_reaper::start_lease_reaper;
-use aurcache_scheduler::mirror_ranking::start_mirror_rank_job;
+use aurcache_scheduler::mirrorlist;
 use aurcache_scheduler::official_repos::start_official_repo_refresh;
 use aurcache_scheduler::retired_packages::start_retired_package_sweep;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
@@ -16,9 +16,7 @@ use aurcache_utils::repository::{REPO_ROOT, Repository};
 use aurcache_utils::services::Services;
 use aurcache_utils::snapshot::SnapshotStore;
 use dotenvy::dotenv;
-use std::env;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::warn;
 
 mod logger;
@@ -33,12 +31,13 @@ async fn main() {
 
     let db = init_db().await.expect("failed to initialize database");
 
-    if let Err(e) = post_startup_tasks(&db).await {
-        warn!("Startup cleanup did not complete: {e}");
+    startup::close_orphaned_operations(&db).await;
+    if let Err(e) = mirrorlist::prepare().await {
+        warn!("Could not write the configured mirrorlists: {e:#}");
     }
 
-    // What the curated activity log recorded, carried into the structured log
-    // it became. Once, in practice: rows leave the old table as they land.
+    // What 0.5.0's activity log recorded, carried into the structured log.
+    // Once, in practice: rows leave the old table as they land.
     match aurcache_activitylog::legacy::import_activities(&db).await {
         Ok(0) => {}
         Ok(moved) => tracing::info!("Moved {moved} activity log entries into the log"),
@@ -109,13 +108,13 @@ async fn main() {
     // The things a package operation acts through, from here on passed as one.
     // Cloning is a few refcount bumps, so a job or a request handler takes its
     // own handle on the same instances.
-    let services = Services::new(
-        db.clone(),
-        Arc::clone(&store),
+    let services = Services {
+        db: db.clone(),
+        store: Arc::clone(&store),
         client,
-        Arc::clone(&repo),
-        activity.clone(),
-    );
+        repo: Arc::clone(&repo),
+        activity: activity.clone(),
+    };
 
     // Builds a restart caught mid-publish pick up where they were.
     startup::resume_publishing(&db, &repo, &activity).await;
@@ -124,86 +123,9 @@ async fn main() {
     // clone in flight from a stranded one.
     startup::prune_source_checkouts(&db, &store).await;
 
-    // Anything that should be building and has no build -- a package added
-    // while the server was down, or whose build row was lost -- gets one.
-    // Not before an upgrade's backfill, though: until it has recorded what a
-    // package from 0.5.0 depends on, every one reads as ready to build. The
-    // backfill makes this pass itself once it has.
-    if !aurcache_utils::package::backfill::queued(&db)
-        .await
-        .unwrap_or(false)
-        && let Err(e) =
-            aurcache_utils::package::enqueue::enqueue_missing_buildable_packages(&db, &activity)
-                .await
-    {
-        activity.emit(Event::StartupEnqueueFailed {
-            error: format!("{e:#}"),
-        });
-    }
-
-    // Before the version check starts: it would find no AUR package base by
-    // the split-package names 0.5.0 stored and report those packages removed.
-    // Bounded, because it asks the AUR; the backfill asks again if this fails.
-    let backfill_queued = aurcache_utils::package::backfill::queued(&db)
-        .await
-        .unwrap_or(false);
-    let named = !backfill_queued
-        || match tokio::time::timeout(
-            Duration::from_secs(60),
-            aurcache_utils::package::backfill::canonicalize_names(&services),
-        )
-        .await
-        {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => {
-                warn!("Could not ask the AUR for the package bases of 0.5.0's packages: {e:#}");
-                false
-            }
-            Err(_) => {
-                warn!("The AUR did not answer for the package bases of 0.5.0's packages in time");
-                false
-            }
-        };
-
-    // Set once there is no backfill to wait for; see the version check below.
-    let (backfilled, backfill_done) = tokio::sync::watch::channel(!backfill_queued);
-
-    // An upgrade from 0.5.0 queues its packages' dependencies to be recorded.
-    // In the background: it resolves every package's source, and nothing
-    // below waits on it. What it adds is queued to build once it is done.
-    tokio::spawn({
-        let services = services.clone();
-        async move {
-            use aurcache_utils::package::backfill::{
-                Backfill, backfill_dependencies, canonicalize_names,
-            };
-            // Asked again, unbounded this time, if the AUR could not say as the
-            // server started: the backfill resolves every package by its name.
-            if !named && let Err(e) = canonicalize_names(&services).await {
-                warn!("Could not ask the AUR for the package bases of 0.5.0's packages: {e:#}");
-            }
-            let outcome = backfill_dependencies(&services).await;
-            backfilled.send_replace(true);
-            match outcome {
-                Ok(Backfill::Ran) => {}
-                Ok(Backfill::NotQueued) => return,
-                Err(e) => {
-                    tracing::error!("Dependency backfill stopped: {e:#}");
-                    return;
-                }
-            }
-            if let Err(e) = aurcache_utils::package::enqueue::enqueue_missing_buildable_packages(
-                &services.db,
-                &services.activity,
-            )
-            .await
-            {
-                services.activity.emit(Event::StartupEnqueueFailed {
-                    error: format!("{e:#}"),
-                });
-            }
-        }
-    });
+    // What should be building and has no build gets one -- after the
+    // dependency backfill an upgrade from 0.5.0 queued, if there is one.
+    let backfill_done = aurcache_utils::package::backfill::start(&services).await;
 
     // After an upgrade's backfill: until it has recorded the names a package
     // from 0.5.0 builds, the check asks the AUR by the package's base, which
@@ -218,10 +140,8 @@ async fn main() {
     };
     let auto_update_handle = start_auto_update_job(services.clone());
 
-    let mirrorlist_override =
-        env::var("MIRRORLIST_SERVERS_X86_64").is_ok_and(|s| !s.trim().is_empty());
-
-    if !mirrorlist_override && let Err(e) = start_mirror_rank_job(activity.clone()) {
+    // Detached rather than selected on below: with ranking off there is no task.
+    if let Err(e) = mirrorlist::start_ranking(activity.clone()) {
         warn!("mirror_rank job not properly configured: {e}");
     }
 
@@ -232,8 +152,8 @@ async fn main() {
     // an older repo.db have had time to fetch them.
     let retired_sweep_handle = start_retired_package_sweep(db.clone(), Arc::clone(&repo));
 
-    // Keep the log from growing for ever. Nothing has ever pruned it, and it
-    // now records restarts and failures as well as what people did.
+    // Keep the log from growing for ever: it records restarts and failures as
+    // well as what people did.
     let activity_retention_handle = start_activity_retention(db.clone());
 
     let api_handle = init_api(

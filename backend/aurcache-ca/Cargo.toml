@@ -9,13 +9,11 @@ workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
+aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs", "digest"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 x509-parser = "0.18"
-sha2 = "0.11"
-hex = "0.4"
 time = "0.3"
 
 [dev-dependencies]

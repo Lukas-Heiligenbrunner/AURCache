@@ -5,8 +5,8 @@
 # privileged build worker that enrolls over mTLS, claims a job, builds the
 # package in a devtools chroot, and uploads it. Driven by scripts/test-e2e.sh.
 #
-# Single mode only — there is no host/dind split anymore. The worker is a
-# long-lived process; it needs `privileged` + a tmpfs `/run` for systemd-nspawn.
+# The worker is a long-lived process; it needs `privileged` + a tmpfs `/run`
+# for systemd-nspawn.
 # =============================================================================
 
 services:
@@ -42,7 +42,8 @@ services:
   builder:
     build:
       context: ..
-      dockerfile: docker/worker.Dockerfile
+      dockerfile: docker/arch.Dockerfile
+      target: worker
     depends_on:
       - aurcache
     environment:

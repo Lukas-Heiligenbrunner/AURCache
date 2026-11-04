@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Where a setting's resolved value came from in the lookup hierarchy.
 ///
 /// Resolution order (highest precedence first): `Package` → `Env` → `Global` → `Default`.
-#[derive(ToSchema, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SettingSource {
     /// Forced by an environment variable.
@@ -17,13 +17,15 @@ pub enum SettingSource {
     Default,
 }
 
-#[derive(ToSchema, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SettingsEntry<T> {
     pub value: T,
     pub source: SettingSource,
 }
 
-#[derive(ToSchema, Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApplicationSettings {
     pub version_check_interval: SettingsEntry<u32>,
     /// A crontab schedule; empty when off.
@@ -90,8 +92,7 @@ pub enum Setting {
 ///   `AURCACHE_WORKER_IMAGE`.
 ///
 /// A migration deletes their rows -- all but the server-wide values of
-/// [`EMBEDDED_WORKER_LIMITS`] -- and a restore skips them so an older dump
-/// does not bring them back.
+/// [`EMBEDDED_WORKER_LIMITS`].
 pub const RETIRED_SETTING_KEYS: &[&str] = &[
     "cpu_limit",
     "memory_limit",
@@ -117,10 +118,9 @@ impl Setting {
     /// Every setting there is.
     ///
     /// [`Self::from_key`] is derived from this rather than written out
-    /// separately. The two used to be independent lists, and they drifted:
-    /// `date_format` and `build_on_new_version` were served by `GET /settings`
-    /// but rejected by `PATCH /settings/<key>` as unknown, so neither could be
-    /// changed through the API at all.
+    /// separately: two lists drift, and a setting served by `GET /settings`
+    /// but unknown to `PATCH /settings/<key>` cannot be changed through the
+    /// API at all.
     pub const ALL: [Self; 10] = [
         Self::VersionCheckInterval,
         Self::AutoUpdateSchedule,

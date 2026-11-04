@@ -33,22 +33,3 @@ pub struct Services {
     /// what to do when a write fails.
     pub activity: ActivityLog,
 }
-
-impl Services {
-    #[must_use]
-    pub fn new(
-        db: DatabaseConnection,
-        store: Arc<SnapshotStore>,
-        client: Arc<AurClient>,
-        repo: Arc<Repository>,
-        activity: ActivityLog,
-    ) -> Self {
-        Self {
-            db,
-            store,
-            client,
-            repo,
-            activity,
-        }
-    }
-}

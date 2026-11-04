@@ -3,7 +3,9 @@
 
 use crate::cli::OutputFormat;
 use anyhow::{Context, Result};
-use aurcache_client::{GraphDataPoint, ListStats, SearchResult, ServerInfo, UserInfo};
+use aurcache_client::{
+    GraphDataPoint, ListStats, OperationProgress, SearchResult, ServerInfo, UserInfo,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -36,9 +38,50 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-/// How often the bulk-add/restore followers poll progress: one number so
-/// tuning it tunes every follower, human and machine output alike.
+/// How often [`follow_job`] polls progress: one number so tuning it tunes
+/// every follower, human and machine output alike.
 pub(crate) const PROGRESS_POLL_INTERVAL_SECS: u64 = 1;
+
+/// Poll a job until it finishes, and return the whole run: every entry, with
+/// the state of the last poll.
+///
+/// The server does not need us here -- the job runs whether or not anything
+/// watches -- so this is reporting, not driving. Text output prints each entry
+/// through `print_entry` as it arrives. Machine output waits for the end and
+/// prints the whole run at once: a stream of partial states is harder to
+/// consume than one final document. Each poll asks only for the entries after
+/// the ones already held, since refetching the whole history per tick would be
+/// O(n²) transfer over a long run.
+pub(crate) async fn follow_job<E, Fut>(
+    format: OutputFormat,
+    mut poll: impl FnMut(usize) -> Fut,
+    mut print_entry: impl FnMut(&E),
+) -> Result<OperationProgress<E>>
+where
+    E: Serialize,
+    Fut: Future<Output = Result<OperationProgress<E>>>,
+{
+    let mut run = poll(0).await?;
+    let mut printed = 0;
+    loop {
+        if format == OutputFormat::Text {
+            run.entries[printed..].iter().for_each(&mut print_entry);
+        }
+        printed = run.entries.len();
+        if run.finished {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+        let next = poll(printed).await?;
+        let mut entries = std::mem::take(&mut run.entries);
+        entries.extend(next.entries);
+        run = OperationProgress { entries, ..next };
+    }
+    if format == OutputFormat::Json {
+        print_json(&run)?;
+    }
+    Ok(run)
+}
 
 /// Pad `cell` to `width` terminal cells. `format!("{cell:<width$}")` counts
 /// bytes, so a CJK package name would throw every column after it off by one
@@ -164,15 +207,13 @@ pub(crate) fn print_search_results(results: &[SearchResult]) {
 }
 
 pub(crate) fn print_raw_response(text: &str) -> Result<()> {
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value).context("failed to pretty-print JSON")?
-        );
-    } else {
-        print!("{text}");
+    match serde_json::from_str::<Value>(text) {
+        Ok(value) => print_json(&value),
+        Err(_) => {
+            print!("{text}");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 /// Where a watch's progress lines go.

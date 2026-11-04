@@ -1,5 +1,6 @@
-use crate::package::add::{insert_dependency, provides_json, split_packages_json};
+use crate::package::add::insert_dependency;
 use crate::package::edges::{Declaration, resolve_edges};
+use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
 use crate::services::Services;
 use crate::vcs_check::{SourcesMoved, resolve_vcs_commits, vcs_sources_moved};
 use anyhow::{anyhow, bail};
@@ -50,10 +51,37 @@ async fn collect_dropped(services: &Services, pkg_id: i32, former: &[i32]) -> an
     .await
 }
 
+/// Whether the auto-updater rebuilds an out-of-date package whose last build
+/// is in `status`: only one that succeeded. A package whose build is failing
+/// stays flagged for a human rather than being retried in a loop.
+#[must_use]
+pub fn auto_updates(status: BuildState) -> bool {
+    status == BuildState::Successful
+}
+
+/// Whether anything runs [`package_update_all_outdated`] on its own: the
+/// version checker's immediate rebuild (`BUILD_ON_NEW_VERSION`), or the
+/// auto-update schedule.
+///
+/// Both are read globally, never per package, because that is how both jobs
+/// read them. Whether the schedule itself parses is not checked here: an
+/// invalid one surfaces as a `ScheduleInvalid` warning of its own.
+pub async fn auto_update_enabled(db: &DatabaseConnection) -> anyhow::Result<bool> {
+    let (build_on_new_version, schedule) = tokio::try_join!(
+        crate::settings::get(db, crate::settings::key::BUILD_ON_NEW_VERSION, None),
+        crate::settings::get(db, crate::settings::key::AUTO_UPDATE_SCHEDULE, None),
+    )?;
+    Ok(build_on_new_version.value
+        || schedule
+            .value
+            .as_deref()
+            .is_some_and(|expr| !aurcache_common::schedule::is_off(expr)))
+}
+
 /// Update every package currently marked as outdated.
 ///
-/// Only packages whose latest build completed successfully are retriggered.
-/// Returns the build IDs enqueued across all updated packages.
+/// Only the ones [`auto_updates`] picks are retriggered. Returns the build IDs
+/// enqueued across all updated packages.
 ///
 /// Updates of packages with VCS sources run forced, and only those. A VCS
 /// package is flagged when an upstream commit moved without its PKGBUILD's
@@ -75,9 +103,8 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
         .await?;
     let activity_log = &services.activity;
 
-    // Which outdated packages track a VCS source, in one query: the loop
-    // below used to count per package, a round trip each for a flag that
-    // only decides forced-vs-unforced.
+    // Which outdated packages track a VCS source, in one query rather than a
+    // round trip per package for a flag that only decides forced-vs-unforced.
     let vcs_tracked: std::collections::HashSet<i32> = match PackageVcsSources::find()
         .select_only()
         .column(package_vcs_sources::Column::PackageId)
@@ -98,12 +125,12 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
     let mut ids_total = vec![];
     // One package's failure must not starve the rest. A sourceinfo that no
     // longer applies after an upstream bump, a dependency that cannot be
-    // fetched, or a resolution that comes apart mid-way all fail this update,
-    // and with `?` the whole pass stopped at the first of them -- silently
-    // skipping every package after it, every round, while the offender stayed
-    // out of date. Each package is handled on its own and moves on.
+    // fetched, or a resolution that comes apart mid-way all fail this update;
+    // stopping the pass there would skip every package after it, every round,
+    // while the offender stayed out of date. Each package is handled on its
+    // own and moves on.
     for pkg in pkg_models {
-        if pkg.status != BuildState::Successful {
+        if !auto_updates(pkg.status) {
             info!(
                 "Package auto update was not triggered for package {} because of prev. build status: {}",
                 pkg.name,
@@ -192,28 +219,14 @@ pub(crate) async fn resync_graph(
     services: &Services,
     pkg_model: &packages::Model,
 ) -> anyhow::Result<()> {
-    let sourceinfo = services
-        .store
-        .sourceinfo(&pkg_model.source_data, pkg_model.patch.as_deref())
-        .await
-        .map_err(|e| anyhow!("Failed to resolve source info: {e:#}"))?;
-    let deps = aurcache_deps::deps_from_srcinfo(
-        &sourceinfo,
-        &crate::pkg::architectures(&pkg_model.platforms),
-    );
-
-    let split_packages = split_packages_json(&pkg_model.name, &deps.pkgnames)?;
-    let provides = provides_json(&deps.provides)?;
-    if split_packages != pkg_model.split_packages || provides != pkg_model.provides {
-        packages::ActiveModel {
-            id: Set(pkg_model.id),
-            split_packages: Set(split_packages),
-            provides: Set(provides),
-            ..Default::default()
-        }
-        .update(&services.db)
-        .await?;
-    }
+    let SourceFacts { deps, .. } = pkg_deps(
+        &services.store,
+        &pkg_model.source_data,
+        pkg_model.patch.as_deref(),
+        &pkg_model.platforms,
+    )
+    .await?;
+    record_source_names(&services.db, pkg_model.id, &pkg_model.name, &deps).await?;
     sync_dependency_graph(services, pkg_model, &deps).await?;
     Ok(())
 }
@@ -232,11 +245,11 @@ async fn package_update_inner(
         return Ok(vec![]);
     }
 
-    // Rebuilds used to resolve through the cached source snapshot, which only
-    // the periodic version check refreshes: a PKGBUILD bumped upstream after
-    // the last check (a pkgrel-only fix, say) rebuilt stale, and nothing about
-    // the build said so. Refresh first, so every update -- forced or not --
-    // resolves what upstream has now. A refresh failure fails the update
+    // The cached source snapshot is only refreshed by the periodic version
+    // check, so a PKGBUILD bumped upstream after the last check (a pkgrel-only
+    // fix, say) would rebuild stale, and nothing about the build would say so.
+    // Refresh first, so every update -- forced or not -- resolves what
+    // upstream has now. A refresh failure fails the update
     // rather than building stale: for the auto-updater that is a visible skip
     // retried next pass, and for an operator it names the real problem.
     if let Err(e) = services.store.refresh(&pkg_model.source_data).await {
@@ -248,21 +261,19 @@ async fn package_update_inner(
         bail!("Could not refresh sources, not building from a stale snapshot: {e:#}");
     }
 
-    let sourceinfo = services
-        .store
-        .sourceinfo(&pkg_model.source_data, pkg_model.patch.as_deref())
-        .await
-        .map_err(|e| anyhow!("Failed to resolve source info: {e:#}"))?;
+    let SourceFacts { sourceinfo, deps } = pkg_deps(
+        &services.store,
+        &pkg_model.source_data,
+        pkg_model.patch.as_deref(),
+        &pkg_model.platforms,
+    )
+    .await?;
     let pkgbuild = services
         .store
         .pkgbuild(&pkg_model.source_data, pkg_model.patch.as_deref())
         .await
         .map_err(|e| anyhow!("Failed to read the PKGBUILD: {e:#}"))?;
     let upstream_version = sourceinfo.base.version.to_string();
-    let deps = aurcache_deps::deps_from_srcinfo(
-        &sourceinfo,
-        &crate::pkg::architectures(&pkg_model.platforms),
-    );
 
     let former = direct_dependees(&services.db, pkg_model.id).await?;
     let graph = sync_dependency_graph(services, &pkg_model, &deps).await?;
@@ -278,13 +289,13 @@ async fn package_update_inner(
             let moved =
                 vcs_sources_moved(&services.db, pkg_model.id, platform, &queued_commits).await?;
             let current = match moved {
-                SourcesMoved::Unmoved => true,
+                SourcesMoved::Unchanged => true,
                 SourcesMoved::Moved => false,
                 SourcesMoved::Unknown => {
                     aurcache_db::helpers::builds::latest_successful_version(
                         &services.db,
                         pkg_model.id,
-                        platform,
+                        Some(platform),
                     )
                     .await?
                     .as_deref()
@@ -344,14 +355,12 @@ async fn package_update_inner(
         }
     }
 
-    let pkgbase = sourceinfo.base.name.to_string();
     // The status is not written here: queueing the builds above brought it in
     // line with them.
+    record_source_names(&services.db, pkg_model.id, &pkg_model.name, &deps).await?;
     packages::ActiveModel {
         id: Set(pkg_model.id),
         upstream_version: Set(Some(upstream_version.clone())),
-        split_packages: Set(split_packages_json(&pkgbase, &deps.pkgnames)?),
-        provides: Set(provides_json(&deps.provides)?),
         ..Default::default()
     }
     .update(&services.db)
@@ -367,75 +376,50 @@ struct DepInfo {
     package: packages::Model,
 }
 
-/// Dependencies resolved for the current update, keyed by pkgbase.
-struct DependencyGraph {
-    deps: HashMap<String, DepInfo>,
-}
-
 /// Resolve dependency constraints, ensure all dependees exist in the DB,
 /// and sync the dependency rows.
 ///
 /// Reconcile pending builds with the new edges in the same transaction.
+/// Returns the dependencies, keyed by dependee pkgbase.
 async fn sync_dependency_graph(
     services: &Services,
     pkg_model: &packages::Model,
     deps: &PkgDeps,
-) -> anyhow::Result<DependencyGraph> {
-    let PreparedGraph {
-        edges: dep_constraints_by_pkgbase,
-        packages: dep_packages,
-    } = prepare_graph(services, pkg_model, deps).await?;
+) -> anyhow::Result<HashMap<String, DepInfo>> {
+    let graph = prepare_graph(services, pkg_model, deps).await?;
     let txn = aurcache_db::helpers::txn::begin_write(&services.db).await?;
-    sync_dependency_rows(
-        &txn,
-        pkg_model.id,
-        &dep_constraints_by_pkgbase,
-        &dep_packages,
-    )
-    .await?;
+    sync_dependency_rows(&txn, pkg_model.id, &graph).await?;
     let unblocked = crate::worker_complete::resync_pending_builds(&txn, pkg_model.id).await?;
     txn.commit().await?;
     announce_unblocked(services, &unblocked).await;
-
-    // The prepared map contains every resolved dependency.
-    let deps_map = dep_constraints_by_pkgbase
-        .into_iter()
-        .filter_map(|(pkgbase, constraint)| {
-            dep_packages.get(&pkgbase).map(|package| {
-                (
-                    pkgbase,
-                    DepInfo {
-                        constraint,
-                        package: package.clone(),
-                    },
-                )
-            })
-        })
-        .collect();
-
-    Ok(DependencyGraph { deps: deps_map })
+    Ok(graph)
 }
 
-/// A package's resolved dependency edges, with every dependee's row.
-struct PreparedGraph {
-    /// The constraints on each dependee, keyed by its pkgbase.
-    edges: HashMap<String, Vec<crate::pkg::Constraint>>,
-    /// The row of each dependee in `edges`, by the same key.
-    packages: HashMap<String, packages::Model>,
-}
-
+/// A package's resolved dependencies, keyed by dependee pkgbase, every
+/// dependee's row in the database by then.
 async fn prepare_graph(
     services: &Services,
     package: &packages::Model,
     deps: &PkgDeps,
-) -> anyhow::Result<PreparedGraph> {
+) -> anyhow::Result<HashMap<String, DepInfo>> {
     let edges = resolve_dependency_edges(services, package, deps).await?;
     ensure_missing_dependency_packages(services, package, &edges).await?;
-    let packages = fetch_dep_packages_map(&services.db, &edges).await?;
-    if packages.len() != edges.len() {
-        bail!("a dependency disappeared during resolution; retry the update");
-    }
-    Ok(PreparedGraph { edges, packages })
+    let mut packages = fetch_dep_packages_map(&services.db, &edges).await?;
+    edges
+        .into_iter()
+        .map(|(pkgbase, constraint)| {
+            let package = packages.remove(&pkgbase).ok_or_else(|| {
+                anyhow!("a dependency disappeared during resolution; retry the update")
+            })?;
+            Ok((
+                pkgbase,
+                DepInfo {
+                    constraint,
+                    package,
+                },
+            ))
+        })
+        .collect()
 }
 
 pub(crate) async fn announce_unblocked(services: &Services, ids: &[i32]) {
@@ -463,14 +447,13 @@ pub async fn edit_package(
         original.patch != proposed.patch || original.platforms != proposed.platforms;
     let former = direct_dependees(&services.db, original.id).await?;
     let graph = if graph_changed {
-        let sourceinfo = services
-            .store
-            .sourceinfo(&proposed.source_data, proposed.patch.as_deref())
-            .await?;
-        let deps = aurcache_deps::deps_from_srcinfo(
-            &sourceinfo,
-            &crate::pkg::architectures(&proposed.platforms),
-        );
+        let SourceFacts { deps, .. } = pkg_deps(
+            &services.store,
+            &proposed.source_data,
+            proposed.patch.as_deref(),
+            &proposed.platforms,
+        )
+        .await?;
         Some(prepare_graph(services, proposed, &deps).await?)
     } else {
         None
@@ -497,8 +480,8 @@ pub async fn edit_package(
     .update(&txn)
     .await?;
     let mut unblocked = Vec::new();
-    if let Some(PreparedGraph { edges, packages }) = graph {
-        sync_dependency_rows(&txn, original.id, &edges, &packages).await?;
+    if let Some(graph) = graph {
+        sync_dependency_rows(&txn, original.id, &graph).await?;
         unblocked = crate::worker_complete::resync_pending_builds(&txn, original.id).await?;
     }
     aurcache_db::helpers::builds::refresh_package_status(&txn, original.id).await?;
@@ -522,7 +505,7 @@ async fn resolve_dependency_edges(
     // One package, one resolution, so the snapshot lives no longer than this
     // call.
     let tracked =
-        aurcache_db::helpers::dependency_resolution::TrackedPackages::load(&services.db).await?;
+        crate::package::dependency_resolution::TrackedPackages::load(&services.db).await?;
     let edges = resolve_edges(
         &services.client,
         &tracked,
@@ -556,13 +539,7 @@ async fn current_dependee_names(
     db: &DatabaseConnection,
     dependent_id: i32,
 ) -> anyhow::Result<HashSet<String>> {
-    let dependee_ids: Vec<i32> = Dependencies::find()
-        .filter(dependencies::Column::DependentId.eq(dependent_id))
-        .select_only()
-        .column(dependencies::Column::DependeeId)
-        .into_tuple()
-        .all(db)
-        .await?;
+    let dependee_ids = direct_dependees(db, dependent_id).await?;
     if dependee_ids.is_empty() {
         return Ok(HashSet::new());
     }
@@ -629,10 +606,9 @@ async fn fetch_dep_packages_map(
 async fn sync_dependency_rows<C: ConnectionTrait>(
     db: &C,
     dependent_id: i32,
-    dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::pkg::Constraint>>,
-    dep_packages: &HashMap<String, packages::Model>,
+    graph: &HashMap<String, DepInfo>,
 ) -> anyhow::Result<()> {
-    let desired_dependee_ids: HashSet<i32> = dep_packages.values().map(|pkg| pkg.id).collect();
+    let desired_dependee_ids: HashSet<i32> = graph.values().map(|dep| dep.package.id).collect();
 
     // Loaded once and shared by both passes below: the rows the upsert pass
     // needs are already here, so re-querying each edge is pure overhead.
@@ -657,10 +633,11 @@ async fn sync_dependency_rows<C: ConnectionTrait>(
             .await?;
     }
 
-    for (dep_pkgbase, constraint) in dep_constraints_by_pkgbase {
-        let Some(dep_pkg) = dep_packages.get(dep_pkgbase) else {
-            continue;
-        };
+    for DepInfo {
+        constraint,
+        package: dep_pkg,
+    } in graph.values()
+    {
         let serialized = crate::pkg::join_constraints(constraint);
 
         if let Some(edge) = existing.get(&dep_pkg.id) {
@@ -693,13 +670,13 @@ async fn sync_dependency_rows<C: ConnectionTrait>(
 async fn prepare_dependencies_for_platform(
     services: &Services,
     platform: Platform,
-    graph: &DependencyGraph,
+    graph: &HashMap<String, DepInfo>,
     trigger: BuildTrigger,
     visited: &mut HashSet<i32>,
     needed_by: &str,
 ) -> anyhow::Result<Pending> {
     let mut pending = Pending::Enqueued;
-    for dep_info in graph.deps.values() {
+    for dep_info in graph.values() {
         // The same check the builder makes when this dependency's build
         // lands, against the constraint as the edge stores it.
         if aurcache_db::helpers::builds::dependency_satisfied(
@@ -746,7 +723,7 @@ async fn prepare_dependencies_for_platform(
 struct BuildRequest<'a> {
     pkg_model: &'a packages::Model,
     version: &'a str,
-    graph: &'a DependencyGraph,
+    graph: &'a HashMap<String, DepInfo>,
     trigger: BuildTrigger,
 }
 
@@ -1286,13 +1263,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent.clone(),
             false,
             BuildTrigger::User,
@@ -1332,8 +1309,8 @@ mod tests {
             "parent build should be WAITING_FOR_DEPS"
         );
         // The request's own trigger, on the build left waiting as much as on
-        // one queued outright -- it used to be `AutoUpdate` for everything,
-        // which made an operator's rebuild indistinguishable from the scheduler.
+        // one queued outright: `AutoUpdate` for everything would make an
+        // operator's rebuild indistinguishable from the scheduler.
         assert_eq!(parent_builds[0].trigger, BuildTrigger::User);
 
         let child_builds = builds::Entity::find()
@@ -1455,13 +1432,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent,
             false,
             BuildTrigger::User,
@@ -1631,13 +1608,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent.clone(),
             false,
             BuildTrigger::User,
@@ -1856,13 +1833,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent.clone(),
             true,
             BuildTrigger::User,
@@ -2054,13 +2031,13 @@ mod tests {
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
         let build_ids = package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent.clone(),
             false,
             BuildTrigger::User,
@@ -2141,7 +2118,7 @@ mod tests {
                 // assertion is about the edge and nothing else.
                 directly_requested: Set(true),
                 split_packages: Set(None),
-                provides: Set(provides.map(|value| value.to_string())),
+                provides: Set(provides.map(|value| value.to_string().parse().unwrap())),
                 ..Default::default()
             }
             .save(db)
@@ -2197,13 +2174,13 @@ mod tests {
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
         super::package_resync_dependencies(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             &parent,
         )
         .await
@@ -2243,13 +2220,13 @@ mod tests {
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
         super::package_resync_dependencies(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             &parent,
         )
         .await
@@ -2312,13 +2289,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let build_ids = package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             pkg.clone(),
             true,
             BuildTrigger::User,
@@ -2389,13 +2366,13 @@ mod tests {
         .unwrap();
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services::new(
-            db.clone(),
-            Arc::new(store),
-            Arc::new(client),
-            test_repo(),
-            ActivityLog::discarding(),
-        );
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(store),
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
 
         // Prime the cache: the first rebuild resolves and remembers 1.0.0.
         package_update(&services, pkg.clone(), true, BuildTrigger::User)
@@ -2499,13 +2476,13 @@ mod tests {
         .unwrap();
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services::new(
-            db.clone(),
-            Arc::new(store),
-            Arc::new(client),
-            test_repo(),
-            ActivityLog::discarding(),
-        );
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(store),
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
         super::package_update_all_outdated(&services).await.unwrap();
 
         let queued_for = |name: &'static str| {
@@ -2625,13 +2602,13 @@ mod tests {
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         package_update(
-            &Services::new(
-                db.clone(),
-                Arc::new(store),
-                Arc::new(client),
-                test_repo(),
-                ActivityLog::discarding(),
-            ),
+            &Services {
+                db: db.clone(),
+                store: Arc::new(store),
+                client: Arc::new(client),
+                repo: test_repo(),
+                activity: ActivityLog::discarding(),
+            },
             parent.clone(),
             false,
             BuildTrigger::User,
@@ -2695,13 +2672,13 @@ mod tests {
         model.platforms = Set("x86_64;aarch64".parse().unwrap());
         let pkg = model.update(&db).await.unwrap();
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services::new(
-            db.clone(),
-            Arc::new(store),
-            Arc::new(client),
-            test_repo(),
-            ActivityLog::discarding(),
-        );
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(store),
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
         let results = package_update(&services, pkg, false, BuildTrigger::User)
             .await
             .unwrap();
@@ -2737,15 +2714,15 @@ mod tests {
         .await
         .unwrap();
         let checkout = tempdir().unwrap();
-        let services = Services::new(
-            db.clone(),
-            Arc::new(SnapshotStore::with_checkout_root(
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(SnapshotStore::with_checkout_root(
                 checkout.path().to_path_buf(),
             )),
-            Arc::new(client),
-            test_repo(),
-            ActivityLog::discarding(),
-        );
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
         super::package_resync_dependencies(&services, &parent)
             .await
             .unwrap();
@@ -2807,15 +2784,15 @@ mod tests {
         .await
         .unwrap();
         let checkout = tempdir().unwrap();
-        let services = Services::new(
-            db.clone(),
-            Arc::new(SnapshotStore::with_checkout_root(
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(SnapshotStore::with_checkout_root(
                 checkout.path().to_path_buf(),
             )),
-            Arc::new(client),
-            test_repo(),
-            ActivityLog::discarding(),
-        );
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
         let mut proposed = parent.clone();
         proposed.platforms = "x86_64;aarch64".parse().unwrap();
         proposed.patch = Some("invalid patch".into());

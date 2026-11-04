@@ -15,14 +15,19 @@ aurcli pkg add https://github.com/you/pkg.git --ref v1.2 --platform x86_64
 aurcli pkg add --from-installed         # bulk-add what `pacman -Qm` reports, behind a confirmation
 aurcli pkg update hello
 aurcli pkg patch hello --platform x86_64
-aurcli pkg rm hello                     # drop the direct-request flag (alias: delete)
+aurcli pkg rm hello                     # stop requesting it; delete what nothing needs
 ```
 
 Adding a package resolves its AUR `depends` and `make_depends`, inserts
 dependency links, and enqueues builds leaf-first. `pkg add --from-installed`
 prints what it found and asks before submitting; pass `--yes` to skip the
-prompt in a script. `pkg rm` removes the direct-request flag — full removal
-goes through package deletion on the server.
+prompt in a script.
+
+`pkg rm` stops requesting a package. The package is then deleted — its builds,
+its artifacts and their entries in the repository, its build logs and its source
+checkout — together with every dependency of it that no requested package still
+needs. A package that a requested package still depends on, directly or through
+others, stays as a dependency and only stops being requested.
 
 Dependencies can be repointed when upstream changes what provides them:
 

@@ -10,20 +10,20 @@
 
 use crate::build_logger::append_build_output;
 use crate::repository::{PublishedFile, Repository, Update};
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, ensure};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::log::BuildRef;
 use aurcache_common::build_state::BuildState;
-use aurcache_db::helpers::builds::refresh_package_status;
+use aurcache_db::helpers::builds::{Transition, refresh_package_status, transition};
 use aurcache_db::helpers::time::now_secs;
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, dependencies, files, packages};
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::PackageEntry;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
+    QueryFilter, QuerySelect, Set,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -74,7 +74,7 @@ pub async fn publish_build(
     let build = match Builds::find_by_id(build_id).one(db).await {
         Ok(Some(build)) => build,
         Ok(None) => {
-            let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+            repo.discard_staging(build_id).await;
             return PublicationOutcome::Finished;
         }
         Err(e) => {
@@ -91,12 +91,15 @@ pub async fn publish_build(
     if build.status == BuildState::Successful && !repo.staging_dir(build_id).is_dir() {
         return PublicationOutcome::Finished;
     }
-    let pkgbase = Packages::find_by_id(build.pkg_id)
+    let named = Packages::find_by_id(build.pkg_id)
         .one(db)
         .await
         .ok()
         .flatten()
-        .map(|pkg| pkg.name);
+        .map(|pkg| BuildRef {
+            pkgbase: pkg.name,
+            number: build.number,
+        });
 
     let publication = if build.status == BuildState::Successful {
         Ok(Publication::Earlier)
@@ -104,111 +107,129 @@ pub async fn publish_build(
         // An earlier attempt committed the files and the repository; only
         // the status did not follow. Reading every archive again would redo
         // all of that for nothing.
-        settle(db, &build)
-            .await
-            .map(|()| Publication::Now { packages: None })
+        settle(db, &build).await.map(|()| {
+            info!("published build #{build_id}");
+            Publication::Now
+        })
     } else {
-        publish(db, repo, &build)
-            .await
-            .map(|packages| Publication::Now {
-                packages: Some(packages),
-            })
+        publish(db, repo, &build).await.map(|()| Publication::Now)
     };
-    match publication {
+    let outcome = match publication {
         Ok(publication) => {
-            let published = pkgbase.as_ref().map(|pkgbase| BuildRef {
-                pkgbase: pkgbase.clone(),
-                number: build.number,
-            });
             // Announced once, by the call that published it: a retry to
             // promote dependents, or a resume after a restart, has nothing new
             // to say.
-            if let Publication::Now { packages } = publication {
-                match packages {
-                    Some(packages) => info!("published build #{build_id}: {packages} package(s)"),
-                    None => info!("published build #{build_id}"),
-                }
-                log(
-                    Some(activity),
-                    pkgbase.as_deref(),
-                    build.number,
-                    "Published to the repository\n",
-                )
-                .await;
-                if let Some(published) = &published {
-                    activity.emit(Event::BuildPublished {
-                        build: published.clone(),
-                        version: Some(build.version.clone()).filter(|v| !v.is_empty()),
-                    });
-                }
+            if publication == Publication::Now {
+                announce(activity, &build, named.as_ref()).await;
             }
-            match crate::worker_complete::trigger_dependents(db, build.pkg_id, build.platform).await
-            {
-                Ok(unblocked) => {
-                    for unblocked in unblocked {
-                        activity.emit(Event::BuildUnblocked {
-                            build: unblocked,
-                            by: published.clone(),
-                        });
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to trigger dependents of package {}: {e}",
-                        build.pkg_id
-                    );
-                    if let Some(pkgbase) = &pkgbase {
-                        activity.emit(Event::DependentsTriggerFailed {
-                            pkg: pkgbase.as_str().into(),
-                            error: e.to_string(),
-                        });
-                    }
-                    return PublicationOutcome::Retry;
-                }
-            }
+            promote_dependents(db, activity, &build, named.as_ref()).await
         }
         Err(e)
             if e.downcast_ref::<crate::repository::FinalizationPending>()
                 .is_some() =>
         {
             warn!("publication of build #{build_id} needs recovery: {e:#}");
-            return PublicationOutcome::Retry;
+            PublicationOutcome::Retry
+        }
+        Err(e) => report_failure(db, activity, &build, named.as_ref(), &e).await,
+    };
+    if outcome == PublicationOutcome::Finished {
+        repo.discard_staging(build_id).await;
+    }
+    outcome
+}
+
+/// Tell the build's log and the activity log that `build` is published.
+async fn announce(activity: &ActivityLog, build: &builds::Model, named: Option<&BuildRef>) {
+    log(
+        Some(activity),
+        named.map(|b| b.pkgbase.as_str()),
+        build.number,
+        "Published to the repository\n",
+    )
+    .await;
+    if let Some(published) = named {
+        activity.emit(Event::BuildPublished {
+            build: published.clone(),
+            version: Some(build.version.clone()).filter(|v| !v.is_empty()),
+        });
+    }
+}
+
+/// Let the builds waiting on the published `build` go, where it was the last
+/// thing they waited for. A failure is retried: nothing else would ever
+/// promote them.
+async fn promote_dependents(
+    db: &DatabaseConnection,
+    activity: &ActivityLog,
+    build: &builds::Model,
+    named: Option<&BuildRef>,
+) -> PublicationOutcome {
+    match crate::worker_complete::trigger_dependents(db, build.pkg_id, build.platform).await {
+        Ok(unblocked) => {
+            for unblocked in unblocked {
+                activity.emit(Event::BuildUnblocked {
+                    build: unblocked,
+                    by: named.cloned(),
+                });
+            }
+            PublicationOutcome::Finished
         }
         Err(e) => {
-            warn!("publishing build #{build_id} failed: {e:#}");
-            // The build worked and the package exists; it is the last step that
-            // did not. That is worth an entry someone will come across, rather
-            // than only a line in this process's journal.
-            activity.emit(Event::PublishFailed {
-                build: BuildRef {
-                    pkgbase: pkgbase.clone().unwrap_or_else(|| "?".to_string()),
-                    number: build.number,
-                },
-                error: format!("{e:#}"),
-            });
-            log(
-                Some(activity),
-                pkgbase.as_deref(),
-                build.number,
-                &format!("Publishing failed: {e:#}\n"),
-            )
-            .await;
-            if let Err(e) = fail(db, &build).await {
-                error!("could not mark build #{build_id} failed: {e}");
-                if let Some(pkgbase) = &pkgbase {
-                    activity.emit(Event::BuildMarkFailed {
-                        build: BuildRef {
-                            pkgbase: pkgbase.clone(),
-                            number: build.number,
-                        },
-                        error: e.to_string(),
-                    });
-                }
-                return PublicationOutcome::Retry;
+            error!(
+                "Failed to trigger dependents of package {}: {e}",
+                build.pkg_id
+            );
+            if let Some(named) = named {
+                activity.emit(Event::DependentsTriggerFailed {
+                    pkg: named.pkgbase.as_str().into(),
+                    error: e.to_string(),
+                });
             }
+            PublicationOutcome::Retry
         }
     }
-    let _ = tokio::fs::remove_dir_all(repo.staging_dir(build_id)).await;
+}
+
+/// Record that `build` could not be published, and fail it. Only marking it
+/// failed is retried: the failure itself is for good.
+async fn report_failure(
+    db: &DatabaseConnection,
+    activity: &ActivityLog,
+    build: &builds::Model,
+    named: Option<&BuildRef>,
+    e: &anyhow::Error,
+) -> PublicationOutcome {
+    let build_id = build.id;
+    let pkgbase = named.map(|b| b.pkgbase.as_str());
+    warn!("publishing build #{build_id} failed: {e:#}");
+    // The build worked and the package exists; it is the last step that
+    // did not. That is worth an entry someone will come across, rather
+    // than only a line in this process's journal.
+    activity.emit(Event::PublishFailed {
+        build: BuildRef {
+            pkgbase: pkgbase.unwrap_or("?").to_string(),
+            number: build.number,
+        },
+        error: format!("{e:#}"),
+    });
+    log(
+        Some(activity),
+        pkgbase,
+        build.number,
+        &format!("Publishing failed: {e:#}\n"),
+    )
+    .await;
+    if let Err(e) = fail(db, build).await {
+        error!("could not mark build #{build_id} failed: {e}");
+        if let Some(named) = named {
+            activity.emit(Event::BuildMarkFailed {
+                build: named.clone(),
+                error: e.to_string(),
+            });
+        }
+        return PublicationOutcome::Retry;
+    }
     PublicationOutcome::Finished
 }
 
@@ -233,9 +254,10 @@ async fn log(activity: Option<&ActivityLog>, pkgbase: Option<&str>, number: i32,
 
 /// What a call to [`publish_build`] did about the build's place in the
 /// repository.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Publication {
-    /// Published by this call; `packages` when it also knows how many.
-    Now { packages: Option<usize> },
+    /// Published by this call.
+    Now,
     /// Published by an earlier call, which leaves promoting its dependents.
     Earlier,
 }
@@ -252,6 +274,8 @@ struct Staged {
 struct Upload {
     path: PathBuf,
     filename: String,
+    /// The version its filename says it is.
+    version: String,
 }
 
 /// One published file, as its `files` row will hold it.
@@ -278,7 +302,7 @@ async fn publish(
     db: &DatabaseConnection,
     repo: &Repository,
     build: &builds::Model,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<()> {
     let pkg = Packages::find_by_id(build.pkg_id)
         .one(db)
         .await?
@@ -286,11 +310,12 @@ async fn publish(
     let platform = build.platform;
     let staged = read_staging(repo, build, &pkg).await?;
     let packages = staged.len();
+    let version = staged[0].version.clone();
 
     // The slow part, and private: every archive read in full, before anything
     // is locked or changed.
     let mut described = Vec::with_capacity(staged.len());
-    for Upload { path, filename } in staged {
+    for Upload { path, filename, .. } in staged {
         let size = i64::try_from(tokio::fs::metadata(&path).await?.len()).unwrap_or(i64::MAX);
         let entry = repo
             .describe(path.clone())
@@ -303,7 +328,6 @@ async fn publish(
             size,
         });
     }
-    let version = parse_arch_pkg(&described[0].filename)?.version;
 
     let mut update = repo.begin(db).await?;
     let plan = plan(&update, db, &pkg, platform, &described, version).await?;
@@ -323,7 +347,8 @@ async fn publish(
         .await?;
 
     settle(db, build).await?;
-    Ok(packages)
+    info!("published build #{}: {packages} package(s)", build.id);
+    Ok(())
 }
 
 /// Whether the build's files and repository changes are already committed:
@@ -339,27 +364,23 @@ fn recorded(build: &builds::Model) -> bool {
 /// A failure here leaves the build `PUBLISHING` but [`recorded`], and the
 /// retry comes straight back here.
 async fn settle(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Result<()> {
-    let finished = async {
-        let txn = db.begin().await?;
-        Builds::update_many()
-            .col_expr(builds::Column::Status, BuildState::Successful.into())
-            .filter(builds::Column::Id.eq(build.id))
-            .filter(builds::Column::Status.eq(BuildState::Publishing))
-            .exec(&txn)
-            .await?;
-        refresh_package_status(&txn, build.pkg_id).await?;
-        txn.commit().await?;
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    finished.map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error)))
+    transition(
+        db,
+        build,
+        &[BuildState::Publishing],
+        BuildState::Successful,
+        |update| update,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error.into())))
 }
 
 /// The staged files that are to be published, by filename.
 ///
 /// Detached signatures are left out -- the repository moves them with their
 /// package -- and so are makepkg's `-debug` packages (see
-/// [`is_debug_artifact`]). What remains must be named for this package.
+/// [`Artifact::Debug`]). What remains must be named for this package.
 async fn read_staging(
     repo: &Repository,
     build: &builds::Model,
@@ -385,26 +406,26 @@ async fn read_staging(
         {
             continue;
         }
-        if is_debug_artifact(&expected, &filename) {
-            log(
-                None,
-                Some(&pkg.name),
-                build.number,
-                &format!("skipping debug package (not published): {filename}\n"),
-            )
-            .await;
-            continue;
+        match artifact(&expected, &filename)? {
+            Artifact::Debug => {
+                log(
+                    None,
+                    Some(&pkg.name),
+                    build.number,
+                    &format!("skipping debug package (not published): {filename}\n"),
+                )
+                .await;
+            }
+            Artifact::Package(parsed) => names.push(Upload {
+                path: entry.path(),
+                filename,
+                version: parsed.version,
+            }),
         }
-        names.push(Upload {
-            path: entry.path(),
-            filename,
-        });
     }
     if names.is_empty() {
         bail!("no publishable artifacts were uploaded");
     }
-    let filenames: Vec<String> = names.iter().map(|upload| upload.filename.clone()).collect();
-    validate_artifact_names(&expected, &filenames)?;
     names.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(names)
 }
@@ -559,20 +580,18 @@ async fn record(
 
 /// Mark a build that could not be published as failed; its package's status
 /// follows.
-async fn fail(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Result<()> {
-    let txn = db.begin().await?;
-    let marked = Builds::update_many()
-        .col_expr(builds::Column::Status, BuildState::Failed.into())
-        .col_expr(builds::Column::EndTime, Some(now_secs()).into())
-        .filter(builds::Column::Id.eq(build.id))
-        .filter(builds::Column::Status.eq(BuildState::Publishing))
-        .exec(&txn)
-        .await?;
-    if marked.rows_affected > 0 {
-        refresh_package_status(&txn, build.pkg_id).await?;
-    }
-    txn.commit().await?;
-    Ok(())
+///
+/// A build that has left `PUBLISHING` meanwhile -- cancelled, or deleted -- is
+/// left as it is.
+async fn fail(db: &DatabaseConnection, build: &builds::Model) -> Result<Transition, DbErr> {
+    transition(
+        db,
+        build,
+        &[BuildState::Publishing],
+        BuildState::Failed,
+        |update| update.col_expr(builds::Column::EndTime, Some(now_secs()).into()),
+    )
+    .await
 }
 
 /// The builds a restart interrupted mid-publish.
@@ -614,9 +633,9 @@ pub async fn interrupted(db: &DatabaseConnection, repo: &Repository) -> anyhow::
 /// split-package names recorded on the package row.
 pub fn expected_pkgnames(pkg: &packages::Model) -> Vec<String> {
     let mut names = vec![pkg.name.clone()];
-    for name in aurcache_db::lists::json_list(pkg.split_packages.as_deref()) {
-        if !names.contains(&name) {
-            names.push(name);
+    for name in aurcache_db::lists::JsonList::entries(pkg.split_packages.as_ref()) {
+        if !names.contains(name) {
+            names.push(name.clone());
         }
     }
     names
@@ -651,62 +670,49 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     })
 }
 
-/// Sanity-check uploaded artifact filenames against the set of package names the
-/// server expects for this package (its pkgbase plus any split packages).
-///
-/// This blocks *wrong-named* artifacts (e.g. a worker uploading `openssh-*`
-/// under a job for `hello`); it does **not** and cannot verify the *contents* of
-/// a correctly-named package (see design non-goals). Signature sidecars
-/// (`*.sig`) and hidden helper files are ignored; every remaining file must be a
-/// `*.pkg.tar.*` whose parsed pkgname is in `expected`.
-///
-/// Debug packages are dropped before this runs — see [`is_debug_artifact`].
-fn validate_artifact_names(expected: &[String], filenames: &[String]) -> anyhow::Result<()> {
-    if expected.is_empty() {
-        bail!("no expected package names to validate against");
-    }
-    for filename in filenames {
-        if filename.starts_with('.')
-            || filename.ends_with(".sig")
-            || filename.ends_with(".publishing")
-        {
-            continue;
-        }
-        if !filename.contains(".pkg.tar") {
-            bail!("unexpected non-package artifact: {filename}");
-        }
-        let parsed = parse_arch_pkg(filename)?;
-        if !expected.iter().any(|e| e == &parsed.name) {
-            bail!(
-                "artifact '{filename}' has pkgname '{}' not among expected {expected:?}",
-                parsed.name
-            );
-        }
-    }
-    Ok(())
+/// What a staged package file is to publishing.
+#[derive(Debug)]
+enum Artifact {
+    /// makepkg's split debug package of one of the expected pkgnames
+    /// (`<pkgname>-debug`), which the server discards rather than publishing.
+    ///
+    /// AURCache serves a single flat repo per architecture, so a debug package
+    /// would appear in `pacman -Ss` right next to the real ones. Arch keeps
+    /// them out of `core`/`extra`/`multilib` for exactly that reason -- they
+    /// live in separate, opt-in `*-debug` repos.
+    ///
+    /// The server already forces `OPTIONS+=(!debug)` so these are not built at
+    /// all. This is the backstop for a worker whose user-supplied
+    /// `makepkg.conf` re-enables `debug`: without it, the extra artifact is
+    /// not among the expected names and the build fails.
+    Debug,
+    /// A package to publish.
+    Package(ParsedPkg),
 }
 
-/// True for makepkg's split debug package of one of the `expected` pkgnames
-/// (`<pkgname>-debug`), which the server discards rather than publishing.
+/// Check the staged package `filename` against the package names the server
+/// expects for this package (its pkgbase plus any split packages; see
+/// [`expected_pkgnames`]).
 ///
-/// AURCache serves a single flat repo per architecture, so a debug package would
-/// appear in `pacman -Ss` right next to the real ones. Arch keeps them out of
-/// `core`/`extra`/`multilib` for exactly that reason — they live in separate,
-/// opt-in `*-debug` repos.
-///
-/// The server already forces `OPTIONS+=(!debug)` so these are not built at all.
-/// This is the backstop for a worker whose user-supplied `makepkg.conf`
-/// re-enables `debug`: without it, the extra artifact fails
-/// [`validate_artifact_names`] and the build fails.
-#[must_use]
-fn is_debug_artifact(expected: &[String], filename: &str) -> bool {
-    let Ok(parsed) = parse_arch_pkg(filename) else {
-        return false;
-    };
-    parsed
+/// This blocks *wrong-named* artifacts (e.g. a worker uploading `openssh-*`
+/// under a job for `hello`); it does **not** and cannot verify the *contents*
+/// of a correctly-named package (see design non-goals). A file that is not a
+/// `*.pkg.tar.*` at all is refused too.
+fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {
+    let parsed = parse_arch_pkg(filename)?;
+    if parsed
         .name
         .strip_suffix("-debug")
         .is_some_and(|base| expected.iter().any(|e| e == base))
+    {
+        return Ok(Artifact::Debug);
+    }
+    ensure!(
+        expected.contains(&parsed.name),
+        "artifact '{filename}' has pkgname '{}' not among expected {expected:?}",
+        parsed.name
+    );
+    Ok(Artifact::Package(parsed))
 }
 
 #[cfg(test)]
@@ -739,60 +745,57 @@ mod tests {
         assert!(parse_arch_pkg("garbage.pkg.tar.zst").is_err());
     }
 
+    fn is_package(expected: &[String], filename: &str) -> bool {
+        matches!(artifact(expected, filename), Ok(Artifact::Package(_)))
+    }
+
+    fn is_debug(expected: &[String], filename: &str) -> bool {
+        matches!(artifact(expected, filename), Ok(Artifact::Debug))
+    }
+
     #[test]
-    fn validate_accepts_expected_and_signatures() {
+    fn the_pkgbase_and_its_split_packages_are_published() {
         let expected = vec!["hello".to_string(), "hello-docs".to_string()];
-        let files = vec![
-            "hello-1.0-1-x86_64.pkg.tar.zst".to_string(),
-            "hello-1.0-1-x86_64.pkg.tar.zst.sig".to_string(),
-            "hello-docs-1.0-1-x86_64.pkg.tar.zst".to_string(),
-        ];
-        assert!(validate_artifact_names(&expected, &files).is_ok());
+        assert!(is_package(&expected, "hello-1.0-1-x86_64.pkg.tar.zst"));
+        assert!(is_package(&expected, "hello-docs-1.0-1-x86_64.pkg.tar.zst"));
     }
 
     #[test]
-    fn validate_rejects_unexpected_pkgname() {
+    fn an_unexpected_pkgname_is_refused() {
         let expected = vec!["hello".to_string()];
-        let files = vec!["openssh-9.0-1-x86_64.pkg.tar.zst".to_string()];
-        assert!(validate_artifact_names(&expected, &files).is_err());
+        assert!(artifact(&expected, "openssh-9.0-1-x86_64.pkg.tar.zst").is_err());
     }
 
     #[test]
-    fn validate_rejects_non_package_file() {
+    fn a_non_package_file_is_refused() {
         let expected = vec!["hello".to_string()];
-        let files = vec!["evil.sh".to_string()];
-        assert!(validate_artifact_names(&expected, &files).is_err());
+        assert!(artifact(&expected, "evil.sh").is_err());
     }
 
     #[test]
     fn debug_artifact_detected_for_expected_package() {
         let expected = vec!["hello".to_string(), "hello-docs".to_string()];
-        assert!(is_debug_artifact(
+        assert!(is_debug(
             &expected,
             "hello-debug-2.12.1-2-x86_64.pkg.tar.zst"
         ));
-        assert!(is_debug_artifact(
+        assert!(is_debug(
             &expected,
             "hello-docs-debug-2.12.1-2-x86_64.pkg.tar.zst"
         ));
     }
 
     /// Only the debug split of an *expected* package is dropped; a foreign
-    /// `-debug` upload must still reach `validate_artifact_names` and be rejected.
+    /// `-debug` upload is refused like any other unexpected name.
     #[test]
-    fn debug_artifact_of_foreign_package_is_not_dropped() {
+    fn debug_artifact_of_foreign_package_is_refused() {
         let expected = vec!["hello".to_string()];
-        let foreign = "openssh-debug-9.0-1-x86_64.pkg.tar.zst";
-        assert!(!is_debug_artifact(&expected, foreign));
-        assert!(validate_artifact_names(&expected, &[foreign.to_string()]).is_err());
+        assert!(artifact(&expected, "openssh-debug-9.0-1-x86_64.pkg.tar.zst").is_err());
     }
 
     #[test]
     fn regular_package_is_not_a_debug_artifact() {
         let expected = vec!["hello".to_string()];
-        assert!(!is_debug_artifact(
-            &expected,
-            "hello-2.12.1-2-x86_64.pkg.tar.zst"
-        ));
+        assert!(is_package(&expected, "hello-2.12.1-2-x86_64.pkg.tar.zst"));
     }
 }

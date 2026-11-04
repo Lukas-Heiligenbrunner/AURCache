@@ -35,8 +35,7 @@ CREATE TABLE workers (
     cert_fingerprint TEXT NOT NULL UNIQUE,
     signed_cert TEXT,
     not_after BIGINT,
-    native_arches TEXT NOT NULL DEFAULT '',
-    emulated_arches TEXT NOT NULL DEFAULT '',
+    arches TEXT NOT NULL DEFAULT '',
     last_seen BIGINT,
     version TEXT,
     package_affinity TEXT NOT NULL DEFAULT '',
@@ -45,7 +44,8 @@ CREATE TABLE workers (
     kind TEXT,
     settings_declaration TEXT NOT NULL,
     effective_config TEXT,
-    paused BOOLEAN NOT NULL DEFAULT 0
+    paused BOOLEAN NOT NULL DEFAULT 0,
+    embedded BOOLEAN NOT NULL DEFAULT 0
 );
 CREATE TABLE worker_settings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +81,10 @@ CREATE TABLE log_entity (
     id TEXT NOT NULL,
     PRIMARY KEY (log_id, role, ns, id)
 );
+CREATE TABLE repository_updates (
+    id INTEGER NOT NULL PRIMARY KEY,
+    plan TEXT NOT NULL
+);
 ";
 
 /// [`SQLITE_TABLES`], spelled for Postgres.
@@ -111,8 +115,7 @@ CREATE TABLE public.workers (
     cert_fingerprint TEXT NOT NULL UNIQUE,
     signed_cert TEXT,
     not_after BIGINT,
-    native_arches TEXT NOT NULL DEFAULT '',
-    emulated_arches TEXT NOT NULL DEFAULT '',
+    arches TEXT NOT NULL DEFAULT '',
     last_seen BIGINT,
     version TEXT,
     package_affinity TEXT NOT NULL DEFAULT '',
@@ -121,7 +124,8 @@ CREATE TABLE public.workers (
     kind TEXT,
     settings_declaration TEXT NOT NULL,
     effective_config TEXT,
-    paused BOOLEAN NOT NULL DEFAULT false
+    paused BOOLEAN NOT NULL DEFAULT false,
+    embedded BOOLEAN NOT NULL DEFAULT false
 );
 CREATE TABLE public.worker_settings (
     id SERIAL PRIMARY KEY,
@@ -156,6 +160,10 @@ CREATE TABLE public.log_entity (
     ns TEXT NOT NULL,
     id TEXT NOT NULL,
     PRIMARY KEY (log_id, role, ns, id)
+);
+CREATE TABLE public.repository_updates (
+    id INTEGER NOT NULL PRIMARY KEY,
+    plan TEXT NOT NULL
 );
 "#;
 
@@ -282,8 +290,9 @@ pub(super) async fn drop_columns(manager: &SchemaManager<'_>) -> Result<(), DbEr
 }
 
 /// What SQLite cannot add to a table in place, it gets by rebuilding it:
-/// `builds` and `files` belong to their package, and a build always has a
-/// status.
+/// `builds` and `files` belong to their package, a build always has a status,
+/// and a file name is unique per platform rather than per repository -- an
+/// `arch=any` package built for two platforms has one file name in each.
 const SQLITE_CONSTRAINTS: &str = "
 CREATE TABLE builds_new (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -319,11 +328,12 @@ DROP TABLE builds;
 ALTER TABLE builds_new RENAME TO builds;
 
 CREATE TABLE files_new (
-    filename TEXT NOT NULL UNIQUE,
+    filename TEXT NOT NULL,
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     platform TEXT,
     package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
-    size BIGINT
+    size BIGINT,
+    UNIQUE (filename, platform)
 );
 INSERT INTO files_new (filename, id, platform, package_id, size)
     SELECT filename, id, platform, package_id, size FROM files;
@@ -331,7 +341,11 @@ DROP TABLE files;
 ALTER TABLE files_new RENAME TO files;
 ";
 
-/// [`SQLITE_CONSTRAINTS`], which Postgres adds in place.
+/// [`SQLITE_CONSTRAINTS`], which Postgres changes in place.
+///
+/// `files_filename_key` is Postgres's own name for the constraint 0.5.0
+/// declared on `filename`: dropped by name, so a database that has something
+/// else fails here rather than keeping it beside the new one.
 const POSTGRES_CONSTRAINTS: &str = "
 ALTER TABLE public.builds ALTER COLUMN status SET NOT NULL;
 ALTER TABLE public.builds ADD CONSTRAINT builds_pkg_id_fkey
@@ -339,12 +353,16 @@ ALTER TABLE public.builds ADD CONSTRAINT builds_pkg_id_fkey
 ALTER TABLE public.files ALTER COLUMN package_id SET NOT NULL;
 ALTER TABLE public.files ADD CONSTRAINT files_package_id_fkey
     FOREIGN KEY (package_id) REFERENCES public.packages (id) ON DELETE CASCADE;
+ALTER TABLE public.files DROP CONSTRAINT files_filename_key;
+ALTER TABLE public.files ADD CONSTRAINT files_filename_platform_key UNIQUE (filename, platform);
 ";
 
-/// Tie builds and files to their package, and make a build's status required.
+/// Tie builds and files to their package, make a build's status required,
+/// and make a file name unique per platform.
 ///
 /// The data has to satisfy them first: see `builds::fail_unknown_statuses`
-/// and `packages::delete_orphans`.
+/// and `builds::delete_orphans`. The file names already do: unique outright
+/// is unique per platform.
 pub(super) async fn add_constraints(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     let sql = match manager.get_database_backend() {
         DbBackend::Sqlite => SQLITE_CONSTRAINTS,

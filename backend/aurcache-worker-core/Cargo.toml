@@ -10,6 +10,7 @@ workspace = true
 tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "stream"] }
@@ -27,4 +28,6 @@ aurcache-ca = { path = "../aurcache-ca" }
 libc = "0.2"
 
 [dev-dependencies]
+# Paused time, for the stop and log-batching timers.
+tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }

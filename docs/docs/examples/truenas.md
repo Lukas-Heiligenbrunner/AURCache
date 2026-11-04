@@ -73,7 +73,7 @@ recommended for anything you intend to keep (`--database postgres`, with a
 generated password unless you pass `--db-password`), and it asks whether to add
 the `ixsystems/postgres-upgrade` step (`--postgres-upgrade` /
 `--no-postgres-upgrade`) that TrueNAS's own apps use for major-version
-upgrades. See [Quick Start](../overview/quick-start.md#for-truenas-portainer-unraid).
+upgrades. See [Setup and health](../cli/setup.md#a-compose-file-instead).
 
 ## 3. App config
 

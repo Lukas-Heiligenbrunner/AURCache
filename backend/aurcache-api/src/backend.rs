@@ -1,5 +1,5 @@
 use crate::aur::search;
-use crate::auth::regenerate_api_token_endpoint;
+use crate::auth::{regenerate_api_token_endpoint, user_info};
 use crate::build::{
     build_output, cancel_build, delete_build, download_build_output, get_build, list_builds,
     list_package_builds, retry_build,
@@ -17,7 +17,7 @@ use crate::settings::{
     package_setting_get, package_setting_patch, package_setting_reset, package_settings,
     setting_get, setting_patch, setting_reset, setting_schedule_preview, settings,
 };
-use crate::stats::{dashboard, dashboard_graph_data, stats, user_info};
+use crate::stats::{dashboard, dashboard_graph_data, stats};
 use rocket::{Route, routes};
 
 #[must_use]

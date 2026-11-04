@@ -15,8 +15,10 @@
 //! page would only ever search the page you were already looking at.
 
 use crate::dates::AbsoluteDate;
-use crate::listing::{LIST_TABLE, ListHeader, PAGE_SIZE, Pager, ViewParams, use_url_view};
+use crate::list_controls::{LIST_TABLE, ListHeader, Pager, WIDE_ONLY, use_url_view};
+use crate::listing::{PAGE_SIZE, PageInfo};
 use crate::routes::Route;
+use crate::widgets::Spinner;
 use aurcache_client::{
     ActiveOperation, EntityRef, Event, KINDS, LogEntry, LogFilter, PackageRef, Segment, Severity,
     WorkerRef, kind_label, operation_kind,
@@ -37,8 +39,101 @@ const PAGE: u64 = PAGE_SIZE as u64;
 /// something is running, and a job showing up a second late costs nothing.
 const RUNNING_POLL: Duration = Duration::from_secs(3);
 
+/// The log's filters, carried in the URL's query string.
+///
+/// The same spread-query encoding as the other lists' `ViewParams`, but none of
+/// their dimensions: the log has no status and no sort, and its filters are
+/// applied by the server rather than in the browser.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct LogView {
+    /// This severity and worse. `None` is the whole log.
+    pub severity: Option<Severity>,
+    /// Only what happened since the server last started.
+    pub since_boot: bool,
+    /// Only entries naming this, in any role.
+    pub about: Option<EntityRef>,
+    /// Only entries of this kind.
+    pub kind: Option<String>,
+}
+
+impl LogView {
+    #[must_use]
+    pub fn new(severity: Option<Severity>, since_boot: bool, about: Option<EntityRef>) -> Self {
+        Self {
+            // `Info` is every severity there is, so it is not a filter; keeping
+            // it out of the URL is what stops an untouched log carrying one.
+            severity: severity.filter(|&s| s != Severity::Info),
+            since_boot,
+            about,
+            kind: None,
+        }
+    }
+
+    /// The same view, narrowed to one kind of entry as well.
+    #[must_use]
+    pub fn with_kind(mut self, kind: Option<String>) -> Self {
+        self.kind = kind.filter(|kind| !kind.is_empty());
+        self
+    }
+
+    /// The log, narrowed to what names `entity`: where a page links to "its"
+    /// entries.
+    #[must_use]
+    pub fn about(entity: impl Into<EntityRef>) -> Self {
+        Self::new(None, false, Some(entity.into()))
+    }
+}
+
+impl std::fmt::Display for LogView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut sep = "";
+        if let Some(severity) = self.severity {
+            write!(f, "v={}", severity.slug())?;
+            sep = "&";
+        }
+        if self.since_boot {
+            write!(f, "{sep}b=1")?;
+            sep = "&";
+        }
+        if let Some(about) = &self.about {
+            write!(f, "{sep}e={about}")?;
+            sep = "&";
+        }
+        // Kinds are `domain.verb_object`: nothing in them needs escaping.
+        if let Some(kind) = &self.kind {
+            write!(f, "{sep}k={kind}")?;
+        }
+        Ok(())
+    }
+}
+
+impl From<&str> for LogView {
+    /// Parse what [`Display`] writes, ignoring what it does not recognise, as
+    /// `ViewParams` does.
+    ///
+    /// [`Display`]: std::fmt::Display
+    fn from(query: &str) -> Self {
+        let mut view = Self::default();
+        for (key, value) in query.split('&').filter_map(|p| p.split_once('=')) {
+            match key {
+                "v" => {
+                    view.severity = Severity::from_slug(value).filter(|&s| s != Severity::Info);
+                }
+                "b" => view.since_boot = value == "1",
+                // A pkgbase may hold `+`, which a query parser may already
+                // have turned into a space. No reference can contain a space,
+                // so turning one back is always right.
+                "e" => view.about = value.replace("%2B", "+").replace(' ', "+").parse().ok(),
+                "k" => view.kind = Some(value.to_string()).filter(|kind| !kind.is_empty()),
+                _ => {}
+            }
+        }
+        view
+    }
+}
+
 #[component]
-pub fn Logs(view: ViewParams) -> Element {
+pub fn Logs(view: LogView) -> Element {
     let mut page = use_signal(|| 0usize);
     let severity = use_signal(|| view.severity);
     let since_boot = use_signal(|| view.since_boot);
@@ -46,12 +141,10 @@ pub fn Logs(view: ViewParams) -> Element {
     let mut kind = use_signal(|| view.kind.clone());
 
     // The whole route from live control state, which is what keeps a filtered
-    // log linkable and survives a reload. The search box picks a filter rather
-    // than holding a term, so there is no term signal.
-    let to_route = move |_: String| Route::Logs {
-        view: ViewParams::for_logs(severity(), since_boot(), about()).with_kind(kind()),
-    };
-    use_url_view(None, true, to_route);
+    // log linkable and survives a reload.
+    use_url_view(true, move || Route::Logs {
+        view: LogView::new(severity(), since_boot(), about()).with_kind(kind()),
+    });
 
     // Narrowing the log changes what page 1 even is, so start again from it --
     // otherwise a filter applied on page 4 lands past the end of a shorter log.
@@ -77,6 +170,17 @@ pub fn Logs(view: ViewParams) -> Element {
             .map_err(|e| e.to_string())
     });
 
+    // A page past the end -- the log shrank under it -- is pulled back to the
+    // last one there is, so the entries fetched are the ones the pager names.
+    use_effect(move || {
+        if let Some(Ok(view)) = &*entries.read() {
+            let last = PageInfo::at(usize::MAX, view.total as usize).index;
+            if *page.peek() > last {
+                page.set(last);
+            }
+        }
+    });
+
     rsx! {
         div { class: "space-y-4",
 
@@ -88,11 +192,7 @@ pub fn Logs(view: ViewParams) -> Element {
                 LogControls { severity, since_boot, about, kind }
 
                 match &*entries.read_unchecked() {
-                    None => rsx! {
-                        div { class: "flex justify-center p-8",
-                            span { class: "loading loading-spinner loading-lg" }
-                        }
-                    },
+                    None => rsx! { Spinner {} },
                     Some(Err(e)) => rsx! {
                         div { class: "alert alert-error", span { "Could not load the log: {e}" } }
                     },
@@ -114,14 +214,7 @@ pub fn Logs(view: ViewParams) -> Element {
                             on_about: move |entity| about.set(Some(entity)),
                             on_kind: move |chosen| kind.set(Some(chosen)),
                         }
-                        Pager {
-                            page,
-                            index: page().min(pages_of(view.total).saturating_sub(1)),
-                            pages: pages_of(view.total),
-                            first: page() * PAGE_SIZE,
-                            count: view.entries.len(),
-                            total: view.total as usize,
-                        }
+                        Pager { page, info: PageInfo::at(page(), view.total as usize) }
                     },
                 }
             }
@@ -332,7 +425,7 @@ pub fn RecentActivity(about: EntityRef) -> Element {
                 Link {
                     class: "card-title text-base link-hover w-fit",
                     to: Route::Logs {
-                        view: ViewParams::about(about),
+                        view: LogView::about(about),
                     },
                     "Activity"
                 }
@@ -780,16 +873,6 @@ fn SeverityBadge(severity: Severity) -> Element {
     }
 }
 
-/// How many pages a log of this length has.
-///
-/// At least one, so an empty log reads as "page 1 of 1" rather than "of 0".
-fn pages_of(total: u64) -> usize {
-    (total as usize).div_ceil(PAGE_SIZE).max(1)
-}
-
-/// Columns that only appear once there is room for them.
-const WIDE_ONLY: &str = "hidden md:table-cell";
-
 #[component]
 fn LogTable(
     entries: Vec<LogEntry>,
@@ -856,9 +939,9 @@ fn actor(user: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogTable, actor, entities_of, entity_route, suggest};
-    use crate::listing::ViewParams;
+    use super::{LogTable, LogView, actor, entities_of, entity_route, suggest};
     use crate::routes::Route;
+    use aurcache_client::Severity;
     use aurcache_client::{BuildRef, EntityRef, Event, LogEntry, PackageRef, WorkerRef};
     use dioxus::prelude::*;
 
@@ -1051,15 +1134,61 @@ mod tests {
     #[test]
     fn the_activity_title_links_to_the_filtered_log() {
         let pkg = Route::Logs {
-            view: ViewParams::about(PackageRef::from("hello")),
+            view: LogView::about(PackageRef::from("hello")),
         }
         .to_string();
         assert!(pkg.contains("e=pkg:hello"), "{pkg}");
 
         let worker = Route::Logs {
-            view: ViewParams::about(WorkerRef::from("builder-01")),
+            view: LogView::about(WorkerRef::from("builder-01")),
         }
         .to_string();
         assert!(worker.contains("e=worker:builder-01"), "{worker}");
+    }
+
+    /// Whatever `Display` writes must parse back to the same view: the URL is
+    /// the only place this state lives across a reload.
+    #[test]
+    fn a_log_view_round_trips_through_its_query() {
+        for view in [
+            LogView::default(),
+            LogView::new(Some(Severity::Warning), false, None),
+            LogView::new(Some(Severity::Error), true, None),
+            LogView::new(None, false, None).with_kind(Some("build.started".to_string())),
+            LogView::about(PackageRef::from("hello")).with_kind(Some("build.queued".to_string())),
+            LogView::new(None, true, None),
+            LogView::about(PackageRef::from("gtk+")),
+            LogView::about(BuildRef {
+                pkgbase: "hello".to_string(),
+                number: 7,
+            }),
+            LogView::new(
+                Some(Severity::Error),
+                true,
+                Some(WorkerRef::from("builder-01").into()),
+            ),
+        ] {
+            let encoded = view.to_string();
+            assert_eq!(LogView::from(encoded.as_str()), view, "{encoded:?}");
+        }
+    }
+
+    /// `Info` is every severity, so it is no filter and never reaches the URL.
+    #[test]
+    fn an_info_filter_is_no_filter() {
+        assert_eq!(
+            LogView::new(Some(Severity::Info), false, None),
+            LogView::default()
+        );
+        assert_eq!(LogView::from("v=info"), LogView::default());
+    }
+
+    /// A pkgbase may contain `+`, which some query parsers read as a space;
+    /// no reference contains a space, so one is always a `+`.
+    #[test]
+    fn a_plus_read_back_as_a_space_is_still_a_plus() {
+        let view = LogView::from("e=pkg:gtk 3");
+        assert_eq!(view.about, Some(PackageRef::from("gtk+3").into()));
+        assert_eq!(LogView::from("e=nonsense").about, None);
     }
 }

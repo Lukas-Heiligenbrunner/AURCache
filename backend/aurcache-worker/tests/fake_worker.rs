@@ -168,7 +168,7 @@ async fn fake_worker_protocol_roundtrip() {
 
     // Enroll a synthetic worker with the production client + enrollment flow.
     // The shared enrollment token makes the server auto-approve it.
-    let cfg = CoreConfig::from_env();
+    let cfg = CoreConfig::from_env(aurcache_worker::settings::chroot_settings());
     let identity = Identity::load_or_create(&cfg.data_dir).unwrap();
     let client: WorkerClient = ensure_enrolled(&cfg, &identity, "chroot")
         .await
@@ -261,8 +261,11 @@ async fn fake_worker_protocol_roundtrip() {
 
         // Taken in the way the runner takes it, and reported back.
         let next = cfg.with_settings(cfg.settings.with_snapshot(&delivered));
-        assert_eq!(next.concurrency, 3);
-        assert_eq!(next.build_timeout, 6 * 60 * 60);
+        assert_eq!(next.tunables.concurrency, 3);
+        assert_eq!(
+            next.tunables.build_timeout,
+            Some(Duration::from_secs(6 * 60 * 60))
+        );
         let held = client
             .heartbeat(&aurcache_common::worker::Heartbeat {
                 active_build_ids: vec![],

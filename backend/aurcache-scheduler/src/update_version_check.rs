@@ -1,7 +1,8 @@
 use anyhow::Context;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, RefreshTarget, SourceinfoPurpose};
-use aurcache_db::helpers::builds::latest_successful_version_any_platform;
+use aurcache_db::helpers::builds::latest_successful_version;
+use aurcache_db::lists::JsonList;
 use aurcache_db::packages;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::Packages;
@@ -57,11 +58,10 @@ pub fn start_update_version_checking(services: Services) -> JoinHandle<()> {
 struct Unreadable(HashSet<i32>);
 
 /// Choose a produced package name for AUR RPC, which cannot look up a pkgbase.
-fn aur_query_name(pkgbase: &str, split_packages: Option<&str>) -> String {
-    aurcache_db::lists::json_list(split_packages)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| pkgbase.to_string())
+fn aur_query_name(pkgbase: &str, split_packages: Option<&JsonList>) -> String {
+    JsonList::entries(split_packages)
+        .first()
+        .map_or_else(|| pkgbase.to_string(), Clone::clone)
 }
 
 async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> anyhow::Result<()> {
@@ -76,7 +76,7 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
     let aur_query_names: Vec<String> = packages
         .iter()
         .filter(|x| matches!(x.source_data, SourceData::Aur { .. }))
-        .map(|package| aur_query_name(&package.name, package.split_packages.as_deref()))
+        .map(|package| aur_query_name(&package.name, package.split_packages.as_ref()))
         .collect();
 
     let aur_name_refs: Vec<&str> = aur_query_names.iter().map(String::as_str).collect();
@@ -101,7 +101,7 @@ async fn check_versions(services: &Services, unreadable: &mut Unreadable) -> any
 
     // One pass, one answer per remote: several packages can name the same
     // upstream, and what its ref points at does not change between two of them.
-    let mut round = RoundCache::new();
+    let mut round = RoundCache::default();
 
     for package in packages {
         // Only what this sweep sets: the loop does network I/O per package
@@ -253,7 +253,7 @@ impl Check<'_> {
         let name = &self.package.name;
         // Not scoped to a platform: this is a question about the package
         // rather than about one architecture.
-        let built = latest_successful_version_any_platform(db, self.package.id).await?;
+        let built = latest_successful_version(db, self.package.id, None).await?;
         let mut vcs_moved = false;
         if let Some(resolved) = resolved {
             apply_source_metadata(model, &resolved.metadata);
@@ -408,18 +408,19 @@ async fn save_package(
 #[cfg(test)]
 mod tests {
     use super::aur_query_name;
+    use aurcache_db::lists::JsonList;
 
     #[test]
     fn aur_queries_use_a_produced_name_even_with_only_one_child() {
         assert_eq!(
-            aur_query_name("demo-base", Some(r#"["demo-cli"]"#)),
+            aur_query_name("demo-base", Some(&JsonList::new(["demo-cli"]))),
             "demo-cli"
         );
         assert_eq!(
-            aur_query_name("demo-base", Some(r#"["demo-cli","demo-gui"]"#)),
+            aur_query_name("demo-base", Some(&JsonList::new(["demo-cli", "demo-gui"]))),
             "demo-cli"
         );
         assert_eq!(aur_query_name("demo", None), "demo");
-        assert_eq!(aur_query_name("demo", Some("[]")), "demo");
+        assert_eq!(aur_query_name("demo", Some(&JsonList::default())), "demo");
     }
 }

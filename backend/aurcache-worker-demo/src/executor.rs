@@ -7,42 +7,27 @@
 //! as in production.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use aurcache_common::worker::{CompleteReport, JobDescriptor};
 use aurcache_worker_core::client::WorkerClient;
-use aurcache_worker_core::config::env_opt;
-use aurcache_worker_core::executor::Executor;
-use aurcache_worker_core::{protocol, report};
+use aurcache_worker_core::config::env_duration;
+use aurcache_worker_core::executor::{ClaimedJob, Executor};
+use aurcache_worker_core::protocol;
+use aurcache_worker_core::report::{self, Exit};
 
-/// How long a fake build appears to take, in seconds.
+/// How long a fake build appears to take.
 ///
-/// From `DEMO_BUILD_SECS` (default 3): long enough to watch a build move
+/// From `DEMO_BUILD_SECS` (default 3s): long enough to watch a build move
 /// through the queue UI, short enough that dependency fan-out stays lively.
-fn fake_build_secs() -> u64 {
-    env_opt("DEMO_BUILD_SECS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
+fn fake_build_time() -> Duration {
+    env_duration("DEMO_BUILD_SECS").unwrap_or(Duration::from_secs(3))
 }
 
-/// Builds nothing, convincingly and quickly.
+/// Builds nothing, convincingly and quickly. Holds no machine state: every
+/// job is independent.
 pub struct DemoExecutor;
-
-impl DemoExecutor {
-    /// A demo executor holds no machine state: every job is independent.
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for DemoExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl Executor for DemoExecutor {
     const KIND: &'static str = "demo";
@@ -50,38 +35,30 @@ impl Executor for DemoExecutor {
     async fn run_job(
         &self,
         client: Arc<WorkerClient>,
-        job: JobDescriptor,
-        _mirrorlist: Option<String>,
-        cancel: Arc<AtomicBool>,
-    ) -> CompleteReport {
-        let build_id = job.build_id;
+        claimed: ClaimedJob,
+    ) -> Result<CompleteReport> {
+        let job = &claimed.job;
         protocol::log(
             &client,
-            build_id,
+            job.build_id,
             "[demo] synthetic build: nothing is compiled, archives are near-empty\n",
         )
         .await;
 
-        let names = job.expected_packages.clone();
-
-        // The visible beat, in slices so a cancel lands promptly rather
-        // than after the whole wait.
-        let deadline = std::time::Instant::now() + Duration::from_secs(fake_build_secs());
-        while std::time::Instant::now() < deadline {
-            if cancel.load(Ordering::Relaxed) || protocol::cancel_requested(&client, build_id).await
-            {
-                return report::canceled();
+        // The visible beat, stopped like a real build: a cancel lands at
+        // once, and a timeout shorter than the beat ends it.
+        let watch = claimed.watch();
+        tokio::select! {
+            () = tokio::time::sleep(fake_build_time()) => {}
+            stop = watch.stopped() => {
+                return Ok(report::ended(Some(stop), watch.elapsed(), Exit::Unknown));
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        if cancel.load(Ordering::Relaxed) {
-            return report::canceled();
         }
 
-        match fake_and_upload(&client, &job, &names).await {
-            Ok(()) => report::success(),
-            Err(e) => report::interrupted(format!("demo packaging failed: {e:#}")),
-        }
+        fake_and_upload(&client, job)
+            .await
+            .context("demo packaging failed")?;
+        Ok(report::success())
     }
 
     fn describe_self(&self) -> String {
@@ -89,15 +66,11 @@ impl Executor for DemoExecutor {
     }
 }
 
-/// Write one fake archive per package name into a staging directory and
+/// Write one fake archive per expected package into a staging directory and
 /// upload the directory through the shared artifact path.
-async fn fake_and_upload(
-    client: &WorkerClient,
-    job: &JobDescriptor,
-    names: &[String],
-) -> Result<()> {
+async fn fake_and_upload(client: &WorkerClient, job: &JobDescriptor) -> Result<()> {
     let dir = tempfile::tempdir().context("demo staging directory")?;
-    for name in names {
+    for name in &job.expected_packages {
         let bytes = fake_package_bytes(name, &job.pkgbase, &job.expected_version, &job.arch)?;
         let filename = format!("{name}-{}-{}.pkg.tar.zst", job.expected_version, job.arch);
         std::fs::write(dir.path().join(&filename), &bytes)

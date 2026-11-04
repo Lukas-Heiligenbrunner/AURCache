@@ -32,6 +32,8 @@ lru = "0.19"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = "3.24.0"
+# Comparing enrollment secrets in constant time.
+subtle = {workspace = true}
 
 aurcache-ca = {path = "../aurcache-ca"}
 aurcache-db = {path = "../aurcache-db"}
@@ -39,7 +41,7 @@ aurcache-deps = {path = "../aurcache-deps"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 pacman-mirrors = {path = "../pacman-mirrors"}
 pacman-repo-utils = {path = "../pacman-repo-utils"}
-aurcache-common = {path = "../aurcache-common"}
+aurcache-common = {path = "../aurcache-common", features = ["digest"]}
 
 
 [dev-dependencies]

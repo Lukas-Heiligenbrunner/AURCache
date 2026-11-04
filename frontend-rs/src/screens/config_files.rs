@@ -10,7 +10,7 @@
 //! image's own copy, which is why a reset is worth offering: it is the only way
 //! back to whatever the image ships.
 
-use crate::listing::ListHeader;
+use crate::list_controls::ListHeader;
 use aurcache_client::SettingSource;
 use dioxus::prelude::*;
 
@@ -154,9 +154,7 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
         div { class: "pt-3 space-y-2",
             match &*loaded.read_unchecked() {
                 None => rsx! {
-                    div { class: "flex justify-center p-8",
-                        span { class: "loading loading-spinner loading-lg" }
-                    }
+                    crate::widgets::Spinner {}
                 },
                 Some(Err(e)) => rsx! {
                     div { class: "alert alert-error", span { "Could not load {name}: {e}" } }

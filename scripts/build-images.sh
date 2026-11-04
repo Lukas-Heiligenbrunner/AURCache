@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# Build the multi-architecture server, worker, hybrid and demo-worker images.
+# Build the multi-architecture AURCache images.
 #
-# The same thing the publish workflow does, runnable by hand.
+# What the publish workflows run, and runnable by hand.
 #
-#   aurcache-server  the backend alone -- what a split deployment runs.
-#   aurcache-worker  a build worker, for a split deployment.
-#   aurcache         the hybrid (server + embedded worker) compatibility image.
-#   aurcache-demo-worker  the dummy worker for demo instances: synthetic
-#                    packages, no build. Debian, like the server.
+#   server       aurcache-server: the backend alone -- what a split deployment
+#                runs.
+#   worker       aurcache-worker: a build worker, for a split deployment.
+#   hybrid       aurcache: the hybrid (server + embedded worker) compatibility
+#                image.
+#   builder      aurcache-builder: the container the hybrid's legacy builder
+#                spawns per build.
+#   demo-worker  aurcache-demo-worker: the dummy worker for demo instances,
+#                synthetic packages and no build. Debian, like the server.
 #
-# The worker and hybrid images install AURCache as Arch packages, which the
-# packager stage cross-compiles on the build host; only their runtime stages are
+# The worker and hybrid images are two targets of docker/arch.Dockerfile. They
+# install AURCache as Arch packages, which its packager stage cross-compiles on
+# the build host, once for both; only their runtime stages are
 # per-architecture, so an emulated build spends its time on `pacman -U` rather
 # than on cargo. The server image is Debian and cross-compiles through
 # build-rust.sh. The demo-worker image is Debian too but builds natively per
@@ -18,7 +23,7 @@
 # docker/demo-worker.Dockerfile).
 #
 #   scripts/build-images.sh docker.example.com
-#   scripts/build-images.sh --push --tag v0.5.0 docker.example.com
+#   scripts/build-images.sh --push --tag v0.5.0 --tag latest docker.example.com
 #   scripts/build-images.sh --images worker --platforms linux/amd64 localhost:5000
 #
 # armv7 needs a cross toolchain that is not in Arch's repositories and takes
@@ -29,7 +34,7 @@
 # The worker and hybrid images *build* the AURCache packages as a stage of their
 # own and then install them. `--packages-dir` keeps that work for the host too:
 # the packager stage is replayed from the build cache into the directory, so a
-# local `pacman -U` gets the same artifacts the image just installed, without
+# local `pacman -U` gets the same artifacts the images just installed, without
 # `build-packages.sh` building them a second time.
 set -euo pipefail
 
@@ -40,13 +45,16 @@ readonly SCRIPT_DIR REPO_ROOT
 readonly DEFAULT_PLATFORMS="linux/amd64,linux/arm64,linux/arm/v7"
 readonly DEFAULT_BUILDER="aurcache-multiarch"
 
+# shellcheck source=scripts/lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
 usage() {
-    sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \?//; $d'
+    header_help "${BASH_SOURCE[0]}"
     cat <<'EOF'
 Options:
-  -t, --tag TAG             Image tag (default: latest)
-  -i, --images LIST         Comma-separated: server, worker, hybrid, demo-worker
-                            (default: server, worker, hybrid)
+  -t, --tag TAG             Image tag; repeat for several (default: latest)
+  -i, --images LIST         Comma-separated: server, worker, hybrid, builder,
+                            demo-worker (default: server, worker, hybrid)
   -p, --platforms LIST      Target platforms (default: linux/amd64,linux/arm64,linux/arm/v7)
       --push                Push to the registry; without it the images are
                             built and discarded (see the note below)
@@ -57,6 +65,10 @@ Options:
                             database file pacman fetches (default: repo)
       --builder NAME        buildx builder to use (default: aurcache-multiarch,
                             created on demand)
+      --cache gha           Restore and save the build cache in GitHub Actions'
+                            cache backend, one scope per image. The step needs
+                            the runtime's token in its environment (see
+                            docker-worker-publish.yml).
       --packages-dir DIR    Also write the AURCache packages the worker/hybrid
                             images built into DIR, for a native install. The
                             packager stage is replayed from the build cache, so
@@ -73,25 +85,7 @@ enabled. A single-platform build is always loaded.
 EOF
 }
 
-# The PKGBUILDs are submodules of the AUR repositories they are published from,
-# so a fresh clone has empty directories until they are checked out. Without
-# this the failure is a confusing one deep inside makepkg or the image build,
-# about a PKGBUILD that is simply not there.
-require_packaging_submodules() {
-    local missing=()
-    local pkg
-    for pkg in "$@"; do
-        [[ -f "$REPO_ROOT/packaging/$pkg/PKGBUILD" ]] || missing+=("$pkg")
-    done
-    if ((${#missing[@]})); then
-        echo "error: no PKGBUILD for: ${missing[*]}" >&2
-        echo "       packaging/ holds git submodules of the AUR repositories." >&2
-        echo "       Check them out with:  git submodule update --init" >&2
-        exit 2
-    fi
-}
-
-tag=latest
+tags=()
 images=server,worker,hybrid
 platforms=$DEFAULT_PLATFORMS
 push=0
@@ -99,11 +93,12 @@ toolchain_repo=
 toolchain_repo_name=
 builder=$DEFAULT_BUILDER
 packages_dir=
+cache=
 registry=
 
 while (($#)); do
     case $1 in
-        -t | --tag) tag=$2; shift 2 ;;
+        -t | --tag) tags+=("$2"); shift 2 ;;
         -i | --images) images=$2; shift 2 ;;
         -p | --platforms) platforms=$2; shift 2 ;;
         --push) push=1; shift ;;
@@ -111,6 +106,7 @@ while (($#)); do
         --toolchain-repo-name) toolchain_repo_name=$2; shift 2 ;;
         --builder) builder=$2; shift 2 ;;
         --packages-dir) packages_dir=$2; shift 2 ;;
+        --cache) cache=$2; shift 2 ;;
         -h | --help) usage; exit 0 ;;
         -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
         *)
@@ -126,30 +122,59 @@ if [[ -z $registry ]]; then
     usage >&2
     exit 2
 fi
-
-# --packages-dir exports the packages the worker/hybrid packager stages built,
-# via `type=local` output. Local output needs the docker-container driver too,
-# so both cases pull in the container builder.
-export_targets=()
-if [[ -n $packages_dir ]]; then
-    IFS=',' read -r -a _sel <<<"$images"
-    for _img in "${_sel[@]}"; do
-        case $_img in worker | hybrid) export_targets+=("$_img") ;; esac
-    done
+((${#tags[@]})) || tags=(latest)
+if [[ -n $cache && $cache != gha ]]; then
+    echo "error: unknown cache backend '$cache' (expected gha)" >&2
+    exit 2
 fi
-need_local_output=0
-((${#export_targets[@]})) && need_local_output=1
 
-# A multi-platform build needs the docker-container driver; the default `docker`
-# driver builds for one architecture only and fails with a message that does not
-# say so. Created rather than demanded, since one builder is as good as another.
-if [[ ($platforms == *,* || $need_local_output == 1) ]] &&
-    ! docker buildx inspect "$builder" >/dev/null 2>&1; then
-    echo "==> creating buildx builder '$builder'"
-    docker buildx create --name "$builder" --driver docker-container --bootstrap >/dev/null
+# The image each name publishes as. `aurcache` rather than `aurcache-hybrid`
+# because that is the name deployments predating the split already pull.
+declare -A IMAGE_NAMES=(
+    [server]=aurcache-server
+    [worker]=aurcache-worker
+    [hybrid]=aurcache
+    [builder]=aurcache-builder
+    [demo-worker]=aurcache-demo-worker
+)
+# The Dockerfile each is built from, and the stage, for the two that share one.
+declare -A DOCKERFILES=(
+    [server]=docker/server.Dockerfile
+    [worker]=docker/arch.Dockerfile
+    [hybrid]=docker/arch.Dockerfile
+    [builder]=docker/builder.Dockerfile
+    [demo-worker]=docker/demo-worker.Dockerfile
+)
+declare -A TARGETS=(
+    [worker]=worker
+    [hybrid]=hybrid
+)
+
+IFS=',' read -r -a selected <<<"$images"
+packaged=0
+for image in "${selected[@]}"; do
+    if [[ -z ${IMAGE_NAMES[$image]:-} ]]; then
+        echo "error: unknown image '$image' (expected server, worker, hybrid, builder or demo-worker)" >&2
+        exit 2
+    fi
+    [[ -n ${TARGETS[$image]:-} ]] && packaged=1
+done
+
+# The default `docker` driver builds for one architecture only, and fails a
+# multi-platform build with a message that does not say so; it cannot write
+# `type=local` output (--packages-dir) or save a cache to GitHub's backend
+# either. Any of those uses a docker-container builder, created rather than
+# demanded, since one is as good as another.
+use_container_builder=0
+if [[ $platforms == *,* || -n $packages_dir || -n $cache ]]; then
+    use_container_builder=1
 fi
 builder_args=()
-if [[ $platforms == *,* || $need_local_output == 1 ]]; then
+if ((use_container_builder)); then
+    if ! docker buildx inspect "$builder" >/dev/null 2>&1; then
+        echo "==> creating buildx builder '$builder'"
+        docker buildx create --name "$builder" --driver docker-container --bootstrap >/dev/null
+    fi
     builder_args=(--builder "$builder")
 fi
 
@@ -208,9 +233,8 @@ fi
 # inside (see aurcache-common's build script). Outside a checkout there is
 # simply nothing to pass, and the binaries report their bare release.
 #
-# Apart from the toolchain args: every image consumes these (the server in its
-# builder stage, the others in their packager stages), so unlike those they
-# are never cleared per image below.
+# Every image but the builder consumes these (the server and the demo worker
+# in their builder stages, the others in their packager stage).
 version_args=()
 if sha=$(git rev-parse HEAD 2>/dev/null); then
     version_args+=(--build-arg "LATEST_COMMIT_SHA=$sha")
@@ -226,94 +250,74 @@ if [[ $platforms == *arm/v7* ]] && [[ -z $toolchain_repo ]]; then
     echo "      built from the AUR and takes roughly an hour the first time."
 fi
 
-# The image each Dockerfile publishes as. `aurcache` rather than
-# `aurcache-hybrid` because that is the name deployments predating the split
-# already pull.
-declare -A DOCKERFILES=(
-    [server]=docker/server.Dockerfile
-    [worker]=docker/worker.Dockerfile
-    [hybrid]=docker/hybrid.Dockerfile
-    [demo-worker]=docker/demo-worker.Dockerfile
-)
-declare -A IMAGE_NAMES=(
-    [server]=aurcache-server
-    [worker]=aurcache-worker
-    [hybrid]=aurcache
-    [demo-worker]=aurcache-demo-worker
-)
-
 # The worker and hybrid images build these as Arch packages; the server image
 # does not, but checking unconditionally keeps the message the same wherever it
 # is hit.
 require_packaging_submodules aurcache-sandbox aurcache-worker aurcache-server \
     aurcache-worker-docker
 
-IFS=',' read -r -a selected <<<"$images"
 for image in "${selected[@]}"; do
-    dockerfile=${DOCKERFILES[$image]:-}
-    if [[ -z $dockerfile ]]; then
-        echo "error: unknown image '$image' (expected server, worker, hybrid or demo-worker)" >&2
-        exit 2
+    name="$registry/${IMAGE_NAMES[$image]}"
+    tag_args=()
+    for tag in "${tags[@]}"; do tag_args+=(--tag "$name:$tag"); done
+    echo
+    echo "==> $image -> $name:{$(IFS=,; echo "${tags[*]}")}  [$platforms]"
+
+    image_args=()
+    target=${TARGETS[$image]:-}
+    [[ -n $target ]] && image_args+=(--target "$target")
+    # buildkit warns about a build arg no stage consumes, so each image gets
+    # only those it declares: the cross-toolchain args belong to the Arch
+    # packager stage, and the builder image declares none at all.
+    [[ -n $target ]] && image_args+=("${build_args[@]}")
+    [[ $image != builder ]] && image_args+=("${version_args[@]}")
+    # Scoped per image: several images build in one CI job and would
+    # otherwise share a cache key, each overwriting the other's entry.
+    if [[ -n $cache ]]; then
+        image_args+=(--cache-from "type=$cache,scope=$image" \
+            --cache-to "type=$cache,scope=$image,mode=max")
     fi
 
-    ref="$registry/${IMAGE_NAMES[$image]}:$tag"
-    echo
-    echo "==> $image -> $ref  [$platforms]"
-    # The cross-toolchain args belong to the Arch packager stages. The Debian
-    # images (server, demo-worker) declare neither, and buildkit warns about
-    # a build arg no stage consumes, so they are built without them. The
-    # version args go to every image: the Debian images consume them in their
-    # builder stages.
-    image_build_args=("${build_args[@]}")
-    [[ $image == server || $image == demo-worker ]] && image_build_args=()
-    image_build_args+=("${version_args[@]}")
     docker buildx build "${builder_args[@]}" \
         --platform "$platforms" \
-        --file "$REPO_ROOT/$dockerfile" \
-        --tag "$ref" \
-        "${image_build_args[@]}" \
+        --file "$REPO_ROOT/${DOCKERFILES[$image]}" \
+        "${tag_args[@]}" \
+        "${image_args[@]}" \
         "${output_args[@]}" \
         "$REPO_ROOT"
 done
 
-# The packager stages just built the AURCache packages and the image build
-# discarded them (`rm -rf /tmp/pkg`). Give the host its own copy: a second
-# build targeting the export-pkgs stage replays those stages from the build
-# cache the image build just populated and copies the archives out with
-# `type=local` output. One run per Dockerfile, since worker and hybrid both
-# build the worker packages (overwriting is fine, the bytes are identical).
+# The packager stage just built the AURCache packages, which the images
+# install without keeping. Give the host its own copy: a second build
+# targeting the export-pkgs stage replays that stage from the build cache the
+# image build just populated and copies the archives out with `type=local`
+# output.
 if [[ -n $packages_dir ]]; then
     echo
-    if ((${#export_targets[@]})); then
+    if ((packaged)); then
         echo "==> exporting built packages to $packages_dir (x86_64, host arch)"
         mkdir -p "$packages_dir"
-        declare -A exported_dockerfiles=()
-        for image in "${export_targets[@]}"; do
-            dockerfile=${DOCKERFILES[$image]}
-            [[ -n ${exported_dockerfiles[$dockerfile]:-} ]] && continue
-            docker buildx build "${builder_args[@]}" \
-                --platform linux/amd64 \
-                --file "$REPO_ROOT/$dockerfile" \
-                --target export-pkgs \
-                "${version_args[@]}" \
-                --output "type=local,dest=$packages_dir" \
-                "$REPO_ROOT"
-            exported_dockerfiles[$dockerfile]=1
-        done
+        docker buildx build "${builder_args[@]}" \
+            --platform linux/amd64 \
+            --file "$REPO_ROOT/docker/arch.Dockerfile" \
+            --target export-pkgs \
+            "${version_args[@]}" \
+            --output "type=local,dest=$packages_dir" \
+            "$REPO_ROOT"
     else
         echo "note: --packages-dir given but no worker or hybrid image selected;" >&2
-        echo "      the server and demo-worker images install no packages to export." >&2
+        echo "      the other images install no packages to export." >&2
     fi
 fi
 
 echo
 if ((push)); then
-    echo "==> pushed $images as :$tag to $registry"
+    echo "==> pushed $images as ${tags[*]} to $registry"
 elif ((containerd_store)) || [[ $platforms != *,* ]]; then
     echo "==> built and loaded $images for $platforms"
 else
     echo "==> built $images for $platforms (discarded; --push to publish)"
 fi
-if [[ -n $packages_dir ]] && ((${#export_targets[@]})); then
+if [[ -n $packages_dir ]] && ((packaged)); then
     echo "==> packages written to $packages_dir (install with: sudo pacman -U $packages_dir/*.pkg.tar.zst)"
 fi

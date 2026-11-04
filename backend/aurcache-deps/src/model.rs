@@ -71,15 +71,8 @@ pub struct PkgDeps {
 /// nothing to do, link to something we track, or go build it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencyResolution {
-    /// Already installable as a binary, from an official Arch repository or
-    /// from AURCache's own -- so there is nothing to build and nothing to
-    /// record.
-    ///
-    /// Deliberately not called `Official`: a package AURCache built itself
-    /// lands here too, whenever the database had no row to offer for it. The
-    /// old name said "official repository" while the code also meant "our own
-    /// repository", and the two disagreed about whether a dependency link
-    /// should exist.
+    /// Already installable as a binary from an official Arch repository, so
+    /// there is nothing to build and nothing to record.
     Available,
     /// Satisfied by a package AURCache tracks. The only variant that can
     /// become a dependency edge, which is why it is the only one resolved
@@ -119,17 +112,10 @@ pub struct Resolutions {
     /// Names that matched nothing: no repository holds them, no AUR package
     /// carries the name, and nothing declares them in `provides`.
     ///
-    /// Reported rather than silently dropped. A typo, or a dependency removed
-    /// from the AUR, used to vanish during resolution and resurface much later
-    /// as an opaque `makepkg` failure with nothing pointing back to here.
+    /// Reported rather than silently dropped: a typo, or a dependency removed
+    /// from the AUR, would otherwise resurface much later as an opaque
+    /// `makepkg` failure with nothing pointing back to here.
     pub unresolved: Vec<String>,
-}
-
-impl Resolutions {
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<&DependencyResolution> {
-        self.found.get(name)
-    }
 }
 
 /// Package metadata returned by the AUR RPC v5 `/info` or `/search` endpoints.

@@ -21,7 +21,7 @@ interactive prompt (saved back to the config file):
 
 ```bash
 aurcli config show                    # where the file is and what it holds
-aurcli config set-url https://aur.example.com:8080
+aurcli config set-url https://aur.example.com:8080/api   # the API, not the web UI
 aurcli config set-token <token>
 aurcli user-info                       # who this token authenticates as
 aurcli token regenerate                # rotate the current user's token

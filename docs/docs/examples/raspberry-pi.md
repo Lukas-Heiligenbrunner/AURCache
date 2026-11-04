@@ -55,8 +55,8 @@ after editing three things in that file (see
    public internet.
 3. Approve **this** worker, picking one:
    - pre-approve its certificate fingerprint on the server (recommended — the
-     worker prints its fingerprint on first start, add it to the server's
-     `AURCACHE_PREAPPROVED_WORKERS=<fingerprint>:<name>:x86_64`),
+     worker prints its fingerprint on first start; add it to the server's
+     `AURCACHE_PREAPPROVED_WORKERS`, a comma-separated list of fingerprints),
    - share an enrollment token (`AURCACHE_ENROLLMENT_TOKEN`, same value on
      both sides), or
    - approve it once on the **Workers** page.

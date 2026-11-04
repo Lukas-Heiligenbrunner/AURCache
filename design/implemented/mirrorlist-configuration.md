@@ -27,7 +27,7 @@ readers want different things.
 | --- | --- |
 | `MIRRORLIST_SERVERS_X86_64` (semicolon-separated) | `startup.rs:139` writes `mirrorlist.x86_64` |
 | a bare `mirrorlist` file mounted in | `adopt_shared_mirrorlist()` adopts it into the native arch slot |
-| `MIRROR_RANK_SCHEDULE` (default weekly) | `aurcache-scheduler/src/mirror_ranking.rs` re-ranks and rewrites `mirrorlist.x86_64` |
+| `MIRROR_RANK_SCHEDULE` (default weekly) | `aurcache-scheduler/src/mirrorlist.rs` re-ranks and rewrites `mirrorlist.x86_64` |
 
 When none of these has produced a file, `startup.rs` ranks official Arch
 mirrors itself via `pacman_mirrors::get_status`. **The server is therefore

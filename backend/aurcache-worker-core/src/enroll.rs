@@ -6,16 +6,15 @@ use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::worker::{PROTOCOLS, RegisterRequest, RegisterStatus};
 use std::time::Duration;
 
-use crate::client::{Incompatible, WorkerClient, fetch_and_pin_ca};
+use crate::client::{ClientIdentity, Incompatible, WorkerClient, fetch_and_pin_ca};
 use crate::config::CoreConfig;
 use crate::identity::Identity;
+use crate::repo::RepoSection;
 
 /// Drop the CSR into the shared enrollment volume so a co-located backend can
 /// auto-approve this worker (bundled single-host topology). Best-effort.
 pub fn publish_csr_to_enrollment_dir(cfg: &CoreConfig, fingerprint: &str, csr_pem: &str) {
-    let Some(dir) = &cfg.enrollment_dir else {
-        return;
-    };
+    let dir = &cfg.enrollment_dir;
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::debug!("enrollment dir {} unavailable: {e}", dir.display());
         return;
@@ -43,9 +42,9 @@ pub fn register_request(cfg: &CoreConfig, csr_pem: String, kind: &str) -> Regist
         csr_pem,
         enrollment_token: cfg.enrollment_token.clone(),
         embedded_secret: cfg.embedded_secret.clone(),
-        affinity: cfg.packages.clone(),
-        priority: cfg.priority,
-        concurrency: cfg.concurrency as u32,
+        affinity: cfg.tunables.packages.clone(),
+        priority: cfg.tunables.priority,
+        concurrency: u32::try_from(cfg.tunables.concurrency).unwrap_or(u32::MAX),
         settings: cfg.settings.declare(),
     }
 }
@@ -94,9 +93,9 @@ pub async fn enroll(cfg: &CoreConfig, identity: &Identity, kind: &str) -> Result
             Err(e) => {
                 tracing::warn!(
                     "Enrollment not complete ({e:#}); retrying in {}s",
-                    cfg.poll_interval
+                    cfg.tunables.poll_interval.as_secs()
                 );
-                tokio::time::sleep(Duration::from_secs(cfg.poll_interval)).await;
+                tokio::time::sleep(cfg.tunables.poll_interval).await;
             }
         }
     }
@@ -171,14 +170,19 @@ pub async fn ensure_enrolled(
             return Ok(client);
         }
 
+        // Approved or not: the section describes the deployment, and a worker
+        // approved later in this process builds with what this client holds.
         tracing::info!("Reusing persisted worker certificate");
         let client = WorkerClient::authenticated(
             &cfg.aurcache_url,
-            &ca_pem,
-            &identity.cert_pem()?,
-            &identity.key_pem(),
+            &ClientIdentity {
+                ca_pem: &ca_pem,
+                cert_pem: &identity.cert_pem()?,
+                key_pem: &identity.key_pem(),
+            },
+            request,
+            repo_section(cfg, &status),
         )?;
-        client.remember_registration(request);
         return Ok(client);
     }
 
@@ -208,7 +212,7 @@ pub async fn ensure_enrolled(
             return Err(Revoked.into());
         }
         tracing::info!("Awaiting approval (status: {})…", status.status);
-        tokio::time::sleep(Duration::from_secs(cfg.poll_interval)).await;
+        tokio::time::sleep(cfg.tunables.poll_interval).await;
         status = enroll_client
             .register_status(&identity.fingerprint)
             .await
@@ -294,31 +298,83 @@ fn try_finish_enrollment(
         return Ok(None);
     };
     identity.store_signed(cert, ca)?;
-    let mut client = WorkerClient::authenticated(&cfg.aurcache_url, ca, cert, &identity.key_pem())?;
-    client.remember_registration(request.clone());
+    let client = WorkerClient::authenticated(
+        &cfg.aurcache_url,
+        &ClientIdentity {
+            ca_pem: ca,
+            cert_pem: cert,
+            key_pem: &identity.key_pem(),
+        },
+        request.clone(),
+        repo_section(cfg, status),
+    )?;
+    Ok(Some(client))
+}
 
-    // Render the server's `[repo]` template with the host we actually reach it
-    // on. Done here, once, because it describes the deployment rather than any
-    // one build.
-    let section = status
-        .repo_template
-        .as_deref()
-        .map(|template| {
-            crate::repo::render(
-                template,
-                &cfg.aurcache_url,
-                cfg.repo_host.as_deref(),
-                cfg.repo_url.as_deref(),
-            )
-        })
-        .unwrap_or_default();
-    match section.lines().find(|l| l.starts_with("Server =")) {
+/// The `[repo]` section for this worker, rendered from the server's template
+/// with the host it actually reaches the server on.
+///
+/// From any answer to a registration, approved or still pending: it
+/// describes the deployment rather than this worker's standing.
+fn repo_section(cfg: &CoreConfig, status: &RegisterStatus) -> Option<RepoSection> {
+    let section = status.repo_template.as_deref().and_then(|template| {
+        RepoSection::render(
+            template,
+            &cfg.aurcache_url,
+            cfg.repo_host.as_deref(),
+            cfg.repo_url.as_deref(),
+        )
+    });
+    match section.as_ref().and_then(RepoSection::server) {
         Some(server) => tracing::info!("Package repository for this worker: {server}"),
         None => tracing::warn!(
             "No usable [repo] section for this worker; builds cannot resolve \
              AURCache-built dependencies"
         ),
     }
-    client.set_repo_section(section);
-    Ok(Some(client))
+    section
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(status: ApprovalStatus) -> RegisterStatus {
+        RegisterStatus {
+            status,
+            signed_cert: None,
+            ca_cert: None,
+            repo_template: Some(
+                "[repo]\nSigLevel = Never\nServer = http://%AURCACHE_HOST%:8081/$arch\n".into(),
+            ),
+            protocol: Some(1),
+        }
+    }
+
+    /// A worker holding a certificate whose registration is still pending
+    /// builds its client from that answer; if it is approved later in the
+    /// same process, its builds still need the section.
+    #[test]
+    fn a_pending_answer_still_gives_the_section() {
+        let cfg = CoreConfig {
+            aurcache_url: "https://aurcache:8083".into(),
+            ..CoreConfig::from_env(Vec::new())
+        };
+        let section = repo_section(&cfg, &status(ApprovalStatus::Pending)).expect("a section");
+        assert_eq!(
+            section.db_url("x86_64").as_deref(),
+            Some("http://aurcache:8081/x86_64/repo.db")
+        );
+    }
+
+    /// A server that publishes no repository sends no template.
+    #[test]
+    fn no_template_is_no_section() {
+        let cfg = CoreConfig::from_env(Vec::new());
+        let none = RegisterStatus {
+            repo_template: None,
+            ..status(ApprovalStatus::Approved)
+        };
+        assert_eq!(repo_section(&cfg, &none), None);
+    }
 }

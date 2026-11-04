@@ -206,12 +206,35 @@ pub struct Change {
     pub value: Option<String>,
 }
 
+/// What [`write`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Write {
+    /// Every change is stored.
+    Written,
+    /// A value was given for a package, for a setting that applies to the whole
+    /// server; nothing was stored.
+    GlobalOnly(Setting),
+}
+
 /// Store and remove values: removals first, then every new value in one
 /// upsert.
-pub async fn write(
-    db: &DatabaseConnection,
+///
+/// All or nothing: a package value for a server-wide setting refuses the
+/// whole set, since nothing would ever read it. Removing one stays allowed --
+/// it is how a stray row goes.
+pub async fn write<C: sea_orm::ConnectionTrait>(
+    db: &C,
     changes: impl IntoIterator<Item = Change>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Write> {
+    let changes: Vec<Change> = changes.into_iter().collect();
+    if let Some(change) = changes.iter().find(|change| {
+        change.pkg_id.is_some()
+            && change.value.is_some()
+            && change.setting.meta().scope == Scope::Global
+    }) {
+        return Ok(Write::GlobalOnly(change.setting));
+    }
+
     let mut inserts = Vec::new();
     let mut removals = sea_orm::Condition::any();
     let mut any_removal = false;
@@ -260,7 +283,7 @@ pub async fn write(
             .exec(db)
             .await?;
     }
-    Ok(())
+    Ok(Write::Written)
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -7,6 +8,14 @@ use backon::{FibonacciBuilder, Retryable};
 use reqwest::Client;
 use tracing::warn;
 use url::Url;
+
+use crate::deps::deps_from_packages;
+use crate::model::{
+    Dependency, DependencyResolution, Error, Package, PackageResponse, PkgDeps, Resolutions,
+};
+use crate::paths::official_repo_cache_dir;
+use crate::repo::{OfficialRepos, default_official_mirrorlist_path};
+use crate::satisfy::SatisfyIndex;
 
 /// How an outbound request rides out a blip: three attempts, Fibonacci from
 /// 500 ms. Defined once so the AUR and the mirrors cannot drift apart.
@@ -20,11 +29,11 @@ pub(crate) fn retry_policy() -> FibonacciBuilder {
 ///
 /// A 5xx or a 429 is retried like a dropped connection: either is the server
 /// having a bad moment, and the AUR's gateway answers 502 often enough that a
-/// whole version-check pass used to be lost to a single one. Any other error
-/// status is an answer, and fails at once.
+/// whole version-check pass would otherwise be lost to a single one. Any other
+/// error status is an answer, and fails at once.
 ///
 /// The error names the URL without its query. An RPC query lists every
-/// package of its batch, which turned one failure into a line thousands of
+/// package of its batch, which would make one failure a line thousands of
 /// characters long -- in the log and in the activity feed alike -- naming
 /// packages that had nothing to do with it.
 pub(crate) async fn send_with_retry<F, Fut>(
@@ -118,15 +127,6 @@ fn without_query(error: reqwest::Error) -> reqwest::Error {
 /// limit with room for the scheme, host and path already in the base.
 const MAX_RPC_URL_BYTES: usize = 7_600;
 
-use crate::deps::deps_from_packages;
-use crate::model::{
-    Dependency, DependencyResolution, Error, Package, PackageResponse, PkgDeps, Resolutions,
-};
-use crate::repo::{
-    OfficialRepos, default_official_mirrorlist_path, default_official_repo_cache_dir,
-};
-use crate::satisfy::SatisfyIndex;
-
 /// Client for the AUR RPC and Arch Linux official package search APIs.
 ///
 /// Handles dependency resolution against AUR packages, official Arch
@@ -151,22 +151,13 @@ impl Default for AurClient {
 
 /// What each source says about one dependency name.
 ///
-/// The columns of the truth table in [`AurClient::resolve_dependencies`],
-/// gathered separately so that combining them is a pure function.
-/// [`Evidence::outcome`] is the only encoding of the precedence rule anywhere
-/// in the crate: changing what beats what means changing those branches and
+/// Gathered separately so that combining them is a pure function:
+/// [`Evidence::outcome`] is the only encoding of the precedence rule in the
+/// crate, so changing what beats what means changing those branches and
 /// nothing else.
-///
-/// Whether a candidate carries the name or merely declares it in `provides`
-/// is deliberately not recorded. It decides which candidate *within* a source
-/// wins -- [`SatisfyIndex::best_match`] ranks a name above a split package
-/// above a `provides` entry -- and nothing beyond that: a name the official
-/// repositories only provide still beats one a tracked package carries,
-/// because the question this rule answers is which *source* to use.
 #[derive(Debug, Default, Clone)]
 struct Evidence {
-    /// The official repositories publish the name at a version satisfying the
-    /// constraint.
+    /// The official repositories hold the name, by name or by `provides`.
     official: bool,
     /// The pkgbase of a tracked package claiming the name.
     tracked: Option<String>,
@@ -194,20 +185,22 @@ impl Evidence {
     }
 }
 
-/// The names no column has settled yet, in declared order.
+/// One dependency, and what the sources asked so far say about it.
+struct Lookup<'a> {
+    dep: Dependency<'a>,
+    evidence: Evidence,
+}
+
+/// The lookups no source has settled yet, in declared order.
 ///
-/// Gathering a column costs something -- a disk read, a network round trip --
-/// so each is asked only about what is still open. That this is safe is not a
-/// second statement of the precedence rule: it *asks* [`Evidence::outcome`],
-/// which returns on the first column that answers, so a column that gets
-/// skipped provably could not have changed the result. Reordering the
-/// gathering below can change how much work happens, never the answer.
-fn undecided<'a>(evidence: &[(Dependency<'a>, Evidence)]) -> Vec<&'a str> {
-    evidence
-        .iter()
-        .filter(|(_, found)| found.outcome().is_none())
-        .map(|(dep, _)| dep.name)
-        .collect()
+/// Asking a source costs something -- a disk read, a network round trip -- so
+/// each is asked only about what is still open. That is safe because it asks
+/// [`Evidence::outcome`], which returns on the first source that answers: a
+/// source that gets skipped could not have changed the result.
+fn undecided<'l, 'a>(lookups: &'l mut [Lookup<'a>]) -> impl Iterator<Item = &'l mut Lookup<'a>> {
+    lookups
+        .iter_mut()
+        .filter(|lookup| lookup.evidence.outcome().is_none())
 }
 
 /// What the server calls itself to the AUR and the mirrors.
@@ -221,7 +214,7 @@ impl AurClient {
         Self::with_urls_and_paths(
             rpc_url,
             default_official_mirrorlist_path(),
-            default_official_repo_cache_dir(),
+            official_repo_cache_dir(),
         )
     }
 
@@ -230,7 +223,7 @@ impl AurClient {
         Self::with_urls_and_paths(
             aur_url,
             default_official_mirrorlist_path(),
-            default_official_repo_cache_dir(),
+            official_repo_cache_dir(),
         )
     }
 
@@ -369,120 +362,39 @@ impl AurClient {
 
     /// Resolve dependencies to what should happen about each of them.
     ///
-    /// The outcome is a pure function of three independent facts about a name:
+    /// Each name goes to the first source that answers for it, by name or by
+    /// `provides`:
     ///
-    /// - **tracked** -- `tracked` holds a package claiming the name: AURCache
-    ///   has a row for it, or an in-flight add is about to insert one. A
-    ///   statement about ownership, not about anything having been built, so a
-    ///   package whose last build failed still counts. Version constraints are
-    ///   deliberately not consulted (see below).
-    /// - **published** -- a repository database lists a package providing the
-    ///   name at a version satisfying the constraint: AURCache's own
-    ///   repository for the platforms being built, or the cached
-    ///   `core`/`extra`/`multilib`. Note this is what the *database* says, not
-    ///   that the file is still on disk, and that the official databases are
-    ///   fetched for `x86_64` only.
-    /// - **in the AUR** -- an AUR package carries the name, or declares it in
-    ///   `provides`.
+    /// 1. the official repositories hold it: [`DependencyResolution::Available`];
+    /// 2. a package in `tracked` claims it: [`DependencyResolution::Local`];
+    /// 3. an AUR package carries the name, or else declares it in `provides`:
+    ///    [`DependencyResolution::Aur`];
+    /// 4. nothing does: the name is listed in [`Resolutions::unresolved`].
     ///
-    /// | official repos | AURCache | in the AUR | outcome |
-    /// |---|---|---|---|
-    /// | yes | — | — | [`DependencyResolution::Available`] |
-    /// | no | tracked | — | [`DependencyResolution::Local`] |
-    /// | no | built, no row | — | [`DependencyResolution::Available`] |
-    /// | no | no | yes | [`DependencyResolution::Aur`] |
-    /// | no | no | no | [`Resolutions::unresolved`] |
+    /// Use what the official repositories hold; failing that, what AURCache
+    /// already has; only then build something from the AUR. Carrying a name
+    /// rather than providing it only ranks candidates *within* a source
+    /// ([`SatisfyIndex::best_match`], [`ProviderRank`]): `git-git` declaring
+    /// `provides=('git')` never outranks the `git` in `extra`. Resolving a
+    /// name to a package makes that package tracked, so one bad guess would
+    /// otherwise capture the name for every package added afterwards.
     ///
-    /// One sentence: **use what the official repositories already hold; if
-    /// they do not hold it, use what AURCache already has; only then build
-    /// something from the AUR.**
+    /// No version constraint is checked here. A tracked package answers
+    /// whether or not it has built: the edge records the constraint, and the
+    /// build queue checks it against each build.
     ///
-    /// A source answers whether it carries the name outright or merely
-    /// declares it in `provides` -- the two are equivalent here. Which
-    /// candidate *within* a source wins is where that distinction lives
-    /// ([`SatisfyIndex::best_match`] ranks a name above a split package above
-    /// a `provides` entry), and it goes no further: `git-git` declaring
-    /// `provides=('git')` does not let a tracked copy of it outrank the `git`
-    /// in `extra`, which is the bug this order exists to prevent -- resolving
-    /// a name to a package is what makes that package tracked, so one bad
-    /// guess would otherwise capture the name for every package added
-    /// afterwards.
+    /// `tracked` is every package that may satisfy a dependency: AURCache's
+    /// rows and, during an add, the packages it has planned but not inserted
+    /// yet, which only the caller knows. `preferred` are package bases to
+    /// favour among them -- in practice the ones the package being resolved
+    /// already depends on, so that a provider picked by hand survives
+    /// re-resolution and two equal providers do not trade places between runs.
     ///
-    /// The implementation evaluates that table left to right, stopping as soon
-    /// as a column settles it. That is an evaluation order, not the
-    /// definition: no stage can see what an earlier one concluded, and the
-    /// answer for a name does not depend on the other names in the batch.
+    /// # Errors
     ///
-    /// # Why the columns are in this order
-    ///
-    /// Each boundary is load-bearing, so none of them may be swapped for
-    /// convenience:
-    ///
-    /// - **the official repositories before everything.** A name they hold is
-    ///   answered by a binary that already exists on every mirror; anything
-    ///   else means building a stand-in for it. This is also what stops a
-    ///   mistaken provider from entrenching itself, as above.
-    /// - **a tracked row before AURCache's own repository.** Both mean
-    ///   "AURCache has it", but only a row can be linked to, and the
-    ///   dependency edge is what rebuilds dependents when it changes.
-    ///   Reaching the repository instead means no row exists -- a deleted
-    ///   package whose artifact remains -- and `Available` is correct there,
-    ///   since there is nothing to link to.
-    /// - **AURCache before the AUR.** A package AURCache tracks is already
-    ///   its responsibility, whether or not a build of it has succeeded yet;
-    ///   sending the name to the AUR would add a second row for the same
-    ///   thing.
-    /// - **exact AUR name before `provides`.** Within that last source, a
-    ///   package carrying the name outright is a better answer than one that
-    ///   merely declares it -- see [`provider_rank`] for how the rest of that
-    ///   choice is made.
-    ///
-    /// Cost happens to agree with the last three, which is why short-circuiting
-    /// them is free rather than a compromise: the tracked column is in memory,
-    /// AURCache's repository is on disk, and only the AUR columns touch the
-    /// network -- the last without a bulk form, so it costs one request per
-    /// name left. The first column does not fit that pattern and is asked
-    /// about every name, which is the price of it deciding first.
-    ///
-    /// # Why `tracked` is a parameter
-    ///
-    /// Not merely because this crate has no database. The set of packages that
-    /// can satisfy a dependency is not the set any query returns: during an
-    /// add it also includes packages that add has *planned* but not yet
-    /// inserted, since the whole graph is resolved before anything is written.
-    /// Only the caller knows those. A version of this that fetched its own
-    /// rows would still have to be handed the in-flight half, so the parameter
-    /// buys correctness at no cost in coupling.
-    ///
-    /// It also removes an ordering hazard that used to be real: the database
-    /// was once a *separate function* callers had to remember to run first,
-    /// and calling this one alone reported every package AURCache had already
-    /// built as merely available.
-    ///
-    /// # Which columns check the version constraint
-    ///
-    /// Only "published". A repository hit *ends* resolution -- the binary
-    /// is used as it is, and nothing downstream will ever look at its version
-    /// again -- so a repository holding `foo-1.0` must not answer for
-    /// `foo>=2.0`. A tracked hit defers instead: the edge it produces records
-    /// the constraint, and the build queue re-checks it against each new
-    /// build, which is both later and better informed than anything decidable
-    /// here. The AUR columns have nothing to check, since the version will be
-    /// whatever the build produces.
-    ///
-    /// `preferred` are package bases the caller would rather have among the
-    /// tracked candidates -- in practice, the ones the package being resolved
-    /// already depends on. It only reorders column 2: the official
-    /// repositories are still asked first, and the AUR still last. Within the
-    /// preferred set the usual ranking applies.
-    ///
-    /// This is what makes a hand-picked provider survive. Re-resolution
-    /// recomputes every edge from the declared names, so without it a choice
-    /// that beat the ranking once would be undone the next time the package
-    /// was updated; with it, the existing edge is the first thing consulted
-    /// and only loses if it no longer satisfies the name at all. It also keeps
-    /// resolution stable for its own sake: two providers of equal rank stop
-    /// trading places between runs.
+    /// [`Error::OfficialReposUnread`] while the official databases have never
+    /// been read, rather than sending every name they hold to the AUR; and any
+    /// AUR request that fails.
     pub async fn resolve_dependencies(
         &self,
         deps: &[Dependency<'_>],
@@ -492,60 +404,48 @@ impl AurClient {
         // A pkgbase can name the same dependency in `depends` and
         // `makedepends`, and its split packages multiply that again.
         let mut seen = HashSet::new();
-        let mut evidence: Vec<(Dependency<'_>, Evidence)> = Vec::new();
-        for dep in deps {
-            if seen.insert(dep.name) {
-                evidence.push((*dep, Evidence::default()));
-            }
+        let mut lookups: Vec<Lookup<'_>> = deps
+            .iter()
+            .filter(|dep| seen.insert(dep.name))
+            .map(|&dep| Lookup {
+                dep,
+                evidence: Evidence::default(),
+            })
+            .collect();
+
+        // The official repositories, from memory, about every name.
+        for lookup in &mut lookups {
+            lookup.evidence.official = self.official.holds(lookup.dep.name).await?;
         }
 
-        // Column 1: what the official repositories publish. From memory --
-        // and an error, rather than a "no", while they have never been read.
-        for (dep, found) in &mut evidence {
-            found.official = self.official.holds(dep.name).await?;
-        }
-
-        // Column 2: what AURCache already tracks, `preferred` first. In
-        // memory; costs nothing.
-        // A row, not a built artifact: the two are kept in step -- deleting a
-        // package removes its artifact -- and only a row can carry the
-        // dependency edge that rebuilds dependents when it changes.
-        for (dep, found) in &mut evidence {
-            if found.outcome().is_some() {
-                continue;
-            }
-            found.tracked = tracked
-                .best_match(dep.name, |matched| preferred.contains(&matched.pkgbase))
-                .or_else(|| tracked.best_match(dep.name, |_| true))
+        // What AURCache already tracks, `preferred` first. In memory.
+        for lookup in undecided(&mut lookups) {
+            let name = lookup.dep.name;
+            lookup.evidence.tracked = tracked
+                .best_match(name, |matched| preferred.contains(&matched.pkgbase))
+                .or_else(|| tracked.best_match(name, |_| true))
                 .map(|matched| matched.pkgbase.clone());
         }
 
-        // Column 3: the AUR, by exact package name. One request for every
-        // remaining name, not one per name: `resolve_bases` chunks by URL
-        // length, so this is a single call for any realistic dependency list.
-        let open = undecided(&evidence);
+        // The AUR, by exact package name: one call for every remaining name,
+        // which `resolve_bases` chunks by URL length.
+        let open: Vec<&str> = undecided(&mut lookups).map(|l| l.dep.name).collect();
         if !open.is_empty() {
             let exact_aur_bases = self.resolve_bases(&open).await?;
-            for (dep, found) in &mut evidence {
-                if found.outcome().is_some() {
-                    continue;
-                }
-                found.aur = exact_aur_bases.get(dep.name).cloned();
+            for lookup in undecided(&mut lookups) {
+                lookup.evidence.aur = exact_aur_bases.get(lookup.dep.name).cloned();
             }
         }
 
-        // Column 4: the AUR, by `provides`. No bulk form, so one request each
-        // -- which is why it is asked last, of the fewest names.
-        for (dep, found) in &mut evidence {
-            if found.outcome().is_some() {
-                continue;
-            }
-            found.aur = self.aur_provider_pkgbase(dep.name).await?;
+        // The AUR, by `provides`. No bulk form, so one request each -- which
+        // is why it is asked last, of the fewest names.
+        for lookup in undecided(&mut lookups) {
+            lookup.evidence.aur = self.aur_provider_pkgbase(lookup.dep.name).await?;
         }
 
         let mut resolutions = Resolutions::default();
-        for (dep, found) in evidence {
-            match found.outcome() {
+        for Lookup { dep, evidence } in lookups {
+            match evidence.outcome() {
                 Some(resolution) => {
                     resolutions.found.insert(dep.name.to_string(), resolution);
                 }
@@ -604,13 +504,8 @@ impl AurClient {
             .map_err(Error::Http)
     }
 
-    /// The AUR package base that declares `dep_name` in its `provides`.
-    ///
-    /// Ranked through [`SatisfyIndex`] like every other source, so an AUR
-    /// package carrying the name outright beats one that merely provides it.
-    /// This used to take whichever pkgbase sorted first alphabetically, which
-    /// meant a virtual dependency was built from a package chosen by nothing
-    /// more than its initial.
+    /// The best AUR package base declaring `dep_name` in its `provides`, as
+    /// [`ProviderRank`] orders them.
     async fn aur_provider_pkgbase(&self, dep_name: &str) -> Result<Option<String>, Error> {
         Ok(self
             .aur_providers(dep_name)
@@ -637,29 +532,16 @@ impl AurClient {
         // unlike `info` -- so re-deriving the claim from the response body
         // would find nothing and quietly resolve every virtual dependency to
         // nothing at all.
-        // `sort_by` rather than `sort_by_key`: the rank borrows the names it
-        // ranks, which a key function may not do.
-        packages.sort_by(|a, b| {
-            provider_rank(&a.name, &a.package_base, a.num_votes, dep_name).cmp(&provider_rank(
-                &b.name,
-                &b.package_base,
-                b.num_votes,
-                dep_name,
-            ))
-        });
+        packages.sort_by(|a, b| ProviderRank::of(a, dep_name).cmp(&ProviderRank::of(b, dep_name)));
         Ok(packages)
     }
 }
 
-/// How good a candidate is at standing in for `dep_name`, lowest first.
+/// How good a candidate is at standing in for a dependency, best first.
 ///
 /// Every candidate provides the name, so there is nothing in the `provides`
-/// entries to tell them apart, and something has to choose. This used to be
-/// alphabetical order, which is how an instance ended up building `git-git`
-/// for `git` and `jpegli-git` for `libjpeg6`: both sort first among their
-/// providers, and neither is what anyone meant.
-///
-/// Three signals, in order:
+/// entries to tell them apart, and something has to choose. The fields are
+/// compared in order:
 ///
 /// 1. **The name itself.** A package called `foo` is a better answer for `foo`
 ///    than any package merely declaring it.
@@ -667,25 +549,29 @@ impl AurClient {
 ///    is at the time, so they are a poor way to satisfy someone else's
 ///    dependency -- they rebuild endlessly and track no release. Someone who
 ///    wants one adds it directly, which makes it tracked and settles the name
-///    before this function is ever reached.
+///    before this is ever reached.
 /// 3. **Votes.** Cumulative and integral, where `Popularity` decays and is a
 ///    float: for `libjpeg6` popularity puts `jpegli-git` (4 votes) ahead of
 ///    `libjpeg6-turbo` (26), which is exactly backwards.
-///
-/// Pkgbase breaks the remaining ties, so the answer is at least stable across
-/// runs rather than dependent on the order the RPC happened to return.
-fn provider_rank<'a>(
-    name: &str,
+/// 4. **The pkgbase**, so the answer is stable across runs rather than
+///    dependent on the order the RPC happened to return.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProviderRank<'a> {
+    named_otherwise: bool,
+    vcs: bool,
+    votes: Reverse<u32>,
     pkgbase: &'a str,
-    votes: u32,
-    dep_name: &str,
-) -> (u8, u8, std::cmp::Reverse<u32>, &'a str) {
-    (
-        u8::from(name != dep_name),
-        u8::from(is_vcs_pkgbase(pkgbase)),
-        std::cmp::Reverse(votes),
-        pkgbase,
-    )
+}
+
+impl<'a> ProviderRank<'a> {
+    fn of(package: &'a Package, dep_name: &str) -> Self {
+        Self {
+            named_otherwise: package.name != dep_name,
+            vcs: is_vcs_pkgbase(&package.package_base),
+            votes: Reverse(package.num_votes),
+            pkgbase: &package.package_base,
+        }
+    }
 }
 
 /// Whether a pkgbase names a package that builds from a moving upstream ref.
@@ -696,44 +582,55 @@ fn is_vcs_pkgbase(pkgbase: &str) -> bool {
 
 #[cfg(test)]
 mod provider_rank_tests {
-    use super::provider_rank;
+    use super::ProviderRank;
+    use crate::model::Package;
 
-    /// Rank candidates the way `aur_provider_pkgbase` does and name the winner.
-    fn best<'a>(dep_name: &str, candidates: &[(&'a str, &'a str, u32)]) -> &'a str {
+    /// An AUR package whose pkgbase is its name.
+    fn package(name: &str, votes: u32) -> Package {
+        Package {
+            name: name.to_string(),
+            package_base: name.to_string(),
+            num_votes: votes,
+            ..Package::default()
+        }
+    }
+
+    /// The pkgbase that ranks first among `candidates` for `dep_name`.
+    fn best(dep_name: &str, candidates: &[Package]) -> String {
         candidates
             .iter()
-            .min_by_key(|(name, pkgbase, votes)| provider_rank(name, pkgbase, *votes, dep_name))
-            .map(|(_, pkgbase, _)| *pkgbase)
+            .min_by_key(|package| ProviderRank::of(package, dep_name))
+            .map(|package| package.package_base.clone())
             .expect("a candidate")
     }
 
-    /// The reported bug: every provider of `git` in the AUR is a VCS package,
-    /// and `git-git` wins on alphabetical order alone. (In practice the
-    /// repositories answer `git` long before this function is reached -- this
-    /// is about which one is chosen when nothing else can answer.)
+    /// Every provider of `git` in the AUR is a VCS package, so votes decide,
+    /// not alphabetical order. (In practice the repositories answer `git`
+    /// long before this is reached -- this is about which one is chosen when
+    /// nothing else can answer.)
     #[test]
-    fn votes_break_the_tie_that_alphabetical_order_got_wrong() {
+    fn votes_break_a_tie_between_vcs_packages() {
         let winner = best(
             "git",
             &[
-                ("git-git", "git-git", 3),
-                ("git-gl", "git-gl", 2),
-                ("git-wd40", "git-wd40", 12),
+                package("git-git", 3),
+                package("git-gl", 2),
+                package("git-wd40", 12),
             ],
         );
         assert_eq!(winner, "git-wd40");
     }
 
-    /// Real `libjpeg6` providers, with their votes. Alphabetical order picks
-    /// `jpegli-git`; so does `Popularity`, which is why votes decide.
+    /// Real `libjpeg6` providers, with their votes. Alphabetical order would
+    /// pick `jpegli-git`; so would `Popularity`, which is why votes decide.
     #[test]
     fn a_release_package_beats_a_vcs_one_that_sorts_first() {
         let winner = best(
             "libjpeg6",
             &[
-                ("jpegli-git", "jpegli-git", 4),
-                ("libjpeg6-turbo", "libjpeg6-turbo", 26),
-                ("libjpeg6-turbo-bin", "libjpeg6-turbo-bin", 2),
+                package("jpegli-git", 4),
+                package("libjpeg6-turbo", 26),
+                package("libjpeg6-turbo-bin", 2),
             ],
         );
         assert_eq!(winner, "libjpeg6-turbo");
@@ -745,10 +642,7 @@ mod provider_rank_tests {
     fn a_vcs_package_loses_on_kind_not_on_votes() {
         let winner = best(
             "thing",
-            &[
-                ("thing-git", "thing-git", 500),
-                ("thing-stable", "thing-stable", 1),
-            ],
+            &[package("thing-git", 500), package("thing-stable", 1)],
         );
         assert_eq!(winner, "thing-stable");
     }
@@ -757,10 +651,7 @@ mod provider_rank_tests {
     /// on `foo-git` means `foo-git`.
     #[test]
     fn the_package_named_for_the_dependency_wins_outright() {
-        let winner = best(
-            "foo-git",
-            &[("other", "other", 900), ("foo-git", "foo-git", 0)],
-        );
+        let winner = best("foo-git", &[package("other", 900), package("foo-git", 0)]);
         assert_eq!(winner, "foo-git");
     }
 }
@@ -778,7 +669,7 @@ mod evidence_tests {
         }
     }
 
-    /// Every combination of the three columns, so the precedence rule is
+    /// Every combination of the three sources, so the precedence rule is
     /// pinned by a test rather than by the order of the statements that happen
     /// to gather it. No repository, no database, no network.
     #[test]
@@ -828,9 +719,9 @@ mod evidence_tests {
         );
     }
 
-    /// The property the short-circuit in `undecided` relies on: once a column
-    /// answers, no later column can change the outcome. If this ever stops
-    /// holding, skipping the remaining columns stops being safe.
+    /// The property the short-circuit in `undecided` relies on: once a source
+    /// answers, no later source can change the outcome. If this ever stops
+    /// holding, skipping the remaining sources stops being safe.
     #[test]
     fn later_columns_cannot_override_an_earlier_answer() {
         for tracked in [false, true] {

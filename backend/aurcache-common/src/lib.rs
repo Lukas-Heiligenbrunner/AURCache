@@ -8,6 +8,9 @@
 pub mod api;
 pub mod build_flags;
 pub mod build_state;
+/// SHA-256 as lowercase hex. Requires the `digest` feature.
+#[cfg(feature = "digest")]
+pub mod digest;
 /// Filesystem helpers. Requires the `fs` feature: `std::fs` is meaningless in
 /// a browser, so wasm consumers leave it off.
 #[cfg(feature = "fs")]

@@ -1,8 +1,8 @@
 //! How a request to the AUR rides out a bad answer.
 //!
-//! The AUR's gateway answers 502 now and then, and a version check used to
-//! give up its whole pass on the first one, logging every package of the
-//! batch in the URL as it did.
+//! The AUR's gateway answers 502 now and then. A version check must not give
+//! up its whole pass on the first one, nor log every package of the batch in
+//! the URL as it fails.
 
 use aurcache_deps::AurClient;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,9 +86,9 @@ async fn a_failed_query_does_not_list_its_packages() {
     assert!(!message.contains("first-package"), "{message}");
 }
 
-/// An answer that breaks off fails after the request itself succeeded, which
-/// is where a version check whose answer could not be read used to log the
-/// whole batch's URL: thousands of characters, every package in it.
+/// An answer that breaks off fails after the request itself succeeded, and
+/// must not log the whole batch's URL there either: thousands of characters,
+/// every package in it.
 #[tokio::test]
 async fn an_unreadable_answer_does_not_list_its_packages() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

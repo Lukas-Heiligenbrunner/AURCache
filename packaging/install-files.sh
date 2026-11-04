@@ -18,16 +18,16 @@ readonly BINDIR=$4
 
 readonly PKG="$ROOT/packaging"
 
-# The package being built, which is also the name its declaration files take.
 case "$ROLE" in
-sandbox)       _pkgname=aurcache-sandbox ;;
-server)        _pkgname=aurcache-server ;;
-worker)        _pkgname=aurcache-worker ;;
-worker-docker) _pkgname=aurcache-worker-docker ;;
-cli)           _pkgname=aurcache-cli ;;
-*)  echo "install-files.sh: unknown role '$ROLE'" >&2; exit 1 ;;
+sandbox | server | worker | worker-docker | cli) ;;
+*) echo "install-files.sh: unknown role '$ROLE'" >&2; exit 1 ;;
 esac
+# The package being built, which is also the name its declaration files take.
+readonly _pkgname="aurcache-$ROLE"
 
+# Install the users and directories declared by `$1` (aurcache-server or
+# aurcache-worker) under this package's own name.
+#
 # Each package installs its declarations under its OWN name, even where two
 # packages share the source file. pacman refuses to install two packages that
 # ship the same path -- identical contents are no exemption, it is a plain path
@@ -35,29 +35,26 @@ esac
 # exclusive. systemd merges every file in these directories and both tools are
 # idempotent, so declaring one user or directory twice is a no-op.
 #
-# `$_decl` names the source file; the installed name is always the package.
-# aurcache-sandbox and aurcache-cli are exempt: each is one binary the other
-# packages do not depend on, owning no users, directories or state of its own.
-if [ "$ROLE" != sandbox ] && [ "$ROLE" != cli ]; then
-    case "$ROLE" in
-    server) _decl=aurcache-server ;;
-    *)      _decl=aurcache-worker ;;   # both workers share the worker declarations
-    esac
-    install -Dm644 "$PKG/$_decl.sysusers" "$PKGDIR/usr/lib/sysusers.d/$_pkgname.conf"
-    install -Dm644 "$PKG/$_decl.tmpfiles" "$PKGDIR/usr/lib/tmpfiles.d/$_pkgname.conf"
-fi
+# aurcache-sandbox and aurcache-cli declare nothing: each is one binary owning
+# no users, directories or state of its own.
+declare_from() {
+    install -Dm644 "$PKG/$1.sysusers" "$PKGDIR/usr/lib/sysusers.d/$_pkgname.conf"
+    install -Dm644 "$PKG/$1.tmpfiles" "$PKGDIR/usr/lib/tmpfiles.d/$_pkgname.conf"
+}
 
 case "$ROLE" in
 sandbox)
     install -Dm755 "$BINDIR/aurcache-sandbox" "$PKGDIR/usr/bin/aurcache-sandbox"
     ;;
 server)
+    declare_from aurcache-server
     install -Dm755 "$BINDIR/aurcache" "$PKGDIR/usr/bin/aurcache"
     install -Dm644 "$PKG/aurcache.service" \
         "$PKGDIR/usr/lib/systemd/system/aurcache.service"
     install -Dm644 "$PKG/server.env" "$PKGDIR/etc/aurcache/server.env"
     ;;
 worker)
+    declare_from aurcache-worker
     install -Dm755 "$BINDIR/aurcache-worker" "$PKGDIR/usr/bin/aurcache-worker"
     install -Dm644 "$PKG/aurcache-worker.service" \
         "$PKGDIR/usr/lib/systemd/system/aurcache-worker.service"
@@ -86,17 +83,14 @@ worker)
 worker-docker)
     # The legacy executor delegates builds to containers, so it needs none of
     # the chroot machinery the chroot worker installs -- no sandbox, no
-    # aurcache-build, no sudoers entry. Just the binary and the shared users and
-    # directories declared above.
+    # aurcache-build, no sudoers entry. Just the binary and the users and
+    # directories it shares with the chroot worker.
+    declare_from aurcache-worker
     install -Dm755 "$BINDIR/aurcache-worker-docker" \
         "$PKGDIR/usr/bin/aurcache-worker-docker"
     ;;
 cli)
     # The client is one binary with no service, users or state of its own.
     install -Dm755 "$BINDIR/aurcli" "$PKGDIR/usr/bin/aurcli"
-    ;;
-*)
-    echo "install-files.sh: unknown role '$ROLE'" >&2
-    exit 1
     ;;
 esac

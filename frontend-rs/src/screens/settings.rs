@@ -8,7 +8,7 @@
 //! reset.
 
 use crate::dates::{Clock, DateOrder, DateParts, DateStyle, render};
-use crate::listing::ListHeader;
+use crate::list_controls::ListHeader;
 use crate::routes::Route;
 use crate::setting_editor::{
     EditorDraft, MutationOutcome, SettingEdit, SettingScope, use_editor_draft,
@@ -714,12 +714,16 @@ fn ApiAccessSection() -> Element {
                     class: "btn btn-sm",
                     onclick: move |_| async move {
                         error.set(None);
-                        match crate::api::client() {
+                        let regenerated = async {
+                            crate::api::client()?
+                                .regenerate_api_token()
+                                .await
+                                .map_err(|e| e.to_string())
+                        }
+                        .await;
+                        match regenerated {
+                            Ok(response) => issued.set(Some(response.token)),
                             Err(e) => error.set(Some(e)),
-                            Ok(client) => match client.regenerate_api_token().await {
-                                Ok(response) => issued.set(Some(response.token)),
-                                Err(e) => error.set(Some(e.to_string())),
-                            },
                         }
                     },
                     "Generate new token"

@@ -15,6 +15,7 @@
 
 use aurcache_common::worker_config::{Applies, ValueKind};
 use aurcache_worker_core::settings::{Builtin, SettingSpec};
+use std::time::Duration;
 
 /// Keys of the settings this executor accepts.
 pub mod keys {
@@ -34,6 +35,8 @@ pub mod keys {
     pub const BUILD_DISK_MAX: &str = "build_disk_max";
     pub const DISK_MAX: &str = "disk_max";
     pub const KEEP_FAILED: &str = "keep_failed";
+    pub const BUILDDIR_MAX_BYTES: &str = "builddir_max_bytes";
+    pub const BUILDDIR_MIN_FREE: &str = "builddir_min_free";
 }
 
 /// Re-exported from the shared executor settings: the legacy container
@@ -42,18 +45,24 @@ pub use aurcache_worker_core::settings::DEFAULT_KEYSERVER;
 /// Total disk the worker's caches may use when nothing is configured.
 pub const DEFAULT_TOTAL_CACHE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 /// How long a source stays in the cache without being used.
-pub const DEFAULT_CACHE_TTL: u64 = 30 * 24 * 60 * 60;
+pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How long a freshly upgraded base chroot counts as current.
 ///
 /// The refresh costs ~13s and, measured over a day on the reference worker, 23
 /// of 26 of them upgraded nothing: Arch's repositories move a few times a day,
 /// not a few times an hour.
-pub const DEFAULT_CHROOT_REFRESH_INTERVAL: u64 = 15 * 60;
+pub const DEFAULT_CHROOT_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Disk one build may use when nothing is configured.
 pub const DEFAULT_BUILD_DISK_MAX: u64 = 50 * 1024 * 1024 * 1024;
 /// Everything the worker may store when nothing is configured: the base
 /// chroot, the builds, and (once they move into the pool) the caches.
 pub const DEFAULT_DISK_MAX: u64 = 200 * 1024 * 1024 * 1024;
+/// Enough for one very large build tree, small enough that opting in a second
+/// is a decision someone makes.
+pub const DEFAULT_BUILDDIR_MAX_BYTES: u64 = 200 * 1024 * 1024 * 1024;
+/// Secondary floor, covering what a cap cannot see: a small disk, or one
+/// shared with something else that grew.
+pub const DEFAULT_BUILDDIR_MIN_FREE: u64 = 50 * 1024 * 1024 * 1024;
 
 /// The settings this executor accepts, on top of the protocol ones.
 #[must_use]
@@ -119,7 +128,7 @@ pub fn chroot_settings() -> Vec<SettingSpec> {
                           would discard one used daily simply for being old.",
             category: "Caches",
             applies: Applies::NextLoop,
-            default: Builtin::Duration(0),
+            default: Builtin::Duration(Duration::ZERO),
         },
         SettingSpec {
             key: keys::CHROOT_REFRESH_INTERVAL,
@@ -231,6 +240,26 @@ pub fn chroot_settings() -> Vec<SettingSpec> {
             applies: Applies::NextLoop,
             default: Builtin::Unset,
         },
+        SettingSpec {
+            key: keys::BUILDDIR_MAX_BYTES,
+            env_var: "WORKER_BUILDDIR_MAX_BYTES",
+            kind: ValueKind::Size,
+            description: "Total disk the kept build trees may occupy before the oldest are \
+                          swept.",
+            category: "Build trees",
+            applies: Applies::NextLoop,
+            default: Builtin::Size(DEFAULT_BUILDDIR_MAX_BYTES),
+        },
+        SettingSpec {
+            key: keys::BUILDDIR_MIN_FREE,
+            env_var: "WORKER_BUILDDIR_MIN_FREE",
+            kind: ValueKind::Size,
+            description: "Disk to keep free on the filesystem holding the build trees, whatever \
+                          the cap above allows.",
+            category: "Build trees",
+            applies: Applies::NextLoop,
+            default: Builtin::Size(DEFAULT_BUILDDIR_MIN_FREE),
+        },
     ]
 }
 
@@ -239,40 +268,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every built-in default has to read back as its own kind: it is at once
-    /// what the worker runs and what the server is told the fallback is, and a
-    /// default that did not parse would make those two different answers.
     #[test]
-    fn built_in_defaults_are_valid_for_their_kind() {
-        for spec in chroot_settings() {
-            if let Some(written) = spec.default.as_written() {
-                assert!(
-                    spec.kind.validate(&written).is_ok(),
-                    "{}'s default {written:?} is not a valid {:?}",
-                    spec.key,
-                    spec.kind
-                );
-            }
-        }
-    }
-
-    /// Keys and variables are what the server stores values under and what an
-    /// operator renames to hand a setting over, so a duplicate of either would
-    /// be two settings quietly sharing one slot.
-    #[test]
-    fn keys_and_variables_are_unique_across_both_tables() {
+    fn the_whole_table_checks_out() {
         let all: Vec<_> = aurcache_worker_core::settings::protocol_settings()
             .into_iter()
             .chain(chroot_settings())
             .collect();
-        let keys: HashSet<_> = all.iter().map(|spec| spec.key).collect();
-        assert_eq!(keys.len(), all.len(), "a setting key is declared twice");
-        let vars: HashSet<_> = all.iter().map(|spec| spec.env_var).collect();
-        assert_eq!(
-            vars.len(),
-            all.len(),
-            "an environment variable is declared twice"
-        );
+        aurcache_worker_core::settings::check_table(&all);
     }
 
     /// The security boundary, asserted rather than left to review: these decide

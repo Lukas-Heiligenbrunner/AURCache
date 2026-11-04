@@ -26,18 +26,12 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// `OFFICIAL_MIRRORLIST_PATH` still overrides it outright.
 ///
 /// This resolves through [`crate::paths`] so it cannot drift from where the
-/// mirrorlist is actually written — it previously defaulted to
-/// `./config/pacman_x86_64/mirrorlist`, a path nothing ever wrote, which made
-/// dependency resolution fail for every package that had dependencies.
+/// mirrorlist is actually written.
 pub(crate) fn default_official_mirrorlist_path() -> PathBuf {
     if let Ok(path) = std::env::var("OFFICIAL_MIRRORLIST_PATH") {
         return PathBuf::from(path);
     }
     crate::paths::mirrorlist_path("x86_64")
-}
-
-pub(crate) fn default_official_repo_cache_dir() -> PathBuf {
-    crate::paths::official_repo_cache_dir()
 }
 
 /// The official repositories, as AURCache is able to see them.
@@ -370,12 +364,11 @@ fn names_in_archive(archive: &Path, held: &mut HashSet<String>) -> Result<(), Er
 /// `%BASE%` is deliberately not read: a name the repositories publish resolves
 /// to `Available`, which carries no package for a pkgbase to fill in.
 ///
-/// Parsed by hand rather than with `alpm-repo-db`, which auto-detects the
-/// schema version by the presence of `%MD5SUM%`: entries with it are treated
-/// as v1, which requires `%PGPSIG%`. AURCache does not sign packages, so
-/// `%PGPSIG%` is always absent and `alpm-repo-db` would fail on every entry.
-/// Two sections out of a dozen are wanted here, so a lenient scan is both
-/// simpler and more robust.
+/// Parsed by hand rather than with `alpm-repo-db`: two sections out of a dozen
+/// are wanted, and a strict parser refuses an entry over a field this never
+/// reads -- `alpm-repo-db` guesses the schema version from which fields are
+/// present and then requires the rest of that version's. One entry it
+/// refused would cost the whole database, and with it every name it holds.
 fn names_in_desc(content: &str, held: &mut HashSet<String>) {
     enum Section {
         Name,
@@ -606,9 +599,9 @@ mod tests {
         );
     }
 
-    /// Reading the databases is not allowed to fail quietly. A corrupt one
-    /// used to be indistinguishable from "the official repositories do not
-    /// have it", which sent ordinary `core` names off to be built.
+    /// Reading the databases is not allowed to fail quietly: a corrupt one
+    /// would be indistinguishable from "the official repositories do not have
+    /// it", and send ordinary `core` names off to be built.
     #[tokio::test]
     async fn an_unreadable_database_fails_the_refresh() {
         let cache_dir = tempfile::tempdir().unwrap();

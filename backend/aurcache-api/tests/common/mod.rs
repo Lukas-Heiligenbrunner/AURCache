@@ -37,23 +37,24 @@ pub async fn test_api(
     let checkouts = tempfile::tempdir().expect("tempdir");
     let rocket = rocket::build()
         .manage(db.clone())
-        .manage(ActivityLog::discarding())
+        // No OAuth: every request is signed in, as on an instance without it.
+        .manage::<Option<aurcache_api::init::OAuthSettings>>(None)
         // Routes that act on packages take the bundle; the tests never reach
         // one, but Rocket refuses to launch with an unmanaged type.
         .manage(Arc::new(SnapshotStore::with_checkout_root(
             checkouts.path().to_path_buf(),
         )))
-        .manage(aurcache_utils::services::Services::new(
-            db.clone(),
-            Arc::new(SnapshotStore::with_checkout_root(
+        .manage(aurcache_utils::services::Services {
+            db: db.clone(),
+            store: Arc::new(SnapshotStore::with_checkout_root(
                 checkouts.path().to_path_buf(),
             )),
-            Arc::new(aurcache_deps::AurClient::new()),
-            Arc::new(aurcache_utils::repository::Repository::new(
+            client: Arc::new(aurcache_deps::AurClient::new()),
+            repo: Arc::new(aurcache_utils::repository::Repository::new(
                 checkouts.path().join("repo"),
             )),
-            ActivityLog::discarding(),
-        ))
+            activity: ActivityLog::discarding(),
+        })
         // The dump route reports which AURCache wrote a dump. Rocket's
         // sentinels refuse to launch without it, which is the point: a route
         // needing unmanaged state would otherwise 500 in production.

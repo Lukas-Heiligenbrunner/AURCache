@@ -2,8 +2,8 @@
 //!
 //! In one place because more than one part of the server enforces it: the
 //! worker API renews leases and requeues a revoked worker's builds, and the
-//! lease reaper reclaims the leases nobody renewed. Each used to read the
-//! variables for itself, so the two could disagree about the same setting.
+//! lease reaper reclaims the leases nobody renewed. Each reading the variables
+//! for itself, the two could disagree about the same setting.
 //!
 //! Read once: these back per-claim and per-heartbeat paths, and the process
 //! environment is fixed at start in every deployment, so a change needs a

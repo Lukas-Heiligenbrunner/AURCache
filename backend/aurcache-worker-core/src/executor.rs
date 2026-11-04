@@ -10,12 +10,36 @@
 //! own crate with its own binary, so neither has to know the other exists and
 //! retiring one is a deletion rather than a refactor.
 
+use anyhow::Result;
 use aurcache_common::worker::{CompleteReport, JobDescriptor};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
 
 use crate::client::WorkerClient;
+use crate::protocol::{StopWatch, Timeout};
 use crate::settings::WorkerSettings;
+
+/// A claimed job, with what the runner settled for it before handing it over.
+pub struct ClaimedJob {
+    pub job: JobDescriptor,
+    /// The mirrorlist to build with, already resolved from what the server
+    /// offered; `None` leaves the build environment's own.
+    pub mirrorlist: Option<String>,
+    /// How long the build may run: the shorter of this worker's limit and
+    /// the job's, as they stood when it was claimed.
+    pub timeout: Option<Timeout>,
+    /// Tripped when the build has to stop: the server asked, or it has been
+    /// out of reach past the lease.
+    pub cancel: CancellationToken,
+}
+
+impl ClaimedJob {
+    /// Start timing the build, which is starting now.
+    #[must_use]
+    pub fn watch(&self) -> StopWatch {
+        StopWatch::start(self.timeout, self.cancel.clone())
+    }
+}
 
 /// Builds one claimed job to completion.
 pub trait Executor: Send + Sync + 'static {
@@ -34,20 +58,19 @@ pub trait Executor: Send + Sync + 'static {
 
     /// Run a job and return its terminal report.
     ///
-    /// Implementations must not panic — the runner wraps the call and reports a
-    /// panic as a failure, but a clean report carries a far better message.
-    /// `mirrorlist` is the one to build with, already resolved from what the
-    /// server offered; `None` leaves the build environment's own.
-    /// `cancel` is set when the worker has decided to abandon the build (the
-    /// server became unreachable past the lease); implementations should stop
-    /// promptly and return [`canceled`](crate::report::canceled).
+    /// An error is reported for the build by the runner, through
+    /// [`from_error`](crate::report::from_error), and written to its log.
+    /// Implementations must not panic -- the runner reports a panic as an
+    /// interruption, but an error carries a far better message.
+    ///
+    /// When the job's `cancel` trips, an implementation stops promptly and
+    /// reports [`canceled`](crate::report::canceled); [`ClaimedJob::watch`]
+    /// says when that, or the timeout, is.
     fn run_job(
         &self,
         client: Arc<WorkerClient>,
-        job: JobDescriptor,
-        mirrorlist: Option<String>,
-        cancel: Arc<AtomicBool>,
-    ) -> impl Future<Output = CompleteReport> + Send;
+        job: ClaimedJob,
+    ) -> impl Future<Output = Result<CompleteReport>> + Send;
 
     /// Whether this executor can take work right now.
     ///
@@ -77,10 +100,17 @@ pub trait Executor: Send + Sync + 'static {
     /// An executor keeps what it reads per job for its next one (a build
     /// already running keeps the limits it started with), applies at once
     /// what takes effect at once, and refuses what the machine cannot honour
-    /// with [`WorkerSettings::refused`], so the value it runs and the value it
-    /// reports cannot differ. The default keeps nothing and refuses nothing,
-    /// for an executor whose settings are all the runner's own.
-    fn reconfigure(&self, settings: WorkerSettings) -> impl Future<Output = WorkerSettings> + Send {
+    /// with [`WorkerSettings::refused`] -- each keeping its value in
+    /// `previous`, the resolution in force until now -- so the value it runs
+    /// and the value it reports cannot differ. The default keeps nothing and
+    /// refuses nothing, for an executor whose settings are all the runner's
+    /// own.
+    fn reconfigure(
+        &self,
+        settings: WorkerSettings,
+        previous: &WorkerSettings,
+    ) -> impl Future<Output = WorkerSettings> + Send {
+        let _ = previous;
         async { settings }
     }
 }

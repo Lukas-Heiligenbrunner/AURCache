@@ -9,17 +9,21 @@
 #     docker compose -f compose/docker-compose.demo.yaml logs -f
 #     docker compose -f compose/docker-compose.demo.yaml down -v     # -v drops all data
 #
-# Or run the prebuilt images instead of compiling: scripts/deploy-truenas.sh
-# (local-only) pushes `aurcache-server` and `aurcache-demo-worker` to
-# $AURCACHE_REGISTRY, so
+# Or run prebuilt images instead of compiling. The publish workflows push
+# `aurcache-server` and `aurcache-demo-worker` to ghcr.io; to run this tree's
+# code without building it here, push its own elsewhere with
+#
+#     scripts/build-images.sh --push --images server,demo-worker "$AURCACHE_REGISTRY"
+#
+# and then
 #
 #     docker compose -f compose/docker-compose.demo.yaml pull aurcache demo-worker
 #     docker compose -f compose/docker-compose.demo.yaml up -d
 #
-# runs this tree's code without building it. `up -d --build` always ignores
-# the registry and compiles locally, which is the path that needs no
-# registry access. Set AURCACHE_REGISTRY to point the `image:` tags below at
-# another registry (default: ghcr.io/lukas-heiligenbrunner).
+# `up -d --build` always ignores the registry and compiles locally, which is
+# the path that needs no registry access. Set AURCACHE_REGISTRY to point the
+# `image:` tags below at another registry (default:
+# ghcr.io/lukas-heiligenbrunner).
 #
 # Web UI / API : http://localhost:8080
 #

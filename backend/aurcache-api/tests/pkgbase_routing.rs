@@ -179,36 +179,6 @@ async fn an_unknown_pkgbase_is_not_found() {
     assert_eq!(response.status(), Status::NotFound);
 }
 
-/// The client and the server must use *one* type per API shape, not two that
-/// happen to look alike.
-///
-/// Hand-mirrored copies drift silently: before these shapes were shared, the
-/// client's git variant expected `git_url`/`git_ref` while the server sent
-/// `url`/`ref`, so `pkg get` failed outright for every git-sourced package —
-/// and the client's `ExtendedPackage` was missing `has_patch` entirely. Both
-/// were invisible because nothing deserialised a git package.
-#[test]
-fn client_and_server_share_one_type_per_shape() {
-    // Compiles only if these are the *same* type, not merely the same fields.
-    // The left side is what the server serialises, the right what the client
-    // deserialises: naming both is what makes this catch drift. Comparing
-    // `aurcache_common` against the client would be near-tautological, since
-    // the client re-exports it.
-    fn _same<T>(x: T) -> T {
-        x
-    }
-    let _: fn(aurcache_api::models::package::SimplePackage) -> aurcache_client::SimplePackage =
-        _same;
-    let _: fn(aurcache_api::models::package::ExtendedPackage) -> aurcache_client::ExtendedPackage =
-        _same;
-    let _: fn(aurcache_api::models::builds::BuildSummary) -> aurcache_client::Build = _same;
-    let _: fn(aurcache_api::models::package::PackageSource) -> aurcache_client::PackageSource =
-        _same;
-    let _: fn(
-        aurcache_api::models::package::PackageDependency,
-    ) -> aurcache_client::PackageDependency = _same;
-}
-
 /// A git source round-trips through the wire format the server actually emits.
 ///
 /// Pins the field names — `url`, `ref`, `subfolder` — that the client had
@@ -241,10 +211,9 @@ fn a_git_source_round_trips_through_json() {
 
 /// `built_version` must mean the same thing on both routes.
 ///
-/// The list query used to wrap the lookup in `COALESCE(..., '')` while the
-/// detail route returned the column as-is, so a package with no build was `""`
-/// from one and `null` from the other — one field with two representations of
-/// "no version", depending on which URL you asked.
+/// A package with no build is `null` on both, never `""` on one of them: one
+/// field with two representations of "no version", depending on which URL you
+/// asked, is how a client ends up checking for both.
 #[rocket::async_test]
 async fn a_package_with_no_build_has_no_version_on_either_route() {
     let TestApi { client, db } = test_api("test", identity).await;
@@ -600,9 +569,9 @@ async fn an_unconstrained_dependency_only_needs_to_have_built() {
 
 /// The package route answers from the row, with no AUR request.
 ///
-/// It used to fetch live on every call: ~128ms of a ~130ms response, and one
+/// A live fetch on every call would be ~128ms of a ~130ms response, and one
 /// of the AUR's 4000 daily calls per page view. These tests have no network,
-/// so a route that still reached for the AUR would fail here.
+/// so a route that reached for the AUR would fail here.
 #[rocket::async_test]
 async fn package_metadata_is_served_from_the_row() {
     let TestApi { client, db } = test_api("test", identity).await;
@@ -614,7 +583,7 @@ async fn package_metadata_is_served_from_the_row() {
         source_description: Set(Some("Prints Hello World and more".to_string())),
         source_maintainer: Set(Some("someone".to_string())),
         source_project_url: Set(Some("https://www.gnu.org/software/hello/".to_string())),
-        source_licenses: Set(Some("GPL-3.0-or-later".to_string())),
+        source_licenses: Set(Some("GPL-3.0-or-later".parse().unwrap())),
         source_first_submitted: Set(Some(1_425_168_000)),
         source_last_modified: Set(Some(1_755_000_000)),
         aur_flagged_outdated: Set(Some(false)),
@@ -720,7 +689,7 @@ fn listed_build(pkg: &str, number: i32) -> Listed {
 async fn listed(client: &Client, path: &str) -> Vec<Listed> {
     let response = client.get(path).dispatch().await;
     assert_eq!(response.status(), Status::Ok, "{path}");
-    let builds: Vec<aurcache_api::models::builds::BuildSummary> =
+    let builds: Vec<aurcache_common::api::builds::BuildSummary> =
         response.into_json().await.expect("a build list");
     let mut out: Vec<_> = builds
         .into_iter()
@@ -800,7 +769,7 @@ async fn a_builds_disk_usage_is_listed_with_it() {
     .unwrap();
 
     let response = client.get("/api/builds").dispatch().await;
-    let builds: Vec<aurcache_api::models::builds::BuildSummary> =
+    let builds: Vec<aurcache_common::api::builds::BuildSummary> =
         response.into_json().await.expect("a build list");
     let usage_of = |name: &str| {
         builds

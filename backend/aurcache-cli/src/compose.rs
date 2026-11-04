@@ -13,6 +13,7 @@
 
 use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_MIRROR_PORT, AURCACHE_WORKER_PORT};
 use clap::ValueEnum;
+use serde::Serialize;
 use std::fmt::Write as _;
 
 pub const SERVER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-server:latest";
@@ -65,15 +66,28 @@ const POSTGRES_UID: &str = "999:999";
 /// trusting whatever answers.
 pub const FINGERPRINT_PLACEHOLDER: &str = "REPLACE_WITH_SERVER_CA_SHA256";
 
-/// The service name the server runs under, which is also the host name workers
-/// dial inside the compose network — and therefore a name the server's TLS
-/// certificate must be valid for.
-const SERVER_SERVICE: &str = "aurcache";
+/// The server's service name in a compose file, and its container name under
+/// `setup server`: the host name a worker beside it dials, and therefore a
+/// name the server's TLS certificate must be valid for.
+pub const SERVER_SERVICE: &str = "aurcache";
+
+/// Where pacman clients fetch packages from when nothing else is said: the
+/// mirror port on this host.
+pub const DEFAULT_PUBLIC_URL: &str = "http://localhost:8081";
+
+/// The names the server's certificate covers by default: [`SERVER_SERVICE`],
+/// for the worker beside it, and `localhost`.
+pub const DEFAULT_TLS_SANS: &str = "aurcache,localhost";
+
+/// The worker's own default for `WORKER_DISK_MAX`, as the help and the
+/// generated files quote it.
+pub const DEFAULT_DISK_MAX: &str = "200G";
 
 /// Where the worker drops its enrollment request in the bundled setup.
 pub const ENROLLMENT_DIR: &str = "/enroll";
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ComposeRole {
     /// The server alone, for a host that gets its workers from elsewhere.
     Backend,
@@ -211,6 +225,21 @@ impl PoolSetup {
 }
 
 impl WorkerEnv {
+    /// The environment of a worker beside the server -- in the same compose
+    /// project, or on the same docker network: it dials the server by name,
+    /// and the shared enrollment volume is what makes approval automatic. A
+    /// fingerprint pin is meaningless there: the CA is created by that very
+    /// server.
+    #[must_use]
+    pub fn beside_server(mut self) -> Self {
+        self.url
+            .get_or_insert_with(|| format!("https://{SERVER_SERVICE}:{AURCACHE_WORKER_PORT}"));
+        self.enrollment_dir
+            .get_or_insert_with(|| ENROLLMENT_DIR.to_string());
+        self.ca_fingerprint = None;
+        self
+    }
+
     /// Only the variables that have a value, in a stable order.
     ///
     /// Unset means absent rather than empty: the worker has its own defaults —
@@ -288,7 +317,8 @@ fn join_list(values: &[String]) -> Option<String> {
 }
 
 /// Which database a generated server uses, as chosen on the command line.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DatabaseKind {
     /// A PostgreSQL service beside the server: what a deployment you keep
     /// should run.
@@ -348,9 +378,9 @@ impl Default for ComposeParams {
             database: ComposeDatabase::Sqlite,
             server_image: SERVER_IMAGE.to_string(),
             worker_image: WORKER_IMAGE.to_string(),
-            public_url: format!("http://localhost:{AURCACHE_MIRROR_PORT}"),
+            public_url: DEFAULT_PUBLIC_URL.to_string(),
             log_level: "info".to_string(),
-            tls_sans: format!("{SERVER_SERVICE},localhost"),
+            tls_sans: DEFAULT_TLS_SANS.to_string(),
             worker: WorkerEnv::default(),
         }
     }
@@ -683,24 +713,16 @@ fn upgrade_service(env: &str) -> String {
 
 fn worker_service(params: &ComposeParams) -> String {
     let bundled = params.role == ComposeRole::Bundle;
-    let mut env = params.worker.clone();
-
-    if bundled {
-        // Inside the compose network the server is reachable by service name,
-        // and the shared volume is what makes approval automatic.
-        env.url
-            .get_or_insert_with(|| format!("https://{SERVER_SERVICE}:{AURCACHE_WORKER_PORT}"));
-        env.enrollment_dir
-            .get_or_insert_with(|| ENROLLMENT_DIR.to_string());
-        // A fingerprint pin is meaningless against a server in the same compose
-        // project: the CA is created by that very server.
-        env.ca_fingerprint = None;
+    let env = if bundled {
+        params.worker.clone().beside_server()
     } else {
+        let mut env = params.worker.clone();
         env.url
             .get_or_insert_with(|| format!("https://aurcache.example.com:{AURCACHE_WORKER_PORT}"));
         env.ca_fingerprint
             .get_or_insert_with(|| FINGERPRINT_PLACEHOLDER.to_string());
-    }
+        env
+    };
 
     let mut out = String::new();
     out.push_str("  builder:\n");
@@ -722,14 +744,17 @@ fn worker_service(params: &ComposeParams) -> String {
         );
     }
     match &env.pool.backing {
-        PoolBacking::Image => out.push_str(
-            "      - worker_data:/var/lib/aurcache-worker   # identity + storage pool (chroots, caches)\n\
-             \x20   # The storage pool is one image file in that volume, holding every chroot,\n\
-             \x20   # build and cache under one disk quota (WORKER_DISK_MAX, 200G by default).\n\
-             \x20   # On ZFS -- TrueNAS -- a zvol is better (`setup compose --pool-device`), or\n\
-             \x20   # give the volume a dataset of its own with recordsize=16K,\n\
-             \x20   # primarycache=metadata and logbias=throughput. See the docs' \"Storage pool\".\n",
-        ),
+        PoolBacking::Image => {
+            let _ = write!(
+                out,
+                "      - worker_data:/var/lib/aurcache-worker   # identity + storage pool (chroots, caches)\n\
+                 \x20   # The storage pool is one image file in that volume, holding every chroot,\n\
+                 \x20   # build and cache under one disk quota (WORKER_DISK_MAX, {DEFAULT_DISK_MAX} by default).\n\
+                 \x20   # On ZFS -- TrueNAS -- a zvol is better (`setup compose --pool-device`), or\n\
+                 \x20   # give the volume a dataset of its own with recordsize=16K,\n\
+                 \x20   # primarycache=metadata and logbias=throughput. See the docs' \"Storage pool\".\n",
+            );
+        }
         PoolBacking::Device(_) | PoolBacking::Mount(_) => {
             out.push_str(
                 "      - worker_data:/var/lib/aurcache-worker   # identity (the pool is below)\n",
@@ -780,11 +805,8 @@ fn volumes(params: &ComposeParams) -> String {
             out.push_str("  aurcache_postgres:\n");
         }
         out.push_str("  aurcache_data:\n");
-    }
-    // The bundle needs it on both sides; the backend declares it so a worker on
-    // this host can be added later without editing the server service.
-    // (`Bundle` already satisfies `has_server`; no second disjunct.)
-    if role.has_server() {
+        // Declared even without a worker beside the server, so one on this
+        // host can be added later without editing the server service.
         out.push_str("  enroll:\n");
     }
     if role.has_worker() {
@@ -796,9 +818,10 @@ fn volumes(params: &ComposeParams) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeDatabase, ComposeParams, ComposeRole, ENROLLMENT_DIR, EnvVar,
-        FINGERPRINT_PLACEHOLDER, NGINX_CONF, NGINX_IMAGE, POSTGRES_IMAGE, POSTGRES_MAJOR,
-        PoolBacking, PoolSetup, WorkerEnv, is_plain_password, render_compose,
+        ComposeDatabase, ComposeParams, ComposeRole, DEFAULT_PUBLIC_URL, DEFAULT_TLS_SANS,
+        ENROLLMENT_DIR, EnvVar, FINGERPRINT_PLACEHOLDER, NGINX_CONF, NGINX_IMAGE, POSTGRES_IMAGE,
+        POSTGRES_MAJOR, PoolBacking, PoolSetup, SERVER_SERVICE, WorkerEnv, is_plain_password,
+        render_compose,
     };
     use aurcache_common::ports::AURCACHE_MIRROR_PORT;
     use yaml_rust2::{Yaml, YamlLoader};
@@ -808,6 +831,17 @@ mod tests {
             role,
             ..ComposeParams::default()
         }
+    }
+
+    /// The defaults are spelled out as literals for clap, so they are held to
+    /// the names they are made of here.
+    #[test]
+    fn the_defaults_agree_with_what_they_are_made_of() {
+        assert_eq!(
+            DEFAULT_PUBLIC_URL,
+            format!("http://localhost:{AURCACHE_MIRROR_PORT}")
+        );
+        assert_eq!(DEFAULT_TLS_SANS.split(',').next(), Some(SERVER_SERVICE));
     }
 
     /// Unset must mean absent: the worker defaults to the host's name and
@@ -1300,8 +1334,8 @@ mod tests {
             .collect()
     }
 
-    /// The repository's own compose file and the quick start give nginx the
-    /// same server block as a generated file, so a fix to one reaches all.
+    /// The repository's own compose file gives nginx the same server block as
+    /// a generated file, so a fix to one reaches both.
     #[test]
     fn every_compose_file_serves_the_repository_alike() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1310,17 +1344,12 @@ mod tests {
             ours["configs"]["repo_nginx"]["content"].as_str(),
             Some(NGINX_CONF)
         );
-        for file in [
-            "compose/docker-compose.yaml",
-            "docs/docs/overview/quick-start.md",
-        ] {
-            let text = std::fs::read_to_string(root.join(file)).unwrap();
-            let indented: String = NGINX_CONF.lines().map(|l| format!("      {l}\n")).collect();
-            assert!(
-                text.contains(&indented),
-                "{file} serves the repository differently"
-            );
-        }
+        let text = std::fs::read_to_string(root.join("compose/docker-compose.yaml")).unwrap();
+        let indented: String = NGINX_CONF.lines().map(|l| format!("      {l}\n")).collect();
+        assert!(
+            text.contains(&indented),
+            "compose/docker-compose.yaml serves the repository differently"
+        );
     }
 
     /// The mirror port moved off the server onto nginx: the same host port,

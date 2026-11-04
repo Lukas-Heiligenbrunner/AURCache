@@ -3,18 +3,24 @@
 //! Protocol settings (identity, enrollment, scheduling, liveness) live in
 //! [`CoreConfig`]; this adds only what building in a chroot needs. Both are
 //! read from the same environment, so a worker is still configured as one flat
-//! set of variables.
+//! set of variables, and this executor's declared settings are resolved with
+//! the protocol's, once, by [`CoreConfig::from_env`].
 
+use crate::cache::CacheLimits;
+use crate::cgroup::BuildLimits;
 use crate::settings::keys;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::WorkerSettings;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-/// Fully-resolved configuration for the chroot worker.
+/// Fully-resolved configuration for the chroot worker: the machine's own,
+/// and the declared settings it runs with.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Settings shared with every executor.
-    pub core: CoreConfig,
+    /// The worker's data directory ([`CoreConfig::data_dir`]): the per-job
+    /// workspaces and the secrets live under it.
+    pub data_dir: PathBuf,
     /// Explicit SSH key for authenticated sources. When set, no key is
     /// generated — see `credentials.rs`.
     pub git_ssh_key: Option<PathBuf>,
@@ -36,26 +42,27 @@ pub struct Config {
     /// subvolume in the storage pool, so the caches count against
     /// `WORKER_DISK_MAX` with everything else the worker stores.
     pub cache_dir: PathBuf,
-    /// Keyserver for `gpg --recv-keys`.
-    pub keyserver: String,
     /// Unix user each build runs as.
     ///
     /// Must differ from the user the worker itself runs as: the worker's mTLS
     /// identity and build credentials are protected from PKGBUILD code by file
     /// ownership, which only separates them if the two users differ.
     pub build_user: String,
-    /// Source (`SRCDEST`) cache budget in bytes (`0` disables size-based
-    /// eviction).
-    pub cache_max_size: u64,
-    /// Cache entry TTL in seconds (`0` disables age-based eviction).
-    pub cache_ttl: u64,
-    /// Shared pacman package cache budget in bytes (`0` disables size-based
-    /// eviction). Kept separate from the source budget: the two pools have
-    /// very different sizes and refill costs, and a shared budget would let
-    /// large VCS checkouts starve the package cache (or vice versa).
-    pub pkgcache_max_size: u64,
-    /// How long a freshly `-Syu`'d base chroot counts as current, in seconds
-    /// (`0` refreshes before every build, which is what this used to do).
+    /// This executor's declared settings, read from the worker's resolution
+    /// of them.
+    pub tunables: Tunables,
+}
+
+/// The settings this executor declares, read whole from the worker's
+/// resolution of them, and read again whenever the server delivers values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tunables {
+    /// Keyserver for `gpg --recv-keys`.
+    pub keyserver: String,
+    /// What the source and package caches may hold, and for how long.
+    pub cache: CacheLimits,
+    /// How long a freshly `-Syu`'d base chroot counts as current (zero
+    /// refreshes before every build).
     ///
     /// The refresh costs ~13s and, measured over a day on the reference
     /// worker, 23 of 26 of them upgraded nothing at all: Arch's repositories
@@ -68,42 +75,37 @@ pub struct Config {
     /// AURCache's own repository moves whenever a build finishes rather than a
     /// few times a day. Keeping the base close to current is what leaves that
     /// per-build sync with nothing to download.
-    pub chroot_refresh_interval: u64,
-    /// Package cache TTL in seconds. Defaults to `0` (disabled) because a
-    /// cached package's mtime is its *download* time — pacman does not touch
-    /// it on a cache hit — so age-evicting would discard a package used daily
-    /// simply for being old. Size pressure is the honest bound for this pool.
-    pub pkgcache_ttl: u64,
+    pub chroot_refresh_interval: Duration,
     /// Memory, swap and CPU each build may use (`WORKER_BUILD_MEMORY_MAX`,
-    /// `WORKER_BUILD_SWAP_MAX`, `WORKER_BUILD_CPUS`). Unset means unlimited, as
-    /// it always was.
-    pub build_limits: crate::cgroup::BuildLimits,
+    /// `WORKER_BUILD_SWAP_MAX`, `WORKER_BUILD_CPUS`). Unset means unlimited.
+    pub build_limits: BuildLimits,
     /// Memory, swap and CPU all builds may use between them
     /// (`WORKER_TOTAL_BUILD_MEMORY_MAX`, `WORKER_TOTAL_BUILD_SWAP_MAX`,
     /// `WORKER_TOTAL_BUILD_CPUS`). Unset means unlimited.
-    pub total_build_limits: crate::cgroup::BuildLimits,
+    pub total_build_limits: BuildLimits,
     /// Disk one build may write (`WORKER_BUILD_DISK_MAX`).
     pub build_disk_max: u64,
     /// Everything the worker may store in its pool (`WORKER_DISK_MAX`).
     pub disk_max: u64,
-    /// How long a failed build's chroot is kept for inspection, in seconds;
-    /// `None` keeps nothing (`WORKER_KEEP_FAILED`).
-    pub keep_failed: Option<u64>,
+    /// How long a failed build's chroot is kept for inspection; `None` keeps
+    /// nothing (`WORKER_KEEP_FAILED`).
+    pub keep_failed: Option<Duration>,
+    /// Total bytes the persistent build trees may occupy
+    /// (`WORKER_BUILDDIR_MAX_BYTES`). A cap rather than only a free-space
+    /// floor, because a floor does nothing on a large pool: trees would grow
+    /// into the terabytes before it ever triggered.
+    pub builddir_max_bytes: u64,
+    /// Bytes to keep free on the filesystem holding the build trees
+    /// (`WORKER_BUILDDIR_MIN_FREE`).
+    pub builddir_min_free: u64,
 }
 
 impl Config {
     /// Build a [`Config`] from the process environment, applying zero-config
-    /// defaults for everything not explicitly set.
+    /// defaults for everything not explicitly set, with the tunables read
+    /// from `core`'s resolution of the declared settings.
     #[must_use]
-    pub fn from_env() -> Self {
-        let mut core = CoreConfig::from_env();
-        // The executor's settings are declared beside the protocol ones, so
-        // registration reports one table and the fields below read from the
-        // same resolved values the server is shown.
-        let settings =
-            std::mem::take(&mut core.settings).extended(crate::settings::chroot_settings());
-        let core = core.with_settings(settings);
-
+    pub fn from_env(core: &CoreConfig) -> Self {
         // The chroot lives under the data dir by default so that persisting one
         // volume persists the identity *and* the expensive base chroot; a
         // worker whose data dir moved to a bigger disk should not silently
@@ -113,7 +115,8 @@ impl Config {
             .unwrap_or_else(|| core.data_dir.join("chroot"));
 
         let pool = env_opt("WORKER_POOL").map(PathBuf::from);
-        let mut cfg = Self {
+        Self {
+            data_dir: core.data_dir.clone(),
             git_ssh_key: env_opt("WORKER_GIT_SSH_KEY").map(PathBuf::from),
             ssh_known_hosts: env_opt("WORKER_SSH_KNOWN_HOSTS").map(PathBuf::from),
             bind_mounts: env_opt("WORKER_BIND_MOUNTS")
@@ -128,23 +131,8 @@ impl Config {
                 &chroot_dir,
             ),
             pool_mountpoint: pool_mountpoint(pool, &chroot_dir),
-            // Filled in from the settings just below, by the same code that
-            // fills them in again whenever the server delivers new values.
-            keyserver: String::new(),
-            cache_max_size: 0,
-            cache_ttl: 0,
-            pkgcache_max_size: 0,
-            pkgcache_ttl: 0,
-            chroot_refresh_interval: 0,
-            build_limits: crate::cgroup::BuildLimits::default(),
-            total_build_limits: crate::cgroup::BuildLimits::default(),
-            build_disk_max: 0,
-            disk_max: 0,
-            keep_failed: None,
-            core,
-        };
-        cfg.read_settings();
-        cfg
+            tunables: Tunables::from_settings(&core.settings),
+        }
     }
 
     /// Who owns the cache subvolume: the build user and its group, as the
@@ -162,65 +150,82 @@ impl Config {
         aurcache_chroot::PoolConfig {
             backing: self.pool_backing.clone(),
             mountpoint: self.pool_mountpoint.clone(),
-            total: self.disk_max,
+            total: self.tunables.disk_max,
             owner: aurcache_chroot::Owner::current(),
         }
     }
 
-    /// The same configuration with `settings` in force: the protocol's
-    /// declared fields and this executor's read again from them, and nothing
-    /// else touched -- the paths, the build user and the bind mounts are the
-    /// machine's alone.
+    /// The same configuration with `settings` in force: the tunables read
+    /// again from them, and nothing else touched -- the paths, the build user
+    /// and the bind mounts are the machine's alone.
     #[must_use]
-    pub fn with_settings(&self, settings: WorkerSettings) -> Self {
-        let mut cfg = Self {
-            core: self.core.with_settings(settings),
+    pub fn with_settings(&self, settings: &WorkerSettings) -> Self {
+        Self {
+            tunables: Tunables::from_settings(settings),
             ..self.clone()
-        };
-        cfg.read_settings();
-        cfg
+        }
     }
 
-    /// Read this executor's declared fields from `core.settings`.
-    fn read_settings(&mut self) {
-        let settings = &self.core.settings;
+    /// The configuration this process's environment gives, for tests.
+    #[cfg(test)]
+    pub(crate) fn from_process_env() -> Self {
+        Self::from_env(&CoreConfig::from_env(crate::settings::chroot_settings()))
+    }
+}
+
+impl Tunables {
+    /// Read every declared setting of this executor from `settings`.
+    #[must_use]
+    pub fn from_settings(settings: &WorkerSettings) -> Self {
         let budgets = split_cache_budgets(
             settings.size(keys::CACHE_MAX_SIZE),
             settings.size(keys::SRCCACHE_MAX_SIZE),
             settings.size(keys::PKGCACHE_MAX_SIZE),
         );
-        self.keyserver = settings
-            .raw(keys::KEYSERVER)
-            .unwrap_or(crate::settings::DEFAULT_KEYSERVER)
-            .to_string();
-        self.cache_max_size = budgets.src;
-        self.cache_ttl = settings
-            .duration(keys::CACHE_TTL)
-            .unwrap_or(crate::settings::DEFAULT_CACHE_TTL);
-        self.pkgcache_max_size = budgets.pkg;
-        self.pkgcache_ttl = settings.duration(keys::PKGCACHE_TTL).unwrap_or(0);
-        self.chroot_refresh_interval = settings
-            .duration(keys::CHROOT_REFRESH_INTERVAL)
-            .unwrap_or(crate::settings::DEFAULT_CHROOT_REFRESH_INTERVAL);
-        self.build_limits = limits_from_settings(
-            settings,
-            keys::BUILD_MEMORY_MAX,
-            keys::BUILD_SWAP_MAX,
-            keys::BUILD_CPUS,
-        );
-        self.total_build_limits = limits_from_settings(
-            settings,
-            keys::TOTAL_BUILD_MEMORY_MAX,
-            keys::TOTAL_BUILD_SWAP_MAX,
-            keys::TOTAL_BUILD_CPUS,
-        );
-        self.build_disk_max = settings
-            .size(keys::BUILD_DISK_MAX)
-            .unwrap_or(crate::settings::DEFAULT_BUILD_DISK_MAX);
-        self.disk_max = settings
-            .size(keys::DISK_MAX)
-            .unwrap_or(crate::settings::DEFAULT_DISK_MAX);
-        self.keep_failed = settings.duration(keys::KEEP_FAILED);
+        Self {
+            keyserver: settings
+                .raw(keys::KEYSERVER)
+                .unwrap_or(crate::settings::DEFAULT_KEYSERVER)
+                .to_string(),
+            cache: CacheLimits {
+                sources_max_size: budgets.src,
+                sources_ttl: settings
+                    .duration(keys::CACHE_TTL)
+                    .unwrap_or(crate::settings::DEFAULT_CACHE_TTL),
+                packages_max_size: budgets.pkg,
+                packages_ttl: settings
+                    .duration(keys::PKGCACHE_TTL)
+                    .unwrap_or(Duration::ZERO),
+            },
+            chroot_refresh_interval: settings
+                .duration(keys::CHROOT_REFRESH_INTERVAL)
+                .unwrap_or(crate::settings::DEFAULT_CHROOT_REFRESH_INTERVAL),
+            build_limits: limits_from_settings(
+                settings,
+                keys::BUILD_MEMORY_MAX,
+                keys::BUILD_SWAP_MAX,
+                keys::BUILD_CPUS,
+            ),
+            total_build_limits: limits_from_settings(
+                settings,
+                keys::TOTAL_BUILD_MEMORY_MAX,
+                keys::TOTAL_BUILD_SWAP_MAX,
+                keys::TOTAL_BUILD_CPUS,
+            ),
+            build_disk_max: settings
+                .size(keys::BUILD_DISK_MAX)
+                .unwrap_or(crate::settings::DEFAULT_BUILD_DISK_MAX),
+            disk_max: settings
+                .size(keys::DISK_MAX)
+                .unwrap_or(crate::settings::DEFAULT_DISK_MAX),
+            keep_failed: settings.duration(keys::KEEP_FAILED),
+            builddir_max_bytes: settings
+                .size(keys::BUILDDIR_MAX_BYTES)
+                .unwrap_or(crate::settings::DEFAULT_BUILDDIR_MAX_BYTES),
+            builddir_min_free: settings
+                .size(keys::BUILDDIR_MIN_FREE)
+                .unwrap_or(crate::settings::DEFAULT_BUILDDIR_MIN_FREE),
+        }
     }
 }
 
@@ -236,7 +241,11 @@ fn pool_backing(
     match pool {
         None => aurcache_chroot::Backing::Image {
             path: chroot_dir.join("pool.img"),
-            reserve,
+            allocation: if reserve {
+                aurcache_chroot::Allocation::Reserved
+            } else {
+                aurcache_chroot::Allocation::Sparse
+            },
         },
         Some(path) if std::fs::metadata(&path).is_ok_and(|m| m.file_type().is_block_device()) => {
             aurcache_chroot::Backing::Device(path)
@@ -271,11 +280,11 @@ fn limits_from_settings(
     memory_key: &str,
     swap_key: &str,
     cpus_key: &str,
-) -> crate::cgroup::BuildLimits {
+) -> BuildLimits {
     // `0` is the unlimited that leaving it unset already is, and writing it
     // would give the builds no memory at all.
     let memory_max = settings.size(memory_key).filter(|&bytes| bytes > 0);
-    crate::cgroup::BuildLimits {
+    BuildLimits {
         memory_max,
         // A memory limit means no swap beyond it unless swap is asked for; see
         // `BuildLimits::swap_max` for why it cannot simply be left alone.
@@ -384,20 +393,27 @@ mod tests {
             return;
         }
 
-        let cfg = Config::from_env();
-        assert_eq!(cfg.core.concurrency, 1);
-        assert_eq!(cfg.core.priority, 0);
-        assert!(cfg.core.packages.is_empty());
-        assert_eq!(cfg.core.poll_interval, 10);
-        assert_eq!(cfg.core.build_timeout, 3 * 60 * 60);
-        assert_eq!(cfg.core.builddir_max_bytes, 200 * 1024 * 1024 * 1024);
-        assert_eq!(cfg.core.builddir_min_free, 50 * 1024 * 1024 * 1024);
+        let core = CoreConfig::from_env(crate::settings::chroot_settings());
+        assert_eq!(core.tunables.concurrency, 1);
+        assert_eq!(core.tunables.priority, 0);
+        assert!(core.tunables.packages.is_empty());
+        assert_eq!(core.tunables.poll_interval, Duration::from_secs(10));
+        assert_eq!(
+            core.tunables.build_timeout,
+            Some(Duration::from_secs(3 * 60 * 60))
+        );
+        let cfg = Config::from_env(&core).tunables;
+        assert_eq!(cfg.builddir_max_bytes, 200 * 1024 * 1024 * 1024);
+        assert_eq!(cfg.builddir_min_free, 50 * 1024 * 1024 * 1024);
         assert_eq!(cfg.keyserver, "hkps://keyserver.ubuntu.com");
-        assert_eq!(cfg.cache_max_size, 10 * 1024 * 1024 * 1024);
-        assert_eq!(cfg.pkgcache_max_size, 10 * 1024 * 1024 * 1024);
-        assert_eq!(cfg.cache_ttl, 30 * 24 * 60 * 60);
-        assert_eq!(cfg.pkgcache_ttl, 0);
-        assert_eq!(cfg.chroot_refresh_interval, 15 * 60);
+        assert_eq!(cfg.cache.sources_max_size, 10 * 1024 * 1024 * 1024);
+        assert_eq!(cfg.cache.packages_max_size, 10 * 1024 * 1024 * 1024);
+        assert_eq!(
+            cfg.cache.sources_ttl,
+            Duration::from_secs(30 * 24 * 60 * 60)
+        );
+        assert_eq!(cfg.cache.packages_ttl, Duration::ZERO);
+        assert_eq!(cfg.chroot_refresh_interval, Duration::from_secs(15 * 60));
         assert_eq!(cfg.build_limits.memory_max, None);
         assert_eq!(cfg.build_limits.swap_max, None);
         assert_eq!(cfg.build_limits.cpus, None);
@@ -441,14 +457,14 @@ mod tests {
             pool_backing(None, false, chroot),
             aurcache_chroot::Backing::Image {
                 path: chroot.join("pool.img"),
-                reserve: false
+                allocation: aurcache_chroot::Allocation::Sparse
             }
         );
         assert_eq!(
             pool_backing(None, true, chroot),
             aurcache_chroot::Backing::Image {
                 path: chroot.join("pool.img"),
-                reserve: true
+                allocation: aurcache_chroot::Allocation::Reserved
             }
         );
         assert_eq!(pool_mountpoint(None, chroot), chroot.join("pool"));

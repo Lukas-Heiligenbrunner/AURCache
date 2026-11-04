@@ -2,12 +2,13 @@
 //!
 //! Several columns are joined strings rather than richer types, and they do
 //! not agree on the delimiter: the package columns use `;`, the worker columns
-//! `,`. Each has a type here, so a value can only be read the way it was
+//! `,`, and some hold JSON. Each has a type here, so a value can only be read the way it was
 //! written -- a dump once split the worker columns on `;`, and restored a
 //! hand-edited worker as one unknown architecture -- and nothing else splits or
 //! joins them.
 
 use pacman_mirrors::platforms::Platform;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
@@ -20,21 +21,6 @@ fn split(value: &str, delimiter: char) -> impl Iterator<Item = &str> {
         .split(delimiter)
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
-}
-
-/// Write `entries` joined by `delimiter`.
-fn join<T: fmt::Display>(
-    f: &mut fmt::Formatter<'_>,
-    entries: &[T],
-    delimiter: char,
-) -> fmt::Result {
-    for (index, entry) in entries.iter().enumerate() {
-        if index > 0 {
-            write!(f, "{delimiter}")?;
-        }
-        write!(f, "{entry}")?;
-    }
-    Ok(())
 }
 
 /// `packages.platforms`: what a package is built for, `;`-joined, sorted and
@@ -72,7 +58,8 @@ impl Platforms {
 
 impl fmt::Display for Platforms {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        join(f, &self.0, ';')
+        let names: Vec<&str> = self.0.iter().map(Platform::as_str).collect();
+        f.write_str(&names.join(";"))
     }
 }
 
@@ -91,97 +78,156 @@ impl FromStr for Platforms {
     }
 }
 
-/// `packages.build_flags`: makepkg flags, `;`-joined, in the order given.
+/// A list of names stored joined by `$joiner` and split on `$delimiter`, in
+/// the order given, each trimmed and blanks dropped.
+macro_rules! delimited_list {
+    ($(#[$doc:meta])* $name:ident, $delimiter:literal, $joiner:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Debug, Default, PartialEq, Eq, sea_orm::DeriveValueType)]
+        #[sea_orm(value_type = "String")]
+        pub struct $name(Vec<String>);
+
+        impl $name {
+            #[must_use]
+            pub fn new(entries: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+                Self(
+                    entries
+                        .into_iter()
+                        .map(|entry| entry.as_ref().trim().to_string())
+                        .filter(|entry| !entry.is_empty())
+                        .collect(),
+                )
+            }
+
+            #[must_use]
+            pub fn as_slice(&self) -> &[String] {
+                &self.0
+            }
+
+            #[must_use]
+            pub fn into_vec(self) -> Vec<String> {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0.join($joiner))
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = Infallible;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Ok(Self::new(split(value, $delimiter)))
+            }
+        }
+    };
+}
+
+delimited_list!(
+    /// `packages.build_flags`: makepkg flags, `;`-joined.
+    BuildFlags,
+    ';',
+    ";"
+);
+
+delimited_list!(
+    /// The worker columns -- `arches`, `package_affinity` -- `,`-joined.
+    WorkerList,
+    ',',
+    ","
+);
+
+delimited_list!(
+    /// `packages.source_licenses`: what `.SRCINFO` lists, joined with `, ` as
+    /// the package page shows it.
+    Licenses,
+    ',',
+    ", "
+);
+
+/// A JSON-array column -- `packages.split_packages` and `packages.provides`.
+///
+/// Read best-effort: these columns are derived from a PKGBUILD and rewritten
+/// on the next resolve, so a value that does not parse costs its names until
+/// then, with a warning, rather than the whole row.
 #[derive(Clone, Debug, Default, PartialEq, Eq, sea_orm::DeriveValueType)]
 #[sea_orm(value_type = "String")]
-pub struct BuildFlags(Vec<String>);
+pub struct JsonList(Vec<String>);
 
-impl BuildFlags {
-    /// The flags with surrounding whitespace trimmed and blank ones dropped.
+impl JsonList {
     #[must_use]
-    pub fn new(flags: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        Self(
-            flags
-                .into_iter()
-                .map(|flag| flag.as_ref().trim().to_string())
-                .filter(|flag| !flag.is_empty())
-                .collect(),
-        )
+    pub fn new(entries: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self(entries.into_iter().map(Into::into).collect())
     }
 
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
     }
-}
 
-impl fmt::Display for BuildFlags {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        join(f, &self.0, ';')
+    /// The entries of a nullable column: none for `NULL`.
+    #[must_use]
+    pub fn entries(list: Option<&Self>) -> &[String] {
+        list.map_or(&[], Self::as_slice)
     }
 }
 
-impl FromStr for BuildFlags {
+impl fmt::Display for JsonList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&serde_json::to_string(&self.0).map_err(|_| fmt::Error)?)
+    }
+}
+
+impl FromStr for JsonList {
     type Err = Infallible;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(Self::new(split(value, ';')))
+        Ok(Self(serde_json::from_str(value).unwrap_or_else(|e| {
+            tracing::warn!("ignoring an unreadable stored list: {e}");
+            Vec::new()
+        })))
     }
 }
 
-/// The worker columns -- `arches`, `package_affinity` -- `,`-joined, in the order the worker gave them.
+/// `builds.vcs_sources`: what a build's VCS sources were at, a JSON object of
+/// `source_url -> commit`.
+///
+/// Read best-effort like [`JsonList`]: a stored value nobody can parse is not
+/// evidence of anything, so it reads as nothing recorded, with a warning.
 #[derive(Clone, Debug, Default, PartialEq, Eq, sea_orm::DeriveValueType)]
 #[sea_orm(value_type = "String")]
-pub struct WorkerList(Vec<String>);
+pub struct VcsCommits(BTreeMap<String, String>);
 
-impl WorkerList {
+impl VcsCommits {
     #[must_use]
-    pub fn new(entries: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        Self(
-            entries
-                .into_iter()
-                .map(|entry| entry.as_ref().trim().to_string())
-                .filter(|entry| !entry.is_empty())
-                .collect(),
-        )
+    pub fn new(commits: BTreeMap<String, String>) -> Self {
+        Self(commits)
     }
 
     #[must_use]
-    pub fn as_slice(&self) -> &[String] {
-        &self.0
-    }
-
-    #[must_use]
-    pub fn into_vec(self) -> Vec<String> {
+    pub fn into_map(self) -> BTreeMap<String, String> {
         self.0
     }
 }
 
-impl fmt::Display for WorkerList {
+impl fmt::Display for VcsCommits {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        join(f, &self.0, ',')
+        f.write_str(&serde_json::to_string(&self.0).map_err(|_| fmt::Error)?)
     }
 }
 
-impl FromStr for WorkerList {
+impl FromStr for VcsCommits {
     type Err = Infallible;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(Self::new(split(value, ',')))
+        Ok(Self(serde_json::from_str(value).unwrap_or_else(|e| {
+            tracing::warn!("ignoring unreadable recorded VCS commits: {e}");
+            BTreeMap::new()
+        })))
     }
-}
-
-/// The entries of a JSON-array column -- `packages.split_packages` and
-/// `packages.provides` -- with nothing for an empty or unreadable one.
-///
-/// Best-effort like the readers it replaces: these columns are derived from a
-/// PKGBUILD and rewritten on the next resolve, so a value that does not parse
-/// costs a name until then rather than the whole request.
-#[must_use]
-pub fn json_list(value: Option<&str>) -> Vec<String> {
-    value
-        .and_then(|value| serde_json::from_str(value).ok())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -200,6 +246,21 @@ mod tests {
             "a, b ,c".parse::<WorkerList>().unwrap().as_slice(),
             ["a", "b", "c"]
         );
+    }
+
+    /// The JSON columns store exactly what `serde_json` writes, and read back
+    /// unreadable as nothing.
+    #[test]
+    fn a_json_column_reads_back_as_it_was_written() {
+        let list = JsonList::new(["a", "b"]);
+        assert_eq!(list.to_string(), r#"["a","b"]"#);
+        assert_eq!(list.to_string().parse::<JsonList>().unwrap(), list);
+        assert!("nope".parse::<JsonList>().unwrap().as_slice().is_empty());
+
+        let commits = VcsCommits::new(BTreeMap::from([("u".to_string(), "c".to_string())]));
+        assert_eq!(commits.to_string(), r#"{"u":"c"}"#);
+        assert_eq!(commits.to_string().parse::<VcsCommits>().unwrap(), commits);
+        assert!("nope".parse::<VcsCommits>().unwrap().into_map().is_empty());
     }
 
     #[test]

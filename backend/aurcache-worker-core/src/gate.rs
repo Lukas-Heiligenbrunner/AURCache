@@ -92,14 +92,14 @@ impl ConcurrencyGate {
     }
 
     /// The limit as it stands.
-    #[must_use]
-    pub fn target(&self) -> usize {
+    #[cfg(test)]
+    fn target(&self) -> usize {
         self.state().target
     }
 
     /// How many builds hold a place now.
-    #[must_use]
-    pub fn running(&self) -> usize {
+    #[cfg(test)]
+    fn running(&self) -> usize {
         self.state().running
     }
 }

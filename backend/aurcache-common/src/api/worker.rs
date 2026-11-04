@@ -3,7 +3,6 @@
 #[cfg(feature = "db")]
 use sea_orm::sea_query::StringLen;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// What the workers list shows about one machine.
 ///
@@ -11,7 +10,8 @@ use utoipa::ToSchema;
 /// issued at approval — and there is no reason to hand every browser that opens
 /// the page a copy of it. The worker gets its own certificate through
 /// enrollment, not from this list.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WorkerSummary {
     pub id: i32,
     /// Operator-facing name reported at enrollment.
@@ -70,7 +70,8 @@ pub struct WorkerSummary {
 /// Fetched per worker rather than carried in the list: the list is polled while
 /// anything is building, and a declaration is a few kilobytes of descriptions
 /// that change only when a worker is upgraded.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WorkerConfigView {
     pub worker_id: i32,
     /// What this worker declared it accepts, at its last registration.
@@ -101,7 +102,8 @@ pub struct WorkerConfigView {
 /// together -- fewer builds each with more memory -- and a worker that picked
 /// up half of such a change would run a combination nobody chose. The server
 /// writes the whole set in one transaction or none of it.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WorkerConfigUpdate {
     /// By key: `Some` sets the value, `None` removes it so the worker falls
     /// back to its own environment or built-in default.
@@ -115,7 +117,8 @@ pub struct WorkerConfigUpdate {
 /// worker protocol listens on. The host is left to the browser, which fills it
 /// from the address the page was opened on — the server has no reliable view of
 /// how it is reached from outside.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct WorkerJoinInfo {
     /// Container image a worker runs, e.g.
     /// `ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest`. Overridable with
@@ -136,7 +139,8 @@ pub struct WorkerJoinInfo {
 /// This is the stored type as well as the wire type: the `workers.status`
 /// column maps to it directly, so an unknown value fails at the edge instead of
 /// spreading as a string that every reader parses for itself.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(
     feature = "db",

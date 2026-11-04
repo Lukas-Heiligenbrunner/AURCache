@@ -14,7 +14,7 @@ use crate::dates::RelativeDate;
 use crate::format::now_secs;
 use crate::routes::Route;
 use crate::screens::workers::{
-    KindBadge, Liveness, PausedBadge, StatusBadge, WorkerAction, architectures,
+    KindBadge, Liveness, PausedBadge, StatusBadge, WorkerAction, WorkerRequest, architectures,
 };
 use aurcache_client::{Worker as WorkerRow, WorkerConfigUpdate, WorkerConfigView};
 use aurcache_common::worker_config::{
@@ -183,7 +183,7 @@ fn WorkerPage(name: String, fingerprint: String) -> Element {
     // shows what the server made of it once the list is read again.
     let mut busy = use_signal(|| false);
     let mut outcome = use_signal(|| Option::<Result<String, String>>::None);
-    let act = move |(id, action): (i32, WorkerAction)| async move {
+    let act = move |WorkerRequest { id, action }: WorkerRequest| async move {
         busy.set(true);
         let result = action.perform(id).await;
         busy.set(false);
@@ -298,7 +298,7 @@ fn WorkerHeader(
     worker: WorkerRow,
     /// An action on this worker is in flight.
     busy: bool,
-    act: EventHandler<(i32, WorkerAction)>,
+    act: EventHandler<WorkerRequest>,
 ) -> Element {
     let now = now_secs();
     let id = worker.id;
@@ -333,7 +333,7 @@ fn WorkerHeader(
                                     class: "btn btn-sm btn-primary",
                                     disabled: busy,
                                     title: WorkerAction::Resume.hint(),
-                                    onclick: move |_| act.call((id, WorkerAction::Resume)),
+                                    onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Resume }),
                                     "Resume intake"
                                 }
                             } else {
@@ -341,7 +341,7 @@ fn WorkerHeader(
                                     class: "btn btn-sm btn-outline",
                                     disabled: busy,
                                     title: WorkerAction::Pause.hint(),
-                                    onclick: move |_| act.call((id, WorkerAction::Pause)),
+                                    onclick: move |_| act.call(WorkerRequest { id, action: WorkerAction::Pause }),
                                     "Stop intake"
                                 }
                             }
@@ -497,13 +497,13 @@ fn WorkerConfig(id: i32) -> Element {
     let save = move |_| async move {
         let update = WorkerConfigUpdate { settings: drafts() };
         saving.set(true);
-        let result = match crate::api::client() {
-            Ok(client) => client
+        let result = async {
+            crate::api::client()?
                 .update_worker_config(id, &update)
                 .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
+                .map_err(|e| e.to_string())
+        }
+        .await;
         saving.set(false);
         match result {
             Ok(_) => {

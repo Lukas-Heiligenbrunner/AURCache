@@ -9,11 +9,13 @@ workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-utoipa = { workspace = true }
+utoipa = { workspace = true, optional = true }
 sea-orm = { workspace = true, optional = true }
 # Only for working out when a schedule runs (`clock`). Default features off:
 # the server's own jiff brings the time zone database.
 jiff = { version = "0.2.38", default-features = false, features = ["std"], optional = true }
+sha2 = { version = "0.11", optional = true }
+hex = { version = "0.4", optional = true }
 
 [dev-dependencies]
 jiff = "0.2.38"
@@ -35,3 +37,10 @@ fs = []
 # whether a schedule parses -- the server tells it when that is -- and the
 # frontend keeps a date crate out of its bundle on purpose.
 clock = ["dep:jiff"]
+# The OpenAPI schemas the server's `/docs` is built from. Off by default, unlike
+# the others: `aurcache-api` is the only crate that reads them, so it names the
+# feature, and the workers, the CLI and the browser bundle build without utoipa.
+openapi = ["dep:utoipa"]
+# SHA-256 as hex, for what the server, the CA and the workers fingerprint. Off
+# by default so the browser bundle carries no hash it never computes.
+digest = ["dep:sha2", "dep:hex"]

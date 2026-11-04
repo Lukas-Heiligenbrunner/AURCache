@@ -16,7 +16,6 @@
 use crate::units::{parse_duration, parse_size};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use utoipa::ToSchema;
 
 /// The type of a declared setting: the one thing the server and a worker must
 /// agree on, since it is what the server validates and renders against.
@@ -24,7 +23,8 @@ use utoipa::ToSchema;
 /// Deliberately small and closed. Everything else about a setting — what it
 /// does, what it defaults to, when it takes effect — travels as data in the
 /// declaration, so adding a worker setting never needs a change here.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ValueKind {
     /// A whole number, optionally bounded. Both bounds are inclusive.
@@ -132,7 +132,8 @@ where
 ///
 /// Reported so the UI can say so rather than leaving an operator to wonder
 /// whether a save did anything yet. Nothing on the server acts on it.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Applies {
     /// Read afresh by the next build that starts; builds already running keep
@@ -152,7 +153,8 @@ pub enum Applies {
 /// name the ones that decide what a build may reach (`WORKER_BIND_MOUNTS`,
 /// `WORKER_BUILD_USER`). The set of keys is a security boundary, so it is
 /// stated in code by the side the boundary protects.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SettingDecl {
     /// Stable identifier, e.g. `build_memory_max`.
     pub key: String,
@@ -176,7 +178,8 @@ pub struct SettingDecl {
 }
 
 /// Where the value a worker is running came from.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveSource {
     /// Pinned by the plain environment variable on the worker's machine.
@@ -190,7 +193,8 @@ pub enum EffectiveSource {
 }
 
 /// What became of a setting on the worker.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SettingStatus {
     /// In use.
@@ -204,7 +208,8 @@ pub enum SettingStatus {
 }
 
 /// One setting as the worker is actually running it.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EffectiveSetting {
     /// The value in use, written the way it was configured. `None` where the
     /// setting is unset and unset means unlimited.
@@ -217,7 +222,8 @@ pub struct EffectiveSetting {
 }
 
 /// Everything a worker is running, keyed by setting.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EffectiveConfig {
     /// The revision of the last [`ConfigSnapshot`] this reflects.
     ///
@@ -235,7 +241,8 @@ pub struct EffectiveConfig {
 /// because the server does not know what any of them mean -- a key the worker
 /// does not declare is reported back as unsupported rather than failing to
 /// deserialize.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ConfigSnapshot {
     /// Identifies this exact set of values, so a worker's heartbeat can say
     /// which one it holds and the server resends only when that differs.
@@ -289,6 +296,57 @@ impl EffectiveConfig {
             })
             .cloned()
             .collect()
+    }
+}
+
+/// Check a save against the worker's declaration, and put each value in the
+/// form it is stored in: trimmed, with `None` for a value to remove.
+///
+/// All of it or none: every refusal is collected, so an operator who got two
+/// fields wrong hears about both rather than fixing them one round trip at a
+/// time.
+///
+/// # Errors
+///
+/// Every refusal, joined with `; `.
+pub fn checked_changes(
+    declared: &[SettingDecl],
+    changes: BTreeMap<String, Option<String>>,
+) -> Result<BTreeMap<String, Option<String>>, String> {
+    let mut refused = Vec::new();
+    let mut checked = BTreeMap::new();
+    for (key, value) in changes {
+        let value = match value {
+            // Removing needs no declaration: a value for a key the worker has
+            // since dropped is exactly the one worth being able to clear.
+            None => None,
+            Some(raw) => {
+                let value = raw.trim().to_string();
+                // Blank is how a worker's environment spells "unset", so a
+                // stored blank would read as nothing at all.
+                let problem = if value.is_empty() {
+                    Some(format!(
+                        "{key}: remove the value rather than saving it empty"
+                    ))
+                } else {
+                    validate_value(declared, &key, &value)
+                        .err()
+                        .map(|why| format!("{key}: {why}"))
+                };
+                if let Some(problem) = problem {
+                    refused.push(problem);
+                    continue;
+                }
+                Some(value)
+            }
+        };
+        checked.insert(key, value);
+    }
+    if refused.is_empty() {
+        Ok(checked)
+    } else {
+        refused.dedup();
+        Err(refused.join("; "))
     }
 }
 
@@ -428,6 +486,76 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<EffectiveConfig>(&json).unwrap(),
             config
+        );
+    }
+}
+
+#[cfg(test)]
+mod checked_changes_tests {
+    use super::{Applies, SettingDecl, ValueKind, checked_changes};
+    use std::collections::BTreeMap;
+
+    fn declared() -> Vec<SettingDecl> {
+        vec![SettingDecl {
+            key: "build_memory_max".to_string(),
+            kind: ValueKind::Size,
+            description: String::new(),
+            category: String::new(),
+            default: None,
+            env_var: Some("WORKER_BUILD_MEMORY_MAX".to_string()),
+            applies: Applies::NextJob,
+        }]
+    }
+
+    fn save(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.map(str::to_string)))
+            .collect()
+    }
+
+    /// A value is stored the way it will be compared: trimmed, so a stray
+    /// space does not make the same value a different revision.
+    #[test]
+    fn a_valid_value_is_stored_trimmed() {
+        let checked =
+            checked_changes(&declared(), save(&[("build_memory_max", Some(" 32G "))])).unwrap();
+        assert_eq!(checked["build_memory_max"].as_deref(), Some("32G"));
+    }
+
+    /// Every refusal is reported at once, and nothing is taken: a save is
+    /// whole or not at all.
+    #[test]
+    fn every_refusal_is_reported_together() {
+        let why = checked_changes(
+            &declared(),
+            save(&[
+                ("build_memory_max", Some("lots")),
+                ("build_user", Some("root")),
+            ]),
+        )
+        .unwrap_err();
+        assert!(why.contains("build_memory_max"), "{why}");
+        assert!(why.contains("build_user"), "{why}");
+    }
+
+    /// A blank value would read as unset on the worker, so it is refused
+    /// rather than stored as a value that does nothing.
+    #[test]
+    fn a_blank_value_is_refused() {
+        assert!(checked_changes(&declared(), save(&[("build_memory_max", Some("  "))])).is_err());
+    }
+
+    /// Removing needs no declaration: a value for a key the worker has since
+    /// dropped, or one set before it was upgraded away, must stay clearable.
+    #[test]
+    fn a_removal_needs_no_declaration() {
+        let checked = checked_changes(&[], save(&[("gone", None)])).unwrap();
+        assert_eq!(checked["gone"], None);
+        let refused = checked_changes(&[], save(&[("build_memory_max", Some("32G"))]));
+        assert!(
+            refused.is_err(),
+            "a worker that declares nothing cannot take a value"
         );
     }
 }

@@ -166,7 +166,9 @@ every 15 seconds by default, listing the builds it is running:
 
 - Each listed build's lease is renewed.
 - A build the worker holds but no longer lists is taken as dropped, and
-  abandoned.
+  abandoned. Not during its first lease, though: a heartbeat can reach the
+  server before the claim's answer reaches the worker, so a build that new is
+  left to that lease instead.
 - A build whose lease runs out, because its worker went silent, is abandoned
   by the server, which queues a fresh build of the package when there are
   retries left.
@@ -185,10 +187,11 @@ setting resolved to on the worker (`received_revision`, `effective`).
 A build is stopped by an operator, or abandoned by the server. Either way, the
 worker learns it from:
 
-- the `cancel` list in the heartbeat's answer; and
-- `GET /api/worker/jobs/{build_id}/status`, which a build can poll while it
-  runs (every five seconds in the workers here) and which says
-  `cancel_requested`.
+- the `cancel` list in the heartbeat's answer; or
+- `GET /api/worker/jobs/{build_id}/status`, which a worker can poll while the
+  build runs and which says `cancel_requested`. It answers from the same
+  condition as the heartbeat, so the workers here rely on the heartbeat
+  alone.
 
 The worker then stops the build and reports it `canceled`.
 

@@ -138,9 +138,9 @@ impl SettingMutationController {
         self.busy.set(true);
         self.status.set(None);
         let submitted = edit.draft.and_then(|draft| draft.peek().value.clone());
-        let outcome = match crate::api::client() {
-            Err(error) => Err(error),
-            Ok(client) => match &edit.change {
+        let outcome = async {
+            let client = crate::api::client()?;
+            match &edit.change {
                 SettingChange::Set(value) => {
                     client
                         .patch_setting(scope.package(), edit.setting.meta().key, value)
@@ -152,8 +152,9 @@ impl SettingMutationController {
                         .await
                 }
             }
-            .map_err(|error| error.to_string()),
-        };
+            .map_err(|error| error.to_string())
+        }
+        .await;
         self.busy.set(false);
         match outcome {
             Ok(()) => {

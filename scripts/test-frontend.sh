@@ -20,12 +20,12 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SEED="$PROJECT_DIR/scripts/fixtures/frontend-seed.sql"
 
-# The API port is compiled in (aurcache_common::ports::AURCACHE_HTTP_PORT), so it
-# cannot be moved out of the way.
-# One port, because one server. The frontend is embedded into the backend by
+# One port, because one server: the frontend is embedded into the backend by
 # `aurcache-api`'s `static` feature, exactly as it ships, so these checks
 # exercise the real asset handler and the real SPA fallback rather than a
-# stand-in that reimplements them.
+# stand-in that reimplements them. It is compiled in
+# (aurcache_common::ports::AURCACHE_HTTP_PORT), so it cannot be moved out of the
+# way.
 API_PORT=8080
 
 SHOTS=""
@@ -62,11 +62,7 @@ port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 port_busy "$API_PORT" && fail "port $API_PORT is already in use — stop the other server first"
 
 WORKDIR="$(mktemp -d)"
-# Every browser launch below gets its own profile directory rather than the
-# user's default one. Dozens of launches in quick succession against a shared
-# profile interfere with each other -- the symptom is a page that reports as
-# mounted while its content is missing, on a different route each run, which is
-# indistinguishable from a real rendering bug until you notice the set moves.
+# The browser runs on a profile of this run's own, never the user's.
 CHROME_PROFILE="$WORKDIR/chrome-profile"
 BACKEND_PID=""
 cleanup() {
@@ -74,16 +70,24 @@ cleanup() {
     # Wait for it to release the port, or an immediate rerun trips the
     # busy-port preflight.
     [ -n "$BACKEND_PID" ] && wait "$BACKEND_PID" 2>/dev/null || true
-    # `--dump-dom` normally exits on its own, but a launch that does not leaves
-    # its process behind, and this script starts one per check. Across repeated
-    # runs they accumulate until there is no memory left for the next one --
-    # which surfaces as routes failing to render, a different set each time, and
-    # reads exactly like a rendering bug in the app. Matched on this run's own
-    # profile directory so nothing else's browser is touched.
+    # A launch that did not exit on its own would otherwise outlive the run.
+    # Matched on this run's profile so nothing else's browser is touched.
     pkill -f "user-data-dir=$CHROME_PROFILE" 2>/dev/null || true
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
+
+# One headless launch against the server; the arguments say what it does.
+chrome() {
+    "$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" \
+        --virtual-time-budget=8000 "$@"
+}
+
+# Screenshot `route` into `file`, at `size` (default 1440x1400).
+shot() {
+    chrome --hide-scrollbars --window-size="${3:-1440,1400}" \
+        --screenshot="$2" "http://localhost:$API_PORT$1" >/dev/null 2>&1
+}
 
 # --- build -----------------------------------------------------------------
 
@@ -379,13 +383,27 @@ JUNK='PROBE\[|DEBUG\[|HREF\[|QUERY\[|dbg!|todo!\(|XXXTEMP'
 [ -n "$SHOTS" ] && mkdir -p "$SHOTS"
 
 echo "==> checking routes"
+# Each route is dumped once, and every marker for it is checked against that
+# one document: many checks share a route, and a launch per check made the
+# run slow and the browser the likeliest thing in it to fail.
+declare -A DOMS=()
 failures=0
 for entry in "${ROUTES[@]}"; do
     route="${entry%%|*}"; rest="${entry#*|}"
     marker="${rest%%|*}"; desc="${rest#*|}"
 
-    dom="$("$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" \
-             --virtual-time-budget=8000 --dump-dom "http://localhost:$API_PORT$route" 2>/dev/null || true)"
+    if [ -z "${DOMS[$route]+set}" ]; then
+        DOMS[$route]="$(chrome --dump-dom "http://localhost:$API_PORT$route" 2>/dev/null || true)"
+        if [ -n "$SHOTS" ]; then
+            # Routes carry query/fragment characters (`?`, `#`, `=`, `:` …) that
+            # `actions/upload-artifact` rejects (NTFS-forbidden `" : < > | * ?`).
+            # Keep only a safe allowlist so every shot uploads.
+            name="$(printf '%s' "${route#/}" | tr '/' '-' | tr -c 'A-Za-z0-9_.-' '-')"
+            [ -z "$name" ] && name="index"
+            shot "$route" "$SHOTS/$name.png"
+        fi
+    fi
+    dom="${DOMS[$route]}"
 
     # The shell is the layout every route renders into. Missing it means the
     # app never mounted -- a blank page -- rather than a wrong screen.
@@ -414,17 +432,6 @@ for entry in "${ROUTES[@]}"; do
         continue
     fi
     echo "  ok    $route ($desc)"
-
-    if [ -n "$SHOTS" ]; then
-        # Routes carry query/fragment characters (`?`, `#`, `=`, `:` …) that
-        # `actions/upload-artifact` rejects (NTFS-forbidden `" : < > | * ?`).
-        # Keep only a safe allowlist so every shot uploads.
-        name="$(printf '%s' "${route#/}" | tr '/' '-' | tr -c 'A-Za-z0-9_.-' '-')"
-        [ -z "$name" ] && name="index"
-        "$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" --hide-scrollbars \
-            --window-size=1440,1400 --virtual-time-budget=8000 \
-            --screenshot="$SHOTS/$name.png" "http://localhost:$API_PORT$route" >/dev/null 2>&1
-    fi
 done
 
 # Two shots at widths the default 1440 does not cover.
@@ -433,19 +440,15 @@ done
 # broken twice. Settings splits into two columns only above 1440, so the shape
 # most people actually see it in is not the shape the run above captured.
 if [ -n "$SHOTS" ]; then
-    "$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" --hide-scrollbars \
-        --window-size=420,900 --virtual-time-budget=8000 \
-        --screenshot="$SHOTS/packages-narrow.png" "http://localhost:$API_PORT/packages" >/dev/null 2>&1
-    "$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" --hide-scrollbars \
-        --window-size=1920,1200 --virtual-time-budget=8000 \
-        --screenshot="$SHOTS/settings-wide.png" "http://localhost:$API_PORT/settings" >/dev/null 2>&1
+    shot /packages "$SHOTS/packages-narrow.png" 420,900
+    shot /settings "$SHOTS/settings-wide.png" 1920,1200
     echo "==> screenshots in $SHOTS"
 fi
 
 if [ "$failures" -gt 0 ]; then
-    fail "$failures route(s) did not render"
+    fail "$failures check(s) failed"
 fi
-echo "==> all ${#ROUTES[@]} routes rendered"
+echo "==> all ${#ROUTES[@]} checks passed on ${#DOMS[@]} routes"
 
 # The checks above dump a page and read it. These drive it: type in a filter,
 # queue something, take it back. That needs a session rather than one

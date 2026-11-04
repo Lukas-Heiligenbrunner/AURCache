@@ -6,7 +6,7 @@
 //! asked to: `AURCACHE_POOL_TESTS=1 cargo test -p aurcache-worker --test
 //! pool_drain`. Its image goes under Cargo's target directory, not `/tmp`.
 
-use aurcache_chroot::{Backing, Owner, PoolConfig};
+use aurcache_chroot::{Allocation, Backing, Owner, PoolConfig};
 use aurcache_worker::chroots::Chroots;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,7 +59,7 @@ async fn an_oversized_pool_is_made_again_once_its_builds_finish() {
         PoolConfig {
             backing: Backing::Image {
                 path: image.clone(),
-                reserve: false,
+                allocation: Allocation::Sparse,
             },
             mountpoint: mountpoint.clone(),
             total: 4096 * MIB,

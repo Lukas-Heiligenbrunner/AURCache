@@ -1,10 +1,5 @@
 //! Dependency resolution against the packages AURCache tracks.
 //!
-//! This lives in `aurcache-db` because it is the lowest crate that can see
-//! both the `packages` entity and the `AurClient` (via `aurcache-deps`), which
-//! lets the schema migration and the runtime package pipeline share one
-//! implementation.
-//!
 //! It is deliberately thin. Deciding *what satisfies a dependency name* is
 //! `aurcache-deps`' job and is the same question whatever the source, so all
 //! this does is describe the tracked packages in the shape
@@ -16,8 +11,8 @@ use aurcache_deps::{AurClient, Dependency, Resolutions, SatisfyIndex};
 use sea_orm::{ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QuerySelect};
 use std::collections::HashSet;
 
-use crate::lists::json_list;
-use crate::packages;
+use aurcache_db::lists::JsonList;
+use aurcache_db::packages;
 
 /// A package that can satisfy a dependency: either a row already in the
 /// database, or one an in-flight add has planned but not yet inserted.
@@ -32,10 +27,10 @@ use crate::packages;
 pub struct PackageCandidate {
     /// The pkgbase, which is what a dependency ultimately resolves to.
     pub name: String,
-    /// JSON array of split package names, as stored on `packages`.
-    pub split_packages: Option<String>,
-    /// JSON array of `provides` entries, as stored on `packages`.
-    pub provides: Option<String>,
+    /// Split package names, as stored on `packages`.
+    pub split_packages: Option<JsonList>,
+    /// `provides` entries, as stored on `packages`.
+    pub provides: Option<JsonList>,
 }
 
 /// The packages AURCache tracks, read once and reused.
@@ -50,13 +45,11 @@ pub struct PackageCandidate {
 /// - **An add** loads once. It resolves its whole graph before writing
 ///   anything -- `persist_plan` does every insert at the end, in one
 ///   transaction -- so the rows cannot change underneath it, and the packages
-///   it intends to add travel separately as `planned`. Planning a package with
-///   a hundred dependencies used to re-read the table once per package
-///   planned.
-/// - **A resync** loads once; it resolves a single package.
-/// - **The backfill migration** must load per package: it inserts rows as it
-///   recurses, so a snapshot would go stale and a package inserted earlier in
-///   the run would be resolved against the AUR and added a second time.
+///   it intends to add travel separately as `planned`. Re-reading per package
+///   planned would scan the table once for each of them.
+/// - **A resync** loads once; it resolves a single package. A run over many
+///   packages -- a restore, the dependency backfill -- resyncs each in turn,
+///   so each sees the rows the ones before it inserted.
 ///
 /// Held as a named value rather than cached invisibly so that each caller's
 /// choice is one it had to make.
@@ -70,12 +63,12 @@ impl TrackedPackages {
     /// Every row counts, whatever state its last build left it in. A row's
     /// status says how its build went, not whether a dependency on it is real,
     /// and what actually gates a dependent is the dependee's latest
-    /// *successful build* ([`crate::helpers::builds::dependency_satisfied`]) —
-    /// which no filter here could speak for. Restricting this to
-    /// `ACTIVE`/`SUCCESS`/`ENQUEUED`, as it once did, only meant a `Failed` or
-    /// `WaitingForDeps` package went unrecognised here and was picked up a
-    /// stage later by its artifact sitting in the repository, which reports
-    /// "already published" and records no dependency link at all.
+    /// *successful build*
+    /// ([`dependency_satisfied`](aurcache_db::helpers::builds::dependency_satisfied))
+    /// — which no filter here could speak for. Leaving out a `Failed` or
+    /// `WaitingForDeps` package would only have it picked up a stage later by
+    /// its artifact sitting in the repository, which reports "already
+    /// published" and records no dependency link at all.
     pub async fn load<C: ConnectionTrait>(db: &C) -> Result<Self, DbErr> {
         // Only the three columns matching consults. The rows also carry the
         // large `source_data` JSON, which a full-model load would haul in for
@@ -106,11 +99,11 @@ impl TrackedPackages {
                 // records the constraint for the build queue to check against
                 // real builds.
                 None,
-                json_list(candidate.provides.as_deref()),
+                JsonList::entries(candidate.provides.as_ref()),
                 wanted,
             );
-            for split in json_list(candidate.split_packages.as_deref()) {
-                index.insert_package(&split, &candidate.name, None, Vec::<String>::new(), wanted);
+            for split in JsonList::entries(candidate.split_packages.as_ref()) {
+                index.insert_package(split, &candidate.name, None, Vec::<String>::new(), wanted);
             }
         }
         index

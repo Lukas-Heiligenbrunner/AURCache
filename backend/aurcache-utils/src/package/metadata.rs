@@ -1,9 +1,8 @@
 //! Mirroring package metadata onto the package row.
 //!
-//! `/api/package/<pkgbase>` used to fetch this from the AUR on every request,
-//! which made the route ~128ms where the rest of it is ~2ms and spent one of
-//! the AUR's 4000 daily calls per page view. Persisting it turns that into a
-//! plain column read.
+//! Persisted so that `/api/package/<pkgbase>` is a plain column read, rather
+//! than a lookup per page view -- one that, made against the AUR, would cost
+//! far more than the rest of the route and a call of its daily quota.
 //!
 //! It is read from the package's own source checkout, not the AUR. The
 //! snapshot store already clones every package's repository to resolve its

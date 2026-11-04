@@ -25,6 +25,7 @@
 //! never refuses to start over it.
 
 use anyhow::{Context, Result};
+use aurcache_worker_core::repo::{Endpoint, RepoSection};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
 
@@ -49,29 +50,10 @@ pub fn disabled() -> bool {
     )
 }
 
-/// Where a URL's traffic goes: its host and the port actually dialled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Endpoint {
-    host: String,
-    port: u16,
-}
-
-/// The endpoint a URL is dialled on.
-///
-/// The port is the explicit one, else the scheme's default -- what the HTTP
-/// client connects to, so what the rule has to name. An IPv6 literal is
-/// returned without its brackets, ready for resolution.
+/// The endpoint a URL is dialled on: what the HTTP client connects to, so
+/// what the rule has to name.
 fn endpoint(url: &str) -> Option<Endpoint> {
-    let url = url::Url::parse(url).ok()?;
-    let host = match url.host()? {
-        url::Host::Domain(domain) => domain.to_string(),
-        url::Host::Ipv4(addr) => addr.to_string(),
-        url::Host::Ipv6(addr) => addr.to_string(),
-    };
-    Some(Endpoint {
-        host,
-        port: url.port_or_known_default()?,
-    })
+    Endpoint::of(&url::Url::parse(url).ok()?)
 }
 
 /// Every address an endpoint's host resolves to, deduplicated.
@@ -226,7 +208,7 @@ fn ensure_one_in(
 /// Block the build user's TCP traffic to the worker-protocol port.
 ///
 /// Resolves the build user's uid, the port `server_url` is dialled on and the
-/// repository `repo_section` points builds at, then ensures the rule via
+/// repository `repo` points builds at, then ensures the rule via
 /// `iptables` and `ip6tables`. Called after enrollment, since the repository
 /// comes from the server, and before any build. A no-op when disabled; an
 /// `Err` names what failed so the caller can warn and continue.
@@ -240,7 +222,7 @@ fn ensure_one_in(
 /// reliable anyway: a killed worker would leave it behind, and two workers
 /// sharing a build user would race to delete each other's. Restarts are safe
 /// because installation is check-then-add.
-pub fn ensure(server_url: &str, repo_section: &str, build_user: &str) -> Result<()> {
+pub fn ensure(server_url: &str, repo: Option<&RepoSection>, build_user: &str) -> Result<()> {
     if disabled() {
         tracing::info!("{DISABLE_ENV} disables the build-user worker-port rule; skipping");
         return Ok(());
@@ -250,10 +232,7 @@ pub fn ensure(server_url: &str, repo_section: &str, build_user: &str) -> Result<
     let worker = endpoint(server_url)
         .with_context(|| format!("no host and port to firewall in {server_url:?}"))?;
     let worker_addrs = resolve(&worker);
-    // The arch only fills in `$arch`; the host and port are the same for all.
-    let repo = aurcache_worker_core::repo::repo_db_url(repo_section, "x86_64")
-        .as_deref()
-        .and_then(endpoint);
+    let repo = repo.and_then(RepoSection::endpoint);
     let repo_addrs = repo.as_ref().map(resolve).unwrap_or_default();
     let scope = scope(
         &Resolved {

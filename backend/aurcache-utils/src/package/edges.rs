@@ -6,12 +6,12 @@
 //! answers to itself, and merge the bounds of every name that landed on the
 //! same package base onto one edge.
 
+use crate::package::dependency_resolution::{
+    PackageCandidate, TrackedPackages, resolve_dependencies,
+};
 use crate::pkg::{Constraint, Declared, DependencySet};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
-use aurcache_db::helpers::dependency_resolution::{
-    PackageCandidate, TrackedPackages, resolve_dependencies,
-};
 use aurcache_deps::{AurClient, DependencyResolution};
 use std::collections::{HashMap, HashSet};
 
@@ -48,8 +48,8 @@ pub(crate) struct Edge {
 /// the bases a package already depends on; see
 /// [`resolve_dependencies`]. A dependency nothing provides is not fatal --
 /// `makepkg` may still find it -- but it is said out loud, to `activity` or,
-/// without one, to the journal: it is where a typo or a package dropped from
-/// the AUR used to disappear without trace.
+/// without one, to the journal: otherwise a typo or a package dropped from the
+/// AUR would disappear without trace.
 pub(crate) async fn resolve_edges(
     client: &AurClient,
     tracked: &TrackedPackages,
@@ -116,7 +116,7 @@ pub(crate) async fn resolve_edges(
     let mut edges: Vec<Edge> = Vec::new();
     let mut bounds: HashMap<String, Vec<Constraint>> = HashMap::new();
     for Declared { name, .. } in &declared {
-        let (pkgbase, dependee) = match resolved.get(name) {
+        let (pkgbase, dependee) = match resolved.found.get(name) {
             // Installable as a binary: nothing to build, no row to link to.
             None | Some(DependencyResolution::Available) => continue,
             Some(DependencyResolution::Local { pkgbase }) => (pkgbase, Dependee::Tracked),
@@ -132,11 +132,11 @@ pub(crate) async fn resolve_edges(
                 dependee,
             });
         }
-        crate::pkg::merge_bounds_into(
-            &mut bounds,
-            pkgbase,
-            declaration.deps.constraints.get(name),
-        )?;
+        // One name can carry a whole range, so each bound merges in turn.
+        let conjunction = bounds.entry(pkgbase.clone()).or_default();
+        for bound in declaration.deps.constraints.get(name).into_iter().flatten() {
+            crate::pkg::merge_bound(conjunction, pkgbase, bound.clone())?;
+        }
     }
     for edge in &mut edges {
         edge.bounds = bounds.remove(&edge.pkgbase).unwrap_or_default();

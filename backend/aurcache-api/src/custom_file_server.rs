@@ -90,7 +90,7 @@ impl Handler for CustomFileServer {
                 Ok(resp) => Response::build_from(resp),
                 Err(_) => return Outcome::error(Status::InternalServerError),
             },
-            RangeRequest::Satisfiable(start, end) => {
+            RangeRequest::Satisfiable { start, end } => {
                 // The file already open, not the path again: `repo.db` is
                 // renamed over on every commit, and a second open could stream
                 // a newer file than the size above was read from.
@@ -136,8 +136,8 @@ impl Handler for CustomFileServer {
 /// What a `Range` header asks of a file of a given size.
 #[derive(Debug, PartialEq, Eq)]
 enum RangeRequest {
-    /// Send `start..end` (exclusive) as 206.
-    Satisfiable(u64, u64),
+    /// Send `start..end` (`end` exclusive) as 206.
+    Satisfiable { start: u64, end: u64 },
     /// A valid range the file cannot satisfy: 416.
     Unsatisfiable,
     /// Not a single byte range this server understands -- another unit, a
@@ -169,7 +169,10 @@ fn parse_range_header(header: &str, file_size: u64) -> RangeRequest {
         return match last.parse::<u64>() {
             Ok(0) => RangeRequest::Unsatisfiable,
             Ok(_) if file_size == 0 => RangeRequest::Unsatisfiable,
-            Ok(n) => RangeRequest::Satisfiable(file_size.saturating_sub(n), file_size),
+            Ok(n) => RangeRequest::Satisfiable {
+                start: file_size.saturating_sub(n),
+                end: file_size,
+            },
             Err(_) => RangeRequest::Ignored,
         };
     }
@@ -190,7 +193,7 @@ fn parse_range_header(header: &str, file_size: u64) -> RangeRequest {
     if start >= file_size {
         return RangeRequest::Unsatisfiable;
     }
-    RangeRequest::Satisfiable(start, end)
+    RangeRequest::Satisfiable { start, end }
 }
 
 #[cfg(test)]
@@ -202,14 +205,23 @@ mod download_tests {
     #[test]
     fn range_bounds_are_exclusive_with_open_end() {
         use RangeRequest::Satisfiable;
-        assert_eq!(parse_range_header("bytes=0-99", 1000), Satisfiable(0, 100));
+        assert_eq!(
+            parse_range_header("bytes=0-99", 1000),
+            Satisfiable { start: 0, end: 100 }
+        );
         assert_eq!(
             parse_range_header("bytes=100-", 1000),
-            Satisfiable(100, 1000)
+            Satisfiable {
+                start: 100,
+                end: 1000
+            }
         );
         assert_eq!(
             parse_range_header("bytes=500-500", 1000),
-            Satisfiable(500, 501)
+            Satisfiable {
+                start: 500,
+                end: 501
+            }
         );
     }
 
@@ -220,15 +232,24 @@ mod download_tests {
         use RangeRequest::Satisfiable;
         assert_eq!(
             parse_range_header("bytes=0-9999", 1000),
-            Satisfiable(0, 1000)
+            Satisfiable {
+                start: 0,
+                end: 1000
+            }
         );
         assert_eq!(
             parse_range_header("bytes=-100", 1000),
-            Satisfiable(900, 1000)
+            Satisfiable {
+                start: 900,
+                end: 1000
+            }
         );
         assert_eq!(
             parse_range_header("bytes=-5000", 1000),
-            Satisfiable(0, 1000)
+            Satisfiable {
+                start: 0,
+                end: 1000
+            }
         );
     }
 
@@ -266,10 +287,10 @@ mod serve_tests {
             .expect("tracked client builds")
     }
 
-    /// A directory is not a file to download: opening one used to succeed and
-    /// the response write then failed with "Is a directory" (os error 21),
-    /// answering 500. There is no listing to serve, so a directory answers
-    /// exactly like a missing file.
+    /// A directory is not a file to download: opening one succeeds, and the
+    /// response write would then fail with "Is a directory" (os error 21) as a
+    /// 500. There is no listing to serve, so a directory answers exactly like a
+    /// missing file.
     #[rocket::async_test]
     async fn directories_answer_like_missing_files() {
         let root = tempfile::tempdir().unwrap();

@@ -14,7 +14,6 @@ workspace = true
 tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
@@ -27,7 +26,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 percent-encoding = "2.3"
 url = "2"
-aurcache-common = { path = "../aurcache-common" }
+aurcache-common = { path = "../aurcache-common", features = ["digest"] }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-chroot = { path = "../aurcache-chroot" }
 # The page size, for reading RSS out of /proc; see src/memory.rs.

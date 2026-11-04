@@ -19,7 +19,7 @@ use aurcache_db::helpers::builds::latest_successful_build_vcs_sources;
 use aurcache_db::helpers::time::now_secs;
 use aurcache_db::package_vcs_sources::{self, Entity as PackageVcsSources};
 
-use crate::git::checkout::ls_remote;
+use crate::git::ls_remote;
 
 /// A single VCS source entry extracted from a package's `.SRCINFO`.
 ///
@@ -29,12 +29,11 @@ use crate::git::checkout::ls_remote;
 /// source entries within the same package base (that's what the optional
 /// `name::` prefix and `#fragment` are for), and two different sources
 /// always have different `source_url`s.
-#[derive(Clone)]
 struct VcsSource {
     source_url: String,
-    repo_url: String,
-    /// The ref makepkg checks out: a branch or tag name, or `HEAD`.
-    git_ref: String,
+    /// The `name::` prefix, which names the directory makepkg clones into.
+    filename: Option<String>,
+    remote: Remote,
 }
 
 /// What two sources must share for one remote lookup to answer both: the
@@ -43,24 +42,18 @@ struct VcsSource {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Remote {
     repo_url: String,
+    /// The ref makepkg checks out: a branch or tag name, or `HEAD`.
     git_ref: String,
 }
 
-impl VcsSource {
-    /// Resolve the commit this source currently points to on the remote
+impl Remote {
+    /// Resolve the commit this ref currently points to on the remote
     /// (equivalent to `git ls-remote`); does not clone or fetch objects.
     ///
     /// Blocking: performs network I/O and must be run via
     /// `tokio::task::spawn_blocking` from async code.
     fn resolve_commit(&self) -> anyhow::Result<String> {
         ls_remote(&self.repo_url, &self.git_ref)
-    }
-
-    fn remote(&self) -> Remote {
-        Remote {
-            repo_url: self.repo_url.clone(),
-            git_ref: self.git_ref.clone(),
-        }
     }
 }
 
@@ -92,24 +85,12 @@ fn makepkg_source_dir(filename: Option<&str>, url: &str) -> String {
 /// carries; see [`extract_git_vcs_sources`] for which those are.
 #[must_use]
 pub fn job_vcs_sources(sourceinfo: &SourceInfoV1, pkgbuild: &str) -> Vec<JobVcsSource> {
-    if !defines_pkgver(pkgbuild) {
-        return Vec::new();
-    }
-    sourceinfo
-        .base
-        .sources
-        .iter()
-        .filter_map(|source| {
-            let vcs = git_vcs_source_from(source)?;
-            let filename = source
-                .filename()
-                .and_then(|name| name.to_str())
-                .map(ToString::to_string);
-            Some(JobVcsSource {
-                dir: makepkg_source_dir(filename.as_deref(), &vcs.repo_url),
-                source_url: vcs.source_url,
-                git_ref: vcs.git_ref,
-            })
+    extract_git_vcs_sources(sourceinfo, pkgbuild)
+        .into_iter()
+        .map(|vcs| JobVcsSource {
+            dir: makepkg_source_dir(vcs.filename.as_deref(), &vcs.remote.repo_url),
+            source_url: vcs.source_url,
+            git_ref: vcs.remote.git_ref,
         })
         .collect()
 }
@@ -206,8 +187,14 @@ fn git_vcs_source_from(source: &Source) -> Option<VcsSource> {
 
     Some(VcsSource {
         source_url: source.to_string(),
-        repo_url: source_url.url.to_string(),
-        git_ref,
+        filename: source
+            .filename()
+            .and_then(|name| name.to_str())
+            .map(ToString::to_string),
+        remote: Remote {
+            repo_url: source_url.url.to_string(),
+            git_ref,
+        },
     })
 }
 
@@ -241,15 +228,17 @@ pub async fn sync_vcs_sources(
     // moves when the *check* looks, so any build triggered another way -- a
     // manual rebuild, a retry, an unforced update -- left it behind, and the
     // next check re-detected a move it had already built.
-    let built = latest_successful_build_vcs_sources(db, package_id).await?;
+    let built = latest_successful_build_vcs_sources(db, package_id, None).await?;
 
     let mut changed = false;
     let mut seen_urls: HashSet<String> = HashSet::new();
     let mut upserts = Vec::new();
 
-    for source in vcs_sources {
-        let source_url = source.source_url.clone();
-        let commit = round.resolve(source).await?;
+    for VcsSource {
+        source_url, remote, ..
+    } in vcs_sources
+    {
+        let commit = round.resolve(&remote).await?;
 
         seen_urls.insert(source_url.clone());
 
@@ -327,9 +316,11 @@ pub async fn resolve_vcs_commits(
     pkgbuild: &str,
 ) -> BTreeMap<String, String> {
     let mut resolved = BTreeMap::new();
-    for source in extract_git_vcs_sources(sourceinfo, pkgbuild) {
-        let source_url = source.source_url.clone();
-        match tokio::task::spawn_blocking(move || source.resolve_commit()).await {
+    for VcsSource {
+        source_url, remote, ..
+    } in extract_git_vcs_sources(sourceinfo, pkgbuild)
+    {
+        match tokio::task::spawn_blocking(move || remote.resolve_commit()).await {
             Ok(Ok(commit)) => {
                 resolved.insert(source_url, commit);
             }
@@ -348,7 +339,7 @@ pub enum SourcesMoved {
     /// no commit recorded for it.
     Moved,
     /// Every source is where the last build left it.
-    Unmoved,
+    Unchanged,
     /// The question does not apply: nothing tracked, nothing recorded to
     /// compare against, or no commit could be resolved. Never "up to date".
     Unknown,
@@ -365,7 +356,7 @@ pub async fn vcs_sources_moved(
     if now.is_empty() {
         return Ok(SourcesMoved::Unknown);
     }
-    let built = aurcache_db::helpers::builds::latest_successful_build_vcs_sources_on(
+    let built = aurcache_db::helpers::builds::latest_successful_build_vcs_sources(
         db,
         package_id,
         Some(platform),
@@ -383,7 +374,7 @@ pub async fn vcs_sources_moved(
     Ok(if moved {
         SourcesMoved::Moved
     } else {
-        SourcesMoved::Unmoved
+        SourcesMoved::Unchanged
     })
 }
 
@@ -424,19 +415,13 @@ pub struct RoundCache {
 }
 
 impl RoundCache {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The commit this source points at, asking the remote only the first time
+    /// The commit `remote` points at, asking the remote only the first time
     /// this pass sees it.
     ///
     /// A failure is not cached: the next package naming the same remote should
     /// get its own attempt rather than inheriting a transient error.
-    async fn resolve(&mut self, source: VcsSource) -> anyhow::Result<String> {
-        let key = source.remote();
-        if let Some(commit) = self.seen.get(&key) {
+    async fn resolve(&mut self, remote: &Remote) -> anyhow::Result<String> {
+        if let Some(commit) = self.seen.get(remote) {
             return Ok(commit.clone());
         }
         if let Some(gap) = gap_before_lookup(self.lookups) {
@@ -446,7 +431,9 @@ impl RoundCache {
         // failures are not cached and would otherwise retry back-to-back.
         self.lookups += 1;
         // `resolve_commit` performs blocking network I/O via git2.
-        let commit = tokio::task::spawn_blocking(move || source.resolve_commit()).await??;
+        let key = remote.clone();
+        let lookup = remote.clone();
+        let commit = tokio::task::spawn_blocking(move || lookup.resolve_commit()).await??;
         self.seen.insert(key, commit.clone());
         Ok(commit)
     }
@@ -667,12 +654,12 @@ mod tests {
         let branched = srcinfo_with_source("git+https://example.test/repo.git#branch=main");
         let branched = extract_git_vcs_sources(&branched, VCS_PKGBUILD);
         assert_eq!(branched.len(), 1);
-        assert_eq!(branched[0].git_ref, "main");
+        assert_eq!(branched[0].remote.git_ref, "main");
 
         let bare = srcinfo_with_source("git+https://example.test/repo.git");
         let bare = extract_git_vcs_sources(&bare, VCS_PKGBUILD);
         assert_eq!(bare.len(), 1);
-        assert_eq!(bare[0].git_ref, "HEAD");
+        assert_eq!(bare[0].remote.git_ref, "HEAD");
     }
 
     /// Without `pkgver()` the version cannot follow the source, so even a

@@ -6,7 +6,6 @@
 //! something is running. Listing them is what makes a job findable again.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// What kind of work an operation is.
 ///
@@ -32,7 +31,8 @@ pub mod kind {
 ///
 /// Read straight off the row by the operations helper: the selected columns
 /// are exactly these fields.
-#[derive(Deserialize, ToSchema, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "db", derive(sea_orm::FromQueryResult))]
 pub struct ActiveOperation {
     pub id: i32,
@@ -51,4 +51,24 @@ impl ActiveOperation {
     pub const fn resolved_count(&self) -> i32 {
         self.completed + self.failed
     }
+}
+
+/// An operation's state, and its entries after the offset the caller asked
+/// from.
+///
+/// One shape for every kind of operation: only the entries differ, as `E`.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct OperationProgress<E> {
+    pub id: i32,
+    pub total: i32,
+    pub completed: i32,
+    pub failed: i32,
+    /// Whether the job has stopped -- successfully or not. A job whose server
+    /// restarted mid-run is finished too, with the unreached items recorded as
+    /// failures rather than left pending forever.
+    pub finished: bool,
+    /// Entries from the requested offset onwards, so a caller polling only ever
+    /// receives what it has not already seen.
+    pub entries: Vec<E>,
 }

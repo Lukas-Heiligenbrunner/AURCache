@@ -7,16 +7,8 @@
 # headers, a stage-2 gcc builds glibc proper, and only then can the real gcc be
 # built against it.
 #
-# Usage: build-cross-toolchain.sh armv7h
+# Usage: build-cross-toolchain.sh
 set -euo pipefail
-
-readonly CARCH_TARGET=${1:?usage: build-cross-toolchain.sh <carch>}
-
-if [[ $CARCH_TARGET != armv7h ]]; then
-    printf 'build-cross-toolchain.sh: only armv7h is built from source; %s comes from the official repositories\n' \
-        "$CARCH_TARGET" >&2
-    exit 1
-fi
 
 # Dependency order, from each package's own metadata rather than guesswork.
 readonly PACKAGES=(
@@ -201,4 +193,4 @@ for pkg in "${PACKAGES[@]}"; do
     cd /
 done
 
-printf '==> cross toolchain for %s installed\n' "$CARCH_TARGET"
+printf '==> cross toolchain for armv7h installed\n'

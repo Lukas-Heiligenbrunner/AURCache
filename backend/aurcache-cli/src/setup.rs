@@ -18,20 +18,18 @@
 //! auto-approved. Without that a local install would end with the user hunting
 //! for the approve button, which is the single most common first-run stumble.
 
-use crate::compose::{ENROLLMENT_DIR, WorkerEnv};
-/// Whether a worker can take the local shortcut — shared volume, shared network,
-/// no fingerprint — or has to be configured as a remote one.
-pub use crate::url::is_loopback as is_local_host;
+use crate::compose::{ENROLLMENT_DIR, SERVER_SERVICE, WorkerEnv};
 use anyhow::{Context, Result, bail};
 use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_MIRROR_PORT, AURCACHE_WORKER_PORT};
+use aurcache_common::shell::quote_argument;
 use serde::Serialize;
 use std::process::Command;
 
 /// Docker objects the local setup owns. Named, not anonymous: a recreated
 /// container has to find the same identity and the same data, or the worker
-/// re-enrolls as a stranger and the server forgets its CA.
+/// re-enrolls as a stranger and the server forgets its CA. The server's
+/// container is [`SERVER_SERVICE`], the name a worker beside it dials.
 pub const NETWORK: &str = "aurcache";
-pub const SERVER_CONTAINER: &str = "aurcache";
 pub const WORKER_CONTAINER: &str = "aurcache-worker";
 pub const ENROLL_VOLUME: &str = "aurcache_enroll";
 /// Where the host keeps its timezone, and where the server image reads it.
@@ -56,24 +54,34 @@ impl DockerRun {
     }
 }
 
-use aurcache_common::shell::quote_argument;
+/// What the server container is run with.
+#[derive(Debug, Clone)]
+pub struct ServerRunSpec {
+    pub image: String,
+    pub public_url: String,
+    pub tls_sans: String,
+    pub log_level: String,
+    /// Extra `docker run` arguments, placed before the image.
+    pub extra: Vec<String>,
+}
 
 /// What the server container needs: three ports, three volumes for state that
 /// must survive a restart, and the enrollment directory that lets a local
 /// worker approve itself.
 #[must_use]
-pub fn server_run(
-    image: &str,
-    public_url: &str,
-    log_level: &str,
-    tls_sans: &str,
-    extra: &[String],
-) -> DockerRun {
+pub fn server_run(spec: &ServerRunSpec) -> DockerRun {
+    let ServerRunSpec {
+        image,
+        public_url,
+        tls_sans,
+        log_level,
+        extra,
+    } = spec;
     let mut args: Vec<String> = vec![
         "run".into(),
         "-d".into(),
         "--name".into(),
-        SERVER_CONTAINER.into(),
+        SERVER_SERVICE.into(),
         "--network".into(),
         NETWORK.into(),
         "--restart".into(),
@@ -90,7 +98,7 @@ pub fn server_run(
     }
 
     for (key, value) in [
-        ("LOG_LEVEL", log_level),
+        ("LOG_LEVEL", log_level.as_str()),
         ("AURCACHE_TLS_SANS", tls_sans),
         ("AURCACHE_PUBLIC_URL", public_url),
         ("AURCACHE_ENROLLMENT_DIR", ENROLLMENT_DIR),
@@ -118,11 +126,11 @@ pub fn server_run(
     }
 
     args.extend(extra.iter().cloned());
-    args.push(image.to_string());
+    args.push(image.clone());
 
     DockerRun {
-        container_name: SERVER_CONTAINER.to_string(),
-        image: image.to_string(),
+        container_name: SERVER_SERVICE.to_string(),
+        image: image.clone(),
         args,
     }
 }
@@ -211,19 +219,6 @@ pub fn worker_run(spec: &WorkerRunSpec) -> DockerRun {
     }
 }
 
-/// The worker environment for joining a server on this same host.
-#[must_use]
-pub fn local_worker_env(mut env: WorkerEnv) -> WorkerEnv {
-    env.url
-        .get_or_insert_with(|| format!("https://{SERVER_CONTAINER}:{AURCACHE_WORKER_PORT}"));
-    env.enrollment_dir
-        .get_or_insert_with(|| ENROLLMENT_DIR.to_string());
-    // The CA belongs to the server one container away; there is nothing a pin
-    // would defend against.
-    env.ca_fingerprint = None;
-    env
-}
-
 /// The worker environment for joining a server somewhere else.
 ///
 /// A fingerprint is not forced: on a trusted LAN trust-on-first-use is a
@@ -254,25 +249,17 @@ fn ensure_docker_object(kind: &str, name: &str) -> Result<()> {
 }
 
 fn docker(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("docker").args(args).output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            anyhow::anyhow!(
-                "docker not found on PATH; install Docker, or use `--dry-run` \
-                 to print the command, or `setup compose` to write a file instead"
-            )
-        } else {
-            anyhow::Error::new(e).context("failed to run docker")
-        }
-    })
+    Command::new("docker")
+        .args(args)
+        .output()
+        .map_err(docker_error)
 }
 
-/// Make sure the shared network and enrollment volume exist.
-pub fn ensure_local_objects(with_enrollment: bool) -> Result<()> {
+/// Make sure the network and the enrollment volume a server and the workers
+/// beside it share exist.
+pub fn ensure_local_objects() -> Result<()> {
     ensure_docker_object("network", NETWORK)?;
-    if with_enrollment {
-        ensure_docker_object("volume", ENROLL_VOLUME)?;
-    }
-    Ok(())
+    ensure_docker_object("volume", ENROLL_VOLUME)
 }
 
 /// Run it, inheriting stdio so docker's own progress and errors reach the user.
@@ -280,16 +267,7 @@ pub fn execute(run: &DockerRun) -> Result<()> {
     let status = Command::new("docker")
         .args(&run.args)
         .status()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "docker not found on PATH; install Docker, or use `--dry-run` \
-                     to print the command instead"
-                )
-            } else {
-                anyhow::Error::new(e).context("failed to run docker")
-            }
-        })
+        .map_err(docker_error)
         .context("starting the container")?;
 
     if !status.success() {
@@ -304,13 +282,36 @@ pub fn execute(run: &DockerRun) -> Result<()> {
     Ok(())
 }
 
+/// Docker failing to start at all, named for what to do about it.
+fn docker_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "docker not found on PATH; install Docker, or use `--dry-run` \
+             to print the command, or `setup compose` to write a file instead"
+        )
+    } else {
+        anyhow::Error::new(error).context("failed to run docker")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DockerRun, ENROLL_VOLUME, NETWORK, WorkerRunSpec, is_local_host, local_worker_env,
-        quote_argument, remote_worker_env, server_run, worker_run,
+        DockerRun, ENROLL_VOLUME, NETWORK, ServerRunSpec, WorkerRunSpec, quote_argument,
+        remote_worker_env, server_run, worker_run,
     };
     use crate::compose::WorkerEnv;
+    use crate::url::is_loopback;
+
+    fn server(image: &str, extra: &[&str]) -> DockerRun {
+        server_run(&ServerRunSpec {
+            image: image.to_string(),
+            public_url: "http://localhost:8081".to_string(),
+            tls_sans: "aurcache,localhost".to_string(),
+            log_level: "info".to_string(),
+            extra: extra.iter().map(ToString::to_string).collect(),
+        })
+    }
 
     fn args_of(run: &DockerRun) -> String {
         run.args.join(" ")
@@ -330,13 +331,7 @@ mod tests {
 
     #[test]
     fn the_server_publishes_all_three_ports() {
-        let run = server_run(
-            "img",
-            "http://localhost:8081",
-            "info",
-            "aurcache,localhost",
-            &[],
-        );
+        let run = server("img", &[]);
         let args = args_of(&run);
         for port in ["8080:8080", "8081:8081", "8083:8083"] {
             assert!(args.contains(port), "{args}");
@@ -347,7 +342,7 @@ mod tests {
     /// so an unset one leaves the host's /etc/localtime in charge.
     #[test]
     fn the_server_is_handed_the_hosts_timezone() {
-        let run = server_run("img", "http://localhost:8081", "info", "sans", &[]);
+        let run = server("img", &[]);
         assert!(
             run.args.windows(2).any(|pair| pair == ["-e", "TZ"]),
             "{:?}",
@@ -359,7 +354,7 @@ mod tests {
     /// logs -- is under /app, in one named volume.
     #[test]
     fn the_server_persists_its_state_in_named_volumes() {
-        let run = server_run("img", "http://localhost:8081", "info", "sans", &[]);
+        let run = server("img", &[]);
         let args = args_of(&run);
         assert!(args.contains("aurcache_data:/app"), "{args}");
     }
@@ -367,20 +362,19 @@ mod tests {
     /// The server only reads enrollment requests; a worker writes them.
     #[test]
     fn the_server_mounts_the_enrollment_volume_read_only() {
-        let run = server_run("img", "http://localhost:8081", "info", "sans", &[]);
+        let run = server("img", &[]);
         assert!(args_of(&run).contains(&format!("{ENROLL_VOLUME}:/enroll:ro")));
     }
 
     #[test]
     fn the_image_is_the_last_argument() {
-        let run = server_run("myimage", "http://localhost:8081", "info", "sans", &[]);
+        let run = server("myimage", &[]);
         assert_eq!(run.args.last().map(String::as_str), Some("myimage"));
     }
 
     #[test]
     fn passthrough_arguments_come_before_the_image() {
-        let extra = vec!["--pull=always".to_string()];
-        let run = server_run("myimage", "http://localhost:8081", "info", "sans", &extra);
+        let run = server("myimage", &["--pull=always"]);
         let position = run.args.iter().position(|a| a == "--pull=always").unwrap();
         assert_eq!(position, run.args.len() - 2, "{:?}", run.args);
     }
@@ -435,7 +429,7 @@ mod tests {
     /// pin, and therefore no approval step.
     #[test]
     fn a_local_worker_joins_the_network_and_shares_the_enrollment_volume() {
-        let env = local_worker_env(WorkerEnv::default());
+        let env = WorkerEnv::default().beside_server();
         let run = worker_run(&spec(env, true, "d"));
         let args = args_of(&run);
         assert!(args.contains(&format!("--network {NETWORK}")), "{args}");
@@ -478,10 +472,10 @@ mod tests {
     #[test]
     fn loopback_addresses_are_recognised_as_this_machine() {
         for host in ["localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"] {
-            assert!(is_local_host(host), "{host}");
+            assert!(is_loopback(host), "{host}");
         }
-        assert!(!is_local_host("build.example.com"));
-        assert!(!is_local_host("192.168.1.10"));
+        assert!(!is_loopback("build.example.com"));
+        assert!(!is_loopback("192.168.1.10"));
     }
 
     #[test]
@@ -497,7 +491,7 @@ mod tests {
 
     #[test]
     fn the_command_line_starts_with_docker_run() {
-        let run = server_run("img", "http://localhost:8081", "info", "sans", &[]);
+        let run = server("img", &[]);
         assert!(
             run.command_line().starts_with("docker run -d "),
             "{}",

@@ -9,13 +9,12 @@ use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
-use aurcache_worker_core::protocol::{
-    Stop, StopWatch, Timeout, log, report_warning, upload_artifacts,
-};
+use aurcache_worker_core::executor::ClaimedJob;
+use aurcache_worker_core::protocol::{Stop, log, report_warning, upload_artifacts};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, BindMount};
@@ -26,7 +25,6 @@ use crate::chroots::Lease;
 use crate::config::Config;
 use crate::credentials;
 use crate::executor::Shared;
-use crate::repo_db;
 
 /// Await a blocking cache task, logging the panic instead of swallowing it.
 ///
@@ -55,22 +53,11 @@ pub async fn run_job(
     cfg: &Config,
     cgroups: Option<&Hierarchy>,
     client: &Arc<WorkerClient>,
-    job: JobDescriptor,
-    mirrorlist: Option<&str>,
-    cancel: Arc<AtomicBool>,
-    shared: Arc<Shared>,
-) -> CompleteReport {
-    let workdir = workdir(cfg, job.build_id);
-    let report = match run_job_inner(cfg, cgroups, client, &job, mirrorlist, &cancel, &shared).await
-    {
-        Ok(report) => report,
-        Err(e) => {
-            let report = report::from_error(&e);
-            let reason = report.reason.as_deref().unwrap_or_default();
-            log(client, job.build_id, &format!("\n[worker] {reason}\n")).await;
-            report
-        }
-    };
+    claimed: &ClaimedJob,
+    shared: &Shared,
+) -> Result<CompleteReport> {
+    let workdir = workdir(cfg, claimed.job.build_id);
+    let report = run_job_inner(cfg, cgroups, client, claimed, shared).await;
 
     // Keep the shared caches and base chroot; only this job's tree goes.
     if let Err(e) = tokio::fs::remove_dir_all(&workdir).await
@@ -83,25 +70,29 @@ pub async fn run_job(
 
 /// The per-job workspace of build `build_id`.
 fn workdir(cfg: &Config, build_id: i32) -> PathBuf {
-    cfg.core.data_dir.join("work").join(build_id.to_string())
+    cfg.data_dir.join("work").join(build_id.to_string())
+}
+
+/// The name a job's private cache replicas go by.
+fn job_label(build_id: i32) -> String {
+    format!("job-{build_id}")
 }
 
 async fn run_job_inner(
     cfg: &Config,
     cgroups: Option<&Hierarchy>,
     client: &Arc<WorkerClient>,
-    job: &JobDescriptor,
-    mirrorlist: Option<&str>,
-    cancel: &AtomicBool,
+    claimed: &ClaimedJob,
     shared: &Shared,
 ) -> Result<CompleteReport> {
-    let mut prepared = prepare_job(cfg, client, job, mirrorlist, shared).await?;
-    if cancel.load(Ordering::SeqCst) {
+    let job = &claimed.job;
+    let prepared = prepare_job(cfg, client, job, claimed.mirrorlist.as_deref(), shared).await?;
+    if claimed.cancel.is_cancelled() {
         return Ok(report::canceled());
     }
     let lease = shared
         .chroots
-        .acquire(job.build_id, Some(cfg.build_disk_max))
+        .acquire(job.build_id, Some(cfg.tunables.build_disk_max))
         .await?;
     log(client, job.build_id, "[worker] starting build\n").await;
     let context = WorkerContext {
@@ -111,45 +102,51 @@ async fn run_job_inner(
         lease: &lease,
         chroots: &shared.chroots,
     };
-    let outcome = execute_prepared_job(&context, client, job, cancel, &prepared).await;
-    let outcome =
-        settle_build_lease(cfg, client, job, shared, &prepared.cache, lease, outcome).await;
+    let outcome = execute_prepared_job(&context, client, claimed, &prepared).await;
+    let caches = &prepared.caches;
+    let outcome = settle_build_lease(cfg, client, job, shared, &caches.cache, lease, outcome).await;
     let succeeded = outcome
         .as_ref()
         .is_ok_and(|report| report.outcome == BuildOutcome::Succeeded);
-    discard_failed_tree(client, job, &prepared.cache, succeeded).await;
-    finish_package_cache(client, job, &prepared.cache, &prepared.cleanup.label).await;
-    prepared.cleanup.active = false;
+    discard_failed_tree(client, job, &caches.cache, succeeded).await;
+    finish_package_cache(client, job, shared, caches).await;
     outcome
 }
 
 /// Resources prepared for one job, held until reporting and cache cleanup end.
 struct PreparedJob {
-    cache: Cache,
+    caches: JobCaches,
     dropin: PathBuf,
     binds: Vec<BindMount>,
-    cleanup: JobCacheCleanup,
 }
 
-/// Clean private cache replicas even if preparation or artifact upload fails.
-struct JobCacheCleanup {
+/// One job's view of the caches, whose private replicas are wiped when it is
+/// dropped -- however the job ended, preparation and upload failures
+/// included. The wipe is idempotent, so a job that already folded them into
+/// the shared cache loses nothing to it.
+struct JobCaches {
     cache: Cache,
     label: String,
-    active: bool,
 }
-impl Drop for JobCacheCleanup {
+
+impl Drop for JobCaches {
     fn drop(&mut self) {
-        if self.active
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let cache = self.cache.clone();
-            let label = self.label.clone();
+            let label = std::mem::take(&mut self.label);
             runtime.spawn_blocking(move || {
                 cache.wipe_pacman_pkg_job(&label);
                 cache.wipe_gnupg_job(&label);
             });
         }
     }
+}
+
+/// How a build that ran ended: the report, and the stop that ended it, if
+/// the worker stopped it.
+struct Ended {
+    report: CompleteReport,
+    stop: Option<Stop>,
 }
 
 /// Stage the job's configs and caches and prepare its bind mounts.
@@ -162,27 +159,17 @@ async fn prepare_job(
 ) -> Result<PreparedJob> {
     let build_id = job.build_id;
     let workdir = &workdir(cfg, build_id);
-    let cache = Cache::new(
-        &cfg.cache_dir,
-        cfg.cache_max_size,
-        cfg.cache_ttl,
-        cfg.pkgcache_max_size,
-        cfg.pkgcache_ttl,
-    )
-    .with_volumes(shared.chroots.cache_volumes().await);
-
-    let job_label = format!("job-{build_id}");
-    let cleanup = JobCacheCleanup {
-        cache: cache.clone(),
-        label: job_label.clone(),
-        active: true,
+    let caches = JobCaches {
+        cache: shared.cache(cfg.tunables.cache).await,
+        label: job_label(build_id),
     };
+    let cache = &caches.cache;
 
     // Opportunistic cache GC (never blocks the build). Pin every pkgbase that is
     // currently building — not just this job's — so a concurrent sibling's
     // in-progress SRCDEST is never wiped out from under it.
     //
-    // The scan recurses the whole srcdest tree (up to `cache_max_size`) with
+    // The scan recurses the whole srcdest tree (up to its size budget) with
     // blocking `read_dir`/`metadata`, so it runs on the blocking pool: with
     // `concurrency` jobs starting at once it would otherwise tie up that many
     // runtime worker threads and stall heartbeats, claims, and log streaming.
@@ -220,7 +207,7 @@ async fn prepare_job(
     // without a reconcile, and the promote step's own re-fetch stands in for it
     // when it can. The one thing the code must never do is reconcile against a
     // previous fetch's stale copy.
-    match repo_db::fetch_repo_db(client, client.repo_section(), &job.arch).await {
+    match shared.repo_dbs.fetch(client, &job.arch).await {
         Ok(db) => {
             let cache = cache.clone();
             let removed = join_cache_task(
@@ -239,11 +226,15 @@ async fn prepare_job(
     }
 
     // 2. Stage build credentials, then write per-package configs + ensure base
-    //    chroot. The key is read now rather than at worker start, so replacing
-    //    it on the host takes effect on the next build without a restart.
-    let secrets_dir = credentials::secrets_dir(&cfg.core.data_dir);
-    let credential =
-        credentials::stage_for_job(cfg, &secrets_dir).context("staging build credentials")?;
+    //    chroot. The credential is the agent's, which loaded the key at
+    //    worker start; only `known_hosts` is read per job.
+    let secrets_dir = credentials::secrets_dir(&cfg.data_dir);
+    let credential = credentials::stage_for_job(
+        cfg.ssh_known_hosts.as_deref(),
+        &secrets_dir,
+        agent_socket().as_deref(),
+    )
+    .context("staging build credentials")?;
     if credential.is_some() {
         log(
             client,
@@ -257,19 +248,15 @@ async fn prepare_job(
     // The server sends no `[repo]` section; the worker appends one rendered for
     // the host it reaches the server on (see aurcache_worker_core::repo).
     let pacman_conf =
-        aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo_section());
+        aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
     let chroot::StagedConfigs {
         makepkg_overrides,
         pacman_conf,
     } = chroot::write_configs(
         &cfg_dir,
         &build::with_parallelism(
-            &credentials::augment_makepkg_conf(
-                &job.makepkg_conf,
-                credential.as_ref(),
-                agent_socket().as_deref(),
-            ),
-            parallelism_cpus(&cfg.build_limits, &cfg.total_build_limits),
+            &credentials::augment_makepkg_conf(&job.makepkg_conf, credential.as_ref()),
+            parallelism_cpus(&cfg.tunables.build_limits, &cfg.tunables.total_build_limits),
         ),
         &pacman_conf,
         mirrorlist,
@@ -296,18 +283,23 @@ async fn prepare_job(
     //    from the shared one so a key is fetched from the keyserver once and
     //    then reused, without the build reading a keybox that a sibling job's
     //    import may rewrite underneath it.
-    if let (Some(shared), Some(replica)) = (cache.gnupg_home(), cache.gnupg_job(&job_label)) {
-        chroot::prepare_job_keyring(&shared, &replica, &cfg.keyserver, &job.pgp_keys)
-            .await
-            .ok();
+    //    A failure is not the build's: makepkg names the key it could not
+    //    verify, which this warning then explains.
+    if let (Some(shared), Some(replica)) = (cache.gnupg_home(), cache.gnupg_job(&caches.label))
+        && let Err(e) =
+            chroot::prepare_job_keyring(&shared, &replica, &cfg.tunables.keyserver, &job.pgp_keys)
+                .await
+    {
+        let msg = format!("preparing the build's keyring failed: {e:#}");
+        tracing::warn!("build {build_id}: {msg}");
+        log(client, build_id, &format!("[worker] {msg}\n")).await;
     }
 
-    let binds = prepare_bind_mounts(cfg, client, job, shared, &cache, &job_label).await;
+    let binds = prepare_bind_mounts(cfg, client, job, shared, &caches).await;
     Ok(PreparedJob {
-        cache,
+        caches,
         dropin,
         binds,
-        cleanup,
     })
 }
 
@@ -317,14 +309,14 @@ async fn prepare_bind_mounts(
     client: &Arc<WorkerClient>,
     job: &JobDescriptor,
     shared: &Shared,
-    cache: &Cache,
-    job_label: &str,
+    caches: &JobCaches,
 ) -> Vec<BindMount> {
+    let cache = &caches.cache;
     // Private writable pacman cache for this job. Concurrent builds otherwise
     // share one writable cache directory and race on the same partial
     // download; the shared cache remains available read-only for hits.
     let build_id = job.build_id;
-    let pkg_cache_bind = cache.pacman_pkg_job(job_label).map(|dir| BindMount {
+    let pkg_cache_bind = cache.pacman_pkg_job(&caches.label).map(|dir| BindMount {
         host: dir,
         chroot: PathBuf::from(chroot::PER_JOB_CACHE_MOUNT),
     });
@@ -357,7 +349,10 @@ async fn prepare_bind_mounts(
         // On the blocking pool: deleting a tree of millions of files takes
         // minutes, and this build waits for it anyway.
         let (reclaim_cache, arch) = (cache.clone(), job.arch.clone());
-        let (max_bytes, min_free) = (cfg.core.builddir_max_bytes, cfg.core.builddir_min_free);
+        let (max_bytes, min_free) = (
+            cfg.tunables.builddir_max_bytes,
+            cfg.tunables.builddir_min_free,
+        );
         let _ = join_cache_task(
             tokio::task::spawn_blocking(move || {
                 reclaim_cache.reclaim_builddirs(&arch, &in_use, max_bytes, min_free);
@@ -417,10 +412,10 @@ async fn prepare_bind_mounts(
 async fn execute_prepared_job(
     ctx: &WorkerContext<'_>,
     client: &Arc<WorkerClient>,
-    job: &JobDescriptor,
-    cancel: &AtomicBool,
+    claimed: &ClaimedJob,
     prepared: &PreparedJob,
-) -> Result<CompleteReport> {
+) -> Result<Ended> {
+    let job = &claimed.job;
     let build_id = job.build_id;
 
     log(client, build_id, "[worker] downloading source\n").await;
@@ -446,19 +441,19 @@ async fn execute_prepared_job(
     let execution = execute_build_process(
         ctx,
         client,
-        job,
+        claimed,
         &pkgdir,
-        &prepared.cache,
+        &prepared.caches,
         &prepared.binds,
-        cancel,
     )
     .await?;
-    let report = finish_build_execution(ctx, client, job, &prepared.cache, execution).await;
+    let stop = execution.stopped;
+    let report = finish_build_execution(ctx, client, job, &prepared.caches.cache, execution).await;
     // Before the lease goes, and the packages with it.
     if report.outcome == BuildOutcome::Succeeded {
         upload_artifacts(client, build_id, &pkgdir).await?;
     }
-    Ok(report)
+    Ok(Ended { report, stop })
 }
 
 /// Keep a failed build for inspection or release its lease on every other outcome.
@@ -469,11 +464,11 @@ async fn settle_build_lease(
     shared: &Shared,
     cache: &Cache,
     lease: Lease,
-    outcome: Result<CompleteReport>,
+    outcome: Result<Ended>,
 ) -> Result<CompleteReport> {
     let build_id = job.build_id;
-    let mut report = match outcome {
-        Ok(report) => report,
+    let Ended { mut report, stop } = match outcome {
+        Ok(ended) => ended,
         Err(e) => {
             shared.chroots.release(lease).await;
             return Err(e);
@@ -482,8 +477,8 @@ async fn settle_build_lease(
     // A failed build's chroot is kept for inspection when keeping is on and
     // the failure is keepable. The keep consumes the lease; anything else
     // releases it.
-    let keep_for = match cfg.keep_failed.map(Duration::from_secs) {
-        Some(keep_for) if should_keep(build_id, &report) => shared
+    let keep_for = match cfg.tunables.keep_failed {
+        Some(keep_for) if should_keep(build_id, &report, stop) => shared
             .chroots
             .disk_reason(&lease)
             .await
@@ -566,8 +561,8 @@ async fn discard_failed_tree(
 async fn finish_package_cache(
     client: &Arc<WorkerClient>,
     job: &JobDescriptor,
-    cache: &Cache,
-    job_label: &str,
+    shared: &Shared,
+    caches: &JobCaches,
 ) {
     let build_id = job.build_id;
     // 5. Fold this job's downloads into the shared cache, then bound it. Only
@@ -578,7 +573,7 @@ async fn finish_package_cache(
     //    minutes, and a dependency rebuilt mid-build is exactly the case the
     //    promote-time check exists for. The fetch is conditional, so an
     //    unchanged DB costs one cheap round-trip.
-    let repo_db = match repo_db::fetch_repo_db(client, client.repo_section(), &job.arch).await {
+    let repo_db = match shared.repo_dbs.fetch(client, &job.arch).await {
         Ok(db) => Some(db),
         Err(e) => {
             // No DB to validate against: promote anyway (never silently drop
@@ -595,8 +590,8 @@ async fn finish_package_cache(
         }
     };
     {
-        let cache = cache.clone();
-        let label = job_label.to_owned();
+        let cache = caches.cache.clone();
+        let label = caches.label.clone();
         let _ = join_cache_task(
             tokio::task::spawn_blocking(move || {
                 let promoted = cache.promote_job_pkgs(&label, repo_db.as_deref());
@@ -614,12 +609,6 @@ async fn finish_package_cache(
         )
         .await;
     }
-}
-
-/// stdout and stderr differ in type but not in handling.
-enum Either {
-    Out(tokio::process::ChildStdout),
-    Err(tokio::process::ChildStderr),
 }
 
 /// Recursively open up the extracted source tree so the build user can write
@@ -643,67 +632,6 @@ async fn make_source_writable(pkgdir: &Path) -> Result<()> {
         anyhow::bail!("chmod -R a+w {} failed: {status}", pkgdir.display());
     }
     Ok(())
-}
-
-/// How much output to accumulate before sending, and how long to hold a
-/// partial batch. A build emits thousands of lines; one request per line would
-/// swamp the server, and one request at the end would defeat the purpose.
-const LOG_BATCH_BYTES: usize = 4096;
-const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(500);
-/// Largest single read from the child: a newline-less flood must arrive in
-/// capped chunks, never as one unbounded `read_line` allocation. Chunk
-/// boundaries are invisible downstream — the log is append-only.
-const LOG_LINE_CAP_BYTES: usize = 1024 * 1024;
-
-/// Forward a child stream to the build log, batched.
-///
-/// Batches flush on size or age, whichever comes first, and always on EOF — so
-/// the last lines of a failed build, which are the ones that explain it, are
-/// never left in the buffer.
-async fn pump_output<R>(reader: R, client: Arc<WorkerClient>, build_id: i32)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut batch = String::new();
-    let mut line = Vec::new();
-    let mut last_flush = std::time::Instant::now();
-
-    loop {
-        line.clear();
-        // Bytes, decoded lossily: build output is not always UTF-8 (and a
-        // capped chunk can end mid-character), and `read_line` would treat
-        // either as a read error -- ending the log and leaving the child
-        // writing into a pipe nobody drains.
-        match (&mut reader)
-            .take(LOG_LINE_CAP_BYTES as u64)
-            .read_until(b'\n', &mut line)
-            .await
-        {
-            Ok(0) => break,
-            Ok(_) => {
-                let text = String::from_utf8_lossy(&line);
-                batch.push_str(&text);
-                if batch.len() >= LOG_BATCH_BYTES || last_flush.elapsed() >= LOG_BATCH_INTERVAL {
-                    log(&client, build_id, &batch).await;
-                    batch.clear();
-                    last_flush = std::time::Instant::now();
-                }
-            }
-            // A read error ends the stream; the build's own exit status is
-            // what determines success, so this is not escalated.
-            Err(e) => {
-                tracing::debug!("build {build_id}: reading output ended: {e}");
-                break;
-            }
-        }
-    }
-
-    if !batch.is_empty() {
-        log(&client, build_id, &batch).await;
-    }
 }
 
 /// The build ssh-agent's socket, if this worker started one.
@@ -733,19 +661,6 @@ struct WorkerContext<'a> {
     dropin: &'a Path,
 }
 
-/// How long a killed build's output may stay open before the build is reported
-/// ended anyway. Generous: a killed tree closes its pipes within milliseconds,
-/// so reaching this means something escaped the kill, not that it was slow.
-const KILLED_OUTPUT_GRACE: Duration = Duration::from_secs(30);
-
-/// Spawn `makechrootpkg`, stream its output as logs, and poll for local
-/// self-abort, a remote cancel request, and the build timeout — killing the
-/// child in any of those cases.
-///
-/// The output really is streamed: stdout and stderr are piped and forwarded in
-/// batches. Letting the child inherit the worker's stdio instead sends the
-/// build's output to the worker's own container logs, where the user reading
-/// the build page cannot see it.
 /// The completed process and its resource report, ready for artifact handling.
 struct BuildExecution {
     status: std::process::ExitStatus,
@@ -755,18 +670,26 @@ struct BuildExecution {
     total_ooms_before: Option<u64>,
 }
 
+/// Spawn `makechrootpkg`, stream its output as logs, and kill it if it has to
+/// stop: the worker cancelled it, or it reached its timeout.
+///
+/// The output really is streamed: stdout and stderr are piped and forwarded in
+/// batches. Letting the child inherit the worker's stdio instead sends the
+/// build's output to the worker's own container logs, where the user reading
+/// the build page cannot see it.
 async fn execute_build_process(
     ctx: &WorkerContext<'_>,
     client: &Arc<WorkerClient>,
-    job: &JobDescriptor,
+    claimed: &ClaimedJob,
     pkgdir: &Path,
-    cache: &Cache,
+    caches: &JobCaches,
     binds: &[BindMount],
-    cancel: &AtomicBool,
 ) -> Result<BuildExecution> {
+    let job = &claimed.job;
     let build_id = job.build_id;
+    let cache = &caches.cache;
     let srcdest = cache.srcdest(&job.pkgbase);
-    let gnupg = cache.gnupg_job(&format!("job-{build_id}"));
+    let gnupg = cache.gnupg_job(&caches.label);
     let argv = build::build_command(
         ctx.lease.chroot_dir(),
         ctx.lease.label(),
@@ -784,8 +707,10 @@ async fn execute_build_process(
     // build: this measures the work, it does not do it -- unless limits are
     // configured, which are enforced here or not at all, and a build does not
     // run without the limits its operator set.
-    let limits = &ctx.cfg.build_limits;
-    if ctx.cgroups.is_none() && !(limits.is_empty() && ctx.cfg.total_build_limits.is_empty()) {
+    let limits = &ctx.cfg.tunables.build_limits;
+    if ctx.cgroups.is_none()
+        && !(limits.is_empty() && ctx.cfg.tunables.total_build_limits.is_empty())
+    {
         anyhow::bail!(
             "build resource limits (WORKER_BUILD_* or WORKER_TOTAL_BUILD_*) are set, but \
              this worker has no cgroup to enforce them in (see the worker's startup log)"
@@ -872,101 +797,28 @@ async fn execute_build_process(
         }
     };
 
-    // Watched for cancellation and the timeout while the child runs; see
-    // `StopWatch` for how often each is looked at.
-    let timeout = Timeout::for_job(ctx.cfg.core.build_timeout, job);
-    let mut watch = StopWatch::start(timeout, cancel, build_id);
     // Forward both streams to the build log. Held so they can be awaited after
     // the child exits, which is what guarantees the final lines are sent.
-    let pumps = [
-        child.stdout.take().map(Either::Out),
-        child.stderr.take().map(Either::Err),
+    let watch = claimed.watch();
+    let build_log = BuildLog::open(Arc::clone(client), build_id);
+    let pumps: Vec<_> = [
+        child.stdout.take().map(|out| build_log.pump(out)),
+        child.stderr.take().map(|err| build_log.pump(err)),
     ]
     .into_iter()
     .flatten()
-    .map(|stream| {
-        let client = Arc::clone(client);
-        tokio::spawn(async move {
-            match stream {
-                Either::Out(r) => pump_output(r, client, build_id).await,
-                Either::Err(r) => pump_output(r, client, build_id).await,
-            }
-        })
-    })
-    .collect::<Vec<_>>();
+    .collect();
 
     let mut stopped = None;
-    let status = loop {
-        tokio::select! {
-            res = child.wait() => break res.context("awaiting build")?,
-            () = tokio::time::sleep(StopWatch::TICK) => {
-                stopped = watch.check(client).await;
-                if stopped.is_some() {
-                    // Kill the whole build tree, not just makechrootpkg:
-                    // cgroup.kill (recursive over descendants) when the cgroup
-                    // is available, else the process-group SIGKILL the
-                    // `process_group(0)` spawn made possible. `start_kill`
-                    // alone would orphan the compilers and whatever the chroot
-                    // spawned into a systemd-managed scope.
-                    let killed = if let Some(cg) = &build_cgroup {
-                        match cg.kill() {
-                            Ok(()) => true,
-                            Err(e) => {
-                                let msg = format!(
-                                    "cgroup.kill failed for build {build_id}: {e:#}; \
-                                     falling back to the process group"
-                                );
-                                tracing::warn!("{msg}");
-                                report_warning(client, Some(build_id), &msg).await;
-                                false
-                            }
-                        }
-                    } else {
-                        false
-                    };
-                    if !killed && let Err(e) = kill_process_group(&mut child).await {
-                        let msg = format!(
-                            "process-group kill failed for build {build_id}: {e}; \
-                             falling back to start_kill"
-                        );
-                        tracing::warn!("{msg}");
-                        report_warning(client, Some(build_id), &msg).await;
-                        let _ = child.start_kill();
-                    }
-                    let status = child.wait().await.context("awaiting killed build")?;
-                    break status;
-                }
-            }
+    let status = tokio::select! {
+        status = child.wait() => status.context("awaiting build")?,
+        stop = watch.stopped() => {
+            stopped = Some(stop);
+            kill_build(&mut child, build_cgroup.as_ref(), client, build_id).await;
+            child.wait().await.context("awaiting killed build")?
         }
     };
-
-    // Drain the output before reporting: the pumps hold whatever the build
-    // printed last, which is exactly what a failure report needs.
-    //
-    // A pump ends at EOF, which only comes once *every* holder of the pipe has
-    // exited. After a normal exit that is at once. After a kill it may never
-    // be, if something outlived it -- a container that escaped the cgroup did
-    // exactly that, and the build stayed "active" with its lease held until the
-    // process was stopped by hand. So a killed build waits a bounded time.
-    let drain = async {
-        for pump in pumps {
-            let _ = pump.await;
-        }
-    };
-    if stopped.is_some() {
-        if tokio::time::timeout(KILLED_OUTPUT_GRACE, drain)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                "build {build_id} was killed but its output is still open after {}s; \
-                 something outlived the kill. Reporting it ended regardless",
-                KILLED_OUTPUT_GRACE.as_secs()
-            );
-        }
-    } else {
-        drain.await;
-    }
+    build_log.close(pumps, stopped).await;
 
     Ok(BuildExecution {
         status,
@@ -985,12 +837,11 @@ async fn finish_build_execution(
     cache: &Cache,
     execution: BuildExecution,
 ) -> CompleteReport {
-    let canceled = execution.stopped == Some(Stop::Canceled);
-    let mut report = if let Some(Stop::TimedOut(limit)) = execution.stopped {
-        report::timeout_failure(execution.elapsed.as_secs(), limit)
-    } else {
-        report::classify_exit(execution.status, canceled)
-    };
+    let mut report = report::ended(
+        execution.stopped,
+        execution.elapsed,
+        execution.status.into(),
+    );
     // Measure the tree now rather than during the next reclaim: the cost rides
     // on a build that already took minutes, instead of walking every candidate
     // on every future build. Only for a success: a failure's tree is moved
@@ -1120,20 +971,17 @@ async fn disk_usage(
 }
 
 /// Whether a finished build's chroot is worth keeping for inspection: a real
-/// failure, not a success, a cancel, a timeout, or the fixed one-shot id
-/// (whose next run would collide with the kept name).
+/// failure, not a success, nor one the worker stopped (a cancel, a timeout),
+/// nor the fixed one-shot id (whose next run would collide with the kept
+/// name).
 ///
 /// Out-of-disk builds are excluded by the caller, which still holds the lease
 /// to ask: their chroot is the largest and says the least, since the cause is
 /// already known. Out-of-memory failures are kept: small on disk, and the
 /// state they died in is the interesting part.
-fn should_keep(build_id: i32, report: &CompleteReport) -> bool {
-    // Exit 124 is the worker's own timeout convention (`timeout_failure`, and
-    // `classify_exit`'s mapping of a bare 124): a build that genuinely exited
-    // 124 reads as timed out everywhere already.
-    const TIMEOUT_EXIT: i32 = 124;
+fn should_keep(build_id: i32, report: &CompleteReport, stop: Option<Stop>) -> bool {
     report.outcome == BuildOutcome::Failed
-        && report.exit_code != Some(TIMEOUT_EXIT)
+        && stop.is_none()
         && build_id != crate::chroots::ONE_SHOT_BUILD_ID
 }
 
@@ -1161,8 +1009,8 @@ fn oom_reason(kills: u64, cause: crate::cgroup::OomCause, cfg: &Config) -> Strin
     use crate::chroots::gib;
     match (
         cause,
-        cfg.build_limits.memory_max,
-        cfg.total_build_limits.memory_max,
+        cfg.tunables.build_limits.memory_max,
+        cfg.tunables.total_build_limits.memory_max,
     ) {
         (OomCause::BuildLimit, Some(bytes), _) => format!(
             "out of memory: the kernel killed {processes} at the build's memory limit of \
@@ -1182,6 +1030,44 @@ fn oom_reason(kills: u64, cause: crate::cgroup::OomCause, cfg: &Config) -> Strin
         // A cause without the limit it names: configuration read at startup
         // cannot disagree with the cgroups it set up, but say something true.
         _ => format!("out of memory: the kernel killed {processes} in the build"),
+    }
+}
+
+/// Kill the whole build tree, not just makechrootpkg: `cgroup.kill`
+/// (recursive over descendants) when the build has a cgroup, else the
+/// process-group SIGKILL the `process_group(0)` spawn made possible, and
+/// `start_kill` as the last resort. `start_kill` alone would orphan the
+/// compilers and whatever the chroot spawned into a systemd-managed scope.
+///
+/// Each fallback is reported: a kill that only reached part of the tree is
+/// what leaves a build's output open past its end.
+async fn kill_build(
+    child: &mut tokio::process::Child,
+    cgroup: Option<&crate::cgroup::BuildCgroup>,
+    client: &WorkerClient,
+    build_id: i32,
+) {
+    if let Some(cg) = cgroup {
+        match cg.kill() {
+            Ok(()) => return,
+            Err(e) => {
+                let msg = format!(
+                    "cgroup.kill failed for build {build_id}: {e:#}; \
+                     falling back to the process group"
+                );
+                tracing::warn!("{msg}");
+                report_warning(client, Some(build_id), &msg).await;
+            }
+        }
+    }
+    if let Err(e) = kill_process_group(child).await {
+        let msg = format!(
+            "process-group kill failed for build {build_id}: {e}; \
+             falling back to start_kill"
+        );
+        tracing::warn!("{msg}");
+        report_warning(client, Some(build_id), &msg).await;
+        let _ = child.start_kill();
     }
 }
 
@@ -1213,17 +1099,16 @@ mod tests {
     #[tokio::test]
     async fn an_aborted_job_wipes_its_private_caches() {
         let tmp = tempfile::tempdir().unwrap();
-        let cache = Cache::new(tmp.path(), 0, 0, 0, 0);
+        let cache = Cache::new(tmp.path(), crate::cache::CacheLimits::default());
         let packages = cache.pacman_pkg_job("job-1").unwrap();
         let keyring = cache.gnupg_job("job-1").unwrap();
         std::fs::write(packages.join("unfinished.part"), "partial download").unwrap();
         std::fs::write(keyring.join("private"), "private material").unwrap();
         let (started, holding) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            let _cleanup = JobCacheCleanup {
+            let _caches = JobCaches {
                 cache,
-                label: "job-1".into(),
-                active: true,
+                label: job_label(1),
             };
             started.send(()).unwrap();
             std::future::pending::<()>().await;
@@ -1241,9 +1126,9 @@ mod tests {
     }
 
     fn with_limits(build: Option<u64>, total: Option<u64>) -> Config {
-        let mut cfg = Config::from_env();
-        cfg.build_limits.memory_max = build;
-        cfg.total_build_limits.memory_max = total;
+        let mut cfg = Config::from_process_env();
+        cfg.tunables.build_limits.memory_max = build;
+        cfg.tunables.total_build_limits.memory_max = total;
         cfg
     }
 
@@ -1275,23 +1160,36 @@ mod tests {
     /// caller, which still holds the lease to ask.)
     #[test]
     fn only_real_failures_are_keepable() {
-        use aurcache_worker_core::report;
-        use std::os::unix::process::ExitStatusExt;
+        use aurcache_worker_core::protocol::{Timeout, TimeoutSource};
+        use aurcache_worker_core::report::Exit;
 
-        let status = |code: i32| std::process::ExitStatus::from_raw(code << 8);
-        assert!(should_keep(7, &report::classify_exit(status(1), false)));
-        assert!(should_keep(7, &report::classify_exit(status(137), false)));
-        assert!(!should_keep(7, &report::classify_exit(status(0), false)));
-        assert!(!should_keep(7, &report::classify_exit(status(1), true)));
-        let limit = aurcache_worker_core::protocol::Timeout {
-            secs: 60,
-            set_by: aurcache_worker_core::protocol::TimeoutSource::Server,
-        };
-        assert!(!should_keep(7, &report::timeout_failure(60, limit)));
-        assert!(!should_keep(7, &report::classify_exit(status(124), false)));
+        let secs = Duration::from_secs(60);
+        let exited = |code| report::ended(None, secs, Exit::Code(code));
+        assert!(should_keep(7, &exited(1), None));
+        assert!(should_keep(7, &exited(137), None));
+        // The package's own 124 is a failure like any other.
+        assert!(should_keep(7, &exited(124), None));
+        assert!(!should_keep(7, &exited(0), None));
+
+        let canceled = Some(Stop::Canceled);
+        assert!(!should_keep(
+            7,
+            &report::ended(canceled, secs, Exit::Code(1)),
+            canceled
+        ));
+        let timed_out = Some(Stop::TimedOut(Timeout {
+            limit: secs,
+            set_by: TimeoutSource::Server,
+        }));
+        assert!(!should_keep(
+            7,
+            &report::ended(timed_out, secs, Exit::Signal),
+            timed_out
+        ));
         assert!(!should_keep(
             crate::chroots::ONE_SHOT_BUILD_ID,
-            &report::classify_exit(status(1), false)
+            &exited(1),
+            None
         ));
     }
 

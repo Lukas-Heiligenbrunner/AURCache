@@ -21,7 +21,7 @@ use pacman_mirrors::platforms::Platform;
 use tokio::sync::mpsc::Sender;
 use tracing::info;
 
-use crate::package::add::{AddContext, AddedSource, add_resolved_source, build_add_context};
+use crate::package::add::{AddContext, AddedSource, add_resolved_source};
 use crate::services::Services;
 
 /// Resolve every AUR name in `sources` to its pkgbase, in as few requests as
@@ -78,7 +78,7 @@ pub async fn bulk_add(
     sources: Vec<SourceData>,
     progress: Sender<BulkAddEntry>,
 ) {
-    let context = build_add_context(platforms, build_flags);
+    let context = AddContext::new(platforms, build_flags);
     let bases = resolve_pkgbases(&services.client, &services.activity, &sources).await;
 
     info!(
@@ -98,8 +98,11 @@ pub async fn bulk_add(
     }
 }
 
-/// Swap an AUR source's name for its pkgbase, when the batch found one.
-fn apply_resolved_base(source: SourceData, bases: &HashMap<String, String>) -> SourceData {
+/// Swap an AUR source's name for its pkgbase, when the lookup found one.
+pub(crate) fn apply_resolved_base(
+    source: SourceData,
+    bases: &HashMap<String, String>,
+) -> SourceData {
     match source {
         SourceData::Aur { name } => {
             let name = bases.get(&name).cloned().unwrap_or(name);

@@ -31,6 +31,7 @@ macro_rules! as_integer {
             }
         }
 
+        #[cfg(feature = "openapi")]
         impl utoipa::PartialSchema for $t {
             fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
                 use utoipa::openapi::schema::{ObjectBuilder, Type};
@@ -41,6 +42,7 @@ macro_rules! as_integer {
             }
         }
 
+        #[cfg(feature = "openapi")]
         impl utoipa::ToSchema for $t {}
     )*};
 }

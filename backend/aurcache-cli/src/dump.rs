@@ -1,9 +1,12 @@
 //! `dump` and `restore`: an instance's state to a file and back.
 
-use crate::cli::{OnExisting, OutputFormat, Secrets};
-use crate::output::PROGRESS_POLL_INTERVAL_SECS;
+use crate::cli::{OutputFormat, RestoreArgs};
+use crate::output::{follow_job, render};
 use anyhow::{Context, Result, bail};
-use aurcache_client::{AurCacheClient, RestoreOutcome};
+use aurcache_client::{
+    AurCacheClient, RestoreEntry, RestoreOptions, RestoreOutcome, RestoreProgress,
+};
+use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -11,42 +14,29 @@ use std::path::{Path, PathBuf};
 pub(crate) async fn restore_command(
     client: &AurCacheClient,
     format: OutputFormat,
-    archive: &Path,
-    dry_run: bool,
-    on_existing: OnExisting,
-    clear: bool,
-    secrets: Secrets,
+    args: RestoreArgs,
 ) -> Result<()> {
-    let bytes =
-        std::fs::read(archive).with_context(|| format!("failed to read {}", archive.display()))?;
+    let bytes = std::fs::read(&args.archive)
+        .with_context(|| format!("failed to read {}", args.archive.display()))?;
 
-    let accepted = client
-        .restore(
-            bytes.into(),
-            dry_run,
-            on_existing.into(),
-            clear,
-            secrets.into(),
-        )
-        .await?;
+    let options = RestoreOptions {
+        dry_run: args.dry_run,
+        on_existing: args.on_existing.into(),
+        clear: args.clear,
+        secrets: args.secrets.into(),
+    };
+    let accepted = client.restore(bytes.into(), &options).await?;
 
     // A dry run has nothing to poll: it changed nothing, and what it would have
     // done is already in hand.
     let Some(job_id) = accepted.job_id else {
-        if format == OutputFormat::Json {
-            println!("{}", serde_json::to_string_pretty(&accepted)?);
-        } else {
-            if clear {
+        render(format, &accepted, |accepted| {
+            if args.clear {
                 println!("would first remove every package, setting and worker here");
             }
             println!("would apply {} package(s):", accepted.total);
-            for entry in &accepted.preview {
-                println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
-                if let RestoreOutcome::Failed { error } = &entry.outcome {
-                    println!("             {error}");
-                }
-            }
-        }
+            accepted.preview.iter().for_each(print_restore_entry);
+        })?;
         // A dry run that found something blocking exits non-zero, so
         // `restore --dry-run && restore` cannot walk into the failure it was
         // run to discover. Reporting the problem and then reporting success is
@@ -59,43 +49,29 @@ pub(crate) async fn restore_command(
         return restore_result(i32::try_from(blocked).unwrap_or(i32::MAX));
     };
 
-    if format == OutputFormat::Json {
-        // Incremental like the bulk-add follower above: the final document
-        // still shows the whole run, without re-transferring it per tick.
-        let mut full = client.restore_progress(job_id, 0).await?;
-        let mut seen = full.entries.len();
-        while !full.finished {
-            tokio::time::sleep(std::time::Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
-            let next = client.restore_progress(job_id, seen).await?;
-            seen += next.entries.len();
-            full.entries.extend(next.entries);
-            full.completed = next.completed;
-            full.failed = next.failed;
-            full.finished = next.finished;
-        }
-        println!("{}", serde_json::to_string_pretty(&full)?);
-        return restore_result(full.failed);
+    if format == OutputFormat::Text {
+        println!("restoring {} package(s), job {job_id}", accepted.total);
     }
+    let run: RestoreProgress = follow_job(
+        format,
+        |seen| client.restore_progress(job_id, seen),
+        print_restore_entry,
+    )
+    .await?;
+    if format == OutputFormat::Text {
+        println!(
+            "done: {} applied, {} failed, of {}",
+            run.completed, run.failed, run.total
+        );
+    }
+    restore_result(run.failed)
+}
 
-    println!("restoring {} package(s), job {job_id}", accepted.total);
-    let mut seen = 0_usize;
-    loop {
-        let progress = client.restore_progress(job_id, seen).await?;
-        for entry in &progress.entries {
-            println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
-            if let RestoreOutcome::Failed { error } = &entry.outcome {
-                println!("             {error}");
-            }
-        }
-        seen += progress.entries.len();
-        if progress.finished {
-            println!(
-                "done: {} applied, {} failed, of {}",
-                progress.completed, progress.failed, progress.total
-            );
-            return restore_result(progress.failed);
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(PROGRESS_POLL_INTERVAL_SECS)).await;
+/// One package of a restore, or of the preview of one.
+pub(crate) fn print_restore_entry(entry: &RestoreEntry) {
+    println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
+    if let RestoreOutcome::Failed { error } = &entry.outcome {
+        println!("             {error}");
     }
 }
 
@@ -142,22 +118,26 @@ pub(crate) async fn dump_command(
     write_dump_file(&path, &bytes, include_secrets)
         .with_context(|| format!("failed to write dump to {}", path.display()))?;
 
-    match format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::json!({ "path": path.display().to_string(), "bytes": bytes.len() })
-        ),
-        OutputFormat::Text => {
-            println!("wrote {} ({} bytes)", path.display(), bytes.len());
-            if include_secrets {
-                println!(
-                    "This file contains the CA private key. Anyone holding it can \
-                     act as a build worker for this server."
-                );
-            }
+    let written = WrittenDump {
+        path: &path,
+        bytes: bytes.len(),
+    };
+    render(format, &written, |written| {
+        println!("wrote {} ({} bytes)", written.path.display(), written.bytes);
+        if include_secrets {
+            println!(
+                "This file contains the CA private key. Anyone holding it can \
+                 act as a build worker for this server."
+            );
         }
-    }
-    Ok(())
+    })
+}
+
+/// Where a dump went, and how big it is.
+#[derive(Serialize)]
+pub(crate) struct WrittenDump<'a> {
+    path: &'a Path,
+    bytes: usize,
 }
 
 /// Write the archive, owner-only when it carries secrets.

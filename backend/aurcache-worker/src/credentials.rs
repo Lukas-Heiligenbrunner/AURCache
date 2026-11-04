@@ -31,26 +31,24 @@ use tokio::process::Command;
 use crate::build::BindMount;
 use crate::config::Config;
 
-/// Directory the staged credential lives in — on the worker only.
+/// Directory the staged `known_hosts` lives in — on the worker only.
 ///
 /// `makechrootpkg` downloads sources **outside** the chroot: its
 /// `download_sources()` runs `makepkg --verifysource` as the build user on the
 /// worker, using the chroot's `makepkg.conf` but not its filesystem. So this is
-/// where the key must be readable, and deliberately the *only* place it is.
+/// where what ssh reads must be readable.
 ///
 /// It is never bind-mounted into the chroot. Everything a PKGBUILD executes —
 /// `prepare`, `build`, `package` — runs in there, and a hostile or merely
-/// careless one could read and exfiltrate any credential within reach. Sources
-/// are already fetched by the time the chroot is entered, so exposing it there
-/// would buy nothing.
+/// careless one could read and exfiltrate anything within reach.
 ///
 /// The path is stable across jobs: [`stage_for_job`] overwrites what is there
 /// for each one, and the `known_hosts` path it puts in `GIT_SSH_COMMAND` stays
-/// the same.
+/// the same. The key is never here: builds use it through the agent.
 pub fn secrets_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("secrets")
 }
-/// Key filename within that directory.
+/// Filename of the key the worker generates.
 pub const KEY_FILE: &str = "id_ed25519";
 /// `known_hosts` filename within that directory.
 pub const KNOWN_HOSTS_FILE: &str = "known_hosts";
@@ -60,15 +58,19 @@ pub fn generated_key(data_dir: &Path) -> PathBuf {
     data_dir.join("ssh").join(KEY_FILE)
 }
 
-/// A credential staged for a build: the `GIT_SSH_COMMAND` that uses it.
+/// A credential staged for a build: the agent holding the key, and the
+/// `GIT_SSH_COMMAND` that uses it.
 ///
-/// Only the command is carried — the staged key path lives at the fixed
-/// [`KEY_FILE`] slot the worker's ssh-agent loads (see [`stage_for_job`]), and
-/// the command itself must never name it (the build user cannot read the file;
-/// see [`git_ssh_command`]).
+/// No key path is carried. The agent loaded the key from where it was
+/// configured when the worker started (see [`crate::agent::start`]), and the
+/// command must never name it: the build user cannot read the file (see
+/// [`git_ssh_command`]).
 #[derive(Debug, Clone)]
 pub struct StagedCredential {
     pub git_ssh_command: String,
+    /// The agent's socket, which builds reach on the same path inside the
+    /// chroot and out.
+    pub agent_socket: PathBuf,
 }
 
 /// Which SSH key a build should use, and where it came from.
@@ -94,7 +96,7 @@ impl KeySource {
 pub fn resolve(cfg: &Config) -> KeySource {
     match &cfg.git_ssh_key {
         Some(path) => KeySource::Provided(path.clone()),
-        None => KeySource::Generated(generated_key(&cfg.core.data_dir)),
+        None => KeySource::Generated(generated_key(&cfg.data_dir)),
     }
 }
 
@@ -206,15 +208,8 @@ pub fn git_ssh_command(known_hosts: Option<&str>) -> String {
 /// environment this file cannot count on. Where there is no agent the guard
 /// fails and git behaves as if AURCache had never touched the config.
 #[must_use]
-pub fn augment_makepkg_conf(
-    base: &str,
-    credential: Option<&StagedCredential>,
-    agent_socket: Option<&Path>,
-) -> String {
+pub fn augment_makepkg_conf(base: &str, credential: Option<&StagedCredential>) -> String {
     let Some(cred) = credential else {
-        return base.to_string();
-    };
-    let Some(socket) = agent_socket else {
         return base.to_string();
     };
     let mut out = base.to_string();
@@ -230,7 +225,7 @@ pub fn augment_makepkg_conf(
         "if [ -S {sock} ]; then\n    \
          export SSH_AUTH_SOCK={sock}\n    \
          export GIT_SSH_COMMAND={cmd}\nfi\n",
-        sock = quote_argument(&socket.display().to_string()),
+        sock = quote_argument(&cred.agent_socket.display().to_string()),
         cmd = quote_argument(&cred.git_ssh_command)
     ));
     out
@@ -268,41 +263,30 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
 }
 
 /// Stage the build credentials for one job into `dir`, returning the
-/// `GIT_SSH_COMMAND` to export.
+/// `GIT_SSH_COMMAND` to export; `None` when there is no credential to use.
 ///
-/// The key is **copied** rather than bind-mounted from wherever the operator
-/// put it: OpenSSH refuses a group- or world-readable private key, and a
-/// docker-secret or root-owned mount would not be readable by the unprivileged
-/// build user. Copying normalises owner and mode to this process's user, which
-/// is the same user `makechrootpkg` runs `makepkg` as.
+/// A credential is the ssh-agent at `agent_socket`, which loaded the key when
+/// the worker started: without one, there is none, whatever key is on disk.
+/// So replacing the key takes effect when the worker restarts, not at the
+/// next build.
 ///
-/// Read at job time rather than worker start, so replacing the key on the host
-/// takes effect on the next build with no restart. The destination is shared by
-/// every job (see [`secrets_dir`]) and simply overwritten each time.
-pub fn stage_for_job(cfg: &Config, dir: &Path) -> Result<Option<StagedCredential>> {
-    let source = resolve(cfg);
-    let key = source.path();
-    if !key.exists() {
-        // A `Provided` key is an operator error, mirroring `ensure`; a
-        // `Generated` key simply may not exist yet.
-        if matches!(source, KeySource::Provided(_)) {
-            anyhow::bail!(
-                "WORKER_GIT_SSH_KEY points at {}, which does not exist",
-                key.display()
-            );
-        }
+/// What is staged is `known_hosts`, **copied** rather than bind-mounted from
+/// wherever the operator put it: a docker-secret or root-owned mount would not
+/// be readable by the unprivileged build user. Read per job, so a replaced
+/// file takes effect on the next build. The destination is shared by every
+/// job (see [`secrets_dir`]) and simply overwritten each time.
+pub fn stage_for_job(
+    known_hosts: Option<&Path>,
+    dir: &Path,
+    agent_socket: Option<&Path>,
+) -> Result<Option<StagedCredential>> {
+    let Some(agent_socket) = agent_socket else {
         return Ok(None);
-    }
-
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("creating secrets dir {}", dir.display()))?;
-    let staged_key = dir.join(KEY_FILE);
-    std::fs::copy(key, &staged_key)
-        .with_context(|| format!("copying {} into the job workspace", key.display()))?;
-    set_private_mode(&staged_key)?;
-
-    let known_hosts = match &cfg.ssh_known_hosts {
+    };
+    let known_hosts = match known_hosts {
         Some(src) if src.exists() => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating secrets dir {}", dir.display()))?;
             let staged = dir.join(KNOWN_HOSTS_FILE);
             std::fs::copy(src, &staged).context("copying known_hosts")?;
             Some(staged.display().to_string())
@@ -312,19 +296,8 @@ pub fn stage_for_job(cfg: &Config, dir: &Path) -> Result<Option<StagedCredential
 
     Ok(Some(StagedCredential {
         git_ssh_command: git_ssh_command(known_hosts.as_deref()),
+        agent_socket: agent_socket.to_path_buf(),
     }))
-}
-
-#[cfg(unix)]
-fn set_private_mode(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("setting 0600 on {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn set_private_mode(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -332,11 +305,18 @@ mod tests {
     use super::*;
 
     fn cfg_with(key: Option<&str>, data_dir: &str) -> Config {
-        let mut cfg = Config::from_env();
+        let mut cfg = Config::from_process_env();
         cfg.git_ssh_key = key.map(PathBuf::from);
-        cfg.core.data_dir = PathBuf::from(data_dir);
+        cfg.data_dir = PathBuf::from(data_dir);
         cfg.ssh_known_hosts = None;
         cfg
+    }
+
+    fn credential(socket: &str) -> StagedCredential {
+        StagedCredential {
+            git_ssh_command: "ssh -o StrictHostKeyChecking=accept-new".to_string(),
+            agent_socket: PathBuf::from(socket),
+        }
     }
 
     #[test]
@@ -390,13 +370,10 @@ mod tests {
     #[test]
     fn makepkg_conf_gains_the_export_only_when_a_credential_exists() {
         let base = "PKGDEST=/output";
-        assert_eq!(augment_makepkg_conf(base, None, None), base);
+        assert_eq!(augment_makepkg_conf(base, None), base);
 
-        let cred = StagedCredential {
-            git_ssh_command: "ssh -o StrictHostKeyChecking=accept-new".to_string(),
-        };
-        let augmented =
-            augment_makepkg_conf(base, Some(&cred), Some(Path::new("/run/a/agent.sock")));
+        let cred = credential("/run/a/agent.sock");
+        let augmented = augment_makepkg_conf(base, Some(&cred));
         assert!(augmented.starts_with("PKGDEST=/output\n"));
         assert!(
             augmented.contains("export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new'")
@@ -413,14 +390,8 @@ mod tests {
     /// while a worker without an agent is still left alone.
     #[test]
     fn the_export_names_the_socket_and_is_guarded_on_it() {
-        let cred = StagedCredential {
-            git_ssh_command: "ssh -o StrictHostKeyChecking=accept-new".to_string(),
-        };
-        let conf = augment_makepkg_conf(
-            "PKGDEST=/output",
-            Some(&cred),
-            Some(Path::new("/var/lib/aurcache-worker/agent/agent.sock")),
-        );
+        let cred = credential("/var/lib/aurcache-worker/agent/agent.sock");
+        let conf = augment_makepkg_conf("PKGDEST=/output", Some(&cred));
 
         assert!(conf.contains("export SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/agent.sock"));
         assert!(conf.trim_end().ends_with("fi"));
@@ -481,15 +452,18 @@ mod tests {
         );
     }
 
-    /// No agent means no exports at all, so a worker without a credential
-    /// builds exactly as it would if none of this existed.
+    /// No agent means no credential, and no exports at all, so a worker
+    /// without one builds exactly as it would if none of this existed --
+    /// whatever key lies on disk.
     #[test]
-    fn without_an_agent_the_config_is_untouched() {
-        let cred = StagedCredential {
-            git_ssh_command: "ssh".to_string(),
-        };
+    fn without_an_agent_there_is_no_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hosts = tmp.path().join("hosts");
+        std::fs::write(&hosts, "github.com ssh-ed25519 AAAA").unwrap();
+        let staged = stage_for_job(Some(&hosts), &secrets_dir(tmp.path()), None).unwrap();
+        assert!(staged.is_none());
         assert_eq!(
-            augment_makepkg_conf("PKGDEST=/output", Some(&cred), None),
+            augment_makepkg_conf("PKGDEST=/output", staged.as_ref()),
             "PKGDEST=/output"
         );
     }
@@ -518,35 +492,25 @@ mod tests {
         assert!(parse_bind_mounts("").is_empty());
     }
 
+    /// The key stays where the agent loaded it from: nothing copies it into
+    /// the secrets directory, where nothing would read it. `known_hosts` is
+    /// staged, and named in the command.
     #[test]
-    fn staging_copies_the_key_with_owner_only_permissions() {
+    fn staging_copies_known_hosts_and_no_key() {
         let tmp = tempfile::tempdir().unwrap();
-        let key = tmp.path().join("src-key");
-        std::fs::write(&key, "PRIVATE").unwrap();
-        // World-readable at the source, as a bind-mounted docker secret may be.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
+        let hosts = tmp.path().join("src-hosts");
+        std::fs::write(&hosts, "github.com ssh-ed25519 AAAA").unwrap();
 
         let dest = secrets_dir(tmp.path());
-        let cfg = cfg_with(key.to_str(), tmp.path().to_str().unwrap());
-        let cred = stage_for_job(&cfg, &dest).unwrap().expect("staged");
+        let socket = tmp.path().join("agent.sock");
+        let cred = stage_for_job(Some(&hosts), &dest, Some(&socket))
+            .unwrap()
+            .expect("staged");
 
-        // The key is still staged at a stable path — that is where the worker's
-        // ssh-agent loads it from — but the command must not name it: the build
-        // user cannot read it, and authentication goes through the agent.
-        let staged = dest.join(KEY_FILE);
-        assert!(!cred.git_ssh_command.contains(&staged.display().to_string()));
+        assert_eq!(cred.agent_socket, socket);
+        let staged = dest.join(KNOWN_HOSTS_FILE);
+        assert!(cred.git_ssh_command.contains(&staged.display().to_string()));
         assert!(!cred.git_ssh_command.contains("-i "));
-        assert_eq!(std::fs::read_to_string(&staged).unwrap(), "PRIVATE");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&staged).unwrap().permissions().mode();
-            // ssh refuses a group/world-readable private key.
-            assert_eq!(mode & 0o077, 0, "staged key must be owner-only");
-        }
+        assert!(!dest.join(KEY_FILE).exists(), "no key is staged");
     }
 }

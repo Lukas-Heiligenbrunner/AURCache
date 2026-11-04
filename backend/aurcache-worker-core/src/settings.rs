@@ -34,6 +34,7 @@ use aurcache_common::worker_config::{
     SettingStatus, ValueKind,
 };
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use crate::config::env_opt;
 
@@ -51,11 +52,8 @@ pub enum Builtin {
     /// affinity list that reserves nothing.
     Unset,
     Size(u64),
-    /// Seconds.
-    Duration(u64),
+    Duration(Duration),
     Integer(i64),
-    Float(f64),
-    Bool(bool),
     Text(&'static str),
 }
 
@@ -66,10 +64,8 @@ impl Builtin {
         match self {
             Self::Unset => None,
             Self::Size(bytes) => Some(format_size(*bytes)),
-            Self::Duration(seconds) => Some(format_duration(*seconds)),
+            Self::Duration(duration) => Some(format_duration(duration.as_secs())),
             Self::Integer(value) => Some(value.to_string()),
-            Self::Float(value) => Some(value.to_string()),
-            Self::Bool(value) => Some(value.to_string()),
             Self::Text(value) => Some((*value).to_string()),
         }
     }
@@ -269,10 +265,10 @@ impl WorkerSettings {
         parse_size(self.raw(key)?)
     }
 
-    /// The value in effect as a number of seconds.
+    /// The value in effect as a duration.
     #[must_use]
-    pub fn duration(&self, key: &str) -> Option<u64> {
-        parse_duration(self.raw(key)?)
+    pub fn duration(&self, key: &str) -> Option<Duration> {
+        parse_duration(self.raw(key)?).map(Duration::from_secs)
     }
 
     /// The value in effect as a whole number.
@@ -443,8 +439,6 @@ pub mod keys {
     pub const PACKAGES: &str = "packages";
     pub const POLL_INTERVAL: &str = "poll_interval";
     pub const BUILD_TIMEOUT: &str = "build_timeout";
-    pub const BUILDDIR_MAX_BYTES: &str = "builddir_max_bytes";
-    pub const BUILDDIR_MIN_FREE: &str = "builddir_min_free";
 }
 
 /// One build at a time unless asked otherwise.
@@ -454,16 +448,10 @@ pub mod keys {
 /// nproc compiler processes, each build also holding its own chroot copy and
 /// package cache. That is memory exhaustion, not throughput.
 pub const DEFAULT_CONCURRENCY: i64 = 1;
-/// Enough for one very large build tree, small enough that opting in a second
-/// is a decision someone makes.
-pub const DEFAULT_BUILDDIR_MAX_BYTES: u64 = 200 * 1024 * 1024 * 1024;
-/// Secondary floor, covering what a cap cannot see: a small disk, or one
-/// shared with something else that grew.
-pub const DEFAULT_BUILDDIR_MIN_FREE: u64 = 50 * 1024 * 1024 * 1024;
 /// How long to wait before asking for work again when there is none.
-pub const DEFAULT_POLL_INTERVAL: u64 = 10;
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Long enough for the large packages this exists to build.
-pub const DEFAULT_BUILD_TIMEOUT: u64 = 3 * 60 * 60;
+pub const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
 /// Keyserver `gpg --recv-keys` asks for a PKGBUILD's `validpgpkeys`.
 ///
 /// One spelling shared by the chroot executor's setting default and the legacy
@@ -541,27 +529,44 @@ pub fn protocol_settings() -> Vec<SettingSpec> {
             applies: Applies::NextJob,
             default: Builtin::Duration(DEFAULT_BUILD_TIMEOUT),
         },
-        SettingSpec {
-            key: keys::BUILDDIR_MAX_BYTES,
-            env_var: "WORKER_BUILDDIR_MAX_BYTES",
-            kind: ValueKind::Size,
-            description: "Total disk the kept build trees may occupy before the oldest are \
-                          swept.",
-            category: "Build trees",
-            applies: Applies::NextLoop,
-            default: Builtin::Size(DEFAULT_BUILDDIR_MAX_BYTES),
-        },
-        SettingSpec {
-            key: keys::BUILDDIR_MIN_FREE,
-            env_var: "WORKER_BUILDDIR_MIN_FREE",
-            kind: ValueKind::Size,
-            description: "Disk to keep free on the filesystem holding the build trees, whatever \
-                          the cap above allows.",
-            category: "Build trees",
-            applies: Applies::NextLoop,
-            default: Builtin::Size(DEFAULT_BUILDDIR_MIN_FREE),
-        },
     ]
+}
+
+/// Check a worker's whole table -- the protocol's settings and an
+/// executor's together -- panicking on the first fault: for each executor's
+/// tests.
+///
+/// Every built-in default has to read back as its own kind, since it is at
+/// once what the worker runs and what the server is told the fallback is. And
+/// keys and variables have to be unique: they are what the server stores
+/// values under and what an operator renames to hand a setting over, so a
+/// duplicate of either is two settings quietly sharing one slot.
+///
+/// # Panics
+///
+/// On the first default that is not valid for its kind, and on a key or a
+/// variable declared twice.
+pub fn check_table(specs: &[SettingSpec]) {
+    for spec in specs {
+        if let Some(written) = spec.default.as_written() {
+            assert!(
+                spec.kind.validate(&written).is_ok(),
+                "{}'s default {written:?} is not a valid {:?}",
+                spec.key,
+                spec.kind
+            );
+        }
+    }
+    let mut keys = std::collections::HashSet::new();
+    let mut vars = std::collections::HashSet::new();
+    for spec in specs {
+        assert!(keys.insert(spec.key), "{} is declared twice", spec.key);
+        assert!(
+            vars.insert(spec.env_var),
+            "{} is declared twice",
+            spec.env_var
+        );
+    }
 }
 
 #[cfg(test)]
@@ -851,20 +856,18 @@ mod tests {
         assert_eq!(report.reason.as_deref(), Some("no cgroup"));
     }
 
-    /// Every built-in default must be readable back as its own kind, since it
-    /// is both what the worker runs and what the server is told the fallback
-    /// is.
     #[test]
-    fn built_in_defaults_are_valid_for_their_kind() {
-        for spec in crate::settings::protocol_settings() {
-            if let Some(written) = spec.default.as_written() {
-                assert!(
-                    spec.kind.validate(&written).is_ok(),
-                    "{}'s default {written:?} is not a valid {:?}",
-                    spec.key,
-                    spec.kind
-                );
-            }
-        }
+    fn the_protocol_table_checks_out() {
+        check_table(&protocol_settings());
+    }
+
+    /// What [`check_table`] exists to catch, so a check that passed
+    /// everything would be noticed.
+    #[test]
+    #[should_panic(expected = "declared twice")]
+    fn a_key_declared_twice_fails_the_check() {
+        let mut table = protocol_settings();
+        table.push(table[0].clone());
+        check_table(&table);
     }
 }

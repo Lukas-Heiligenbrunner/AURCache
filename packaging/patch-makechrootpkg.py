@@ -55,6 +55,22 @@ DST = os.environ.get("AURCACHE_BUILD_DST", "/usr/lib/aurcache/bin/aurcache-build
 # something a copy derived by the previous version of this file would not do.
 INTERFACE = "1"
 
+
+def _no_follow(description: str, var: str) -> tuple[str, str, str]:
+    """Make one of the loops that hand outputs back skip anything that is not a
+    regular file, and `chown -h` the rest; `var` is the loop's variable. See
+    the comment above its uses in PATCHES."""
+    return (
+        description,
+        f'\t\tchown "$src_owner" "${var}"\n',
+        f"\t\tif [[ -L ${var} || ! -f ${var} ]]; then\n"
+        f"\t\t\twarning 'Skipping %s: not a regular file' \"${{{var}##*/}}\"\n"
+        "\t\t\tcontinue\n"
+        "\t\tfi\n"
+        f'\t\tchown -h "$src_owner" "${var}"\n',
+    )
+
+
 # (description, anchor, replacement)
 PATCHES = [
     (
@@ -292,33 +308,9 @@ bindmounts_ro=()""",
     # processes with it, so nothing can swap a file for a link in between.
     # A skipped entry is not a product makepkg made; the worker refuses
     # symlinked artifacts anyway (aurcache-worker-core/src/artifacts.rs).
-    (
-        "move_logfiles: never follow a link the build left in logdest",
-        '\t\tchown "$src_owner" "$l"\n',
-        '\t\tif [[ -L $l || ! -f $l ]]; then\n'
-        "\t\t\twarning 'Skipping %s: not a regular file' \"${l##*/}\"\n"
-        "\t\t\tcontinue\n"
-        "\t\tfi\n"
-        '\t\tchown -h "$src_owner" "$l"\n',
-    ),
-    (
-        "move_products: never follow a link the build left in pkgdest",
-        '\t\tchown "$src_owner" "$pkgfile"\n',
-        '\t\tif [[ -L $pkgfile || ! -f $pkgfile ]]; then\n'
-        "\t\t\twarning 'Skipping %s: not a regular file' \"${pkgfile##*/}\"\n"
-        "\t\t\tcontinue\n"
-        "\t\tfi\n"
-        '\t\tchown -h "$src_owner" "$pkgfile"\n',
-    ),
-    (
-        "move_products: never follow a link the build left in srcpkgdest",
-        '\t\tchown "$src_owner" "$s"\n',
-        '\t\tif [[ -L $s || ! -f $s ]]; then\n'
-        "\t\t\twarning 'Skipping %s: not a regular file' \"${s##*/}\"\n"
-        "\t\t\tcontinue\n"
-        "\t\tfi\n"
-        '\t\tchown -h "$src_owner" "$s"\n',
-    ),
+    _no_follow("move_logfiles: never follow a link the build left in logdest", "l"),
+    _no_follow("move_products: never follow a link the build left in pkgdest", "pkgfile"),
+    _no_follow("move_products: never follow a link the build left in srcpkgdest", "s"),
 ]
 
 

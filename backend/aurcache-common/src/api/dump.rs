@@ -13,7 +13,6 @@
 use crate::source::SourceData;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use utoipa::ToSchema;
 
 /// The format version an importer checks before reading anything else.
 ///
@@ -39,7 +38,8 @@ pub const CA_KEY_FILE: &str = "ca-key.pem";
 /// API token hashes, present only in a dump taken with secrets.
 pub const TOKENS_FILE: &str = "tokens.json";
 
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DumpManifest {
     /// Checked first, and refused if newer than the importer understands.
     pub schema_version: u32,
@@ -58,7 +58,8 @@ pub struct DumpManifest {
 ///
 /// Everything `AURCache` derives is absent: status, versions, the resolved
 /// dependency graph, split package names, provides. A restore rebuilds those.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DumpPackage {
     pub source_data: SourceData,
     /// Expanded from the database's semicolon-delimited column, because a dump
@@ -78,7 +79,8 @@ pub struct DumpPackage {
 }
 
 /// Settings, split by what they apply to.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DumpSettings {
     /// Server-wide values, by setting key.
     pub global: BTreeMap<String, String>,
@@ -91,7 +93,8 @@ pub struct DumpSettings {
 /// The fingerprint is the identity: a worker whose certificate is not in the
 /// dump re-enrolls on first contact and is auto-approved because its
 /// fingerprint is already known.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DumpWorker {
     pub name: String,
     pub cert_fingerprint: String,
@@ -127,7 +130,8 @@ pub struct DumpWorker {
 /// The hash, never the token. `api_tokens` only ever stores a SHA-256 digest,
 /// so a dump carries nothing directly usable to authenticate -- but restoring
 /// it means the tokens users already hold keep working, which is the point.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DumpToken {
     pub username: String,
     pub token_hash: String,
@@ -155,7 +159,8 @@ pub struct DumpSecrets {
 /// policy: replacing a CA invalidates every certificate the current workers
 /// hold, which is a destructive act in the mode whose whole promise is that it
 /// only adds.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
     /// Leave this instance's CA and tokens as they are.
@@ -170,7 +175,8 @@ pub enum SecretsPolicy {
 /// Three policies rather than one flag because the right answer depends on why
 /// you are importing: topping up an instance from a colleague's dump wants
 /// `Skip`, rebuilding one from your own backup wants `Overwrite`.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ExistingPackagePolicy {
     /// Leave what is here alone. The safe default: an import that only ever
@@ -239,7 +245,8 @@ impl std::str::FromStr for ExistingPackagePolicy {
 }
 
 /// How an import should behave.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreOptions {
     /// Report what would happen and change nothing.
     #[serde(default)]
@@ -264,7 +271,8 @@ pub struct RestoreOptions {
 }
 
 /// What an import did, or would do, to one package.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum RestoreOutcome {
     /// Not here before; inserted.
@@ -295,7 +303,8 @@ impl RestoreOutcome {
 }
 
 /// One line of an import's report.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreEntry {
     pub pkgbase: String,
     #[serde(flatten)]
@@ -303,21 +312,14 @@ pub struct RestoreEntry {
 }
 
 /// An import's state and the entries after the offset asked for.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
-pub struct RestoreProgress {
-    pub id: i32,
-    pub total: i32,
-    pub completed: i32,
-    pub failed: i32,
-    pub finished: bool,
-    pub entries: Vec<RestoreEntry>,
-}
+pub type RestoreProgress = crate::api::operations::OperationProgress<RestoreEntry>;
 
 /// What starting an import returns.
 ///
 /// A dry run has no id to poll: it changed nothing, so there is nothing to
 /// watch, and the entries it would have written are in `preview`.
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreAccepted {
     pub job_id: Option<i32>,
     pub total: i32,

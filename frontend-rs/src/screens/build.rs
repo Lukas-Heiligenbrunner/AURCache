@@ -5,29 +5,13 @@ use crate::dates::{AbsoluteDate, absolute, use_date_style};
 use crate::format::{format_bytes, format_duration, now_secs};
 use crate::listing::ViewParams;
 use crate::routes::Route;
+use crate::screens::package_scope::use_scoped_package;
 use crate::shell::{CheckIcon, CopyIcon, DownloadIcon, WarnIcon};
 use crate::status::BuildStatusBadge;
+use crate::widgets::{ConfirmDialog, Consequence};
 use aurcache_common::api::builds::DiskUsage;
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
-
-/// Whether the build page is still waiting on something, so its header keeps
-/// re-fetching briskly rather than falling back to the idle cadence.
-///
-/// Either side can be the one that is behind: the build's own state comes
-/// from the log's poll loop, while the package badge up top only moves when
-/// its lookup re-runs — without this a finished build read "successful" below
-/// a header that still said "building". Nothing fetched yet counts as idle,
-/// the same as elsewhere: the initial load is already in flight.
-fn is_build_page_busy(
-    build_status: Option<BuildState>,
-    package_status: Option<BuildState>,
-) -> bool {
-    [build_status, package_status]
-        .into_iter()
-        .flatten()
-        .any(BuildState::is_in_progress)
-}
 
 /// What the log area says while it has no text, given whether the poll loop
 /// has finished (its final page is in) and the build's state.
@@ -51,32 +35,6 @@ fn empty_log_placeholder(finished: bool, status: Option<BuildState>) -> &'static
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_terminal_states_settle() {
-        assert!(!BuildState::Successful.is_in_progress());
-        assert!(!BuildState::Failed.is_in_progress());
-        assert!(BuildState::Active.is_in_progress());
-        // The regression: queued is not finished.
-        assert!(BuildState::Enqueued.is_in_progress());
-        assert!(BuildState::WaitingForDeps.is_in_progress());
-    }
-
-    /// The header stays live while either side is still moving: the bug was a
-    /// finished build reading "successful" under a package badge that still
-    /// said "building", because only the log's loop kept polling.
-    #[test]
-    fn the_header_stays_busy_while_either_side_is_still_moving() {
-        let active = Some(BuildState::Active);
-        let successful = Some(BuildState::Successful);
-        assert!(is_build_page_busy(active, active));
-        assert!(is_build_page_busy(successful, active));
-        assert!(is_build_page_busy(active, successful));
-        assert!(!is_build_page_busy(successful, successful));
-        // Nothing fetched yet: the initial load is already in flight, so
-        // there is nothing extra to hurry along.
-        assert!(!is_build_page_busy(None, None));
-    }
 
     #[test]
     fn empty_log_placeholder_tells_loading_from_missing() {
@@ -253,110 +211,43 @@ mod tests {
 /// The screen behind `/package/:pkgbase/build/:number`.
 #[component]
 pub fn Build(pkgbase: String, number: i32) -> Element {
-    // `use_reactive` so the fetch follows the route. Navigating between two
-    // packages reuses this component -- same route, different parameter -- and
-    // a resource whose closure captured the old name simply never re-runs: the
-    // URL changes, no request is made, and the previous package stays on
-    // screen looking like the one that was clicked.
-    let mut build = use_resource(use_reactive(
+    let package = use_scoped_package();
+    // Only asked whether the build is there at all: the log below follows the
+    // build on its own loop. `use_reactive` so it follows the route.
+    let build = use_resource(use_reactive(
         &(pkgbase.clone(), number),
         |(pkgbase, number)| async move {
             Ok::<_, LoadError>(crate::api::client()?.get_build(&pkgbase, number).await?)
         },
     ));
 
-    // Fetched from the build's package so this page carries the same header
-    // as every other package-scoped page, with the trail in the same place.
-    let mut package = use_resource(use_reactive(&pkgbase, |pkgbase| async move {
-        Ok::<_, LoadError>(Some(crate::api::client()?.get_package(&pkgbase).await?))
-    }));
-
-    // A build that is not here leaves for the closest thing that is: its
-    // package's builds, or -- when the package is gone too -- the add page with
-    // the name searched. Waits for both answers, since which it is depends on
-    // the package.
+    // A build that is not here leaves for its package's builds. When the
+    // package is gone too, the scope is already sending you to add it.
     let notice = crate::notice::use_notice();
     use_effect(use_reactive(
         &(pkgbase.clone(), number),
         move |(pkgbase, number)| {
-            if !matches!(&*build.read(), Some(Err(LoadError::NotFound))) {
-                return;
-            }
-            match &*package.read() {
-                Some(Err(LoadError::NotFound)) => crate::notice::redirect(
-                    notice,
-                    Route::PackageAdd { q: pkgbase.clone() },
-                    crate::notice::Level::Info,
-                    format!(
-                        "No package called {pkgbase} is tracked here, so there is no build \
-                     #{number} of it. Search the AUR to add it."
-                    ),
-                ),
-                Some(Ok(_)) => crate::notice::redirect(
+            if matches!(&*build.read(), Some(Err(LoadError::NotFound)))
+                && matches!(&*package.read(), Some(Ok(_)))
+            {
+                crate::notice::redirect(
                     notice,
                     Route::PackageBuilds {
                         pkgbase: pkgbase.clone(),
                     },
                     crate::notice::Level::Error,
                     format!("{pkgbase} has no build #{number}."),
-                ),
-                // Still asking, or the package lookup itself failed: nowhere
-                // better to go.
-                _ => {}
+                );
             }
         },
     ));
 
-    // The log below polls the build on its own loop, so without this the
-    // package badge up top froze at whatever the first lookup returned while
-    // the build's own badge moved on to "successful".
-    let build_status = match &*build.read_unchecked() {
-        Some(Ok(b)) => Some(b.status),
-        _ => None,
-    };
-    let package_status = match &*package.read_unchecked() {
-        Some(Ok(Some(p))) => Some(p.status),
-        _ => None,
-    };
-    let busy = is_build_page_busy(build_status, package_status);
-    crate::poll::use_poll(build, busy);
-    crate::poll::use_poll(package, busy);
-
+    // Not asked for a build that is not there; see the redirect above.
+    if matches!(&*build.read_unchecked(), Some(Err(LoadError::NotFound))) {
+        return rsx! {};
+    }
     rsx! {
-        // `h-full` so the log below can flex into what the header leaves,
-        // rather than guessing a fraction of the viewport and overshooting it.
-        div { class: "space-y-4 h-full flex flex-col min-h-0",
-            match (&*package.read_unchecked(), &*build.read_unchecked()) {
-                // `done`, not `build`: the resource of that name is what the
-                // rebuild handler below restarts, and the pattern would
-                // otherwise shadow it with this one finished build.
-                (Some(Ok(Some(pkg))), Some(Ok(done))) => rsx! {
-                    crate::screens::PackageHeader {
-                        pkg: pkg.clone(),
-                        trail: vec![
-                            (
-                                "Builds".to_string(),
-                                Some(crate::routes::Route::PackageBuilds {
-                                    pkgbase: done.pkg_name.clone(),
-                                }),
-                            ),
-                            (done.number.to_string(), None),
-                        ],
-                        on_rebuilt: move |()| {
-                            build.restart();
-                            package.restart();
-                        },
-                    }
-                },
-                // The log is what this page is for, so a failed lookup costs
-                // the header rather than the page.
-                _ => rsx! {},
-            }
-            // Not asked for a build that is not there; see the redirect above.
-            if !matches!(&*build.read_unchecked(), Some(Err(LoadError::NotFound))) {
-                BuildLog { key: "{pkgbase}/{number}", pkgbase, number }
-            }
-        }
+        BuildLog { key: "{pkgbase}/{number}", pkgbase, number }
     }
 }
 
@@ -369,8 +260,6 @@ pub fn Build(pkgbase: String, number: i32) -> Element {
 // them to a cap-sized window, and stops once the build reaches a terminal
 // state, with the raw bytes decoded (and the cap kept) client-side.
 // ---------------------------------------------------------------------------
-
-/// How often to ask for more output while a build is running.
 
 #[component]
 pub fn BuildLog(pkgbase: String, number: i32) -> Element {
@@ -398,7 +287,7 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
     let canceling = use_signal(|| false);
     let mut confirming_stop = use_signal(|| false);
     let pkgbase_for_stop = pkgbase.clone();
-    let number_for_stop = number;
+    let stop_title = format!("Stop {pkgbase} build #{number}?");
     let pkgbase_for_keep = pkgbase.clone();
     let line_count = use_memo(move || log.read().lines().count());
 
@@ -499,66 +388,41 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
                         // Inside the same condition as the button, so a build
                         // that ends while the dialog is open takes the dialog
                         // with it rather than offering to stop a finished build.
-                        div {
-                            class: if confirming_stop() { "modal modal-open" } else { "modal" },
-                            role: "dialog",
-                            aria_modal: "true",
-                            aria_label: "Confirm stopping the build",
-                            div { class: "modal-box",
-                                h3 { class: "font-bold text-lg",
-                                    "Stop {pkgbase_for_stop} build #{number_for_stop}?"
-                                }
-                                p { class: "text-sm opacity-70 pt-2",
-                                    if status() == Some(BuildState::Active) {
-                                        "It is killed where it is and ends as canceled. Nothing it has built so \
-                                         far is published; retrying it starts the build again."
-                                    } else {
-                                        "It leaves the queue without starting and ends as canceled. Retrying it \
-                                         queues it again."
+                        ConfirmDialog {
+                            open: confirming_stop(),
+                            label: "Confirm stopping the build",
+                            title: stop_title,
+                            cancel: "Keep building",
+                            confirm: "Stop build",
+                            consequence: Consequence::Destructive,
+                            on_cancel: move |()| confirming_stop.set(false),
+                            on_confirm: move |()| {
+                                confirming_stop.set(false);
+                                // Signals are Copy; both are rebound `mut` for
+                                // the async body below.
+                                let (mut canceling, mut error) = (canceling, error);
+                                let pkgbase = pkgbase_for_stop.clone();
+                                spawn(async move {
+                                    canceling.set(true);
+                                    let stopped = async {
+                                        crate::api::client()?
+                                            .cancel_build(&pkgbase, number)
+                                            .await
+                                            .map_err(|e| e.to_string())
                                     }
-                                }
-                                div { class: "modal-action",
-                                    button {
-                                        class: "btn btn-sm",
-                                        onclick: move |_| confirming_stop.set(false),
-                                        "Keep building"
+                                    .await;
+                                    if let Err(e) = stopped {
+                                        error.set(Some(e));
+                                        canceling.set(false);
                                     }
-                                    button {
-                                        class: "btn btn-error btn-sm",
-                                        onclick: move |_| {
-                                            confirming_stop.set(false);
-                                            // Signals are Copy; both are rebound `mut`
-                                            // for the async body below.
-                                            let (mut canceling, mut error) = (canceling, error);
-                                            let (pkgbase, number) =
-                                                (pkgbase_for_stop.clone(), number_for_stop);
-                                            spawn(async move {
-                                                canceling.set(true);
-                                                let result = match crate::api::client() {
-                                                    Ok(client) => {
-                                                        match client.cancel_build(&pkgbase, number).await {
-                                                            Ok(()) => Ok(()),
-                                                            Err(e) => Err(e.to_string()),
-                                                        }
-                                                    }
-                                                    Err(e) => Err(e),
-                                                };
-                                                if let Err(e) = result {
-                                                    error.set(Some(e));
-                                                    canceling.set(false);
-                                                }
-                                            });
-                                        },
-                                        "Stop build"
-                                    }
-                                }
-                            }
-                            // Clicking away is "no", as it is for every dialog here.
-                            button {
-                                class: "modal-backdrop",
-                                onclick: move |_| confirming_stop.set(false),
-                                aria_label: "Keep building",
-                                "Close"
+                                });
+                            },
+                            if status() == Some(BuildState::Active) {
+                                "It is killed where it is and ends as canceled. Nothing it has built so \
+                                 far is published; retrying it starts the build again."
+                            } else {
+                                "It leaves the queue without starting and ends as canceled. Retrying it \
+                                 queues it again."
                             }
                         }
                     }
