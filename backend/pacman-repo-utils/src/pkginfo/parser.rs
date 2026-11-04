@@ -2,9 +2,13 @@ use anyhow::bail;
 use base64::Engine;
 use base64::engine::general_purpose;
 use std::io::{BufRead, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+/// Upper bound on a detached signature, mirroring `repo-add`'s own check.
+const MAX_SIGNATURE_BYTES: usize = 16384;
+
+#[derive(Default)]
 pub struct Pkginfo {
     pub groups: Vec<String>,
     pub licenses: Vec<String>,
@@ -28,47 +32,27 @@ pub struct Pkginfo {
 }
 
 impl Pkginfo {
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            groups: vec![],
-            licenses: vec![],
-            replaces: vec![],
-            depends: vec![],
-            conflicts: vec![],
-            provides: vec![],
-            optdepends: vec![],
-            makedepends: vec![],
-            checkdepends: vec![],
-            pkgname: String::new(),
-            pkgbase: String::new(),
-            pkgver: String::new(),
-            pkgdesc: String::new(),
-            size: 0,
-            url: String::new(),
-            arch: String::new(),
-            builddate: String::new(),
-            packager: String::new(),
-            pgpsig: String::new(),
-        }
+        Self::default()
     }
 
     pub fn parse(&mut self, file: impl Read) -> anyhow::Result<()> {
         let reader = io::BufReader::new(file);
         for line in reader.lines() {
-            let line = line?;
-            self.parse_line(line)?;
+            self.parse_line(&line?)?;
         }
         Ok(())
     }
 
-    pub fn parse_line(&mut self, line: String) -> anyhow::Result<()> {
+    pub fn parse_line(&mut self, line: &str) -> anyhow::Result<()> {
         if line.starts_with('#') {
             return Ok(());
         }
-        let (key, value) = match line.split_once('=') {
-            None => return Ok(()),
-            Some((key, value)) => (key.trim(), value.trim()),
+        let Some((key, value)) = line.split_once('=') else {
+            return Ok(());
         };
+        let (key, value) = (key.trim(), value.trim());
         match key {
             "group" => self.groups.push(value.to_string()),
             "license" => self.licenses.push(value.to_string()),
@@ -93,22 +77,26 @@ impl Pkginfo {
         Ok(())
     }
 
-    pub fn set_signature(&mut self, pkgfile: &str) -> anyhow::Result<()> {
-        let sigfile = format!("{pkgfile}.sig");
-        if Path::new(&sigfile).exists() {
-            let sigdata = fs::read(&sigfile)?;
-            if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
-                eprintln!("Cannot use armored signatures for packages: {sigfile}");
-                bail!("Invalid package signature file");
-            }
-            let pgpsigsize = sigdata.len();
-            if pgpsigsize > 16384 {
-                eprintln!("Invalid package signature file '{sigfile}'.");
-                bail!("Invalid package signature file");
-            }
-
-            self.pgpsig = general_purpose::STANDARD.encode(&sigdata);
+    pub fn set_signature(&mut self, pkgfile: &Path) -> anyhow::Result<()> {
+        let mut sigfile = pkgfile.as_os_str().to_owned();
+        sigfile.push(".sig");
+        let sigfile = PathBuf::from(sigfile);
+        if !sigfile.exists() {
+            return Ok(());
         }
+
+        let sigdata = fs::read(&sigfile)?;
+        if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
+            bail!(
+                "Cannot use armored signatures for packages: {}",
+                sigfile.display()
+            );
+        }
+        if sigdata.len() > MAX_SIGNATURE_BYTES {
+            bail!("Package signature file too large: {}", sigfile.display());
+        }
+
+        self.pgpsig = general_purpose::STANDARD.encode(&sigdata);
         Ok(())
     }
 

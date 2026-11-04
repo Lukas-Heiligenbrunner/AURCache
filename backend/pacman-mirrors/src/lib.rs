@@ -14,7 +14,7 @@ pub use country::Country;
 pub use protocol::Protocol;
 pub use status::Status;
 
-/// Shorthand for [`Status::get()`](Status::get). This gets the mirror status of all Arch Linux
+/// Shorthand for [`Status::get_from_default_url`]. This gets the mirror status of all Arch Linux
 /// mirrors.
 pub async fn get_status(platform: Platform) -> anyhow::Result<Status> {
     Status::get_from_default_url(platform).await

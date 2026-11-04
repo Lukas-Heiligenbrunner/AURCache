@@ -1,0 +1,83 @@
+name: Publish Arch-based images
+
+# The Arch-based images: the worker, the hybrid compatibility image, and the
+# legacy builder image the hybrid's compatibility executor spawns — plus the
+# Debian-based demo worker, which the demo compose file pulls from ghcr.io.
+#
+# All four must be published for every release tag: a release whose server and
+# worker images come from different commits can disagree about the worker
+# protocol. The weekly cron additionally refreshes `latest`, which these images
+# need more than most — an Arch image that is never rebuilt eventually fails its
+# own `pacman -Syu` as the keyring and base packages go stale.
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * 1"
+
+jobs:
+  build:
+    name: Build multi-arch AURCache Arch images
+    runs-on: ubuntu-latest
+    env:
+      # Every image is `latest`, and a release tag's name as well. The
+      # binaries' own version comes from the checkout (see build-images.sh):
+      # the release tag on a release, the commit otherwise.
+      VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # packaging/ holds AUR submodules; the image builds read the
+          # PKGBUILDs from them.
+          submodules: recursive
+      -
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      -
+        name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      -
+        # `--cache gha` drives buildx from `run:` steps, which unlike
+        # build-push-action are not handed the token GitHub's cache backend
+        # needs. This exposes it to the steps that follow.
+        name: Expose the Actions cache to buildx
+        uses: crazy-max/ghaction-github-runtime@v4
+      -
+        # armv7's cross toolchain is built from the AUR in a stage of its own
+        # -- seven packages, gcc three times. Locally Docker's layer cache
+        # keeps it, but a CI runner starts cold every time, so the cache is
+        # exported to and restored from GitHub's cache backend. Without this
+        # every publish pays the better part of an hour.
+        name: Build the worker and hybrid images
+        run: >
+          ./scripts/build-images.sh --push --cache gha --images worker,hybrid
+          --tag latest ${VERSION:+--tag "$VERSION"} "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+      -
+        # Spawned per build by the hybrid image's legacy builder.
+        name: Build the legacy builder image
+        run: >
+          ./scripts/build-images.sh --push --images builder
+          --tag latest ${VERSION:+--tag "$VERSION"} "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+      -
+        # The dummy worker the demo compose file pulls from ghcr.io.
+        # amd64 only: it builds natively per platform, so a foreign arch
+        # would each pay a full emulated Rust build, and the demo runs on
+        # x86_64.
+        name: Build the demo worker image
+        run: >
+          ./scripts/build-images.sh --push --cache gha --images demo-worker
+          --platforms linux/amd64
+          --tag latest ${VERSION:+--tag "$VERSION"} "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"

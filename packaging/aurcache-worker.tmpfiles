@@ -1,0 +1,23 @@
+# Directories AURCache needs, with the ownership that makes the uid split work.
+#
+# Ownership here is not bookkeeping: it is what protects the worker's secrets
+# even if the Landlock policy is never applied.
+#
+#   /var/lib/aurcache-worker   - the worker's, traversable so builds can reach
+#                                work/, with secrets inside readable only by
+#                                the worker.
+#   .../work and the cache     - owned by *builder*, shared to the worker by
+#                                group, because makechrootpkg copies only the
+#                                build user's primary uid/gid into the chroot.
+#                                Supplementary groups do not exist in there, so
+#                                group-based write access silently fails inside
+#                                it; ownership by uid is the only form that
+#                                survives. The setgid bit keeps new files in the
+#                                shared group so the worker can still collect
+#                                them.
+
+
+d /var/lib/aurcache-worker       0755 aurcache aurcache -
+d /var/lib/aurcache-worker/secrets 0700 aurcache aurcache -
+d /var/lib/aurcache-worker/work  2775 builder  aurbuild -
+d /var/lib/aurcache-worker/chroot 0755 aurcache aurcache -

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AURCache</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- Prototype only: CDN Tailwind + daisyUI. A real port would run a
+         Tailwind build so unused classes are purged. -->
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.14/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* The chart crate colours each series itself and offers one class for
+         all of them, so telling them apart needs a descendant selector — which
+         Tailwind has no utility for. It groups each series as
+         `{class_line}-{n}`, set to `series-{n}` here, and an SVG presentation attribute loses to any
+         CSS rule, so these win without !important.
+
+         Theme variables rather than fixed colours, so the chart follows the
+         palette like everything else. */
+      /* dioxus-charts wraps its <svg> in a plain <div> of its own, and the svg
+         asks for height:100%. That resolves against *that* wrapper rather than
+         the box we sized, and an auto-height wrapper makes the request
+         indefinite -- so the svg falls back to its viewBox aspect ratio and
+         grows with the available width. On a 2560-wide screen that is a ~680px
+         chart hanging out of a 256px card with 40px axis labels. Passing the
+         height through the wrapper is what makes a fixed height on the outer
+         box mean anything at all. */
+      .chart-box > div { height: 100%; }
+
+      /* daisyUI pads a card by 2rem a side, which on a phone is a sixth of
+         the screen spent on margins inside margins. Below `md` it is halved,
+         through the variable daisyUI reads so `card-compact` still wins. */
+      @media (max-width: 767.98px) {
+        :root { --padding-card: 1rem; }
+      }
+
+      .series-0 .chart-line { stroke: oklch(var(--p)); }
+      .series-1 .chart-line { stroke: oklch(var(--su)); }
+      .dx-grid-label {
+        fill: oklch(var(--bc));
+        font-size: 12px;
+      }
+      .dx-grid-line {
+        stroke: oklch(var(--bc) / 0.15);
+      }
+      /* Months sit on the horizontal axis; with the crate's 6px LABEL_OFFSET
+         and hanging baseline they render on the line in some browsers.
+         Nudge the hanging labels (x-axis, anchor start) 6px further down so
+         the text is clearly below the axis, not on it. The y-axis labels
+         (anchor end, text-bottom) are unaffected. */
+      g.dx-grid-labels text[alignment-baseline="hanging"] {
+        transform: translateY(6px);
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Apply the saved theme before anything paints. The wasm takes a moment
+      // to load, and without this the page renders in the default palette and
+      // visibly flips once the app mounts.
+      //
+      // This mirrors `resolve`/`normalise` in src/theme.rs -- keep the two in
+      // step. Unknown values fall through to following the system, because
+      // daisyUI has no rules for them and the page would render unstyled.
+      (function () {
+        try {
+          var choice = localStorage.getItem("aurcache-theme") || "system";
+          var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var theme = choice === "system" ? (dark ? "dark" : "light") : choice;
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {
+          // Storage can be unavailable (private mode, blocked cookies). A
+          // readable default beats failing to boot over a preference.
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+    <div id="main"></div>
+    <script type="module">
+      // Absolute, not "./": the app routes on real paths, so this document is
+      // served at /build/12 and /package/foo/source/PKGBUILD as well as /. A
+      // relative specifier would resolve against those, ask for
+      // /build/aurcache-frontend.js, and get the app shell back instead of the
+      // module — which fails silently as a blank page.
+      import init from "/aurcache-frontend.js";
+      init();
+    </script>
+  </body>
+</html>

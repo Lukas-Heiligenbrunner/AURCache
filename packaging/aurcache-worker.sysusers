@@ -1,0 +1,35 @@
+# Users and groups an AURCache build worker needs, declared rather than
+# created by a script.
+#
+# The server package declares `aurcache` in a file of its own. Two sysusers
+# files may declare one user -- the second is a no-op -- and they must be two
+# files, because pacman refuses to install two packages that ship the same
+# path even when the contents are identical.
+#
+# systemd-sysusers is idempotent by construction and re-applied on boot, where
+# an install script has to be written carefully not to clobber an existing
+# account -- and would be re-run on every package upgrade.
+#
+# Two users, deliberately separate:
+#
+#   aurcache - runs the server and the worker process. Owns the mTLS identity
+#              and the build credentials, and is the only user that can read
+#              them.
+#   builder  - runs each package build. `makechrootpkg -U builder` names it
+#              explicitly, so a build never inherits the worker's user through
+#              SUDO_USER and cannot reach the worker's secrets by file
+#              permissions.
+#
+# `aurbuild` is builder's PRIMARY group, not a supplementary one, and that is
+# load-bearing: makechrootpkg carries only the build user's primary uid/gid into
+# the chroot, so a supplementary group does not exist in there and group-write
+# on the bind-mounted caches fails with "no write permission for $SRCDEST" --
+# from inside the chroot, after every host-side check has already passed.
+g aurbuild -
+u aurcache - "AURCache server and build worker" /var/lib/aurcache -
+# The group goes in the ID field as `-:aurbuild`, which is what makes aurbuild
+# builder's PRIMARY group without pinning a uid. A bare `-` would create a
+# `builder` group and use that instead -- and that failure shows up only inside
+# the chroot, long after every host-side check has passed.
+u builder -:aurbuild "AURCache package build user" /var/lib/aurcache-worker -
+m aurcache aurbuild

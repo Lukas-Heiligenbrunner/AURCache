@@ -29,61 +29,53 @@ pub struct Desc {
 
 impl Display for Desc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let desc_lines = vec![
-            self.add_desc_entry("filename", self.filename.clone()),
-            self.add_desc_entry("name", self.name.clone()),
-            self.add_desc_entry("base", self.base.clone()),
-            self.add_desc_entry("version", self.version.clone()),
-            self.add_desc_entry("desc", self.desc.clone()),
-            self.add_desc_entries("groups", &self.groups),
-            self.add_desc_entry("csize", self.csize.clone()),
-            self.add_desc_entry("isize", self.isize.clone()),
-            self.add_desc_entry("md5sum", self.md5sum.clone()),
-            self.add_desc_entry("sha256sum", self.sha256sum.clone()),
-            self.add_desc_entry("pgpsig", self.pgpsig.clone()),
-            self.add_desc_entry("url", self.url.clone()),
-            self.add_desc_entries("license", &self.licenses),
-            self.add_desc_entry("arch", self.arch.clone()),
-            self.add_desc_entry("builddate", self.builddate.clone()),
-            self.add_desc_entry("packager", self.packager.clone()),
-            self.add_desc_entries("replaces", &self.replace),
-            self.add_desc_entries("conflicts", &self.conflicts),
-            self.add_desc_entries("provides", &self.provides),
-            self.add_desc_entries("depends", &self.depends),
-            self.add_desc_entries("optdepends", &self.optdepends),
-            self.add_desc_entries("makedepends", &self.makedepends),
-            self.add_desc_entries("checkdepends", &self.checkdepends),
-        ];
-        write!(f, "{}", desc_lines.join(""))
+        write_entry(f, "filename", &self.filename)?;
+        write_entry(f, "name", &self.name)?;
+        write_entry(f, "base", &self.base)?;
+        write_entry(f, "version", &self.version)?;
+        write_entry(f, "desc", &self.desc)?;
+        write_entries(f, "groups", &self.groups)?;
+        write_entry(f, "csize", &self.csize)?;
+        write_entry(f, "isize", &self.isize)?;
+        write_entry(f, "md5sum", &self.md5sum)?;
+        write_entry(f, "sha256sum", &self.sha256sum)?;
+        write_entry(f, "pgpsig", &self.pgpsig)?;
+        write_entry(f, "url", &self.url)?;
+        write_entries(f, "license", &self.licenses)?;
+        write_entry(f, "arch", &self.arch)?;
+        write_entry(f, "builddate", &self.builddate)?;
+        write_entry(f, "packager", &self.packager)?;
+        write_entries(f, "replaces", &self.replace)?;
+        write_entries(f, "conflicts", &self.conflicts)?;
+        write_entries(f, "provides", &self.provides)?;
+        write_entries(f, "depends", &self.depends)?;
+        write_entries(f, "optdepends", &self.optdepends)?;
+        write_entries(f, "makedepends", &self.makedepends)?;
+        write_entries(f, "checkdepends", &self.checkdepends)
     }
 }
-impl Desc {
-    fn add_desc_entry(&self, header: &str, value: String) -> String {
-        if value.is_empty() {
-            String::new()
-        } else {
-            format!("%{}%\n{}\n\n", header.to_uppercase(), value)
-        }
-    }
 
-    fn add_desc_entries(&self, header: &str, values: &[String]) -> String {
-        if values.is_empty()
-            || (values.len() == 1
-                && values
-                    .first()
-                    .expect("Must be populated bc. of short-circuit evaluation")
-                    .is_empty())
-        {
-            String::new()
-        } else {
-            self.add_desc_entry(header, values.join("\n"))
-        }
+/// Write one `%HEADER%` section; an empty value writes nothing at all.
+fn write_entry(f: &mut Formatter<'_>, header: &str, value: &str) -> std::fmt::Result {
+    if value.is_empty() {
+        return Ok(());
+    }
+    write!(f, "%{}%\n{value}\n\n", header.to_uppercase())
+}
+
+/// Write a multi-value `%HEADER%` section. An empty list, or a list holding
+/// nothing but one empty string, writes nothing at all.
+fn write_entries(f: &mut Formatter<'_>, header: &str, values: &[String]) -> std::fmt::Result {
+    match values {
+        [] => Ok(()),
+        [value] if value.is_empty() => Ok(()),
+        _ => write_entry(f, header, &values.join("\n")),
     }
 }
 
 impl From<Pkginfo> for Desc {
     fn from(value: Pkginfo) -> Self {
-        Desc {
+        Self {
             filename: String::new(),
             name: value.pkgname,
             base: value.pkgbase,

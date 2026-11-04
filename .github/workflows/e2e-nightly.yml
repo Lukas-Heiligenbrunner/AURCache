@@ -1,0 +1,72 @@
+name: E2E (nightly)
+
+# The full end-to-end suite builds the server and worker images and exercises
+# them against the real AUR and Arch mirrors. That makes it slow (~15 min) and
+# flaky in ways no diff can fix, so it runs once a night instead of on every
+# push -- and only when something actually landed since the last slot.
+#
+# To run it on a pull request on demand, add the `run-e2e` label; the job
+# removes it when done, so re-adding it re-runs the suite.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  # Removing the trigger label once the run finishes.
+  issues: write
+
+jobs:
+  e2eTest:
+    # Scheduled and manual runs always go ahead; a PR run only when the label
+    # that was just added is the trigger one.
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-e2e'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The e2e suite builds the images, which read the PKGBUILDs from the
+          # AUR submodules under packaging/.
+          submodules: recursive
+
+      - name: Check for new commits
+        id: changed
+        run: |
+          # Scheduled runs fire even when nothing landed, so they only go ahead
+          # when HEAD is newer than the last slot (24h plus slack for queue
+          # delays). A manual or label-triggered run always goes ahead.
+          if [ "${{ github.event_name }}" = "schedule" ] \
+            && [ "$(git log -1 --format=%ct)" -lt "$(($(date +%s) - 90000))" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No commits in the last 25h; skipping."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-docker-action@v5
+
+      - name: Set up Docker Buildx
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Run E2E test
+        if: steps.changed.outputs.run == 'true'
+        run: ./scripts/test-e2e.sh hello
+
+      # The label means "e2e requested". Taking it back off once the run is over
+      # -- pass or fail -- restores that meaning and lets a re-add trigger a
+      # fresh run. Best-effort: fork PRs get a read-only token, so removal
+      # fails there and the label just stays until someone clears it.
+      - name: Remove the trigger label
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh pr edit ${{ github.event.pull_request.number }}
+          --remove-label run-e2e

@@ -1,0 +1,82 @@
+[
+  {
+    "outcome": "succeeded",
+    "exit_code": 0,
+    "reason": "makepkg exited with 0",
+    "peak_memory_bytes": 1073741824,
+    "disk_usage": {
+      "chroot": 3221225472,
+      "workdir": 41943040,
+      "sources": 1048576,
+      "build_tree": 20971520
+    },
+    "vcs_commits": {
+      "git+https://example.invalid/hello.git": "0123abcd"
+    },
+    "kept": {
+      "path": "/var/lib/aurcache-chroot/kept-42",
+      "until": 1800000000,
+      "tree": "/var/lib/aurcache-chroot/kept-42.build"
+    }
+  },
+  {
+    "outcome": "failed",
+    "exit_code": 0,
+    "reason": "makepkg exited with 0",
+    "peak_memory_bytes": 1073741824,
+    "disk_usage": {
+      "chroot": 3221225472,
+      "workdir": 41943040,
+      "sources": 1048576,
+      "build_tree": 20971520
+    },
+    "vcs_commits": {
+      "git+https://example.invalid/hello.git": "0123abcd"
+    },
+    "kept": {
+      "path": "/var/lib/aurcache-chroot/kept-42",
+      "until": 1800000000,
+      "tree": "/var/lib/aurcache-chroot/kept-42.build"
+    }
+  },
+  {
+    "outcome": "canceled",
+    "exit_code": 0,
+    "reason": "makepkg exited with 0",
+    "peak_memory_bytes": 1073741824,
+    "disk_usage": {
+      "chroot": 3221225472,
+      "workdir": 41943040,
+      "sources": 1048576,
+      "build_tree": 20971520
+    },
+    "vcs_commits": {
+      "git+https://example.invalid/hello.git": "0123abcd"
+    },
+    "kept": {
+      "path": "/var/lib/aurcache-chroot/kept-42",
+      "until": 1800000000,
+      "tree": "/var/lib/aurcache-chroot/kept-42.build"
+    }
+  },
+  {
+    "outcome": "interrupted",
+    "exit_code": 0,
+    "reason": "makepkg exited with 0",
+    "peak_memory_bytes": 1073741824,
+    "disk_usage": {
+      "chroot": 3221225472,
+      "workdir": 41943040,
+      "sources": 1048576,
+      "build_tree": 20971520
+    },
+    "vcs_commits": {
+      "git+https://example.invalid/hello.git": "0123abcd"
+    },
+    "kept": {
+      "path": "/var/lib/aurcache-chroot/kept-42",
+      "until": 1800000000,
+      "tree": "/var/lib/aurcache-chroot/kept-42.build"
+    }
+  }
+]

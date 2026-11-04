@@ -38,9 +38,9 @@ macro_rules! countries {
         impl std::fmt::Display for Kind {
             fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 match self {
-                    $(Self::$kind => write!(f, $name)),+,
-                    Self::Worldwide => write!(f, "Worldwide"),
-                    Self::Other(kind) => write!(f, "{}", kind)
+                    $(Self::$kind => f.write_str($name)),+,
+                    Self::Worldwide => f.write_str("Worldwide"),
+                    Self::Other(kind) => f.write_str(kind)
                 }
             }
         }
@@ -70,9 +70,9 @@ macro_rules! countries {
         impl std::fmt::Display for Code {
             fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 match self {
-                    $(Self::$code => write!(f, "{}", stringify!($code))),+,
-                    Self::Worldwide => write!(f, "Worldwide"),
-                    Self::Other(code) => write!(f, "{}", code)
+                    $(Self::$code => f.write_str(stringify!($code))),+,
+                    Self::Worldwide => f.write_str("Worldwide"),
+                    Self::Other(code) => f.write_str(code)
                 }
             }
         }

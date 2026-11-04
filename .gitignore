@@ -11,3 +11,31 @@ target/
 
 
 *.env
+# ...except the packaging's own templates: install-files.sh installs them into
+# /etc/aurcache, so a checkout without them cannot build the packages. They are
+# commented examples, not anyone's configuration.
+!packaging/server.env
+!packaging/worker.env
+
+# Persistent on-disk git checkout cache for SnapshotStore (AURCACHE_SOURCE_CACHE_PATH)
+source_cache/
+
+# Build output of the Rust frontend (wasm bundle + wasm-bindgen glue).
+# Produced by `cargo build --target wasm32-unknown-unknown` + `wasm-bindgen`.
+frontend-rs/dist/
+
+# The built frontend, embedded into the server by `aurcache-api`'s `static`
+# feature. Produced by the Docker build and by scripts/test-frontend.sh; never
+# a source file.
+backend/aurcache-api/web/
+
+# Compiler crash dumps, written into the working directory by rustc itself.
+rustc-ice-*.txt
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+/.claude
+/.ignore
+/.mcp.json
+/opencode.json
+__pycache__/

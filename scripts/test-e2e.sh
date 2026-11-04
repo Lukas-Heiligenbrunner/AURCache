@@ -1,192 +1,127 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# End-to-end test for the remote-worker architecture.
+#
+# Brings up the AURCache server + one real privileged build worker (see
+# compose/docker-compose.e2e.yaml), then: requests a package, waits for the worker to
+# enroll/approve, waits for the build to finish, and finally installs the built
+# package from the repo in a throwaway container.
+#
+#   ./scripts/test-e2e.sh <package> [port] [timeout]
+
 : "${1?Usage: $0 <package> [port] [timeout]}"
 PACKAGE="$1"
 export AURCACHE_PORT="${2:-8080}"
 export AURCACHE_MIRROR_PORT=$((AURCACHE_PORT + 1))
-BUILD_TIMEOUT="${3:-300}"
-
-# We take security very seriously
-AUTH_HEADER="Authorization: Basic $(echo -n 'admin:secret' | base64)"
+export AURCACHE_WORKER_PORT=$((AURCACHE_PORT + 3))
+BUILD_TIMEOUT="${3:-600}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-COMPOSE_FILE="$PROJECT_DIR/docker-compose.e2e.yaml"
 
-# A clean slate for each new test.
-export TEMP_DIR=$(mktemp -d)
-echo "Using temp dir $TEMP_DIR"
+# The human-facing API is plain HTTP (worker mTLS lives on its own port), so
+# the CLI needs no TLS to talk to it.
+export AURCACHE_URL="http://localhost:$AURCACHE_PORT/api"
+export AURCACHE_TOKEN="${AURCACHE_TOKEN:-}"
 
-# These are mounted by docker-compose
-BUILD_DIR="$TEMP_DIR/builds"
+# Overridable so the same harness can drive an alternative topology — see
+# scripts/test-e2e-hybrid.sh, which points it at the single-container image.
+COMPOSE_ARGS=(-f "${E2E_COMPOSE_FILE:-$PROJECT_DIR/compose/docker-compose.e2e.yaml}")
+# The hybrid image runs both roles in one container, so it overrides this to a
+# single name.
+E2E_SERVICES="${E2E_SERVICES:-aurcache builder}"
 
-# These will be picked up by docker-compose
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-
-curl_api() {
-    local path="$1"
-    shift
-    curl -s "http://localhost:$AURCACHE_PORT$path" \
-        -H "$AUTH_HEADER" \
-        -H "Content-Type: application/json" \
-        "$@"
-}
-
-wait_for_service() {
-    echo "=== Waiting for AURCache to be ready ==="
-    local max_attempts=30
-    local delay=2
-
-    for i in $(seq 1 "$max_attempts"); do
-        if curl -s "http://localhost:$AURCACHE_PORT/api"  > /dev/null 2>&1; then
-            echo "    AURCache is ready"
-            return 0
-        fi
-        if [ "$i" -eq "$max_attempts" ]; then
-            return 1
-        fi
-        sleep "$delay"
-    done
-}
-
-dc() {
-    docker compose -f docker-compose.e2e.yaml "$@"
-}
+# shellcheck source=scripts/lib/e2e.sh
+. "$SCRIPT_DIR/lib/e2e.sh"
+E2E_KEEP_HINTS+=("Re-run against these containers without rebuilding: REUSE=1 $0 <pkg>")
 
 # =============================================================================
-# Setup Functions
+# Steps
 # =============================================================================
 
-setup_directories() {
-    mkdir -p "$BUILD_DIR"/{builds,repo,db,downloads,config/pacman_x86_64}
-    chmod 777 "$BUILD_DIR"/{builds,repo,db,downloads}
+build_and_start() {
+    announce_log
+    build_cli
 
-    # The build config expects mirrorlist at BUILD_DIR/config/pacman_x86_64/mirrorlist
-    echo "Server = https://mirror.rackspace.com/archlinux/\$repo/os/\$arch" > "$BUILD_DIR/config/pacman_x86_64/mirrorlist"
+    # REUSE=1 keeps whatever is already running: no image rebuild, no teardown,
+    # no re-enrollment. Diagnosing a failure usually means changing one variable
+    # and re-adding one package, and a full cycle costs minutes for nothing.
+    # It deliberately does not rebuild, so it will NOT pick up source changes.
+    if [ "${REUSE:-0}" = "1" ] && [ -n "$(dc ps -q aurcache 2>/dev/null)" ]; then
+        log "=== Reusing the running stack (REUSE=1; images not rebuilt) ==="
+        return
+    fi
+
+    log "=== Building images (server + worker) ==="
+    dc build
+
+    log "=== Starting services ==="
+    dc up -d
 }
 
-cleanup() {
-    if [ "${CLEANUP:-1}" = "1" ]; then
-        echo "=== Cleaning up ==="
-        dc down --remove-orphans -t 10 2>/dev/null || true
-        # Note: some of the files there were written by root in a docker container.
-        # So we're not legally allowed to touch them. But we can use the same docker trick to do that.
-        # We need to mount TEMP_DIR's parent to properly remove the folder itself.
-        TEMP_PARENT=$(dirname "$TEMP_DIR")
-        docker run --rm -v "$TEMP_PARENT:$TEMP_PARENT" archlinux bash -c " rm -rf '$TEMP_DIR' "
-    else
-        echo "=== Skipping cleanup (CLEANUP=0) ==="
+request_package() {
+    log "=== Adding package: $PACKAGE (timeout: ${BUILD_TIMEOUT}s) ==="
+    # `--wait` rather than a separate `builds watch`, because the two are a
+    # race: a build can be queued, run and fail between the add returning and a
+    # watcher's first listing, and from that listing a build that failed a
+    # second ago is indistinguishable from one that failed last week. `--wait`
+    # lists the builds *before* it adds, so everything that appears afterwards
+    # is this run's, however fast it failed. It reports how many builds the add
+    # queued -- dependency resolution is recursive, so an implausible number
+    # shows a mis-resolved tree long before any of them fails -- and does the
+    # progress reporting and stall detection, so this script never re-encodes
+    # build status codes or re-parses `waiting_reason`.
+    if ! pkg_add "$PACKAGE" --platform x86_64 \
+        --wait \
+        --wait-timeout "$BUILD_TIMEOUT" \
+        --wait-stall-after "${STALL_AFTER:-120}"; then
+        # A dead container explains a failure better than the build log does, so
+        # check that first.
+        assert_services_alive
+        CURRENT_BUILD_REF=$(latest_build_ref "$PACKAGE")
+        dump_logs_on_failure
+        exit 1
+    fi
+
+    # A chroot worker measures what each build used on its disk. Off for the
+    # legacy container builder, which has no storage pool to measure.
+    local usage
+    usage=$(aurcache_cli --format json builds list --limit 20 2>/dev/null \
+        | jq -c --arg pkg "$PACKAGE" '[.[] | select(.pkg_name == $pkg)] | max_by(.number) | .disk_usage' 2>/dev/null)
+    log "    disk usage: ${usage:-none}"
+    if [ "${E2E_EXPECT_DISK_USAGE:-1}" = 1 ] && { [ -z "$usage" ] || [ "$usage" = null ]; }; then
+        log "ERROR: the build reported no disk usage"
+        exit 1
     fi
 }
 
-start_docker_services() {
-    echo "=== Starting Docker services ==="
-    dc up -d registry
-    sleep 2
-
-    echo "=== Building and pushing builder image ==="
-    docker build -q -t localhost:5000/aurcache-builder:test -f docker/builder.Dockerfile --push .
-
-    echo "=== Building and starting AURCache ==="
-    dc build -q aurcache && dc up -d aurcache
-}
-
-configure_aurcache_registry() {
-    echo "=== Configuring AURCache registry ==="
-    echo '[[registry]]
-prefix = "localhost"
-location = "localhost"
-insecure = true' | docker exec -i aurcache-aurcache-1 bash -c "cat > /etc/containers/registries.conf.d/localhost.conf"
-}
-
-prepare() {
-    start_docker_services
-
-    wait_for_service || { dc logs; exit 1; }
-
-    configure_aurcache_registry
-}
-
-# =============================================================================
-# Build trigger function
-# =============================================================================
-
-request_package() {
-    echo "=== Adding package: $PACKAGE ==="
-    # We're starting from a fresh DB every time, so we know it'll be a new package.
-    # If we reused the DB test after test we'd need to delete the package before adding it again.
-    RESPONSE=$(curl_api "/api/package" -X POST -d "{\"source\": {\"type\": \"aur\", \"name\": \"$PACKAGE\"}, \"platforms\": [\"x86_64\"]}")
-
-    # Hofstadter's law: It always takes longer than you expect, even when you take into account Hofstadter's law.
-    echo "=== Waiting for build to complete (timeout: ${BUILD_TIMEOUT}s) ==="
-    local START_TIME
-    START_TIME=$(date +%s)
-    while true; do
-        local ELAPSED
-        ELAPSED=$(($(date +%s) - START_TIME))
-        if [ $ELAPSED -gt "$BUILD_TIMEOUT" ]; then
-            echo "ERROR: Build timed out after ${BUILD_TIMEOUT}s"
-            # Show what we can to understand what went wrong.
-            dc logs
-            exit 1
-        fi
-
-        local RESPONSE
-        RESPONSE=$(curl_api "/api/packages/list?limit=100")
-        local BUILD_STATUS
-        BUILD_STATUS=$(echo "$RESPONSE" | jq -r ".[] | select(.name == \"$PACKAGE\") | .status" 2>/dev/null || echo "not_found")
-
-        echo "    Build status: $BUILD_STATUS (elapsed: ${ELAPSED}s)"
-
-        case "$BUILD_STATUS" in
-            1)  echo "    Build completed successfully"; break ;;
-            2)  echo "ERROR: Build failed"; dc logs; exit 1 ;;
-            null|"") echo "Package not found yet"; sleep 5 ;;
-            *)  sleep 5 ;;
-        esac
-    done
-}
-
-# =============================================================================
-# Validation Functions
-# =============================================================================
-
 validate() {
-    echo "=== Validating built package ==="
-
-    # Try to install the package just like a user would.
-    docker run --rm \
-        --network aurcache_aurcache_network \
+    log "=== Validating built package by installing it from the repo ==="
+    local net
+    net=$(e2e_network)
+    log "    Using network: $net"
+    docker run --rm -i \
+        --network "$net" \
+        -e PACKAGE="$PACKAGE" \
         archlinux:latest \
-        sh -e -c '
-            # First setup the repo we want to test
-            cat >> /etc/pacman.conf << EOF
+        sh -e <<'EOF'
+cat >> /etc/pacman.conf <<'CONF'
 [repo]
 SigLevel = Optional TrustAll
-Server = http://aurcache-aurcache-1:'${AURCACHE_MIRROR_PORT}'/\$arch
+Server = http://aurcache:8081/$arch
+CONF
+(
+    pacman-key --init
+    pacman-key --populate archlinux
+    pacman -Syq archlinux-keyring --noconfirm
+    pacman -Suq --noconfirm
+) >/dev/null 2>&1
+echo "Installing $PACKAGE"
+pacman -S --noconfirm "$PACKAGE"
+pacman -Qi "$PACKAGE"
 EOF
-
-            echo "Updating test container"
-            (
-                # Just making sure we are up-to-date
-                pacman-key --init
-                pacman-key --populate archlinux
-                # Need to install this first so we can validate other updates
-                pacman -Syq archlinux-keyring --noconfirm
-                pacman -Suq --noconfirm
-            ) 2>/dev/null >/dev/null
-
-            echo "Installing package"
-            pacman -S --noconfirm '$PACKAGE'
-            pacman -Qi '$PACKAGE'
-        '
-
-    echo "=== End-to-end test complete ==="
+    log "=== End-to-end test complete ==="
 }
 
 # =============================================================================
@@ -195,7 +130,13 @@ EOF
 
 trap cleanup EXIT
 
-setup_directories
-prepare
+RUN_STARTED=$(date +%s)
+
+preflight
+build_and_start
+wait_for_service || { dump_logs_on_failure; exit 1; }
+wait_for_worker || { dump_logs_on_failure; exit 1; }
 request_package
 validate
+
+log "=== Total runtime: $(($(date +%s) - RUN_STARTED))s ==="

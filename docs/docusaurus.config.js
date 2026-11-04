@@ -10,7 +10,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 const config = {
   title: 'AURCache',
   tagline: 'The Archlinux AUR build server',
-  favicon: '../frontend/assets/icons/icon.png',
+  favicon: '../assets/icons/icon.svg',
 
   // Set the production url of your site here
   url: 'https://lukas-heiligenbrunner.github.io',
@@ -42,17 +42,11 @@ const config = {
       ({
         docs: {
           sidebarPath: './sidebars.js',
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            'https://github.com/facebook/docusaurus/tree/main/packages/create-docusaurus/templates/shared/',
+          editUrl: 'https://github.com/Lukas-Heiligenbrunner/AURCache/edit/master/docs/',
         },
         blog: {
           showReadingTime: true,
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            'https://github.com/facebook/docusaurus/tree/main/packages/create-docusaurus/templates/shared/',
+          editUrl: 'https://github.com/Lukas-Heiligenbrunner/AURCache/edit/master/docs/',
         },
         theme: {
           customCss: './src/css/custom.css',
@@ -64,12 +58,12 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
-      // Replace with your project's social card
-      image: 'img/docusaurus-social-card.jpg',
+      // Social card shown in link previews: the dashboard screenshot.
+      image: 'img/screenshot1.png',
       navbar: {
         title: 'AURCache',
         logo: {
-          alt: 'My Site Logo',
+          alt: 'AURCache Logo',
           src: 'img/favicon.png',
         },
         items: [
@@ -80,7 +74,7 @@ const config = {
             label: 'Docs',
           },
           {
-            href: 'https://github.com/lukas-heiligenbrunner/aurcache',
+            href: 'https://github.com/Lukas-Heiligenbrunner/AURCache',
             label: 'GitHub',
             position: 'right',
           },
