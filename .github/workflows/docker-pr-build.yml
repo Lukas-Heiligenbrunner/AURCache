@@ -24,7 +24,7 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       # No registry login, secrets, or write token on this runner.
-      - name: Build image archive
+      - name: Build OCI image layout
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           TARGET_ARCH: linux/${{ matrix.arch }}
@@ -34,10 +34,10 @@ jobs:
             --build-arg LATEST_COMMIT_SHA="$HEAD_SHA" \
             --build-arg TARGET_ARCH="$TARGET_ARCH" \
             -f ./docker/Dockerfile \
-            --output "type=oci,dest=$RUNNER_TEMP/image.tar" .
+            --output "type=oci,tar=false,dest=$RUNNER_TEMP/image" .
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/image.tar
+          path: ${{ runner.temp }}/image
           compression-level: 0
           retention-days: 3
