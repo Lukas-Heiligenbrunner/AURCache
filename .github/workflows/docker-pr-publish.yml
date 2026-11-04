@@ -1,0 +1,154 @@
+name: Publish PR Docker Images
+
+on:
+  workflow_run:
+    workflows: [Build PR Docker Images]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      packages: write
+    outputs:
+      pr: ${{ steps.destination.outputs.pr }}
+      image: ${{ steps.destination.outputs.image }}
+      tag: ${{ steps.destination.outputs.tag }}
+    strategy:
+      matrix:
+        include:
+          - artifact: image-amd64
+            suffix: ""
+          - artifact: image-arm64
+            suffix: "-aarch64"
+    steps:
+      # This workflow runs from the default branch. Never check out PR code,
+      # restore its caches, rebuild, or execute the downloaded image here.
+      - name: Validate source run and choose destination
+        id: destination
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+            const expectedRepo = owner + '/' + repo;
+            if (run.repository.full_name !== expectedRepo ||
+                !/^[0-9a-f]{40}$/.test(run.head_sha)) {
+              throw new Error('Unexpected source repository or commit');
+            }
+            const { data: workflow } = await github.rest.actions.getWorkflow({
+              owner, repo, workflow_id: run.workflow_id
+            });
+            if (workflow.path !== '.github/workflows/docker-pr-build.yml') {
+              throw new Error('Unexpected source workflow');
+            }
+            // Fork runs may have an empty pull_requests array. Resolve through
+            // GitHub's API instead of trusting metadata uploaded by PR code.
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open',
+              head: run.head_repository.owner.login + ':' + run.head_branch,
+              per_page: 100
+            });
+            const matching = prs.filter(pr =>
+              pr.base.repo.full_name === expectedRepo &&
+              pr.base.ref === 'master' &&
+              pr.head.repo?.full_name === run.head_repository.full_name &&
+              pr.head.sha === run.head_sha);
+            if (matching.length !== 1) {
+              throw new Error('No unique open PR at the built commit (possibly superseded)');
+            }
+            const pr = matching[0];
+            // The destination is fixed by trusted code, never by the artifact.
+            const image = 'ghcr.io/' + expectedRepo.toLowerCase() + '-preview';
+            core.setOutput('pr', String(pr.number));
+            core.setOutput('image', image);
+            core.setOutput('tag', 'pr-' + pr.number + '-' + run.head_sha);
+      - name: Download this run's image
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/image
+      - name: Install image copy tool
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+      # Read the OCI layout directly; do not unpack a PR-controlled tar archive.
+      - name: Copy image to preview registry
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+          IMAGE: ${{ steps.destination.outputs.image }}
+          TAG: ${{ steps.destination.outputs.tag }}${{ matrix.suffix }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
+            --username "$REGISTRY_USER" --password-stdin ghcr.io
+          skopeo copy --all \
+            --authfile "$RUNNER_TEMP/registry-auth.json" \
+            "oci:$RUNNER_TEMP/image" "docker://$IMAGE:$TAG"
+          echo "Preview image: \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    # Report only after both architecture pushes succeed. This runner handles
+    # no PR artifacts and is the only job with permission to comment.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post image references on the PR
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ needs.publish.outputs.pr }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          TAG: ${{ needs.publish.outputs.tag }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const sha = context.payload.workflow_run.head_sha;
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: issue_number
+            });
+            if (pr.state !== 'open' || pr.head.sha !== sha) {
+              core.info('PR closed or superseded; skipping image comment');
+              return;
+            }
+            const marker = '<!-- aurcache-preview-images:' + sha + ' -->';
+            const image = process.env.IMAGE + ':' + process.env.TAG;
+            const runUrl = context.serverUrl + '/' + owner + '/' + repo +
+              '/actions/runs/' + context.runId;
+            const body = [
+              marker,
+              'Preview images for commit ' + sha + ' are ready:',
+              '',
+              '| Architecture | Image |',
+              '| --- | --- |',
+              '| amd64 | `' + image + '` |',
+              '| arm64 | `' + image + '-aarch64` |',
+              '',
+              'Pull with `docker pull ' + image + '` (amd64), or',
+              '`docker pull ' + image + '-aarch64` (arm64).',
+              '',
+              'These images contain untrusted PR code.',
+              '[Publishing run](' + runUrl + ')'
+            ].join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
