@@ -16,6 +16,10 @@ jobs:
       contents: read
       pull-requests: read
       packages: write
+    outputs:
+      pr: ${{ steps.destination.outputs.pr }}
+      image: ${{ steps.destination.outputs.image }}
+      tag: ${{ steps.destination.outputs.tag }}
     strategy:
       matrix:
         include:
@@ -62,6 +66,7 @@ jobs:
             const pr = matching[0];
             // The destination is fixed by trusted code, never by the artifact.
             const image = 'ghcr.io/' + expectedRepo.toLowerCase() + '-preview';
+            core.setOutput('pr', String(pr.number));
             core.setOutput('image', image);
             core.setOutput('tag', 'pr-' + pr.number + '-' + run.head_sha);
       - name: Download this run's image
@@ -88,3 +93,62 @@ jobs:
             --authfile "$RUNNER_TEMP/registry-auth.json" \
             "oci:$RUNNER_TEMP/image" "docker://$IMAGE:$TAG"
           echo "Preview image: \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    # Report only after both architecture pushes succeed. This runner handles
+    # no PR artifacts and is the only job with permission to comment.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post image references on the PR
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ needs.publish.outputs.pr }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          TAG: ${{ needs.publish.outputs.tag }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const sha = context.payload.workflow_run.head_sha;
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: issue_number
+            });
+            if (pr.state !== 'open' || pr.head.sha !== sha) {
+              core.info('PR closed or superseded; skipping image comment');
+              return;
+            }
+            const marker = '<!-- aurcache-preview-images:' + sha + ' -->';
+            const image = process.env.IMAGE + ':' + process.env.TAG;
+            const runUrl = context.serverUrl + '/' + owner + '/' + repo +
+              '/actions/runs/' + context.runId;
+            const body = [
+              marker,
+              'Preview images for commit ' + sha + ' are ready:',
+              '',
+              '| Architecture | Image |',
+              '| --- | --- |',
+              '| amd64 | `' + image + '` |',
+              '| arm64 | `' + image + '-aarch64` |',
+              '',
+              'Pull with `docker pull ' + image + '` (amd64), or',
+              '`docker pull ' + image + '-aarch64` (arm64).',
+              '',
+              'These images contain untrusted PR code.',
+              '[Publishing run](' + runUrl + ')'
+            ].join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

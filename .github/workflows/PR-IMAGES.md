@@ -14,7 +14,9 @@ Images are published as:
 - `ghcr.io/<owner>/<repo>-preview:pr-<number>-<full-head-sha>` (amd64)
 - `ghcr.io/<owner>/<repo>-preview:pr-<number>-<full-head-sha>-aarch64` (arm64)
 
-The publisher's job summary lists the resulting image reference. Preview images
+After both pushes succeed, the publisher posts a PR comment listing both image
+references and pull commands. Re-running the same commit updates its existing
+comment. Each publishing job also lists its image in the run summary. Preview images
 contain untrusted PR code. Their tags and package are separate from releases;
 there is no mutable `latest` or `pr-<number>` alias. The publisher intentionally
 rejects closed PRs and runs superseded by a new commit.
