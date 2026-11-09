@@ -48,7 +48,7 @@ dioxus-charts = "0.4"
 # the server embeds the frontend: the two only work as a matching pair. Bump
 # them together, and run scripts/test-frontend.sh after: every page boots
 # through that glue, and no unit test loads it.
-wasm-bindgen = "=0.2.129"
+wasm-bindgen = "=0.2.130"
 # The client's error type: only named to tell a 404 apart from other failures.
 anyhow = "1"
 # A log entry's payload, read for the entities a row's menu can narrow to.

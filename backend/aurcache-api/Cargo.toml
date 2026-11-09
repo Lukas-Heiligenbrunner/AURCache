@@ -45,7 +45,7 @@ static = ["dep:rust-embed", "dep:wasm-bindgen-cli-support"]
 # exactly, and to the same version as the `wasm-bindgen` crate in
 # frontend-rs/Cargo.toml: the two refuse to work together at any other pair,
 # and pinning both is what keeps them a pair. Bump them together.
-wasm-bindgen-cli-support = { version = "=0.2.129", optional = true }
+wasm-bindgen-cli-support = { version = "=0.2.130", optional = true }
 
 [dev-dependencies]
 aurcache-db = { path = "../aurcache-db", features = ["testing"] }
