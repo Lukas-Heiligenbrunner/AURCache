@@ -17,6 +17,13 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Never run this job at all for PRs from forks: pull_request_target grants
+    # base-repo secrets/token (packages: write) to the job, and there is no way
+    # to check out or build fork-authored code in that context without risking
+    # credential exfiltration (e.g. via a malicious build.rs/Dockerfile RUN
+    # step reading them off disk or from the environment). Same-repo PRs
+    # (renovate, internal branches) and push/tag events are unaffected.
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
 
     strategy:
       matrix:
