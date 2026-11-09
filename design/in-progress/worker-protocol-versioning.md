@@ -387,12 +387,14 @@ maintainer, so a tag pushed by anyone else waits for their approval before
 anything reaches the AUR.
 
 **One-time switch.** The PKGBUILDs still name the fork
-(`url="https://github.com/gyscos/AURCache"`) and download `v$pkgver` tags.
-The switch happens after the upstream merge, and the PKGBUILDs need a tag in
-this repository to point at. Upstream's newest tag is `v0.5.0`. Either push
-the fork's `v0.6.0` tag here (its commit is in the merged history) and change
-only `url` and the checksum, or make the switch the first per-component
-release.
+(`url="https://github.com/gyscos/AURCache"`) and download `v$pkgver` tags,
+which exist only there: this repository's newest tag is `v0.5.0`. Each
+package moves here with its first release from this repository, not before.
+That release changes `pkgver` and the checksum anyway, and its tag is
+`<package>-v<version>`, so the same bump sets `url` to this repository and
+updates `source` and `_srcdir` for the new tag name
+(`AURCache-<package>-v<version>`). Until every package has moved, the fork
+has to stay up, or the 0.6.0 sources stop downloading.
 
 ## 4. The CLI and the REST API
 
