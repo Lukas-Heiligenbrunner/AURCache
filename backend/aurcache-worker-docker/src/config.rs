@@ -50,8 +50,10 @@ pub struct Tunables {
 /// spelled out because that crate would bring a database driver with it.
 const PLATFORMS: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
 
-/// The default builder image, matching the pre-worker default.
-const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder:latest";
+/// The default builder image. Not the pre-worker `aurcache-builder`: 0.5.0
+/// keeps pulling that before every build and runs paru in it, which this
+/// image does not ship.
+const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
 
 /// The protocol configuration for this executor, its settings declared
 /// beside the protocol's so registration reports one table.
