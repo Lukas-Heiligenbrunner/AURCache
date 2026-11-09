@@ -105,8 +105,9 @@ pub fn with_layout(makepkg_conf: &str, pkgdest: &str) -> String {
 /// `pacman.conf` and the mirrorlist are deliberately absent here: they are
 /// bind-mounted over `/etc` instead of written in. The build user has
 /// passwordless sudo for `pacman`, `pacman-key` and `chmod` alone, in every
-/// builder image ever published -- the `ghcr.io/.../aurcache-builder:latest` a
-/// 0.5.0 deployment keeps pulling included -- so writing anywhere under `/etc`
+/// builder image ever published -- `aurcache-builder-v2` and the
+/// `ghcr.io/.../aurcache-builder:latest` a 0.5.0 deployment keeps pulling
+/// alike -- so writing anywhere under `/etc`
 /// fails with "a password is required" and takes the build with it.
 #[must_use]
 pub fn wrap_with_config(

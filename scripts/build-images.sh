@@ -8,8 +8,10 @@
 #   worker       aurcache-worker: a build worker, for a split deployment.
 #   hybrid       aurcache: the hybrid (server + embedded worker) compatibility
 #                image.
-#   builder      aurcache-builder: the container the hybrid's legacy builder
-#                spawns per build.
+#   builder      aurcache-builder-v2: the container the docker worker (and so
+#                the hybrid image) spawns per build. Not `aurcache-builder`:
+#                0.5.0 still pulls that name before every build and needs the
+#                paru it ships, which this image does not have.
 #   demo-worker  aurcache-demo-worker: the dummy worker for demo instances,
 #                synthetic packages and no build. Debian, like the server.
 #
@@ -134,7 +136,7 @@ declare -A IMAGE_NAMES=(
     [server]=aurcache-server
     [worker]=aurcache-worker
     [hybrid]=aurcache
-    [builder]=aurcache-builder
+    [builder]=aurcache-builder-v2
     [demo-worker]=aurcache-demo-worker
 )
 # The Dockerfile each is built from, and the stage, for the two that share one.

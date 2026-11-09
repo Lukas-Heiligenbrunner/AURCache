@@ -11,10 +11,13 @@ sidebar_position: 1
 | `aurcache-server` | The server. This is what most setups want. |
 | `aurcache-worker` | A build worker. Multi-arch (`amd64`, `arm64`, `arm/v7`). |
 | `aurcache` | The hybrid compatibility image — **deprecated**, see [Hybrid](../../workers/hybrid.md). |
-| `aurcache-builder` | Spawned per build by the hybrid image's legacy builder. Not used by the split setup. |
+| `aurcache-builder-v2` | Spawned per build by the docker worker, which the hybrid image runs. Not used by the split setup. |
+| `aurcache-builder` | The image AURCache 0.5.0 builds in. No longer published; 0.5.0 keeps pulling the last one. |
 
-Each is published as `:latest`, `:<version>` for a release tag, and the server
-also as `:git` for the current master branch.
+Each is published as `:<version>` and `:latest` for a release tag, and as
+`:git` for the current master branch, which is also rebuilt weekly.
+`aurcache-builder-v2:latest` is the newest build of either, so a worker
+from master finds one before the first release that ships it.
 
 The worker image is multi-arch: the same tag serves `linux/amd64`,
 `linux/arm64` and `linux/arm/v7`, and a foreign-architecture worker is the same

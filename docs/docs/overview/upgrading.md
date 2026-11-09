@@ -78,7 +78,10 @@ The log says what it does; nothing needs an answer.
   Workers. Set on one package, they are dropped — a worker's limits are its own —
   and the log names each. Set as `CPU_LIMIT`, `MEMORY_LIMIT` or
   `MAX_CONCURRENT_BUILDS` in the compose file, they apply as before.
-- **The builder image** setting is gone; the worker chooses its image.
+- **The builder image** setting is gone; the worker chooses its image,
+  `aurcache-builder-v2`. A `BUILDER_IMAGE` in the compose file still applies:
+  if it names 0.5's `aurcache-builder`, remove it, as that image is no longer
+  updated.
 - **The job timeout** is kept, globally and per package.
 - **`DB_PWD`** is the password itself. If you percent-encoded it for 0.5 so that
   it differed from `POSTGRES_PASSWORD`, set the plain password.

@@ -338,17 +338,22 @@ interface only grows, and the packages that use it declare
 |---|---|
 | `aurcache-server-v*` | `aurcache-server` (`docker-build.yml`); `aurcache` hybrid (it bundles the server) |
 | `aurcache-worker-v*` | `aurcache-worker`; `aurcache-demo-worker` |
-| `aurcache-worker-docker-v*` | `aurcache` hybrid (it bundles the container worker); `aurcache-builder` |
+| `aurcache-worker-docker-v*` | `aurcache` hybrid (it bundles the container worker); `aurcache-builder-v2` |
 
 Each image is tagged with its component's version and `latest`.
 `docker-worker-publish.yml` splits into one job per image, each filtered on
 its tag pattern. The rule that every image comes from one commit goes away,
 because the protocol check replaces it.
 
-The weekly cron that refreshes Arch images currently rebuilds the default
-branch as `latest`. With independent releases, `latest` should be the
-component's last release, rebuilt on a fresh base, so the cron checks out the
-newest `aurcache-worker-v*` tag (and so on) instead of `master`.
+`latest` is a release's, and the weekly cron that refreshes Arch images
+rebuilds the default branch as `git` only, so nothing unreleased reaches a
+deployment that pulls `latest`. Released images are not rebuilt on a fresh
+base between releases. The exception is `aurcache-builder-v2`, a build
+environment rather than a component: every build of it is `latest`, and
+its interface to the worker (the `ab` user, its sudo rules, `/build`, an
+entrypoint that runs its arguments) only grows. The older `aurcache-builder`
+is 0.5.0's and is no longer published; 0.5.0 runs paru in it, which v2 does
+not ship.
 
 The hybrid image bundles two components, so its tag follows the server's
 version. A container-worker-only release rebuilds it under the same tag.
