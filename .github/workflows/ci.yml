@@ -156,7 +156,7 @@ jobs:
 
       - name: Keep the screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-screenshots
           path: ${{ runner.temp }}/shots
