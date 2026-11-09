@@ -14,7 +14,7 @@
 # The authorised key is supplied at run time from a mounted directory, so the
 # test can generate a fresh throwaway keypair per run and nothing is baked into
 # the image or committed to the repository.
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache openssh-server git git-daemon \
     && adduser -D -s /bin/sh git \
