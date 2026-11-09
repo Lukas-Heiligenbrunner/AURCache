@@ -1,4 +1,3 @@
-use crate::helpers::dbtype::database_type;
 use sea_orm::DbBackend;
 use sea_orm_migration::prelude::*;
 
@@ -10,7 +9,7 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        match database_type() {
+        match manager.get_database_backend() {
             DbBackend::Sqlite => {
                 // add new column version to builds
                 db.execute_unprepared(
@@ -71,7 +70,7 @@ DROP COLUMN version;
                 )
                 .await?;
             }
-            _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
+            _ => return Err(DbErr::Migration("Unsupported database type".to_string())),
         }
 
         Ok(())
@@ -81,7 +80,7 @@ DROP COLUMN version;
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
 
-        match database_type() {
+        match manager.get_database_backend() {
             DbBackend::Sqlite => {
                 // add version column back to packages
                 db.execute_unprepared(
@@ -142,7 +141,7 @@ DROP COLUMN version;
                 )
                 .await?;
             }
-            _ => Err(DbErr::Migration("Unsupported database type".to_string()))?,
+            _ => return Err(DbErr::Migration("Unsupported database type".to_string())),
         }
 
         Ok(())

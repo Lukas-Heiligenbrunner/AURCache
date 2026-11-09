@@ -1,5 +1,7 @@
-pub mod activity_serializer;
 pub mod activity_utils;
-pub mod package_add_activity;
-pub mod package_delete_activity;
-pub mod package_update_activity;
+pub mod event;
+pub mod legacy;
+pub mod log_store;
+
+/// The catalogue, which lives in `aurcache-common` so the browser can render it.
+pub use aurcache_common::api::events;

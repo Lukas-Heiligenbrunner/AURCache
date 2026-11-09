@@ -1,0 +1,100 @@
+[package]
+name = "aurcache-frontend"
+version = "0.1.0"
+edition = "2024"
+
+# Its own workspace on purpose: this crate only builds for
+# wasm32-unknown-unknown, so including it in the backend workspace would break
+# `cargo build --workspace` on the host target.
+[workspace]
+
+# The same policy `backend/Cargo.toml` sets for its workspace. Duplicated
+# rather than inherited because this is a separate workspace, which is also why
+# it went unlinted until now -- the frontend was already clean under every one
+# of these, so adopting them costs nothing today and stops that from silently
+# ceasing to be true.
+[lints.clippy]
+use_self = "warn"
+or_fun_call = "warn"
+unnecessary_wraps = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_is_variant_and = "warn"
+redundant_clone = "warn"
+assigning_clones = "warn"
+needless_collect = "warn"
+uninlined_format_args = "warn"
+explicit_into_iter_loop = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+cloned_instead_of_copied = "warn"
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["web", "router"] }
+# The same client the CLI uses, and the same types the server defines. This is
+# the point of the exercise: no hand-maintained duplicate of the API shapes.
+aurcache-client = { path = "../backend/aurcache-client" }
+# The status enum the server defines, so the frontend matches on names rather
+# than on integers it would otherwise have to guess.
+# `default-features = false` drops the build-queue types that carry database
+# models, and with them sea-orm/sqlx — which do not build for wasm.
+aurcache-common = { path = "../backend/aurcache-common", default-features = false }
+# Line and bar charts as SVG, styled by CSS so they follow the theme picker.
+# Static for now: the crate has no hover support, and adding it upstream is a
+# separate piece of work.
+dioxus-charts = "0.4"
+# Pinned exactly, and to the same version as `wasm-bindgen-cli-support` in
+# backend/aurcache-api/Cargo.toml, which generates this crate's JS glue when
+# the server embeds the frontend: the two only work as a matching pair. Bump
+# them together, and run scripts/test-frontend.sh after: every page boots
+# through that glue, and no unit test loads it.
+wasm-bindgen = "=0.2.129"
+# The client's error type: only named to tell a 404 apart from other failures.
+anyhow = "1"
+# A log entry's payload, read for the entities a row's menu can narrow to.
+serde_json = "1"
+# Awaiting the `Promise` the Clipboard API returns from `write_text`.
+wasm-bindgen-futures = "0.4"
+# Wall clock, for "3h ago" on the builds list.
+js-sys = "0.3"
+# Joining requests so they overlap rather than queue: the two the package page
+# makes, and one per dependent when working out where a package's dependents
+# could go instead. `alloc` is what `join_all` needs -- the fixed-arity `join`
+# cannot take a list whose length is the number of dependents.
+# `default-features = false` keeps the executor out: the browser is the
+# executor here.
+futures-util = { version = "0.3", default-features = false, features = ["async-await", "alloc"] }
+# Timers: the build log polls, so it needs a sleep that works in the browser.
+gloo-timers = { version = "0.4", features = ["futures"] }
+# Zero-copy dump upload: the file reader hands back `Bytes`, the signal holds
+# them, and the client streams them into the request body without copying.
+bytes = "1"
+web-sys = { version = "0.3", features = ["Clipboard", "Document", "Element", "EventTarget", "History", "Location", "MediaQueryList", "Navigator", "Storage", "Window"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+# Renders components to an HTML string, so presentational logic can be tested
+# without a browser or a running backend.
+dioxus-ssr = "0.7"
+# Asserting the exact JSON a request body serialises to. The shapes come from
+# the server's own types, but how they nest is still worth pinning.
+
+# Drives a browser for the tests that click and type. WebDriver rather than the
+# devtools protocol: this crate resolves the local Chrome, fetches a matching
+# chromedriver and supervises both, so the test script needs no browser
+# plumbing of its own. The CDP client also cannot navigate to a fragment-only
+# URL, which this frontend's search terms are.
+#
+# Host-only: tokio's mio does not build for wasm, and `clippy --target wasm32
+# --all-targets` would otherwise fail on a dependency no wasm build uses.
+# `tests/browser.rs` is gated the same way.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+thirtyfour = "0.38"
+serde = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

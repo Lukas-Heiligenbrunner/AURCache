@@ -1,0 +1,20 @@
+[submodule "packaging/aurcache-sandbox"]
+	path = packaging/aurcache-sandbox
+	url = https://aur.archlinux.org/aurcache-sandbox.git
+	pushurl = ssh://aur@aur.archlinux.org/aurcache-sandbox.git
+[submodule "packaging/aurcache-worker"]
+	path = packaging/aurcache-worker
+	url = https://aur.archlinux.org/aurcache-worker.git
+	pushurl = ssh://aur@aur.archlinux.org/aurcache-worker.git
+[submodule "packaging/aurcache-server"]
+	path = packaging/aurcache-server
+	url = https://aur.archlinux.org/aurcache-server.git
+	pushurl = ssh://aur@aur.archlinux.org/aurcache-server.git
+[submodule "packaging/aurcache-worker-docker"]
+	path = packaging/aurcache-worker-docker
+	url = https://aur.archlinux.org/aurcache-worker-docker.git
+	pushurl = ssh://aur@aur.archlinux.org/aurcache-worker-docker.git
+[submodule "packaging/aurcache-cli"]
+	path = packaging/aurcache-cli
+	url = https://aur.archlinux.org/aurcache-cli.git
+	pushurl = ssh://aur@aur.archlinux.org/aurcache-cli.git

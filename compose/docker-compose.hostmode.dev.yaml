@@ -1,0 +1,30 @@
+# The single-container host-mode setup: the hybrid image, whose embedded worker
+# builds in containers on the host's Docker, through the mounted socket.
+services:
+  aurcache:
+    build:
+        context: ..
+        dockerfile: docker/arch.Dockerfile
+        target: hybrid
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      - LOG_LEVEL=debug
+      - TZ   # the schedule's timezone: the host's unless set (see docker-compose.yaml)
+      # Selects host mode. A path the host's Docker binds into each build
+      # container, so absolute -- a volume name cannot take a subdirectory --
+      # and mounted at /app/builds below, so this container sees it too.
+      - BUILD_ARTIFACT_DIR=/tmp/aurcache-dev-builds
+    volumes:
+      - ../aurcache/db:/app/db
+      - ../aurcache/repo:/app/repo
+      - /etc/localtime:/etc/localtime:ro   # the host's timezone (see TZ above)
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/aurcache-dev-builds:/app/builds
+    networks:
+      aurcache_network:
+
+networks:
+  aurcache_network:
+    driver: bridge

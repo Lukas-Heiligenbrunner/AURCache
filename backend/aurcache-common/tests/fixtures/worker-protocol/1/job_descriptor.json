@@ -1,0 +1,91 @@
+[
+  {
+    "build_id": 42,
+    "pkgbase": "hello",
+    "arch": "x86_64",
+    "build_flags": [
+      "--noconfirm"
+    ],
+    "persistent_builddir": true,
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
+    "pacman_conf": "[options]\n",
+    "mirrorlist": {
+      "offer": "send",
+      "content": "Server = https://mirror.invalid/$repo/os/$arch\n",
+      "checksum": "9b1c"
+    },
+    "pgp_keys": [
+      "ABCDEF0123456789"
+    ],
+    "vcs_sources": [
+      {
+        "source_url": "git+https://example.invalid/hello.git",
+        "dir": "hello",
+        "git_ref": "0123abcd"
+      }
+    ],
+    "expected_packages": [
+      "hello",
+      "hello-docs"
+    ],
+    "expected_version": "2.12.1-2"
+  },
+  {
+    "build_id": 42,
+    "pkgbase": "hello",
+    "arch": "x86_64",
+    "build_flags": [
+      "--noconfirm"
+    ],
+    "persistent_builddir": true,
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
+    "pacman_conf": "[options]\n",
+    "mirrorlist": {
+      "offer": "keep"
+    },
+    "pgp_keys": [
+      "ABCDEF0123456789"
+    ],
+    "vcs_sources": [
+      {
+        "source_url": "git+https://example.invalid/hello.git",
+        "dir": "hello",
+        "git_ref": "0123abcd"
+      }
+    ],
+    "expected_packages": [
+      "hello",
+      "hello-docs"
+    ],
+    "expected_version": "2.12.1-2"
+  },
+  {
+    "build_id": 42,
+    "pkgbase": "hello",
+    "arch": "x86_64",
+    "build_flags": [
+      "--noconfirm"
+    ],
+    "persistent_builddir": true,
+    "makepkg_conf": "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n",
+    "pacman_conf": "[options]\n",
+    "mirrorlist": {
+      "offer": "nothing"
+    },
+    "pgp_keys": [
+      "ABCDEF0123456789"
+    ],
+    "vcs_sources": [
+      {
+        "source_url": "git+https://example.invalid/hello.git",
+        "dir": "hello",
+        "git_ref": "0123abcd"
+      }
+    ],
+    "expected_packages": [
+      "hello",
+      "hello-docs"
+    ],
+    "expected_version": "2.12.1-2"
+  }
+]

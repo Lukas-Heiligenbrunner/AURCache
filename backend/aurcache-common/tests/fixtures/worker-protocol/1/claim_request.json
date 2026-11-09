@@ -1,0 +1,15 @@
+[
+  {
+    "mirrorlist": {
+      "mode": "local"
+    }
+  },
+  {
+    "mirrorlist": {
+      "mode": "server",
+      "checksums": {
+        "x86_64": "9b1c"
+      }
+    }
+  }
+]

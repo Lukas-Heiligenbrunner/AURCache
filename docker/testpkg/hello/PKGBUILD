@@ -1,0 +1,22 @@
+# Minimal, fully self-contained test package for validating the
+# aurcache-worker chroot build path. Uses a LOCAL source (hello.c) so the
+# smoke test needs no network access inside the build chroot.
+pkgname=aurcache-hello
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Self-contained smoke-test package for the aurcache-worker chroot build"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+depends=('glibc')
+makedepends=('gcc')
+source=('hello.c')
+sha256sums=('c8e6eb1dd7318a5a0e227e706a98fa3ccd05795a3b562d564323f692271318c7')
+
+build() {
+  gcc -O2 -o aurcache-hello hello.c
+}
+
+package() {
+  install -Dm755 aurcache-hello "${pkgdir}/usr/bin/aurcache-hello"
+}

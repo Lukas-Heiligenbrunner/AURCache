@@ -2,8 +2,11 @@
 name = "pacman-mirrors"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
-chrono = {workspace = true, features = ["serde"] }
+jiff = {workspace = true, features = ["serde"] }
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 anyhow = {workspace = true}
@@ -11,3 +14,8 @@ tracing = {workspace = true}
 backon = {workspace = true}
 
 url = { version = "2.5.8", features = ["serde"] }
+sea-orm = { version = "2.0", default-features = false, features = ["macros", "sqlx-sqlite", "runtime-tokio-rustls"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt"] }

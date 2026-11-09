@@ -1,0 +1,7 @@
+[
+  {
+    "severity": "warning",
+    "build_id": 42,
+    "message": "the chroot needed a fallback"
+  }
+]
