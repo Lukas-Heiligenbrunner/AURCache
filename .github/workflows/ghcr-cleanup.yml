@@ -1,0 +1,82 @@
+name: Clean Up Container Images
+
+# Retention for every image this repository publishes to GHCR:
+#
+# - Release tags (`v*`) are kept forever.
+# - Whatever `latest` and `git` point to is kept while they do.
+# - An open pull request's newest preview image is kept while it is open.
+# - Everything else -- a pull request's older previews, a closed one's, and
+#   the images `latest`/`git` have moved on from -- is deleted once it is a
+#   week old.
+#
+# ghcr-cleanup-plan.js lists the preview tags; dataaxiom/ghcr-cleanup-action
+# does the deleting, and deletes a multi-architecture image together with its
+# platform images and attestations, so none is left half there.
+#
+# A run only reports what it would delete unless deletion is turned on:
+# scheduled runs delete when the repository variable GHCR_CLEANUP is
+# `delete`, and a manual run when its `delete` input is ticked.
+
+on:
+  schedule:
+    # Daily: the action's manifest cache is evicted after a week unused.
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: Delete, rather than only report what would be deleted
+        type: boolean
+        default: false
+
+permissions: {}
+
+# The action is not safe to run twice at once against the same package.
+concurrency:
+  group: ghcr-cleanup
+
+env:
+  PACKAGES: aurcache,aurcache-server,aurcache-worker,aurcache-builder,aurcache-builder-v2,aurcache-demo-worker,aurcache-preview
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.result }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: List the preview tags to delete
+        id: plan
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const plan = require('./.github/scripts/ghcr-cleanup-plan.js');
+            return await plan({ github, context, core }, process.env.PACKAGES.split(','));
+
+  clean:
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      # One package at a time: they share the action's manifest cache.
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Clean up ${{ matrix.package }}
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          package: ${{ matrix.package }}
+          delete-tags: ${{ matrix.delete-tags }}
+          delete-untagged: true
+          older-than: 7 days
+          dry-run: ${{ !(inputs.delete || (github.event_name == 'schedule' && vars.GHCR_CLEANUP == 'delete')) }}
+          validate: true
