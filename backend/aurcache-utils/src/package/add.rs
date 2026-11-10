@@ -2,12 +2,13 @@ use crate::package::bulk_add::apply_resolved_base;
 use crate::package::dependency_resolution::{PackageCandidate, TrackedPackages};
 use crate::package::edges::{Declaration, Dependee, resolve_edges};
 use crate::package::enqueue::trigger_initial_builds;
+use crate::package::error::PackageError;
 use crate::package::metadata::refresh_source_metadata;
 use crate::package::source_facts::{SourceFacts, pkg_deps, provides_json, split_packages_json};
 use crate::patch::SourcePatch;
 use crate::services::Services;
 use crate::snapshot::SnapshotStore;
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
@@ -293,12 +294,11 @@ pub async fn package_add(
     build_flags: Option<Vec<String>>,
     source_data: SourceData,
     patched_files: Option<BTreeMap<String, String>>,
-) -> anyhow::Result<String> {
+) -> Result<String, PackageError> {
     let context = AddContext::new(platforms, build_flags);
     let source_data = resolve_source_pkgbase(&services.client, source_data).await?;
-    add_resolved_source(services, &context, source_data, patched_files)
-        .await
-        .map(|added| added.pkgbase)
+    let added = add_resolved_source(services, &context, source_data, patched_files).await?;
+    Ok(added.pkgbase)
 }
 
 async fn set_directly_requested(db: &DatabaseConnection, pkgbase: &str) -> anyhow::Result<()> {
@@ -329,7 +329,7 @@ pub(crate) async fn resolve_source_pkgbase(
             let bases = client
                 .resolve_bases(&[name])
                 .await
-                .map_err(|e| anyhow!("AUR lookup failed: {e}"))?;
+                .context("AUR lookup failed")?;
             apply_resolved_base(
                 SourceData::Aur {
                     name: name.to_string(),

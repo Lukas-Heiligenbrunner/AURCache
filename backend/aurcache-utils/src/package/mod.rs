@@ -5,6 +5,7 @@ pub mod delete;
 pub(crate) mod dependency_resolution;
 pub(crate) mod edges;
 pub mod enqueue;
+pub mod error;
 pub mod live_check;
 pub mod metadata;
 pub mod replace;

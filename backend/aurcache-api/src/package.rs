@@ -25,7 +25,9 @@ use aurcache_utils::listing::package_row_select;
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::replace::{self, ReplaceError};
-use aurcache_utils::package::update::{Dispatch, Rebuild, edit_package, package_update, queued};
+use aurcache_utils::package::update::{
+    Dispatch, Rebuild, Update, edit_package, package_update, queued,
+};
 use aurcache_utils::patch::SourcePatch;
 use aurcache_utils::services::Services;
 use aurcache_utils::snapshot::SnapshotStore;
@@ -264,6 +266,8 @@ pub async fn bulk_add_progress(
 #[utoipa::path(
     responses(
             (status = 200, description = "Add new Package"),
+            (status = 400, description = "The source cannot be used: unknown, unfetchable, or does not parse"),
+            (status = 500, description = "The server could not record the package"),
     )
 )]
 #[post("/package", data = "<input>")]
@@ -283,12 +287,7 @@ pub async fn add_package(
         input.source,
         input.patched_files,
     )
-    .await
-    // Adding is driven by user input: an unknown AUR name, an unreachable git
-    // remote or an unparseable PKGBUILD are all "this request cannot be
-    // fulfilled" rather than a server fault, and the flow reports them as an
-    // untyped `anyhow` error we cannot tell apart from an internal one.
-    .map_err(|e| err(Status::BadRequest, e))?;
+    .await?;
 
     services.activity.emit_by(
         Event::PackageAdded {
@@ -529,6 +528,9 @@ pub async fn preview_source_file(
 #[utoipa::path(
     responses(
             (status = 200, description = "Update package to newest AUR version"),
+            (status = 400, description = "The source cannot be used: unfetchable, or does not parse"),
+            (status = 409, description = "Every platform already has this version built; nothing was queued"),
+            (status = 500, description = "The server could not record the builds"),
     ),
     params(
             ("pkgbase", description = "pkgbase of the package")
@@ -558,11 +560,11 @@ pub async fn update_package(
     };
 
     // An operator's Update or Rebuild, from the UI or the CLI.
-    let results = package_update(services, pkg_model, rebuild, BuildTrigger::User)
-        .await
-        // Same as adding: "already up to date", an unresolvable source, or a
-        // patch that no longer applies are all caller-visible conditions.
-        .map_err(|e| err(Status::BadRequest, e))?;
+    let results = package_update(services, pkg_model, rebuild, BuildTrigger::User).await?;
+    let results = match results {
+        Update::Queued(results) => results,
+        Update::UpToDate(up_to_date) => return Err(err(Status::Conflict, up_to_date)),
+    };
 
     services
         .activity

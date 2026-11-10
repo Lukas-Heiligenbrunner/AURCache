@@ -390,6 +390,7 @@ async fn add_pkg_via_rpc(env: &TestEnv, name: &str) -> anyhow::Result<String> {
         None,
     )
     .await
+    .map_err(Into::into)
 }
 
 // -----------------------------------------------------------------------
