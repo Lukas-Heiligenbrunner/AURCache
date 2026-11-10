@@ -27,7 +27,7 @@ pub async fn run_capture(mut cmd: Command) -> Result<Captured> {
     })
 }
 
-/// The variables `sudo` must pass through to devtools; see [`devtools`].
+/// The variables `sudo` must pass through to devtools; see [`command`].
 const DEVTOOLS_ENV: &str =
     "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,AURCACHE_NSPAWN_KEEP_UNIT";
 
@@ -46,7 +46,7 @@ const DEVTOOLS_ENV: &str =
 /// build's chroot copy, and `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
 /// stays in the build's cgroup. `PKGDEST` reaches the build through
 /// `makepkg.conf` instead, so preserving it here would be a no-op.
-pub fn devtools(program: &str) -> Command {
+pub fn command(program: &str) -> Command {
     let mut cmd = Command::new("sudo");
     // `SRCDEST` is how `makechrootpkg` is told where to keep downloaded
     // sources; sudo would otherwise strip it and devtools would silently fall
@@ -55,7 +55,7 @@ pub fn devtools(program: &str) -> Command {
     cmd
 }
 
-/// [`devtools`], with `TMPDIR` set to `tmpdir` for the program.
+/// [`command`], with `TMPDIR` set to `tmpdir` for the program.
 ///
 /// For a build: devtools makes its `WORKDIR` with `mktemp` under `TMPDIR`, and
 /// the host-side `makepkg --verifysource` -- which sources the PKGBUILD --
@@ -67,7 +67,7 @@ pub fn devtools(program: &str) -> Command {
 /// it: glibc removes `TMPDIR` from a setuid program's environment, so sudo
 /// never sees a preserved one. devtools also unsets a preset `WORKDIR`,
 /// which is why this sets the directory `WORKDIR` is made in, not `WORKDIR`.
-pub fn devtools_in(program: &str, tmpdir: &Path) -> Command {
+pub fn command_in(program: &str, tmpdir: &Path) -> Command {
     let mut cmd = Command::new("sudo");
     cmd.arg(DEVTOOLS_ENV)
         .arg("env")
@@ -101,7 +101,7 @@ pub(crate) async fn create_base(root: &Path, pacman_conf: &Path) -> Result<()> {
     // installed: complete, correct for the chroot's architecture, and owing
     // nothing to whatever the host happens to be configured for. What this
     // worker wants to change goes in `makepkg.conf.d/` instead.
-    let mut cmd = devtools("mkarchroot");
+    let mut cmd = command("mkarchroot");
     cmd.arg("-C")
         .arg(pacman_conf)
         .arg(root)
@@ -122,7 +122,7 @@ pub(crate) async fn create_base(root: &Path, pacman_conf: &Path) -> Result<()> {
 /// snapshot. Must exit 0: a failed upgrade is a failed refresh, and the
 /// candidate is deleted rather than swapped in.
 pub(crate) async fn upgrade_candidate(next: &Path) -> Result<()> {
-    let mut cmd = devtools("arch-nspawn");
+    let mut cmd = command("arch-nspawn");
     cmd.arg(next).args(["pacman", "-Syu", "--noconfirm"]);
     let Captured { log, status } = run_capture(cmd).await?;
     if !status.success() {
@@ -142,7 +142,7 @@ pub(crate) async fn check_candidate(next: &Path) -> Result<()> {
         &["sudo", "-u", "nobody", "true"],
     ];
     for args in checks {
-        let mut cmd = devtools("arch-nspawn");
+        let mut cmd = command("arch-nspawn");
         cmd.arg(next).args(args.iter().copied());
         let Captured { log, status } = run_capture(cmd).await?;
         if !status.success() {
@@ -174,7 +174,7 @@ pub(crate) async fn check_candidate(next: &Path) -> Result<()> {
 /// Best-effort for the same reason: absence is the expected case off x86_64,
 /// not a failure worth refusing to build over.
 pub(crate) async fn ensure_multilib(root: &Path) {
-    let mut cmd = devtools("arch-nspawn");
+    let mut cmd = command("arch-nspawn");
     cmd.arg(root).args([
         "pacman",
         "-S",
@@ -547,7 +547,7 @@ mod tests {
     /// silently runs on the chroot's own defaults.
     #[test]
     fn the_build_environment_survives_sudo() {
-        let cmd = devtools("makechrootpkg");
+        let cmd = command("makechrootpkg");
         let preserve = cmd
             .as_std()
             .get_args()
@@ -564,7 +564,7 @@ mod tests {
     /// way through sudo -- and still the preserved environment.
     #[test]
     fn a_builds_tmpdir_reaches_devtools_through_env() {
-        let cmd = devtools_in("makechrootpkg", Path::new("/pool/job-7.data/tmp"));
+        let cmd = command_in("makechrootpkg", Path::new("/pool/job-7.data/tmp"));
         let args: Vec<_> = cmd
             .as_std()
             .get_args()

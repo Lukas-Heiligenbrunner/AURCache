@@ -15,7 +15,7 @@
 //! overlay chroots, update layers and flattening this replaced existed because
 //! an overlay's lower layer must not change for as long as a build reads it.
 
-use crate::chroot;
+use crate::devtools;
 use anyhow::{Context, Result, bail};
 use aurcache_chroot::{BuildVolumes, Pool, PoolConfig, Usage};
 use aurcache_worker_core::client::WorkerClient;
@@ -351,10 +351,11 @@ impl Chroots {
         let root = pool.root();
         // One decision for "is it due" and "refresh it", or two builds
         // starting together both find it due.
-        let Some(mut last) = self.refresh_gate(chroot::base_exists(&root)).await else {
+        let Some(mut last) = self.refresh_gate(devtools::base_exists(&root)).await else {
             return Ok(root);
         };
-        if chroot::base_exists(&root) && !refresh_due(last.map(|at| at.elapsed()), self.interval())
+        if devtools::base_exists(&root)
+            && !refresh_due(last.map(|at| at.elapsed()), self.interval())
         {
             tracing::debug!("base chroot is current; not refreshing");
             return Ok(root);
@@ -374,20 +375,20 @@ impl Chroots {
         // not be cleared is only ever `root.next`.
         if let Err(e) = pool.recover_refresh().await {
             let e = e.context("recovering an interrupted base refresh");
-            if chroot::base_exists(&root) {
+            if devtools::base_exists(&root) {
                 warn_refresh(report_to, &e).await;
                 *last = Some(Instant::now());
                 return Ok(root);
             }
             tracing::warn!("{e:#}");
         }
-        if !chroot::base_exists(&root) {
+        if !devtools::base_exists(&root) {
             // First start, or an operator removed the base: made in place, as
             // it always was, then counted against the total.
             if root.exists() {
                 pool.discard_root().await?;
             }
-            if let Err(e) = chroot::create_base(&root, pacman_conf).await {
+            if let Err(e) = devtools::create_base(&root, pacman_conf).await {
                 // Never left behind half made or uncounted: the next try
                 // would take it as a base, refresh it forever and never
                 // count it -- or, with no `usr` yet, `mkarchroot` would
@@ -418,9 +419,9 @@ impl Chroots {
         // in that build's log.
         let candidate = async {
             pool.snapshot_next().await?;
-            chroot::upgrade_candidate(&pool.next_root()).await?;
-            chroot::ensure_multilib(&pool.next_root()).await;
-            chroot::check_candidate(&pool.next_root()).await?;
+            devtools::upgrade_candidate(&pool.next_root()).await?;
+            devtools::ensure_multilib(&pool.next_root()).await;
+            devtools::check_candidate(&pool.next_root()).await?;
             // The swap is atomic; a refusal is a failed check like any other.
             pool.exchange_root()
                 .context("swapping the refreshed base in")?;
@@ -691,7 +692,7 @@ impl Lease {
 
     /// Where devtools makes its working directory for this build, and where
     /// the host-side source download writes: inside the build's own
-    /// subvolume, so under its quota. See [`crate::chroot::devtools_in`].
+    /// subvolume, so under its quota. See [`crate::devtools::command_in`].
     #[must_use]
     pub fn tmpdir(&self) -> PathBuf {
         self.volumes.data().join("tmp")
