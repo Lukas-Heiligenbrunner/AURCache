@@ -43,6 +43,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | BUILD_ON_NEW_VERSION   | Boolean       | Queue a rebuild as soon as a version check finds a package out of date, rather than waiting for the auto-update schedule | `true`  |
 | TZ                     | String        | Timezone cron schedules (`AUTO_UPDATE_SCHEDULE`, `MIRROR_RANK_SCHEDULE`) are read in, e.g. `Europe/Paris`. The compose files forward the host's `/etc/localtime` and pass `TZ` through when it is set where compose runs | the host's, else UTC |
 | LOG_LEVEL              | String        | Log level                                                             | INFO    |
+| LOG_STYLE              | String        | `never` turns off coloured log output, for a log collector that shows the escape codes; anything else keeps it | coloured |
 | JOB_TIMEOUT            | Duration      | Longest a build may run (`3h`, seconds). Sent with each job: the worker stops the build at this or its own `WORKER_BUILD_TIMEOUT`, whichever is shorter. Also a setting, which a package can set for itself | `1h`    |
 | MAX_ARTIFACT_SIZE      | Size          | Largest package file a worker may upload, e.g. `20G`; also a setting, per package or global | `20G` |
 | PERSISTENT_BUILDDIR    | Boolean       | Keep a package's build tree between its builds, as an AUR helper does; also a setting, per package or global | `true` |
@@ -52,6 +53,14 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | PARSE_NETWORK          | Boolean       | Let a PKGBUILD reach the network while the server parses it; also a setting, global | false |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
 | AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081` | `http://localhost:8081` |
+| AURCACHE_PROTECTED_DIR | Paths         | Further directories a PKGBUILD parse may not read, colon-separated, added to the built-in list; see [Package parsing](./package-parsing.md) | none |
+| AURCACHE_SANDBOX       | Path          | The `aurcache-sandbox` a parse runs under, for an install outside the default place; absolute | `/usr/bin/aurcache-sandbox` |
+| AURCACHE_PKGBUILD_BRIDGE | Path        | The `alpm-pkgbuild-bridge` script a parse runs, likewise | `/usr/bin/alpm-pkgbuild-bridge` |
+
+Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
+`OAUTH_AUTH_URI`, `OAUTH_TOKEN_URI`, `OAUTH_USERINFO_URI`,
+`OAUTH_REDIRECT_URI` and `OAUTH_ALLOWED_USERS`; see
+[Authentication](./authentication.md).
 
 ## Where the server keeps its state
 
@@ -72,6 +81,20 @@ a volume, the server keeps them in the repository, as `repo/.ca` and
 `repo/.build_logs`, which is what a 0.5 compose file persists. Once their
 directories are on a volume it moves them there at start; see [Hybrid
 image](../workers/hybrid.md#migrating).
+
+## Mirrors
+
+What the server fetches packages and official databases from; see
+[Mirrorlist](./mirrorlist.md) for how the lists are kept.
+
+| Variable                    | Description                                                        | Default |
+|-----------------------------|--------------------------------------------------------------------|---------|
+| MIRROR_RANK_SCHEDULE        | When to re-rank the mirrors, as a [schedule](#schedules)           | `@weekly` |
+| MIRRORLIST_SERVERS_X86_64   | Mirrors for x86_64 builds, `;`-separated, in place of a ranked list | none |
+| MIRRORLIST_SERVERS_AARCH64  | The same, for aarch64                                              | none |
+| MIRRORLIST_SERVERS_ARMV7H   | The same, for armv7h                                               | none |
+| OFFICIAL_MIRRORLIST_SERVERS | Mirrors for the official databases the server reads itself, `;`-separated, in place of `OFFICIAL_MIRRORLIST_PATH` | none: that mirrorlist is used |
+| MIRRORLIST_PATH_X86_64      | Where 0.5.0 read a mounted mirrorlist. A `mirrorlist` there is adopted at every start, unless `BUILD_ARTIFACT_DIR` is set | `./config/pacman_x86_64` |
 
 ## Where the server finds the AUR
 
@@ -115,9 +138,27 @@ own environment. See [Build Workers](../workers/index.md).
 |-------------------------|---------|--------------------------------------------------------------|---------|
 | AURCACHE_WORKER_PORT    | Integer | Port for the worker protocol listener                        | 8083    |
 | AURCACHE_TLS_SANS       | String  | Hostnames the worker listener's certificate is valid for     | localhost |
+| AURCACHE_WORKER_IMAGE   | String  | Image named in the copy-and-run command the **Workers** page shows; changes nothing about how workers connect | `ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest` |
+| AURCACHE_ENROLLMENT_DIR | Path    | A directory shared with workers: one whose certificate request is there is approved without an operator. The bundled compose setup uses it | none |
+| AURCACHE_ENROLLMENT_TOKEN | String | A token shared with workers: one that presents it is approved without an operator | none |
+| AURCACHE_PREAPPROVED_WORKERS | String | Comma-separated certificate fingerprints approved without an operator; a worker prints its own on first start | none |
 | WORKER_SPILL_DELAY      | Duration | How long before worker priority stops holding a job back      | `60s`      |
 | WORKER_LIVENESS_TIMEOUT | Duration | How long before a quiet worker stops counting as available    | `60s`      |
 | MAX_ATTEMPTS            | Integer | Requeues before a build is failed for good                   | 3       |
+| LEASE_TTL               | Duration | How long a build's lease lasts without a heartbeat before it is requeued | `60s` |
+| REAP_INTERVAL           | Duration | How often expired leases are looked for                      | `20s`   |
+| REAP_BACKSTOP_GRACE     | Duration | How far past its own timeout a build that still heartbeats is taken back anyway | `5m` |
+| WORKER_CERT_VALIDITY_DAYS | Integer | Lifetime of an issued worker certificate                    | 3650    |
+
+None of the three approval paths re-approves a worker you revoked; see
+[Approving](../workers/managing.md#approving).
+
+The images set some themselves, which there is no reason to set by hand:
+`AURCACHE_CONTAINER_IMAGE` tells the server it runs in a container (and so
+which of its directories are on a volume), the hybrid image's entrypoint
+sets `AURCACHE_EMBEDDED_WORKER_SECRET` for its own worker, and the server
+image points `AURCACHE_SANDBOX` and `AURCACHE_PKGBUILD_BRIDGE` at its copies
+under `/usr/local`.
 
 ## Schedules
 
