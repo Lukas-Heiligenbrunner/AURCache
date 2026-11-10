@@ -126,11 +126,11 @@ impl AurCacheClient {
         // one stalled connection stops any CLI command (or browser poll loop)
         // with no lease watchdog to save it. The total timeout does not cover
         // a dump -- a tens-of-MB body on a slow link legitimately takes
-        // minutes -- so the dump download and the restore upload override it
-        // per request (the same reason the worker protocol client keeps a
-        // deadline-free upload client).
+        // minutes -- so the dump download, the restore upload and a build log
+        // page override it per request (the same reason the worker protocol
+        // client keeps a deadline-free upload client).
         //
-        // The total is set per request in `send`, which is the only form
+        // The total is set per request in `request`, which is the only form
         // reqwest's wasm client offers; natively the builder bounds the
         // connect phase as well, which the browser's fetch has no separate
         // handle on.
@@ -190,10 +190,7 @@ impl AurCacheClient {
     /// request ended up if it is not.
     pub async fn probe_api(&self) -> Result<ApiReachability> {
         let requested = self.url("/health")?;
-        let response = self
-            .send(Method::GET, "/health", NO_QUERY, Body::<()>::Empty, None)
-            .await?;
-        let response = self.success_or_notify(response).await?;
+        let response = self.request(Method::GET, "/health").send().await?;
         let landed_on = response.url().clone();
         if !same_endpoint(&requested, &landed_on) {
             return Ok(ApiReachability::NotApi {
@@ -256,7 +253,8 @@ impl AurCacheClient {
 
     /// Regenerates the authenticated user's API token.
     pub async fn regenerate_api_token(&self) -> Result<ApiTokenResponse> {
-        self.request_json(Method::POST, "/token/regenerate", NO_QUERY, None::<&()>)
+        self.request(Method::POST, "/token/regenerate")
+            .send_json()
             .await
     }
 
@@ -272,7 +270,9 @@ impl AurCacheClient {
 
     /// Adds a package using the supplied request payload.
     pub async fn add_package(&self, body: &AddPackageRequest) -> Result<()> {
-        self.request_empty(Method::POST, "/package", NO_QUERY, Some(body))
+        self.request(Method::POST, "/package")
+            .json(body)
+            .send_empty()
             .await
     }
 
@@ -285,7 +285,9 @@ impl AurCacheClient {
     /// resolution alone. Poll [`Self::bulk_add_progress`] with the returned id
     /// to follow it, or do not -- the work does not depend on being watched.
     pub async fn add_packages(&self, body: &AddPackagesRequest) -> Result<BulkAddAccepted> {
-        self.request_json(Method::POST, "/packages", NO_QUERY, Some(body))
+        self.request(Method::POST, "/packages")
+            .json(body)
+            .send_json()
             .await
     }
 
@@ -305,24 +307,18 @@ impl AurCacheClient {
     /// Returns the build number, within that package, of each build queued as
     /// a result of the update — one per platform that got one.
     pub async fn update_package(&self, pkgbase: &str, body: &UpdatePackage) -> Result<Vec<i32>> {
-        self.request_json(
-            Method::POST,
-            &format!("/package/{pkgbase}/update"),
-            NO_QUERY,
-            Some(body),
-        )
-        .await
+        self.request(Method::POST, &format!("/package/{pkgbase}/update"))
+            .json(body)
+            .send_json()
+            .await
     }
 
     /// Partially updates package metadata.
     pub async fn patch_package(&self, pkgbase: &str, body: &PackagePatch) -> Result<()> {
-        self.request_empty(
-            Method::PATCH,
-            &format!("/package/{pkgbase}"),
-            NO_QUERY,
-            Some(body),
-        )
-        .await
+        self.request(Method::PATCH, &format!("/package/{pkgbase}"))
+            .json(body)
+            .send_empty()
+            .await
     }
 
     /// What could take over one of a package's dependencies.
@@ -348,14 +344,14 @@ impl AurCacheClient {
         dependency: &str,
         replacement: Option<&str>,
     ) -> Result<()> {
-        self.request_empty(
+        self.request(
             Method::PUT,
             &format!("/package/{pkgbase}/dependency/{dependency}"),
-            NO_QUERY,
-            Some(&ReplaceDependency {
-                replacement: replacement.map(ToString::to_string),
-            }),
         )
+        .json(&ReplaceDependency {
+            replacement: replacement.map(ToString::to_string),
+        })
+        .send_empty()
         .await
     }
 
@@ -399,13 +395,10 @@ impl AurCacheClient {
             path: path.to_string(),
             content: content.to_string(),
         };
-        self.request_empty(
-            Method::PUT,
-            &format!("/package/{pkgbase}/source/file"),
-            NO_QUERY,
-            Some(&body),
-        )
-        .await
+        self.request(Method::PUT, &format!("/package/{pkgbase}/source/file"))
+            .json(&body)
+            .send_empty()
+            .await
     }
 
     /// Fetch one build by its public identity, `<pkgbase>/<number>`.
@@ -469,24 +462,25 @@ impl AurCacheClient {
             #[serde(skip_serializing_if = "Option::is_none")]
             limit: Option<u64>,
         }
-        self.request_bytes(
+        self.request(
             Method::GET,
             &format!("/package/{pkgbase}/build/{number}/output"),
-            &Page { offset, limit },
-            None::<&()>,
         )
+        .query(&Page { offset, limit })
+        // A page is up to 32 MiB, so it gets the long deadline a dump does.
+        .timeout(CLIENT_UPLOAD_TIMEOUT)
+        .send_bytes()
         .await
     }
 
     /// Re-runs the given build, returning the new build's number within the
     /// same package.
     pub async fn retry_build(&self, pkgbase: &str, number: i32) -> Result<i32> {
-        self.request_json(
+        self.request(
             Method::POST,
             &format!("/package/{pkgbase}/build/{number}/retry"),
-            NO_QUERY,
-            None::<&()>,
         )
+        .send_json()
         .await
     }
 
@@ -508,15 +502,12 @@ impl AurCacheClient {
     /// because there is no package to name: this is what lets a PKGBUILD be
     /// inspected — and fixed — before the package exists.
     pub async fn preview_source_files(&self, source: &SourceData) -> Result<SourceFileList> {
-        self.request_json(
-            Method::POST,
-            "/package/source/preview/files",
-            NO_QUERY,
-            Some(&SourcePreviewRequest {
+        self.request(Method::POST, "/package/source/preview/files")
+            .json(&SourcePreviewRequest {
                 source: source.clone(),
-            }),
-        )
-        .await
+            })
+            .send_json()
+            .await
     }
 
     /// Reads one pristine file from a source that has not been added yet.
@@ -525,16 +516,13 @@ impl AurCacheClient {
         source: &SourceData,
         path: &str,
     ) -> Result<SourceFileContent> {
-        self.request_json(
-            Method::POST,
-            "/package/source/preview/file",
-            NO_QUERY,
-            Some(&SourcePreviewFileRequest {
+        self.request(Method::POST, "/package/source/preview/file")
+            .json(&SourcePreviewFileRequest {
                 source: source.clone(),
                 path: path.to_string(),
-            }),
-        )
-        .await
+            })
+            .send_json()
+            .await
     }
 
     /// Fetches every setting with the value in force and where it came from.
@@ -560,29 +548,26 @@ impl AurCacheClient {
     /// parsing, so a client that formats a number differently cannot store
     /// something the server would reject on read.
     pub async fn patch_setting(&self, pkgbase: Option<&str>, key: &str, value: &str) -> Result<()> {
-        self.request_empty(
-            Method::PATCH,
-            &settings_path(pkgbase, Some(key)),
-            NO_QUERY,
-            Some(&SettingValue {
+        self.request(Method::PATCH, &settings_path(pkgbase, Some(key)))
+            .json(&SettingValue {
                 value: value.to_string(),
-            }),
-        )
-        .await
+            })
+            .send_empty()
+            .await
     }
 
     /// When `value` would run, for a setting that holds a schedule; nothing is
     /// stored. The server answers because only it knows its timezone and what
     /// `H` resolves to on this instance.
     pub async fn preview_schedule(&self, key: &str, value: &str) -> Result<SchedulePreview> {
-        self.request_json(
+        self.request(
             Method::POST,
             &format!("{}/schedule", settings_path(None, Some(key))),
-            NO_QUERY,
-            Some(&SettingValue {
-                value: value.to_string(),
-            }),
         )
+        .json(&SettingValue {
+            value: value.to_string(),
+        })
+        .send_json()
         .await
     }
 
@@ -653,13 +638,10 @@ impl AurCacheClient {
         id: i32,
         update: &WorkerConfigUpdate,
     ) -> Result<WorkerConfigView> {
-        self.request_json(
-            Method::PATCH,
-            &format!("/workers/{id}/config"),
-            NO_QUERY,
-            Some(update),
-        )
-        .await
+        self.request(Method::PATCH, &format!("/workers/{id}/config"))
+            .json(update)
+            .send_json()
+            .await
     }
 
     /// The image and worker-protocol port a new worker's `docker run` needs.
@@ -687,10 +669,28 @@ impl AurCacheClient {
         self.post_empty(&format!("/workers/{id}/revoke")).await
     }
 
+    /// A request for `path`, to describe further and then send.
+    pub fn request(&self, method: Method, path: &str) -> Request<'_> {
+        let builder = self.url(path).map(|url| {
+            let request = self
+                .client
+                .request(method, url)
+                .timeout(CLIENT_REQUEST_TIMEOUT);
+            match &self.token {
+                Some(token) => request.bearer_auth(token),
+                None => request,
+            }
+        });
+        Request {
+            client: self,
+            path: path.to_string(),
+            builder,
+        }
+    }
+
     /// `GET path`, decoded as JSON.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        self.request_json(Method::GET, path, NO_QUERY, None::<&()>)
-            .await
+        self.request(Method::GET, path).send_json().await
     }
 
     /// `GET path?query`, decoded as JSON.
@@ -699,130 +699,20 @@ impl AurCacheClient {
         T: DeserializeOwned,
         Q: Serialize + ?Sized,
     {
-        self.request_json(Method::GET, path, query, None::<&()>)
+        self.request(Method::GET, path)
+            .query(query)
+            .send_json()
             .await
     }
 
     /// `POST path` with no body, for an endpoint that answers with none.
     pub async fn post_empty(&self, path: &str) -> Result<()> {
-        self.request_empty(Method::POST, path, NO_QUERY, None::<&()>)
-            .await
+        self.request(Method::POST, path).send_empty().await
     }
 
     /// `DELETE path`, for an endpoint that answers with no body.
     pub async fn delete(&self, path: &str) -> Result<()> {
-        self.request_empty(Method::DELETE, path, NO_QUERY, None::<&()>)
-            .await
-    }
-
-    /// Sends a request and decodes the response body as JSON.
-    ///
-    /// This is intended for endpoints that are not yet wrapped by a typed helper.
-    pub async fn request_json<T, Q, B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &Q,
-        body: Option<&B>,
-    ) -> Result<T>
-    where
-        T: DeserializeOwned,
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
-    {
-        let response = self
-            .send(method, path, query, Body::json(body), None)
-            .await?;
-        let response = self.success_or_notify(response).await?;
-        Self::decode_json(response, path).await
-    }
-
-    /// Decode a success response as JSON.
-    ///
-    /// Read the body first: `json()` consumes the response, leaving nothing
-    /// to explain the failure with beyond serde's "expected value at line 1
-    /// column 1", which describes the symptom and not the cause.
-    async fn decode_json<T: DeserializeOwned>(response: Response, path: &str) -> Result<T> {
-        let body = response
-            .text()
-            .await
-            .with_context(|| format!("failed to read the response from {path}"))?;
-        serde_json::from_str(&body).with_context(|| json_decode_context(path, &body))
-    }
-
-    /// Sends a request that is expected to return no meaningful response body.
-    pub async fn request_empty<Q, B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &Q,
-        body: Option<&B>,
-    ) -> Result<()>
-    where
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
-    {
-        let response = self
-            .send(method, path, query, Body::json(body), None)
-            .await?;
-        self.success_or_notify(response).await?;
-        Ok(())
-    }
-
-    /// Sends a request and returns the raw response body as text.
-    pub async fn request_text<Q, B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &Q,
-        body: Option<&B>,
-    ) -> Result<String>
-    where
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
-    {
-        let response = self
-            .send(method, path, query, Body::json(body), None)
-            .await?;
-        let response = self.success_or_notify(response).await?;
-        response
-            .text()
-            .await
-            .with_context(|| format!("failed to read text response from {path}"))
-    }
-
-    /// Fetch a binary response body.
-    ///
-    /// Separate from [`Self::request_text`] because a dump is a `.tar.gz`:
-    /// decoding it as UTF-8 would corrupt it.
-    pub async fn request_bytes<Q, B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &Q,
-        body: Option<&B>,
-    ) -> Result<Vec<u8>>
-    where
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
-    {
-        // A binary body is a dump, as large as the restore upload, so it gets
-        // the upload's deadline rather than the one for API round trips.
-        let response = self
-            .send(
-                method,
-                path,
-                query,
-                Body::json(body),
-                Some(CLIENT_UPLOAD_TIMEOUT),
-            )
-            .await?;
-        let response = self.success_or_notify(response).await?;
-        Ok(response
-            .bytes()
-            .await
-            .with_context(|| format!("failed to read response body from {path}"))?
-            .to_vec())
+        self.request(Method::DELETE, path).send_empty().await
     }
 
     /// Restore a dump, returning before it has finished.
@@ -848,21 +738,14 @@ impl AurCacheClient {
             clear: options.clear,
             secrets: options.secrets.as_str(),
         };
-        let body = Body::<()>::Raw {
-            bytes: archive,
-            content_type: "application/gzip",
-        };
-        let response = self
-            .send(
-                Method::POST,
-                "/restore",
-                &query,
-                body,
-                Some(CLIENT_UPLOAD_TIMEOUT),
-            )
-            .await?;
-        let response = self.success_or_notify(response).await?;
-        Self::decode_json(response, "/restore").await
+        // A dump is tens of MB on a slow link, so the upload gets a deadline
+        // of its own.
+        self.request(Method::POST, "/restore")
+            .query(&query)
+            .raw(archive, "application/gzip")
+            .timeout(CLIENT_UPLOAD_TIMEOUT)
+            .send_json()
+            .await
     }
 
     /// Read a restore's progress, returning only entries after the first
@@ -882,7 +765,11 @@ impl AurCacheClient {
         struct Dump {
             include_secrets: bool,
         }
-        self.request_bytes(Method::GET, "/dump", &Dump { include_secrets }, None::<&()>)
+        // As large as the restore upload, so the same deadline.
+        self.request(Method::GET, "/dump")
+            .query(&Dump { include_secrets })
+            .timeout(CLIENT_UPLOAD_TIMEOUT)
+            .send_bytes()
             .await
     }
 
@@ -894,60 +781,6 @@ impl AurCacheClient {
             self.base.join(path.trim_start_matches('/'))
         }
         .with_context(|| format!("invalid URL for path {path}"))
-    }
-
-    /// Send one request, with the token, and the default total deadline
-    /// replaced by `timeout` when one is given.
-    async fn send<Q, B>(
-        &self,
-        method: Method,
-        path: &str,
-        query: &Q,
-        body: Body<'_, B>,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<Response>
-    where
-        Q: Serialize + ?Sized,
-        B: Serialize + ?Sized,
-    {
-        let mut request = self
-            .client
-            .request(method, self.url(path)?)
-            .query(query)
-            .timeout(timeout.unwrap_or(CLIENT_REQUEST_TIMEOUT));
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        request = match body {
-            Body::Empty => request,
-            Body::Json(body) => request.json(body),
-            Body::Raw {
-                bytes,
-                content_type,
-            } => request
-                .header(reqwest::header::CONTENT_TYPE, content_type)
-                .body(bytes),
-        };
-        request.send().await.context("request failed")
-    }
-
-    /// Turns a response into an error where it is not a success, and runs the
-    /// `on_unauthorized` callback when the failure was the server refusing the
-    /// session.
-    ///
-    /// Every response goes through this rather than the free
-    /// [`ensure_success`], so no call can miss the callback.
-    async fn success_or_notify(&self, response: Response) -> Result<Response> {
-        match ensure_success(response).await {
-            Ok(response) => Ok(response),
-            Err(error) if is_unauthorized(&error) => {
-                if let Some(on_unauthorized) = &self.on_unauthorized {
-                    on_unauthorized();
-                }
-                Err(error)
-            }
-            Err(error) => Err(error),
-        }
     }
 }
 
@@ -993,29 +826,112 @@ fn json_decode_context(path: &str, body: &str) -> String {
     }
 }
 
-/// The query of a request that has none.
-const NO_QUERY: &[(&str, &str)] = &[];
-
 /// A progress poll: the entries after the first `after`.
 #[derive(Serialize)]
 struct After {
     after: usize,
 }
 
-/// What a request carries.
-enum Body<'a, B: ?Sized> {
-    Empty,
-    Json(&'a B),
-    /// Bytes sent as they are, such as a dump.
-    Raw {
-        bytes: bytes::Bytes,
-        content_type: &'static str,
-    },
+/// A request to the API, sent by one of its `send_*` methods, each of which
+/// fails on an answer that is not a success.
+#[must_use]
+pub struct Request<'c> {
+    client: &'c AurCacheClient,
+    path: String,
+    /// An unparseable URL fails at sending, with the rest.
+    builder: Result<reqwest::RequestBuilder>,
 }
 
-impl<'a, B: ?Sized> Body<'a, B> {
-    fn json(body: Option<&'a B>) -> Self {
-        body.map_or(Self::Empty, Self::Json)
+impl Request<'_> {
+    /// With `query` as the URL's query string.
+    pub fn query<Q: Serialize + ?Sized>(self, query: &Q) -> Self {
+        self.with(|request| request.query(query))
+    }
+
+    /// With `body` as a JSON body.
+    pub fn json<B: Serialize + ?Sized>(self, body: &B) -> Self {
+        self.with(|request| request.json(body))
+    }
+
+    /// With `bytes` as the body, as they are.
+    fn raw(self, bytes: bytes::Bytes, content_type: &'static str) -> Self {
+        self.with(|request| {
+            request
+                .header(reqwest::header::CONTENT_TYPE, content_type)
+                .body(bytes)
+        })
+    }
+
+    /// With `timeout` as the whole request's deadline, in place of the default
+    /// for an API round trip.
+    fn timeout(self, timeout: std::time::Duration) -> Self {
+        self.with(|request| request.timeout(timeout))
+    }
+
+    fn with(self, change: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder) -> Self {
+        Self {
+            builder: self.builder.map(change),
+            ..self
+        }
+    }
+
+    /// Send it, failing on an answer that is not a success, and run the
+    /// client's `on_unauthorized` callback when the server refused the
+    /// session. Every request goes through here, so none can miss the
+    /// callback.
+    async fn send(self) -> Result<Response> {
+        let response = self.builder?.send().await.context("request failed")?;
+        match ensure_success(response).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                if is_unauthorized(&error)
+                    && let Some(on_unauthorized) = &self.client.on_unauthorized
+                {
+                    on_unauthorized();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Send it, and decode the answer as JSON.
+    ///
+    /// The body is read first: `json()` consumes the response, leaving nothing
+    /// to explain the failure with beyond serde's "expected value at line 1
+    /// column 1", which describes the symptom and not the cause.
+    pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
+        let path = self.path.clone();
+        let body = self.send_text().await?;
+        serde_json::from_str(&body).with_context(|| json_decode_context(&path, &body))
+    }
+
+    /// Send it, to an endpoint that answers with no meaningful body.
+    pub async fn send_empty(self) -> Result<()> {
+        self.send().await?;
+        Ok(())
+    }
+
+    /// Send it, and return the answer as text.
+    pub async fn send_text(self) -> Result<String> {
+        let path = self.path.clone();
+        self.send()
+            .await?
+            .text()
+            .await
+            .with_context(|| format!("failed to read the response from {path}"))
+    }
+
+    /// Send it, and return the answer as bytes: a dump is a `.tar.gz`, which
+    /// decoding as UTF-8 would corrupt.
+    pub async fn send_bytes(self) -> Result<Vec<u8>> {
+        let path = self.path.clone();
+        Ok(self
+            .send()
+            .await?
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read the response from {path}"))?
+            .to_vec())
     }
 }
 
