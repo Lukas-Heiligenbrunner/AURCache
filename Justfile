@@ -17,9 +17,18 @@ format:
   cd backend && cargo fmt --all
   cd frontend-rs && cargo fmt
 
-# Lint both workspaces, and the frontend for both its targets
+# Lint both workspaces as CI does: formatting, clippy, and the frontend for
+# both its targets
 lint:
+  cd backend && cargo fmt --all -- --check
   cd backend && cargo clippy --all-targets -- -D warnings
+  # The asset handler and app-shell fallback only exist under `static`.
+  cd backend && cargo clippy --all-targets --features static -p aurcache-api -- -D warnings
+  # A workspace build turns `db` and `fs` on, so only this proves the browser
+  # and the client can still take the shared types without a database driver.
+  cd backend && cargo check -p aurcache-common --no-default-features
+  cd backend && cargo check -p aurcache-client
+  cd frontend-rs && cargo fmt -- --check
   # The crate ships as wasm; its browser tests are host-only. Both are linted.
   cd frontend-rs && cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings
   cd frontend-rs && cargo clippy --all-targets -- -D warnings

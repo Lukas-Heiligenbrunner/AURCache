@@ -75,8 +75,8 @@ jobs:
       - name: Test PKGBUILD parsing as root
         run: |
           sudo useradd --system --no-create-home aurcache-parse
-          tests=$(cargo test -p aurcache-utils --lib --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "aurcache_utils" and .executable != null) | .executable')
+          source ../scripts/lib/common.sh
+          tests=$(cargo_executable aurcache_utils test -p aurcache-utils --lib --no-run)
           cd aurcache-utils
           as_root() { sudo --preserve-env=AURCACHE_SANDBOX,AURCACHE_PKGBUILD_BRIDGE,CI env "$@"; }
           as_root "$tests" pkgbuild snapshot

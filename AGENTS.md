@@ -36,7 +36,8 @@ needs no AUR account and only a maintainer can publish.
 # repo helpers (Justfile at repo root) -- these are the whole workflow
 just serve         # run a server with the UI embedded, as the container ships it
 just format        # cargo fmt, both workspaces
-just lint          # clippy over both workspaces; the frontend for wasm *and* host
+just lint          # what CI lints: fmt --check, clippy (also `static`, and the frontend
+                   # for wasm *and* host), and the driver-free aurcache-common check
 just test          # cargo test, both workspaces (no browser)
 just test-browser  # scripts/test-frontend.sh
 just test-kernel   # scripts/test-kernel.sh (docker, privileged)
@@ -45,7 +46,7 @@ just clean
 # Rust backend workspace
 cd backend
 cargo fmt -- --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo check
 cargo test --all
 
@@ -134,6 +135,23 @@ defect this frontend has had was of that kind.
   SQLite uses `./db` plus WAL pragmas, while Postgres is selected from env vars.
 - `backend/aurcache-scheduler` contains background jobs such as auto-update, mirror ranking, and version
   checking.
+- `backend/aurcache-deps` talks to the AUR and the official repositories and decides dependencies:
+  `.SRCINFO` parsing, version constraints, and `SatisfyIndex`, the one place that says which package
+  satisfies a name. It sits below `aurcache-utils` because `aurcache-db`'s build helpers use it
+  to check a dependency's constraint.
+- `backend/aurcache-activitylog` is the structured log: the handle callers record through (one task
+  writes), the store that filters and pages it, and the import of 0.5.0's activity rows. The event
+  catalogue itself is in `aurcache-common`, so the browser can render it.
+- `backend/aurcache-ca` is the internal certificate authority: it issues the server's certificate and
+  signs a worker's CSR on approval; workers are known by their key's fingerprint.
+- `backend/pacman-repo-utils` writes pacman's `repo.db`/`repo.files` (only ever through
+  `Repository`, see below), and `backend/pacman-mirrors` fetches and parses the Arch mirror list.
+- Workers are separate processes. `backend/aurcache-worker-core` is everything that makes one a worker
+  (enrollment over mTLS, the job protocol, claim/heartbeat/report) behind an `Executor`;
+  `backend/aurcache-worker` is the `devtools` chroot executor, on the storage pool in
+  `backend/aurcache-chroot`; `aurcache-worker-docker` is the deprecated per-build container executor
+  the hybrid image uses, and `aurcache-worker-demo` produces synthetic packages for demo instances.
+  `backend/aurcache-sandbox` confines PKGBUILD code with Landlock, for the server's parse and a build.
 - `backend/aurcache-cli` is a typed CLI for the HTTP API (`cargo run -p aurcache-cli -- ...`); the reusable
   Rust client library backing it lives in `backend/aurcache-client`. It authenticates via
   `Authorization: Bearer <token>`, resolving `--url`/`--token`, then `AURCACHE_URL`/`AURCACHE_TOKEN`, then
