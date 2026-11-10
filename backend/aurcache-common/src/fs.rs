@@ -82,10 +82,9 @@ pub fn build_log_root() -> PathBuf {
     configured_build_log_root()
 }
 
-const BUILD_LOG_PATH_VAR: &str = "AURCACHE_BUILD_LOG_PATH";
-
 fn configured_build_log_root() -> PathBuf {
-    std::env::var(BUILD_LOG_PATH_VAR)
+    crate::server_env::AURCACHE_BUILD_LOG_PATH
+        .get()
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./build_logs"))
 }
@@ -103,10 +102,9 @@ pub fn ca_dir() -> PathBuf {
     configured_ca_dir()
 }
 
-const CA_DIR_VAR: &str = "AURCACHE_CA_DIR";
-
 fn configured_ca_dir() -> PathBuf {
-    std::env::var(CA_DIR_VAR)
+    crate::server_env::AURCACHE_CA_DIR
+        .get()
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./data/ca"))
 }

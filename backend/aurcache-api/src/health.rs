@@ -58,7 +58,7 @@ pub fn server_info(version: &State<ServerVersion>) -> Json<ServerInfo> {
 /// ship without that link so that a host's zone bind-mounted over it is not
 /// mislabelled as the image's `Etc/UTC`, and is reported by offset alone.
 fn local_timezone() -> Timezone {
-    let name = match std::env::var("TZ") {
+    let name = match aurcache_common::server_env::TZ.get() {
         // An empty `TZ` is UTC to `Local`, not "unset".
         Ok(tz) if tz.is_empty() => Some("UTC".to_string()),
         Ok(tz) => Some(tz.trim_start_matches(':').to_string()),

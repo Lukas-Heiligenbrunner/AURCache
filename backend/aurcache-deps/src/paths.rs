@@ -29,7 +29,11 @@ use std::path::PathBuf;
 /// Override with `AURCACHE_MIRRORLIST_DIR` (default `./repo`).
 #[must_use]
 pub fn mirrorlist_dir() -> PathBuf {
-    PathBuf::from(std::env::var("AURCACHE_MIRRORLIST_DIR").unwrap_or_else(|_| "./repo".to_string()))
+    PathBuf::from(
+        aurcache_common::server_env::AURCACHE_MIRRORLIST_DIR
+            .get()
+            .unwrap_or_else(|_| "./repo".to_string()),
+    )
 }
 
 /// Mirrorlist for one architecture: `<dir>/mirrorlist.<arch>`.
@@ -58,10 +62,14 @@ pub fn shared_mirrorlist_path() -> PathBuf {
 /// there itself, so a file there says nothing about who chose its mirrors.
 #[must_use]
 pub fn legacy_mirrorlist_path() -> Option<PathBuf> {
-    if std::env::var_os("BUILD_ARTIFACT_DIR").is_some() {
+    if aurcache_common::server_env::BUILD_ARTIFACT_DIR
+        .get_os()
+        .is_some()
+    {
         return None;
     }
-    let dir = std::env::var("MIRRORLIST_PATH_X86_64")
+    let dir = aurcache_common::server_env::MIRRORLIST_PATH_X86_64
+        .get()
         .unwrap_or_else(|_| "./config/pacman_x86_64".to_string());
     Some(PathBuf::from(dir).join("mirrorlist"))
 }
@@ -98,7 +106,7 @@ pub fn native_arch() -> &'static str {
 /// as the repo, rather than being re-downloaded on every boot.
 #[must_use]
 pub fn official_repo_cache_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("OFFICIAL_REPO_CACHE_DIR") {
+    if let Ok(path) = aurcache_common::server_env::OFFICIAL_REPO_CACHE_DIR.get() {
         return PathBuf::from(path);
     }
     mirrorlist_dir().join("official_repo_cache")

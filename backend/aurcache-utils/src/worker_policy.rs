@@ -9,6 +9,7 @@
 //! environment is fixed at start in every deployment, so a change needs a
 //! restart like any other setting.
 
+use aurcache_common::server_env::{self, Var};
 use aurcache_common::units::parse_duration;
 use std::sync::LazyLock;
 
@@ -57,8 +58,8 @@ impl WorkerPolicy {
     /// Durations take what [`parse_duration`] takes: plain seconds, or `90s`,
     /// `5m`, `1h30m`.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let duration = |key: &str, default: u64| -> u64 {
-            let Some(raw) = lookup(key).filter(|v| !v.trim().is_empty()) else {
+        let duration = |key: Var, default: u64| -> u64 {
+            let Some(raw) = lookup(key.name()).filter(|v| !v.trim().is_empty()) else {
                 return default;
             };
             parse_duration(&raw).unwrap_or_else(|| {
@@ -69,8 +70,8 @@ impl WorkerPolicy {
                 default
             })
         };
-        let count = |key: &str, default: i64| -> i64 {
-            let Some(raw) = lookup(key).filter(|v| !v.trim().is_empty()) else {
+        let count = |key: Var, default: i64| -> i64 {
+            let Some(raw) = lookup(key.name()).filter(|v| !v.trim().is_empty()) else {
                 return default;
             };
             raw.trim().parse().unwrap_or_else(|_| {
@@ -79,15 +80,15 @@ impl WorkerPolicy {
             })
         };
         let seconds =
-            |key: &str, default: u64| i64::try_from(duration(key, default)).unwrap_or(i64::MAX);
+            |key: Var, default: u64| i64::try_from(duration(key, default)).unwrap_or(i64::MAX);
         Self {
-            lease_ttl_secs: seconds("LEASE_TTL", 60),
-            max_attempts: i32::try_from(count("MAX_ATTEMPTS", 3)).unwrap_or(3),
-            spill_delay_secs: seconds("WORKER_SPILL_DELAY", 60),
-            liveness_timeout_secs: seconds("WORKER_LIVENESS_TIMEOUT", 60),
-            reap_interval_secs: duration("REAP_INTERVAL", 20).max(1),
-            reap_backstop_grace_secs: seconds("REAP_BACKSTOP_GRACE", 300),
-            cert_validity_days: count("WORKER_CERT_VALIDITY_DAYS", 3650),
+            lease_ttl_secs: seconds(server_env::LEASE_TTL, 60),
+            max_attempts: i32::try_from(count(server_env::MAX_ATTEMPTS, 3)).unwrap_or(3),
+            spill_delay_secs: seconds(server_env::WORKER_SPILL_DELAY, 60),
+            liveness_timeout_secs: seconds(server_env::WORKER_LIVENESS_TIMEOUT, 60),
+            reap_interval_secs: duration(server_env::REAP_INTERVAL, 20).max(1),
+            reap_backstop_grace_secs: seconds(server_env::REAP_BACKSTOP_GRACE, 300),
+            cert_validity_days: count(server_env::WORKER_CERT_VALIDITY_DAYS, 3650),
         }
     }
 }

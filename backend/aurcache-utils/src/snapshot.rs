@@ -25,7 +25,9 @@ use crate::pkgbuild::fix_source_urls;
 /// mirror, or the repositories `scripts/showcase/restore.py` serves so a
 /// restored instance reads its sources without the network.
 fn default_aur_git_base_url() -> String {
-    std::env::var("AUR_GIT_URL").unwrap_or_else(|_| "https://aur.archlinux.org".to_string())
+    aurcache_common::server_env::AUR_GIT_URL
+        .get()
+        .unwrap_or_else(|_| "https://aur.archlinux.org".to_string())
 }
 
 /// Git's per-checkout metadata directory, excluded from source archives.
@@ -127,7 +129,8 @@ impl CacheEntry {
 /// `refresh` only needs to `git fetch` (transfer new objects) instead of a
 /// full re-clone.
 pub(crate) fn default_checkout_root() -> PathBuf {
-    std::env::var("AURCACHE_SOURCE_CACHE_PATH")
+    aurcache_common::server_env::AURCACHE_SOURCE_CACHE_PATH
+        .get()
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./source_cache"))
 }

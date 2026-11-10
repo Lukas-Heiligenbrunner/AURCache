@@ -1,8 +1,4 @@
 use rocket_oauth2::{OAuthConfig, StaticProvider};
-use std::env;
-
-/// Env var naming the OAuth users allowed to sign in.
-pub const ALLOWED_USERS_ENV: &str = "OAUTH_ALLOWED_USERS";
 
 /// Sign-in with OAuth, as the environment configures it. Read once, at startup.
 pub struct OAuth {
@@ -28,15 +24,15 @@ pub struct OAuthSettings {
 /// Sign-in as the `OAUTH_*` variables configure it, or an error naming the
 /// first one missing.
 pub fn oauth_from_env() -> anyhow::Result<OAuth> {
-    let userinfo_uri = env::var("OAUTH_USERINFO_URI")?;
+    let userinfo_uri = aurcache_common::server_env::OAUTH_USERINFO_URI.get()?;
     let config = OAuthConfig::new(
         StaticProvider {
-            auth_uri: env::var("OAUTH_AUTH_URI")?.into(),
-            token_uri: env::var("OAUTH_TOKEN_URI")?.into(),
+            auth_uri: aurcache_common::server_env::OAUTH_AUTH_URI.get()?.into(),
+            token_uri: aurcache_common::server_env::OAUTH_TOKEN_URI.get()?.into(),
         },
-        env::var("OAUTH_CLIENT_ID")?,
-        env::var("OAUTH_CLIENT_SECRET")?,
-        Some(env::var("OAUTH_REDIRECT_URI")?),
+        aurcache_common::server_env::OAUTH_CLIENT_ID.get()?,
+        aurcache_common::server_env::OAUTH_CLIENT_SECRET.get()?,
+        Some(aurcache_common::server_env::OAUTH_REDIRECT_URI.get()?),
     );
     Ok(OAuth {
         config,
@@ -60,7 +56,12 @@ pub fn oauth_from_env() -> anyhow::Result<OAuth> {
 /// AURCache's list-valued variables use. Neither can occur in an address, so
 /// accepting both costs nothing.
 pub fn allowed_users() -> Option<Vec<String>> {
-    parse_allowed_users(env::var(ALLOWED_USERS_ENV).ok().as_deref())
+    parse_allowed_users(
+        aurcache_common::server_env::OAUTH_ALLOWED_USERS
+            .get()
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// [`allowed_users`] split from the environment, so it can be tested.

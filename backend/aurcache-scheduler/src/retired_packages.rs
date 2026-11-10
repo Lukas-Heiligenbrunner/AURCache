@@ -23,7 +23,10 @@ const DEFAULT_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 fn grace() -> Duration {
-    crate::env_duration("RETIRED_PACKAGE_GRACE", DEFAULT_GRACE)
+    crate::env_duration(
+        aurcache_common::server_env::RETIRED_PACKAGE_GRACE,
+        DEFAULT_GRACE,
+    )
 }
 
 /// Sweep often enough that a short grace is honoured roughly, without

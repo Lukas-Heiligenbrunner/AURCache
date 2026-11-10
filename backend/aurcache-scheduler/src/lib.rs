@@ -17,8 +17,8 @@ use tracing::{debug, info, warn};
 /// A value that does not parse is the default too, with a warning: `90d` read
 /// as a plain number silently meant the default, which is how a typo goes
 /// unnoticed.
-pub(crate) fn env_duration(key: &str, default: Duration) -> Duration {
-    let Some(raw) = std::env::var(key).ok().filter(|v| !v.trim().is_empty()) else {
+pub(crate) fn env_duration(key: aurcache_common::server_env::Var, default: Duration) -> Duration {
+    let Some(raw) = key.get().ok().filter(|v| !v.trim().is_empty()) else {
         return default;
     };
     parse_duration(&raw).map_or_else(

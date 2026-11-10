@@ -27,7 +27,6 @@ use aurcache_common::worker::{PROTOCOLS, RegisterRequest};
 use aurcache_common::worker_config::SettingDecl;
 use aurcache_db::helpers::worker_store;
 use sea_orm::DatabaseConnection;
-use std::env;
 use std::path::PathBuf;
 use subtle::ConstantTimeEq;
 
@@ -52,12 +51,19 @@ impl EnrollmentPolicy {
     #[must_use]
     pub fn from_env() -> Self {
         Self {
-            dir: env::var_os("AURCACHE_ENROLLMENT_DIR").map(PathBuf::from),
-            preapproved: env::var("AURCACHE_PREAPPROVED_WORKERS")
+            dir: aurcache_common::server_env::AURCACHE_ENROLLMENT_DIR
+                .get_os()
+                .map(PathBuf::from),
+            preapproved: aurcache_common::server_env::AURCACHE_PREAPPROVED_WORKERS
+                .get()
                 .map(|raw| parse_preapproved(&raw))
                 .unwrap_or_default(),
-            token: env::var("AURCACHE_ENROLLMENT_TOKEN").ok(),
-            embedded_secret: env::var("AURCACHE_EMBEDDED_WORKER_SECRET").ok(),
+            token: aurcache_common::server_env::AURCACHE_ENROLLMENT_TOKEN
+                .get()
+                .ok(),
+            embedded_secret: aurcache_common::server_env::AURCACHE_EMBEDDED_WORKER_SECRET
+                .get()
+                .ok(),
         }
     }
 

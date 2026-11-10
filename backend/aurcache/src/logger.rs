@@ -3,21 +3,21 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-const ENV_NAME: &str = "LOG_LEVEL";
-
 pub fn init_logger() {
     let default_level = LevelFilter::INFO;
 
     let env_filter = EnvFilter::builder()
         .with_default_directive(default_level.into())
-        .with_env_var(ENV_NAME)
+        .with_env_var(aurcache_common::server_env::LOG_LEVEL.name())
         .from_env_lossy();
 
     let env_filter = env_filter
         .add_directive("rocket=warn".parse().unwrap())
         .add_directive("hyper::proto=warn".parse().unwrap());
 
-    let use_color = std::env::var("LOG_STYLE").map_or(true, |s| s != "never");
+    let use_color = aurcache_common::server_env::LOG_STYLE
+        .get()
+        .map_or(true, |s| s != "never");
 
     #[cfg(debug_assertions)]
     let formatter = fmt::layer().with_target(true).with_ansi(use_color).pretty();

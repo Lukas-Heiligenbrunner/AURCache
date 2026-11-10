@@ -215,8 +215,8 @@ impl Bridge {
     /// install under `/usr/local` and set `AURCACHE_SANDBOX` and
     /// `AURCACHE_PKGBUILD_BRIDGE` accordingly.
     pub(crate) fn from_env(network: bool) -> anyhow::Result<Self> {
-        let path_from = |key: &str, default: &str| {
-            std::env::var_os(key)
+        let path_from = |var: aurcache_common::server_env::Var, default: &str| {
+            var.get_os()
                 .filter(|v| !v.is_empty())
                 .map_or_else(|| PathBuf::from(default), PathBuf::from)
         };
@@ -225,7 +225,9 @@ impl Bridge {
         // `AURCACHE_PROTECTED_DIR` adds to the defaults rather than replacing
         // them, so a deployment naming one more directory cannot accidentally
         // expose the server's own.
-        let extra = std::env::var_os("AURCACHE_PROTECTED_DIR").filter(|v| !v.is_empty());
+        let extra = aurcache_common::server_env::AURCACHE_PROTECTED_DIR
+            .get_os()
+            .filter(|v| !v.is_empty());
         // Absolute, because the sandbox is not started where the server runs.
         let mut private: Vec<PathBuf> = private_state()
             .into_iter()
@@ -237,8 +239,14 @@ impl Bridge {
 
         Ok(Self {
             network,
-            sandbox: path_from("AURCACHE_SANDBOX", "/usr/bin/aurcache-sandbox"),
-            script: path_from("AURCACHE_PKGBUILD_BRIDGE", "/usr/bin/alpm-pkgbuild-bridge"),
+            sandbox: path_from(
+                aurcache_common::server_env::AURCACHE_SANDBOX,
+                "/usr/bin/aurcache-sandbox",
+            ),
+            script: path_from(
+                aurcache_common::server_env::AURCACHE_PKGBUILD_BRIDGE,
+                "/usr/bin/alpm-pkgbuild-bridge",
+            ),
             private,
         })
     }
