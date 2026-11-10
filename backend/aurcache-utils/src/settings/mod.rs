@@ -14,6 +14,7 @@ use aurcache_common::settings::{
 };
 use aurcache_db::settings;
 use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 /// A setting, and the type its value is read as.
@@ -67,6 +68,87 @@ pub async fn get<T: ParseSetting>(
     key: Key<T>,
     pkg_id: Option<i32>,
 ) -> Result<SettingsEntry<T>, sea_orm::DbErr> {
+    // The environment outranks everything stored but a package's own value,
+    // so when no package value can apply and the environment has one there is
+    // nothing to read: the answer does not wait on, or fail with, the database.
+    let stored = if env_decides(key.setting, pkg_id) {
+        Stored::nothing(pkg_id)
+    } else {
+        Stored::one(db, key.setting, pkg_id).await?
+    };
+    Ok(resolve(&stored, key))
+}
+
+/// Whether the environment answers for `setting` whatever is stored.
+fn env_decides(setting: Setting, pkg_id: Option<i32>) -> bool {
+    let meta = setting.meta();
+    let package_may_override = pkg_id.is_some() && meta.scope == Scope::Package;
+    !package_may_override
+        && meta
+            .env_name
+            .is_some_and(|name| std::env::var(name).is_ok())
+}
+
+/// The values stored for the server and for one package, as one read saw
+/// them.
+struct Stored {
+    pkg_id: Option<i32>,
+    package: HashMap<String, String>,
+    global: HashMap<String, String>,
+}
+
+impl Stored {
+    /// What is stored for `setting`, for the server and for `pkg_id`.
+    async fn one(
+        db: &DatabaseConnection,
+        setting: Setting,
+        pkg_id: Option<i32>,
+    ) -> Result<Self, sea_orm::DbErr> {
+        Self::load(db, Some(setting), pkg_id).await
+    }
+
+    /// What is stored for every setting, for the server and for `pkg_id`.
+    async fn every(db: &DatabaseConnection, pkg_id: Option<i32>) -> Result<Self, sea_orm::DbErr> {
+        Self::load(db, None, pkg_id).await
+    }
+
+    /// Nothing stored, as when the database need not be asked.
+    fn nothing(pkg_id: Option<i32>) -> Self {
+        Self {
+            pkg_id,
+            package: HashMap::new(),
+            global: HashMap::new(),
+        }
+    }
+
+    /// A failed read must reach the caller: a missing row permits fallback, a
+    /// broken database does not.
+    async fn load(
+        db: &DatabaseConnection,
+        setting: Option<Setting>,
+        pkg_id: Option<i32>,
+    ) -> Result<Self, sea_orm::DbErr> {
+        let scopes = std::iter::once(settings::scope(None))
+            .chain(pkg_id.map(|id| settings::scope(Some(id))));
+        let mut query = settings::Entity::find().filter(settings::Column::PkgId.is_in(scopes));
+        if let Some(setting) = setting {
+            query = query.filter(settings::Column::Key.eq(setting.meta().key));
+        }
+        let mut stored = Self::nothing(pkg_id);
+        for row in query.all(db).await? {
+            let Some(value) = row.value else { continue };
+            match settings::package_of(row.pkg_id) {
+                Some(_) => stored.package.insert(row.key, value),
+                None => stored.global.insert(row.key, value),
+            };
+        }
+        Ok(stored)
+    }
+}
+
+/// `key`'s value for the package `stored` was read for, from what is stored:
+/// `Package -> Env -> Global -> Default`.
+fn resolve<T: ParseSetting>(stored: &Stored, key: Key<T>) -> SettingsEntry<T> {
     let setting = key.setting.meta();
 
     let parse_or_default = |val: &str, context: &str| -> T {
@@ -82,39 +164,39 @@ pub async fn get<T: ParseSetting>(
     // 1. The value set for the package: explicit intent for one package wins
     //    over the deployment-wide environment. Only for a setting a package
     //    can override; anything else has one value for the whole server.
-    if let Some(pid) = pkg_id
+    if let Some(pid) = stored.pkg_id
         && setting.scope == Scope::Package
-        && let Some(v) = stored(db, setting.key, Some(pid)).await?
+        && let Some(v) = stored.package.get(setting.key)
     {
-        return Ok(SettingsEntry {
-            value: parse_or_default(&v, &format!("pkg setting {} pkg={pid}", setting.key)),
+        return SettingsEntry {
+            value: parse_or_default(v, &format!("pkg setting {} pkg={pid}", setting.key)),
             source: SettingSource::Package,
-        });
+        };
     }
 
     // 2. The environment: the deployment's override of the server-wide value.
     if let Some(env_name) = setting.env_name
         && let Ok(env_value) = std::env::var(env_name)
     {
-        return Ok(SettingsEntry {
+        return SettingsEntry {
             value: parse_or_default(&env_value, &format!("ENV {env_name}")),
             source: SettingSource::Env,
-        });
+        };
     }
 
     // 3. The value set for the server.
-    if let Some(v) = stored(db, setting.key, None).await? {
-        return Ok(SettingsEntry {
-            value: parse_or_default(&v, &format!("global setting {}", setting.key)),
+    if let Some(v) = stored.global.get(setting.key) {
+        return SettingsEntry {
+            value: parse_or_default(v, &format!("global setting {}", setting.key)),
             source: SettingSource::Global,
-        });
+        };
     }
 
     // 4. The built-in default.
-    Ok(SettingsEntry {
+    SettingsEntry {
         value: parse_default(&setting),
         source: SettingSource::Default,
-    })
+    }
 }
 
 /// One setting's value as written, whatever its type: for showing and editing
@@ -125,20 +207,6 @@ pub async fn raw(
     pkg_id: Option<i32>,
 ) -> Result<SettingsEntry<String>, sea_orm::DbErr> {
     get(db, Key::of(setting), pkg_id).await
-}
-
-/// A missing row permits fallback; a failed read must reach the caller.
-async fn stored(
-    db: &DatabaseConnection,
-    key: &str,
-    pkg_id: Option<i32>,
-) -> Result<Option<String>, sea_orm::DbErr> {
-    Ok(settings::Entity::find()
-        .filter(settings::Column::Key.eq(key))
-        .filter(settings::Column::PkgId.eq(settings::scope(pkg_id)))
-        .one(db)
-        .await?
-        .and_then(|row| row.value))
 }
 
 /// Parse a setting's built-in default. The defaults are compile-time constants
@@ -152,49 +220,32 @@ fn parse_default<T: ParseSetting>(setting: &SettingsMeta) -> T {
     })
 }
 
-/// Every setting for `pkg_id`, resolved.
+/// Every setting for `pkg_id`, resolved from one read of what is stored.
 pub async fn all(
     db: &DatabaseConnection,
     pkg_id: Option<i32>,
 ) -> Result<ApplicationSettings, sea_orm::DbErr> {
-    // Independent reads over one pooled connection: serial awaits would pay
-    // up to sixteen point queries (package + global each) in turn.
-    let (
-        version_check_interval,
-        auto_update_schedule,
-        job_timeout,
-        max_artifact_size,
-        date_format,
-        build_on_new_version,
-        persistent_builddir,
-        parse_network,
-    ) = tokio::try_join!(
-        get(db, key::VERSION_CHECK_INTERVAL, pkg_id),
-        get(db, key::AUTO_UPDATE_SCHEDULE, pkg_id),
-        get(db, key::JOB_TIMEOUT, pkg_id),
-        get(db, key::MAX_ARTIFACT_SIZE, pkg_id),
-        get(db, key::DATE_FORMAT, pkg_id),
-        get(db, key::BUILD_ON_NEW_VERSION, pkg_id),
-        get(db, key::PERSISTENT_BUILDDIR, pkg_id),
-        get(db, key::PARSE_NETWORK, pkg_id),
-    )?;
+    let stored = Stored::every(db, pkg_id).await?;
     // Seconds on the wire, as they always were; written as durations.
     let seconds = |entry: SettingsEntry<Seconds>| SettingsEntry {
         value: u32::try_from(entry.value.0).unwrap_or(u32::MAX),
         source: entry.source,
     };
     Ok(ApplicationSettings {
-        version_check_interval: seconds(version_check_interval),
-        auto_update_schedule,
-        job_timeout: seconds(job_timeout),
-        max_artifact_size: SettingsEntry {
-            value: max_artifact_size.value.0,
-            source: max_artifact_size.source,
+        version_check_interval: seconds(resolve(&stored, key::VERSION_CHECK_INTERVAL)),
+        auto_update_schedule: resolve(&stored, key::AUTO_UPDATE_SCHEDULE),
+        job_timeout: seconds(resolve(&stored, key::JOB_TIMEOUT)),
+        max_artifact_size: {
+            let entry = resolve(&stored, key::MAX_ARTIFACT_SIZE);
+            SettingsEntry {
+                value: entry.value.0,
+                source: entry.source,
+            }
         },
-        date_format,
-        build_on_new_version,
-        persistent_builddir,
-        parse_network,
+        date_format: resolve(&stored, key::DATE_FORMAT),
+        build_on_new_version: resolve(&stored, key::BUILD_ON_NEW_VERSION),
+        persistent_builddir: resolve(&stored, key::PERSISTENT_BUILDDIR),
+        parse_network: resolve(&stored, key::PARSE_NETWORK),
     })
 }
 
@@ -350,5 +401,47 @@ mod tests {
         .unwrap();
         let entry = get(&db, key::MAX_ARTIFACT_SIZE, Some(1)).await.unwrap();
         assert_eq!(entry.source, SettingSource::Package);
+    }
+
+    /// The whole page and one setting at a time give the same answers: they
+    /// share one resolver, over one read.
+    #[tokio::test]
+    async fn all_agrees_with_get() {
+        let db = db().await;
+        write(
+            &db,
+            [
+                Change {
+                    setting: Setting::MaxArtifactSize,
+                    pkg_id: Some(1),
+                    value: Some("40G".to_string()),
+                },
+                Change {
+                    setting: Setting::MaxArtifactSize,
+                    pkg_id: None,
+                    value: Some("2G".to_string()),
+                },
+                Change {
+                    setting: Setting::DateFormat,
+                    pkg_id: None,
+                    value: Some("%Y".to_string()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        for pkg_id in [None, Some(1), Some(2)] {
+            let page = super::all(&db, pkg_id).await.unwrap();
+            let size = get(&db, key::MAX_ARTIFACT_SIZE, pkg_id).await.unwrap();
+            assert_eq!(page.max_artifact_size.value, size.value.0);
+            assert_eq!(page.max_artifact_size.source, size.source);
+            let date = get(&db, key::DATE_FORMAT, pkg_id).await.unwrap();
+            assert_eq!(page.date_format.value, date.value);
+            assert_eq!(page.date_format.source, SettingSource::Global);
+        }
+        let package = super::all(&db, Some(1)).await.unwrap();
+        assert_eq!(package.max_artifact_size.source, SettingSource::Package);
+        let other = super::all(&db, Some(2)).await.unwrap();
+        assert_eq!(other.max_artifact_size.source, SettingSource::Global);
     }
 }
