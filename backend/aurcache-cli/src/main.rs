@@ -9,7 +9,7 @@ mod output;
 mod packages;
 mod pacman;
 mod repo;
-mod setup_cmd;
+mod setup;
 mod url;
 mod workers;
 
@@ -24,7 +24,7 @@ use crate::output::{
     print_user_info, render,
 };
 use crate::packages::run_packages_command;
-use crate::setup_cmd::run_setup_command;
+use crate::setup::run_setup_command;
 use crate::workers::run_worker_command;
 use anyhow::{Context, Result};
 use aurcache_client::{AurCacheClient, Method};

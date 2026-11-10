@@ -1,5 +1,20 @@
-//! `setup`: standing an instance up -- the arguments a compose file or a
-//! `docker run` is generated from.
+//! `aurcli setup` — stand an instance up from nothing.
+//!
+//! The audience is someone who has just run `cargo install aurcache-cli` and has
+//! no server, no worker and no token. So nothing here talks to the API: every
+//! command is offline arithmetic over flags and constants. Asking for
+//! credentials to an instance that does not exist yet would be absurd, and it is
+//! exactly the position a first-time user is in.
+//!
+//! Two ways out of that position:
+//!
+//! - `setup compose` writes a file to hand to Docker, or to paste into TrueNAS,
+//!   Portainer, Unraid or anything else that takes a compose file.
+//! - `setup server` / `setup worker` run the containers here, now, with
+//!   `docker run`.
+//!
+//! This module turns the arguments into a compose file (through `compose`) or
+//! `docker run` commands (through `docker_run`).
 
 use crate::cli::{
     ComposeArgs, OutputFormat, SetupCommand, SetupServerArgs, SetupWorkerArgs, WorkerKnobs,

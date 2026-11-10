@@ -1,17 +1,4 @@
-//! `aurcli setup` — stand an instance up from nothing.
-//!
-//! The audience is someone who has just run `cargo install aurcache-cli` and has
-//! no server, no worker and no token. So nothing here talks to the API: every
-//! command is offline arithmetic over flags and constants. Asking for
-//! credentials to an instance that does not exist yet would be absurd, and it is
-//! exactly the position a first-time user is in.
-//!
-//! Two ways out of that position:
-//!
-//! - `setup compose` writes a file to hand to Docker, or to paste into TrueNAS,
-//!   Portainer, Unraid or anything else that takes a compose file.
-//! - `setup server` / `setup worker` run the containers here, now, with
-//!   `docker run`.
+//! The `docker run` commands behind `aurcli setup server` and `setup worker`.
 //!
 //! The local pair deliberately reproduces what the bundled compose file does:
 //! one network, and one shared `enroll` volume that makes the worker
