@@ -10,7 +10,7 @@ use crate::list_controls::{
 use crate::listing::{PageInfo, Sort, SortDir, SortKey, ViewParams, filter_builds, sort_builds};
 use crate::routes::Route;
 use crate::status::BuildStatusBadge;
-use crate::widgets::{LinkRow, RowLink, Spinner};
+use crate::widgets::{LinkRow, LoadFailed, RowLink, Spinner};
 use aurcache_client::Build;
 use dioxus::prelude::*;
 
@@ -74,7 +74,7 @@ pub fn Builds(view: ViewParams, q: String) -> Element {
                 match &*rows.read() {
                     Rows::Loading => rsx! { Spinner {} },
                     Rows::Failed(e) => rsx! {
-                        div { class: "alert alert-error", span { "Could not load builds: {e}" } }
+                        LoadFailed { what: "builds", error: e.clone() }
                     },
                     Rows::Ready { total: 0, .. } => rsx! {
                         div { class: "alert", span { "No builds yet." } }

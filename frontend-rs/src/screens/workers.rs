@@ -89,15 +89,12 @@ pub fn Workers() -> Element {
                     }
                 }
 
-                match &*workers.read_unchecked() {
-                    None => rsx! { crate::widgets::Spinner {} },
-                    Some(Err(e)) => rsx! {
-                        div { class: "alert alert-error", span { "Could not load workers: {e}" } }
-                    },
-                    Some(Ok(list)) if list.is_empty() => rsx! {
+                match crate::widgets::ready(&*workers.read_unchecked(), "workers") {
+                    Err(placeholder) => placeholder,
+                    Ok(list) if list.is_empty() => rsx! {
                         AddFirstWorker {}
                     },
-                    Some(Ok(list)) => {
+                    Ok(list) => {
                         let waiting = list.iter().filter(|w| w.status == ApprovalStatus::Pending).count();
                         let retired = list.iter().filter(|w| w.status.is_retired()).count();
                         let shown: Vec<Worker> = list

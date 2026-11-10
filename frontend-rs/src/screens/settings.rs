@@ -53,12 +53,9 @@ pub fn Settings() -> Element {
                 }
             }
 
-            match &*settings.read_unchecked() {
-                None => rsx! { span { class: "loading loading-spinner" } },
-                Some(Err(e)) => rsx! {
-                    div { class: "alert alert-error", span { "Could not load settings: {e}" } }
-                },
-                Some(Ok(loaded)) => rsx! {
+            match crate::widgets::ready(&*settings.read_unchecked(), "settings") {
+                Err(placeholder) => placeholder,
+                Ok(loaded) => rsx! {
                     fieldset { disabled: (controller.busy)(),
                     SettingsSections {
                         settings: loaded.clone(),

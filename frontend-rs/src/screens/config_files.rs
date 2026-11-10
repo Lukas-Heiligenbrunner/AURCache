@@ -152,14 +152,9 @@ fn ConfigFileEditor(setting: String, name: String, pkgbase: Option<String>) -> E
 
     rsx! {
         div { class: "pt-3 space-y-2",
-            match &*loaded.read_unchecked() {
-                None => rsx! {
-                    crate::widgets::Spinner {}
-                },
-                Some(Err(e)) => rsx! {
-                    div { class: "alert alert-error", span { "Could not load {name}: {e}" } }
-                },
-                Some(Ok(_)) => rsx! {
+            match crate::widgets::ready(&*loaded.read_unchecked(), &name) {
+                Err(placeholder) => placeholder,
+                Ok(_) => rsx! {
                     div { class: "flex items-center gap-2 flex-wrap",
                         span { class: "font-mono text-sm", "{name}" }
                         // Says which copy is on screen. Without it an unset

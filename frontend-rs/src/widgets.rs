@@ -126,6 +126,41 @@ pub fn Spinner() -> Element {
     }
 }
 
+/// A resource's value once it has loaded, or what to show in its place: a
+/// [`Spinner`] while it loads, and a [`LoadFailed`] naming `what` if it
+/// failed.
+///
+/// For the usual `match` on a resource, so a screen spells out only the arms
+/// about the value itself -- an empty list, say:
+///
+/// ```ignore
+/// match ready(&*workers.read_unchecked(), "workers") {
+///     Err(placeholder) => placeholder,
+///     Ok(list) if list.is_empty() => rsx! { AddFirstWorker {} },
+///     Ok(list) => rsx! { WorkerTable { list: list.clone() } },
+/// }
+/// ```
+pub fn ready<'a, T, E: std::fmt::Display>(
+    state: &'a Option<Result<T, E>>,
+    what: &str,
+) -> Result<&'a T, Element> {
+    match state {
+        None => Err(rsx! { Spinner {} }),
+        Some(Err(error)) => Err(rsx! {
+            LoadFailed { what: what.to_string(), error: error.to_string() }
+        }),
+        Some(Ok(value)) => Ok(value),
+    }
+}
+
+/// `what` could not be loaded, and why.
+#[component]
+pub fn LoadFailed(what: String, error: String) -> Element {
+    rsx! {
+        div { class: "alert alert-error", span { "Could not load {what}: {error}" } }
+    }
+}
+
 /// A table row that is one link: clicking anywhere in it goes to `to`.
 ///
 /// Pair it with a [`RowLink`] on the cell that names the row. A bare row
@@ -159,5 +194,35 @@ pub fn RowLink(to: Route, #[props(default)] class: String, children: Element) ->
             onclick: move |e: MouseEvent| e.stop_propagation(),
             {children}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[component]
+    fn Shown(state: Option<Result<String, String>>) -> Element {
+        match ready(&state, "the thing") {
+            Err(placeholder) => placeholder,
+            Ok(value) => rsx! { span { "value: {value}" } },
+        }
+    }
+
+    fn render(state: Option<Result<String, String>>) -> String {
+        let mut dom = VirtualDom::new_with_props(Shown, ShownProps { state });
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn a_resource_shows_a_spinner_then_its_value_or_why_not() {
+        assert!(render(None).contains("loading-spinner"));
+        assert!(render(Some(Ok("x".into()))).contains("value: x"));
+        let failed = render(Some(Err("timed out".into())));
+        assert!(
+            failed.contains("Could not load the thing: timed out"),
+            "{failed}"
+        );
     }
 }

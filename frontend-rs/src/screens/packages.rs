@@ -14,7 +14,7 @@ use crate::list_controls::{
 use crate::listing::{Sort, SortDir, SortKey, ViewParams, filter_packages, sort_packages};
 use crate::routes::Route;
 use crate::status::StatusBadge;
-use crate::widgets::{LinkRow, RowLink, Spinner};
+use crate::widgets::{LinkRow, LoadFailed, RowLink, Spinner};
 use aurcache_client::SimplePackage;
 use aurcache_common::build_state::BuildState;
 use dioxus::prelude::*;
@@ -122,11 +122,7 @@ pub fn Packages(
 
                 match &*rows.read() {
                     Rows::Loading => rsx! { Spinner {} },
-                    Rows::Failed(e) => rsx! {
-                        div { class: "alert alert-error",
-                            span { "Could not load packages: {e}" }
-                        }
-                    },
+                    Rows::Failed(e) => rsx! { LoadFailed { what: "packages", error: e.clone() } },
                     // Empty fetch, not an empty scope: with the toggle off and
                     // only dependencies fetched, `total` is 0 but there are
                     // packages, so that case reads "nothing matches" below.
