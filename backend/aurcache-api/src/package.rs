@@ -24,7 +24,7 @@ use aurcache_utils::listing::package_row_select;
 use aurcache_utils::package::add::package_add;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::package::replace::{self, ReplaceError};
-use aurcache_utils::package::update::{Dispatch, edit_package, package_update, queued};
+use aurcache_utils::package::update::{Dispatch, Rebuild, edit_package, package_update, queued};
 use aurcache_utils::patch::SourcePatch;
 use aurcache_utils::pkg::satisfies_constraint;
 use aurcache_utils::services::Services;
@@ -545,27 +545,28 @@ pub async fn package_update_endpoint(
 
     let pkg_model: packages::Model = package_by_pkgbase(db, pkgbase).await?;
     let package_name = pkg_model.name.clone();
-    let forced = input.force;
     // What the request was, named by what came before it: without `force` it
     // is an update, and with it a rebuild of a build that worked or a retry of
     // one that failed.
-    let cause = if forced {
-        QueueCause::after(pkg_model.status == BuildState::Failed)
+    let (rebuild, cause) = if input.force {
+        (
+            Rebuild::Always,
+            QueueCause::after(pkg_model.status == BuildState::Failed),
+        )
     } else {
-        QueueCause::Update
+        (Rebuild::Never, QueueCause::Update)
     };
 
     // An operator's Update or Rebuild, from the UI or the CLI.
-    let results = package_update(services, pkg_model, forced, BuildTrigger::User)
+    let results = package_update(services, pkg_model, rebuild, BuildTrigger::User)
         .await
         // Same as adding: "already up to date", an unresolvable source, or a
         // patch that no longer applies are all caller-visible conditions.
         .map_err(|e| err(Status::BadRequest, e))?;
 
-    services.activity.emit_by(
-        queued(&package_name, cause, &results, None, None),
-        a.username,
-    );
+    services
+        .activity
+        .emit_by(queued(&package_name, cause, &results), a.username);
     Ok(Json(
         results
             .into_iter()
