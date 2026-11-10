@@ -1,6 +1,6 @@
 //! The command line itself: every subcommand, argument and value parser.
 
-use crate::{compose, repo, setup};
+use crate::{compose, docker_run, repo};
 use anyhow::Result;
 use aurcache_client::{ExistingPackagePolicy, SecretsPolicy};
 use aurcache_common::build_state::BuildState;
@@ -298,7 +298,7 @@ pub(crate) struct SetupWorkerArgs {
     pub(crate) join: ServerJoin,
 
     /// Container name. Give each worker on a host its own.
-    #[arg(long, default_value = setup::WORKER_CONTAINER)]
+    #[arg(long, default_value = docker_run::WORKER_CONTAINER)]
     pub(crate) container_name: String,
 
     /// Volume holding the worker's identity and its storage pool: the base

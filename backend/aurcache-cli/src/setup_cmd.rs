@@ -6,7 +6,7 @@ use crate::cli::{
 };
 use crate::output::render;
 use crate::url::is_loopback;
-use crate::{compose, config, setup};
+use crate::{compose, config, docker_run};
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_common::repo::host_from_url;
 use dialoguer::{Confirm, Select};
@@ -161,7 +161,7 @@ pub(crate) fn run_setup_compose(format: OutputFormat, args: ComposeArgs) -> Resu
 }
 
 pub(crate) fn run_setup_server(format: OutputFormat, args: SetupServerArgs) -> Result<()> {
-    let run = setup::server_run(&setup::ServerRunSpec {
+    let run = docker_run::server_run(&docker_run::ServerRunSpec {
         image: args.common.server_image,
         public_url: args.server.public_url,
         tls_sans: args.server.tls_sans,
@@ -173,8 +173,8 @@ pub(crate) fn run_setup_server(format: OutputFormat, args: SetupServerArgs) -> R
         return report_dry_run(format, &run);
     }
 
-    setup::ensure_local_objects()?;
-    setup::execute(&run)?;
+    docker_run::ensure_local_objects()?;
+    docker_run::execute(&run)?;
 
     render(format, &run, |_| {
         println!();
@@ -208,7 +208,7 @@ pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> R
                      on the Workers page."
                 );
             }
-            setup::remote_worker_env(env, server_url)
+            docker_run::remote_worker_env(env, server_url)
         }
     };
 
@@ -218,7 +218,7 @@ pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> R
         .data_volume
         .unwrap_or_else(|| format!("{}_data", args.container_name.replace('-', "_")));
 
-    let run = setup::worker_run(&setup::WorkerRunSpec {
+    let run = docker_run::worker_run(&docker_run::WorkerRunSpec {
         image: args.common.worker_image,
         container_name: args.container_name,
         env,
@@ -235,9 +235,9 @@ pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> R
     // A remote worker joins neither the network nor the enrollment volume, so
     // it needs neither to exist.
     if local {
-        setup::ensure_local_objects()?;
+        docker_run::ensure_local_objects()?;
     }
-    setup::execute(&run)?;
+    docker_run::execute(&run)?;
 
     render(format, &run, |_| {
         println!();
@@ -258,7 +258,7 @@ pub(crate) fn run_setup_worker(format: OutputFormat, args: SetupWorkerArgs) -> R
     })
 }
 
-pub(crate) fn report_dry_run(format: OutputFormat, run: &setup::DockerRun) -> Result<()> {
+pub(crate) fn report_dry_run(format: OutputFormat, run: &docker_run::DockerRun) -> Result<()> {
     render(format, run, |run| println!("{}", run.command_line()))
 }
 
