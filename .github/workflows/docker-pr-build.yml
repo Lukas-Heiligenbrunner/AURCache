@@ -22,6 +22,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+      # The server image cross-compiles, but its runtime stage still runs
+      # apt-get for the target architecture.
+      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       # No registry login, secrets, or write token on this runner.
       - name: Build OCI image layout
@@ -32,8 +35,7 @@ jobs:
           docker buildx build \
             --platform "$TARGET_ARCH" \
             --build-arg LATEST_COMMIT_SHA="$HEAD_SHA" \
-            --build-arg TARGET_ARCH="$TARGET_ARCH" \
-            -f ./docker/Dockerfile \
+            -f ./docker/server.Dockerfile \
             --output "type=oci,tar=false,dest=$RUNNER_TEMP/image" .
       - uses: actions/upload-artifact@v4
         with:
