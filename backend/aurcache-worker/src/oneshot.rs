@@ -9,8 +9,8 @@ use aurcache_common::worker::BuildOutcome;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build;
-use crate::chroot;
 use crate::config::Config;
+use crate::devtools;
 use crate::executor::Shared;
 
 /// Build the PKGBUILD in `path` locally and report where the artifacts landed.
@@ -61,7 +61,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
                 );
                 tracing::info!("$ sudo {}", argv.join(" "));
 
-                let mut cmd = chroot::devtools_in(&argv[0], &lease.tmpdir());
+                let mut cmd = devtools::command_in(&argv[0], &lease.tmpdir());
                 cmd.args(&argv[1..]).current_dir(&pkgdir);
                 // devtools binds `$SRCDEST` itself; unset, it falls back to the
                 // PKGBUILD directory and downloads are not cached between runs.

@@ -20,10 +20,10 @@ use aurcache_worker_core::{artifacts, report};
 use crate::build::{self, BindMount};
 use crate::cache::Cache;
 use crate::cgroup::Hierarchy;
-use crate::chroot;
 use crate::chroots::Lease;
 use crate::config::Config;
 use crate::credentials;
+use crate::devtools;
 use crate::executor::Shared;
 
 /// Await a blocking cache task, logging the panic instead of swallowing it.
@@ -249,10 +249,10 @@ async fn prepare_job(
     // the host it reaches the server on (see aurcache_worker_core::repo).
     let pacman_conf =
         aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
-    let chroot::StagedConfigs {
+    let devtools::StagedConfigs {
         makepkg_overrides,
         pacman_conf,
-    } = chroot::write_configs(
+    } = devtools::write_configs(
         &cfg_dir,
         &build::with_parallelism(
             &credentials::augment_makepkg_conf(&job.makepkg_conf, credential.as_ref()),
@@ -277,7 +277,7 @@ async fn prepare_job(
     // is where it went until concurrent builds started overwriting each
     // other's -- is what that replaced.
     let dropin =
-        chroot::stage_makepkg_dropin(&makepkg_overrides).context("staging makepkg overrides")?;
+        devtools::stage_makepkg_dropin(&makepkg_overrides).context("staging makepkg overrides")?;
 
     // 3. Stage this job's trusted PGP keys into a keyring of its own, copied
     //    from the shared one so a key is fetched from the keyserver once and
@@ -287,7 +287,7 @@ async fn prepare_job(
     //    verify, which this warning then explains.
     if let (Some(shared), Some(replica)) = (cache.gnupg_home(), cache.gnupg_job(&caches.label))
         && let Err(e) =
-            chroot::prepare_job_keyring(&shared, &replica, &cfg.tunables.keyserver, &job.pgp_keys)
+            devtools::prepare_job_keyring(&shared, &replica, &cfg.tunables.keyserver, &job.pgp_keys)
                 .await
     {
         let msg = format!("preparing the build's keyring failed: {e:#}");
@@ -318,7 +318,7 @@ async fn prepare_bind_mounts(
     let build_id = job.build_id;
     let pkg_cache_bind = cache.pacman_pkg_job(&caches.label).map(|dir| BindMount {
         host: dir,
-        chroot: PathBuf::from(chroot::PER_JOB_CACHE_MOUNT),
+        chroot: PathBuf::from(devtools::PER_JOB_CACHE_MOUNT),
     });
 
     // Operator-configured mounts, then this job's private pacman cache. Ours
@@ -367,7 +367,7 @@ async fn prepare_bind_mounts(
         if let Some(tree) = cache.builddir_tree(&job.arch, &job.pkgbase) {
             binds.push(BindMount {
                 host: tree,
-                chroot: Path::new(chroot::BUILDDIR_MOUNT).join(&job.pkgbase),
+                chroot: Path::new(devtools::BUILDDIR_MOUNT).join(&job.pkgbase),
             });
         } else {
             let msg = format!(
@@ -725,7 +725,7 @@ async fn execute_build_process(
     // needs is whether it moved while it ran.
     let total_ooms_before = ctx.cgroups.and_then(Hierarchy::total_ooms);
     let spawn = |argv: &[String]| {
-        let mut cmd = chroot::devtools_in(&argv[0], &ctx.lease.tmpdir());
+        let mut cmd = devtools::command_in(&argv[0], &ctx.lease.tmpdir());
         cmd.args(&argv[1..]).current_dir(pkgdir).kill_on_drop(true);
         // The build's own process group: alone it enables the process-group
         // SIGKILL fallback below, which takes makechrootpkg's whole tree even
