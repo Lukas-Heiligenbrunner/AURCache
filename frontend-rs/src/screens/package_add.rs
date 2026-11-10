@@ -911,6 +911,159 @@ fn results_list(
     }
 }
 
+/// Editing a not-yet-added package's sources.
+///
+/// Reads the pristine files through the preview endpoints, which take the
+/// source in the request body because there is no package to name yet. Edits
+/// are kept here as whole files and travel with the add; the server diffs each
+/// against the upstream it fetches, so nothing is stored until the package is.
+#[component]
+fn AddSourceEditor(
+    source: SourceData,
+    patched: Signal<BTreeMap<String, String>>,
+    /// Add the package with the edits. The editor is the last step rather than
+    /// a detour: edits describe one source, so there is nothing sensible to do
+    /// with them except add that source, and carrying them back to a dialog
+    /// where a second package could be queued only created a state where they
+    /// could no longer be attributed.
+    onsubmit: EventHandler<()>,
+    /// Abandon the edits and go back.
+    oncancel: EventHandler<()>,
+) -> Element {
+    let mut patched = patched;
+    let files = use_resource({
+        let source = source.clone();
+        move || {
+            let source = source.clone();
+            async move {
+                crate::api::client()?
+                    .preview_source_files(&source)
+                    .await
+                    .map(|list| list.files)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    });
+
+    let editor = crate::source_editor::use_file_editor();
+    let selected = editor.selected;
+    let mut draft = editor.draft;
+    let error = editor.error;
+    let pristine = move || {
+        editor
+            .loaded
+            .read()
+            .as_ref()
+            .map(|file| file.original_content.clone())
+            .unwrap_or_default()
+    };
+    let open_file = move |source: SourceData, path: String| async move {
+        let saved = patched.peek().get(&path).cloned();
+        editor
+            .open(
+                crate::source_editor::SourceLocation::Preview(source),
+                path,
+                saved,
+            )
+            .await;
+    };
+
+    // The point of opening the editor is nearly always the PKGBUILD, so it is
+    // opened rather than offered.
+    use_effect({
+        let source = source.clone();
+        move || {
+            if selected.peek().is_some() {
+                return;
+            }
+            let Some(Ok(list)) = &*files.read_unchecked() else {
+                return;
+            };
+            let Some(first) = list
+                .iter()
+                .find(|p| p.as_str() == "PKGBUILD")
+                .or_else(|| list.first())
+                .cloned()
+            else {
+                return;
+            };
+            let source = source.clone();
+            spawn(async move { open_file(source, first).await });
+        }
+    });
+
+    let dirty = draft() != pristine();
+    // Recorded when it differs from upstream and dropped when it matches again,
+    // so typing a change and undoing it by hand leaves nothing behind.
+    let mut keep = move || {
+        let Some(path) = selected() else { return };
+        if draft() == pristine() {
+            patched.write().remove(&path);
+        } else {
+            patched.write().insert(path, draft());
+        }
+    };
+
+    rsx! {
+        div { class: "space-y-2",
+            crate::source_editor::SourcePane {
+                title: source_label(&source),
+                files: files.read_unchecked().clone(),
+                selected: selected(),
+                onselect: {
+                    let source = source.clone();
+                    move |path: String| {
+                        // Hold what is on screen before leaving it, so moving
+                        // between files does not quietly discard an edit.
+                        keep();
+                        let source = source.clone();
+                        spawn(async move { open_file(source, path).await });
+                    }
+                },
+                modified: patched().keys().cloned().collect(),
+                draft,
+                loading: (editor.loading)(),
+                dirty,
+                // A modal has less room than a page.
+                height: "h-64",
+                actions: rsx! {
+                    button {
+                        class: "btn btn-ghost btn-sm",
+                        // Drops every edit, not just the open file: the editor
+                        // is entered to add one package with changes, so
+                        // leaving without adding leaves nothing behind.
+                        onclick: move |_| {
+                            patched.set(BTreeMap::new());
+                            oncancel.call(());
+                        },
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-ghost btn-sm",
+                        disabled: !dirty,
+                        onclick: move |_| draft.set(pristine()),
+                        "Revert to upstream"
+                    }
+                    button {
+                        class: "btn btn-primary btn-sm",
+                        disabled: (editor.loading)(),
+                        onclick: move |_| {
+                            keep();
+                            onsubmit.call(());
+                        },
+                        "Add package"
+                    }
+                },
+                notices: rsx! {
+                    if let Some(message) = error() {
+                        div { class: "alert alert-error text-sm", span { "{message}" } }
+                    }
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1607,158 +1760,5 @@ mod tests {
         let html = render("hello", Some(Err("connection refused".to_string())));
         assert!(html.contains("connection refused"), "{html}");
         assert!(!html.contains("Nothing in the AUR"), "{html}");
-    }
-}
-
-/// Editing a not-yet-added package's sources.
-///
-/// Reads the pristine files through the preview endpoints, which take the
-/// source in the request body because there is no package to name yet. Edits
-/// are kept here as whole files and travel with the add; the server diffs each
-/// against the upstream it fetches, so nothing is stored until the package is.
-#[component]
-fn AddSourceEditor(
-    source: SourceData,
-    patched: Signal<BTreeMap<String, String>>,
-    /// Add the package with the edits. The editor is the last step rather than
-    /// a detour: edits describe one source, so there is nothing sensible to do
-    /// with them except add that source, and carrying them back to a dialog
-    /// where a second package could be queued only created a state where they
-    /// could no longer be attributed.
-    onsubmit: EventHandler<()>,
-    /// Abandon the edits and go back.
-    oncancel: EventHandler<()>,
-) -> Element {
-    let mut patched = patched;
-    let files = use_resource({
-        let source = source.clone();
-        move || {
-            let source = source.clone();
-            async move {
-                crate::api::client()?
-                    .preview_source_files(&source)
-                    .await
-                    .map(|list| list.files)
-                    .map_err(|e| e.to_string())
-            }
-        }
-    });
-
-    let editor = crate::source_editor::use_file_editor();
-    let selected = editor.selected;
-    let mut draft = editor.draft;
-    let error = editor.error;
-    let pristine = move || {
-        editor
-            .loaded
-            .read()
-            .as_ref()
-            .map(|file| file.original_content.clone())
-            .unwrap_or_default()
-    };
-    let open_file = move |source: SourceData, path: String| async move {
-        let saved = patched.peek().get(&path).cloned();
-        editor
-            .open(
-                crate::source_editor::SourceLocation::Preview(source),
-                path,
-                saved,
-            )
-            .await;
-    };
-
-    // The point of opening the editor is nearly always the PKGBUILD, so it is
-    // opened rather than offered.
-    use_effect({
-        let source = source.clone();
-        move || {
-            if selected.peek().is_some() {
-                return;
-            }
-            let Some(Ok(list)) = &*files.read_unchecked() else {
-                return;
-            };
-            let Some(first) = list
-                .iter()
-                .find(|p| p.as_str() == "PKGBUILD")
-                .or_else(|| list.first())
-                .cloned()
-            else {
-                return;
-            };
-            let source = source.clone();
-            spawn(async move { open_file(source, first).await });
-        }
-    });
-
-    let dirty = draft() != pristine();
-    // Recorded when it differs from upstream and dropped when it matches again,
-    // so typing a change and undoing it by hand leaves nothing behind.
-    let mut keep = move || {
-        let Some(path) = selected() else { return };
-        if draft() == pristine() {
-            patched.write().remove(&path);
-        } else {
-            patched.write().insert(path, draft());
-        }
-    };
-
-    rsx! {
-        div { class: "space-y-2",
-            crate::source_editor::SourcePane {
-                title: source_label(&source),
-                files: files.read_unchecked().clone(),
-                selected: selected(),
-                onselect: {
-                    let source = source.clone();
-                    move |path: String| {
-                        // Hold what is on screen before leaving it, so moving
-                        // between files does not quietly discard an edit.
-                        keep();
-                        let source = source.clone();
-                        spawn(async move { open_file(source, path).await });
-                    }
-                },
-                modified: patched().keys().cloned().collect(),
-                draft,
-                loading: (editor.loading)(),
-                dirty,
-                // A modal has less room than a page.
-                height: "h-64",
-                actions: rsx! {
-                    button {
-                        class: "btn btn-ghost btn-sm",
-                        // Drops every edit, not just the open file: the editor
-                        // is entered to add one package with changes, so
-                        // leaving without adding leaves nothing behind.
-                        onclick: move |_| {
-                            patched.set(BTreeMap::new());
-                            oncancel.call(());
-                        },
-                        "Cancel"
-                    }
-                    button {
-                        class: "btn btn-ghost btn-sm",
-                        disabled: !dirty,
-                        onclick: move |_| draft.set(pristine()),
-                        "Revert to upstream"
-                    }
-                    button {
-                        class: "btn btn-primary btn-sm",
-                        disabled: (editor.loading)(),
-                        onclick: move |_| {
-                            keep();
-                            onsubmit.call(());
-                        },
-                        "Add package"
-                    }
-                },
-                notices: rsx! {
-                    if let Some(message) = error() {
-                        div { class: "alert alert-error text-sm", span { "{message}" } }
-                    }
-                },
-            }
-        }
     }
 }

@@ -113,6 +113,58 @@ pub fn drop_leading_partial_line(window: &mut String) {
     }
 }
 
+/// Byte position in a UTF-8 log, independent of the displayed window length.
+#[derive(Debug, Default)]
+pub struct LogCursor {
+    pub next_offset: u64,
+}
+
+/// Whether a metadata refresh requires a new display window.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WindowPosition {
+    Continue,
+    Restart { offset: u64 },
+}
+
+/// What appending a fetched page did to the display window.
+pub struct WindowChange {
+    pub is_tail: bool,
+}
+
+impl LogCursor {
+    /// Reposition for a truncated log or a backlog larger than the window.
+    pub fn position(&mut self, size: Option<u64>, cap: u64) -> WindowPosition {
+        let offset = if size.is_some_and(|size| size < self.next_offset) {
+            Some(0)
+        } else {
+            catch_up_offset(self.next_offset, size, cap)
+        };
+        match offset {
+            Some(offset) => {
+                self.next_offset = offset;
+                WindowPosition::Restart { offset }
+            }
+            None => WindowPosition::Continue,
+        }
+    }
+
+    /// Append a raw page and advance only past complete UTF-8 code points.
+    pub fn append_page(&mut self, window: &mut String, page: &[u8], cap: usize) -> WindowChange {
+        let alignment = aurcache_common::api::build_log::align(page);
+        let end = page.len() - alignment.back_drop;
+        let first_tail = self.next_offset > 0 && window.is_empty();
+        let chunk = String::from_utf8_lossy(&page[alignment.front_skip..end]);
+        let discarded = append_capped(window, &chunk, cap);
+        if first_tail {
+            drop_leading_partial_line(window);
+        }
+        self.next_offset = self.next_offset.saturating_add(end as u64);
+        WindowChange {
+            is_tail: discarded > 0 || first_tail,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -229,58 +281,6 @@ mod tests {
         let mut single = "just one long line".to_string();
         drop_leading_partial_line(&mut single);
         assert_eq!(single, "just one long line");
-    }
-}
-
-/// Byte position in a UTF-8 log, independent of the displayed window length.
-#[derive(Debug, Default)]
-pub struct LogCursor {
-    pub next_offset: u64,
-}
-
-/// Whether a metadata refresh requires a new display window.
-#[derive(Debug, PartialEq, Eq)]
-pub enum WindowPosition {
-    Continue,
-    Restart { offset: u64 },
-}
-
-/// What appending a fetched page did to the display window.
-pub struct WindowChange {
-    pub is_tail: bool,
-}
-
-impl LogCursor {
-    /// Reposition for a truncated log or a backlog larger than the window.
-    pub fn position(&mut self, size: Option<u64>, cap: u64) -> WindowPosition {
-        let offset = if size.is_some_and(|size| size < self.next_offset) {
-            Some(0)
-        } else {
-            catch_up_offset(self.next_offset, size, cap)
-        };
-        match offset {
-            Some(offset) => {
-                self.next_offset = offset;
-                WindowPosition::Restart { offset }
-            }
-            None => WindowPosition::Continue,
-        }
-    }
-
-    /// Append a raw page and advance only past complete UTF-8 code points.
-    pub fn append_page(&mut self, window: &mut String, page: &[u8], cap: usize) -> WindowChange {
-        let alignment = aurcache_common::api::build_log::align(page);
-        let end = page.len() - alignment.back_drop;
-        let first_tail = self.next_offset > 0 && window.is_empty();
-        let chunk = String::from_utf8_lossy(&page[alignment.front_skip..end]);
-        let discarded = append_capped(window, &chunk, cap);
-        if first_tail {
-            drop_leading_partial_line(window);
-        }
-        self.next_offset = self.next_offset.saturating_add(end as u64);
-        WindowChange {
-            is_tail: discarded > 0 || first_tail,
-        }
     }
 }
 

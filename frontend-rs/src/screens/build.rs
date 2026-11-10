@@ -32,182 +32,6 @@ fn empty_log_placeholder(finished: bool, status: Option<BuildState>) -> &'static
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_log_placeholder_tells_loading_from_missing() {
-        let failed = Some(BuildState::Failed);
-        // The regression: an old build whose log is still downloading is not
-        // one without a log.
-        assert_eq!(empty_log_placeholder(false, failed), "loading log…");
-        assert_eq!(empty_log_placeholder(true, failed), "no log for this build");
-        assert_eq!(
-            empty_log_placeholder(false, Some(BuildState::Active)),
-            "waiting for output…"
-        );
-        // Before the first status poll answers, nothing is known yet.
-        assert_eq!(empty_log_placeholder(false, None), "waiting for output…");
-    }
-
-    /// Signals only have a home inside a running component, so the button is
-    /// rendered through a harness rather than handed `Signal` props from a
-    /// test function.
-    #[component]
-    fn CopyButtonHarness(log: String, copied: bool) -> Element {
-        let log_signal = use_signal(move || log);
-        let copied_signal = use_signal(move || copied);
-        let tail = use_signal(|| false);
-        let error = use_signal(|| None::<String>);
-        rsx! {
-            LogCopyButton {
-                pkgbase: "hello".to_string(),
-                number: 3,
-                log: log_signal,
-                tail,
-                cap: 4 << 20,
-                copied: copied_signal,
-                error,
-            }
-        }
-    }
-
-    fn render_copy_button(log: &str, copied: bool) -> String {
-        let mut dom = VirtualDom::new_with_props(
-            CopyButtonHarness,
-            CopyButtonHarnessProps {
-                log: log.to_string(),
-                copied,
-            },
-        );
-        dom.rebuild_in_place();
-        dioxus_ssr::render(&dom)
-    }
-
-    thread_local! {
-        /// Lets a test reach the signal a rendered harness owns. A signal has
-        /// no life outside a component, so this is the only way to change one
-        /// between renders.
-        static LATE_LOG: std::cell::RefCell<Option<Signal<String>>> =
-            const { std::cell::RefCell::new(None) };
-    }
-
-    #[component]
-    fn LateLogHarness() -> Element {
-        let log = use_signal(String::new);
-        LATE_LOG.with(|cell| *cell.borrow_mut() = Some(log));
-        let copied = use_signal(|| false);
-        let tail = use_signal(|| false);
-        let error = use_signal(|| None::<String>);
-        rsx! {
-            LogCopyButton {
-                pkgbase: "hello".to_string(),
-                number: 3,
-                log,
-                tail,
-                cap: 4 << 20,
-                copied,
-                error,
-            }
-        }
-    }
-
-    /// A log arrives after the first render — always, since the page fetches
-    /// it — and the button has to arrive with it. Component props are memoized
-    /// on signals whose identity never changes, so a button that only `peek`s
-    /// at the log is never re-run: it stayed hidden for the whole life of the
-    /// page, on every build.
-    #[test]
-    fn the_copy_button_appears_when_the_log_arrives() {
-        let mut dom = VirtualDom::new(LateLogHarness);
-        dom.rebuild_in_place();
-        assert!(
-            !dioxus_ssr::render(&dom).contains("Copy"),
-            "nothing to copy before the log arrives"
-        );
-
-        let mut log = LATE_LOG.with(|cell| *cell.borrow().as_ref().unwrap());
-        dom.in_runtime(|| log.set("make: *** [all] Error 1".to_string()));
-        dom.render_immediate(&mut dioxus_core::NoOpMutations);
-
-        let html = dioxus_ssr::render(&dom);
-        assert!(
-            html.contains("Copy"),
-            "the button must arrive with the log: {html:?}"
-        );
-    }
-
-    /// Nothing to copy: a build that has not written its first line yet, or a
-    /// finished one whose log has been removed, is not offered a copy button.
-    #[test]
-    fn the_copy_button_appears_only_once_there_is_a_log() {
-        assert!(
-            !render_copy_button("", false).contains("Copy"),
-            "an empty log should show no copy button"
-        );
-    }
-
-    /// The checkmark is the promise that the paste will land, so it must not
-    /// hang around after the button has gone back to work.
-    #[test]
-    fn the_copy_button_shows_a_checkmark_after_copying() {
-        let html = render_copy_button("make: nothing to be done for `all'.", true);
-        assert!(html.contains("Copied"), "{html}");
-        assert!(
-            !html.contains(">Copy<"),
-            "the label should flip to Copied: {html}"
-        );
-    }
-
-    /// Once the window is a true tail, Copy stops pretending —
-    /// it labels itself, warns, and the Download link is offered beside it.
-    #[component]
-    fn TailButtonHarness() -> Element {
-        let log = use_signal(|| "line one\nline two\nline three\n".to_string());
-        let tail = use_signal(|| true);
-        let copied = use_signal(|| false);
-        let error = use_signal(|| None::<String>);
-        rsx! {
-            LogCopyButton {
-                pkgbase: "hello".to_string(),
-                number: 3,
-                log,
-                tail,
-                cap: 4 << 20,
-                copied,
-                error,
-            }
-        }
-    }
-
-    #[test]
-    fn the_copy_button_says_when_it_is_a_tail_and_offers_download() {
-        let mut dom = VirtualDom::new(TailButtonHarness);
-        dom.rebuild_in_place();
-        let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("Copy tail"), "{html}");
-        assert!(
-            html.contains("Copying the shown ~4.0 MiB tail, not the full log"),
-            "the tooltip should send whole-log users to Download: {html}"
-        );
-        // The Download anchor reaches the streaming route and names the file
-        // it will save.
-        assert!(
-            html.contains("/package/hello/build/3/output/download"),
-            "the anchor should point at the download route: {html}"
-        );
-        assert!(html.contains("download=\"hello-3.log\""), "{html}");
-        // Warning marker on the tail's copy button.
-        assert!(
-            html.contains(
-                "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"
-            ),
-            "a tail should carry the `!` warning: {html}"
-        );
-    }
-}
-
 /// The screen behind `/package/:pkgbase/build/:number`.
 #[component]
 pub fn Build(pkgbase: String, number: i32) -> Element {
@@ -666,6 +490,182 @@ pub(crate) fn kept_command(path: &str, tree: Option<&str>, pkgbase: &str) -> Str
     match tree {
         Some(tree) => format!("systemd-nspawn -D {path} --bind={tree}:/build/{pkgbase}"),
         None => format!("systemd-nspawn -D {path}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_log_placeholder_tells_loading_from_missing() {
+        let failed = Some(BuildState::Failed);
+        // The regression: an old build whose log is still downloading is not
+        // one without a log.
+        assert_eq!(empty_log_placeholder(false, failed), "loading log…");
+        assert_eq!(empty_log_placeholder(true, failed), "no log for this build");
+        assert_eq!(
+            empty_log_placeholder(false, Some(BuildState::Active)),
+            "waiting for output…"
+        );
+        // Before the first status poll answers, nothing is known yet.
+        assert_eq!(empty_log_placeholder(false, None), "waiting for output…");
+    }
+
+    /// Signals only have a home inside a running component, so the button is
+    /// rendered through a harness rather than handed `Signal` props from a
+    /// test function.
+    #[component]
+    fn CopyButtonHarness(log: String, copied: bool) -> Element {
+        let log_signal = use_signal(move || log);
+        let copied_signal = use_signal(move || copied);
+        let tail = use_signal(|| false);
+        let error = use_signal(|| None::<String>);
+        rsx! {
+            LogCopyButton {
+                pkgbase: "hello".to_string(),
+                number: 3,
+                log: log_signal,
+                tail,
+                cap: 4 << 20,
+                copied: copied_signal,
+                error,
+            }
+        }
+    }
+
+    fn render_copy_button(log: &str, copied: bool) -> String {
+        let mut dom = VirtualDom::new_with_props(
+            CopyButtonHarness,
+            CopyButtonHarnessProps {
+                log: log.to_string(),
+                copied,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    thread_local! {
+        /// Lets a test reach the signal a rendered harness owns. A signal has
+        /// no life outside a component, so this is the only way to change one
+        /// between renders.
+        static LATE_LOG: std::cell::RefCell<Option<Signal<String>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    #[component]
+    fn LateLogHarness() -> Element {
+        let log = use_signal(String::new);
+        LATE_LOG.with(|cell| *cell.borrow_mut() = Some(log));
+        let copied = use_signal(|| false);
+        let tail = use_signal(|| false);
+        let error = use_signal(|| None::<String>);
+        rsx! {
+            LogCopyButton {
+                pkgbase: "hello".to_string(),
+                number: 3,
+                log,
+                tail,
+                cap: 4 << 20,
+                copied,
+                error,
+            }
+        }
+    }
+
+    /// A log arrives after the first render — always, since the page fetches
+    /// it — and the button has to arrive with it. Component props are memoized
+    /// on signals whose identity never changes, so a button that only `peek`s
+    /// at the log is never re-run: it stayed hidden for the whole life of the
+    /// page, on every build.
+    #[test]
+    fn the_copy_button_appears_when_the_log_arrives() {
+        let mut dom = VirtualDom::new(LateLogHarness);
+        dom.rebuild_in_place();
+        assert!(
+            !dioxus_ssr::render(&dom).contains("Copy"),
+            "nothing to copy before the log arrives"
+        );
+
+        let mut log = LATE_LOG.with(|cell| *cell.borrow().as_ref().unwrap());
+        dom.in_runtime(|| log.set("make: *** [all] Error 1".to_string()));
+        dom.render_immediate(&mut dioxus_core::NoOpMutations);
+
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("Copy"),
+            "the button must arrive with the log: {html:?}"
+        );
+    }
+
+    /// Nothing to copy: a build that has not written its first line yet, or a
+    /// finished one whose log has been removed, is not offered a copy button.
+    #[test]
+    fn the_copy_button_appears_only_once_there_is_a_log() {
+        assert!(
+            !render_copy_button("", false).contains("Copy"),
+            "an empty log should show no copy button"
+        );
+    }
+
+    /// The checkmark is the promise that the paste will land, so it must not
+    /// hang around after the button has gone back to work.
+    #[test]
+    fn the_copy_button_shows_a_checkmark_after_copying() {
+        let html = render_copy_button("make: nothing to be done for `all'.", true);
+        assert!(html.contains("Copied"), "{html}");
+        assert!(
+            !html.contains(">Copy<"),
+            "the label should flip to Copied: {html}"
+        );
+    }
+
+    /// Once the window is a true tail, Copy stops pretending —
+    /// it labels itself, warns, and the Download link is offered beside it.
+    #[component]
+    fn TailButtonHarness() -> Element {
+        let log = use_signal(|| "line one\nline two\nline three\n".to_string());
+        let tail = use_signal(|| true);
+        let copied = use_signal(|| false);
+        let error = use_signal(|| None::<String>);
+        rsx! {
+            LogCopyButton {
+                pkgbase: "hello".to_string(),
+                number: 3,
+                log,
+                tail,
+                cap: 4 << 20,
+                copied,
+                error,
+            }
+        }
+    }
+
+    #[test]
+    fn the_copy_button_says_when_it_is_a_tail_and_offers_download() {
+        let mut dom = VirtualDom::new(TailButtonHarness);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("Copy tail"), "{html}");
+        assert!(
+            html.contains("Copying the shown ~4.0 MiB tail, not the full log"),
+            "the tooltip should send whole-log users to Download: {html}"
+        );
+        // The Download anchor reaches the streaming route and names the file
+        // it will save.
+        assert!(
+            html.contains("/package/hello/build/3/output/download"),
+            "the anchor should point at the download route: {html}"
+        );
+        assert!(html.contains("download=\"hello-3.log\""), "{html}");
+        // Warning marker on the tail's copy button.
+        assert!(
+            html.contains(
+                "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"
+            ),
+            "a tail should carry the `!` warning: {html}"
+        );
     }
 }
 

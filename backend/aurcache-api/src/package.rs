@@ -868,6 +868,67 @@ fn aur_source(pkg: &packages::Model) -> AurPackage {
     }
 }
 
+/// The status a [`ReplaceError`] answers with.
+fn replace_error(e: ReplaceError) -> ApiError {
+    let status = match &e {
+        ReplaceError::NotFound(_) => Status::NotFound,
+        ReplaceError::Refused(_) => Status::BadRequest,
+        ReplaceError::Unreachable(_) => Status::BadGateway,
+        ReplaceError::Internal(_) => Status::InternalServerError,
+    };
+    err(status, e)
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "What could take over this dependency", body = DependencyOptions),
+    ),
+    params(
+            ("pkgbase", description = "pkgbase of the depending package"),
+            ("dependency", description = "pkgbase of the dependency to replace")
+    )
+)]
+#[get("/package/<pkgbase>/dependency/<dependency>/options")]
+pub async fn package_dependency_options(
+    services: &State<Services>,
+    pkgbase: &str,
+    dependency: &str,
+    _a: Authenticated,
+) -> Result<Json<DependencyOptions>, ApiError> {
+    replace::options(services, pkgbase, dependency)
+        .await
+        .map(Json)
+        .map_err(replace_error)
+}
+
+#[utoipa::path(
+    responses(
+            (status = 200, description = "Point the dependency somewhere else, or drop it"),
+    ),
+    params(
+            ("pkgbase", description = "pkgbase of the depending package"),
+            ("dependency", description = "pkgbase of the dependency being replaced")
+    )
+)]
+#[put("/package/<pkgbase>/dependency/<dependency>", data = "<input>")]
+pub async fn package_dependency_replace(
+    services: &State<Services>,
+    pkgbase: &str,
+    dependency: &str,
+    input: Json<ReplaceDependency>,
+    a: Authenticated,
+) -> Result<(), ApiError> {
+    replace::replace(
+        services,
+        pkgbase,
+        dependency,
+        input.into_inner().replacement,
+        a.username,
+    )
+    .await
+    .map_err(replace_error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RelationDirection, list_package_relations, list_packages};
@@ -1220,65 +1281,4 @@ mod file_tests {
         let listed = package_files(&db, 1).await.unwrap();
         assert_eq!(listed[0].size, None);
     }
-}
-
-/// The status a [`ReplaceError`] answers with.
-fn replace_error(e: ReplaceError) -> ApiError {
-    let status = match &e {
-        ReplaceError::NotFound(_) => Status::NotFound,
-        ReplaceError::Refused(_) => Status::BadRequest,
-        ReplaceError::Unreachable(_) => Status::BadGateway,
-        ReplaceError::Internal(_) => Status::InternalServerError,
-    };
-    err(status, e)
-}
-
-#[utoipa::path(
-    responses(
-            (status = 200, description = "What could take over this dependency", body = DependencyOptions),
-    ),
-    params(
-            ("pkgbase", description = "pkgbase of the depending package"),
-            ("dependency", description = "pkgbase of the dependency to replace")
-    )
-)]
-#[get("/package/<pkgbase>/dependency/<dependency>/options")]
-pub async fn package_dependency_options(
-    services: &State<Services>,
-    pkgbase: &str,
-    dependency: &str,
-    _a: Authenticated,
-) -> Result<Json<DependencyOptions>, ApiError> {
-    replace::options(services, pkgbase, dependency)
-        .await
-        .map(Json)
-        .map_err(replace_error)
-}
-
-#[utoipa::path(
-    responses(
-            (status = 200, description = "Point the dependency somewhere else, or drop it"),
-    ),
-    params(
-            ("pkgbase", description = "pkgbase of the depending package"),
-            ("dependency", description = "pkgbase of the dependency being replaced")
-    )
-)]
-#[put("/package/<pkgbase>/dependency/<dependency>", data = "<input>")]
-pub async fn package_dependency_replace(
-    services: &State<Services>,
-    pkgbase: &str,
-    dependency: &str,
-    input: Json<ReplaceDependency>,
-    a: Authenticated,
-) -> Result<(), ApiError> {
-    replace::replace(
-        services,
-        pkgbase,
-        dependency,
-        input.into_inner().replacement,
-        a.username,
-    )
-    .await
-    .map_err(replace_error)
 }
