@@ -991,6 +991,7 @@ mod tests {
     use super::{Rebuild, package_update};
     use aurcache_activitylog::activity_utils::ActivityLog;
     use aurcache_common::build_state::BuildTrigger;
+    use aurcache_db::testing::{build, depend, package};
     /// A repository of its own for a test that never publishes to it.
     fn test_repo() -> Arc<crate::repository::Repository> {
         Arc::new(crate::repository::Repository::new(
@@ -1000,7 +1001,6 @@ mod tests {
     use crate::services::Services;
     use crate::snapshot::SnapshotStore;
     use aurcache_common::build_state::BuildState;
-    use aurcache_db::packages::SourceData;
     use aurcache_db::prelude::{Dependencies, Packages};
     use aurcache_db::{builds, dependencies, packages};
     use aurcache_deps::AurClient;
@@ -1009,7 +1009,7 @@ mod tests {
     use sea_orm::DatabaseConnection;
     use sea_orm::{
         ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
-        Set, TryIntoModel,
+        Set,
     };
     use serde_json::json;
     use std::fs;
@@ -1142,6 +1142,17 @@ mod tests {
         let parent = repo.head().unwrap().peel_to_commit().unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, "bump", &tree, &[&parent])
             .unwrap();
+    }
+
+    /// The services an update runs with, over `db`.
+    fn services(db: &DatabaseConnection, store: SnapshotStore, client: AurClient) -> Services {
+        Services {
+            db: db.clone(),
+            store: Arc::new(store),
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        }
     }
 
     /// A store, and the directory its checkouts live in, which goes when this
@@ -1297,78 +1308,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let parent = packages::ActiveModel {
-            name: Set("parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "parent".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        let child = packages::ActiveModel {
-            name: Set("child".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "child".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(child.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(child.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        let parent = package("parent").insert(&db).await;
+        let child = package("child").dependency_only().insert(&db).await;
+        depend(&db, &parent, &child, ">=1.0").await;
+        build(&child).insert(&db).await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent.clone(),
             Rebuild::Never,
             BuildTrigger::User,
@@ -1448,32 +1395,14 @@ mod tests {
         name: &str,
         requested: bool,
     ) -> packages::Model {
-        let pkg = packages::ActiveModel {
-            name: Set(name.to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur { name: name.into() }),
-            directly_requested: Set(requested),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .unwrap();
-        builds::ActiveModel {
-            pkg_id: Set(pkg.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .insert(db)
-        .await
-        .unwrap();
+        let pkg = package(name).with(|p| p.build_flags = Set("--noconfirm".parse().unwrap()));
+        let pkg = if requested {
+            pkg
+        } else {
+            pkg.dependency_only()
+        };
+        let pkg = pkg.insert(db).await;
+        build(&pkg).insert(db).await;
         pkg
     }
 
@@ -1517,27 +1446,13 @@ mod tests {
         let mut dependees = vec![];
         for name in ["one", "two"] {
             let dependee = built_package(&db, name, false).await;
-            dependencies::ActiveModel {
-                dependent_id: Set(parent.id),
-                dependee_id: Set(dependee.id),
-                version_constraint: Set(">=1.0".to_string()),
-                ..Default::default()
-            }
-            .insert(&db)
-            .await
-            .unwrap();
+            depend(&db, &parent, &dependee, ">=1.0").await;
             dependees.push(dependee);
         }
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent,
             Rebuild::Never,
             BuildTrigger::User,
@@ -1598,121 +1513,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let parent = packages::ActiveModel {
-            name: Set("parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "parent".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        let child = packages::ActiveModel {
-            name: Set("child".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "child".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        let grandchild = packages::ActiveModel {
-            name: Set("grandchild".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "grandchild".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(child.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        dependencies::ActiveModel {
-            dependent_id: Set(child.id),
-            dependee_id: Set(grandchild.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(child.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(grandchild.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        let parent = package("parent").insert(&db).await;
+        let child = package("child").dependency_only().insert(&db).await;
+        let grandchild = package("grandchild").dependency_only().insert(&db).await;
+        depend(&db, &parent, &child, ">=1.0").await;
+        depend(&db, &child, &grandchild, ">=1.0").await;
+        build(&child).insert(&db).await;
+        build(&grandchild).insert(&db).await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent.clone(),
             Rebuild::Never,
             BuildTrigger::User,
@@ -1823,121 +1634,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let parent = packages::ActiveModel {
-            name: Set("parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "parent".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        let child = packages::ActiveModel {
-            name: Set("child".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "child".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        let grandchild = packages::ActiveModel {
-            name: Set("grandchild".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "grandchild".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
-
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(child.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        dependencies::ActiveModel {
-            dependent_id: Set(child.id),
-            dependee_id: Set(grandchild.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(child.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(grandchild.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        let parent = package("parent").insert(&db).await;
+        let child = package("child").dependency_only().insert(&db).await;
+        let grandchild = package("grandchild").dependency_only().insert(&db).await;
+        depend(&db, &parent, &child, ">=1.0").await;
+        depend(&db, &child, &grandchild, ">=1.0").await;
+        build(&child).insert(&db).await;
+        build(&grandchild).insert(&db).await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let results = package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent.clone(),
             Rebuild::Always,
             BuildTrigger::User,
@@ -2024,118 +1731,35 @@ mod tests {
         let repo = Repository::init(dir.path()).unwrap();
         commit_pkgbuild(&repo, "initial", "1.0.0", &["old-dep>=1.0"]);
 
-        let parent = packages::ActiveModel {
-            name: Set("git-parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(packages::SourceData::Git {
+        let parent = package("git-parent")
+            .source(packages::SourceData::Git {
                 spec: packages::GitSourceSpec {
                     url: dir.path().to_string_lossy().to_string(),
                     r#ref: "main".to_string(),
                     subfolder: ".".to_string(),
                 },
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+            })
+            .insert(&db)
+            .await;
 
-        let old_dep = packages::ActiveModel {
-            name: Set("old-dep".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "old-dep".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let old_dep = package("old-dep").dependency_only().insert(&db).await;
 
-        let new_dep = packages::ActiveModel {
-            name: Set("new-dep".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("2.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "new-dep".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let new_dep = package("new-dep")
+            .version("2.0.0")
+            .dependency_only()
+            .insert(&db)
+            .await;
 
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(old_dep.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(parent.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
-
-        builds::ActiveModel {
-            pkg_id: Set(new_dep.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("2.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        depend(&db, &parent, &old_dep, ">=1.0").await;
+        build(&parent).insert(&db).await;
+        build(&new_dep).version("2.0.0").insert(&db).await;
 
         commit_pkgbuild(&repo, "updated", "2.0.0", &["new-dep>=2.0"]);
 
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
         let build_ids = package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent.clone(),
             Rebuild::Never,
             BuildTrigger::User,
@@ -2170,61 +1794,38 @@ mod tests {
     /// What [`two_providers_of_one_name`] sets up.
     struct TwoProviders {
         parent: packages::Model,
-        /// Id of `mydep`, which carries the name.
-        by_name: i32,
-        /// Id of `mydep-git`, which only provides it.
-        by_provides: i32,
+        /// `mydep`, which carries the name.
+        by_name: packages::Model,
+        /// `mydep-git`, which only provides it.
+        by_provides: packages::Model,
     }
 
     /// Set up a git package declaring `mydep`, with two tracked packages able
     /// to satisfy it: `mydep`, which carries the name, and `mydep-git`, which
     /// only provides it. Ranking prefers the first.
     async fn two_providers_of_one_name(db: &DatabaseConnection, repo_path: &Path) -> TwoProviders {
-        let parent = packages::ActiveModel {
-            name: Set("git-parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set(Default::default()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(packages::SourceData::Git {
+        let parent = package("git-parent")
+            .with(|p| p.build_flags = Set(Default::default()))
+            .source(packages::SourceData::Git {
                 spec: packages::GitSourceSpec {
                     url: repo_path.to_string_lossy().to_string(),
                     r#ref: "main".to_string(),
                     subfolder: String::new(),
                 },
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+            })
+            .insert(db)
+            .await;
 
+        // Requested, as package() makes them, so the loser is not swept as an
+        // orphan and the assertion is about the edge and nothing else.
         let provider = async |name: &str, provides: Option<serde_json::Value>| {
-            packages::ActiveModel {
-                name: Set(name.to_string()),
-                status: Set(BuildState::Successful),
-                out_of_date: Set(false),
-                upstream_version: Set(Some("1.0.0".to_string())),
-                build_flags: Set(Default::default()),
-                platforms: Set("x86_64".parse().unwrap()),
-                source_data: Set(SourceData::Aur { name: name.into() }),
-                // Requested, so the loser is not swept as an orphan and the
-                // assertion is about the edge and nothing else.
-                directly_requested: Set(true),
-                split_packages: Set(None),
-                provides: Set(provides.map(|value| value.to_string().parse().unwrap())),
-                ..Default::default()
-            }
-            .save(db)
-            .await
-            .unwrap()
-            .id
-            .unwrap()
+            package(name)
+                .with(|p| p.build_flags = Set(Default::default()))
+                .with(|p| {
+                    p.provides = Set(provides.map(|value| value.to_string().parse().unwrap()));
+                })
+                .insert(db)
+                .await
         };
 
         let by_name = provider("mydep", None).await;
@@ -2259,30 +1860,13 @@ mod tests {
         } = two_providers_of_one_name(&db, dir.path()).await;
 
         // The hand-picked edge, as an "update this link" action would leave it.
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(by_provides),
-            version_constraint: Set(String::new()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        depend(&db, &parent, &by_provides, "").await;
 
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
-        super::package_resync_dependencies(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
-            &parent,
-        )
-        .await
-        .unwrap();
+        super::package_resync_dependencies(&services(&db, store, client), &parent)
+            .await
+            .unwrap();
 
         let deps = Dependencies::find()
             .filter(dependencies::Column::DependentId.eq(parent.id))
@@ -2291,7 +1875,7 @@ mod tests {
             .unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(
-            deps[0].dependee_id, by_provides,
+            deps[0].dependee_id, by_provides.id,
             "the existing edge should outrank the better-ranked candidate"
         );
     }
@@ -2316,18 +1900,9 @@ mod tests {
 
         let checkout_dir = tempdir().unwrap();
         let store = SnapshotStore::with_checkout_root(checkout_dir.path().to_path_buf());
-        super::package_resync_dependencies(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
-            &parent,
-        )
-        .await
-        .unwrap();
+        super::package_resync_dependencies(&services(&db, store, client), &parent)
+            .await
+            .unwrap();
 
         let deps = Dependencies::find()
             .filter(dependencies::Column::DependentId.eq(parent.id))
@@ -2335,7 +1910,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].dependee_id, by_name);
+        assert_eq!(deps[0].dependee_id, by_name.id);
     }
 
     #[tokio::test]
@@ -2349,49 +1924,17 @@ mod tests {
         create_aur_git_repo(aur_root.path(), "mypkg", "1.0.0", &[]);
 
         // Simulate package that previously failed its first build.
-        let pkg = packages::ActiveModel {
-            name: Set("mypkg".to_string()),
-            status: Set(BuildState::Failed),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "mypkg".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let pkg = package("mypkg")
+            .status(BuildState::Failed)
+            .insert(&db)
+            .await;
 
         // The first (failed) build record.
-        builds::ActiveModel {
-            pkg_id: Set(pkg.id),
-            status: Set(BuildState::Failed),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        build(&pkg).status(BuildState::Failed).insert(&db).await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         let build_ids = package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             pkg.clone(),
             Rebuild::Always,
             BuildTrigger::User,
@@ -2441,34 +1984,13 @@ mod tests {
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "mypkg", "1.0.0", &[]);
 
-        let pkg = packages::ActiveModel {
-            name: Set("mypkg".to_string()),
-            status: Set(BuildState::Failed),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "mypkg".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let pkg = package("mypkg")
+            .status(BuildState::Failed)
+            .insert(&db)
+            .await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(store),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(&db, store, client);
 
         // Prime the cache: the first rebuild resolves and remembers 1.0.0.
         package_update(&services, pkg.clone(), Rebuild::Always, BuildTrigger::User)
@@ -2528,35 +2050,13 @@ mod tests {
         for name in ["plain", "tracks-git"] {
             create_aur_git_repo(aur_root.path(), name, "1.0.0", &[]);
             // Built at the version its source still reports, and flagged anyway.
-            let pkg = packages::ActiveModel {
-                name: Set(name.to_string()),
-                status: Set(BuildState::Successful),
-                out_of_date: Set(true),
-                upstream_version: Set(Some("1.0.0-1".to_string())),
-                build_flags: Set(Default::default()),
-                platforms: Set("x86_64".parse().unwrap()),
-                source_data: Set(SourceData::Aur { name: name.into() }),
-                directly_requested: Set(true),
-                split_packages: Set(None),
-                ..Default::default()
-            }
-            .save(&db)
-            .await
-            .unwrap()
-            .try_into_model()
-            .unwrap();
-            builds::ActiveModel {
-                pkg_id: Set(pkg.id),
-                status: Set(BuildState::Successful),
-                start_time: Set(Some(1)),
-                end_time: Set(Some(2)),
-                platform: Set(Platform::X86_64),
-                version: Set("1.0.0-1".to_string()),
-                ..Default::default()
-            }
-            .save(&db)
-            .await
-            .unwrap();
+            let pkg = package(name)
+                .out_of_date()
+                .version("1.0.0-1")
+                .with(|p| p.build_flags = Set(Default::default()))
+                .insert(&db)
+                .await;
+            build(&pkg).version("1.0.0-1").insert(&db).await;
             ids.insert(name, pkg.id);
         }
         aurcache_db::package_vcs_sources::ActiveModel {
@@ -2571,13 +2071,7 @@ mod tests {
         .unwrap();
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(store),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(&db, store, client);
         super::package_update_all_outdated(&services).await.unwrap();
 
         let queued_for = |name: &'static str| {
@@ -2628,81 +2122,20 @@ mod tests {
         create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &[]);
 
         // Insert parent (directly requested, with a successful build)
-        let parent = packages::ActiveModel {
-            name: Set("parent".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "parent".into(),
-            }),
-            directly_requested: Set(true),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let parent = package("parent").insert(&db).await;
 
         // Insert child (not directly requested)
-        let child = packages::ActiveModel {
-            name: Set("child".to_string()),
-            status: Set(BuildState::Successful),
-            out_of_date: Set(false),
-            upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
-            platforms: Set("x86_64".parse().unwrap()),
-            source_data: Set(SourceData::Aur {
-                name: "child".into(),
-            }),
-            directly_requested: Set(false),
-            split_packages: Set(None),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap()
-        .try_into_model()
-        .unwrap();
+        let child = package("child").dependency_only().insert(&db).await;
 
         // Dependency link: parent -> child
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(child.id),
-            version_constraint: Set(">=1.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        depend(&db, &parent, &child, ">=1.0").await;
 
         // Successful build record for child
-        builds::ActiveModel {
-            pkg_id: Set(child.id),
-            status: Set(BuildState::Successful),
-            start_time: Set(Some(1)),
-            end_time: Set(Some(2)),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0".to_string()),
-            ..Default::default()
-        }
-        .save(&db)
-        .await
-        .unwrap();
+        build(&child).insert(&db).await;
 
         let TestStore { store, _checkouts } = test_store(aur_root.path());
         package_update(
-            &Services {
-                db: db.clone(),
-                store: Arc::new(store),
-                client: Arc::new(client),
-                repo: test_repo(),
-                activity: ActivityLog::discarding(),
-            },
+            &services(&db, store, client),
             parent.clone(),
             Rebuild::Never,
             BuildTrigger::User,
@@ -2764,13 +2197,7 @@ mod tests {
             .await
             .unwrap();
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(store),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(&db, store, client);
         let update = package_update(&services, pkg, Rebuild::Never, BuildTrigger::User)
             .await
             .unwrap();
@@ -2801,13 +2228,7 @@ mod tests {
         model.platforms = Set("x86_64;aarch64".parse().unwrap());
         let pkg = model.update(&db).await.unwrap();
         let TestStore { store, _checkouts } = test_store(aur_root.path());
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(store),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(&db, store, client);
         let results = package_update(&services, pkg, Rebuild::Never, BuildTrigger::User)
             .await
             .unwrap()
@@ -2832,26 +2253,19 @@ mod tests {
         let repo = Repository::init(dir.path()).unwrap();
         commit_pkgbuild(&repo, "initial", "1.0.0", &["mydep"]);
         let TwoProviders { parent, .. } = two_providers_of_one_name(&db, dir.path()).await;
-        let pending = builds::ActiveModel {
-            pkg_id: Set(parent.id),
-            status: Set(BuildState::Enqueued),
-            platform: Set(Platform::X86_64),
-            version: Set("1.0.0-1".into()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .unwrap();
+        let pending = build(&parent)
+            .status(BuildState::Enqueued)
+            .version("1.0.0-1")
+            .with(|b| b.start_time = Set(None))
+            .with(|b| b.end_time = Set(None))
+            .insert(&db)
+            .await;
         let checkout = tempdir().unwrap();
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(SnapshotStore::with_checkout_root(
-                checkout.path().to_path_buf(),
-            )),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(
+            &db,
+            SnapshotStore::with_checkout_root(checkout.path().to_path_buf()),
+            client,
+        );
         super::package_resync_dependencies(&services, &parent)
             .await
             .unwrap();
@@ -2902,25 +2316,13 @@ mod tests {
         let TwoProviders {
             parent, by_name, ..
         } = two_providers_of_one_name(&db, dir.path()).await;
-        dependencies::ActiveModel {
-            dependent_id: Set(parent.id),
-            dependee_id: Set(by_name),
-            version_constraint: Set(String::new()),
-            ..Default::default()
-        }
-        .insert(&db)
-        .await
-        .unwrap();
+        depend(&db, &parent, &by_name, "").await;
         let checkout = tempdir().unwrap();
-        let services = Services {
-            db: db.clone(),
-            store: Arc::new(SnapshotStore::with_checkout_root(
-                checkout.path().to_path_buf(),
-            )),
-            client: Arc::new(client),
-            repo: test_repo(),
-            activity: ActivityLog::discarding(),
-        };
+        let services = services(
+            &db,
+            SnapshotStore::with_checkout_root(checkout.path().to_path_buf()),
+            client,
+        );
         let mut proposed = parent.clone();
         proposed.platforms = "x86_64;aarch64".parse().unwrap();
         proposed.patch = Some("invalid patch".into());
