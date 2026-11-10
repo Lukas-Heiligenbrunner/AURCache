@@ -16,7 +16,7 @@ use aurcache_utils::build_delete::Delete;
 use aurcache_utils::build_logger::{build_log_path, build_log_size, read_build_output};
 use aurcache_utils::cancel::Cancel;
 use aurcache_utils::listing::{BuildRow, annotate_waiting, build_row_select, waiting_reasons};
-use aurcache_utils::package::update::{package_update, queued};
+use aurcache_utils::package::update::{Rebuild, package_update, queued};
 use rocket::fs::NamedFile;
 use rocket::http::{ContentType, Header};
 use rocket::response::Responder;
@@ -476,7 +476,7 @@ pub async fn retry_build(
     // An operator's retry: recorded as theirs on the build rows, and in the
     // log against the build they retried, so a build nobody remembers queueing
     // can be traced to whoever did.
-    let platform_results = package_update(services, package, true, BuildTrigger::User)
+    let platform_results = package_update(services, package, Rebuild::Always, BuildTrigger::User)
         .await
         // As for an update: an unresolvable source or a patch that no longer
         // applies is the caller's to fix.
@@ -487,12 +487,11 @@ pub async fn retry_build(
             pkgbase,
             QueueCause::after(old_build.status == BuildState::Failed),
             &platform_results,
-            Some(BuildRef {
-                pkgbase: pkgbase.to_string(),
-                number,
-            }),
-            None,
-        ),
+        )
+        .retrying(BuildRef {
+            pkgbase: pkgbase.to_string(),
+            number,
+        }),
         a.username,
     );
 

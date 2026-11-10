@@ -83,17 +83,17 @@ pub async fn auto_update_enabled(db: &DatabaseConnection) -> anyhow::Result<bool
 /// Only the ones [`auto_updates`] picks are retriggered. Returns the build IDs
 /// enqueued across all updated packages.
 ///
-/// Updates of packages with VCS sources run forced, and only those. A VCS
-/// package is flagged when an upstream commit moved without its PKGBUILD's
-/// version changing, and the unforced path would refuse exactly that case as
-/// "already up to date" -- the version is only computed by `pkgver()` at build
-/// time.
+/// Updates of packages with VCS sources run with [`Rebuild::Always`], and only
+/// those. A VCS package is flagged when an upstream commit moved without its
+/// PKGBUILD's version changing, and [`Rebuild::Never`] would refuse exactly
+/// that case as "already up to date" -- the version is only computed by
+/// `pkgver()` at build time.
 ///
-/// Anything else runs unforced, because for it the same version means nothing
-/// new to build. Every update refreshes the source snapshot first and fails
-/// loudly when the refresh fails, so a forced update can no longer rebuild a
-/// stale version whose success would clear the flag -- the failure keeps it
-/// flagged until the source catches up.
+/// Anything else runs with [`Rebuild::Never`], because for it the same version
+/// means nothing new to build. Every update refreshes the source snapshot
+/// first and fails loudly when the refresh fails, so a rebuild can no longer
+/// build a stale version whose success would clear the flag -- the failure
+/// keeps it flagged until the source catches up.
 pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<Vec<i32>> {
     let db = &services.db;
     let pkg_models: Vec<packages::Model> = Packages::find()
@@ -104,7 +104,8 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
     let activity_log = &services.activity;
 
     // Which outdated packages track a VCS source, in one query rather than a
-    // round trip per package for a flag that only decides forced-vs-unforced.
+    // round trip per package for a flag that only decides
+    // whether to rebuild.
     let vcs_tracked: std::collections::HashSet<i32> = match PackageVcsSources::find()
         .select_only()
         .column(package_vcs_sources::Column::PackageId)
@@ -143,18 +144,16 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
         // "already up to date" check would refuse it: the flag gets it past
         // that check. It is still an update -- a new version is being
         // attempted -- and the log entry calls it one.
-        let force = vcs_tracked.contains(&pkg.id);
-        match package_update(services, pkg, force, BuildTrigger::AutoUpdate).await {
+        let rebuild = if vcs_tracked.contains(&pkg.id) {
+            Rebuild::Always
+        } else {
+            Rebuild::Never
+        };
+        match package_update(services, pkg, rebuild, BuildTrigger::AutoUpdate).await {
             Ok(results) => {
                 // No actor: the auto-updater is the server acting on its own,
                 // which is what an entry without a user already says.
-                activity_log.emit(queued(
-                    &package_name,
-                    QueueCause::Update,
-                    &results,
-                    None,
-                    None,
-                ));
+                activity_log.emit(queued(&package_name, QueueCause::Update, &results));
                 ids_total.extend(
                     results
                         .into_iter()
@@ -171,23 +170,33 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
     Ok(ids_total)
 }
 
+/// Whether an update builds a version that is already built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebuild {
+    /// Build only on the platforms that lack the current version, and refuse
+    /// when none does.
+    Never,
+    /// Build it again anyway: a rebuild, or a retry.
+    Always,
+}
+
 /// Queue a build of `pkg_model`'s current upstream version on every platform
 /// it is configured for, with any dependency rebuilds that needs.
 ///
-/// Refused when the version is already built, unless `force`. `trigger` is
-/// recorded on each build row -- and on the rows of any dependency rebuilt
-/// along the way, which is part of the same request.
+/// Refused when the version is already built, unless `rebuild` says
+/// otherwise. `trigger` is recorded on each build row -- and on the rows of
+/// any dependency rebuilt along the way, which is part of the same request.
 ///
 /// Returns one entry per configured platform: the build that was queued or
 /// promoted, or left waiting on dependencies.
 pub async fn package_update(
     services: &Services,
     pkg_model: packages::Model,
-    force: bool,
+    rebuild: Rebuild,
     trigger: BuildTrigger,
 ) -> anyhow::Result<Vec<PlatformUpdateResult>> {
     let mut visited = HashSet::new();
-    package_update_inner(services, pkg_model, force, trigger, &mut visited).await
+    package_update_inner(services, pkg_model, rebuild, trigger, &mut visited).await
 }
 
 /// Recompute and persist a package's dependency graph from its current
@@ -237,7 +246,7 @@ pub(crate) async fn resync_graph(
 async fn package_update_inner(
     services: &Services,
     pkg_model: packages::Model,
-    force: bool,
+    rebuild: Rebuild,
     trigger: BuildTrigger,
     visited: &mut HashSet<i32>,
 ) -> anyhow::Result<Vec<PlatformUpdateResult>> {
@@ -248,7 +257,7 @@ async fn package_update_inner(
     // The cached source snapshot is only refreshed by the periodic version
     // check, so a PKGBUILD bumped upstream after the last check (a pkgrel-only
     // fix, say) would rebuild stale, and nothing about the build would say so.
-    // Refresh first, so every update -- forced or not -- resolves what
+    // Refresh first, so every update -- a rebuild or not -- resolves what
     // upstream has now. A refresh failure fails the update
     // rather than building stale: for the auto-updater that is a visible skip
     // retried next pass, and for an operator it names the real problem.
@@ -283,7 +292,7 @@ async fn package_update_inner(
 
     let queued_commits = resolve_vcs_commits(&sourceinfo, &pkgbuild).await;
     let mut requested = pkg_model.clone();
-    if !force {
+    if rebuild == Rebuild::Never {
         let mut needed = Vec::new();
         for &platform in pkg_model.platforms.as_slice() {
             let moved =
@@ -701,17 +710,19 @@ async fn prepare_dependencies_for_platform(
 
         // A dependency whose last build failed is not auto-retried.
         if !has_pending_build && dep_info.package.status != BuildState::Failed {
-            let results =
-                package_update_inner(services, dep_info.package.clone(), true, trigger, visited)
-                    .await?;
+            let results = package_update_inner(
+                services,
+                dep_info.package.clone(),
+                Rebuild::Always,
+                trigger,
+                visited,
+            )
+            .await?;
             if !results.is_empty() {
-                services.activity.emit(queued(
-                    &dep_info.package.name,
-                    QueueCause::Dependency,
-                    &results,
-                    None,
-                    Some(needed_by),
-                ));
+                services.activity.emit(
+                    queued(&dep_info.package.name, QueueCause::Dependency, &results)
+                        .needed_by(needed_by),
+                );
             }
         }
     }
@@ -764,34 +775,79 @@ impl From<Queued> for Dispatch {
     }
 }
 
-/// The log entry for builds `results` queued for `pkgbase`, and why.
+/// The log entry for builds `results` queued for `pkgbase`, and why: an
+/// [`Event::BuildQueued`] once converted.
 ///
 /// The version is named for an update only: it is what is new there, where a
 /// rebuild or a retry repeats the version that was already built.
-#[must_use]
-pub fn queued(
-    pkgbase: &str,
+pub fn queued<'a>(
+    pkgbase: &'a str,
     cause: QueueCause,
-    results: &[PlatformUpdateResult],
-    retried: Option<aurcache_common::api::log::BuildRef>,
-    needed_by: Option<&str>,
-) -> Event {
-    Event::BuildQueued {
-        pkg: pkgbase.into(),
+    results: &'a [PlatformUpdateResult],
+) -> QueuedEntry<'a> {
+    QueuedEntry {
+        pkgbase,
         cause,
-        builds: results
-            .iter()
-            .map(|result| aurcache_common::api::log::BuildRef {
-                pkgbase: pkgbase.to_string(),
-                number: result.build_number,
-            })
-            .collect(),
-        version: (cause == QueueCause::Update)
-            .then(|| results.first().map(|result| result.version.clone()))
-            .flatten()
-            .filter(|version| !version.is_empty()),
-        retried,
-        needed_by: needed_by.map(Into::into),
+        results,
+        retried: None,
+        needed_by: None,
+    }
+}
+
+/// A [`queued`] log entry, still being described.
+#[must_use]
+pub struct QueuedEntry<'a> {
+    pkgbase: &'a str,
+    cause: QueueCause,
+    results: &'a [PlatformUpdateResult],
+    retried: Option<aurcache_common::api::log::BuildRef>,
+    needed_by: Option<&'a str>,
+}
+
+impl<'a> QueuedEntry<'a> {
+    /// The builds were queued by retrying `build`.
+    pub fn retrying(self, build: aurcache_common::api::log::BuildRef) -> Self {
+        Self {
+            retried: Some(build),
+            ..self
+        }
+    }
+
+    /// The builds were queued because `pkgbase` needs them.
+    pub fn needed_by(self, pkgbase: &'a str) -> Self {
+        Self {
+            needed_by: Some(pkgbase),
+            ..self
+        }
+    }
+}
+
+impl From<QueuedEntry<'_>> for Event {
+    fn from(entry: QueuedEntry<'_>) -> Self {
+        let QueuedEntry {
+            pkgbase,
+            cause,
+            results,
+            retried,
+            needed_by,
+        } = entry;
+        Self::BuildQueued {
+            pkg: pkgbase.into(),
+            cause,
+            builds: results
+                .iter()
+                .map(|result| aurcache_common::api::log::BuildRef {
+                    pkgbase: pkgbase.to_string(),
+                    number: result.build_number,
+                })
+                .collect(),
+            version: (cause == QueueCause::Update)
+                .then(|| results.first().map(|result| result.version.clone()))
+                .flatten()
+                .filter(|version| !version.is_empty()),
+            retried,
+            needed_by: needed_by.map(Into::into),
+        }
     }
 }
 
@@ -886,7 +942,7 @@ async fn update_platform(
 
 #[cfg(test)]
 mod tests {
-    use super::package_update;
+    use super::{Rebuild, package_update};
     use aurcache_activitylog::activity_utils::ActivityLog;
     use aurcache_common::build_state::BuildTrigger;
     /// A repository of its own for a test that never publishes to it.
@@ -1271,7 +1327,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent.clone(),
-            false,
+            Rebuild::Never,
             BuildTrigger::User,
         )
         .await
@@ -1440,7 +1496,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent,
-            false,
+            Rebuild::Never,
             BuildTrigger::User,
         )
         .await
@@ -1616,7 +1672,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent.clone(),
-            false,
+            Rebuild::Never,
             BuildTrigger::User,
         )
         .await
@@ -1841,7 +1897,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent.clone(),
-            true,
+            Rebuild::Always,
             BuildTrigger::User,
         )
         .await
@@ -2039,7 +2095,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent.clone(),
-            false,
+            Rebuild::Never,
             BuildTrigger::User,
         )
         .await
@@ -2297,7 +2353,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             pkg.clone(),
-            true,
+            Rebuild::Always,
             BuildTrigger::User,
         )
         .await
@@ -2375,7 +2431,7 @@ mod tests {
         };
 
         // Prime the cache: the first rebuild resolves and remembers 1.0.0.
-        package_update(&services, pkg.clone(), true, BuildTrigger::User)
+        package_update(&services, pkg.clone(), Rebuild::Always, BuildTrigger::User)
             .await
             .unwrap();
 
@@ -2397,7 +2453,7 @@ mod tests {
         bump_aur_git_repo(aur_root.path(), "mypkg", "1.0.1", &[]);
 
         // The rebuild must pick up 1.0.1, not requeue the cached 1.0.0.
-        package_update(&services, pkg.clone(), true, BuildTrigger::User)
+        package_update(&services, pkg.clone(), Rebuild::Always, BuildTrigger::User)
             .await
             .unwrap();
 
@@ -2610,7 +2666,7 @@ mod tests {
                 activity: ActivityLog::discarding(),
             },
             parent.clone(),
-            false,
+            Rebuild::Never,
             BuildTrigger::User,
         )
         .await
@@ -2679,7 +2735,7 @@ mod tests {
             repo: test_repo(),
             activity: ActivityLog::discarding(),
         };
-        let results = package_update(&services, pkg, false, BuildTrigger::User)
+        let results = package_update(&services, pkg, Rebuild::Never, BuildTrigger::User)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
