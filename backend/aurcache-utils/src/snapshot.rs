@@ -85,7 +85,7 @@ pub enum Refresh {
 pub struct Resolved {
     pub sourceinfo: SourceInfoV1,
     pub pkgbuild: String,
-    pub metadata: crate::package::source_metadata::SourceMetadata,
+    pub metadata: crate::package::metadata::SourceMetadata,
 }
 
 struct CacheEntry {
@@ -360,7 +360,7 @@ impl SnapshotStore {
         &self,
         source_data: &SourceData,
         patch: Option<&str>,
-    ) -> anyhow::Result<crate::package::source_metadata::SourceMetadata> {
+    ) -> anyhow::Result<crate::package::metadata::SourceMetadata> {
         let entry = self.get_or_fetch(source_data, patch).await?;
         Ok(self.metadata_from_entry(&entry, source_data).await)
     }
@@ -388,8 +388,8 @@ impl SnapshotStore {
         &self,
         entry: &CacheEntry,
         source_data: &SourceData,
-    ) -> crate::package::source_metadata::SourceMetadata {
-        use crate::package::source_metadata::{from_sourceinfo, maintainer_from_pkgbuild};
+    ) -> crate::package::metadata::SourceMetadata {
+        use crate::package::metadata::{from_sourceinfo, maintainer_from_pkgbuild};
 
         let mut metadata = entry
             .active

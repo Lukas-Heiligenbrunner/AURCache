@@ -9,5 +9,4 @@ pub mod live_check;
 pub mod metadata;
 pub mod replace;
 pub(crate) mod source_facts;
-pub mod source_metadata;
 pub mod update;
