@@ -6,10 +6,10 @@
 //! answers to itself, and merge the bounds of every name that landed on the
 //! same package base onto one edge.
 
+use crate::constraint::{Constraint, Declared, DependencySet};
 use crate::package::dependency_resolution::{
     PackageCandidate, TrackedPackages, resolve_dependencies,
 };
-use crate::pkg::{Constraint, Declared, DependencySet};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
 use aurcache_deps::{AurClient, DependencyResolution};
@@ -60,7 +60,7 @@ pub(crate) async fn resolve_edges(
 ) -> anyhow::Result<Vec<Edge>> {
     // What the package answers to itself is never an edge: resolving it would
     // let a co-provider (`flutter-bin` for `flutter`'s own `dart`) win.
-    let self_provided = crate::pkg::self_provided_names(
+    let self_provided = crate::constraint::self_provided_names(
         declaration.pkgbase,
         declaration.pkgnames,
         declaration.provides,
@@ -135,7 +135,7 @@ pub(crate) async fn resolve_edges(
         // One name can carry a whole range, so each bound merges in turn.
         let conjunction = bounds.entry(pkgbase.clone()).or_default();
         for bound in declaration.deps.constraints.get(name).into_iter().flatten() {
-            crate::pkg::merge_bound(conjunction, pkgbase, bound.clone())?;
+            crate::constraint::merge_bound(conjunction, pkgbase, bound.clone())?;
         }
     }
     for edge in &mut edges {

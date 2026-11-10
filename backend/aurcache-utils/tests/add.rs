@@ -8,8 +8,8 @@ use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
 use aurcache_deps::AurClient;
+use aurcache_utils::constraint::satisfies_constraint;
 use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
-use aurcache_utils::pkg::satisfies_constraint;
 use flate2::{Compression, write::GzEncoder};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{

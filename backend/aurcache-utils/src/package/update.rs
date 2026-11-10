@@ -381,7 +381,7 @@ async fn package_update_inner(
 /// A single dependency of the package being updated, with its merged bounds
 /// (several when a range was declared).
 struct DepInfo {
-    constraint: Vec<crate::pkg::Constraint>,
+    constraint: Vec<crate::constraint::Constraint>,
     package: packages::Model,
 }
 
@@ -509,8 +509,8 @@ async fn resolve_dependency_edges(
     services: &Services,
     pkg_model: &packages::Model,
     deps: &PkgDeps,
-) -> anyhow::Result<HashMap<String, Vec<crate::pkg::Constraint>>> {
-    let declared = crate::pkg::DependencySet::of(deps)?;
+) -> anyhow::Result<HashMap<String, Vec<crate::constraint::Constraint>>> {
+    let declared = crate::constraint::DependencySet::of(deps)?;
     // One package, one resolution, so the snapshot lives no longer than this
     // call.
     let tracked =
@@ -569,7 +569,7 @@ async fn current_dependee_names(
 async fn ensure_missing_dependency_packages(
     services: &Services,
     pkg_model: &packages::Model,
-    dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::pkg::Constraint>>,
+    dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::constraint::Constraint>>,
 ) -> anyhow::Result<()> {
     // The packages already tracked, in one query — not one probe per
     // declared dependency. Nothing declared means nothing to look up (`IN ()`
@@ -597,7 +597,7 @@ async fn ensure_missing_dependency_packages(
 /// Fetch a name→model map of all dependency packages from the database.
 async fn fetch_dep_packages_map(
     db: &DatabaseConnection,
-    dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::pkg::Constraint>>,
+    dep_constraints_by_pkgbase: &HashMap<String, Vec<crate::constraint::Constraint>>,
 ) -> anyhow::Result<HashMap<String, packages::Model>> {
     if dep_constraints_by_pkgbase.is_empty() {
         return Ok(HashMap::new());
@@ -647,7 +647,7 @@ async fn sync_dependency_rows<C: ConnectionTrait>(
         package: dep_pkg,
     } in graph.values()
     {
-        let serialized = crate::pkg::join_constraints(constraint);
+        let serialized = crate::constraint::join_constraints(constraint);
 
         if let Some(edge) = existing.get(&dep_pkg.id) {
             let mut active: dependencies::ActiveModel = edge.clone().into();
@@ -692,7 +692,7 @@ async fn prepare_dependencies_for_platform(
             &services.db,
             dep_info.package.id,
             platform,
-            &crate::pkg::join_constraints(&dep_info.constraint),
+            &crate::constraint::join_constraints(&dep_info.constraint),
         )
         .await?
         {
