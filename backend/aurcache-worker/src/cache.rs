@@ -1213,6 +1213,169 @@ pub fn plan_eviction(
     evict
 }
 
+/// Free bytes on the filesystem holding `path`.
+#[cfg(unix)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is NUL-terminated and outlives the call; `stat` is a
+    // valid out-parameter.
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &raw mut stat) };
+    (rc == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// Measure a tree completely, using the existing privileged fallback if needed.
+/// No partial result is written to a stamp or reported as a known total.
+fn measure_tree(path: &Path) -> Option<u64> {
+    aurcache_common::fs::measure_directory(path)
+        .total()
+        .or_else(|| privileged_du(path))
+}
+
+/// `du` as root, for a tree the worker cannot read all of.
+///
+/// `-n` so a host without the sudoers grant fails at once instead of waiting on
+/// a password prompt no one will answer.
+fn privileged_du(path: &Path) -> Option<u64> {
+    let out = std::process::Command::new("sudo")
+        .args(["-n", "du", "-s", "--bytes", "--one-file-system", "--"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        tracing::debug!(
+            "sudo du {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// What a tree is renamed to while it is being removed.
+const SET_ASIDE_SUFFIX: &str = ".aurcache-removing";
+
+/// Whether a directory entry is a tree set aside for removal, rather than a
+/// cache entry of its own.
+fn is_set_aside(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().ends_with(SET_ASIDE_SUFFIX)
+}
+
+/// Where devtools binds `SRCDEST` inside every build's chroot, and so the path
+/// a checkout borrowing from it records.
+const CHROOT_SRCDEST: &str = "/srcdest/";
+
+/// Whether a checkout's objects live in the `SRCDEST` mirror rather than in
+/// itself.
+///
+/// `git clone -s` records the mirror it borrows from in `alternates`, as the
+/// absolute path it was cloned by -- which is the in-chroot one, since that is
+/// where the clone ran. A checkout borrowing from anywhere else, or from
+/// nowhere, owns its objects and is none of our business.
+fn borrows_from_srcdest(checkout: &Path) -> bool {
+    // Non-bare first, which is what makepkg makes; the bare spelling costs one
+    // failed `read_to_string` to also cover a PKGBUILD that made its own.
+    [checkout.join(".git"), checkout.to_path_buf()]
+        .iter()
+        .filter_map(|git| std::fs::read_to_string(git.join("objects/info/alternates")).ok())
+        .any(|alternates| {
+            alternates
+                .lines()
+                .any(|line| line.trim().starts_with(CHROOT_SRCDEST))
+        })
+}
+
+/// Remove a cache tree the build user may have written into.
+///
+/// Such a tree is not the worker's to delete: makepkg and the build write it
+/// as the build user, mode 755, and the worker can only unlink what sits
+/// directly in a directory it may write. `remove_dir_all` as the worker failed
+/// on every build tree ("Permission denied") -- none was ever reclaimed -- and
+/// on source caches it failed *partway*, taking the tarballs next to a git
+/// checkout it could not touch.
+///
+/// So the tree is renamed aside first, which needs only the parent directory
+/// the worker owns. Nothing is ever left half-deleted under the name makepkg
+/// looks for -- a partial build tree reads as resumable, a partial checkout as
+/// something to update. Then it is deleted: as the worker where that is enough,
+/// otherwise with `sudo rm`, as the chroot operations already are. A removal
+/// that fails even so stays set aside, never counted as an entry, and is
+/// finished by [`sweep_set_aside`] on a later pass.
+fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let Some(name) = path.file_name() else {
+        return Err(std::io::Error::other("no file name to set aside"));
+    };
+    let aside = path.with_file_name(format!(".{}{SET_ASIDE_SUFFIX}", name.to_string_lossy()));
+    // An earlier removal of the same name that did not finish would make the
+    // rename fail on a non-empty target.
+    if aside.exists() {
+        remove_set_aside(&aside)?;
+    }
+    match std::fs::rename(path, &aside) {
+        Ok(()) => remove_set_aside(&aside),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            // The parent belongs to the build user (0755), so the worker
+            // cannot rename the entry out of it. Remove it in place with
+            // privilege instead, as `remove_set_aside` already does for the
+            // `rmdir` half -- otherwise a stale checkout in a persistent tree
+            // survives every wipe and fails every retry identically.
+            privileged_rm(path).map_err(|with_sudo| {
+                std::io::Error::new(e.kind(), format!("{e}; and with sudo: {with_sudo}"))
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Delete a tree already renamed aside.
+fn remove_set_aside(aside: &Path) -> std::io::Result<()> {
+    let Err(e) = std::fs::remove_dir_all(aside) else {
+        return Ok(());
+    };
+    match e.kind() {
+        std::io::ErrorKind::NotFound => Ok(()),
+        std::io::ErrorKind::PermissionDenied => privileged_rm(aside).map_err(|with_sudo| {
+            std::io::Error::new(e.kind(), format!("{e}; and with sudo: {with_sudo}"))
+        }),
+        _ => Err(e),
+    }
+}
+
+/// `rm -rf` as root. `--one-file-system`, as devtools removes chroot copies: a
+/// bind mount left behind under a tree must not be walked into.
+fn privileged_rm(path: &Path) -> Result<(), String> {
+    let out = std::process::Command::new("sudo")
+        .args(["-n", "rm", "-rf", "--one-file-system", "--"])
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() && !path.exists() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Finish removing whatever an earlier pass set aside and could not delete.
+fn sweep_set_aside(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if !is_set_aside(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(e) = remove_set_aside(&path) {
+            tracing::warn!("could not remove {}: {e}", path.display());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2072,168 +2235,5 @@ mod pkgcache_tests {
         let repo = make_db(&[(name, 100, &sha_of(&[b'y'; 100]))]);
         assert_eq!(c.reconcile_pkgs(&repo), 1);
         assert!(!shared.join(name).exists());
-    }
-}
-
-/// Free bytes on the filesystem holding `path`.
-#[cfg(unix)]
-fn free_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `c_path` is NUL-terminated and outlives the call; `stat` is a
-    // valid out-parameter.
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &raw mut stat) };
-    (rc == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
-}
-
-/// Measure a tree completely, using the existing privileged fallback if needed.
-/// No partial result is written to a stamp or reported as a known total.
-fn measure_tree(path: &Path) -> Option<u64> {
-    aurcache_common::fs::measure_directory(path)
-        .total()
-        .or_else(|| privileged_du(path))
-}
-
-/// `du` as root, for a tree the worker cannot read all of.
-///
-/// `-n` so a host without the sudoers grant fails at once instead of waiting on
-/// a password prompt no one will answer.
-fn privileged_du(path: &Path) -> Option<u64> {
-    let out = std::process::Command::new("sudo")
-        .args(["-n", "du", "-s", "--bytes", "--one-file-system", "--"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        tracing::debug!(
-            "sudo du {} failed: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// What a tree is renamed to while it is being removed.
-const SET_ASIDE_SUFFIX: &str = ".aurcache-removing";
-
-/// Whether a directory entry is a tree set aside for removal, rather than a
-/// cache entry of its own.
-fn is_set_aside(name: &std::ffi::OsStr) -> bool {
-    name.to_string_lossy().ends_with(SET_ASIDE_SUFFIX)
-}
-
-/// Where devtools binds `SRCDEST` inside every build's chroot, and so the path
-/// a checkout borrowing from it records.
-const CHROOT_SRCDEST: &str = "/srcdest/";
-
-/// Whether a checkout's objects live in the `SRCDEST` mirror rather than in
-/// itself.
-///
-/// `git clone -s` records the mirror it borrows from in `alternates`, as the
-/// absolute path it was cloned by -- which is the in-chroot one, since that is
-/// where the clone ran. A checkout borrowing from anywhere else, or from
-/// nowhere, owns its objects and is none of our business.
-fn borrows_from_srcdest(checkout: &Path) -> bool {
-    // Non-bare first, which is what makepkg makes; the bare spelling costs one
-    // failed `read_to_string` to also cover a PKGBUILD that made its own.
-    [checkout.join(".git"), checkout.to_path_buf()]
-        .iter()
-        .filter_map(|git| std::fs::read_to_string(git.join("objects/info/alternates")).ok())
-        .any(|alternates| {
-            alternates
-                .lines()
-                .any(|line| line.trim().starts_with(CHROOT_SRCDEST))
-        })
-}
-
-/// Remove a cache tree the build user may have written into.
-///
-/// Such a tree is not the worker's to delete: makepkg and the build write it
-/// as the build user, mode 755, and the worker can only unlink what sits
-/// directly in a directory it may write. `remove_dir_all` as the worker failed
-/// on every build tree ("Permission denied") -- none was ever reclaimed -- and
-/// on source caches it failed *partway*, taking the tarballs next to a git
-/// checkout it could not touch.
-///
-/// So the tree is renamed aside first, which needs only the parent directory
-/// the worker owns. Nothing is ever left half-deleted under the name makepkg
-/// looks for -- a partial build tree reads as resumable, a partial checkout as
-/// something to update. Then it is deleted: as the worker where that is enough,
-/// otherwise with `sudo rm`, as the chroot operations already are. A removal
-/// that fails even so stays set aside, never counted as an entry, and is
-/// finished by [`sweep_set_aside`] on a later pass.
-fn remove_tree(path: &Path) -> std::io::Result<()> {
-    let Some(name) = path.file_name() else {
-        return Err(std::io::Error::other("no file name to set aside"));
-    };
-    let aside = path.with_file_name(format!(".{}{SET_ASIDE_SUFFIX}", name.to_string_lossy()));
-    // An earlier removal of the same name that did not finish would make the
-    // rename fail on a non-empty target.
-    if aside.exists() {
-        remove_set_aside(&aside)?;
-    }
-    match std::fs::rename(path, &aside) {
-        Ok(()) => remove_set_aside(&aside),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // The parent belongs to the build user (0755), so the worker
-            // cannot rename the entry out of it. Remove it in place with
-            // privilege instead, as `remove_set_aside` already does for the
-            // `rmdir` half -- otherwise a stale checkout in a persistent tree
-            // survives every wipe and fails every retry identically.
-            privileged_rm(path).map_err(|with_sudo| {
-                std::io::Error::new(e.kind(), format!("{e}; and with sudo: {with_sudo}"))
-            })
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Delete a tree already renamed aside.
-fn remove_set_aside(aside: &Path) -> std::io::Result<()> {
-    let Err(e) = std::fs::remove_dir_all(aside) else {
-        return Ok(());
-    };
-    match e.kind() {
-        std::io::ErrorKind::NotFound => Ok(()),
-        std::io::ErrorKind::PermissionDenied => privileged_rm(aside).map_err(|with_sudo| {
-            std::io::Error::new(e.kind(), format!("{e}; and with sudo: {with_sudo}"))
-        }),
-        _ => Err(e),
-    }
-}
-
-/// `rm -rf` as root. `--one-file-system`, as devtools removes chroot copies: a
-/// bind mount left behind under a tree must not be walked into.
-fn privileged_rm(path: &Path) -> Result<(), String> {
-    let out = std::process::Command::new("sudo")
-        .args(["-n", "rm", "-rf", "--one-file-system", "--"])
-        .arg(path)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() && !path.exists() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
-
-/// Finish removing whatever an earlier pass set aside and could not delete.
-fn sweep_set_aside(dir: &Path) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if !is_set_aside(&entry.file_name()) {
-            continue;
-        }
-        let path = entry.path();
-        if let Err(e) = remove_set_aside(&path) {
-            tracing::warn!("could not remove {}: {e}", path.display());
-        }
     }
 }

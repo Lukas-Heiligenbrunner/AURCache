@@ -630,6 +630,131 @@ pub(crate) fn architectures(worker: &Worker) -> String {
     }
 }
 
+/// Why the dot is the colour it is.
+fn liveness_hint(online: bool) -> &'static str {
+    if online {
+        "Checked in within the liveness timeout"
+    } else {
+        "Has not checked in recently; jobs will spill to other workers"
+    }
+}
+
+/// Whether a worker is connected, and what it is doing right now.
+///
+/// Connectivity is not the approval status beside it: an approved worker that
+/// stopped calling in still reads "approved", and that column would go on
+/// saying so for as long as the machine stayed off. This is the column that
+/// answers whether the fleet is actually there.
+#[component]
+pub(crate) fn Liveness(worker: Worker) -> Element {
+    // A revoked worker is not expected to be connected, so absence is not
+    // worth reporting as though something were wrong.
+    if worker.status.is_retired() {
+        return rsx! { span { class: "opacity-40", "—" } };
+    }
+
+    rsx! {
+        div { class: "flex items-center gap-2 text-sm",
+            span {
+                class: if worker.online { "badge badge-success badge-xs" } else { "badge badge-outline badge-xs opacity-40" },
+                title: liveness_hint(worker.online),
+            }
+            if worker.active_builds > 0 {
+                // Straight to what this machine is building, rather than to
+                // every build it has ever run with the filter still to apply.
+                Link {
+                    class: "whitespace-nowrap hover:underline",
+                    to: Route::Builds {
+                        view: ViewParams::with_status(BuildState::Active),
+                        q: worker.name.clone(),
+                    },
+                    title: "Show what this worker is building",
+                    "{worker.active_builds} building"
+                }
+            } else if worker.online {
+                span { class: "opacity-60", "idle" }
+            } else {
+                span { class: "opacity-60", "offline" }
+            }
+        }
+    }
+}
+
+/// How much attention a success rate deserves.
+///
+/// Not "any failure at all": a machine that has failed one build in a hundred
+/// is working, and colouring 99% as a warning spends the reader's attention on
+/// the wrong row. The threshold is where a rate stops reading as noise.
+fn rate_class(rate: f64) -> &'static str {
+    if rate < 50.0 {
+        "text-error"
+    } else if rate < 90.0 {
+        "text-warning"
+    } else {
+        ""
+    }
+}
+
+/// What a worker has actually produced.
+///
+/// Counts rather than a bare rate: three of three is not the same evidence as
+/// three hundred of three hundred, and a rate alone hides which one you have.
+/// The share says whether this machine matters to the fleet — a worker that is
+/// reliable but takes one build in fifty is a different thing to fix than one
+/// that takes half of them and fails.
+#[component]
+fn Record(worker: Worker, fleet_finished: i32) -> Element {
+    let finished = worker.successful_builds + worker.failed_builds;
+    // Filtering is by name because that is what the Builds list matches on and
+    // what it shows in its own Worker column, so the destination explains the
+    // filter it arrived with. A name is not unique the way the fingerprint is;
+    // two machines sharing one would list together, which is a truthful answer
+    // to "builds from a worker called this" and the same answer the Builds page
+    // gives to anyone typing it into the search box.
+    let filter = Route::Builds {
+        view: ViewParams::default(),
+        q: worker.name.clone(),
+    };
+    if finished == 0 {
+        return rsx! {
+            Link {
+                class: "text-sm opacity-40 hover:opacity-70",
+                to: filter,
+                // Still a link with nothing finished: a worker part-way through
+                // its first build has something to show, and the count here
+                // only covers builds that ended.
+                title: "Show this worker's builds",
+                "no builds yet"
+            }
+        };
+    }
+
+    let rate = f64::from(worker.successful_builds) / f64::from(finished) * 100.0;
+    let share = if fleet_finished > 0 {
+        f64::from(finished) / f64::from(fleet_finished) * 100.0
+    } else {
+        0.0
+    };
+
+    rsx! {
+        Link {
+            class: "text-sm leading-tight block hover:underline",
+            to: filter,
+            title: "Show this worker's builds",
+            div { class: "flex items-center gap-1 whitespace-nowrap",
+                span { class: rate_class(rate), "{rate:.0}%" }
+                span { class: "opacity-60", "of {finished}" }
+            }
+            div { class: "text-xs opacity-60 whitespace-nowrap",
+                if worker.failed_builds > 0 {
+                    "{worker.failed_builds} failed · "
+                }
+                "{share:.0}% of fleet"
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -801,131 +926,6 @@ mod tests {
             let html = dioxus_ssr::render(&dom);
             assert!(html.contains(label), "{status:?}: {html}");
             assert!(html.contains(class), "{status:?}: {html}");
-        }
-    }
-}
-
-/// Why the dot is the colour it is.
-fn liveness_hint(online: bool) -> &'static str {
-    if online {
-        "Checked in within the liveness timeout"
-    } else {
-        "Has not checked in recently; jobs will spill to other workers"
-    }
-}
-
-/// Whether a worker is connected, and what it is doing right now.
-///
-/// Connectivity is not the approval status beside it: an approved worker that
-/// stopped calling in still reads "approved", and that column would go on
-/// saying so for as long as the machine stayed off. This is the column that
-/// answers whether the fleet is actually there.
-#[component]
-pub(crate) fn Liveness(worker: Worker) -> Element {
-    // A revoked worker is not expected to be connected, so absence is not
-    // worth reporting as though something were wrong.
-    if worker.status.is_retired() {
-        return rsx! { span { class: "opacity-40", "—" } };
-    }
-
-    rsx! {
-        div { class: "flex items-center gap-2 text-sm",
-            span {
-                class: if worker.online { "badge badge-success badge-xs" } else { "badge badge-outline badge-xs opacity-40" },
-                title: liveness_hint(worker.online),
-            }
-            if worker.active_builds > 0 {
-                // Straight to what this machine is building, rather than to
-                // every build it has ever run with the filter still to apply.
-                Link {
-                    class: "whitespace-nowrap hover:underline",
-                    to: Route::Builds {
-                        view: ViewParams::with_status(BuildState::Active),
-                        q: worker.name.clone(),
-                    },
-                    title: "Show what this worker is building",
-                    "{worker.active_builds} building"
-                }
-            } else if worker.online {
-                span { class: "opacity-60", "idle" }
-            } else {
-                span { class: "opacity-60", "offline" }
-            }
-        }
-    }
-}
-
-/// How much attention a success rate deserves.
-///
-/// Not "any failure at all": a machine that has failed one build in a hundred
-/// is working, and colouring 99% as a warning spends the reader's attention on
-/// the wrong row. The threshold is where a rate stops reading as noise.
-fn rate_class(rate: f64) -> &'static str {
-    if rate < 50.0 {
-        "text-error"
-    } else if rate < 90.0 {
-        "text-warning"
-    } else {
-        ""
-    }
-}
-
-/// What a worker has actually produced.
-///
-/// Counts rather than a bare rate: three of three is not the same evidence as
-/// three hundred of three hundred, and a rate alone hides which one you have.
-/// The share says whether this machine matters to the fleet — a worker that is
-/// reliable but takes one build in fifty is a different thing to fix than one
-/// that takes half of them and fails.
-#[component]
-fn Record(worker: Worker, fleet_finished: i32) -> Element {
-    let finished = worker.successful_builds + worker.failed_builds;
-    // Filtering is by name because that is what the Builds list matches on and
-    // what it shows in its own Worker column, so the destination explains the
-    // filter it arrived with. A name is not unique the way the fingerprint is;
-    // two machines sharing one would list together, which is a truthful answer
-    // to "builds from a worker called this" and the same answer the Builds page
-    // gives to anyone typing it into the search box.
-    let filter = Route::Builds {
-        view: ViewParams::default(),
-        q: worker.name.clone(),
-    };
-    if finished == 0 {
-        return rsx! {
-            Link {
-                class: "text-sm opacity-40 hover:opacity-70",
-                to: filter,
-                // Still a link with nothing finished: a worker part-way through
-                // its first build has something to show, and the count here
-                // only covers builds that ended.
-                title: "Show this worker's builds",
-                "no builds yet"
-            }
-        };
-    }
-
-    let rate = f64::from(worker.successful_builds) / f64::from(finished) * 100.0;
-    let share = if fleet_finished > 0 {
-        f64::from(finished) / f64::from(fleet_finished) * 100.0
-    } else {
-        0.0
-    };
-
-    rsx! {
-        Link {
-            class: "text-sm leading-tight block hover:underline",
-            to: filter,
-            title: "Show this worker's builds",
-            div { class: "flex items-center gap-1 whitespace-nowrap",
-                span { class: rate_class(rate), "{rate:.0}%" }
-                span { class: "opacity-60", "of {finished}" }
-            }
-            div { class: "text-xs opacity-60 whitespace-nowrap",
-                if worker.failed_builds > 0 {
-                    "{worker.failed_builds} failed · "
-                }
-                "{share:.0}% of fleet"
-            }
         }
     }
 }

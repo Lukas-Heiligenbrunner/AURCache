@@ -315,6 +315,35 @@ pub fn parse_dep_constraint(constraint: &str) -> Option<Constraint> {
         .map(Constraint)
 }
 
+/// The alpm architectures a package's configured platforms correspond to.
+///
+/// `packages.platforms` holds this project's `Platform`s; `.SRCINFO` is keyed by
+/// alpm's `SystemArchitecture`. Dependency extraction needs the second, so the
+/// two have to be bridged somewhere.
+#[must_use]
+pub fn architectures(platforms: &Platforms) -> Vec<alpm_types::SystemArchitecture> {
+    platforms
+        .as_slice()
+        .iter()
+        .copied()
+        .map(architecture)
+        .collect()
+}
+
+/// The alpm architecture a platform builds for.
+#[must_use]
+pub const fn architecture(
+    platform: pacman_mirrors::platforms::Platform,
+) -> alpm_types::SystemArchitecture {
+    use alpm_types::SystemArchitecture;
+    use pacman_mirrors::platforms::Platform;
+    match platform {
+        Platform::X86_64 => SystemArchitecture::X86_64,
+        Platform::Aarch64 => SystemArchitecture::Aarch64,
+        Platform::Armv7h => SystemArchitecture::Armv7h,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,35 +446,6 @@ mod tests {
     fn test_merge_bound_pin() {
         assert_eq!(merged(&[">=1.0", "=1.5"]).unwrap(), "=1.5");
         assert!(merged(&["=1.5", "<1.0"]).is_err());
-    }
-}
-
-/// The alpm architectures a package's configured platforms correspond to.
-///
-/// `packages.platforms` holds this project's `Platform`s; `.SRCINFO` is keyed by
-/// alpm's `SystemArchitecture`. Dependency extraction needs the second, so the
-/// two have to be bridged somewhere.
-#[must_use]
-pub fn architectures(platforms: &Platforms) -> Vec<alpm_types::SystemArchitecture> {
-    platforms
-        .as_slice()
-        .iter()
-        .copied()
-        .map(architecture)
-        .collect()
-}
-
-/// The alpm architecture a platform builds for.
-#[must_use]
-pub const fn architecture(
-    platform: pacman_mirrors::platforms::Platform,
-) -> alpm_types::SystemArchitecture {
-    use alpm_types::SystemArchitecture;
-    use pacman_mirrors::platforms::Platform;
-    match platform {
-        Platform::X86_64 => SystemArchitecture::X86_64,
-        Platform::Aarch64 => SystemArchitecture::Aarch64,
-        Platform::Armv7h => SystemArchitecture::Armv7h,
     }
 }
 
