@@ -20,13 +20,6 @@ jobs:
       pr: ${{ steps.destination.outputs.pr }}
       image: ${{ steps.destination.outputs.image }}
       tag: ${{ steps.destination.outputs.tag }}
-    strategy:
-      matrix:
-        include:
-          - artifact: image-amd64
-            suffix: ""
-          - artifact: image-arm64
-            suffix: "-aarch64"
     steps:
       # This workflow runs from the default branch. Never check out PR code,
       # restore its caches, rebuild, or execute the downloaded image here.
@@ -74,17 +67,18 @@ jobs:
         with:
           github-token: ${{ github.token }}
           run-id: ${{ github.event.workflow_run.id }}
-          name: ${{ matrix.artifact }}
+          name: server-image
           path: ${{ runner.temp }}/image
       - name: Install image copy tool
         run: sudo apt-get update && sudo apt-get install -y skopeo
       # Read the OCI layout directly; do not unpack a PR-controlled tar archive.
+      # `--all` keeps every architecture under the one tag.
       - name: Copy image to preview registry
         env:
           REGISTRY_TOKEN: ${{ github.token }}
           REGISTRY_USER: ${{ github.actor }}
           IMAGE: ${{ steps.destination.outputs.image }}
-          TAG: ${{ steps.destination.outputs.tag }}${{ matrix.suffix }}
+          TAG: ${{ steps.destination.outputs.tag }}
         run: |
           printf '%s' "$REGISTRY_TOKEN" | skopeo login \
             --authfile "$RUNNER_TEMP/registry-auth.json" \
@@ -95,8 +89,8 @@ jobs:
           echo "Preview image: \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
 
   comment:
-    # Report only after both architecture pushes succeed. This runner handles
-    # no PR artifacts and is the only job with permission to comment.
+    # Report only after the push succeeds. This runner handles no PR
+    # artifacts and is the only job with permission to comment.
     needs: publish
     runs-on: ubuntu-latest
     permissions:
@@ -126,17 +120,16 @@ jobs:
               '/actions/runs/' + context.runId;
             const body = [
               marker,
-              'Preview images for commit ' + sha + ' are ready:',
+              'The preview image for commit ' + sha + ' is ready:',
               '',
-              '| Architecture | Image |',
-              '| --- | --- |',
-              '| amd64 | `' + image + '` |',
-              '| arm64 | `' + image + '-aarch64` |',
+              '```',
+              'docker pull ' + image,
+              '```',
               '',
-              'Pull with `docker pull ' + image + '` (amd64), or',
-              '`docker pull ' + image + '-aarch64` (arm64).',
+              'It holds amd64, arm64 and armv7; `docker pull` picks the',
+              'host\'s architecture.',
               '',
-              'These images contain untrusted PR code.',
+              'This image contains untrusted PR code.',
               '[Publishing run](' + runUrl + ')'
             ].join('\n');
             const comments = await github.paginate(github.rest.issues.listComments, {
