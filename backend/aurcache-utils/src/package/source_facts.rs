@@ -3,7 +3,7 @@
 
 use crate::snapshot::SnapshotStore;
 use alpm_srcinfo::SourceInfoV1;
-use anyhow::anyhow;
+use anyhow::Context;
 use aurcache_db::lists::{JsonList, Platforms};
 use aurcache_db::packages;
 use aurcache_db::packages::SourceData;
@@ -28,7 +28,7 @@ pub(crate) async fn pkg_deps(
     let sourceinfo = store
         .sourceinfo(source, patch)
         .await
-        .map_err(|e| anyhow!("Failed to resolve source info: {e:#}"))?;
+        .context("Failed to resolve source info")?;
     let deps =
         aurcache_deps::deps_from_srcinfo(&sourceinfo, &crate::constraint::architectures(platforms));
     Ok(SourceFacts { sourceinfo, deps })

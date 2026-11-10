@@ -47,8 +47,36 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<aurcache_utils::package::error::PackageError> for ApiError {
+    /// A source that cannot be used is the caller's to fix; anything else is
+    /// the server's.
+    fn from(e: aurcache_utils::package::error::PackageError) -> Self {
+        use aurcache_utils::package::error::PackageError;
+        let status = match e {
+            PackageError::Source(_) => Status::BadRequest,
+            PackageError::Internal(_) => Status::InternalServerError,
+        };
+        err(status, e)
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         err(Status::InternalServerError, e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiError;
+    use aurcache_utils::package::error::PackageError;
+    use rocket::http::Status;
+
+    #[test]
+    fn a_package_error_answers_by_whose_it_is() {
+        let source = ApiError::from(PackageError::Source(anyhow::anyhow!("no such package")));
+        assert_eq!(source.status, Status::BadRequest);
+        let internal = ApiError::from(PackageError::Internal(anyhow::anyhow!("database gone")));
+        assert_eq!(internal.status, Status::InternalServerError);
     }
 }

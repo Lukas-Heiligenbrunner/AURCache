@@ -1,9 +1,10 @@
 use crate::package::add::insert_dependency;
 use crate::package::edges::{Declaration, resolve_edges};
+use crate::package::error::PackageError;
 use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
 use crate::services::Services;
 use crate::vcs_check::{SourcesMoved, resolve_vcs_commits, vcs_sources_moved};
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use async_recursion::async_recursion;
 use aurcache_activitylog::events::{Event, QueueCause, RefreshTarget};
 use aurcache_common::build_state::BuildState;
@@ -150,7 +151,7 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
             Rebuild::Never
         };
         match package_update(services, pkg, rebuild, BuildTrigger::AutoUpdate).await {
-            Ok(results) => {
+            Ok(Update::Queued(results)) => {
                 // No actor: the auto-updater is the server acting on its own,
                 // which is what an entry without a user already says.
                 activity_log.emit(queued(&package_name, QueueCause::Update, &results));
@@ -161,13 +162,57 @@ pub async fn package_update_all_outdated(services: &Services) -> anyhow::Result<
                         .map(|r| r.build_id),
                 );
             }
+            // Flagged, yet already built: the same skip as before, though
+            // nothing failed.
+            Ok(Update::UpToDate(up_to_date)) => activity_log.emit(Event::UpdateSkipped {
+                pkg: package_name.into(),
+                error: up_to_date.to_string(),
+            }),
             Err(e) => activity_log.emit(Event::UpdateSkipped {
                 pkg: package_name.into(),
-                error: format!("{e:#}"),
+                error: e.to_string(),
             }),
         }
     }
     Ok(ids_total)
+}
+
+/// What [`package_update`] did.
+#[derive(Debug)]
+pub enum Update {
+    /// Builds queued, promoted or left waiting on dependencies: one per
+    /// platform that needed one. Empty for a package this update already
+    /// visited through another path.
+    Queued(Vec<PlatformUpdateResult>),
+    /// Nothing to build: every configured platform has the current version.
+    UpToDate(UpToDate),
+}
+
+impl Update {
+    /// The builds it queued; none when it was already up to date.
+    #[must_use]
+    pub fn builds(self) -> Vec<PlatformUpdateResult> {
+        match self {
+            Self::Queued(results) => results,
+            Self::UpToDate(_) => Vec::new(),
+        }
+    }
+}
+
+/// The version every configured platform already has built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpToDate {
+    pub version: String,
+}
+
+impl std::fmt::Display for UpToDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Latest build is already up to date on every configured platform (version {})",
+            self.version
+        )
+    }
 }
 
 /// Whether an update builds a version that is already built.
@@ -183,20 +228,20 @@ pub enum Rebuild {
 /// Queue a build of `pkg_model`'s current upstream version on every platform
 /// it is configured for, with any dependency rebuilds that needs.
 ///
-/// Refused when the version is already built, unless `rebuild` says
+/// Nothing is queued when the version is already built, unless `rebuild` says
 /// otherwise. `trigger` is recorded on each build row -- and on the rows of
 /// any dependency rebuilt along the way, which is part of the same request.
 ///
-/// Returns one entry per configured platform: the build that was queued or
-/// promoted, or left waiting on dependencies.
+/// Queued builds come one per configured platform: the build that was queued
+/// or promoted, or left waiting on dependencies.
 pub async fn package_update(
     services: &Services,
     pkg_model: packages::Model,
     rebuild: Rebuild,
     trigger: BuildTrigger,
-) -> anyhow::Result<Vec<PlatformUpdateResult>> {
+) -> Result<Update, PackageError> {
     let mut visited = HashSet::new();
-    package_update_inner(services, pkg_model, rebuild, trigger, &mut visited).await
+    Ok(package_update_inner(services, pkg_model, rebuild, trigger, &mut visited).await?)
 }
 
 /// Recompute and persist a package's dependency graph from its current
@@ -249,9 +294,9 @@ async fn package_update_inner(
     rebuild: Rebuild,
     trigger: BuildTrigger,
     visited: &mut HashSet<i32>,
-) -> anyhow::Result<Vec<PlatformUpdateResult>> {
+) -> anyhow::Result<Update> {
     if !visited.insert(pkg_model.id) {
-        return Ok(vec![]);
+        return Ok(Update::Queued(Vec::new()));
     }
 
     // The cached source snapshot is only refreshed by the periodic version
@@ -267,7 +312,7 @@ async fn package_update_inner(
             target: RefreshTarget::Snapshot,
             error: format!("{e:#}"),
         });
-        bail!("Could not refresh sources, not building from a stale snapshot: {e:#}");
+        return Err(e.context("Could not refresh sources, not building from a stale snapshot"));
     }
 
     let SourceFacts { sourceinfo, deps } = pkg_deps(
@@ -281,7 +326,7 @@ async fn package_update_inner(
         .store
         .pkgbuild(&pkg_model.source_data, pkg_model.patch.as_deref())
         .await
-        .map_err(|e| anyhow!("Failed to read the PKGBUILD: {e:#}"))?;
+        .context("Failed to read the PKGBUILD")?;
     let upstream_version = sourceinfo.base.version.to_string();
 
     let former = direct_dependees(&services.db, pkg_model.id).await?;
@@ -316,9 +361,9 @@ async fn package_update_inner(
             }
         }
         if needed.is_empty() {
-            bail!(
-                "Latest build is already up to date on every configured platform (version {upstream_version})"
-            );
+            return Ok(Update::UpToDate(UpToDate {
+                version: upstream_version,
+            }));
         }
         requested.platforms = aurcache_db::lists::Platforms::new(needed);
     }
@@ -375,7 +420,7 @@ async fn package_update_inner(
     .update(&services.db)
     .await?;
 
-    Ok(platform_results)
+    Ok(Update::Queued(platform_results))
 }
 
 /// A single dependency of the package being updated, with its merged bounds
@@ -717,7 +762,8 @@ async fn prepare_dependencies_for_platform(
                 trigger,
                 visited,
             )
-            .await?;
+            .await?
+            .builds();
             if !results.is_empty() {
                 services.activity.emit(
                     queued(&dep_info.package.name, QueueCause::Dependency, &results)
@@ -1331,7 +1377,8 @@ mod tests {
             BuildTrigger::User,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .builds();
 
         assert!(
             results
@@ -1676,7 +1723,8 @@ mod tests {
             BuildTrigger::User,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .builds();
 
         assert!(
             results
@@ -1901,7 +1949,8 @@ mod tests {
             BuildTrigger::User,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .builds();
 
         assert!(
             results
@@ -2099,7 +2148,8 @@ mod tests {
             BuildTrigger::User,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .builds();
 
         assert_eq!(
             build_ids.len(),
@@ -2357,7 +2407,8 @@ mod tests {
             BuildTrigger::User,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .builds();
 
         assert_eq!(
             build_ids.len(),
@@ -2706,6 +2757,43 @@ mod tests {
         );
     }
 
+    /// A version every platform has built is an outcome, not a failure: the
+    /// API answers it differently from a broken source.
+    #[tokio::test]
+    async fn an_unchanged_version_is_up_to_date() {
+        let server = MockServer::start().await;
+        let TestClient { client, _repos } =
+            client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        let aur_root = tempdir().unwrap();
+        create_aur_git_repo(aur_root.path(), "uptodate", "1.0.0", &[]);
+        let pkg = built_package(&db, "uptodate", true).await;
+        builds::Entity::update_many()
+            .col_expr(
+                builds::Column::Version,
+                sea_orm::sea_query::Expr::value("1.0.0-1"),
+            )
+            .exec(&db)
+            .await
+            .unwrap();
+        let TestStore { store, _checkouts } = test_store(aur_root.path());
+        let services = Services {
+            db: db.clone(),
+            store: Arc::new(store),
+            client: Arc::new(client),
+            repo: test_repo(),
+            activity: ActivityLog::discarding(),
+        };
+        let update = package_update(&services, pkg, Rebuild::Never, BuildTrigger::User)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&update, super::Update::UpToDate(up) if up.version == "1.0.0-1"),
+            "{update:?}"
+        );
+    }
+
     #[tokio::test]
     async fn unchanged_version_queues_only_platforms_without_a_success() {
         let server = MockServer::start().await;
@@ -2737,7 +2825,8 @@ mod tests {
         };
         let results = package_update(&services, pkg, Rebuild::Never, BuildTrigger::User)
             .await
-            .unwrap();
+            .unwrap()
+            .builds();
         assert_eq!(results.len(), 1);
         let queued = builds::Entity::find_by_id(results[0].build_id)
             .one(&db)

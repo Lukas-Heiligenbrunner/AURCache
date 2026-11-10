@@ -477,10 +477,9 @@ pub async fn retry_build(
     // log against the build they retried, so a build nobody remembers queueing
     // can be traced to whoever did.
     let platform_results = package_update(services, package, Rebuild::Always, BuildTrigger::User)
-        .await
-        // As for an update: an unresolvable source or a patch that no longer
-        // applies is the caller's to fix.
-        .map_err(|e| err(Status::BadRequest, e))?;
+        .await?
+        // A retry always builds, so it is never up to date.
+        .builds();
     // "Retry" on a build that worked asks for it again: a rebuild.
     services.activity.emit_by(
         queued(
