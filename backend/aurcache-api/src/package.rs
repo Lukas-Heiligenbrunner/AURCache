@@ -77,22 +77,22 @@ pub(crate) async fn package_by_id(
 
 #[derive(OpenApi)]
 #[openapi(paths(
-    package_add_endpoint,
-    packages_add_endpoint,
+    add_package,
+    add_packages,
     active_operations,
     bulk_add_progress,
-    package_update_entity_endpoint,
-    package_update_endpoint,
-    package_del,
-    package_dependency_options,
-    package_dependency_replace,
-    package_list,
+    patch_package,
+    update_package,
+    delete_package,
+    dependency_options,
+    replace_dependency,
+    list_packages,
     get_package,
-    package_source_files,
-    package_source_file,
-    package_source_file_update,
-    package_source_preview_files,
-    package_source_preview_file
+    list_source_files,
+    get_source_file,
+    put_source_file,
+    preview_source_files,
+    preview_source_file
 ))]
 pub struct PackageApi;
 
@@ -166,7 +166,7 @@ impl Recorder<BulkAddEntry> for BulkAddRecorder {
 /// and its progress -- including anything that failed while nobody was
 /// watching -- is read back from [`bulk_add_progress`].
 #[post("/packages", data = "<input>")]
-pub async fn packages_add_endpoint(
+pub async fn add_packages(
     services: &State<Services>,
     input: Json<AddPackages>,
     a: Authenticated,
@@ -267,7 +267,7 @@ pub async fn bulk_add_progress(
     )
 )]
 #[post("/package", data = "<input>")]
-pub async fn package_add_endpoint(
+pub async fn add_package(
     services: &State<Services>,
     input: Json<AddPackage>,
     a: Authenticated,
@@ -308,7 +308,7 @@ pub async fn package_add_endpoint(
     )
 )]
 #[patch("/package/<pkgbase>", data = "<input>")]
-pub async fn package_update_entity_endpoint(
+pub async fn patch_package(
     services: &State<Services>,
     input: Json<PackagePatch>,
     pkgbase: &str,
@@ -378,7 +378,7 @@ pub async fn package_update_entity_endpoint(
     )
 )]
 #[get("/package/<pkgbase>/source/files")]
-pub async fn package_source_files(
+pub async fn list_source_files(
     db: &State<DatabaseConnection>,
     store: &State<Arc<SnapshotStore>>,
     pkgbase: &str,
@@ -411,7 +411,7 @@ pub async fn package_source_files(
     )
 )]
 #[get("/package/<pkgbase>/source/file?<path>")]
-pub async fn package_source_file(
+pub async fn get_source_file(
     db: &State<DatabaseConnection>,
     store: &State<Arc<SnapshotStore>>,
     pkgbase: &str,
@@ -438,7 +438,7 @@ pub async fn package_source_file(
     )
 )]
 #[put("/package/<pkgbase>/source/file", data = "<input>")]
-pub async fn package_source_file_update(
+pub async fn put_source_file(
     services: &State<Services>,
     pkgbase: &str,
     input: Json<SourceFileUpdate>,
@@ -487,7 +487,7 @@ pub async fn package_source_file_update(
     )
 )]
 #[post("/package/source/preview/files", data = "<input>")]
-pub async fn package_source_preview_files(
+pub async fn preview_source_files(
     store: &State<Arc<SnapshotStore>>,
     input: Json<SourcePreviewRequest>,
     _a: Authenticated,
@@ -506,7 +506,7 @@ pub async fn package_source_preview_files(
     )
 )]
 #[post("/package/source/preview/file", data = "<input>")]
-pub async fn package_source_preview_file(
+pub async fn preview_source_file(
     store: &State<Arc<SnapshotStore>>,
     input: Json<SourcePreviewFileRequest>,
     _a: Authenticated,
@@ -535,7 +535,7 @@ pub async fn package_source_preview_file(
     )
 )]
 #[post("/package/<pkgbase>/update", data = "<input>")]
-pub async fn package_update_endpoint(
+pub async fn update_package(
     services: &State<Services>,
     pkgbase: &str,
     input: Json<UpdatePackage>,
@@ -585,7 +585,7 @@ pub async fn package_update_endpoint(
     )
 )]
 #[delete("/package/<pkgbase>")]
-pub async fn package_del(
+pub async fn delete_package(
     services: &State<Services>,
     pkgbase: &str,
     a: Authenticated,
@@ -619,7 +619,7 @@ pub async fn package_del(
     )
 )]
 #[get("/packages/list?<limit>&<page>&<dependencies>")]
-pub async fn package_list(
+pub async fn list_packages(
     db: &State<DatabaseConnection>,
     limit: Option<u64>,
     page: Option<u64>,
@@ -629,7 +629,7 @@ pub async fn package_list(
     let db = db.inner();
 
     Ok(Json(
-        list_packages(db, limit, page, dependencies.unwrap_or(false)).await?,
+        packages_page(db, limit, page, dependencies.unwrap_or(false)).await?,
     ))
 }
 
@@ -639,7 +639,7 @@ pub async fn package_list(
 /// every existing caller means by "the packages": a repository's dependency
 /// closure is usually the larger part of it, and reading the list as the set of
 /// things being maintained is the common case.
-async fn list_packages(
+async fn packages_page(
     db: &DatabaseConnection,
     limit: Option<u64>,
     page: Option<u64>,
@@ -890,7 +890,7 @@ fn replace_error(e: ReplaceError) -> ApiError {
     )
 )]
 #[get("/package/<pkgbase>/dependency/<dependency>/options")]
-pub async fn package_dependency_options(
+pub async fn dependency_options(
     services: &State<Services>,
     pkgbase: &str,
     dependency: &str,
@@ -912,7 +912,7 @@ pub async fn package_dependency_options(
     )
 )]
 #[put("/package/<pkgbase>/dependency/<dependency>", data = "<input>")]
-pub async fn package_dependency_replace(
+pub async fn replace_dependency(
     services: &State<Services>,
     pkgbase: &str,
     dependency: &str,
@@ -932,7 +932,7 @@ pub async fn package_dependency_replace(
 
 #[cfg(test)]
 mod tests {
-    use super::{RelationDirection, list_package_relations, list_packages};
+    use super::{RelationDirection, list_package_relations, packages_page};
     use aurcache_common::build_state::BuildState;
     use aurcache_db::migration::Migrator;
     use aurcache_db::packages::SourceData;
@@ -981,7 +981,7 @@ mod tests {
         .await
         .unwrap();
 
-        let packages = list_packages(&db, None, None, false).await.unwrap();
+        let packages = packages_page(&db, None, None, false).await.unwrap();
 
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "visible-package");
@@ -989,7 +989,7 @@ mod tests {
 
         // Opting in returns both, and each says which kind it is -- the list
         // is only worth widening if the two can still be told apart.
-        let mut packages = list_packages(&db, None, None, true).await.unwrap();
+        let mut packages = packages_page(&db, None, None, true).await.unwrap();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
 
         assert_eq!(packages.len(), 2);
@@ -1217,7 +1217,7 @@ mod file_tests {
     /// `CASE` expression rather than in Rust.
     #[tokio::test]
     async fn the_list_totals_artifact_sizes_all_or_nothing() {
-        use super::list_packages;
+        use super::packages_page;
         use aurcache_db::packages;
         use aurcache_db::packages::SourceData;
 
@@ -1249,7 +1249,7 @@ mod file_tests {
         file(&db, "partial-a.pkg.tar.zst", ids["partial"], Some(1000)).await;
         file(&db, "partial-b.pkg.tar.zst", ids["partial"], None).await;
 
-        let listed = list_packages(&db, None, None, true).await.unwrap();
+        let listed = packages_page(&db, None, None, true).await.unwrap();
         let total = |name: &str| {
             listed
                 .iter()

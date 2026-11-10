@@ -1,42 +1,41 @@
 use crate::aur::search;
-use crate::auth::{regenerate_api_token_endpoint, user_info};
+use crate::auth::{regenerate_token, user_info};
 use crate::build::{
     build_output, cancel_build, delete_build, download_build_output, get_build, list_builds,
     list_package_builds, retry_build,
 };
-use crate::health::{health, server_version};
+use crate::health::{health, server_info};
 use crate::log::log;
 use crate::package::{
-    active_operations, bulk_add_progress, get_package, package_add_endpoint, package_del,
-    package_dependency_options, package_dependency_replace, package_list, package_source_file,
-    package_source_file_update, package_source_files, package_source_preview_file,
-    package_source_preview_files, package_update_endpoint, package_update_entity_endpoint,
-    packages_add_endpoint,
+    active_operations, add_package, add_packages, bulk_add_progress, delete_package,
+    dependency_options, get_package, get_source_file, list_packages, list_source_files,
+    patch_package, preview_source_file, preview_source_files, put_source_file, replace_dependency,
+    update_package,
 };
 use crate::settings::{
-    package_setting_get, package_setting_patch, package_setting_reset, package_settings,
-    setting_get, setting_patch, setting_reset, setting_schedule_preview, settings,
+    get_package_setting, get_package_settings, get_setting, get_settings, patch_package_setting,
+    patch_setting, preview_schedule, reset_package_setting, reset_setting,
 };
-use crate::stats::{dashboard, dashboard_graph_data, stats};
+use crate::stats::{dashboard, graph, stats};
 use rocket::{Route, routes};
 
 #[must_use]
 pub fn build_api() -> Vec<Route> {
     routes![
         search,
-        regenerate_api_token_endpoint,
-        package_list,
+        regenerate_token,
+        list_packages,
         crate::dump::dump,
         crate::dump::restore,
         crate::dump::restore_progress,
-        package_add_endpoint,
-        packages_add_endpoint,
+        add_package,
+        add_packages,
         active_operations,
         bulk_add_progress,
-        package_del,
-        package_dependency_options,
-        package_dependency_replace,
-        package_update_entity_endpoint,
+        delete_package,
+        dependency_options,
+        replace_dependency,
+        patch_package,
         build_output,
         download_build_output,
         delete_build,
@@ -44,30 +43,30 @@ pub fn build_api() -> Vec<Route> {
         list_package_builds,
         stats,
         dashboard,
-        dashboard_graph_data,
+        graph,
         user_info,
         get_build,
         get_package,
         retry_build,
-        package_update_endpoint,
-        package_source_files,
-        package_source_file,
-        package_source_file_update,
-        package_source_preview_files,
-        package_source_preview_file,
+        update_package,
+        list_source_files,
+        get_source_file,
+        put_source_file,
+        preview_source_files,
+        preview_source_file,
         cancel_build,
         health,
-        server_version,
+        server_info,
         crate::repo::repo_info,
         log,
-        settings,
-        package_settings,
-        package_setting_get,
-        package_setting_patch,
-        package_setting_reset,
-        setting_get,
-        setting_patch,
-        setting_reset,
-        setting_schedule_preview
+        get_settings,
+        get_package_settings,
+        get_package_setting,
+        patch_package_setting,
+        reset_package_setting,
+        get_setting,
+        patch_setting,
+        reset_setting,
+        preview_schedule
     ]
 }

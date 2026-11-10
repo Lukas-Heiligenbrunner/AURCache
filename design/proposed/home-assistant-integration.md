@@ -132,7 +132,7 @@ integration; both use HA built-ins.
 
 ### Option A — HA calls the existing REST API (`rest_command`)
 
-`POST /api/package` (`package_add_endpoint`) and Bearer-token auth already exist
+`POST /api/package` (`add_package`) and Bearer-token auth already exist
 and are what the CLI/client use. HA's built-in `rest_command`:
 
 ```yaml

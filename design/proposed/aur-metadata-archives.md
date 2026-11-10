@@ -164,7 +164,7 @@ hundredth rebuild.
 ### The bulk case: standing up a server
 
 Per-package rates hide the setup cost. The API adds **one package per POST**
-(`package_add_endpoint`), the CLI loops over the names it is given, and the
+(`add_package`), the CLI loops over the names it is given, and the
 dialog adds its queue one at a time — so seeding an instance with 300 packages
 is 300 adds, each paying:
 

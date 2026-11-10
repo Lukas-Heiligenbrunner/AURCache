@@ -21,7 +21,7 @@ use crate::utils::config::{OAuthSettings, is_user_allowed};
 use crate::utils::error::{ApiError, err};
 
 #[derive(OpenApi)]
-#[openapi(paths(oauth_login, oauth_callback, regenerate_api_token_endpoint, user_info))]
+#[openapi(paths(oauth_login, oauth_callback, regenerate_token, user_info))]
 pub struct AuthApi;
 
 /// Request guard: the caller is signed in, or this instance has no sign-in.
@@ -272,7 +272,7 @@ pub async fn oauth_callback(
     )
 )]
 #[post("/token/regenerate")]
-pub async fn regenerate_api_token_endpoint(
+pub async fn regenerate_token(
     services: &State<Services>,
     a: Authenticated,
 ) -> Result<Json<ApiTokenResponse>, ApiError> {
