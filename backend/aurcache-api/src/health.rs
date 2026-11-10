@@ -8,10 +8,7 @@ use utoipa::OpenApi;
 use crate::init::ServerVersion;
 
 #[derive(OpenApi)]
-#[openapi(
-    paths(health, server_version),
-    components(schemas(ServerInfo, Timezone))
-)]
+#[openapi(paths(health, server_info), components(schemas(ServerInfo, Timezone)))]
 pub struct HealthApi;
 
 #[utoipa::path(
@@ -47,7 +44,7 @@ pub async fn health(db: &State<DatabaseConnection>) -> Result<(), Status> {
     )
 )]
 #[get("/version")]
-pub fn server_version(version: &State<ServerVersion>) -> Json<ServerInfo> {
+pub fn server_info(version: &State<ServerVersion>) -> Json<ServerInfo> {
     Json(ServerInfo {
         version: version.0.clone(),
         timezone: Some(local_timezone()),

@@ -15,15 +15,15 @@ use utoipa::OpenApi;
 
 #[derive(OpenApi)]
 #[openapi(paths(
-    settings,
-    package_settings,
-    setting_get,
-    package_setting_get,
-    setting_patch,
-    package_setting_patch,
-    setting_reset,
-    package_setting_reset,
-    setting_schedule_preview
+    get_settings,
+    get_package_settings,
+    get_setting,
+    get_package_setting,
+    patch_setting,
+    patch_package_setting,
+    reset_setting,
+    reset_package_setting,
+    preview_schedule
 ))]
 pub struct SettingsApi;
 
@@ -109,7 +109,7 @@ async fn write(
 /// Fetch every setting with its effective value and source.
 #[utoipa::path(responses((status = 200, description = "Get all settings", body = ApplicationSettings)))]
 #[get("/settings")]
-pub async fn settings(
+pub async fn get_settings(
     db: &State<DatabaseConnection>,
     _a: Authenticated,
 ) -> Result<Json<ApplicationSettings>, ApiError> {
@@ -122,7 +122,7 @@ pub async fn settings(
 )]
 /// Fetch every setting for one package, with effective values and sources.
 #[get("/package/<pkgbase>/settings")]
-pub async fn package_settings(
+pub async fn get_package_settings(
     db: &State<DatabaseConnection>,
     pkgbase: &str,
     _a: Authenticated,
@@ -144,7 +144,7 @@ pub async fn package_settings(
     params(("key" = String, Path, description = "Setting key"))
 )]
 #[get("/settings/<key>")]
-pub async fn setting_get(
+pub async fn get_setting(
     db: &State<DatabaseConnection>,
     key: &str,
     _a: Authenticated,
@@ -164,7 +164,7 @@ pub async fn setting_get(
 )]
 /// Fetch a single setting for one package.
 #[get("/package/<pkgbase>/settings/<key>")]
-pub async fn package_setting_get(
+pub async fn get_package_setting(
     db: &State<DatabaseConnection>,
     pkgbase: &str,
     key: &str,
@@ -188,7 +188,7 @@ pub async fn package_setting_get(
 )]
 /// Update a single setting after validating the value.
 #[patch("/settings/<key>", data = "<input>")]
-pub async fn setting_patch(
+pub async fn patch_setting(
     db: &State<DatabaseConnection>,
     key: &str,
     input: Json<SettingValue>,
@@ -219,7 +219,7 @@ pub async fn setting_patch(
 )]
 /// Update a single setting for one package after validating the value.
 #[patch("/package/<pkgbase>/settings/<key>", data = "<input>")]
-pub async fn package_setting_patch(
+pub async fn patch_package_setting(
     db: &State<DatabaseConnection>,
     pkgbase: &str,
     key: &str,
@@ -252,7 +252,7 @@ pub async fn package_setting_patch(
     params(("key" = String, Path, description = "Setting key"))
 )]
 #[delete("/settings/<key>")]
-pub async fn setting_reset(
+pub async fn reset_setting(
     db: &State<DatabaseConnection>,
     key: &str,
     a: Authenticated,
@@ -281,7 +281,7 @@ pub async fn setting_reset(
 )]
 /// Reset one package's setting back to its default.
 #[delete("/package/<pkgbase>/settings/<key>")]
-pub async fn package_setting_reset(
+pub async fn reset_package_setting(
     db: &State<DatabaseConnection>,
     pkgbase: &str,
     key: &str,
@@ -316,7 +316,7 @@ pub async fn package_setting_reset(
 /// runs, or why there are none. Nothing is stored -- this is for showing what
 /// a value means while it is being written.
 #[post("/settings/<key>/schedule", data = "<input>")]
-pub async fn setting_schedule_preview(
+pub async fn preview_schedule(
     key: &str,
     input: Json<SettingValue>,
     _a: Authenticated,

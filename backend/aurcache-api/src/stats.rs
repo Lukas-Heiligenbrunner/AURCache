@@ -7,7 +7,7 @@ use sea_orm::DatabaseConnection;
 use utoipa::OpenApi;
 
 #[derive(OpenApi)]
-#[openapi(paths(stats, dashboard, dashboard_graph_data))]
+#[openapi(paths(stats, dashboard, graph))]
 pub struct StatsApi;
 
 #[utoipa::path(
@@ -29,7 +29,7 @@ pub async fn stats(
     )
 )]
 #[get("/graph")]
-pub async fn dashboard_graph_data(
+pub async fn graph(
     db: &State<DatabaseConnection>,
     _a: Authenticated,
 ) -> Result<Json<Vec<GraphDataPoint>>, ApiError> {
