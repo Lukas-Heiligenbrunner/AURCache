@@ -3,12 +3,10 @@
 use std::sync::Arc;
 
 use aurcache_activitylog::activity_utils::ActivityLog;
-use aurcache_db::migration::Migrator;
 use aurcache_utils::snapshot::SnapshotStore;
 use rocket::local::asynchronous::Client;
 use rocket::{Build, Rocket};
-use sea_orm::{Database, DatabaseConnection};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::DatabaseConnection;
 
 /// A client for the API, and the database behind it.
 pub struct TestApi {
@@ -31,8 +29,7 @@ pub async fn test_api(
     version: &str,
     mount: impl FnOnce(Rocket<Build>) -> Rocket<Build>,
 ) -> TestApi {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
+    let db = aurcache_db::testing::memory_db().await;
 
     let checkouts = tempfile::tempdir().expect("tempdir");
     let rocket = rocket::build()

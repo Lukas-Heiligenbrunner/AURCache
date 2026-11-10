@@ -936,16 +936,13 @@ pub async fn replace_dependency(
 mod tests {
     use super::{RelationDirection, list_package_relations, packages_page};
     use aurcache_common::build_state::BuildState;
-    use aurcache_db::migration::Migrator;
     use aurcache_db::packages::SourceData;
     use aurcache_db::{dependencies, packages};
-    use sea_orm::{ActiveModelTrait, Database, Set, TryIntoModel};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, Set, TryIntoModel};
 
     #[tokio::test]
     async fn package_list_hides_dependencies_unless_asked() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         packages::ActiveModel {
             name: Set("visible-package".to_string()),
@@ -1003,8 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn package_dependencies_include_link_targets() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let parent = packages::ActiveModel {
             name: Set("parent".to_string()),
@@ -1067,8 +1063,7 @@ mod tests {
 
     #[tokio::test]
     async fn package_dependents_include_reverse_link_targets() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let dependency = packages::ActiveModel {
             name: Set("dependency".to_string()),
@@ -1135,10 +1130,8 @@ mod file_tests {
     use super::package_files;
     use aurcache_common::build_state::BuildState;
     use aurcache_db::files;
-    use aurcache_db::migration::Migrator;
     use pacman_mirrors::platforms::Platform;
-    use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, DatabaseConnection, Set};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseConnection, Set};
 
     /// A migrated database with the packages these tests hang files off.
     ///
@@ -1146,8 +1139,7 @@ mod file_tests {
     /// SQLite enforces that here because sqlx opens connections with
     /// `foreign_keys` on.
     async fn db_with_packages(ids: &[i32]) -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         for id in ids {
             db.execute_unprepared(&format!(
                 "INSERT INTO packages \
@@ -1223,8 +1215,7 @@ mod file_tests {
         use aurcache_db::packages;
         use aurcache_db::packages::SourceData;
 
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let mut ids = std::collections::HashMap::new();
         for name in ["complete", "partial", "unbuilt"] {

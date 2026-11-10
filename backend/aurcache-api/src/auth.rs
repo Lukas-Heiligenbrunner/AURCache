@@ -373,14 +373,9 @@ mod tests {
         assert_eq!(info.email.as_deref(), Some("me@example.com"));
     }
 
-    use aurcache_db::migration::Migrator;
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
-
     #[tokio::test]
     async fn regenerated_token_replaces_previous_value() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let first = regenerate_api_token(&db, "alice").await.unwrap();
         let second = regenerate_api_token(&db, "alice").await.unwrap();

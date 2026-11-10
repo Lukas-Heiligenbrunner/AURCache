@@ -124,16 +124,8 @@ fn convert(typ: ActivityType, data: &str, by_server: bool) -> Option<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurcache_db::migration::Migrator;
     use sea_orm::ActiveValue::Set;
-    use sea_orm::{ActiveModelTrait, Database, PaginatorTrait};
-    use sea_orm_migration::MigratorTrait;
-
-    async fn db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
-        db
-    }
+    use sea_orm::{ActiveModelTrait, PaginatorTrait};
 
     async fn old_row(db: &DatabaseConnection, typ: ActivityType, data: &str, user: Option<&str>) {
         activities::ActiveModel {
@@ -152,7 +144,7 @@ mod tests {
     /// when it happened and who did it, and leaves the old table empty.
     #[tokio::test]
     async fn every_written_kind_moves_with_its_time_and_actor() {
-        let db = db().await;
+        let db = aurcache_db::testing::memory_db().await;
         for (typ, data) in [
             (ActivityType::AddPackage, r#"{"package":"hello"}"#),
             (ActivityType::RemovePackage, r#"{"package":"hello"}"#),
@@ -177,7 +169,7 @@ mod tests {
     /// server's own entry; one a person forced was a rebuild, and stays theirs.
     #[tokio::test]
     async fn a_forced_update_is_an_update_or_a_rebuild_by_who_asked() {
-        let db = db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let forced = r#"{"package":"hello","forced":true}"#;
         old_row(&db, ActivityType::UpdatePackage, forced, Some("Server")).await;
         old_row(&db, ActivityType::UpdatePackage, forced, Some("alice")).await;
@@ -199,7 +191,7 @@ mod tests {
     /// at, and does not stop the rest.
     #[tokio::test]
     async fn an_unreadable_row_stays_behind() {
-        let db = db().await;
+        let db = aurcache_db::testing::memory_db().await;
         old_row(&db, ActivityType::AddPackage, "not json", None).await;
         old_row(
             &db,
@@ -215,7 +207,7 @@ mod tests {
     /// Nothing to import is nothing to do, on every start after the first.
     #[tokio::test]
     async fn an_empty_table_imports_nothing() {
-        let db = db().await;
+        let db = aurcache_db::testing::memory_db().await;
         assert_eq!(import_activities(&db).await.unwrap(), 0);
     }
 
@@ -223,7 +215,7 @@ mod tests {
     async fn a_failed_delete_does_not_duplicate_an_imported_event() {
         use sea_orm::ConnectionTrait;
 
-        let db = db().await;
+        let db = aurcache_db::testing::memory_db().await;
         old_row(
             &db,
             ActivityType::AddPackage,

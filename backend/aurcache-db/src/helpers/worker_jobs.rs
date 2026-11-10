@@ -869,9 +869,7 @@ pub async fn reap_expired_builds<C: ConnectionTrait + TransactionTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::Migrator;
-    use sea_orm::{Database, DatabaseConnection, PaginatorTrait};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{DatabaseConnection, PaginatorTrait};
 
     // Spelled out for the SQL fixtures, which interpolate them by name.
     const ACTIVE_BUILD: i32 = BuildState::Active.as_i32();
@@ -882,12 +880,6 @@ mod tests {
     const LEASE: i64 = 60;
     const SPILL: i64 = 60;
     const LIVENESS: i64 = 60;
-
-    async fn setup() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
-        db
-    }
 
     /// Ids of the abandoned builds failed for good, with no replacement.
     fn failed(abandoned: &[Abandoned]) -> Vec<i32> {
@@ -1011,7 +1003,7 @@ mod tests {
     /// against its own timeout while it waited its turn.
     #[tokio::test]
     async fn a_worker_is_not_offered_a_second_build_of_what_it_is_building() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1039,7 +1031,7 @@ mod tests {
     /// building a package's platforms at once is what multi-arch is for.
     #[tokio::test]
     async fn another_worker_may_take_the_other_platform() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1074,7 +1066,7 @@ mod tests {
     /// the sources.
     #[tokio::test]
     async fn publishing_releases_the_package_for_the_next_platform() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1107,7 +1099,7 @@ mod tests {
     /// the package would claim to be waiting for the whole of its build.
     #[tokio::test]
     async fn a_failed_package_refresh_rolls_back_the_claim() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1127,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn claiming_a_build_marks_its_package_as_building() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 10, "x86_64", 100).await;
         db.execute_unprepared(&format!(
@@ -1151,7 +1143,7 @@ mod tests {
     /// wrong answer.
     #[tokio::test]
     async fn claiming_leaves_other_packages_alone() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 10, "x86_64", 100).await;
         enqueue(&db, 11, "x86_64", 200).await;
@@ -1172,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn claims_oldest_matching_arch() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 10, "x86_64", 200).await;
         enqueue(&db, 11, "x86_64", 100).await;
@@ -1188,7 +1180,7 @@ mod tests {
 
     #[tokio::test]
     async fn claim_is_atomic_no_double_handout() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1213,7 +1205,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_or_unapproved_worker_claims_nothing() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1233,7 +1225,7 @@ mod tests {
     /// them compete: the one that asks first gets it.
     #[tokio::test]
     async fn workers_listing_an_arch_compete_for_it() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1275,7 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn affinity_reserves_package_to_declaring_worker() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1301,7 +1293,7 @@ mod tests {
 
     #[tokio::test]
     async fn package_nobody_claims_is_unaffected_by_affinity_lists() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1327,7 +1319,7 @@ mod tests {
     /// Exact matching only: no wildcards, and no accidental prefix reservation.
     #[tokio::test]
     async fn affinity_matches_package_names_exactly() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1357,7 +1349,7 @@ mod tests {
     /// anybody could have taken — it may be the only worker that can.
     #[tokio::test]
     async fn affine_worker_prefers_its_affine_job() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1376,7 +1368,7 @@ mod tests {
     /// elsewhere fails, where waiting merely waits.
     #[tokio::test]
     async fn offline_approved_affine_worker_still_reserves() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1404,7 +1396,7 @@ mod tests {
     /// machine that is never coming back.
     #[tokio::test]
     async fn revoked_affine_worker_does_not_reserve() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1430,7 +1422,7 @@ mod tests {
 
     #[tokio::test]
     async fn affinity_and_arch_reservation_compose() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         // Affine but wrong arch.
         worker(
             &db,
@@ -1475,7 +1467,7 @@ mod tests {
     /// A fresh job, and a live idle faster worker exists: hold back.
     #[tokio::test]
     async fn lower_priority_worker_is_blocked_while_faster_one_is_available() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1503,7 +1495,7 @@ mod tests {
     /// delay — the case a fixed hold-back would have penalised.
     #[tokio::test]
     async fn spills_immediately_when_faster_worker_is_full() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1533,7 +1525,7 @@ mod tests {
 
     #[tokio::test]
     async fn spills_immediately_when_faster_worker_is_stale() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1561,7 +1553,7 @@ mod tests {
     /// not stall a job forever.
     #[tokio::test]
     async fn spills_once_the_job_is_older_than_the_spill_delay() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1586,7 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn equal_priority_workers_do_not_block_each_other() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1611,7 +1603,7 @@ mod tests {
     /// A faster worker that cannot build the job at all must not hold it back.
     #[tokio::test]
     async fn incapable_faster_worker_does_not_block() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1639,7 +1631,7 @@ mod tests {
     /// affinity cannot take the job, and must not block the affine one either.
     #[tokio::test]
     async fn priority_does_not_override_affinity() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1668,7 +1660,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_reason_when_a_live_worker_could_take_the_job() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 100, "x86_64", now_secs()).await;
 
@@ -1679,7 +1671,7 @@ mod tests {
 
     #[tokio::test]
     async fn explains_a_build_reserved_to_an_offline_worker() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1713,7 +1705,7 @@ mod tests {
     /// for that arch stalls silently today.
     #[tokio::test]
     async fn explains_an_arch_no_worker_can_build() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 102, "aarch64", now_secs()).await;
 
@@ -1728,7 +1720,7 @@ mod tests {
 
     #[tokio::test]
     async fn explains_a_fleet_that_is_entirely_offline() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1755,7 +1747,7 @@ mod tests {
     /// A paused worker claims nothing, and takes work again once resumed.
     #[tokio::test]
     async fn a_paused_worker_claims_nothing_until_resumed() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(&db, W::default()).await;
         enqueue(&db, 200, "x86_64", now_secs()).await;
 
@@ -1772,7 +1764,7 @@ mod tests {
     /// will never take the job, so it does not count as available.
     #[tokio::test]
     async fn a_paused_worker_does_not_hold_back_a_lower_priority_one() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1804,7 +1796,7 @@ mod tests {
     /// build someone else can take is just queued.
     #[tokio::test]
     async fn explains_a_build_only_paused_workers_could_take() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1840,7 +1832,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_renews_reported_and_abandons_dropped() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1884,7 +1876,7 @@ mod tests {
     /// dropped: it keeps the lease its claim gave it.
     #[tokio::test]
     async fn a_heartbeat_overtaking_a_claim_leaves_the_build_alone() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1920,7 +1912,7 @@ mod tests {
     /// it in the repository.
     #[tokio::test]
     async fn a_build_being_published_is_out_of_reach_of_lease_policing() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -1960,7 +1952,7 @@ mod tests {
     /// worker's next tick stops it. Owned-ACTIVE reported ids stay out.
     #[tokio::test]
     async fn heartbeat_flags_reported_but_lost_builds() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2003,7 +1995,7 @@ mod tests {
 
     #[tokio::test]
     async fn reaper_fails_expired_leases_and_queues_fresh_builds() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2066,7 +2058,7 @@ mod tests {
     /// per-row write must not be dragged back out of its terminal state.
     #[tokio::test]
     async fn abandoning_skips_build_resolved_after_observation() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2105,7 +2097,7 @@ mod tests {
     /// Same guard, but for a lease renewed by a heartbeat in the gap.
     #[tokio::test]
     async fn abandoning_skips_build_whose_lease_was_renewed() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2133,7 +2125,7 @@ mod tests {
 
     #[tokio::test]
     async fn reaper_leaves_fresh_leases_alone() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2157,7 +2149,7 @@ mod tests {
 
     #[tokio::test]
     async fn reaper_backstop_fires_despite_fresh_lease() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2186,7 +2178,7 @@ mod tests {
     /// the server's; another package's would have been reclaimed.
     #[tokio::test]
     async fn a_package_timeout_holds_back_the_backstop() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2221,7 +2213,7 @@ mod tests {
     /// and the package is left failed.
     #[tokio::test]
     async fn reaper_gives_up_after_budget_spent() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2302,7 +2294,7 @@ mod tests {
     /// downstream runs.
     #[tokio::test]
     async fn abandon_skips_a_build_renewed_in_the_gap() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         worker(
             &db,
             W {
@@ -2387,7 +2379,7 @@ mod tests {
     /// abandonments interleaved in the history spend none of this one's budget.
     #[tokio::test]
     async fn another_platforms_abandonments_do_not_spend_the_budget() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         seed_abandonment(
             &db,
             &[(91, 7, "aarch64"), (92, 8, "aarch64"), (93, 9, "aarch64")],
@@ -2411,7 +2403,7 @@ mod tests {
     /// and it would read as fine only once that one is retried successfully.
     #[tokio::test]
     async fn a_spent_budget_fails_the_package_whatever_its_other_platforms_did() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         seed_abandonment(&db, &[(93, 8, "x86_64"), (94, 9, "x86_64")]).await;
         db.execute_unprepared(&format!(
             "INSERT INTO builds (id, pkg_id, status, start_time, platform, version, number, trigger) \

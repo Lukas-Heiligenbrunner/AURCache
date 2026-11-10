@@ -48,7 +48,7 @@ static = ["dep:rust-embed", "dep:wasm-bindgen-cli-support"]
 wasm-bindgen-cli-support = { version = "=0.2.129", optional = true }
 
 [dev-dependencies]
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 # The version test reads the answer the way the CLI and the browser do.
 aurcache-client = { path = "../aurcache-client" }
-sea-orm-migration = {version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 tempfile = { workspace = true }

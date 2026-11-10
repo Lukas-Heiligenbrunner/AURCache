@@ -17,5 +17,7 @@ pub mod operations;
 pub mod package_vcs_sources;
 pub mod packages;
 pub mod settings;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod worker_settings;
 pub mod workers;

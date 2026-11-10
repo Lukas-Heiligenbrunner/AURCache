@@ -566,15 +566,8 @@ pub async fn touch_last_seen<C: ConnectionTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migration::Migrator;
-    use sea_orm::{Database, DatabaseConnection};
-    use sea_orm_migration::MigratorTrait;
 
-    async fn setup() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
-        db
-    }
+    use sea_orm::DatabaseConnection;
 
     /// A list column's entries, for as long as the test runs.
     fn names(entries: &[&str]) -> &'static [String] {
@@ -602,7 +595,7 @@ mod tests {
     /// server offering it.
     #[tokio::test]
     async fn registration_replaces_the_declaration() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let first = r#"[{"key":"concurrency"}]"#;
         let w = register_worker(
             &db,
@@ -633,7 +626,7 @@ mod tests {
     /// apart from the declaration and survives the next registration.
     #[tokio::test]
     async fn effective_config_is_stored_and_outlives_registration() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(
             &db,
             &WorkerRegistration {
@@ -664,7 +657,7 @@ mod tests {
     /// same worker, and the page must not keep showing the old strategy.
     #[tokio::test]
     async fn registration_records_and_refreshes_the_kind() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         assert_eq!(w.kind.as_deref(), Some("chroot"));
 
@@ -682,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_is_idempotent_by_fingerprint() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let a = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         let b = register_worker(
             &db,
@@ -706,7 +699,7 @@ mod tests {
     /// including the name, which is easy to forget in the conflict clause.
     #[tokio::test]
     async fn reregistration_refreshes_all_reported_config() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("old-name", "fp-1"))
             .await
             .unwrap();
@@ -740,7 +733,7 @@ mod tests {
     /// never launder away a revoke.
     #[tokio::test]
     async fn reregistration_does_not_resurrect_a_revoked_worker() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         approve_worker(&db, w.id).await.unwrap();
         revoke_worker(&db, w.id, 3).await.unwrap();
@@ -753,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn approve_then_revoke_transitions() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         store_signed_cert(&db, w.id, "CERTPEM", 9999).await.unwrap();
         let approved = approve_worker(&db, w.id).await.unwrap().unwrap();
@@ -781,7 +774,7 @@ mod tests {
     /// database-shaped error, so it can map to 404 instead of 500.
     #[tokio::test]
     async fn unknown_worker_status_changes_are_absence_not_error() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         assert!(approve_worker(&db, 999).await.unwrap().is_none());
         assert!(revoke_worker(&db, 999, 3).await.unwrap().is_none());
         assert!(
@@ -799,7 +792,7 @@ mod tests {
     async fn revoke_abandons_builds_the_worker_still_holds() {
         use aurcache_common::build_state::BuildState;
 
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         approve_worker(&db, w.id).await.unwrap();
 
@@ -861,7 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_by_fingerprint() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         assert!(
             find_worker_by_fingerprint(&db, "missing")
                 .await
@@ -891,7 +884,7 @@ mod tests {
                 .last_seen
         }
 
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
 
         // A stale row refreshes.
@@ -931,7 +924,7 @@ mod tests {
     /// already stored, or resetting one that is not, is not a change.
     #[tokio::test]
     async fn a_save_sets_replaces_and_removes_values() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
 
         let saved = save_worker_settings(
@@ -975,7 +968,7 @@ mod tests {
     /// machine approved again later is expected to build.
     #[tokio::test]
     async fn pausing_is_a_flag_that_retirement_clears() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         approve_worker(&db, w.id).await.unwrap();
 
@@ -998,7 +991,7 @@ mod tests {
     /// Values belong to one worker: another's are neither read nor touched.
     #[tokio::test]
     async fn values_are_per_worker() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let a = register_worker(&db, &reg("a", "fp-a")).await.unwrap();
         let b = register_worker(&db, &reg("b", "fp-b")).await.unwrap();
         save_worker_settings(&db, a.id, &changes(&[("concurrency", Some("4"))]))
@@ -1020,7 +1013,7 @@ mod tests {
     #[tokio::test]
     async fn the_embedded_worker_adopts_0_5_limits_once() {
         use aurcache_common::worker_config::{Applies, SettingDecl, ValueKind};
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let worker = register_worker(&db, &reg("bundled", "fp-1")).await.unwrap();
         db.execute_unprepared(
             "INSERT INTO settings (key, value, pkg_id) VALUES \
@@ -1066,7 +1059,7 @@ mod tests {
     /// worker's settings are nobody else's to keep.
     #[tokio::test]
     async fn values_go_with_their_worker() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let w = register_worker(&db, &reg("w1", "fp-1")).await.unwrap();
         save_worker_settings(&db, w.id, &changes(&[("concurrency", Some("2"))]))
             .await
@@ -1079,7 +1072,7 @@ mod tests {
     /// its approval -- revoked included -- and nothing of the old certificate.
     #[tokio::test]
     async fn the_embedded_worker_keeps_its_row_under_a_new_key() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         assert_eq!(rekey_embedded(&db, "fp-1").await.unwrap(), Rekey::NoRow);
         let first = register_worker(&db, &reg("bundled", "fp-1")).await.unwrap();
         mark_embedded(&db, first.id).await.unwrap();
@@ -1126,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_row_is_embedded_at_a_time() {
-        let db = setup().await;
+        let db = crate::testing::memory_db().await;
         let a = register_worker(&db, &reg("a", "fp-a")).await.unwrap();
         let b = register_worker(&db, &reg("b", "fp-b")).await.unwrap();
         mark_embedded(&db, a.id).await.unwrap();

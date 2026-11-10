@@ -911,14 +911,6 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    async fn test_db() -> sea_orm::DatabaseConnection {
-        use sea_orm_migration::MigratorTrait;
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        aurcache_db::migration::Migrator::up(&db, None)
-            .await
-            .unwrap();
-        db
-    }
 
     /// The archive names are spelled out as constants, so they are checked
     /// against the name they derive from.
@@ -1019,7 +1011,7 @@ mod tests {
     async fn a_file_read_by_another_update_cannot_be_retired() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let stale = {
             let update = repo.begin(&db).await.unwrap();
             published(&update, &filename("foo", "1.0-1"))
@@ -1037,7 +1029,7 @@ mod tests {
         add: Vec<(PathBuf, PackageEntry)>,
         remove: &[String],
     ) -> anyhow::Result<()> {
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let mut update = repo.begin(&db).await.unwrap();
         for (staged, entry) in add {
             update.add(Platform::X86_64, staged, entry);
@@ -1106,12 +1098,19 @@ mod tests {
         let old = platform_file(&repo, "foo", "1.0-1");
         let grace = Duration::from_secs(3600);
 
-        assert_eq!(repo.sweep(&test_db().await, grace).await.unwrap(), 0);
+        assert_eq!(
+            repo.sweep(&aurcache_db::testing::memory_db().await, grace)
+                .await
+                .unwrap(),
+            0
+        );
         assert!(old.exists() && with_suffix(&old, ".sig").exists());
 
         let later = Instant::now() + grace;
         assert_eq!(
-            repo.sweep_at(&test_db().await, later, grace).await.unwrap(),
+            repo.sweep_at(&aurcache_db::testing::memory_db().await, later, grace)
+                .await
+                .unwrap(),
             2
         );
         assert!(!old.exists());
@@ -1131,13 +1130,19 @@ mod tests {
         let restarted = Repository::new(tmp.path());
         let old = platform_file(&restarted, "foo", "1.0-1");
         // Long after the retirement, but the first this process has seen of it.
-        assert_eq!(restarted.sweep(&test_db().await, grace).await.unwrap(), 0);
+        assert_eq!(
+            restarted
+                .sweep(&aurcache_db::testing::memory_db().await, grace)
+                .await
+                .unwrap(),
+            0
+        );
         assert!(old.exists());
 
         let later = Instant::now() + grace;
         assert_eq!(
             restarted
-                .sweep_at(&test_db().await, later, grace)
+                .sweep_at(&aurcache_db::testing::memory_db().await, later, grace)
                 .await
                 .unwrap(),
             2
@@ -1190,9 +1195,13 @@ mod tests {
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
 
         let later = Instant::now() + Duration::from_secs(7200);
-        repo.sweep_at(&test_db().await, later, Duration::from_secs(3600))
-            .await
-            .unwrap();
+        repo.sweep_at(
+            &aurcache_db::testing::memory_db().await,
+            later,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
 
         assert!(platform_file(&repo, "foo", "1.0-1").exists());
         assert_eq!(listed(&repo), ["foo-1.0-1", "foo-1.1-1"]);
@@ -1214,9 +1223,13 @@ mod tests {
 
         let later = Instant::now() + Duration::from_secs(7200);
         assert_eq!(
-            repo.sweep_at(&test_db().await, later, Duration::from_secs(3600))
-                .await
-                .unwrap(),
+            repo.sweep_at(
+                &aurcache_db::testing::memory_db().await,
+                later,
+                Duration::from_secs(3600)
+            )
+            .await
+            .unwrap(),
             2,
             "only foo 1.0 and its signature"
         );
@@ -1233,7 +1246,7 @@ mod tests {
     async fn a_failed_commit_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
         let db_before = std::fs::read(repo.root().join("x86_64").join(DB_ARCHIVE)).unwrap();
@@ -1279,7 +1292,7 @@ mod tests {
     async fn a_commit_that_fails_once_is_retried() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         let commits = AtomicU32::new(0);
 
@@ -1308,7 +1321,7 @@ mod tests {
     async fn an_update_dropped_uncommitted_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         {
             let mut update = repo.begin(&db).await.unwrap();
@@ -1348,7 +1361,7 @@ mod tests {
     async fn concurrent_updates_do_not_lose_each_other() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = Arc::new(Repository::new(tmp.path()));
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let (foo_staged, foo) = stage(&repo, 1, "foo", "1.0-1").await;
         let (bar_staged, bar) = stage(&repo, 2, "bar", "1.0-1").await;
 
@@ -1389,7 +1402,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let repo = Arc::new(Repository::new(tmp.path()));
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
         let archive = repo.root().join("x86_64").join(DB_ARCHIVE);
@@ -1457,7 +1470,7 @@ mod tests {
             FILES_ARCHIVE.to_string(),
         ] {
             let tmp = tempfile::tempdir().unwrap();
-            let db = test_db().await;
+            let db = aurcache_db::testing::memory_db().await;
             let repo = Repository::new(tmp.path());
             let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
             let blocked = tmp.path().join("x86_64").join(&blocked_name);
@@ -1504,7 +1517,7 @@ mod tests {
     #[tokio::test]
     async fn a_plan_whose_staged_file_is_gone_does_not_block_the_repository() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = test_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let repo = Repository::new(tmp.path());
         let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
         let blocked = platform_file(&repo, "foo", "1.0-1");

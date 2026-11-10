@@ -379,18 +379,14 @@ mod tests {
     use super::{
         latest_successful_build_vcs_sources, latest_successful_version, record_build_vcs_sources,
     };
-    use crate::migration::Migrator;
     use aurcache_common::build_state::BuildState;
     use sea_orm::{
-        ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
-        QuerySelect,
+        ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect,
     };
-    use sea_orm_migration::MigratorTrait;
     use std::collections::BTreeMap;
 
     async fn setup() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = crate::testing::memory_db().await;
         db.execute_unprepared("INSERT INTO packages (id, name) VALUES (1, 'cargo-diet')")
             .await
             .unwrap();

@@ -17,6 +17,6 @@ aurcache-db = {path = "../aurcache-db"}
 aurcache-common = {path = "../aurcache-common", features = ["db"]}
 
 [dev-dependencies]
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
-sea-orm-migration = {version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"]}
 pacman-mirrors = {path = "../pacman-mirrors"}

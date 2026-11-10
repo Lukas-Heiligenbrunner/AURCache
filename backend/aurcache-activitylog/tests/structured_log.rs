@@ -9,22 +9,14 @@ use aurcache_activitylog::events::{Event, RefreshTarget};
 use aurcache_activitylog::log_store::{LogFilter, LogStore};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::api::log::{BuildRef, PackageRef};
-use aurcache_db::migration::Migrator;
 use aurcache_db::prelude::LogEntities;
-use sea_orm::{Database, DatabaseConnection, EntityTrait, PaginatorTrait};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{DatabaseConnection, EntityTrait, PaginatorTrait};
 
 // ---------------------------------------------------------------------------
 
-async fn db() -> DatabaseConnection {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
-    db
-}
-
 #[tokio::test]
 async fn an_event_reaches_the_log_with_its_payload() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     // No package rows at all: an entry names what it names, whether or not
     // it is still there.
 
@@ -88,7 +80,7 @@ async fn an_event_reaches_the_log_with_its_payload() {
 /// (a dependency replacement) is ported.
 #[tokio::test]
 async fn the_entity_filter_finds_a_row_in_any_role() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     log.emit(Event::VcsSyncFailed {
         pkg: "baz".into(),
@@ -152,7 +144,7 @@ async fn the_entity_filter_finds_a_row_in_any_role() {
 /// without knowing which kinds exist.
 #[tokio::test]
 async fn severity_narrows_to_this_and_worse() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     log.emit(Event::AurMissing { pkg: "baz".into() });
     log.emit(Event::VcsSyncFailed {
@@ -210,7 +202,7 @@ async fn severity_narrows_to_this_and_worse() {
 /// page can ask for both what was said about it and what happened during it.
 #[tokio::test]
 async fn a_scope_is_indexed_like_any_other_reference() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let build = BuildRef {
         pkgbase: "hello".into(),
         number: 7,
@@ -243,7 +235,7 @@ async fn a_scope_is_indexed_like_any_other_reference() {
 /// everything rather than nothing.
 #[tokio::test]
 async fn since_boot_without_a_marker_shows_everything() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     log.emit(Event::AurMissing {
         pkg: "hello".into(),
@@ -269,7 +261,7 @@ async fn since_boot_without_a_marker_shows_everything() {
 /// consolidation loses nothing: the case is in the payload and in the sentence.
 #[tokio::test]
 async fn a_consolidated_kind_keeps_which_case_it_was() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     log.emit(Event::SourceRefreshFailed {
         pkg: "hello".into(),
@@ -320,7 +312,7 @@ async fn a_consolidated_kind_keeps_which_case_it_was() {
 /// that are gone.
 #[tokio::test]
 async fn pruning_removes_the_index_too() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     log.emit(Event::AurMissing { pkg: "baz".into() });
     drop(log);
@@ -356,7 +348,7 @@ async fn at(db: &DatabaseConnection, timestamp: i64, event: Event) {
 /// happened under an earlier run drops out.
 #[tokio::test]
 async fn since_boot_cuts_at_the_last_start() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let started = |version: &str| Event::ServerStarted {
         version: version.to_string(),
     };
@@ -387,7 +379,7 @@ async fn since_boot_cuts_at_the_last_start() {
 /// everything, for a deployment that would rather the log were complete.
 #[tokio::test]
 async fn pruning_keeps_what_is_still_within_the_window() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let now = aurcache_db::helpers::time::now_secs();
     at(&db, now - 7200, Event::AurMissing { pkg: "old".into() }).await;
     at(&db, now, Event::AurMissing { pkg: "new".into() }).await;
@@ -404,7 +396,7 @@ async fn pruning_keeps_what_is_still_within_the_window() {
 /// is the ordinary case for a bulk add.
 #[tokio::test]
 async fn pages_do_not_drop_or_repeat_an_entry() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     for n in 0..5 {
         at(
             &db,
@@ -431,7 +423,7 @@ async fn pages_do_not_drop_or_repeat_an_entry() {
 /// build of it -- or recorded during one -- is still about the package.
 #[tokio::test]
 async fn a_package_filter_finds_entries_about_its_builds() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let Writer { log, task: writer } = spawn(db.clone());
     let build = BuildRef {
         pkgbase: "yay".into(),

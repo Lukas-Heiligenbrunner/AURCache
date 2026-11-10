@@ -3,7 +3,6 @@ mod test_git;
 
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
-use aurcache_db::migration::Migrator;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
@@ -13,10 +12,9 @@ use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
 use flate2::{Compression, write::GzEncoder};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, Set, TryIntoModel,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    Set, TryIntoModel,
 };
-use sea_orm_migration::MigratorTrait;
 use serde_json::json;
 use std::fs::{self};
 use std::path::Path;
@@ -80,12 +78,7 @@ async fn setup_env() -> TestEnv {
         .await
         .expect("a seeded cache needs no mirror");
 
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to create in-memory DB");
-    Migrator::up(&db, None)
-        .await
-        .expect("failed to run migrations");
+    let db = aurcache_db::testing::memory_db().await;
 
     let aur_root = tempfile::tempdir().expect("failed to create aur root tempdir");
     let checkout_dir = tempfile::tempdir().expect("failed to create checkout tempdir");
