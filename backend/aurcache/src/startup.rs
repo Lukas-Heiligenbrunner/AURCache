@@ -1,5 +1,4 @@
 use aurcache_activitylog::activity_utils::ActivityLog;
-use std::env;
 use std::path::{Path, PathBuf};
 
 use aurcache_activitylog::events::Event;
@@ -101,7 +100,9 @@ fn persisted(dir: &Path) -> bool {
 /// directory as persisted, which it is; taken for a container, it would keep
 /// its state in the repository whenever that shares a filesystem with `/`.
 fn in_container() -> bool {
-    env::var_os("AURCACHE_CONTAINER_IMAGE").is_some()
+    aurcache_common::server_env::AURCACHE_CONTAINER_IMAGE
+        .get_os()
+        .is_some()
         || Path::new("/.dockerenv").exists()
         || Path::new("/run/.containerenv").exists()
 }

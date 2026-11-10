@@ -13,13 +13,13 @@
 use crate::{Wake, sleep_until_next_fire};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
+use aurcache_common::server_env::{self, Var};
 use aurcache_utils::job_config::{
     mirrorlist_dir, mirrorlist_path, mounted_mirrorlist, native_arch,
 };
 use aurcache_utils::scheduled::{Job, schedule};
 use pacman_mirrors::benchmark::{Bench, gen_mirrorlist};
 use pacman_mirrors::platforms::Platform;
-use std::env;
 use std::time::Duration;
 use tokio::fs;
 use tokio::task::JoinHandle;
@@ -82,7 +82,9 @@ pub fn start_ranking(activity: ActivityLog) -> anyhow::Result<Option<JoinHandle<
     // Once a week, on a day and at a time of its own: mirrors see every
     // instance ranking them, and the hashed `@weekly` keeps them from all
     // doing it at once.
-    let cron_str = env::var("MIRROR_RANK_SCHEDULE").unwrap_or_else(|_| "@weekly".to_string());
+    let cron_str = aurcache_common::server_env::MIRROR_RANK_SCHEDULE
+        .get()
+        .unwrap_or_else(|_| "@weekly".to_string());
     if aurcache_common::schedule::is_off(&cron_str) {
         info!("Mirror ranking is off (MIRROR_RANK_SCHEDULE={cron_str:?})");
         return Ok(None);
@@ -165,15 +167,18 @@ fn supplier(configured: bool, mounted: bool, native_arch: &str) -> Supplier {
 }
 
 /// The environment variable naming an architecture's mirrorlist servers.
-///
-/// `x86_64` -> `MIRRORLIST_SERVERS_X86_64`, the name deployments already set.
-fn env_var(platform: Platform) -> String {
-    format!("MIRRORLIST_SERVERS_{}", platform.as_str().to_uppercase())
+fn env_var(platform: Platform) -> Var {
+    match platform {
+        Platform::X86_64 => server_env::MIRRORLIST_SERVERS_X86_64,
+        Platform::Aarch64 => server_env::MIRRORLIST_SERVERS_AARCH64,
+        Platform::Armv7h => server_env::MIRRORLIST_SERVERS_ARMV7H,
+    }
 }
 
 /// The servers configured for `platform`, `;`-separated, if any.
 fn configured(platform: Platform) -> Option<String> {
-    env::var(env_var(platform))
+    env_var(platform)
+        .get()
         .ok()
         .filter(|servers| !servers.trim().is_empty())
 }
@@ -299,11 +304,12 @@ mod tests {
     }
 
     /// The x86_64 name is the one already documented and deployed; the others
-    /// follow the same rule rather than being spelled out by hand.
+    /// follow the same rule.
     #[test]
     fn env_var_names_follow_the_architecture() {
-        assert_eq!(env_var(Platform::X86_64), "MIRRORLIST_SERVERS_X86_64");
-        assert_eq!(env_var(Platform::Aarch64), "MIRRORLIST_SERVERS_AARCH64");
-        assert_eq!(env_var(Platform::Armv7h), "MIRRORLIST_SERVERS_ARMV7H");
+        for platform in Platform::ALL {
+            let expected = format!("MIRRORLIST_SERVERS_{}", platform.as_str().to_uppercase());
+            assert_eq!(env_var(platform).name(), expected);
+        }
     }
 }

@@ -209,7 +209,8 @@ pub const USER_AGENT: &str = "AURCache (+https://github.com/Lukas-Heiligenbrunne
 impl AurClient {
     /// Construct a new client from the `AUR_RPC_URL` env var (or default).
     pub fn new() -> Self {
-        let rpc_url = std::env::var("AUR_RPC_URL")
+        let rpc_url = aurcache_common::server_env::AUR_RPC_URL
+            .get()
             .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5".to_string());
         Self::with_urls_and_paths(
             rpc_url,

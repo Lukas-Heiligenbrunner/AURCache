@@ -28,7 +28,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// This resolves through [`crate::paths`] so it cannot drift from where the
 /// mirrorlist is actually written.
 pub(crate) fn default_official_mirrorlist_path() -> PathBuf {
-    if let Ok(path) = std::env::var("OFFICIAL_MIRRORLIST_PATH") {
+    if let Ok(path) = aurcache_common::server_env::OFFICIAL_MIRRORLIST_PATH.get() {
         return PathBuf::from(path);
     }
     crate::paths::mirrorlist_path("x86_64")
@@ -299,7 +299,7 @@ fn cache_is_stale(path: &Path) -> Result<bool, Error> {
 /// entirely different hardware. Sharing one setting is a fine default and a
 /// poor requirement.
 fn official_mirror_servers(path: &Path) -> Result<Vec<String>, Error> {
-    if let Ok(servers) = std::env::var("OFFICIAL_MIRRORLIST_SERVERS") {
+    if let Ok(servers) = aurcache_common::server_env::OFFICIAL_MIRRORLIST_SERVERS.get() {
         let configured: Vec<String> = servers
             .split(';')
             .map(str::trim)

@@ -18,6 +18,7 @@ pub mod fs;
 pub mod ports;
 pub mod repo;
 pub mod schedule;
+pub mod server_env;
 pub mod settings;
 pub mod shell;
 pub mod source;

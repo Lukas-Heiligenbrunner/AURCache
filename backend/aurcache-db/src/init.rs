@@ -4,13 +4,13 @@ use crate::migration::Migrator;
 use anyhow::{anyhow, bail};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend};
 use sea_orm_migration::{MigrationName, MigratorTrait};
+use std::fs;
 use std::time::Duration;
-use std::{env, fs};
 use tracing::log::LevelFilter;
 
 /// Read a required Postgres env var, with a message naming it.
-fn required_env(name: &str) -> anyhow::Result<String> {
-    env::var(name).map_err(|_| anyhow!("No {name} envvar specified"))
+fn required_env(var: aurcache_common::server_env::Var) -> anyhow::Result<String> {
+    var.get().map_err(|_| anyhow!("No {var} envvar specified"))
 }
 
 /// Percent-encode a URL userinfo component (username or password).
@@ -38,7 +38,9 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
         DbBackend::Sqlite => {
             fs::create_dir_all("./db")?;
 
-            let db_name = env::var("DB_NAME").unwrap_or_else(|_| "db.sqlite".to_string());
+            let db_name = aurcache_common::server_env::DB_NAME
+                .get()
+                .unwrap_or_else(|_| "db.sqlite".to_string());
 
             let mut conn_opts = ConnectOptions::new(format!("sqlite://db/{db_name}?mode=rwc"));
             conn_opts
@@ -59,10 +61,12 @@ pub async fn init_db() -> anyhow::Result<DatabaseConnection> {
             db
         }
         DbBackend::Postgres => {
-            let db_user = required_env("DB_USER")?;
-            let db_pwd = required_env("DB_PWD")?;
-            let db_host = required_env("DB_HOST")?;
-            let db_name = env::var("DB_NAME").unwrap_or_else(|_| "postgres".to_string());
+            let db_user = required_env(aurcache_common::server_env::DB_USER)?;
+            let db_pwd = required_env(aurcache_common::server_env::DB_PWD)?;
+            let db_host = required_env(aurcache_common::server_env::DB_HOST)?;
+            let db_name = aurcache_common::server_env::DB_NAME
+                .get()
+                .unwrap_or_else(|_| "postgres".to_string());
 
             // Encoded, never raw: a password containing `@`, `:` or `%`
             // would corrupt a formatted URL or fail to parse. Local helper

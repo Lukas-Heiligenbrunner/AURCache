@@ -187,6 +187,10 @@ defect this frontend has had was of that kind.
   `aurcache_db::helpers::builds::refresh_package_status` in the same transaction.
 - Settings are read through `aurcache_utils::settings::get` with a typed `settings::key::*`, not by
   reading env vars ad hoc. The effective precedence in code is `Package -> Env -> Global -> Default`.
+- Every other variable the server reads is declared in `aurcache_common::server_env` and read through
+  its constant. Tests fail on a declared variable missing from
+  `docs/docs/Configuration/environment-variables.md`, on a row there nothing declares, and on a plain
+  `env::var("...")` in a server crate, so adding one is a constant and a docs row.
 - API shapes live in `aurcache-common` and are shared, never re-declared. A field added to a response is
   added once and the CLI, the client library and the frontend all see it; mirroring a struct by hand is
   how the two ends drift apart.

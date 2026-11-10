@@ -60,10 +60,10 @@ impl HybridDir {
     /// Whether the operator chose that directory, rather than the default.
     fn chosen(self) -> bool {
         let var = match self {
-            Self::Ca => super::CA_DIR_VAR,
-            Self::BuildLogs => super::BUILD_LOG_PATH_VAR,
+            Self::Ca => crate::server_env::AURCACHE_CA_DIR,
+            Self::BuildLogs => crate::server_env::AURCACHE_BUILD_LOG_PATH,
         };
-        std::env::var_os(var).is_some()
+        var.get_os().is_some()
     }
 
     /// What it is, for a log line.

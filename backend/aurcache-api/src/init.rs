@@ -5,9 +5,10 @@ use crate::custom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::embed::CustomHandler;
 pub use crate::utils::config::OAuthSettings;
-use crate::utils::config::{ALLOWED_USERS_ENV, allowed_users, oauth_from_env};
+use crate::utils::config::{allowed_users, oauth_from_env};
 use crate::utils::failed_requests::{FailedRequests, plain_status};
 use aurcache_activitylog::activity_utils::ActivityLog;
+use aurcache_common::server_env::OAUTH_ALLOWED_USERS;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::services::Services;
 use aurcache_utils::snapshot::SnapshotStore;
@@ -19,7 +20,6 @@ use rocket::{Config, catchers, routes};
 use rocket_async_compression::{Compression, Level};
 use rocket_oauth2::HyperRustlsAdapter;
 use sea_orm::DatabaseConnection;
-use std::env;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -30,7 +30,7 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 
 fn get_secret_key() -> SecretKey {
-    if let Ok(secret_key) = env::var("SECRET_KEY") {
+    if let Ok(secret_key) = aurcache_common::server_env::SECRET_KEY.get() {
         SecretKey::from(secret_key.as_bytes())
     } else {
         warn!("`SECRET_KEY` env not set, generating random key.");
@@ -48,7 +48,8 @@ fn get_secret_key() -> SecretKey {
 fn worker_tls_config(ca: &aurcache_ca::Ca) -> Option<rocket::config::TlsConfig> {
     use rocket::config::{MutualTls, TlsConfig};
 
-    let sans = env::var("AURCACHE_TLS_SANS")
+    let sans = aurcache_common::server_env::AURCACHE_TLS_SANS
+        .get()
         .ok()
         .map(|s| {
             s.split(',')
@@ -167,7 +168,7 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
         // restriction from the outside -- the server simply lets everyone in.
         if oauth.is_none() && allowed_users().is_some() {
             tracing::warn!(
-                "{ALLOWED_USERS_ENV} is set but OAuth is not configured, so it restricts nothing \
+                "{OAUTH_ALLOWED_USERS} is set but OAuth is not configured, so it restricts nothing \
                  and this instance is open to everyone. Configure the OAUTH_* variables to \
                  enforce it."
             );
@@ -299,7 +300,8 @@ pub fn init_worker_api(
 /// The port the worker protocol listens on: `AURCACHE_WORKER_PORT`, else the
 /// default.
 pub(crate) fn worker_port() -> u16 {
-    env::var("AURCACHE_WORKER_PORT")
+    aurcache_common::server_env::AURCACHE_WORKER_PORT
+        .get()
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(aurcache_common::ports::AURCACHE_WORKER_PORT)

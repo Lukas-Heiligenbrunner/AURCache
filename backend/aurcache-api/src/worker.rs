@@ -46,7 +46,6 @@ use rocket::serde::json::Json;
 use rocket::{Data, State, get, patch, post};
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::collections::HashMap;
-use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use utoipa::OpenApi;
@@ -64,12 +63,14 @@ static REPO_TEMPLATE: std::sync::LazyLock<String> =
 
 /// Base URL workers should use for the public pacman repo (`[repo] Server`).
 pub(crate) fn public_repo_url() -> String {
-    env::var("AURCACHE_PUBLIC_URL").unwrap_or_else(|_| {
-        format!(
-            "http://localhost:{}",
-            aurcache_common::ports::AURCACHE_MIRROR_PORT
-        )
-    })
+    aurcache_common::server_env::AURCACHE_PUBLIC_URL
+        .get()
+        .unwrap_or_else(|_| {
+            format!(
+                "http://localhost:{}",
+                aurcache_common::ports::AURCACHE_MIRROR_PORT
+            )
+        })
 }
 
 /// [`REPO_TEMPLATE`] for `public_url`.
@@ -770,7 +771,8 @@ pub async fn list_workers(
 #[utoipa::path(get, path = "/workers/join-info", responses((status = 200, body = WorkerJoinInfo)))]
 #[get("/workers/join-info")]
 pub async fn worker_join_info(_a: Authenticated) -> Json<WorkerJoinInfo> {
-    let image = env::var("AURCACHE_WORKER_IMAGE")
+    let image = aurcache_common::server_env::AURCACHE_WORKER_IMAGE
+        .get()
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_WORKER_IMAGE.to_string());

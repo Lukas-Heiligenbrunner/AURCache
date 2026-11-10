@@ -26,7 +26,11 @@ const DEFAULT_RETENTION: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 fn retention_secs() -> u64 {
-    crate::env_duration("ACTIVITY_RETENTION", DEFAULT_RETENTION).as_secs()
+    crate::env_duration(
+        aurcache_common::server_env::ACTIVITY_RETENTION,
+        DEFAULT_RETENTION,
+    )
+    .as_secs()
 }
 
 /// Spawn the sweep loop.
