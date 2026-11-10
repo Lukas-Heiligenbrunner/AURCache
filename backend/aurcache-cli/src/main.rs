@@ -249,9 +249,11 @@ async fn run_raw_command(client: &AurCacheClient, args: RawArgs) -> Result<()> {
     let method = Method::from_bytes(args.method.as_bytes())
         .with_context(|| format!("unsupported HTTP method: {}", args.method))?;
     let body = args.body.as_deref().map(parse_json_body).transpose()?;
-    let text = client
-        .request_text(method, &args.path, &args.query, body.as_ref())
-        .await?;
+    let mut request = client.request(method, &args.path).query(&args.query);
+    if let Some(body) = &body {
+        request = request.json(body);
+    }
+    let text = request.send_text().await?;
     if text.trim().is_empty() {
         return Ok(());
     }
