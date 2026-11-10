@@ -29,7 +29,8 @@ pub(crate) async fn pkg_deps(
         .sourceinfo(source, patch)
         .await
         .map_err(|e| anyhow!("Failed to resolve source info: {e:#}"))?;
-    let deps = aurcache_deps::deps_from_srcinfo(&sourceinfo, &crate::pkg::architectures(platforms));
+    let deps =
+        aurcache_deps::deps_from_srcinfo(&sourceinfo, &crate::constraint::architectures(platforms));
     Ok(SourceFacts { sourceinfo, deps })
 }
 

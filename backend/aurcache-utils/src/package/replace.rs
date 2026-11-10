@@ -4,9 +4,9 @@
 //! overrides it for one edge -- and the edge then survives later resolutions,
 //! which prefer what a package already depends on.
 
+use crate::constraint::satisfies_constraint;
 use crate::package::live_check::live_check;
 use crate::package::source_facts::{SourceFacts, pkg_deps};
-use crate::pkg::satisfies_constraint;
 use crate::services::Services;
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::package::{
@@ -86,7 +86,7 @@ fn provided_names(
     split_packages: Option<&JsonList>,
     provides: Option<&JsonList>,
 ) -> Vec<String> {
-    let mut names: Vec<String> = crate::pkg::self_provided_names(
+    let mut names: Vec<String> = crate::constraint::self_provided_names(
         name,
         JsonList::entries(split_packages),
         JsonList::entries(provides),
@@ -182,7 +182,7 @@ async fn declared_names_for_edge(
     )
     .await
     .map_err(ReplaceError::Unreachable)?;
-    let declared = crate::pkg::DependencySet::of(&deps).map_err(ReplaceError::Internal)?;
+    let declared = crate::constraint::DependencySet::of(&deps).map_err(ReplaceError::Internal)?;
 
     let answers = provided_names(
         &current.name,

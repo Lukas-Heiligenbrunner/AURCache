@@ -15,7 +15,7 @@ use alpm_types::{Version, VersionRequirement};
 /// such as `">=2.0"`, or several comma-joined (`">=1.0,<2.0"`), every one of
 /// which must hold.
 ///
-/// The comma form is what `aurcache_utils::pkg` stores when one dependency
+/// The comma form is what `aurcache_utils::constraint` stores when one dependency
 /// accumulates bounds in both directions — a single PKGBUILD declaring
 /// `foo>=1.0` and `foo<2.0` is a range, not a conflict. Plain pacman strings
 /// never contain a comma, so single bounds are unaffected.

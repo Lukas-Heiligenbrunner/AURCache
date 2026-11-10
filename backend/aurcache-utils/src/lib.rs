@@ -5,6 +5,8 @@ pub mod aur;
 pub mod build_delete;
 pub mod build_logger;
 pub mod cancel;
+/// Dependency version constraints: parsing, merging and comparing them.
+pub mod constraint;
 pub mod dump;
 /// Git checkouts, and what a remote ref points at.
 pub mod git;
@@ -14,7 +16,6 @@ pub mod job_descriptor;
 pub mod listing;
 pub mod package;
 pub mod patch;
-pub mod pkg;
 pub mod pkgbuild;
 pub mod publish;
 pub mod repository;

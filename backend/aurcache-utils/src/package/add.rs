@@ -60,7 +60,7 @@ impl AddContext {
 struct PackageInsertSpec {
     pkgbase: String,
     version: String,
-    deps: crate::pkg::DependencySet,
+    deps: crate::constraint::DependencySet,
     pkgnames: Vec<String>,
     provides: Vec<String>,
     source_data: SourceData,
@@ -182,7 +182,7 @@ async fn resolve_srcinfo_to_spec(
     Ok(PackageInsertSpec {
         pkgbase,
         version: sourceinfo.base.version.to_string(),
-        deps: crate::pkg::DependencySet::of(&deps)?,
+        deps: crate::constraint::DependencySet::of(&deps)?,
         pkgnames: deps.pkgnames,
         provides: deps.provides,
         patch,
@@ -494,7 +494,7 @@ async fn plan_package_with_deps(
         plan.edges.push(PlannedEdge {
             dependent: package_spec.pkgbase.clone(),
             dependee: edge.pkgbase,
-            version_constraint: crate::pkg::join_constraints(&edge.bounds),
+            version_constraint: crate::constraint::join_constraints(&edge.bounds),
         });
     }
 
