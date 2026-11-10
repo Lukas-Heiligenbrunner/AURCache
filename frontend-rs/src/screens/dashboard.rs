@@ -56,14 +56,9 @@ pub fn Dashboard() -> Element {
 
     rsx! {
         div { class: "space-y-4",
-            match &*stats.read_unchecked() {
-                None => rsx! {
-                    crate::widgets::Spinner {}
-                },
-                Some(Err(e)) => rsx! {
-                    div { class: "alert alert-error", span { "Could not load statistics: {e}" } }
-                },
-                Some(Ok(stats)) => rsx! {
+            match crate::widgets::ready(&*stats.read_unchecked(), "statistics") {
+                Err(placeholder) => placeholder,
+                Ok(stats) => rsx! {
                     StatTiles { stats: stats.clone() }
                 },
             }
@@ -89,14 +84,9 @@ pub fn Dashboard() -> Element {
                                 }
                             }
                         }
-                        match &*graph.read_unchecked() {
-                            None => rsx! {
-                                crate::widgets::Spinner {}
-                            },
-                            Some(Err(e)) => rsx! {
-                                div { class: "alert alert-error", span { "Could not load the graph: {e}" } }
-                            },
-                            Some(Ok(points)) => rsx! {
+                        match crate::widgets::ready(&*graph.read_unchecked(), "the graph") {
+                            Err(placeholder) => placeholder,
+                            Ok(points) => rsx! {
                                 BuildsChart { points: points.clone() }
                             },
                         }

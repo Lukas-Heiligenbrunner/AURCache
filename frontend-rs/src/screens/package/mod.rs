@@ -18,7 +18,7 @@ use crate::format::{format_bytes, format_duration, now_secs};
 use crate::routes::Route;
 use crate::screens::package_scope::use_scoped_package;
 use crate::status::BuildStatusBadge;
-use crate::widgets::Spinner;
+use crate::widgets::{Spinner, ready};
 use aurcache_client::{Build, ExtendedPackage, PackageFile, PackageSource};
 use aurcache_common::build_state::BuildState;
 use config::BuildConfigCard;
@@ -158,10 +158,9 @@ pub fn Package(pkgbase: String) -> Element {
                     // A failed build query does not lose the package itself:
                     // the summary is secondary, and the rest is still worth
                     // showing.
-                    match &*builds.read_unchecked() {
-                        None => rsx! { Spinner {} },
-                        Some(Ok(list)) => rsx! { BuildSummary { pkgbase: pkg.name.clone(), builds: list.clone() } },
-                        Some(Err(error)) => rsx! { div { class: "alert alert-error", "Could not load build history: {error}" } },
+                    match ready(&*builds.read_unchecked(), "build history") {
+                        Err(placeholder) => placeholder,
+                        Ok(list) => rsx! { BuildSummary { pkgbase: pkg.name.clone(), builds: list.clone() } },
                     }
                     Relations { pkg: pkg.clone(), on_changed: changed }
                     crate::screens::logs::RecentActivity {

@@ -18,7 +18,7 @@ use crate::dates::AbsoluteDate;
 use crate::list_controls::{LIST_TABLE, ListHeader, Pager, WIDE_ONLY, use_url_view};
 use crate::listing::{PAGE_SIZE, PageInfo};
 use crate::routes::Route;
-use crate::widgets::Spinner;
+use crate::widgets::ready;
 use aurcache_client::{
     ActiveOperation, EntityRef, Event, KINDS, LogEntry, LogFilter, PackageRef, Segment, Severity,
     WorkerRef, kind_label, operation_kind,
@@ -191,12 +191,9 @@ pub fn Logs(view: LogView) -> Element {
                 ListHeader { title: "Logs" }
                 LogControls { severity, since_boot, about, kind }
 
-                match &*entries.read_unchecked() {
-                    None => rsx! { Spinner {} },
-                    Some(Err(e)) => rsx! {
-                        div { class: "alert alert-error", span { "Could not load the log: {e}" } }
-                    },
-                    Some(Ok(view)) if view.total == 0 => rsx! {
+                match ready(&*entries.read_unchecked(), "the log") {
+                    Err(placeholder) => placeholder,
+                    Ok(view) if view.total == 0 => rsx! {
                         div { class: "alert",
                             // A filter that matched nothing is a different
                             // answer from an empty log, and the remedy is
@@ -208,7 +205,7 @@ pub fn Logs(view: LogView) -> Element {
                             }
                         }
                     },
-                    Some(Ok(view)) => rsx! {
+                    Ok(view) => rsx! {
                         LogTable {
                             entries: view.entries.clone(),
                             on_about: move |entity| about.set(Some(entity)),

@@ -7,7 +7,7 @@ use crate::api::client;
 use crate::list_controls::{ListHeader, Rows, Selection, use_rows};
 use crate::listing::{Sort, SortDir, SortKey, sort_builds};
 use crate::screens::builds::{BuildTable, BuildsOf};
-use crate::widgets::Spinner;
+use crate::widgets::{LoadFailed, Spinner};
 use aurcache_client::Build;
 use dioxus::prelude::*;
 
@@ -66,7 +66,7 @@ pub fn PackageBuilds(pkgbase: String) -> Element {
                 match &*rows.read() {
                     Rows::Loading => rsx! { Spinner {} },
                     Rows::Failed(e) => rsx! {
-                        div { class: "alert alert-error", span { "Could not load builds: {e}" } }
+                        LoadFailed { what: "builds", error: e.clone() }
                     },
                     Rows::Ready { total: 0, .. } => rsx! {
                         div { class: "alert", span { "This package has never been built." } }
