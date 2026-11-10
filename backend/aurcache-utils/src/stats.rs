@@ -672,8 +672,7 @@ mod tests {
     /// average reads as 0 rather than an error.
     #[tokio::test]
     async fn the_average_build_time_is_over_successful_builds() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         assert_eq!(avg_build_time(&db).await.unwrap(), None);
 
         let pkg = insert_package(&db, "hello", false, true).await;
@@ -794,8 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_only_count_directly_requested_packages() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         packages::ActiveModel {
             name: Set("top-level".to_string()),
@@ -841,8 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn recent_packages_are_newest_requested_regardless_of_out_of_date() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         insert_package(&db, "pkg-a", false, true).await;
         insert_package(&db, "pkg-b", true, true).await;
@@ -857,8 +854,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_is_oldest_first_depth_counts_past_cap_and_reason_survives() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         // One queued build per package: the pending (pkg_id, platform)
         // unique index forbids two queued builds for the same package on
@@ -899,8 +895,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_date_splits_on_global_setting_and_queued_build() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let pkg_a = insert_package(&db, "needs-hand", true, true).await;
         let pkg_c = insert_package(&db, "queued-anyway", true, true).await;
@@ -978,8 +973,7 @@ mod tests {
     /// rule to show the packages it counted.
     #[tokio::test]
     async fn out_of_date_excludes_a_failed_build() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         packages::ActiveModel {
             name: Set("stale-and-broken".to_string()),
@@ -1011,8 +1005,7 @@ mod tests {
     /// correctly on both.
     #[tokio::test]
     async fn largest_excludes_a_package_with_no_recorded_size() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let sized = insert_package(&db, "has-files", false, true).await;
         insert_package(&db, "no-files", false, true).await;
@@ -1039,8 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn longest_respects_window_and_pairs_previous_on_same_platform() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let now = now_secs();
         let pkg_id = insert_package(&db, "long-pkg", false, true).await;
@@ -1107,8 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn problems_exclude_info() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let now = now_secs();
         for (kind, severity) in [
@@ -1137,8 +1128,7 @@ mod tests {
 
     #[tokio::test]
     async fn dashboard_slices_succeed_on_an_empty_db_and_hold_none() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         // Every slice is independently fallible in the route (`None` on
         // error), so each must succeed on an empty instance rather than
@@ -1227,8 +1217,7 @@ mod tests {
     /// days against the 30 before.
     #[tokio::test]
     async fn graph_and_trends_count_builds_by_when_they_started() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let pkg = insert_package(&db, "p", false, true).await;
         let now = now_secs();
         const DAY: i64 = 24 * 60 * 60;

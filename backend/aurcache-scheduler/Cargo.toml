@@ -25,5 +25,5 @@ aurcache-common = {path = "../aurcache-common"}
 serde_json = {workspace = true}
 
 [dev-dependencies]
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 git2 = { version = "0.21.0", features = ["https", "vendored-openssl"] }
-sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }

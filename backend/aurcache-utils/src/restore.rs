@@ -1032,13 +1032,10 @@ mod tests {
     /// new one, and it is not recoverable by re-running.
     #[tokio::test]
     async fn a_rolled_back_clear_puts_everything_back() {
-        use aurcache_db::migration::Migrator;
         use aurcache_db::packages::SourceData;
-        use sea_orm::{ActiveModelTrait, Database, EntityTrait, Set, TransactionTrait};
-        use sea_orm_migration::MigratorTrait;
+        use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         aurcache_db::packages::ActiveModel {
             name: Set("precious".to_string()),
             status: Set(BuildState::Active),

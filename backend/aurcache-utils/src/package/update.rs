@@ -1000,7 +1000,6 @@ mod tests {
     use crate::services::Services;
     use crate::snapshot::SnapshotStore;
     use aurcache_common::build_state::BuildState;
-    use aurcache_db::migration::Migrator;
     use aurcache_db::packages::SourceData;
     use aurcache_db::prelude::{Dependencies, Packages};
     use aurcache_db::{builds, dependencies, packages};
@@ -1009,10 +1008,9 @@ mod tests {
     use pacman_mirrors::platforms::Platform;
     use sea_orm::DatabaseConnection;
     use sea_orm::{
-        ActiveModelTrait, ColumnTrait, Database, EntityTrait, IntoActiveModel, PaginatorTrait,
-        QueryFilter, Set, TryIntoModel,
+        ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter,
+        Set, TryIntoModel,
     };
-    use sea_orm_migration::MigratorTrait;
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1278,8 +1276,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
@@ -1488,8 +1485,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(
@@ -1565,8 +1561,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
@@ -1791,8 +1786,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "parent", "2.0.0", &["child>=2.0"]);
@@ -2009,8 +2003,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         Mock::given(method("GET"))
             .and(path("/rpc/v5/info"))
@@ -2253,8 +2246,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let dir = tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -2312,8 +2304,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let dir = tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -2352,8 +2343,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "mypkg", "1.0.0", &[]);
@@ -2446,8 +2436,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "mypkg", "1.0.0", &[]);
@@ -2532,8 +2521,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         let aur_root = tempdir().unwrap();
         let mut ids = std::collections::HashMap::new();
@@ -2633,8 +2621,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
 
         // A v2.0.0 no longer depends on B
         let aur_root = tempdir().unwrap();
@@ -2764,8 +2751,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "uptodate", "1.0.0", &[]);
         let pkg = built_package(&db, "uptodate", true).await;
@@ -2799,8 +2785,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let aur_root = tempdir().unwrap();
         create_aur_git_repo(aur_root.path(), "multiarch", "1.0.0", &[]);
         let pkg = built_package(&db, "multiarch", true).await;
@@ -2842,8 +2827,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let dir = tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         commit_pkgbuild(&repo, "initial", "1.0.0", &["mydep"]);
@@ -2911,8 +2895,7 @@ mod tests {
         let server = MockServer::start().await;
         let TestClient { client, _repos } =
             client_with_empty_official_repos(format!("{}/rpc/v5", server.uri())).await;
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let dir = tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         commit_pkgbuild(&repo, "initial", "1.0.0", &["mydep"]);

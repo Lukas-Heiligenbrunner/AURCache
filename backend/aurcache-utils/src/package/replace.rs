@@ -495,21 +495,13 @@ mod dependency_tests {
     use crate::snapshot::SnapshotStore;
     use aurcache_common::build_state::BuildState;
     use aurcache_db::lists::JsonList;
-    use aurcache_db::migration::Migrator;
     use aurcache_db::packages::SourceData;
     use aurcache_db::prelude::{Dependencies, Packages};
     use aurcache_db::{dependencies, packages};
     use sea_orm::{
-        ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
+        ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait,
         QueryFilter, Set, TryIntoModel,
     };
-    use sea_orm_migration::MigratorTrait;
-
-    async fn memory_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
-        db
-    }
 
     async fn package(
         db: &DatabaseConnection,
@@ -552,7 +544,7 @@ mod dependency_tests {
     /// contributes the name, not the whole entry.
     #[tokio::test]
     async fn provided_names_covers_the_name_the_splits_and_the_provides() {
-        let db = memory_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let package = package(&db, "libfoo", true).await;
         assert_eq!(
             provided_names(
@@ -598,7 +590,7 @@ mod dependency_tests {
 
     #[tokio::test]
     async fn an_edge_that_does_not_exist_is_not_found() {
-        let db = memory_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         package(&db, "dependent", true).await;
         package(&db, "stranger", false).await;
 
@@ -612,7 +604,7 @@ mod dependency_tests {
     /// endpoint that knows how to remove packages.
     #[tokio::test]
     async fn repointing_the_last_edge_collects_the_old_dependency() {
-        let db = memory_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let dependent = package(&db, "dependent", true).await;
         let old = package(&db, "old-provider", false).await;
         let new = package(&db, "new-provider", false).await;
@@ -649,7 +641,7 @@ mod dependency_tests {
     /// into the one already there rather than duplicated.
     #[tokio::test]
     async fn repointing_onto_an_edge_that_already_exists_merges() {
-        let db = memory_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let dependent = package(&db, "dependent", true).await;
         let old = package(&db, "old-provider", false).await;
         let new = package(&db, "new-provider", false).await;
@@ -674,7 +666,7 @@ mod dependency_tests {
     /// collection is reachability, not "did an edge just move".
     #[tokio::test]
     async fn a_dependency_another_package_still_needs_is_kept() {
-        let db = memory_db().await;
+        let db = aurcache_db::testing::memory_db().await;
         let dependent = package(&db, "dependent", true).await;
         let other = package(&db, "other", true).await;
         let old = package(&db, "old-provider", false).await;

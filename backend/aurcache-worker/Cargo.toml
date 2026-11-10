@@ -37,9 +37,8 @@ aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 tempfile = { workspace = true }
 aurcache-api = { path = "../aurcache-api" }
-aurcache-db = { path = "../aurcache-db" }
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 aurcache-ca = { path = "../aurcache-ca" }
 aurcache-utils = { path = "../aurcache-utils" }
 sea-orm = { workspace = true }
-sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
 zstd = "0.14"

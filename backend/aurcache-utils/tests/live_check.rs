@@ -1,15 +1,13 @@
 //! What a removal collects, and what it leaves alone.
 
 use aurcache_common::build_state::BuildState;
-use aurcache_db::migration::Migrator;
 use aurcache_db::packages::{self, SourceData};
 use aurcache_db::{dependencies, prelude::Dependencies};
 use aurcache_utils::package::delete::package_delete;
 use aurcache_utils::package::live_check::package_remove;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::snapshot::SnapshotStore;
-use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, PaginatorTrait, Set};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, PaginatorTrait, Set};
 
 /// A store over a checkout root that holds nothing: these tests are about which
 /// rows go, and removing a checkout that was never made is a no-op.
@@ -20,12 +18,6 @@ fn store() -> SnapshotStore {
 /// A repository nothing was ever published to.
 fn repo() -> Repository {
     Repository::new(tempfile::tempdir().unwrap().keep())
-}
-
-async fn memory_db() -> DatabaseConnection {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
-    db
 }
 
 async fn package(db: &DatabaseConnection, name: &str, directly_requested: bool) -> i32 {
@@ -76,7 +68,7 @@ async fn remaining(db: &DatabaseConnection) -> Vec<String> {
 /// dependencies below it, and the links along with them.
 #[tokio::test]
 async fn removing_a_root_collects_the_chain_under_it() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let root = package(&db, "root", true).await;
     let middle = package(&db, "middle", false).await;
     let leaf = package(&db, "leaf", false).await;
@@ -92,7 +84,7 @@ async fn removing_a_root_collects_the_chain_under_it() {
 /// A dependency two packages share outlives the first of them.
 #[tokio::test]
 async fn a_shared_dependency_waits_for_its_last_dependent() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let first = package(&db, "first", true).await;
     let second = package(&db, "second", true).await;
     let shared = package(&db, "shared", false).await;
@@ -113,7 +105,7 @@ async fn a_shared_dependency_waits_for_its_last_dependent() {
 /// with nothing above them. Rare in the AUR, but permanent when it happened.
 #[tokio::test]
 async fn a_dependency_cycle_is_collected_with_its_root() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let root = package(&db, "root", true).await;
     let left = package(&db, "left", false).await;
     let right = package(&db, "right", false).await;
@@ -130,7 +122,7 @@ async fn a_dependency_cycle_is_collected_with_its_root() {
 /// "is it in a cycle", is what decides.
 #[tokio::test]
 async fn a_cycle_something_still_needs_is_kept() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let leaving = package(&db, "leaving", true).await;
     let staying = package(&db, "staying", true).await;
     let left = package(&db, "left", false).await;
@@ -152,7 +144,7 @@ async fn a_cycle_something_still_needs_is_kept() {
 /// linked it up is not this removal's to collect.
 #[tokio::test]
 async fn an_unrelated_unlinked_package_is_left_alone() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let root = package(&db, "root", true).await;
     let dependency = package(&db, "dependency", false).await;
     needs(&db, root, dependency).await;
@@ -171,7 +163,7 @@ fn checkout_of(root: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// A removed package's checkout goes with its rows.
 #[tokio::test]
 async fn a_collected_package_takes_its_checkout() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let checkouts = tempfile::tempdir().unwrap();
     let store = SnapshotStore::with_checkout_root(checkouts.path().to_path_buf());
     let root = package(&db, "root", true).await;
@@ -196,7 +188,7 @@ async fn a_collected_package_takes_its_checkout() {
 /// requested: its row, and its checkout, stay.
 #[tokio::test]
 async fn a_package_still_depended_on_keeps_its_checkout() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let checkouts = tempfile::tempdir().unwrap();
     let store = SnapshotStore::with_checkout_root(checkouts.path().to_path_buf());
     let dependent = package(&db, "dependent", true).await;
@@ -214,7 +206,7 @@ async fn a_package_still_depended_on_keeps_its_checkout() {
 /// no caller can take rows, artifacts or checkout out from under a dependent.
 #[tokio::test]
 async fn deleting_a_package_something_needs_is_refused() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let dependent = package(&db, "dependent", true).await;
     let needed = package(&db, "needed", false).await;
     needs(&db, dependent, needed).await;
@@ -239,7 +231,7 @@ async fn deleting_a_package_something_needs_is_refused() {
 /// back to it.
 #[tokio::test]
 async fn an_update_collects_the_cycle_it_dropped_but_never_itself() {
-    let db = memory_db().await;
+    let db = aurcache_db::testing::memory_db().await;
     // `mid` is a dependency-only package being updated, its own dependent cut
     // off; `a` and `b` need each other and `b` needs `mid` back.
     let mid = package(&db, "mid", false).await;

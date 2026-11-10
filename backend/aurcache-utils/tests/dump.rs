@@ -4,15 +4,13 @@ use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::api::dump::{DUMP_SCHEMA_VERSION, MANIFEST_FILE, PACKAGES_FILE};
 use aurcache_common::build_state::BuildState;
 use aurcache_common::source::GitSourceSpec;
-use aurcache_db::migration::Migrator;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::Packages;
 use aurcache_db::{packages, settings, workers};
 use aurcache_utils::dump::{build_dump, write_archive};
 use aurcache_utils::services::Services;
 use flate2::read::GzDecoder;
-use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, Set};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -20,12 +18,6 @@ use std::sync::Arc;
 /// A repository of its own for a restore that publishes nothing new.
 fn test_repo() -> aurcache_utils::repository::Repository {
     aurcache_utils::repository::Repository::new(tempfile::tempdir().unwrap().keep())
-}
-
-async fn db() -> DatabaseConnection {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
-    db
 }
 
 async fn package(
@@ -98,7 +90,7 @@ async fn client_with_empty_official_repos() -> TestClient {
 
 #[tokio::test]
 async fn a_dump_carries_configuration_and_not_history() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     package(&db, "hello", true, None).await;
 
     let dump = build_dump(&db, "test", None).await.unwrap();
@@ -132,7 +124,7 @@ async fn a_dump_carries_configuration_and_not_history() {
 /// user now has to manage.
 #[tokio::test]
 async fn a_dependency_is_not_promoted_to_a_request() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     package(&db, "requested", true, None).await;
     package(&db, "pulled-in", false, None).await;
 
@@ -145,7 +137,7 @@ async fn a_dependency_is_not_promoted_to_a_request() {
 /// that a patch is present iff its file is, so the two cannot disagree.
 #[tokio::test]
 async fn a_patch_travels_as_a_file() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     package(&db, "patched", true, Some("--- a\n+++ b\n")).await;
     package(&db, "plain", true, None).await;
 
@@ -167,7 +159,7 @@ async fn a_patch_travels_as_a_file() {
 /// dump uses.
 #[tokio::test]
 async fn settings_are_keyed_by_pkgbase() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     let pkg_id = package(&db, "hello", true, None).await;
 
     for (key, value, scope) in [
@@ -205,7 +197,7 @@ async fn settings_are_keyed_by_pkgbase() {
 /// and restoring it would carry an unanswered question into the new instance.
 #[tokio::test]
 async fn only_approved_workers_are_carried() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     for (name, status) in [
         (
             "trusted",
@@ -243,7 +235,7 @@ async fn only_approved_workers_are_carried() {
 /// contract: the manifest first, and a schema version to refuse on.
 #[tokio::test]
 async fn the_archive_holds_the_documented_files() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     package(&db, "hello", true, None).await;
 
     let dump = build_dump(&db, "test", None).await.unwrap();
@@ -266,7 +258,7 @@ async fn the_archive_holds_the_documented_files() {
 /// kept in git shows real changes rather than reordering.
 #[tokio::test]
 async fn the_output_is_ordered_and_stable() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     for name in ["zzz", "aaa", "mmm"] {
         package(&db, name, true, None).await;
     }
@@ -285,7 +277,7 @@ async fn the_output_is_ordered_and_stable() {
 /// whole of what identifies it, and none of it can be worked out again.
 #[tokio::test]
 async fn a_git_source_is_carried_whole() {
-    let db = db().await;
+    let db = aurcache_db::testing::memory_db().await;
     packages::ActiveModel {
         name: Set("mine".to_string()),
         status: Set(BuildState::Active),
@@ -348,7 +340,7 @@ async fn dump_bytes(db: &DatabaseConnection) -> Vec<u8> {
 /// A dump round-trips: what comes out describes what went in.
 #[tokio::test]
 async fn a_dump_reloads_as_what_it_described() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, Some("--- a\n")).await;
     package(&source, "dep", false, None).await;
 
@@ -366,12 +358,12 @@ async fn a_dump_reloads_as_what_it_described() {
 /// useful thing to know before importing over a live instance.
 #[tokio::test]
 async fn a_preview_reports_without_applying() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "already-here", true, None).await;
     package(&source, "brand-new", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     package(&target, "already-here", true, None).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -394,11 +386,11 @@ async fn a_preview_reports_without_applying() {
 /// Overwrite is opt-in, and it changes what the preview promises.
 #[tokio::test]
 async fn overwrite_is_reported_as_overwrite() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     package(&target, "shared", true, None).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -420,11 +412,11 @@ async fn overwrite_is_reported_as_overwrite() {
 /// the one that cannot destroy configuration nobody meant to replace.
 #[tokio::test]
 async fn skip_leaves_the_existing_configuration_alone() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let id = package(&target, "shared", true, None).await;
     // Something the dump does not carry, so a wrongly-applied overwrite shows.
     let mut existing: packages::ActiveModel = Packages::find_by_id(id)
@@ -465,11 +457,11 @@ async fn skip_leaves_the_existing_configuration_alone() {
 /// Overwrite replaces the configuration the dump owns.
 #[tokio::test]
 async fn overwrite_replaces_the_configuration() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let id = package(&target, "shared", true, None).await;
     let mut existing: packages::ActiveModel = Packages::find_by_id(id)
         .one(&target)
@@ -509,7 +501,7 @@ async fn overwrite_replaces_the_configuration() {
 /// Settings come back under the right package, having travelled by name.
 #[tokio::test]
 async fn settings_are_restored_against_the_right_package() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     let pkg_id = package(&source, "hello", true, None).await;
     for (key, value, scope) in [
         ("version_check_interval", "600", None),
@@ -527,7 +519,7 @@ async fn settings_are_restored_against_the_right_package() {
     }
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let loaded = load_dump(&bytes).unwrap();
     aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &RestoreOptions::default())
         .await
@@ -552,7 +544,7 @@ async fn settings_are_restored_against_the_right_package() {
 /// its row.
 #[tokio::test]
 async fn an_unknown_setting_is_not_restored() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     // Written after the migrations ran, which remove it.
     for key in ["cpu_limit", "version_check_interval"] {
         settings::ActiveModel {
@@ -567,7 +559,7 @@ async fn an_unknown_setting_is_not_restored() {
     }
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let loaded = load_dump(&bytes).unwrap();
     assert!(
         loaded.settings.global.contains_key("cpu_limit"),
@@ -600,7 +592,7 @@ async fn an_unknown_setting_is_not_restored() {
 /// cheapest way to reach that state.
 #[tokio::test]
 async fn a_package_whose_source_fails_is_reported_as_failed() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     packages::ActiveModel {
         name: Set("broken".to_string()),
         status: Set(BuildState::Active),
@@ -623,7 +615,7 @@ async fn a_package_whose_source_fails_is_reported_as_failed() {
     .unwrap();
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let loaded = load_dump(&bytes).unwrap();
     let store = std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
         tempfile::tempdir().unwrap().keep(),
@@ -714,7 +706,7 @@ async fn a_restored_package_is_queued_to_build() {
     repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
         .unwrap();
 
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     packages::ActiveModel {
         name: Set("hello".to_string()),
         status: Set(BuildState::Successful),
@@ -736,7 +728,7 @@ async fn a_restored_package_is_queued_to_build() {
     .unwrap();
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     aurcache_utils::restore::apply(
@@ -777,11 +769,11 @@ async fn a_restored_package_is_queued_to_build() {
 /// is gone, and what the dump carries is present.
 #[tokio::test]
 async fn clear_replaces_what_was_here() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "from-dump", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     package(&target, "only-here", true, None).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -811,7 +803,7 @@ async fn clear_replaces_what_was_here() {
 /// on contact rather than by a name either instance chose.
 #[tokio::test]
 async fn workers_are_restored_by_fingerprint() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     workers::ActiveModel {
         name: Set("builder".to_string()),
@@ -843,7 +835,7 @@ async fn workers_are_restored_by_fingerprint() {
     .unwrap();
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let loaded = load_dump(&bytes).unwrap();
     aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &RestoreOptions::default())
         .await
@@ -870,7 +862,7 @@ async fn workers_are_restored_by_fingerprint() {
 /// written by hand in the documented shape restored as one unknown arch.
 #[tokio::test]
 async fn a_workers_lists_travel_as_lists() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     workers::ActiveModel {
         name: Set("builder".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
@@ -890,7 +882,7 @@ async fn a_workers_lists_travel_as_lists() {
     assert_eq!(dump.workers[0].arches, ["x86_64", "aarch64"]);
     assert_eq!(dump.workers[0].package_affinity, ["big-one", "other"]);
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let loaded = load_dump(&dump_bytes(&source).await).unwrap();
     aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &RestoreOptions::default())
         .await
@@ -904,7 +896,7 @@ async fn a_workers_lists_travel_as_lists() {
 /// dump says who to trust, not how this server should schedule.
 #[tokio::test]
 async fn an_already_trusted_worker_keeps_its_routing() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     workers::ActiveModel {
         name: Set("builder".to_string()),
@@ -922,7 +914,7 @@ async fn an_already_trusted_worker_keeps_its_routing() {
     .unwrap();
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     workers::ActiveModel {
         name: Set("same-machine-other-name".to_string()),
         status: Set(aurcache_common::api::worker::ApprovalStatus::Approved),
@@ -953,7 +945,7 @@ async fn an_already_trusted_worker_keeps_its_routing() {
 /// dump kept beside ordinary backups must not contain a key that mints workers.
 #[tokio::test]
 async fn a_default_dump_carries_no_secrets() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     aurcache_db::api_tokens::ActiveModel {
         username: Set("alice".to_string()),
@@ -988,7 +980,7 @@ async fn a_default_dump_carries_no_secrets() {
 /// and says so in the manifest.
 #[tokio::test]
 async fn a_private_dump_carries_the_ca_and_says_so() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     aurcache_db::api_tokens::ActiveModel {
         username: Set("alice".to_string()),
@@ -1044,7 +1036,7 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
 /// in the mode whose promise is that it only adds.
 #[tokio::test]
 async fn restoring_does_not_touch_the_ca_unless_asked() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     let src_ca = tempfile::tempdir().unwrap();
     aurcache_ca::Ca::load_or_create(src_ca.path()).unwrap();
@@ -1055,7 +1047,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
     )
     .unwrap();
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let target_ca = tempfile::tempdir().unwrap();
     std::fs::write(target_ca.path().join("ca-key.pem"), "MINE").unwrap();
 
@@ -1103,7 +1095,7 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
 /// Asked for them, they are taken -- and the key lands owner-readable only.
 #[tokio::test]
 async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     aurcache_db::api_tokens::ActiveModel {
         username: Set("alice".to_string()),
@@ -1123,7 +1115,7 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
     )
     .unwrap();
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let target_ca = tempfile::tempdir().unwrap();
     std::fs::write(target_ca.path().join("ca-key.pem"), "MINE").unwrap();
 
@@ -1177,11 +1169,11 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
 /// its configuration alone -- it is `skip` plus that one thing.
 #[tokio::test]
 async fn merge_patches_adopts_a_patch_the_instance_lacks() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, Some("--- from-dump\n")).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let id = package(&target, "shared", true, None).await;
     // Local configuration the dump does not match, to show it survives.
     let mut existing: packages::ActiveModel = Packages::find_by_id(id)
@@ -1228,11 +1220,11 @@ async fn merge_patches_adopts_a_patch_the_instance_lacks() {
 /// The instance's own patch is never replaced by the dump's absence of one.
 #[tokio::test]
 async fn merge_patches_keeps_the_instances_own_patch() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let id = package(&target, "shared", true, Some("--- mine\n")).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -1266,12 +1258,12 @@ async fn merge_patches_keeps_the_instances_own_patch() {
 /// between: the import is refused, and nothing is written.
 #[tokio::test]
 async fn two_patches_for_one_package_refuse_the_import() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "shared", true, Some("--- from-dump\n")).await;
     package(&source, "also-new", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     package(&target, "shared", true, Some("--- mine\n")).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -1309,12 +1301,12 @@ async fn two_patches_for_one_package_refuse_the_import() {
 /// which is the whole reason to offer one.
 #[tokio::test]
 async fn a_preview_names_the_conflicting_packages() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     package(&source, "clash", true, Some("--- from-dump\n")).await;
     package(&source, "fine", true, None).await;
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     package(&target, "clash", true, Some("--- mine\n")).await;
 
     let loaded = load_dump(&bytes).unwrap();
@@ -1384,7 +1376,7 @@ fn git_package(dir: &std::path::Path, name: &str, depends: &[&str]) -> GitSource
 /// AUR.
 #[tokio::test]
 async fn a_dependency_only_package_survives_the_restore() {
-    let source = db().await;
+    let source = aurcache_db::testing::memory_db().await;
     let sources = tempfile::tempdir().unwrap();
     for (name, requested, depends) in [
         ("aaa", true, &[][..]),
@@ -1410,7 +1402,7 @@ async fn a_dependency_only_package_survives_the_restore() {
     }
     let bytes = dump_bytes(&source).await;
 
-    let target = db().await;
+    let target = aurcache_db::testing::memory_db().await;
     let TestClient { client, _repos } = client_with_empty_official_repos().await;
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
     aurcache_utils::restore::apply(

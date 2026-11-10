@@ -269,16 +269,14 @@ fn the_migration_is_recorded_under_its_own_name() {
 /// than leaving a half-reverted database.
 #[tokio::test]
 async fn going_back_to_0_5_is_refused() {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
+    let db = crate::testing::memory_db().await;
     assert!(Migrator::down(&db, None).await.is_err());
 }
 
 /// A new instance has nothing to backfill, so nothing is queued.
 #[tokio::test]
 async fn a_new_instance_queues_no_backfill() {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
+    let db = crate::testing::memory_db().await;
     assert_eq!(
         column(&db, "SELECT CAST(COUNT(*) AS TEXT) FROM operations").await,
         ["0"]

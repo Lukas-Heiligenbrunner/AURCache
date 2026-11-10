@@ -434,15 +434,13 @@ mod tests {
     use aurcache_activitylog::activity_utils::ActivityLog;
     use aurcache_common::build_state::BuildState;
     use aurcache_db::lists::JsonList;
-    use aurcache_db::migration::Migrator;
     use aurcache_db::packages::{self, GitSourceSpec, SourceData};
     use aurcache_db::prelude::Packages;
     use aurcache_deps::AurClient;
     use aurcache_utils::repository::Repository;
     use aurcache_utils::services::Services;
     use aurcache_utils::snapshot::SnapshotStore;
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection, EntityTrait};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
     use std::sync::Arc;
 
     async fn insert(db: &DatabaseConnection, name: &str, source_data: SourceData) -> i32 {
@@ -491,8 +489,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = aurcache_db::testing::memory_db().await;
         let aur = insert(
             &db,
             "demo",

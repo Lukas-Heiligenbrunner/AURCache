@@ -3,12 +3,10 @@
 
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
-use aurcache_db::migration::Migrator;
 use aurcache_db::prelude::{Builds, Files, Packages};
 use aurcache_utils::publish::{interrupted, publish_build, publish_with_recovery};
 use aurcache_utils::repository::Repository;
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, EntityTrait};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -47,9 +45,7 @@ fn filename(pkgname: &str, pkgver: &str) -> String {
 
 async fn db() -> DatabaseConnection {
     quiet_logs();
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
-    db
+    aurcache_db::testing::memory_db().await
 }
 
 async fn package(db: &DatabaseConnection, id: i32, name: &str) {

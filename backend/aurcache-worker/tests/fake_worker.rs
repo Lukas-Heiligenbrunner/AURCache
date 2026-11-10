@@ -28,16 +28,12 @@ use aurcache_common::worker::{BuildOutcome, ClaimRequest, CompleteReport, Mirror
 use aurcache_db::builds;
 use aurcache_db::files;
 use aurcache_db::helpers::worker_store;
-use aurcache_db::migration::Migrator;
 use aurcache_utils::settings;
 use aurcache_worker_core::client::{WorkerClient, fetch_and_pin_ca};
 use aurcache_worker_core::config::CoreConfig;
 use aurcache_worker_core::enroll::ensure_enrolled;
 use aurcache_worker_core::identity::Identity;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
-};
-use sea_orm_migration::MigratorTrait;
+use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 /// Craft a minimal but structurally valid `*.pkg.tar.zst`: a zstd-compressed
 /// tar containing a single `.PKGINFO` with the fields `repo_add` requires
@@ -138,8 +134,7 @@ async fn fake_worker_protocol_roundtrip() {
     }
 
     // In-memory DB with the full schema, seeded with two enqueued x86_64 builds.
-    let db = Database::connect("sqlite::memory:").await.unwrap();
-    Migrator::up(&db, None).await.unwrap();
+    let db = aurcache_db::testing::memory_db().await;
     seed_build(&db, 1, "x86_64", 1000).await;
     seed_build(&db, 2, "x86_64", 2000).await;
 

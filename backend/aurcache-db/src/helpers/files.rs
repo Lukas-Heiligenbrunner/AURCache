@@ -73,17 +73,14 @@ pub async fn total_size<C: ConnectionTrait>(db: &C) -> Result<Option<i64>, DbErr
 #[cfg(test)]
 mod tests {
     use super::total_size;
-    use crate::migration::Migrator;
     use crate::packages::SourceData;
     use crate::{files, packages};
     use aurcache_common::build_state::BuildState;
     use pacman_mirrors::platforms::Platform;
-    use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, Set};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm::{ActiveModelTrait, DatabaseConnection, Set};
 
     async fn repository(sizes: &[Option<i64>]) -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = crate::testing::memory_db().await;
         let package = packages::ActiveModel {
             name: Set("hello".to_string()),
             status: Set(BuildState::Successful),

@@ -180,9 +180,6 @@ pub async fn active<C: ConnectionTrait>(
 #[cfg(test)]
 mod tests {
     use super::{KIND_BULK_ADD, append, create, entries_after, get};
-    use crate::migration::Migrator;
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -242,8 +239,7 @@ mod tests {
     /// single-statement append relies on.
     #[tokio::test]
     async fn appends_accumulate_in_sql() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = crate::testing::memory_db().await;
         let id = create(&db, KIND_BULK_ADD, 2).await.unwrap();
 
         append(&db, id, 1, 0, &[Entry { name: "a".into() }], false)
@@ -268,8 +264,7 @@ mod tests {
     /// old read-then-write's early return.
     #[tokio::test]
     async fn appending_to_a_missing_operation_is_a_no_op() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let db = crate::testing::memory_db().await;
         append(&db, 999, 1, 0, &[Entry { name: "a".into() }], true)
             .await
             .unwrap();

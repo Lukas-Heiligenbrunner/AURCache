@@ -266,13 +266,10 @@ mod build_number_tests {
 #[cfg(test)]
 mod transaction_tests {
     use super::*;
-    use sea_orm::Database;
-    use sea_orm_migration::MigratorTrait;
 
     #[tokio::test]
     async fn a_failed_package_refresh_rolls_back_each_queue_mutation() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        crate::migration::Migrator::up(&db, None).await.unwrap();
+        let db = crate::testing::memory_db().await;
         db.execute_unprepared(
             "INSERT INTO packages (id, name, platforms) VALUES (1, 'hello', 'x86_64')",
         )

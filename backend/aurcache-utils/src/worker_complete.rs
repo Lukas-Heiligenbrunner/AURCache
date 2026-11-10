@@ -542,15 +542,8 @@ pub async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurcache_db::migration::Migrator;
-    use sea_orm::{Database, DatabaseConnection};
-    use sea_orm_migration::MigratorTrait;
 
-    async fn setup() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
-        db
-    }
+    use sea_orm::DatabaseConnection;
 
     async fn pkg(db: &DatabaseConnection, id: i32) {
         db.execute_unprepared(&format!(
@@ -589,7 +582,7 @@ mod tests {
     /// reaches the success path.
     #[tokio::test]
     async fn peak_memory_is_recorded_for_a_failed_build() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 1, 1, BuildState::Active, "1").await;
 
@@ -609,7 +602,7 @@ mod tests {
     /// not measure stays unknown rather than becoming 0.
     #[tokio::test]
     async fn disk_usage_is_recorded_part_by_part() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 1, 1, BuildState::Active, "1").await;
 
@@ -636,7 +629,7 @@ mod tests {
     /// build's page to point an operator at.
     #[tokio::test]
     async fn a_kept_failure_records_where_and_until_when() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 1, 1, BuildState::Active, "1").await;
 
@@ -661,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_build_still_names_the_worker_that_ran_it() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
 
@@ -700,7 +693,7 @@ mod tests {
     /// can go, because the old one is no longer what it needs.
     #[tokio::test]
     async fn a_waiting_build_starts_once_its_dependency_is_repointed() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await; // the dependent
         pkg(&db, 2).await; // the replacement, already built
         build(&db, 20, 2, BuildState::Successful, "1").await;
@@ -720,7 +713,7 @@ mod tests {
     /// that still cannot resolve the rest.
     #[tokio::test]
     async fn a_waiting_build_stays_waiting_while_another_dependency_is_unbuilt() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await; // the dependent
         pkg(&db, 2).await; // the repointed dependency, built
         pkg(&db, 3).await; // a second dependency, never built
@@ -748,7 +741,7 @@ mod tests {
     /// replacement has not been built.
     #[tokio::test]
     async fn a_queued_build_waits_when_its_new_dependency_is_not_built() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         pkg(&db, 2).await; // the replacement, never built
         build(&db, 10, 1, BuildState::Enqueued, "NULL").await;
@@ -762,7 +755,7 @@ mod tests {
     /// A build a worker is already running is none of the queue's business.
     #[tokio::test]
     async fn a_running_build_is_left_alone() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         pkg(&db, 2).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
@@ -776,7 +769,7 @@ mod tests {
     /// Dropping the last dependency leaves nothing to wait for.
     #[tokio::test]
     async fn a_waiting_build_starts_when_its_last_dependency_is_dropped() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::WaitingForDeps, "NULL").await;
 
@@ -787,7 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn owned_active_guard() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
         assert!(assert_owned_active(&db, 5, 10).await.is_ok());
@@ -814,7 +807,7 @@ mod tests {
     /// as finished until it is published.
     #[tokio::test]
     async fn an_accepted_build_is_published_without_its_worker() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
         db.execute_unprepared("UPDATE builds SET lease_expires_at = 999 WHERE id = 10")
@@ -837,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn failure_is_terminal_not_requeued() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         build(&db, 10, 1, BuildState::Active, "5").await;
         complete_failure(&db, 10, 5).await.unwrap();
@@ -850,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_by_non_owner_is_discarded() {
-        let db = setup().await;
+        let db = aurcache_db::testing::memory_db().await;
         pkg(&db, 1).await;
         // Build reclaimed and re-handed to worker 6.
         build(&db, 10, 1, BuildState::Active, "6").await;
