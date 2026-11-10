@@ -60,7 +60,10 @@ done
 TARGET=$(cargo metadata --manifest-path backend/Cargo.toml --format-version 1 --no-deps \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 script='set -euo pipefail
-pacman -Sy --noconfirm --needed btrfs-progs sudo util-linux e2fsprogs >/dev/null
+# Upgrade the base image with the refreshed databases: installing against newer
+# repositories alone can break dependencies on libraries already in the image.
+# Keep the pacman output so dependency conflicts are visible in CI.
+pacman -Syu --noconfirm --needed btrfs-progs sudo util-linux e2fsprogs
 # The tests make and mount their own images; `sudo -n` as root needs no grant.
 export AURCACHE_POOL_TESTS=1
 status=0
