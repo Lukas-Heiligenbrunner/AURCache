@@ -71,6 +71,11 @@ Options:
                             cache backend, one scope per image. The step needs
                             the runtime's token in its environment (see
                             docker-worker-publish.yml).
+      --oci-dir DIR         Write each image to DIR/<image> as an OCI image
+                            layout, every platform in one index, instead of
+                            pushing or loading it. For handing a build to
+                            another job: copy it with `skopeo copy --all`
+                            (see docker-pr-build.yml).
       --packages-dir DIR    Also write the AURCache packages the worker/hybrid
                             images built into DIR, for a native install. The
                             packager stage is replayed from the build cache, so
@@ -95,6 +100,7 @@ toolchain_repo=
 toolchain_repo_name=
 builder=$DEFAULT_BUILDER
 packages_dir=
+oci_dir=
 cache=
 registry=
 
@@ -108,6 +114,7 @@ while (($#)); do
         --toolchain-repo-name) toolchain_repo_name=$2; shift 2 ;;
         --builder) builder=$2; shift 2 ;;
         --packages-dir) packages_dir=$2; shift 2 ;;
+        --oci-dir) oci_dir=$2; shift 2 ;;
         --cache) cache=$2; shift 2 ;;
         -h | --help) usage; exit 0 ;;
         -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -125,6 +132,10 @@ if [[ -z $registry ]]; then
     exit 2
 fi
 ((${#tags[@]})) || tags=(latest)
+if ((push)) && [[ -n $oci_dir ]]; then
+    echo "error: --push and --oci-dir are two destinations; pick one" >&2
+    exit 2
+fi
 if [[ -n $cache && $cache != gha ]]; then
     echo "error: unknown cache backend '$cache' (expected gha)" >&2
     exit 2
@@ -164,11 +175,12 @@ done
 
 # The default `docker` driver builds for one architecture only, and fails a
 # multi-platform build with a message that does not say so; it cannot write
-# `type=local` output (--packages-dir) or save a cache to GitHub's backend
-# either. Any of those uses a docker-container builder, created rather than
-# demanded, since one is as good as another.
+# `type=local` output (--packages-dir), export a multi-platform OCI layout
+# (--oci-dir) or save a cache to GitHub's backend either. Any of those uses a
+# docker-container builder, created rather than demanded, since one is as
+# good as another.
 use_container_builder=0
-if [[ $platforms == *,* || -n $packages_dir || -n $cache ]]; then
+if [[ $platforms == *,* || -n $packages_dir || -n $oci_dir || -n $cache ]]; then
     use_container_builder=1
 fi
 builder_args=()
@@ -210,6 +222,9 @@ fi
 
 if ((push)); then
     output_args=(--push)
+elif [[ -n $oci_dir ]]; then
+    # Set per image in the loop below: each gets a layout of its own.
+    output_args=()
 elif ((containerd_store)); then
     output_args=(--load)
 elif [[ $platforms == *,* ]]; then
@@ -280,12 +295,18 @@ for image in "${selected[@]}"; do
             --cache-to "type=$cache,scope=$image,mode=max")
     fi
 
+    image_output=("${output_args[@]}")
+    if [[ -n $oci_dir ]]; then
+        mkdir -p "$oci_dir"
+        image_output=(--output "type=oci,tar=false,dest=$oci_dir/$image")
+    fi
+
     docker buildx build "${builder_args[@]}" \
         --platform "$platforms" \
         --file "$REPO_ROOT/${DOCKERFILES[$image]}" \
         "${tag_args[@]}" \
         "${image_args[@]}" \
-        "${output_args[@]}" \
+        "${image_output[@]}" \
         "$REPO_ROOT"
 done
 
@@ -315,6 +336,8 @@ fi
 echo
 if ((push)); then
     echo "==> pushed $images as ${tags[*]} to $registry"
+elif [[ -n $oci_dir ]]; then
+    echo "==> wrote $images for $platforms to $oci_dir"
 elif ((containerd_store)) || [[ $platforms != *,* ]]; then
     echo "==> built and loaded $images for $platforms"
 else

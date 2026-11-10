@@ -11,9 +11,6 @@ on:
       - master
     tags:
       - '*'
-  pull_request:
-    branches:
-      - master
 
 permissions:
   contents: read
@@ -22,19 +19,11 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # Never run this job at all for PRs from forks: pull_request_target grants
-    # base-repo secrets/token (packages: write) to the job, and there is no way
-    # to check out or build fork-authored code in that context without risking
-    # credential exfiltration (e.g. via a malicious build.rs/Dockerfile RUN
-    # step reading them off disk or from the environment). Same-repo PRs
-    # (renovate, internal branches) and push/tag events are unaffected.
-    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
           persist-credentials: false
           # packaging/ holds AUR submodules; the image builds read the
           # PKGBUILDs from them.
@@ -47,7 +36,6 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -57,9 +45,7 @@ jobs:
       - name: Determine image tag
         id: vars
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo "tag=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
+          if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
             echo "tag=git" >> "$GITHUB_OUTPUT"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
@@ -67,14 +53,13 @@ jobs:
             echo "tag=unknown" >> "$GITHUB_OUTPUT"
           fi
 
-      # A pull request builds without pushing, which still checks that every
-      # architecture builds. A release is `latest` as well.
+      # Pull requests build in docker-pr-build.yml, which holds no registry
+      # credentials. A release is `latest` as well.
       - name: Build server with the local publishing script
         if: steps.vars.outputs.tag != 'unknown'
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.tag }}
         run: |
-          args=(--images server --tag "$IMAGE_TAG")
+          args=(--images server --push --tag "$IMAGE_TAG")
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--tag latest); fi
-          if [[ "$GITHUB_EVENT_NAME" != pull_request ]]; then args+=(--push); fi
           ./scripts/build-images.sh "${args[@]}" "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
