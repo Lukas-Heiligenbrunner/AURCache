@@ -50,7 +50,7 @@ fn main() {
 
     // What makes a rebuild automatic. Cargo walks a directory given here, so
     // the sources are covered by naming `src` rather than every file in it.
-    for path in ["src", "Cargo.toml", "Cargo.lock", "index.html"] {
+    for path in ["src", "Cargo.toml", "Cargo.lock", "index.html", "vendor"] {
         println!("cargo:rerun-if-changed={}", frontend.join(path).display());
     }
     // The nested wasm build imports these local crates. Cargo does not track
@@ -74,6 +74,11 @@ fn main() {
     build_wasm(&frontend);
     bindgen(&frontend);
     install(&frontend.join("dist"), &web);
+    // daisyUI and Tailwind's in-browser compiler, which the page loads as
+    // `/vendor/...` rather than from their CDNs: a network that cannot reach
+    // those left the UI unstyled. See frontend-rs/vendor/README.md.
+    std::fs::create_dir_all(web.join("vendor")).expect("create web/vendor/");
+    copy_tree(&frontend.join("vendor"), &web.join("vendor"));
     // The project logo, shared with the README and the docs rather than
     // copied into the frontend: the sidebar shows it and the page uses it as
     // its favicon, both as `/icon.svg`.
