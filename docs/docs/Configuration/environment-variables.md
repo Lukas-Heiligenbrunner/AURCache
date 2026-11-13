@@ -145,7 +145,8 @@ own environment. See [Build Workers](../workers/index.md).
 | WORKER_SPILL_DELAY      | Duration | How long before worker priority stops holding a job back      | `60s`      |
 | WORKER_LIVENESS_TIMEOUT | Duration | How long before a quiet worker stops counting as available    | `60s`      |
 | MAX_ATTEMPTS            | Integer | Requeues before a build is failed for good                   | 3       |
-| LEASE_TTL               | Duration | How long a build's lease lasts without a heartbeat before it is requeued | `60s` |
+| LEASE_TTL               | Duration | How long a build's lease lasts without a heartbeat before it is requeued. Workers are told at registration | `60s` |
+| WORKER_HEARTBEAT_INTERVAL | Duration | How often workers send a heartbeat; keep it well inside `LEASE_TTL`. Workers are told at registration | `15s` |
 | REAP_INTERVAL           | Duration | How often expired leases are looked for                      | `20s`   |
 | REAP_BACKSTOP_GRACE     | Duration | How far past its own timeout a build that still heartbeats is taken back anyway | `5m` |
 | WORKER_CERT_VALIDITY_DAYS | Integer | Lifetime of an issued worker certificate                    | 3650    |

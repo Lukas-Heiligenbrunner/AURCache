@@ -21,13 +21,11 @@ use aurcache_common::api::log::{BuildRef, WorkerRef};
 use aurcache_common::api::worker::{
     ApprovalStatus, WorkerConfigUpdate, WorkerConfigView, WorkerJoinInfo, WorkerSummary,
 };
-use aurcache_common::build_state::BuildState;
 use aurcache_common::worker::{
-    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, JobStatus,
-    RegisterRequest, RegisterStatus, WorkerLogReport,
+    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, RegisterRequest,
+    RegisterStatus, WorkerLogReport,
 };
 use aurcache_db::helpers::{worker_jobs, worker_store};
-use aurcache_db::prelude::Builds;
 use aurcache_db::workers;
 use aurcache_utils::build_logger::append_build_output;
 use aurcache_utils::repository::Repository;
@@ -44,7 +42,7 @@ use rocket::mtls::Certificate;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::serde::json::Json;
 use rocket::{Data, State, get, patch, post};
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -176,7 +174,6 @@ impl<'r> FromRequest<'r> for WorkerAuth {
     job_artifact,
     complete_job,
     heartbeat,
-    job_status,
     list_workers,
     worker_config,
     update_worker_config,
@@ -206,7 +203,6 @@ pub fn worker_protocol_routes() -> Vec<rocket::Route> {
         job_artifact,
         complete_job,
         heartbeat,
-        job_status,
     ]
 }
 
@@ -323,7 +319,7 @@ async fn register_status_for(
         signed_cert,
         ca_cert,
         repo_template: Some(REPO_TEMPLATE.clone()),
-        protocol,
+        agreement: protocol.map(|protocol| worker_policy().agreement(protocol)),
     }))
 }
 
@@ -714,42 +710,6 @@ pub async fn heartbeat(
     let response =
         aurcache_utils::worker_heartbeat::heartbeat(db, al, &mut auth.worker, &input).await?;
     Ok(Json(response))
-}
-
-/// Poll whether a cancel was requested for a specific job.
-///
-/// A build the worker still owns is cancelled when the server moved it out of
-/// `ACTIVE` (an operator Stop, or the reaper abandoning it). A build that left
-/// this worker's hands entirely — retried, reclaimed by someone else, or
-/// already terminal — reads as cancelled too: the worker must stop touching it.
-/// Only an `ACTIVE` row owned by *another* worker is refused, because that is
-/// the one case where answering would leak a job descriptor the reporter never
-/// had. Without row reuse that refusal is unreachable in practice, and 404 does
-/// the rest of the withholding.
-#[utoipa::path(get, path = "/worker/jobs/{build_id}/status", responses(
-    (status = 200, description = "Whether the worker should stop this build", body = JobStatus),
-    (status = 404, description = "No such build"),
-        WorkerAuthRefusal,
-))]
-#[get("/worker/jobs/<build_id>/status")]
-pub async fn job_status(
-    db: &State<DatabaseConnection>,
-    auth: WorkerAuth,
-    build_id: i32,
-) -> Result<Json<JobStatus>, ApiError> {
-    let db = db.inner();
-    let build = Builds::find_by_id(build_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| err(Status::NotFound, "build not found"))?;
-    let mine = build.worker_id == Some(auth.worker.id);
-    if build.status == BuildState::Active && !mine {
-        return Err(err(Status::Forbidden, "not owner"));
-    }
-    // Cancel is signalled by leaving ACTIVE while owned, or by no longer being
-    // this worker's to run.
-    let cancel_requested = build.status != BuildState::Active || !mine;
-    Ok(Json(JobStatus { cancel_requested }))
 }
 
 // ----------------------------------------------------------------------------

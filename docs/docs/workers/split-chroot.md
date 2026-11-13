@@ -371,8 +371,6 @@ early, oldest first, when the pool needs the room.
 |---|---|---|---|
 | `WORKER_BUILD_TIMEOUT` | Duration | Kill a build after this long (`0` disables), or after the package's job timeout when that is shorter | `3h` |
 | `WORKER_POLL_INTERVAL` | Duration | Time between job claims when idle | `10s` |
-| `WORKER_HEARTBEAT_INTERVAL` | Duration | Time between heartbeats | `15s` |
-| `LEASE_TTL` | Duration | How long before a silent worker's build is requeued | `60s` |
 | `WORKER_KEYSERVER` | String | Keyserver for `validpgpkeys` | `hkps://keyserver.ubuntu.com` |
 
 Durations are a plain number of seconds, or terms with a unit that add up:

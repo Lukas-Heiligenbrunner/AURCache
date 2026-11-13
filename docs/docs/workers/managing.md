@@ -228,11 +228,14 @@ needs nothing.
 
 ## Builds that never finish
 
-A worker sends a heartbeat every `WORKER_HEARTBEAT_INTERVAL` seconds. If one
-stops, its builds are requeued after `LEASE_TTL` and retried, up to
+A worker sends a heartbeat every `WORKER_HEARTBEAT_INTERVAL` (15 seconds by
+default). If they stop, its builds are requeued after `LEASE_TTL` (a minute) and retried, up to
 `MAX_ATTEMPTS` times before being failed for good. A build that runs
 implausibly long is reclaimed the same way even if its worker is still
 heartbeating, which covers a hung build on a healthy machine.
+
+Both are set on the server, which tells each worker when it registers; see
+[Workers](../Configuration/environment-variables.md).
 
 If a build is genuinely just slow, raise the limit it ran into; its log names
 it. A build stops at the shorter of its package's job timeout (an hour by

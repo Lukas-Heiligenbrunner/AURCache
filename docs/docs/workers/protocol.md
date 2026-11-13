@@ -66,8 +66,9 @@ either: workers are released apart from the server and may come from anywhere.
 Only protocol 1 exists so far.
 
 - The worker sends the protocols it speaks as a range, `{"min": 1, "max": 1}`,
-  in `protocols` when it registers. The server answers with the newest one
-  both speak, in `protocol`.
+  in `protocols` when it registers. The server answers with an `agreement`:
+  the newest protocol both speak (`protocol`), and the
+  [lease timing](#leases-and-heartbeats) the worker is to keep to.
 - No protocol in common: the registration is refused with `426 Upgrade
   Required`, and the body says what each side speaks. Nothing about the worker
   is recorded. Retry slowly (the workers here wait five minutes), because only
@@ -82,7 +83,8 @@ Within a protocol, messages only change in ways a peer cannot notice (see
 optional, and its absence means what it meant before; a value added to an
 enumeration is one its fallback reads acceptably. Anything else -- a field
 becoming required or changing meaning, a value an older peer would misread, a
-route removed, a change in timing -- comes with the next protocol number. The
+route removed -- comes with the next protocol number. Lease timing is not part
+of a protocol: the server sets it, and sends it in every agreement. The
 registration messages and the CA routes are exchanged before any protocol is
 agreed, so they belong to none, and only ever gain optional fields.
 
@@ -160,9 +162,12 @@ otherwise, go to `POST /api/worker/log`.
 
 ## Leases and heartbeats
 
-A claim starts a lease on the build, 60 seconds by default (`LEASE_TTL`, the
-same on both sides). The worker keeps it with `POST /api/worker/heartbeat`,
-every 15 seconds by default, listing the builds it is running:
+A claim starts a lease on the build, lasting `lease_ttl_secs` from the
+registration's `agreement`. The worker keeps it with `POST
+/api/worker/heartbeat` every `heartbeat_interval_secs`, listing the builds it
+is running. Both are the server's to set (`LEASE_TTL`, 60 seconds by default,
+and `WORKER_HEARTBEAT_INTERVAL`, 15), and a worker takes them from its latest
+registration, since a server that restarted may have been given new ones:
 
 - Each listed build's lease is renewed.
 - A build the worker holds but no longer lists is taken as dropped, and
@@ -185,15 +190,8 @@ setting resolved to on the worker (`received_revision`, `effective`).
 ## Cancellation
 
 A build is stopped by an operator, or abandoned by the server. Either way, the
-worker learns it from:
-
-- the `cancel` list in the heartbeat's answer; or
-- `GET /api/worker/jobs/{build_id}/status`, which a worker can poll while the
-  build runs and which says `cancel_requested`. It answers from the same
-  condition as the heartbeat, so the workers here rely on the heartbeat
-  alone.
-
-The worker then stops the build and reports it `canceled`.
+worker learns it from the `cancel` list in the heartbeat's answer, then stops
+the build and reports it `canceled`.
 
 ## Mirrorlists
 

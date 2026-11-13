@@ -92,7 +92,6 @@ mod tests {
             "AURCACHE_ENROLLMENT_TOKEN",
             "AURCACHE_ENROLLMENT_DIR",
             "AURCACHE_SERVER_CA_FINGERPRINT",
-            "WORKER_HEARTBEAT_INTERVAL",
         ] {
             assert!(
                 !declared.contains(forbidden),

@@ -301,7 +301,6 @@ mod tests {
             "AURCACHE_EMBEDDED_WORKER_SECRET",
             "AURCACHE_ENROLLMENT_DIR",
             "AURCACHE_SERVER_CA_FINGERPRINT",
-            "WORKER_HEARTBEAT_INTERVAL",
         ] {
             assert!(
                 !declared.contains(forbidden),

@@ -32,8 +32,8 @@ use aurcache_common::api::activity::Severity;
 use aurcache_common::api::builds::{DiskUsage, KeptBuild};
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::worker::{
-    BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
-    JobStatus, JobVcsSource, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, ProtocolRange,
+    Agreement, BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse,
+    JobDescriptor, JobVcsSource, MirrorlistOffer, MirrorlistPreference, PROTOCOLS, ProtocolRange,
     RegisterRequest, RegisterStatus, WorkerLogReport,
 };
 use aurcache_common::worker_config::{
@@ -274,13 +274,6 @@ fn protocol_1_messages_still_decode() {
     );
     check(
         "1",
-        "job_status",
-        &[JobStatus {
-            cancel_requested: true,
-        }],
-    );
-    check(
-        "1",
         "worker_log_report",
         &[WorkerLogReport {
             severity: Severity::Warning,
@@ -320,7 +313,11 @@ fn registration_messages_still_decode() {
             repo_template: Some(
                 "[aurcache]\nServer = http://%AURCACHE_HOST%:8081/$arch\n".to_string(),
             ),
-            protocol: Some(1),
+            agreement: Some(Agreement {
+                protocol: 1,
+                lease_ttl_secs: 60,
+                heartbeat_interval_secs: 15,
+            }),
         }],
     );
 }

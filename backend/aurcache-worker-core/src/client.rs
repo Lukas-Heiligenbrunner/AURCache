@@ -13,8 +13,8 @@ use crate::repo::RepoSection;
 use anyhow::{Context, Result, bail};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::{
-    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, RegisterRequest,
-    RegisterStatus, WorkerLogReport,
+    Agreement, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
+    RegisterRequest, RegisterStatus, WorkerLogReport,
 };
 use percent_encoding::{AsciiSet, CONTROLS};
 use reqwest::{Body, Certificate, Client, Identity, RequestBuilder, Response, StatusCode};
@@ -170,6 +170,12 @@ pub struct WorkerClient {
     /// The last registration the server accepted from this client, sent again
     /// when the server asks for it (see [`Self::exchange`]).
     registration: std::sync::Mutex<Option<RegisterRequest>>,
+    /// What the server answered the last registration with: the protocol and
+    /// the lease timing this worker keeps to. Replaced on every registration,
+    /// including the ones [`Self::exchange`] makes when the server restarted,
+    /// since a restarted server may have been given other timing. `None` only
+    /// on an enrollment client that has not registered.
+    agreement: std::sync::Mutex<Option<Agreement>>,
 }
 
 /// Fetch the server CA (PEM + fingerprint) using a deliberately
@@ -245,19 +251,21 @@ impl WorkerClient {
             http,
             base: base.to_string(),
             registration: std::sync::Mutex::new(None),
+            agreement: std::sync::Mutex::new(None),
         })
     }
 
     /// Build an authenticated mTLS client presenting the worker certificate.
     ///
     /// `registration` is the one the server accepted, sent again whenever it
-    /// asks this worker to register; `repo` the section its builds use. Both
-    /// are required here rather than set afterwards, so no path to a client
-    /// can leave either out.
+    /// asks this worker to register; `agreement` what the server answered it
+    /// with; `repo` the section its builds use. All are required here rather
+    /// than set afterwards, so no path to a client can leave one out.
     pub fn authenticated(
         base: &str,
         identity: &ClientIdentity<'_>,
         registration: RegisterRequest,
+        agreement: Agreement,
         repo: Option<RepoSection>,
     ) -> Result<Self> {
         let ClientIdentity {
@@ -291,6 +299,7 @@ impl WorkerClient {
             http,
             base: base.to_string(),
             registration: std::sync::Mutex::new(Some(registration)),
+            agreement: std::sync::Mutex::new(Some(agreement)),
         })
     }
 
@@ -320,7 +329,24 @@ impl WorkerClient {
             .await
             .context("decoding register status")?;
         self.remember_registration(req.clone());
+        if let Some(agreement) = status.agreement {
+            *self
+                .agreement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(agreement);
+        }
         Ok(status)
+    }
+
+    /// What the server answered this client's latest registration with.
+    ///
+    /// Always `Some` on an authenticated client, which is built from one.
+    #[must_use]
+    pub fn agreement(&self) -> Option<Agreement> {
+        *self
+            .agreement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Take `req` as the registration to send again when the server asks.
