@@ -1,4 +1,5 @@
 use crate::auth::Authenticated;
+use crate::ui_cache::{self, CachePolicy};
 use rocket::http::uri::Segments;
 use rocket::http::uri::fmt::Path;
 use rocket::http::{ContentType, Method, Status};
@@ -54,20 +55,34 @@ impl Handler for CustomHandler {
             file = Asset::get("index.html");
         }
 
-        match file {
-            None => Outcome::Error(Status::NotFound),
-            Some(file_content) => {
-                let content_type: ContentType = path
-                    .extension()
-                    .map(|x| x.to_string_lossy())
-                    .and_then(|x| ContentType::from_extension(&x))
-                    .unwrap_or(ContentType::Plain);
-                let rsp = Response::build()
-                    .header(content_type)
-                    .sized_body(file_content.data.len(), Cursor::new(file_content.data))
-                    .finalize();
-                Outcome::Success(rsp)
-            }
+        let Some(file_content) = file else {
+            return Outcome::Error(Status::NotFound);
+        };
+
+        // Sent on the 304 as well: it refreshes what the browser stored.
+        // `Vary` because the compression fairing picks an encoding from
+        // `Accept-Encoding` and does not say so itself.
+        let etag = ui_cache::etag(&file_content.metadata.sha256_hash());
+        let mut response = Response::build();
+        response
+            .raw_header("ETag", etag.clone())
+            .raw_header("Cache-Control", CachePolicy::of(&path).header())
+            .raw_header("Vary", "Accept-Encoding");
+
+        if ui_cache::not_modified(request.headers().get_one("If-None-Match"), &etag) {
+            return Outcome::Success(response.status(Status::NotModified).finalize());
         }
+
+        let content_type: ContentType = path
+            .extension()
+            .map(|x| x.to_string_lossy())
+            .and_then(|x| ContentType::from_extension(&x))
+            .unwrap_or(ContentType::Plain);
+        Outcome::Success(
+            response
+                .header(content_type)
+                .sized_body(file_content.data.len(), Cursor::new(file_content.data))
+                .finalize(),
+        )
     }
 }
