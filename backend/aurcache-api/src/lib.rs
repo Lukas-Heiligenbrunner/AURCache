@@ -16,5 +16,6 @@ mod repo;
 mod settings;
 pub mod spa;
 mod stats;
+pub mod ui_cache;
 mod utils;
 mod worker;
