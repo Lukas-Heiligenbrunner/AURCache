@@ -1,6 +1,6 @@
 [package]
 name = "aurcache-worker-docker"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
 
 # Legacy compatibility executor. Kept in its own crate so that the supported

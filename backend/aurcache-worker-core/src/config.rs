@@ -35,6 +35,9 @@ pub struct CoreConfig {
     pub arches: Vec<String>,
     /// Human-friendly worker name (defaults to hostname).
     pub name: String,
+    /// The version this worker reports: its binary's own, not this crate's,
+    /// since every executor is released on its own.
+    pub version: String,
     /// Directory where identity (key + cert) is persisted.
     pub data_dir: PathBuf,
     /// Heartbeat cadence.
@@ -235,11 +238,12 @@ impl CoreConfig {
     /// Build a [`CoreConfig`] from the process environment, applying
     /// zero-config defaults for everything not explicitly set.
     ///
-    /// `executor_settings` is the executor's own table, declared beside the
-    /// protocol's: registration reports the two as one, and both are resolved
-    /// here, once.
+    /// `version` is what the worker reports, from its binary:
+    /// `full_version(env!("CARGO_PKG_VERSION"))` there. `executor_settings` is
+    /// the executor's own table, declared beside the protocol's: registration
+    /// reports the two as one, and both are resolved here, once.
     #[must_use]
-    pub fn from_env(executor_settings: Vec<SettingSpec>) -> Self {
+    pub fn from_env(version: String, executor_settings: Vec<SettingSpec>) -> Self {
         let arches = env_opt("WORKER_ARCHES")
             .map(|s| parse_list(&s))
             .filter(|v| !v.is_empty())
@@ -260,6 +264,7 @@ impl CoreConfig {
             embedded_secret: env_opt("AURCACHE_EMBEDDED_WORKER_SECRET"),
             arches,
             name: env_opt("WORKER_NAME").unwrap_or_else(detect_hostname),
+            version,
             data_dir: env_opt("WORKER_DATA_DIR")
                 .map_or_else(|| PathBuf::from("/var/lib/aurcache-worker"), PathBuf::from),
             heartbeat_interval: env_duration("WORKER_HEARTBEAT_INTERVAL")

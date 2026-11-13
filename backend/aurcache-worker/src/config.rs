@@ -169,7 +169,10 @@ impl Config {
     /// The configuration this process's environment gives, for tests.
     #[cfg(test)]
     pub(crate) fn from_process_env() -> Self {
-        Self::from_env(&CoreConfig::from_env(crate::settings::chroot_settings()))
+        Self::from_env(&CoreConfig::from_env(
+            "test".into(),
+            crate::settings::chroot_settings(),
+        ))
     }
 }
 
@@ -393,7 +396,7 @@ mod tests {
             return;
         }
 
-        let core = CoreConfig::from_env(crate::settings::chroot_settings());
+        let core = CoreConfig::from_env("test".into(), crate::settings::chroot_settings());
         assert_eq!(core.tunables.concurrency, 1);
         assert_eq!(core.tunables.priority, 0);
         assert!(core.tunables.packages.is_empty());

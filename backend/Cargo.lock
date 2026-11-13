@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-cli"
-version = "0.0.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aurcache-client",
@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-sandbox"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "landlock",
  "libc",
@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-worker"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aurcache-activitylog",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-worker-demo"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aurcache-common",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-worker-docker"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aurcache-common",

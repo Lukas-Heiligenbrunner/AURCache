@@ -47,7 +47,10 @@ async fn main() -> Result<()> {
     aurcache_worker_core::init_tracing();
 
     let cli = Cli::parse();
-    let core = CoreConfig::from_env(chroot_settings());
+    let core = CoreConfig::from_env(
+        aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
+        chroot_settings(),
+    );
     let cfg = Config::from_env(&core);
 
     match cli.command.unwrap_or(Command::Run) {

@@ -59,7 +59,10 @@ const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-buil
 /// beside the protocol's so registration reports one table.
 #[must_use]
 pub fn core_from_env() -> CoreConfig {
-    let mut core = CoreConfig::from_env(crate::settings::docker_settings());
+    let mut core = CoreConfig::from_env(
+        aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
+        crate::settings::docker_settings(),
+    );
     // Every platform unless told otherwise, as the pre-worker builder did:
     // each build runs in an image pulled for its platform, and the host's
     // binfmt runs a foreign one. Checking for the handlers instead would
