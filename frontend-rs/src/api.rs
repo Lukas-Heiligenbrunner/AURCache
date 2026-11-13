@@ -5,7 +5,7 @@ use aurcache_client::AurCacheClient;
 /// The API is on the same origin the page was served from, so the base URL is
 /// derived at runtime rather than baked in. The fallback is the dev server.
 pub fn api_base() -> String {
-    web_sys::window()
+    crate::browser::window()
         .and_then(|w| w.location().origin().ok())
         .map_or_else(
             || "http://localhost:8080/api".to_string(),
@@ -25,7 +25,7 @@ static CLIENT: std::sync::LazyLock<Result<AurCacheClient, String>> =
         AurCacheClient::new(base, None)
             .map(|client| {
                 client.on_unauthorized(move || {
-                    if let Some(window) = web_sys::window() {
+                    if let Some(window) = crate::browser::window() {
                         let _ = window.location().assign(&login_url);
                     }
                 })

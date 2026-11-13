@@ -25,7 +25,7 @@ impl CopyError {
 
 /// Put `text` on the clipboard.
 pub async fn copy_text(text: &str) -> Result<(), CopyError> {
-    let clipboard = web_sys::window()
+    let clipboard = crate::browser::window()
         .map(|w| w.navigator().clipboard())
         // Outside a secure context `navigator.clipboard` is undefined, and
         // web-sys hands that straight back as a `Clipboard` rather than `None`.

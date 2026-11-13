@@ -34,7 +34,7 @@ pub struct BuildLogController {
 pub fn use_build_log(identity: BuildRef) -> BuildLogController {
     let cap = use_hook(|| {
         log_tail_cap(
-            web_sys::window()
+            crate::browser::window()
                 .and_then(|window| window.inner_width().ok())
                 .and_then(|width| width.as_f64()),
             coarse_pointer(),

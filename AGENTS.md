@@ -185,7 +185,9 @@ defect this frontend has had was of that kind.
   `aurcache-client`, the same one the CLI uses, so API shapes are shared rather than re-declared.
   Styling is daisyUI plus Tailwind's in-browser compiler, both vendored in `frontend-rs/vendor/` and
   served by the server itself: the page loads nothing from a third-party host, and the browser tests
-  run with every other host unresolvable to keep it that way.
+  run with every other host unresolvable to keep it that way. The window comes from
+  `crate::browser::window()`, which is `None` off wasm: calling `web_sys::window()` from a host test
+  races on a static of wasm-bindgen's and segfaults the test binary, so clippy refuses it.
 - `docs/` is a separate Docusaurus site used for published documentation.
 
 ## Key conventions

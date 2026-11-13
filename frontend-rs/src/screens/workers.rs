@@ -156,7 +156,7 @@ fn waiting_message(waiting: usize) -> String {
 /// does in every ordinary deployment, and the reader can see and edit the line
 /// if theirs is one of the exceptions.
 fn server_host() -> Option<String> {
-    web_sys::window()?
+    crate::browser::window()?
         .location()
         .hostname()
         .ok()
