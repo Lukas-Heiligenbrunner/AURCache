@@ -11,6 +11,7 @@
 
 mod action;
 mod api;
+mod browser;
 mod build_log;
 mod clipboard;
 mod dates;

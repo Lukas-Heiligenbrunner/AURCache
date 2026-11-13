@@ -95,7 +95,7 @@ const fn pick(busy: bool) -> Duration {
 /// visible: a missed pause costs one request, a wrong "hidden" would freeze the
 /// page silently.
 pub(crate) fn hidden() -> bool {
-    web_sys::window()
+    crate::browser::window()
         .and_then(|w| w.document())
         .is_some_and(|d| d.hidden())
 }

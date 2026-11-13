@@ -1,0 +1,6 @@
+disallowed-methods = [
+    # Off wasm these race on a static wasm-bindgen only makes sound for one
+    # thread, and segfault multi-threaded host tests. See `src/browser.rs`.
+    { path = "web_sys::window", reason = "use `crate::browser::window()`, which is `None` off wasm" },
+    { path = "js_sys::global", reason = "go through `crate::browser::window()`, which is `None` off wasm" },
+]

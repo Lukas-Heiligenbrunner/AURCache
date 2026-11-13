@@ -339,7 +339,7 @@ pub fn BuildLog(pkgbase: String, number: i32) -> Element {
 /// Done through the DOM rather than a Dioxus abstraction because the element
 /// scrolls itself; there is no reactive value to bind to.
 fn scroll_log_to_bottom() {
-    if let Some(el) = web_sys::window()
+    if let Some(el) = crate::browser::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("build-log"))
     {

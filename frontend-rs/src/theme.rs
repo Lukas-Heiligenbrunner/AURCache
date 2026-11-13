@@ -162,7 +162,7 @@ fn stored_choice() -> String {
 }
 
 fn prefers_dark() -> bool {
-    web_sys::window()
+    crate::browser::window()
         .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
         .is_some_and(|m| m.matches())
 }
@@ -170,7 +170,7 @@ fn prefers_dark() -> bool {
 /// Write the choice and apply it to the document.
 fn apply(choice: &str) {
     crate::storage::set(STORAGE_KEY, choice);
-    let Some(window) = web_sys::window() else {
+    let Some(window) = crate::browser::window() else {
         return;
     };
     if let Some(root) = window.document().and_then(|d| d.document_element()) {

@@ -84,7 +84,7 @@ pub fn append_capped(window: &mut String, chunk: &str, cap: usize) -> usize {
 /// cap measurement. Uses the same `match_media` trip the theme makes for
 /// `(prefers-color-scheme: dark)`; false outside a window (SSR, tests).
 pub fn coarse_pointer() -> bool {
-    web_sys::window()
+    crate::browser::window()
         .and_then(|w| w.match_media("(pointer: coarse)").ok().flatten())
         .is_some_and(|m| m.matches())
 }
