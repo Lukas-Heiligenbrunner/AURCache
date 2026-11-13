@@ -192,25 +192,17 @@ impl DockerExecutor {
         if let Some(list) = &claimed.mirrorlist {
             let path = local_dir.join("mirrorlist");
             std::fs::write(&path, list).with_context(|| format!("writing {}", path.display()))?;
-            binds.push(format!(
-                "{}/mirrorlist:/etc/pacman.d/mirrorlist:ro",
-                host_dir.display()
-            ));
+            binds.push(etc_bind(host_dir, "mirrorlist", "/etc/pacman.d/mirrorlist"));
         }
 
         // The server sends no `[repo]` section; append the one rendered for the
-        // host this worker reaches the server on. Read-only, as 0.5.0 mounted
-        // it: a `pacman -Syu` that upgrades pacman finds it differs from the
-        // packaged file and leaves a `.pacnew` beside it rather than writing.
+        // host this worker reaches the server on.
         let pacman_conf =
             aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
         let path = local_dir.join("pacman.conf");
         std::fs::write(&path, &pacman_conf)
             .with_context(|| format!("writing {}", path.display()))?;
-        binds.push(format!(
-            "{}/pacman.conf:/etc/pacman.conf:ro",
-            host_dir.display()
-        ));
+        binds.push(etc_bind(host_dir, "pacman.conf", "/etc/pacman.conf"));
 
         let cmd = commands::wrap_with_config(
             &commands::with_layout(&job.makepkg_conf, CONTAINER_PKGDEST),
@@ -417,6 +409,24 @@ impl Executor for DockerExecutor {
     }
 }
 
+/// Bind the build directory's `name` over `target`, a file a package owns.
+///
+/// Writable, not `:ro`: with `CheckSpace` on (as in Arch's stock
+/// `pacman.conf`), a `pacman -Syu` that upgrades the owning package
+/// (`pacman`, `pacman-mirrorlist`) checks every mount point the transaction
+/// writes to, and a single-file bind is its own mount point. A read-only one
+/// fails every build with "not enough free disk space" until the builder
+/// image catches up with the repositories. Writable, pacman keeps the file,
+/// since it differs from the packaged one, and writes any new default beside
+/// it as `.pacnew`.
+///
+/// This exposes nothing: the container already reaches the same file through
+/// the build directory at [`CONTAINER_PKGDEST`], which is removed after the
+/// build.
+fn etc_bind(host_dir: &Path, name: &str, target: &str) -> String {
+    format!("{}/{name}:{target}", host_dir.display())
+}
+
 /// Best-effort `chmod 0777`. A failure is logged here; the build then fails on
 /// the write it could not make, with its own error.
 fn world_writable(path: &Path) {
@@ -454,6 +464,16 @@ mod tests {
         assert_eq!(docker_arch("aarch64"), Some("arm64"));
         assert_eq!(docker_arch("armv7h"), Some("arm/v7"));
         assert_eq!(docker_arch("riscv64"), Some("riscv64"));
+    }
+
+    /// A read-only bind over a packaged file fails every `pacman -Syu` that
+    /// upgrades its package.
+    #[test]
+    fn etc_binds_are_writable() {
+        assert_eq!(
+            etc_bind(Path::new("/srv/build/7"), "pacman.conf", "/etc/pacman.conf"),
+            "/srv/build/7/pacman.conf:/etc/pacman.conf"
+        );
     }
 
     /// An arch nobody taught the mapper must refuse the job, not silently
