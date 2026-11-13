@@ -7,16 +7,13 @@
 //! without touching it, which is what every caller already handles.
 
 /// The page's window, or `None` where there is none (host builds and tests).
-#[cfg(target_arch = "wasm32")]
 #[allow(clippy::disallowed_methods)] // The one sanctioned call.
 pub fn window() -> Option<web_sys::Window> {
-    web_sys::window()
-}
-
-/// The page's window, or `None` where there is none (host builds and tests).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn window() -> Option<web_sys::Window> {
-    None
+    if cfg!(target_arch = "wasm32") {
+        web_sys::window()
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
