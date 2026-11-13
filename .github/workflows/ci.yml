@@ -1,9 +1,11 @@
 name: CI
 
+# Branches in this repository get CI through their pull request: a push trigger
+# on every branch ran each PR's jobs twice, once per event.
 on:
   push:
     branches:
-      - '**'
+      - 'master'
   pull_request:
     branches:
       - 'master'
