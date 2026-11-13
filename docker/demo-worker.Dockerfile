@@ -14,7 +14,7 @@ ARG AURCACHE_GIT_DIRTY=
 # buildx is asked for (emulated where the builder cannot run it), so the
 # binary always matches the runtime base below. Pinning it to $BUILDPLATFORM
 # would ship a builder-arch binary under a foreign manifest.
-FROM rust:1.99.1-bookworm AS builder
+FROM rust:1.100.0-bookworm AS builder
 ARG LATEST_COMMIT_SHA
 ARG AURCACHE_GIT_TAG
 ARG AURCACHE_GIT_DIRTY
