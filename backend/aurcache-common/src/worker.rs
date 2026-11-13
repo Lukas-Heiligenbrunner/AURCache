@@ -119,7 +119,9 @@ pub struct RegisterRequest {
     pub settings: Vec<SettingDecl>,
 }
 
-/// Enrollment status returned while a worker polls for approval.
+/// The server's answer to a registration (`POST /worker/register`), and to a
+/// worker polling for approval after it
+/// (`GET /worker/register/{fingerprint}/status`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RegisterStatus {
@@ -144,11 +146,13 @@ pub struct RegisterStatus {
     /// Sent at registration rather than per job because it describes the
     /// deployment, not the build.
     pub repo_template: Option<String>,
-    /// The protocol this worker and the server agreed on at registration.
+    /// The protocol this worker and the server agreed on when it registered.
     ///
-    /// The server keeps the agreement in memory, so after it restarts a poll
-    /// for this answer is refused with `428 Precondition Required`, like any
-    /// other request: the worker registers again and asks once more.
+    /// The server holds that agreement in memory only. If it restarted
+    /// between a worker's registration and its approval poll, it no longer
+    /// knows the protocol, so it refuses the poll with `428 Precondition
+    /// Required`, as it does every other request in that case. The worker
+    /// then registers again, which agrees a protocol anew, and polls again.
     pub protocol: u32,
     /// How long a claimed build's lease lasts without a heartbeat. A worker
     /// that has not reached the server for this long stops its builds: the
