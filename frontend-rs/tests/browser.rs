@@ -79,6 +79,11 @@ impl Session {
         caps.set_headless().expect("headless");
         caps.add_arg("--no-sandbox").expect("no-sandbox");
         caps.add_arg("--disable-gpu").expect("disable-gpu");
+        // Nothing but localhost resolves, as on a network that cannot reach
+        // the internet: the page must work from what the server ships alone
+        // (issue #394).
+        caps.add_arg("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost")
+            .expect("host-resolver-rules");
         let driver = WebDriver::managed(caps).await.expect("start chrome");
         Self { driver }
     }

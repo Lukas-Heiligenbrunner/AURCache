@@ -80,8 +80,14 @@ cleanup() {
 trap cleanup EXIT
 
 # One headless launch against the server; the arguments say what it does.
+#
+# The browser can resolve localhost and nothing else, so the page has to be
+# whole as the server ships it. It once loaded Tailwind and daisyUI from their
+# CDNs, which passed here and rendered as an unstyled page for anyone whose
+# network could not reach them (issue #394).
 chrome() {
     "$CHROME" --headless --disable-gpu --no-sandbox --user-data-dir="$CHROME_PROFILE" \
+        --host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost" \
         --virtual-time-budget=8000 "$@"
 }
 
