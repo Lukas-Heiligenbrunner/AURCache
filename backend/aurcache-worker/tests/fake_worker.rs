@@ -163,7 +163,7 @@ async fn fake_worker_protocol_roundtrip() {
 
     // Enroll a synthetic worker with the production client + enrollment flow.
     // The shared enrollment token makes the server auto-approve it.
-    let cfg = CoreConfig::from_env(aurcache_worker::settings::chroot_settings());
+    let cfg = CoreConfig::from_env("test".into(), aurcache_worker::settings::chroot_settings());
     let identity = Identity::load_or_create(&cfg.data_dir).unwrap();
     let client: WorkerClient = ensure_enrolled(&cfg, &identity, "chroot")
         .await

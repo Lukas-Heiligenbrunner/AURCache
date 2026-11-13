@@ -401,7 +401,7 @@ impl<E: Executor> Runner<E> {
 
         let hb = Heartbeat {
             active_build_ids: active_build_ids.clone(),
-            version: aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
+            version: cfg.version.clone(),
             effective: report.clone(),
             received_revision: effective.received_revision.clone(),
         };

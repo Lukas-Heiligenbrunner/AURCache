@@ -17,7 +17,10 @@ use aurcache_worker_demo::DemoExecutor;
 async fn main() -> Result<()> {
     aurcache_worker_core::init_tracing();
 
-    let core = CoreConfig::from_env(Vec::new());
+    let core = CoreConfig::from_env(
+        aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
+        Vec::new(),
+    );
     let identity = Identity::load_or_create(&core.data_dir)?;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.

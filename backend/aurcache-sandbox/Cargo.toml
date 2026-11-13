@@ -1,6 +1,6 @@
 [package]
 name = "aurcache-sandbox"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
 
 # Deliberately standalone: the patched makechrootpkg and the server exec it

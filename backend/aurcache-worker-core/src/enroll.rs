@@ -37,7 +37,7 @@ pub fn register_request(cfg: &CoreConfig, csr_pem: String, kind: &str) -> Regist
         protocols: PROTOCOLS,
         name: cfg.name.clone(),
         arches: cfg.arches.clone(),
-        version: aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
+        version: cfg.version.clone(),
         kind: kind.to_string(),
         csr_pem,
         enrollment_token: cfg.enrollment_token.clone(),
@@ -358,7 +358,7 @@ mod tests {
     fn a_pending_answer_still_gives_the_section() {
         let cfg = CoreConfig {
             aurcache_url: "https://aurcache:8083".into(),
-            ..CoreConfig::from_env(Vec::new())
+            ..CoreConfig::from_env("test".into(), Vec::new())
         };
         let section = repo_section(&cfg, &status(ApprovalStatus::Pending)).expect("a section");
         assert_eq!(
@@ -370,7 +370,7 @@ mod tests {
     /// A server that publishes no repository sends no template.
     #[test]
     fn no_template_is_no_section() {
-        let cfg = CoreConfig::from_env(Vec::new());
+        let cfg = CoreConfig::from_env("test".into(), Vec::new());
         let none = RegisterStatus {
             repo_template: None,
             ..status(ApprovalStatus::Approved)
