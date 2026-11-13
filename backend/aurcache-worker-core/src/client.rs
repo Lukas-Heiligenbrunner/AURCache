@@ -13,8 +13,8 @@ use crate::repo::RepoSection;
 use anyhow::{Context, Result, bail};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::{
-    Agreement, ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor,
-    RegisterRequest, RegisterStatus, WorkerLogReport,
+    ClaimRequest, CompleteReport, Heartbeat, HeartbeatResponse, JobDescriptor, RegisterRequest,
+    RegisterStatus, WorkerLogReport,
 };
 use percent_encoding::{AsciiSet, CONTROLS};
 use reqwest::{Body, Certificate, Client, Identity, RequestBuilder, Response, StatusCode};
@@ -170,12 +170,32 @@ pub struct WorkerClient {
     /// The last registration the server accepted from this client, sent again
     /// when the server asks for it (see [`Self::exchange`]).
     registration: std::sync::Mutex<Option<RegisterRequest>>,
-    /// What the server answered the last registration with: the protocol and
-    /// the lease timing this worker keeps to. Replaced on every registration,
-    /// including the ones [`Self::exchange`] makes when the server restarted,
-    /// since a restarted server may have been given other timing. `None` only
-    /// on an enrollment client that has not registered.
-    agreement: std::sync::Mutex<Option<Agreement>>,
+    /// The lease timing the server answered the last registration with.
+    /// Replaced on every registration, including the ones [`Self::exchange`]
+    /// makes when the server restarted, since a restarted server may have
+    /// been given other timing. `None` only on an enrollment client that has
+    /// not registered.
+    lease: std::sync::Mutex<Option<Lease>>,
+}
+
+/// The lease timing a worker keeps to: the server's, from a registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lease {
+    /// How long a claimed build's lease lasts without a heartbeat.
+    pub ttl: Duration,
+    /// How often to send a heartbeat. Never zero.
+    pub heartbeat_interval: Duration,
+}
+
+impl Lease {
+    /// The timing `status` gives.
+    #[must_use]
+    pub fn of(status: &RegisterStatus) -> Self {
+        Self {
+            ttl: Duration::from_secs(status.lease_ttl_secs),
+            heartbeat_interval: Duration::from_secs(status.heartbeat_interval_secs.max(1)),
+        }
+    }
 }
 
 /// Fetch the server CA (PEM + fingerprint) using a deliberately
@@ -251,21 +271,21 @@ impl WorkerClient {
             http,
             base: base.to_string(),
             registration: std::sync::Mutex::new(None),
-            agreement: std::sync::Mutex::new(None),
+            lease: std::sync::Mutex::new(None),
         })
     }
 
     /// Build an authenticated mTLS client presenting the worker certificate.
     ///
     /// `registration` is the one the server accepted, sent again whenever it
-    /// asks this worker to register; `agreement` what the server answered it
-    /// with; `repo` the section its builds use. All are required here rather
-    /// than set afterwards, so no path to a client can leave one out.
+    /// asks this worker to register; `lease` the timing the server answered
+    /// it with; `repo` the section its builds use. All are required here
+    /// rather than set afterwards, so no path to a client can leave one out.
     pub fn authenticated(
         base: &str,
         identity: &ClientIdentity<'_>,
         registration: RegisterRequest,
-        agreement: Agreement,
+        lease: Lease,
         repo: Option<RepoSection>,
     ) -> Result<Self> {
         let ClientIdentity {
@@ -299,7 +319,7 @@ impl WorkerClient {
             http,
             base: base.to_string(),
             registration: std::sync::Mutex::new(Some(registration)),
-            agreement: std::sync::Mutex::new(Some(agreement)),
+            lease: std::sync::Mutex::new(Some(lease)),
         })
     }
 
@@ -329,22 +349,21 @@ impl WorkerClient {
             .await
             .context("decoding register status")?;
         self.remember_registration(req.clone());
-        if let Some(agreement) = status.agreement {
-            *self
-                .agreement
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(agreement);
-        }
+        *self
+            .lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Lease::of(&status));
         Ok(status)
     }
 
-    /// What the server answered this client's latest registration with.
+    /// The lease timing the server answered this client's latest
+    /// registration with.
     ///
     /// Always `Some` on an authenticated client, which is built from one.
     #[must_use]
-    pub fn agreement(&self) -> Option<Agreement> {
+    pub fn lease(&self) -> Option<Lease> {
         *self
-            .agreement
+            .lease
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -410,12 +429,15 @@ impl WorkerClient {
         checked(self.exchange(request, what).await?, what).await
     }
 
-    /// Poll enrollment status by fingerprint.
+    /// Poll enrollment status by fingerprint, registering again first if the
+    /// server restarted since this client last did (see [`Self::exchange`]).
     pub async fn register_status(&self, fingerprint: &str) -> Result<RegisterStatus> {
         let resp = self
-            .http
-            .get(self.url(&format!("/register/{fingerprint}/status")))
-            .send_checked("status")
+            .exchange_checked(
+                self.http
+                    .get(self.url(&format!("/register/{fingerprint}/status"))),
+                "status",
+            )
             .await?;
         resp.json().await.context("decoding register status")
     }

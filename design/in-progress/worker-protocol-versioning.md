@@ -254,12 +254,14 @@ Done:
 
 Settled before the freeze (2026-11-13):
 
-4. **The lease is the server's.** `RegisterStatus::agreement` carries the
-   protocol with `lease_ttl_secs` and `heartbeat_interval_secs`
-   (`LEASE_TTL`, `WORKER_HEARTBEAT_INTERVAL`, both server variables now). A
-   worker takes them from its latest registration, including the one a `428`
-   triggers, so a server restarted with other timing is followed. Timing is
-   then no longer a property of a protocol.
+4. **The lease is the server's.** Every `RegisterStatus` carries
+   `lease_ttl_secs` and `heartbeat_interval_secs` (`LEASE_TTL`,
+   `WORKER_HEARTBEAT_INTERVAL`, both server variables now). A worker takes
+   them from its latest registration, including the one a `428` triggers, so
+   a server restarted with other timing is followed. Timing is then no
+   longer a property of a protocol. `protocol` is required too: the approval
+   poll answers `428` when the server holds no agreement, like every other
+   route, instead of answering without one.
 5. **One cancel channel.** `GET /jobs/{id}/status` is gone; the heartbeat's
    `cancel` was the only one the workers here used.
 6. **The quarantine repository waits for protocol 2.** It belongs to a hold
@@ -435,6 +437,11 @@ one is cut:
 
 ## Open questions
 
+- **A versioned registration answer.** `RegisterStatus` belongs to no
+  protocol today and only gains fields. It could instead have one shape per
+  protocol, every one carrying `protocol`, which the worker reads first to
+  pick the shape to decode the rest as. That is why `protocol` is required
+  rather than optional. Not needed yet.
 - **`426` or `409`?** `426 Upgrade Required` formally expects an `Upgrade`
   header naming a protocol to switch to. It is still the most self-explaining
   status for this, and the body carries the details.

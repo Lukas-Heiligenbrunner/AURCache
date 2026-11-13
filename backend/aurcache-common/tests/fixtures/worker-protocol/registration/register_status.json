@@ -4,10 +4,8 @@
     "signed_cert": "-----BEGIN CERTIFICATE-----\n...\n",
     "ca_cert": "-----BEGIN CERTIFICATE-----\n...\n",
     "repo_template": "[aurcache]\nServer = http://%AURCACHE_HOST%:8081/$arch\n",
-    "agreement": {
-      "protocol": 1,
-      "lease_ttl_secs": 60,
-      "heartbeat_interval_secs": 15
-    }
+    "protocol": 1,
+    "lease_ttl_secs": 60,
+    "heartbeat_interval_secs": 15
   }
 ]
