@@ -40,11 +40,6 @@ pub struct CoreConfig {
     pub version: String,
     /// Directory where identity (key + cert) is persisted.
     pub data_dir: PathBuf,
-    /// Heartbeat cadence.
-    pub heartbeat_interval: Duration,
-    /// Lease TTL; the worker self-aborts a build it cannot report for longer
-    /// than this (the server will have abandoned it).
-    pub lease_ttl: Duration,
     /// Overrides the host used in the `[repo]` section, for deployments where
     /// the address used to reach the worker protocol is not the address that
     /// serves the package repository.
@@ -267,9 +262,6 @@ impl CoreConfig {
             version,
             data_dir: env_opt("WORKER_DATA_DIR")
                 .map_or_else(|| PathBuf::from("/var/lib/aurcache-worker"), PathBuf::from),
-            heartbeat_interval: env_duration("WORKER_HEARTBEAT_INTERVAL")
-                .unwrap_or(Duration::from_secs(15)),
-            lease_ttl: env_duration("LEASE_TTL").unwrap_or(Duration::from_secs(60)),
             repo_host: env_opt("AURCACHE_REPO_HOST"),
             repo_url: env_opt("AURCACHE_REPO_URL"),
             mirrorlist: local_mirrorlist(),

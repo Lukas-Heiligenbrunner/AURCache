@@ -149,12 +149,15 @@ pub async fn ensure_enrolled(
                 return Err(e.context("registering"));
             }
         };
+        let agreement = status
+            .agreement
+            .context("the server answered this worker's registration without an agreement")?;
         tracing::info!(
-            "Registered (status: {}, worker protocol {})",
+            "Registered (status: {}, worker protocol {}, lease {}s, heartbeat every {}s)",
             status.status,
-            status
-                .protocol
-                .map_or_else(|| "unknown".to_string(), |p| p.to_string())
+            agreement.protocol,
+            agreement.lease_ttl_secs,
+            agreement.heartbeat_interval_secs,
         );
         // Revocation is terminal, like on the fresh path below: a revoked
         // worker that carried on would run forever failing every claim,
@@ -181,6 +184,7 @@ pub async fn ensure_enrolled(
                 key_pem: &identity.key_pem(),
             },
             request,
+            agreement,
             repo_section(cfg, &status),
         )?;
         return Ok(client);
@@ -217,6 +221,14 @@ pub async fn ensure_enrolled(
             .register_status(&identity.fingerprint)
             .await
             .context("polling enrollment status")?;
+        if status.agreement.is_none() {
+            // The server restarted while this worker waited, and holds no
+            // agreement with it any more: registering again makes one.
+            status = enroll_client
+                .register(&request)
+                .await
+                .context("registering")?;
+        }
     }
 }
 
@@ -297,6 +309,9 @@ fn try_finish_enrollment(
     let (Some(cert), Some(ca)) = (&status.signed_cert, &status.ca_cert) else {
         return Ok(None);
     };
+    let agreement = status
+        .agreement
+        .context("the server approved this worker without an agreement")?;
     identity.store_signed(cert, ca)?;
     let client = WorkerClient::authenticated(
         &cfg.aurcache_url,
@@ -306,6 +321,7 @@ fn try_finish_enrollment(
             key_pem: &identity.key_pem(),
         },
         request.clone(),
+        agreement,
         repo_section(cfg, status),
     )?;
     Ok(Some(client))
@@ -338,6 +354,7 @@ fn repo_section(cfg: &CoreConfig, status: &RegisterStatus) -> Option<RepoSection
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aurcache_common::worker::Agreement;
 
     fn status(status: ApprovalStatus) -> RegisterStatus {
         RegisterStatus {
@@ -347,7 +364,11 @@ mod tests {
             repo_template: Some(
                 "[repo]\nSigLevel = Never\nServer = http://%AURCACHE_HOST%:8081/$arch\n".into(),
             ),
-            protocol: Some(1),
+            agreement: Some(Agreement {
+                protocol: 1,
+                lease_ttl_secs: 60,
+                heartbeat_interval_secs: 15,
+            }),
         }
     }
 

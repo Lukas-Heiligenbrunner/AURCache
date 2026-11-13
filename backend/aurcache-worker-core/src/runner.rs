@@ -9,8 +9,8 @@
 
 use anyhow::Result;
 use aurcache_common::worker::{
-    BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, JobDescriptor, MirrorlistOffer,
-    MirrorlistPreference,
+    Agreement, BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, JobDescriptor,
+    MirrorlistOffer, MirrorlistPreference,
 };
 use aurcache_common::worker_config::{ConfigSnapshot, EffectiveConfig};
 use std::collections::{BTreeMap, HashMap};
@@ -373,10 +373,17 @@ impl<E: Executor> Runner<E> {
         }
     }
 
+    /// The terms of this worker's latest registration, lease timing included.
+    fn agreement(&self) -> Agreement {
+        self.client
+            .agreement()
+            .expect("a runner's client is authenticated, and so built from an agreement")
+    }
+
     /// Background heartbeat + self-abort watchdog.
     async fn heartbeat_loop(self: Arc<Self>) {
         loop {
-            let interval = self.cfg().heartbeat_interval.max(Duration::from_secs(1));
+            let interval = Duration::from_secs(self.agreement().heartbeat_interval_secs.max(1));
             tokio::time::sleep(interval).await;
             self.beat().await;
         }
@@ -415,9 +422,7 @@ impl<E: Executor> Runner<E> {
                 }
                 // The server's abort list: any of our builds that were
                 // abandoned (lease lost) or cancelled by an operator. This is
-                // how a build learns it: the per-build status route answers
-                // from the same condition, so polling it too would only say
-                // this again.
+                // the only way a build learns it.
                 if !resp.cancel.is_empty() {
                     let guard = self.active.lock().await;
                     for id in &resp.cancel {
@@ -438,11 +443,12 @@ impl<E: Executor> Runner<E> {
         // Self-abort: if the server has been unreachable past the lease TTL,
         // the builds we hold have already been abandoned — stop them to avoid
         // a zombie upload.
-        if !active_build_ids.is_empty() && self.since_contact() > cfg.lease_ttl {
+        let lease_ttl = Duration::from_secs(self.agreement().lease_ttl_secs);
+        if !active_build_ids.is_empty() && self.since_contact() > lease_ttl {
             tracing::error!(
                 "server unreachable for {}s (> lease {}s); self-aborting {} build(s)",
                 self.since_contact().as_secs(),
-                cfg.lease_ttl.as_secs(),
+                lease_ttl.as_secs(),
                 active_build_ids.len()
             );
             let guard = self.active.lock().await;

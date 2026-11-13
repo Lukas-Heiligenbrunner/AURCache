@@ -1,6 +1,6 @@
 # Versioned worker protocol, independently released components
 
-Status: **In progress** (negotiation, docs and the v1 review done; three review items open in section 2) · Last updated: 2026-10-15
+Status: **In progress** (negotiation, docs and the v1 review done; versions for 0.6.0 done; component tags open) · Last updated: 2026-11-13
 
 Workers and the server talk a numbered protocol, and that number is the only
 thing either side checks. Each component -- server, chroot worker, container
@@ -252,22 +252,21 @@ Done:
 3. **Names.** `RegisterRequest::affinity`, `JobDescriptor::expected_packages`
    and `expected_version`, and an optional `RegisterStatus::repo_template`.
 
-Still open, and cheap only until the freeze:
+Settled before the freeze (2026-11-13):
 
-4. **The lease is configured twice.** Server and worker each read
-   `LEASE_TTL` (`aurcache-worker-core/src/config.rs:225`) and the protocol
-   page asks for them to match. Sending the lease and heartbeat interval in
-   `RegisterStatus` would make timing the server's to set.
-5. **Two cancel channels.** The heartbeat's `cancel` and
-   `GET /jobs/{id}/status` say the same thing. A route can never be removed
-   after the freeze.
-6. **The quarantine repository.** The hold design (`package-suspicion-signals.md`,
-   "Chains") lets builds use packages held from the repository, through a
-   second, opt-in pacman repository on the same port.
-   The registration answer gains `quarantine_template`, rendered like
-   `repo_template`, and a worker appends it after `[repo]`. A worker that
-   did not would fail a held chain's first builds, so the rule belongs in
-   protocol 1, before the freeze.
+4. **The lease is the server's.** `RegisterStatus::agreement` carries the
+   protocol with `lease_ttl_secs` and `heartbeat_interval_secs`
+   (`LEASE_TTL`, `WORKER_HEARTBEAT_INTERVAL`, both server variables now). A
+   worker takes them from its latest registration, including the one a `428`
+   triggers, so a server restarted with other timing is followed. Timing is
+   then no longer a property of a protocol.
+5. **One cancel channel.** `GET /jobs/{id}/status` is gone; the heartbeat's
+   `cancel` was the only one the workers here used.
+6. **The quarantine repository waits for protocol 2.** It belongs to a hold
+   feature that does not exist yet. When it does, the server sends
+   `quarantine_template` to workers that agreed on 2 and keeps held chains
+   away from workers on 1, rather than protocol 1 carrying a rule nobody
+   exercises.
 
 Additive, so not blocking:
 
@@ -424,13 +423,15 @@ Before the upstream merge leaves draft, because protocol 1 freezes with it:
 With the first release after the merge, since nothing depends on them before
 one is cut:
 
-3. Component versions: `version` per binary crate, all at `0.6.0`;
-   worker-core takes it as a parameter; `assemble_version` matches component
-   tags. Until then every worker reports worker-core's `0.1.0`, which is only
-   what the Workers page shows.
+3. Component versions: `version` per binary crate, all at `0.6.0`, and
+   worker-core takes it as a parameter. **Done** for 0.6.0, which is tagged
+   `v0.6.0` as before: all five components release together, so the plain tag
+   still says the right thing. `assemble_version` matching component tags
+   comes with item 4.
 4. Tags, PKGBUILD sources, split image workflows, `release.sh` and the AUR
-   workflow, with its environment and key. The upstream maintainer has to
-   agree to the tag scheme, and possibly create the environment.
+   workflow, with its environment and key. Due with the first release of one
+   component alone. The upstream maintainer has to agree to the tag scheme,
+   and possibly create the environment.
 
 ## Open questions
 
