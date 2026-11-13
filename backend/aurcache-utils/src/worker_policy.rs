@@ -11,7 +11,6 @@
 
 use aurcache_common::server_env::{self, Var};
 use aurcache_common::units::parse_duration;
-use aurcache_common::worker::Agreement;
 use std::sync::LazyLock;
 
 /// The server's worker tuning; see [`worker_policy`].
@@ -20,9 +19,8 @@ pub struct WorkerPolicy {
     /// How long a lease lasts without a heartbeat, in seconds (`LEASE_TTL`).
     pub lease_ttl_secs: i64,
     /// How often workers are to send a heartbeat, in seconds
-    /// (`WORKER_HEARTBEAT_INTERVAL`). Like the lease, it reaches a worker in
-    /// the [`Agreement`](aurcache_common::worker::Agreement) its registration
-    /// is answered with, so the server sets both.
+    /// (`WORKER_HEARTBEAT_INTERVAL`). Like the lease, it reaches workers in
+    /// every answer to a registration, so the server sets both.
     pub heartbeat_interval_secs: u64,
     /// How many times a build is requeued before it is failed for good
     /// (`MAX_ATTEMPTS`).
@@ -112,17 +110,6 @@ impl WorkerPolicy {
         }
         policy
     }
-
-    /// What a worker that registered speaking `protocol` is told: the
-    /// protocol, and this server's lease timing.
-    #[must_use]
-    pub fn agreement(&self, protocol: u32) -> Agreement {
-        Agreement {
-            protocol,
-            lease_ttl_secs: u64::try_from(self.lease_ttl_secs).unwrap_or(0),
-            heartbeat_interval_secs: self.heartbeat_interval_secs,
-        }
-    }
 }
 
 static POLICY: LazyLock<WorkerPolicy> =
@@ -190,15 +177,5 @@ mod tests {
             policy(&[("WORKER_HEARTBEAT_INTERVAL", "0")]).heartbeat_interval_secs,
             1
         );
-    }
-
-    /// The timing a worker is told is the timing the server polices.
-    #[test]
-    fn the_agreement_carries_the_lease_timing() {
-        let agreement =
-            policy(&[("LEASE_TTL", "2m"), ("WORKER_HEARTBEAT_INTERVAL", "20s")]).agreement(1);
-        assert_eq!(agreement.protocol, 1);
-        assert_eq!(agreement.lease_ttl_secs, 120);
-        assert_eq!(agreement.heartbeat_interval_secs, 20);
     }
 }

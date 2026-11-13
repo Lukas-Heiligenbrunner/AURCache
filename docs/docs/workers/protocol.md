@@ -66,15 +66,15 @@ either: workers are released apart from the server and may come from anywhere.
 Only protocol 1 exists so far.
 
 - The worker sends the protocols it speaks as a range, `{"min": 1, "max": 1}`,
-  in `protocols` when it registers. The server answers with an `agreement`:
-  the newest protocol both speak (`protocol`), and the
-  [lease timing](#leases-and-heartbeats) the worker is to keep to.
+  in `protocols` when it registers. The server answers with the newest one
+  both speak, in `protocol`.
 - No protocol in common: the registration is refused with `426 Upgrade
   Required`, and the body says what each side speaks. Nothing about the worker
   is recorded. Retry slowly (the workers here wait five minutes), because only
   upgrading one side changes the answer.
 - The server holds the agreement in memory. After it restarts, any request
-  from a worker it holds none for is refused with `428 Precondition Required`.
+  from a worker it holds none for is refused with `428 Precondition Required`,
+  polling for approval included.
   The worker registers again and repeats the request. This is how every worker
   renegotiates with a server that was upgraded.
 
@@ -84,7 +84,8 @@ optional, and its absence means what it meant before; a value added to an
 enumeration is one its fallback reads acceptably. Anything else -- a field
 becoming required or changing meaning, a value an older peer would misread, a
 route removed -- comes with the next protocol number. Lease timing is not part
-of a protocol: the server sets it, and sends it in every agreement. The
+of a protocol: the server sets it, and sends it in every answer to a
+registration. The
 registration messages and the CA routes are exchanged before any protocol is
 agreed, so they belong to none, and only ever gain optional fields.
 
@@ -162,8 +163,8 @@ otherwise, go to `POST /api/worker/log`.
 
 ## Leases and heartbeats
 
-A claim starts a lease on the build, lasting `lease_ttl_secs` from the
-registration's `agreement`. The worker keeps it with `POST
+A claim starts a lease on the build, lasting `lease_ttl_secs` from the answer
+to the worker's registration. The worker keeps it with `POST
 /api/worker/heartbeat` every `heartbeat_interval_secs`, listing the builds it
 is running. Both are the server's to set (`LEASE_TTL`, 60 seconds by default,
 and `WORKER_HEARTBEAT_INTERVAL`, 15), and a worker takes them from its latest

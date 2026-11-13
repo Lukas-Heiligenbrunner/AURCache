@@ -274,7 +274,7 @@ pub async fn register_worker(
             protocol,
         } => {
             protocols.agree(&fingerprint, protocol);
-            register_status_for(db, ca, &fingerprint, Some(protocol)).await
+            register_status_for(db, ca, &fingerprint, protocol).await
         }
         Registered::InvalidCsr(why) => Err(err(Status::BadRequest, why)),
         Registered::NoCommonProtocol(why) => Err(err(Status::UpgradeRequired, why)),
@@ -282,7 +282,14 @@ pub async fn register_worker(
 }
 
 /// Poll enrollment status by fingerprint (the worker derives its own).
-#[utoipa::path(get, path = "/worker/register/{fingerprint}/status", responses((status = 200, body = RegisterStatus)))]
+///
+/// Refused with `428 Precondition Required` when this server process holds no
+/// protocol agreed with the worker, as every job route is: after a restart,
+/// the worker registers again and polls once more.
+#[utoipa::path(get, path = "/worker/register/{fingerprint}/status", responses(
+    (status = 200, body = RegisterStatus),
+    (status = 428, description = "This server holds no protocol agreed with the worker: register again, then retry"),
+))]
 #[get("/worker/register/<fingerprint>/status")]
 pub async fn register_status(
     db: &State<DatabaseConnection>,
@@ -290,7 +297,12 @@ pub async fn register_status(
     protocols: &State<AgreedProtocols>,
     fingerprint: &str,
 ) -> Result<Json<RegisterStatus>, ApiError> {
-    let protocol = protocols.of(fingerprint);
+    let protocol = protocols.of(fingerprint).ok_or_else(|| {
+        err(
+            Status::PreconditionRequired,
+            "register first: this server holds no protocol agreed with this worker",
+        )
+    })?;
     register_status_for(db.inner(), ca, fingerprint, protocol).await
 }
 
@@ -298,7 +310,7 @@ async fn register_status_for(
     db: &DatabaseConnection,
     ca: &Ca,
     fingerprint: &str,
-    protocol: Option<u32>,
+    protocol: u32,
 ) -> Result<Json<RegisterStatus>, ApiError> {
     let worker = worker_store::find_worker_by_fingerprint(db, fingerprint)
         .await?
@@ -319,7 +331,9 @@ async fn register_status_for(
         signed_cert,
         ca_cert,
         repo_template: Some(REPO_TEMPLATE.clone()),
-        agreement: protocol.map(|protocol| worker_policy().agreement(protocol)),
+        protocol,
+        lease_ttl_secs: u64::try_from(worker_policy().lease_ttl_secs).unwrap_or(0),
+        heartbeat_interval_secs: worker_policy().heartbeat_interval_secs,
     }))
 }
 

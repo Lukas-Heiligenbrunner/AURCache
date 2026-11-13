@@ -9,8 +9,8 @@
 
 use anyhow::Result;
 use aurcache_common::worker::{
-    Agreement, BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, JobDescriptor,
-    MirrorlistOffer, MirrorlistPreference,
+    BuildOutcome, ClaimRequest, CompleteReport, Heartbeat, JobDescriptor, MirrorlistOffer,
+    MirrorlistPreference,
 };
 use aurcache_common::worker_config::{ConfigSnapshot, EffectiveConfig};
 use std::collections::{BTreeMap, HashMap};
@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{Refused, WorkerClient};
+use crate::client::{Lease, Refused, WorkerClient};
 use crate::config::CoreConfig;
 use crate::executor::{ClaimedJob, Executor};
 use crate::gate::ConcurrencyGate;
@@ -373,17 +373,17 @@ impl<E: Executor> Runner<E> {
         }
     }
 
-    /// The terms of this worker's latest registration, lease timing included.
-    fn agreement(&self) -> Agreement {
+    /// The lease timing of this worker's latest registration.
+    fn lease(&self) -> Lease {
         self.client
-            .agreement()
-            .expect("a runner's client is authenticated, and so built from an agreement")
+            .lease()
+            .expect("a runner's client is authenticated, and so built with a lease")
     }
 
     /// Background heartbeat + self-abort watchdog.
     async fn heartbeat_loop(self: Arc<Self>) {
         loop {
-            let interval = Duration::from_secs(self.agreement().heartbeat_interval_secs.max(1));
+            let interval = self.lease().heartbeat_interval;
             tokio::time::sleep(interval).await;
             self.beat().await;
         }
@@ -443,7 +443,7 @@ impl<E: Executor> Runner<E> {
         // Self-abort: if the server has been unreachable past the lease TTL,
         // the builds we hold have already been abandoned — stop them to avoid
         // a zombie upload.
-        let lease_ttl = Duration::from_secs(self.agreement().lease_ttl_secs);
+        let lease_ttl = self.lease().ttl;
         if !active_build_ids.is_empty() && self.since_contact() > lease_ttl {
             tracing::error!(
                 "server unreachable for {}s (> lease {}s); self-aborting {} build(s)",
