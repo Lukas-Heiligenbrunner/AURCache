@@ -1,0 +1,35 @@
+name: Build PR Docker Images
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          # packaging/ holds AUR submodules, which build-images.sh checks for.
+          submodules: recursive
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      # No registry login, secrets, or write token on this runner. The same
+      # script as a release, every architecture a release has, written as one
+      # multi-architecture OCI layout. The registry named here is only a label
+      # inside the layout: docker-pr-publish.yml picks the destination.
+      - name: Build OCI image layout
+        run: |
+          ./scripts/build-images.sh --images server \
+            --oci-dir "$RUNNER_TEMP/oci" pr-build.invalid
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-image
+          path: ${{ runner.temp }}/oci/server
+          compression-level: 0
+          retention-days: 3
