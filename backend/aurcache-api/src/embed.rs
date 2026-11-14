@@ -55,8 +55,9 @@ impl Handler for CustomHandler {
             file = Asset::get("index.html");
         }
 
-        let Some(file_content) = file else {
-            return Outcome::Error(Status::NotFound);
+        let file_content = match file {
+            Some(file_content) => file_content,
+            None => return Outcome::Error(Status::NotFound),
         };
 
         // Sent on the 304 as well: it refreshes what the browser stored.

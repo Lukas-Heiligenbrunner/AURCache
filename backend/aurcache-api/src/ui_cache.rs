@@ -57,8 +57,9 @@ pub fn etag(sha256: &[u8; 32]) -> String {
 /// Weak comparison, as RFC 9110 requires for this header: `W/` is ignored on
 /// both sides. `*` matches any current representation.
 pub fn not_modified(if_none_match: Option<&str>, etag: &str) -> bool {
-    let Some(header) = if_none_match else {
-        return false;
+    let header = match if_none_match {
+        Some(header) => header,
+        None => return false,
     };
     let ours = opaque(etag);
     header
