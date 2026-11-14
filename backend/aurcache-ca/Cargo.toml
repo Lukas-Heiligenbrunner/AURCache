@@ -12,9 +12,9 @@ serde_json = { workspace = true }
 aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs", "digest"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
-x509-parser = "0.18"
-time = "0.3"
+rcgen = { version = "0.14.10", features = ["pem", "x509-parser"] }
+x509-parser = "0.18.1"
+time = "0.3.55"
 
 [dev-dependencies]
 tempfile = { workspace = true }

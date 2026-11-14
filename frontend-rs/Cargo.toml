@@ -50,26 +50,26 @@ dioxus-charts = "0.4"
 # through that glue, and no unit test loads it.
 wasm-bindgen = "=0.2.130"
 # The client's error type: only named to tell a 404 apart from other failures.
-anyhow = "1"
+anyhow = "1.0.104"
 # A log entry's payload, read for the entities a row's menu can narrow to.
-serde_json = "1"
+serde_json = "1.0.154"
 # Awaiting the `Promise` the Clipboard API returns from `write_text`.
-wasm-bindgen-futures = "0.4"
+wasm-bindgen-futures = "0.4.80"
 # Wall clock, for "3h ago" on the builds list.
-js-sys = "0.3"
+js-sys = "0.3.107"
 # Joining requests so they overlap rather than queue: the two the package page
 # makes, and one per dependent when working out where a package's dependents
 # could go instead. `alloc` is what `join_all` needs -- the fixed-arity `join`
 # cannot take a list whose length is the number of dependents.
 # `default-features = false` keeps the executor out: the browser is the
 # executor here.
-futures-util = { version = "0.3", default-features = false, features = ["async-await", "alloc"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["async-await", "alloc"] }
 # Timers: the build log polls, so it needs a sleep that works in the browser.
 gloo-timers = { version = "0.4", features = ["futures"] }
 # Zero-copy dump upload: the file reader hands back `Bytes`, the signal holds
 # them, and the client streams them into the request body without copying.
-bytes = "1"
-web-sys = { version = "0.3", features = ["Clipboard", "Document", "Element", "EventTarget", "History", "Location", "MediaQueryList", "Navigator", "Storage", "Window"] }
+bytes = "1.12.1"
+web-sys = { version = "0.3.107", features = ["Clipboard", "Document", "Element", "EventTarget", "History", "Location", "MediaQueryList", "Navigator", "Storage", "Window"] }
 
 [profile.release]
 opt-level = "z"
@@ -81,7 +81,7 @@ strip = true
 [dev-dependencies]
 # Renders components to an HTML string, so presentational logic can be tested
 # without a browser or a running backend.
-dioxus-ssr = "0.7"
+dioxus-ssr = "0.7.10"
 # Asserting the exact JSON a request body serialises to. The shapes come from
 # the server's own types, but how they nest is still worth pinning.
 
@@ -95,6 +95,6 @@ dioxus-ssr = "0.7"
 # --all-targets` would otherwise fail on a dependency no wasm build uses.
 # `tests/browser.rs` is gated the same way.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-thirtyfour = "0.38"
-serde = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+thirtyfour = "0.38.3"
+serde = "1.0.229"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }

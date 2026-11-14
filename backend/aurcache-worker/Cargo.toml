@@ -17,20 +17,20 @@ tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
-rcgen = { version = "0.14", features = ["pem"] }
-sha2 = "0.11"
-hex = "0.4"
-base64 = "0.23"
-clap = { version = "4", features = ["derive", "env"] }
+rcgen = { version = "0.14.10", features = ["pem"] }
+sha2 = "0.11.1"
+hex = "0.4.3"
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive", "env"] }
 flate2 = { workspace = true }
 tar = { workspace = true }
-percent-encoding = "2.3"
-url = "2"
+percent-encoding = "2.3.2"
+url = "2.5.8"
 aurcache-common = { path = "../aurcache-common", features = ["digest"] }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-chroot = { path = "../aurcache-chroot" }
 # The page size, for reading RSS out of /proc; see src/memory.rs.
-libc = "0.2"
+libc = "0.2.191"
 
 [dev-dependencies]
 aurcache-activitylog = {path = "../aurcache-activitylog"}
@@ -41,4 +41,4 @@ aurcache-db = { path = "../aurcache-db", features = ["testing"] }
 aurcache-ca = { path = "../aurcache-ca" }
 aurcache-utils = { path = "../aurcache-utils" }
 sea-orm = { workspace = true }
-zstd = "0.14"
+zstd = "0.14.4"

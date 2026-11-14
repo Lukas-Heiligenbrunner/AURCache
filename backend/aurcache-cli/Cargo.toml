@@ -21,11 +21,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
-clap_complete = "4.6"
+clap_complete = "4.6.11"
 dialoguer = "0.12.0"
 dirs = "7.0"
-getrandom = "0.4"
-unicode-width = "0.2"
+getrandom = "0.4.3"
+unicode-width = "0.2.3"
 
 [dev-dependencies]
 tempfile.workspace = true

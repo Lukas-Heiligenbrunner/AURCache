@@ -7,7 +7,7 @@ workspace = true
 
 [dependencies]
 # Killing a parse's whole process group; see `pkgbuild::run_bounded`.
-libc = "0.2"
+libc = "0.2.191"
 # "https" enables the OpenSSL-backed HTTPS transport (required to clone AUR/git
 # sources over https://); "vendored-openssl" builds OpenSSL from source so we
 # don't depend on a system OpenSSL dev package being present (incl. for cross
@@ -26,7 +26,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 alpm-srcinfo = {workspace = true}
 alpm-pkgbuild = {workspace = true}
-alpm-types = "0.13.0"
+alpm-types = "0.14.0"
 diffy = {workspace = true}
 lru = "0.19"
 serde = { workspace = true }
@@ -46,6 +46,6 @@ aurcache-common = {path = "../aurcache-common", features = ["digest"]}
 
 [dev-dependencies]
 aurcache-db = { path = "../aurcache-db", features = ["testing"] }
-wiremock = "0.6"
-zstd = "0.14"
-sea-orm-migration = { version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
+wiremock = "0.6.5"
+zstd = "0.14.4"
+sea-orm-migration = { version = "2.0.4", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
