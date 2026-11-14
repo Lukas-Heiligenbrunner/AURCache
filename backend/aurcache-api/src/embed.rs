@@ -62,9 +62,17 @@ impl Handler for CustomHandler {
         // Sent on the 304 as well: it refreshes what the browser stored.
         // `Vary` because the compression fairing picks an encoding from
         // `Accept-Encoding` and does not say so itself.
+        // The compression fairing needs the media type on a 304 too, so it
+        // applies the same exclusions as on the cached 200 response.
+        let content_type: ContentType = path
+            .extension()
+            .map(|x| x.to_string_lossy())
+            .and_then(|x| ContentType::from_extension(&x))
+            .unwrap_or(ContentType::Plain);
         let etag = ui_cache::etag(&file_content.metadata.sha256_hash());
         let mut response = Response::build();
         response
+            .header(content_type)
             .raw_header("ETag", etag.clone())
             .raw_header("Cache-Control", CachePolicy::of(&path).header())
             .raw_header("Vary", "Accept-Encoding");
@@ -73,16 +81,72 @@ impl Handler for CustomHandler {
             return Outcome::Success(response.status(Status::NotModified).finalize());
         }
 
-        let content_type: ContentType = path
-            .extension()
-            .map(|x| x.to_string_lossy())
-            .and_then(|x| ContentType::from_extension(&x))
-            .unwrap_or(ContentType::Plain);
         Outcome::Success(
             response
-                .header(content_type)
                 .sized_body(file_content.data.len(), Cursor::new(file_content.data))
                 .finalize(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::config::OAuthSettings;
+    use rocket::http::Header;
+    use rocket::local::asynchronous::Client;
+    use rocket_async_compression::{Compression, Level};
+
+    #[rocket::async_test]
+    async fn revalidation_preserves_the_cached_content_encoding() {
+        let client = Client::tracked(
+            rocket::build()
+                .manage(None::<OAuthSettings>)
+                .attach(Compression::with_level(Level::Precise(4)))
+                .mount("/", CustomHandler),
+        )
+        .await
+        .unwrap();
+
+        for path in ["/icon.svg", "/index.html"] {
+            for encoding in ["identity", "gzip", "br"] {
+                let response = client
+                    .get(path)
+                    .header(Header::new("Accept-Encoding", encoding))
+                    .dispatch()
+                    .await;
+                assert_eq!(response.status(), Status::Ok);
+                let etag = response.headers().get_one("ETag").unwrap().to_owned();
+                let expected_encoding = if path.ends_with(".svg") || encoding == "identity" {
+                    None
+                } else {
+                    Some(encoding)
+                };
+                assert_eq!(
+                    response.headers().get_one("Content-Encoding"),
+                    expected_encoding,
+                    "{path}, {encoding}: initial response"
+                );
+
+                let response = client
+                    .get(path)
+                    .header(Header::new("Accept-Encoding", encoding))
+                    .header(Header::new("If-None-Match", etag.clone()))
+                    .dispatch()
+                    .await;
+                assert_eq!(response.status(), Status::NotModified);
+                assert_eq!(response.headers().get_one("ETag"), Some(etag.as_str()));
+                assert_eq!(
+                    response.headers().get_one("Cache-Control"),
+                    Some("no-cache")
+                );
+                assert_eq!(response.headers().get_one("Vary"), Some("Accept-Encoding"));
+                assert_eq!(
+                    response.headers().get_one("Content-Encoding"),
+                    expected_encoding,
+                    "{path}, {encoding}: conditional response"
+                );
+            }
+        }
     }
 }
