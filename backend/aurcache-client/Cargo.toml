@@ -11,11 +11,11 @@ workspace = true
 aurcache-common = { path = "../aurcache-common", default-features = false }
 anyhow = { workspace = true }
 # Zero-copy uploads: `restore` takes `Bytes` straight into the request body.
-bytes = "1"
+bytes = "1.12.1"
 reqwest = { workspace = true, features = ["json", "query"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 # Pinning the query strings the list helpers send.
-serde_urlencoded = "0.7"
+serde_urlencoded = "0.7.1"

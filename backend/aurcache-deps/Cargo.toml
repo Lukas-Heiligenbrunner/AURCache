@@ -10,19 +10,19 @@ workspace = true
 aurcache-common = { path = "../aurcache-common" }
 alpm-compress = "0.1.5"
 alpm-srcinfo = { workspace = true }
-alpm-types = "0.13.0"
+alpm-types = "0.14.0"
 backon = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-thiserror = "2"
+thiserror = "2.0.21"
 tokio = { workspace = true, features = ["sync"] }
-url = "2"
+url = "2.5.8"
 
 [dev-dependencies]
 flate2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
-wiremock = "0.6"
+wiremock = "0.6.5"

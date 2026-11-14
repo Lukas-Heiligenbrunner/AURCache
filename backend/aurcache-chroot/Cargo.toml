@@ -10,7 +10,7 @@ workspace = true
 tokio = { workspace = true, features = ["process", "fs", "sync", "time", "macros", "rt"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-libc = "0.2"
+libc = "0.2.191"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

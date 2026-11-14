@@ -18,7 +18,7 @@ sea-orm = {workspace = true}
 aurcache-deps = {path = "../aurcache-deps"}
 pacman-mirrors = {path = "../pacman-mirrors"}
 
-sea-orm-migration = {version = "2.0", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"]}
+sea-orm-migration = {version = "2.0.4", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"]}
 
 [features]
 # Fixtures for other crates' tests; see src/testing.rs.
