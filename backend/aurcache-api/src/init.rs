@@ -154,7 +154,7 @@ impl Modify for SecurityAddon {
 pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory) -> JoinHandle<()> {
     tokio::spawn(async move {
         let config = Config {
-            address: Ipv4Addr::UNSPECIFIED.into(),
+            address: aurcache_ip().into(),
             port: aurcache_common::ports::AURCACHE_HTTP_PORT,
             secret_key: get_secret_key(),
             ..Default::default()
@@ -267,7 +267,7 @@ pub fn init_worker_api(
         let port = worker_port();
 
         let config = Config {
-            address: Ipv4Addr::UNSPECIFIED.into(),
+            address: worker_ip().into(),
             port,
             secret_key: get_secret_key(),
             tls: Some(tls),
@@ -307,11 +307,35 @@ pub(crate) fn worker_port() -> u16 {
         .unwrap_or(aurcache_common::ports::AURCACHE_WORKER_PORT)
 }
 
+pub(crate) fn worker_ip() -> Ipv4Addr {
+    aurcache_common::server_env::AURCACHE_WORKER_IP
+        .get()
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(aurcache_common::addresses::AURCACHE_WORKER_IP)
+}
+
+pub(crate) fn mirror_ip() -> Ipv4Addr {
+    aurcache_common::server_env::AURCACHE_MIRROR_IP
+        .get()
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(aurcache_common::addresses::AURCACHE_MIRROR_IP)
+}
+
+pub(crate) fn aurcache_ip() -> Ipv4Addr {
+    aurcache_common::server_env::AURCACHE_HTTP_IP
+        .get()
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(aurcache_common::addresses::AURCACHE_HTTP_IP)
+}
+
 #[must_use]
 pub fn init_repo(repo: Arc<Repository>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let config = Config {
-            address: Ipv4Addr::UNSPECIFIED.into(),
+            address: mirror_ip().into(),
             port: aurcache_common::ports::AURCACHE_MIRROR_PORT,
             secret_key: get_secret_key(),
             ..Default::default()
