@@ -56,6 +56,9 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | AURCACHE_PROTECTED_DIR | Paths         | Further directories a PKGBUILD parse may not read, colon-separated, added to the built-in list; see [Package parsing](./package-parsing.md) | none |
 | AURCACHE_SANDBOX       | Path          | The `aurcache-sandbox` a parse runs under, for an install outside the default place; absolute | `/usr/bin/aurcache-sandbox` |
 | AURCACHE_PKGBUILD_BRIDGE | Path        | The `alpm-pkgbuild-bridge` script a parse runs, likewise | `/usr/bin/alpm-pkgbuild-bridge` |
+| AURCACHE_HTTP_IP | IPv4        | IP address on which the AURCache HTTP API and file server listen| `0.0.0.0` |
+| AURCACHE_MIRROR_IP | IPv4        | IP address on which the AURCache pacman repo / mirror file server listens| `0.0.0.0` |
+| AURCACHE_WORKER_IP | IPv4        | IP address for the worker protocol listener| `0.0.0.0` |
 
 Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
 `OAUTH_AUTH_URI`, `OAUTH_TOKEN_URI`, `OAUTH_USERINFO_URI`,

@@ -64,6 +64,8 @@ pub const AURCACHE_PUBLIC_URL: Var = Var("AURCACHE_PUBLIC_URL");
 pub const AURCACHE_CONTAINER_IMAGE: Var = Var("AURCACHE_CONTAINER_IMAGE");
 pub const RETIRED_PACKAGE_GRACE: Var = Var("RETIRED_PACKAGE_GRACE");
 pub const ACTIVITY_RETENTION: Var = Var("ACTIVITY_RETENTION");
+pub const AURCACHE_MIRROR_IP: Var = Var("AURCACHE_MIRROR_IP");
+pub const AURCACHE_HTTP_IP: Var = Var("AURCACHE_HTTP_IP");
 
 // Where the server keeps its state.
 
@@ -106,7 +108,7 @@ pub const OAUTH_REDIRECT_URI: Var = Var("OAUTH_REDIRECT_URI");
 pub const OAUTH_ALLOWED_USERS: Var = Var("OAUTH_ALLOWED_USERS");
 
 // Workers.
-
+pub const AURCACHE_WORKER_IP: Var = Var("AURCACHE_WORKER_IP");
 pub const AURCACHE_WORKER_PORT: Var = Var("AURCACHE_WORKER_PORT");
 pub const AURCACHE_TLS_SANS: Var = Var("AURCACHE_TLS_SANS");
 /// Named in the copy-and-run command the Workers page shows.
@@ -165,6 +167,9 @@ pub const ALL: &[Var] = &[
     OAUTH_USERINFO_URI,
     OAUTH_REDIRECT_URI,
     OAUTH_ALLOWED_USERS,
+    AURCACHE_HTTP_IP,
+    AURCACHE_MIRROR_IP,
+    AURCACHE_WORKER_IP,
     AURCACHE_WORKER_PORT,
     AURCACHE_TLS_SANS,
     AURCACHE_WORKER_IMAGE,
