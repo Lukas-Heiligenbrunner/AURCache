@@ -4,9 +4,11 @@ use crate::backend::build_api;
 use crate::custom_file_server::CustomFileServer;
 #[cfg(feature = "static")]
 use crate::embed::CustomHandler;
+use crate::listen::ListenAddresses;
 pub use crate::utils::config::OAuthSettings;
 use crate::utils::config::{allowed_users, oauth_from_env};
 use crate::utils::failed_requests::{FailedRequests, plain_status};
+use crate::worker::RepoTemplate;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::server_env::OAUTH_ALLOWED_USERS;
 use aurcache_utils::repository::Repository;
@@ -163,23 +165,25 @@ impl Modify for SecurityAddon {
     }
 }
 
-/// Start the human-facing API/UI listener on `address`.
+/// Start the human-facing API/UI listener on `listen.api`.
 ///
 /// `services` carries the process-wide [`SnapshotStore`]; it must be the same
 /// instance handed to the schedulers and the worker listener so every path
 /// shares one set of on-disk git checkouts (see `main.rs`).
+///
+/// `listen` is managed as a whole: the API tells clients where the other two
+/// listeners are, the repository's port and the worker protocol's.
 #[must_use]
 pub fn init_api(
     services: Services,
     version: ServerVersion,
     ca_dir: CaDirectory,
-    address: IpAddr,
+    listen: ListenAddresses,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let port = aurcache_common::ports::AURCACHE_HTTP_PORT;
         let config = Config {
-            address,
-            port,
+            address: listen.api.ip(),
+            port: listen.api.port(),
             secret_key: get_secret_key(),
             ..Default::default()
         };
@@ -229,6 +233,7 @@ pub fn init_api(
             .manage(services)
             .manage(version)
             .manage(ca_dir)
+            .manage(listen)
             .mount("/api/", build_api())
             .mount("/api/", crate::worker::worker_admin_routes())
             .mount("/", Scalar::with_url("/docs", ApiDoc::openapi()))
@@ -249,10 +254,7 @@ pub fn init_api(
         #[cfg(feature = "static")]
         let rock = rock.mount("/", CustomHandler);
 
-        info!(
-            "Starting the API and web UI on {}",
-            SocketAddr::new(address, port)
-        );
+        info!("Starting the API and web UI on {}", listen.api);
         let rock = rock.launch().await;
         match rock {
             Ok(_) => info!("Rocket shut down gracefully."),
@@ -262,7 +264,7 @@ pub fn init_api(
 }
 
 /// Dedicated remote-worker protocol listener: HTTPS with **optional** mutual TLS
-/// on `address`, port `AURCACHE_WORKER_PORT` (default 8083). Enrollment endpoints are reachable
+/// on `listen.worker`. Enrollment endpoints are reachable
 /// without a client certificate; job endpoints require an approved worker's
 /// certificate. This is intentionally separate from [`init_api`] so the
 /// human-facing API/UI need no TLS of their own (front them with a reverse proxy
@@ -275,6 +277,9 @@ pub fn init_api(
 /// the schedulers: job descriptors built during `claim` resolve sources through
 /// the same on-disk checkouts the version-check loop maintains, so the two never
 /// race on (or duplicate) a clone of the same package.
+///
+/// `listen.repo` gives the port the `[repo]` section workers are sent falls
+/// back to when `AURCACHE_PUBLIC_URL` names none.
 #[must_use]
 pub fn init_worker_api(
     db: DatabaseConnection,
@@ -282,10 +287,10 @@ pub fn init_worker_api(
     store: Arc<SnapshotStore>,
     repo: Arc<Repository>,
     activity: ActivityLog,
-    address: IpAddr,
+    listen: ListenAddresses,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(tls) = worker_tls_config(&ca, address) else {
+        let Some(tls) = worker_tls_config(&ca, listen.worker.ip()) else {
             error!("Worker TLS could not be configured; worker protocol listener disabled");
             // Parked rather than returned: the server runs for as long as every
             // one of its tasks does, and the API and the repository are still
@@ -293,11 +298,9 @@ pub fn init_worker_api(
             return std::future::pending().await;
         };
 
-        let port = worker_port();
-
         let config = Config {
-            address,
-            port,
+            address: listen.worker.ip(),
+            port: listen.worker.port(),
             secret_key: get_secret_key(),
             tls: Some(tls),
             ..Default::default()
@@ -305,7 +308,7 @@ pub fn init_worker_api(
 
         info!(
             "Starting remote-worker mTLS protocol listener on {}",
-            SocketAddr::new(address, port)
+            listen.worker
         );
         let launch_result = rocket::custom(config)
             // A worker enrolling or being auto-approved is worth a line in the
@@ -318,6 +321,7 @@ pub fn init_worker_api(
             .manage(store)
             .manage(repo)
             .manage(crate::worker::AgreedProtocols::default())
+            .manage(RepoTemplate::new(listen.repo.port()))
             .manage(EnrollmentPolicy::from_env())
             .mount("/api/", crate::worker::worker_protocol_routes())
             .launch()
@@ -329,32 +333,18 @@ pub fn init_worker_api(
     })
 }
 
-/// The port the worker protocol listens on: `AURCACHE_WORKER_PORT`, else the
-/// default.
-pub(crate) fn worker_port() -> u16 {
-    aurcache_common::server_env::AURCACHE_WORKER_PORT
-        .get()
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(aurcache_common::ports::AURCACHE_WORKER_PORT)
-}
-
 /// Start the pacman repository's file server on `address`.
 #[must_use]
-pub fn init_repo(repo: Arc<Repository>, address: IpAddr) -> JoinHandle<()> {
+pub fn init_repo(repo: Arc<Repository>, address: SocketAddr) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let port = aurcache_common::ports::AURCACHE_REPO_PORT;
         let config = Config {
-            address,
-            port,
+            address: address.ip(),
+            port: address.port(),
             secret_key: get_secret_key(),
             ..Default::default()
         };
 
-        info!(
-            "Starting the pacman repository on {}",
-            SocketAddr::new(address, port)
-        );
+        info!("Starting the pacman repository on {address}");
         let launch_result = rocket::custom(config)
             // A missing signature is a 404 pacman expects, so it is not
             // logged; it gets an answer without Rocket warning for each one.

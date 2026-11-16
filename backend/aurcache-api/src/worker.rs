@@ -12,6 +12,7 @@
 //! each handler here checks the caller, calls one, and maps the outcome.
 
 use crate::auth::Authenticated;
+use crate::listen::ListenAddresses;
 use crate::utils::error::{ApiError, err};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
@@ -56,29 +57,41 @@ use utoipa::OpenApi;
 /// is the one part each worker knows better than the server does. A worker in
 /// the compose network, one on the LAN and one embedded in this very container
 /// all reach the same repository by different names.
-static REPO_TEMPLATE: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| render_repo_template(&public_repo_url()));
+pub struct RepoTemplate(String);
 
-/// Base URL workers should use for the public pacman repo (`[repo] Server`).
-pub(crate) fn public_repo_url() -> String {
-    aurcache_common::server_env::AURCACHE_PUBLIC_URL
-        .get()
-        .unwrap_or_else(|_| {
-            format!(
-                "http://localhost:{}",
-                aurcache_common::ports::AURCACHE_REPO_PORT
-            )
-        })
+impl RepoTemplate {
+    /// The template for this server, whose repository listens on `repo_port`.
+    #[must_use]
+    pub fn new(repo_port: u16) -> Self {
+        Self(render_repo_template(&public_repo_url(repo_port), repo_port))
+    }
 }
 
-/// [`REPO_TEMPLATE`] for `public_url`.
+/// Base URL the pacman repository is published at (`[repo] Server`):
+/// `AURCACHE_PUBLIC_URL`, else this server's own repository port on
+/// `localhost`.
+pub(crate) fn public_repo_url(repo_port: u16) -> String {
+    published_at(
+        aurcache_common::server_env::AURCACHE_PUBLIC_URL.get().ok(),
+        repo_port,
+    )
+}
+
+/// `configured`, else the repository on `repo_port` of `localhost`.
+fn published_at(configured: Option<String>, repo_port: u16) -> String {
+    configured.unwrap_or_else(|| format!("http://localhost:{repo_port}"))
+}
+
+/// [`RepoTemplate`] for `public_url`, with `repo_port` when the URL names no
+/// port.
 ///
 /// The host substitution is shared with the CLI, which answers the same
 /// question for a `pacman.conf` — see [`aurcache_common::repo`].
-fn render_repo_template(public_url: &str) -> String {
+fn render_repo_template(public_url: &str, repo_port: u16) -> String {
     let server = aurcache_common::repo::server_url_for_host(
         public_url,
         aurcache_common::worker::REPO_HOST_PLACEHOLDER,
+        repo_port,
     );
     let name = aurcache_common::repo::REPO_NAME;
     format!("[{name}]\nSigLevel = Never\nServer = {server}\n")
@@ -265,6 +278,7 @@ pub async fn register_worker(
     al: &State<ActivityLog>,
     policy: &State<EnrollmentPolicy>,
     protocols: &State<AgreedProtocols>,
+    template: &State<RepoTemplate>,
     input: Json<RegisterRequest>,
 ) -> Result<Json<RegisterStatus>, ApiError> {
     let db = db.inner();
@@ -274,7 +288,7 @@ pub async fn register_worker(
             protocol,
         } => {
             protocols.agree(&fingerprint, protocol);
-            register_status_for(db, ca, &fingerprint, protocol).await
+            register_status_for(db, ca, template, &fingerprint, protocol).await
         }
         Registered::InvalidCsr(why) => Err(err(Status::BadRequest, why)),
         Registered::NoCommonProtocol(why) => Err(err(Status::UpgradeRequired, why)),
@@ -295,6 +309,7 @@ pub async fn register_status(
     db: &State<DatabaseConnection>,
     ca: &State<Ca>,
     protocols: &State<AgreedProtocols>,
+    template: &State<RepoTemplate>,
     fingerprint: &str,
 ) -> Result<Json<RegisterStatus>, ApiError> {
     let protocol = protocols.of(fingerprint).ok_or_else(|| {
@@ -303,12 +318,13 @@ pub async fn register_status(
             "register first: this server holds no protocol agreed with this worker",
         )
     })?;
-    register_status_for(db.inner(), ca, fingerprint, protocol).await
+    register_status_for(db.inner(), ca, template, fingerprint, protocol).await
 }
 
 async fn register_status_for(
     db: &DatabaseConnection,
     ca: &Ca,
+    template: &RepoTemplate,
     fingerprint: &str,
     protocol: u32,
 ) -> Result<Json<RegisterStatus>, ApiError> {
@@ -330,7 +346,7 @@ async fn register_status_for(
         status: worker.status,
         signed_cert,
         ca_cert,
-        repo_template: Some(REPO_TEMPLATE.clone()),
+        repo_template: Some(template.0.clone()),
         protocol,
         lease_ttl_secs: u64::try_from(worker_policy().lease_ttl_secs).unwrap_or(0),
         heartbeat_interval_secs: worker_policy().heartbeat_interval_secs,
@@ -744,7 +760,10 @@ pub async fn list_workers(
 /// browser knows the address the page was reached on and the server does not.
 #[utoipa::path(get, path = "/workers/join-info", responses((status = 200, body = WorkerJoinInfo)))]
 #[get("/workers/join-info")]
-pub async fn worker_join_info(_a: Authenticated) -> Json<WorkerJoinInfo> {
+pub async fn worker_join_info(
+    listen: &State<ListenAddresses>,
+    _a: Authenticated,
+) -> Json<WorkerJoinInfo> {
     let image = aurcache_common::server_env::AURCACHE_WORKER_IMAGE
         .get()
         .ok()
@@ -752,7 +771,7 @@ pub async fn worker_join_info(_a: Authenticated) -> Json<WorkerJoinInfo> {
         .unwrap_or_else(|| DEFAULT_WORKER_IMAGE.to_string());
     Json(WorkerJoinInfo {
         image,
-        worker_port: crate::init::worker_port(),
+        worker_port: listen.worker.port(),
     })
 }
 
@@ -927,14 +946,14 @@ pub async fn revoke_worker(
 
 #[cfg(test)]
 mod repo_template_tests {
-    use super::render_repo_template;
+    use super::{published_at, render_repo_template};
     use aurcache_common::worker::REPO_HOST_PLACEHOLDER;
 
     /// Only the host is replaced: the scheme, port and path describe how the
     /// repository is published and remain the server's decision.
     #[test]
     fn replaces_only_the_host() {
-        let t = render_repo_template("http://aurcache.example.com:9000/repo");
+        let t = render_repo_template("http://aurcache.example.com:9000/repo", 8081);
         assert!(t.contains(&format!(
             "Server = http://{REPO_HOST_PLACEHOLDER}:9000/repo/$arch"
         )));
@@ -942,19 +961,34 @@ mod repo_template_tests {
     }
 
     /// A URL without an explicit port still needs one, or the worker would
-    /// render `http://host/$arch` and reach the web UI instead of the repo.
+    /// render `http://host/$arch` and reach the web UI instead of the repo:
+    /// the port the repository listens on.
     #[test]
     fn supplies_the_repository_port_when_the_url_omits_it() {
-        let t = render_repo_template("http://aurcache.example.com");
+        let t = render_repo_template("http://aurcache.example.com", 9081);
         assert!(t.contains(&format!(
-            "Server = http://{REPO_HOST_PLACEHOLDER}:{}/$arch",
-            aurcache_common::ports::AURCACHE_REPO_PORT
+            "Server = http://{REPO_HOST_PLACEHOLDER}:9081/$arch"
+        )));
+    }
+
+    /// Unconfigured, the published URL is this server's own repository, on
+    /// whichever port it listens on.
+    #[test]
+    fn the_default_publication_follows_the_repository_port() {
+        assert_eq!(published_at(None, 9081), "http://localhost:9081");
+        assert_eq!(
+            published_at(Some("https://aur.example.com/repo".into()), 9081),
+            "https://aur.example.com/repo"
+        );
+        let t = render_repo_template(&published_at(None, 9081), 9081);
+        assert!(t.contains(&format!(
+            "Server = http://{REPO_HOST_PLACEHOLDER}:9081/$arch"
         )));
     }
 
     #[test]
     fn keeps_https_and_ignores_a_trailing_slash() {
-        let t = render_repo_template("https://aurcache.example.com:8081/");
+        let t = render_repo_template("https://aurcache.example.com:8081/", 9081);
         assert!(t.contains(&format!(
             "Server = https://{REPO_HOST_PLACEHOLDER}:8081/$arch"
         )));

@@ -3,11 +3,12 @@
 //! The last step of setting AURCache up is consuming it, and the documentation
 //! can only print a stanza with `<server_ip>` left as an exercise. The CLI
 //! already knows the address, because it is talking to the thing: the repo is
-//! the same host on the mirror port. So this command prints the finished block
-//! with nothing left to substitute.
+//! the same host on the repository port. So this command prints the finished
+//! block with nothing left to substitute.
 
 use crate::url::{is_loopback, scheme_from_url};
 use anyhow::{Context, Result, anyhow, bail};
+use aurcache_common::api::repo::RepoInfo;
 use aurcache_common::ports::AURCACHE_REPO_PORT;
 use aurcache_common::repo::host_from_url;
 use serde::Serialize;
@@ -49,15 +50,16 @@ pub fn repo_server_url(api_url: &str, port: u16) -> Result<String> {
     ))
 }
 
-/// The `Server =` value for an instance that reported publishing at
-/// `public_url`, as reached from here at `api_url`.
+/// The `Server =` value for an instance that reported how it publishes its
+/// repository, as reached from here at `api_url`.
 ///
 /// Scheme, port and path always come from the server: it is the only party that
 /// knows whether the repository sits on a non-default port, under a path, or
 /// behind a reverse proxy. The host is decided here, because that is the part
 /// the server cannot know — it sees only how it was reached, not how the
 /// machine editing `pacman.conf` gets there.
-pub fn server_url_from_public(public_url: &str, api_url: &str) -> Result<String> {
+pub fn server_url_from_public(published: &RepoInfo, api_url: &str) -> Result<String> {
+    let public_url = published.public_url.as_str();
     let host = match host_from_url(public_url) {
         // A published host naming a real address is a deliberate statement of
         // how clients should reach the repository, and outranks whatever
@@ -69,8 +71,12 @@ pub fn server_url_from_public(public_url: &str, api_url: &str) -> Result<String>
             .ok_or_else(|| anyhow!("could not read a host out of the API URL `{api_url}`"))?
             .to_string(),
     };
+    // A server too old to report its port listens on the default one.
+    let listen_port = published.listen_port.unwrap_or(AURCACHE_REPO_PORT);
     Ok(aurcache_common::repo::server_url_for_host(
-        public_url, &host,
+        public_url,
+        &host,
+        listen_port,
     ))
 }
 
@@ -78,16 +84,18 @@ pub fn server_url_from_public(public_url: &str, api_url: &str) -> Result<String>
 ///
 /// `published` is what the server said about itself, when it could be asked.
 /// An explicit `port` outranks it: someone passing `--port` is correcting us,
-/// not asking to be corrected.
+/// not asking to be corrected. With neither, the repository is assumed to be
+/// on the default port, which is only a guess: the server may listen on
+/// another (`AURCACHE_REPO_PORT`).
 pub fn repo_config(
     api_url: &str,
     port: Option<u16>,
     name: Option<String>,
     siglevel: Option<String>,
-    published: Option<&str>,
+    published: Option<&RepoInfo>,
 ) -> Result<RepoConfig> {
     let server = match (port, published) {
-        (None, Some(public_url)) => server_url_from_public(public_url, api_url)?,
+        (None, Some(published)) => server_url_from_public(published, api_url)?,
         (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_REPO_PORT))?,
     };
     let name = name.unwrap_or_else(|| DEFAULT_REPO_NAME.to_string());
@@ -244,9 +252,19 @@ mod tests {
         DEFAULT_REPO_NAME, Install, append_stanza, has_section, install_stanza, repo_config,
         repo_server_url,
     };
+    use aurcache_common::api::repo::RepoInfo;
+
+    /// What a server answers, `listen_port` absent as from one too old to
+    /// report it.
+    fn published(public_url: &str, listen_port: Option<u16>) -> RepoInfo {
+        RepoInfo {
+            public_url: public_url.to_string(),
+            listen_port,
+        }
+    }
 
     #[test]
-    fn the_repo_is_the_api_host_on_the_mirror_port() {
+    fn the_repo_is_the_api_host_on_the_repository_port() {
         let server = repo_server_url("http://192.168.1.10:8080/api", 8081).unwrap();
         assert_eq!(server, "http://192.168.1.10:8081/$arch");
     }
@@ -395,7 +413,7 @@ mod tests {
             None,
             None,
             None,
-            Some("http://localhost:9000/arch"),
+            Some(&published("http://localhost:9000/arch", Some(8081))),
         )
         .unwrap();
         assert_eq!(config.server, "http://192.168.1.5:9000/arch/$arch");
@@ -411,7 +429,7 @@ mod tests {
             None,
             None,
             None,
-            Some("https://aurcache.example.com/repo"),
+            Some(&published("https://aurcache.example.com/repo", None)),
         )
         .unwrap();
         assert_eq!(
@@ -429,7 +447,7 @@ mod tests {
             None,
             None,
             None,
-            Some("http://localhost:8081"),
+            Some(&published("http://localhost:8081", Some(8081))),
         )
         .unwrap();
         assert_eq!(config.server, "http://192.168.1.5:8081/$arch");
@@ -443,10 +461,43 @@ mod tests {
             Some(9999),
             None,
             None,
-            Some("http://localhost:9000"),
+            Some(&published("http://localhost:9000", Some(9000))),
         )
         .unwrap();
         assert!(config.server.contains(":9999/"), "{}", config.server);
+    }
+
+    /// A server listening on another port reports it, both in its default
+    /// published URL and on its own; a URL that names no port means that one.
+    #[test]
+    fn the_servers_listen_port_fills_in_a_url_without_one() {
+        let config = repo_config(
+            "http://192.168.1.5:9080/api",
+            None,
+            None,
+            None,
+            Some(&published("http://localhost:9081", Some(9081))),
+        )
+        .unwrap();
+        assert_eq!(config.server, "http://192.168.1.5:9081/$arch");
+
+        let config = repo_config(
+            "http://192.168.1.5:9080/api",
+            None,
+            None,
+            None,
+            Some(&published("http://aurcache.example.com/repo", Some(9081))),
+        )
+        .unwrap();
+        assert_eq!(config.server, "http://aurcache.example.com:9081/repo/$arch");
+    }
+
+    /// Without the server's answer the port is the default: a guess, and the
+    /// API URL's own port says nothing about the repository's.
+    #[test]
+    fn without_the_server_the_default_port_is_assumed() {
+        let config = repo_config("http://192.168.1.5:9080/api", None, None, None, None).unwrap();
+        assert_eq!(config.server, "http://192.168.1.5:8081/$arch");
     }
 
     #[test]

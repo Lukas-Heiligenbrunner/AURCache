@@ -61,6 +61,10 @@ pub async fn test_api(
         .manage(aurcache_api::init::CaDirectory(std::path::PathBuf::from(
             "/nonexistent-ca-dir",
         )))
+        // Where the listeners are: the API tells clients the repository's
+        // port and the worker protocol's. Rocket's sentinels refuse to launch
+        // without it.
+        .manage(aurcache_api::listen::ListenAddresses::default())
         .mount("/api", aurcache_api::backend::build_api());
     let rocket = mount(rocket);
     // The checkout root only has to outlive Rocket's construction; nothing in

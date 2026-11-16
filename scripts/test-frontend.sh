@@ -25,9 +25,8 @@ SEED="$PROJECT_DIR/scripts/fixtures/frontend-seed.sql"
 # One port, because one server: the frontend is embedded into the backend by
 # `aurcache-api`'s `static` feature, exactly as it ships, so these checks
 # exercise the real asset handler and the real SPA fallback rather than a
-# stand-in that reimplements them. It is compiled in
-# (aurcache_common::ports::AURCACHE_HTTP_PORT), so it cannot be moved out of the
-# way.
+# stand-in that reimplements them. The server's default port, passed to it
+# explicitly so a value set in the calling shell cannot move it.
 API_PORT=8080
 
 SHOTS=""
@@ -118,6 +117,7 @@ echo "==> starting the server"
 # far into the run the check happens: the fixture's online worker last checked
 # in seconds before seeding, and the default timeout is 60.
 ( cd "$WORKDIR" && exec env VERSION_CHECK_INTERVAL=86400 WORKER_LIVENESS_TIMEOUT=3600 \
+    AURCACHE_HTTP_PORT="$API_PORT" \
     "$SERVER_BIN" > "$WORKDIR/server.log" 2>&1 ) &
 BACKEND_PID=$!
 
