@@ -8,6 +8,8 @@
 pub mod api;
 pub mod build_flags;
 pub mod build_state;
+/// Linux capabilities a build may be granted, by name.
+pub mod capability;
 /// SHA-256 as lowercase hex. Requires the `digest` feature.
 #[cfg(feature = "digest")]
 pub mod digest;
