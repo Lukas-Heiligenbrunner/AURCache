@@ -17,6 +17,11 @@
 //!    Its public half is logged, shown on the settings page and printed by
 //!    `aurcli ssh key`, to be added to the remote as a deploy key.
 //!
+//! Either may be protected by a passphrase, which
+//! `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` names a file holding. It is read
+//! once, at start. The generated key is written unprotected: a passphrase the
+//! server chose and stored beside the key would protect nothing.
+//!
 //! Host keys are never taken on trust silently:
 //!
 //! - `AURCACHE_SSH_KNOWN_HOSTS` names a `known_hosts` file, and only the host
@@ -34,11 +39,14 @@ use std::sync::Mutex;
 
 use anyhow::{Context, bail};
 use aurcache_common::api::ssh::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
-use aurcache_common::server_env::{AURCACHE_GIT_SSH_KEY, AURCACHE_SSH_KNOWN_HOSTS};
+use aurcache_common::server_env::{
+    AURCACHE_GIT_SSH_KEY, AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE, AURCACHE_SSH_KNOWN_HOSTS,
+};
 use aurcache_common::source::SshRemote;
 use hmac::{KeyInit, Mac};
 use ssh_key::known_hosts::{Entry, HostPatterns, KnownHosts, Marker};
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey};
+use zeroize::Zeroizing;
 
 /// Filename of the key the server generates.
 const KEY_FILE: &str = "id_ed25519";
@@ -109,18 +117,78 @@ impl HostKeySource {
     }
 }
 
-/// A usable SSH key: where its private half is, and its public half.
+/// How a deployment configures the server's SSH: the key, the file holding
+/// its passphrase if it has one, and where host keys are judged from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConfig {
+    pub key: KeySource,
+    pub passphrase_file: Option<PathBuf>,
+    pub hosts: HostKeySource,
+}
+
+impl SshConfig {
+    /// What this deployment's environment says.
+    #[must_use]
+    pub fn configured() -> Self {
+        Self {
+            key: KeySource::configured(),
+            passphrase_file: AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE
+                .get_os()
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            hosts: HostKeySource::configured(),
+        }
+    }
+}
+
+/// A key's passphrase, wiped from memory when dropped and never printed.
+#[derive(Clone)]
+pub(crate) struct Passphrase(Zeroizing<String>);
+
+impl Passphrase {
+    /// The passphrase in the file at `path`: its first line, so the newline
+    /// an editor or `echo` leaves at the end is not taken as part of it.
+    fn read(path: &Path) -> anyhow::Result<Self> {
+        let text = Zeroizing::new(fs::read_to_string(path).with_context(|| {
+            format!(
+                "{AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE} points at {}, which cannot be read",
+                path.display()
+            )
+        })?);
+        let first = text.lines().next().unwrap_or_default();
+        Ok(Self(Zeroizing::new(first.to_string())))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Passphrase(<redacted>)")
+    }
+}
+
+/// A usable SSH key: where its private half is, its public half, and the
+/// passphrase that opens it if it needs one.
 #[derive(Debug, Clone)]
 pub struct Identity {
     private_key: PathBuf,
     public_key: PublicKey,
     origin: KeyOrigin,
+    passphrase: Option<Passphrase>,
 }
 
 impl Identity {
     #[must_use]
     pub fn private_key(&self) -> &Path {
         &self.private_key
+    }
+
+    /// The passphrase to open the key with, for a key that needs one.
+    pub(crate) fn passphrase(&self) -> Option<&str> {
+        self.passphrase.as_ref().map(Passphrase::as_str)
     }
 
     /// The public key on one line, as a forge's "add key" form takes it.
@@ -161,21 +229,22 @@ impl SshAccess {
     /// that does not need one, and each SSH source then fails saying why.
     #[must_use]
     pub fn load() -> Self {
-        let access = Self::from_sources(&KeySource::configured(), HostKeySource::configured());
+        let access = Self::new(SshConfig::configured());
         access.log();
         access
     }
 
-    /// The key at `key`, generated there first if it is ours to generate.
+    /// What `config` describes, generating the key first if it is ours to
+    /// generate and missing.
     #[must_use]
-    pub fn from_sources(key: &KeySource, hosts: HostKeySource) -> Self {
-        let key = match ensure(key) {
+    pub fn new(config: SshConfig) -> Self {
+        let key = match ensure(&config.key, config.passphrase_file.as_deref()) {
             Ok(identity) => Key::Ready(identity),
             Err(e) => Key::Unavailable(format!("{e:#}")),
         };
         Self {
             key,
-            hosts: HostKeys::new(hosts),
+            hosts: HostKeys::new(config.hosts),
         }
     }
 
@@ -209,6 +278,7 @@ impl SshAccess {
                 public_key: identity.public_key_line(),
                 fingerprint: identity.fingerprint(),
                 origin: identity.origin,
+                passphrase_protected: identity.passphrase.is_some(),
             },
             Key::Unavailable(reason) => SshKey::Unavailable {
                 reason: reason.clone(),
@@ -239,12 +309,14 @@ impl SshAccess {
     }
 }
 
-/// Load the key `source` names, generating it first when it is ours.
+/// Load the key `source` names, generating it first when it is ours, and
+/// check it opens with the passphrase in `passphrase_file`, if any.
 ///
 /// A [`KeySource::Provided`] key is never touched: if it is missing that is an
 /// operator error, and generating a different key in its place would produce
 /// authentication failures that look like the remote's fault.
-fn ensure(source: &KeySource) -> anyhow::Result<Identity> {
+fn ensure(source: &KeySource, passphrase_file: Option<&Path>) -> anyhow::Result<Identity> {
+    let passphrase = passphrase_file.map(Passphrase::read).transpose()?;
     let path = source.path();
     match source {
         KeySource::Provided(_) if !path.exists() => bail!(
@@ -261,10 +333,40 @@ fn ensure(source: &KeySource) -> anyhow::Result<Identity> {
         }
         KeySource::Generated(_) => {}
     }
+    let file = read_key(path)?;
+    let passphrase = match (file.protection, passphrase) {
+        (Protection::Encrypted(key), Some(passphrase)) => {
+            key.decrypt(passphrase.as_str().as_bytes()).map_err(|_| {
+                anyhow::anyhow!(
+                    "the passphrase in {} does not open {}",
+                    passphrase_file.map_or_else(String::new, |p| p.display().to_string()),
+                    path.display()
+                )
+            })?;
+            Some(passphrase)
+        }
+        (Protection::Encrypted(_), None) => bail!(
+            "{} is protected by a passphrase; give it to the server in a file named by \
+             {AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE}",
+            path.display()
+        ),
+        (Protection::None, Some(_)) => {
+            tracing::warn!(
+                "{AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE} is set, but {} has no passphrase; \
+                 ignoring it",
+                path.display()
+            );
+            None
+        }
+        // libssh2 is the one to tell whether the passphrase opens it.
+        (Protection::Unknown, passphrase) => passphrase,
+        (Protection::None, None) => None,
+    };
     Ok(Identity {
         private_key: path.to_path_buf(),
-        public_key: public_half(path)?,
+        public_key: file.public_key,
         origin: source.origin(),
+        passphrase,
     })
 }
 
@@ -297,19 +399,39 @@ fn generate(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The public half of the private key at `path`.
+/// Whether a key file needs a passphrase.
+enum Protection {
+    None,
+    /// Encrypted, in OpenSSH's format: the key to try a passphrase on.
+    Encrypted(Box<PrivateKey>),
+    /// In an older format, which only libssh2 reads.
+    Unknown,
+}
+
+/// What a private key file says before it is opened.
+struct KeyFile {
+    public_key: PublicKey,
+    protection: Protection,
+}
+
+/// The public half of the private key at `path`, and whether it is
+/// encrypted.
 ///
 /// Read off the private key when it is in OpenSSH's format, which carries the
 /// public key in the clear even when the private half is encrypted. A key in
 /// an older format has its `.pub` beside it read instead.
-fn public_half(path: &Path) -> anyhow::Result<PublicKey> {
-    let pem = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let public = match PrivateKey::from_openssh(&pem) {
-        Ok(key) if key.is_encrypted() => bail!(
-            "{} is protected by a passphrase, which the server has no way to enter",
-            path.display()
-        ),
-        Ok(key) => key.public_key().clone(),
+fn read_key(path: &Path) -> anyhow::Result<KeyFile> {
+    let pem =
+        Zeroizing::new(fs::read(path).with_context(|| format!("reading {}", path.display()))?);
+    let file = match PrivateKey::from_openssh(&*pem) {
+        Ok(key) => KeyFile {
+            public_key: key.public_key().clone(),
+            protection: if key.is_encrypted() {
+                Protection::Encrypted(Box::new(key))
+            } else {
+                Protection::None
+            },
+        },
         Err(_) => {
             let pub_path = public_key_path(path);
             let line = fs::read_to_string(&pub_path).with_context(|| {
@@ -320,11 +442,14 @@ fn public_half(path: &Path) -> anyhow::Result<PublicKey> {
                     pub_path.display()
                 )
             })?;
-            PublicKey::from_openssh(line.trim())
-                .with_context(|| format!("{} is not an SSH public key", pub_path.display()))?
+            KeyFile {
+                public_key: PublicKey::from_openssh(line.trim())
+                    .with_context(|| format!("{} is not an SSH public key", pub_path.display()))?,
+                protection: Protection::Unknown,
+            }
         }
     };
-    Ok(public)
+    Ok(file)
 }
 
 /// Public-key path for a private key, by OpenSSH's `.pub` convention.
@@ -578,13 +703,15 @@ fn record(file: &Path, name: &str, key: &PublicKey) -> anyhow::Result<()> {
 }
 
 /// What a PKGBUILD parse must never read: the server's SSH directory, and a
-/// key the operator keeps somewhere else.
+/// key or a passphrase the operator keeps somewhere else.
 #[must_use]
 pub fn private_paths() -> Vec<PathBuf> {
+    let config = SshConfig::configured();
     let mut paths = vec![aurcache_common::fs::ssh_dir()];
-    if let KeySource::Provided(key) = KeySource::configured() {
+    if let KeySource::Provided(key) = config.key {
         paths.push(key);
     }
+    paths.extend(config.passphrase_file);
     paths
 }
 
@@ -774,12 +901,12 @@ mod tests {
     fn a_generated_key_is_private_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ssh").join(KEY_FILE);
-        let first = ensure(&KeySource::Generated(path.clone())).unwrap();
+        let first = ensure(&KeySource::Generated(path.clone()), None).unwrap();
         assert!(first.public_key_line().starts_with("ssh-ed25519 "));
         assert!(first.public_key_line().ends_with(KEY_COMMENT));
         assert!(first.fingerprint().starts_with("SHA256:"));
         // A restart reads the same key rather than making another.
-        let again = ensure(&KeySource::Generated(path.clone())).unwrap();
+        let again = ensure(&KeySource::Generated(path.clone()), None).unwrap();
         assert_eq!(first.public_key_line(), again.public_key_line());
         let on_disk = fs::read_to_string(public_key_path(&path)).unwrap();
         assert_eq!(on_disk.trim(), first.public_key_line());
@@ -803,10 +930,11 @@ mod tests {
     fn a_missing_provided_key_is_an_error_and_nothing_is_generated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deploy_key");
-        let access = SshAccess::from_sources(
-            &KeySource::Provided(path.clone()),
-            HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
-        );
+        let access = SshAccess::new(SshConfig {
+            key: KeySource::Provided(path.clone()),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
+        });
         let Some(SshKey::Unavailable { reason }) = access.info().key(DEFAULT_KEY).cloned() else {
             panic!("a missing key loaded");
         };
@@ -821,10 +949,11 @@ mod tests {
         let path = dir.path().join("deploy_key");
         generate(&path).unwrap();
         let private = fs::read_to_string(&path).unwrap();
-        let access = SshAccess::from_sources(
-            &KeySource::Provided(path),
-            HostKeySource::Pinned(dir.path().join("known_hosts")),
-        );
+        let access = SshAccess::new(SshConfig {
+            key: KeySource::Provided(path),
+            passphrase_file: None,
+            hosts: HostKeySource::Pinned(dir.path().join("known_hosts")),
+        });
         let info = access.info();
         let Some(SshKey::Ready { origin, .. }) = info.key(DEFAULT_KEY) else {
             panic!("{info:?}");
@@ -840,21 +969,101 @@ mod tests {
         assert!(!format!("{access:?}").contains(secret_line));
     }
 
-    /// The server cannot type a passphrase, so such a key is reported as
-    /// unusable at start rather than failing every clone obscurely.
-    #[test]
-    fn a_passphrase_protected_key_is_reported_as_unusable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("deploy_key");
-        let made = std::process::Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "secret", "-f"])
-            .arg(&path)
-            .status();
-        if !made.is_ok_and(|s| s.success()) {
-            eprintln!("skipped: ssh-keygen is not installed");
-            return;
+    /// A key at `path` encrypted with `passphrase`, and a file holding
+    /// `written` as its passphrase, newline and all.
+    fn encrypted_key(dir: &Path, passphrase: &str, written: &str) -> SshConfig {
+        let path = dir.join("deploy_key");
+        let key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap()
+            .encrypt(&mut ssh_key::rand_core::OsRng, passphrase)
+            .unwrap();
+        fs::write(&path, key.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let passphrase_file = dir.join("passphrase");
+        fs::write(&passphrase_file, written).unwrap();
+        SshConfig {
+            key: KeySource::Provided(path),
+            passphrase_file: Some(passphrase_file),
+            hosts: HostKeySource::Pinned(dir.join("known_hosts")),
         }
-        let error = ensure(&KeySource::Provided(path)).unwrap_err().to_string();
-        assert!(error.contains("passphrase"), "{error}");
+    }
+
+    fn unavailable(access: &SshAccess) -> String {
+        match access.info().key(DEFAULT_KEY).cloned() {
+            Some(SshKey::Unavailable { reason }) => reason,
+            other => panic!("the key loaded: {other:?}"),
+        }
+    }
+
+    /// The passphrase opens the key, and is reported only as being there.
+    #[test]
+    fn a_passphrase_file_opens_a_protected_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = SshAccess::new(encrypted_key(
+            dir.path(),
+            "correct horse",
+            "correct horse\n",
+        ));
+        let Some(SshKey::Ready {
+            passphrase_protected,
+            ..
+        }) = access.info().key(DEFAULT_KEY).cloned()
+        else {
+            panic!("{:?}", access.info());
+        };
+        assert!(passphrase_protected);
+        let identity = access.identity().unwrap();
+        assert_eq!(identity.passphrase(), Some("correct horse"));
+        assert!(!format!("{access:?}").contains("correct horse"));
+        assert!(
+            !serde_json::to_string(&access.info())
+                .unwrap()
+                .contains("correct horse")
+        );
+    }
+
+    /// A wrong passphrase is found at start, and named as the reason every
+    /// SSH source then fails with.
+    #[test]
+    fn a_wrong_passphrase_is_the_reason_the_key_is_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = SshAccess::new(encrypted_key(dir.path(), "correct horse", "battery staple"));
+        let reason = unavailable(&access);
+        assert!(reason.contains("does not open"), "{reason}");
+        assert!(
+            !reason.contains("battery"),
+            "the passphrase leaked: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_protected_key_without_a_passphrase_says_how_to_give_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = encrypted_key(dir.path(), "correct horse", "");
+        config.passphrase_file = None;
+        let reason = unavailable(&SshAccess::new(config));
+        assert!(
+            reason.contains("AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_missing_passphrase_file_is_the_reason_the_key_is_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = encrypted_key(dir.path(), "correct horse", "");
+        config.passphrase_file = Some(dir.path().join("nope"));
+        let reason = unavailable(&SshAccess::new(config));
+        assert!(reason.contains("cannot be read"), "{reason}");
+    }
+
+    /// A passphrase is never invented for the key the server generates.
+    #[test]
+    fn the_generated_key_is_written_unprotected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_FILE);
+        let identity = ensure(&KeySource::Generated(path.clone()), None).unwrap();
+        assert!(identity.passphrase().is_none());
+        let key = PrivateKey::from_openssh(fs::read(&path).unwrap()).unwrap();
+        assert!(!key.is_encrypted());
     }
 }

@@ -121,7 +121,7 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
         }
         if allowed.contains(CredentialType::SSH_KEY) && !offered {
             offered = true;
-            return Cred::ssh_key(user, None, identity.private_key(), None);
+            return Cred::ssh_key(user, None, identity.private_key(), identity.passphrase());
         }
         Err(credentials_refusal.refuse(rejected.clone()))
     });
@@ -420,14 +420,15 @@ pub fn ls_remote(git_repo: &str, git_ref: &str, access: Access<'_>) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssh::{HostKeySource, KeySource};
+    use crate::ssh::{HostKeySource, KeySource, SshConfig};
     use git2::Signature;
 
     fn server_access(dir: &Path) -> SshAccess {
-        SshAccess::from_sources(
-            &KeySource::Generated(dir.join("id_ed25519")),
-            HostKeySource::TrustOnFirstUse(dir.join("known_hosts")),
-        )
+        SshAccess::new(SshConfig {
+            key: KeySource::Generated(dir.join("id_ed25519")),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(dir.join("known_hosts")),
+        })
     }
 
     /// Only an SSH remote is offered the key: anything else is reached as it

@@ -11,7 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use aurcache_utils::git::{Access, checkout_or_fetch_repo_ref, ls_remote};
-use aurcache_utils::ssh::{HostKeySource, KeySource, SshAccess};
+use aurcache_utils::ssh::{HostKeySource, KeySource, SshAccess, SshConfig};
 
 /// A throwaway `sshd`, stopped when dropped.
 struct Sshd {
@@ -183,10 +183,11 @@ fn a_package_source_is_cloned_over_ssh_with_the_servers_key() {
     let Some(sshd) = Sshd::start() else { return };
     let state = tempfile::tempdir().unwrap();
     let known_hosts = state.path().join("ssh/known_hosts");
-    let access = SshAccess::from_sources(
-        &KeySource::Generated(state.path().join("ssh/id_ed25519")),
-        HostKeySource::TrustOnFirstUse(known_hosts.clone()),
-    );
+    let access = SshAccess::new(SshConfig {
+        key: KeySource::Generated(state.path().join("ssh/id_ed25519")),
+        passphrase_file: None,
+        hosts: HostKeySource::TrustOnFirstUse(known_hosts.clone()),
+    });
     let repo = bare_repo(state.path(), "1.0");
     let url = sshd.url(&repo);
     let checkout = state.path().join("checkout");
@@ -252,10 +253,11 @@ fn a_pinned_known_hosts_is_the_whole_list() {
     let state = tempfile::tempdir().unwrap();
     let pinned = state.path().join("known_hosts");
     std::fs::write(&pinned, "").unwrap();
-    let access = SshAccess::from_sources(
-        &KeySource::Generated(state.path().join("ssh/id_ed25519")),
-        HostKeySource::Pinned(pinned.clone()),
-    );
+    let access = SshAccess::new(SshConfig {
+        key: KeySource::Generated(state.path().join("ssh/id_ed25519")),
+        passphrase_file: None,
+        hosts: HostKeySource::Pinned(pinned.clone()),
+    });
     sshd.authorize(&public_key(&access));
     let repo = bare_repo(state.path(), "1.0");
     let url = sshd.url(&repo);
@@ -274,4 +276,50 @@ fn a_pinned_known_hosts_is_the_whole_list() {
 
     std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
     ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
+}
+
+/// A supplied key protected by a passphrase is opened with the one in
+/// `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`, by libssh2 itself.
+#[test]
+fn a_passphrase_protected_key_clones_with_its_passphrase_file() {
+    let Some(sshd) = Sshd::start() else { return };
+    let state = tempfile::tempdir().unwrap();
+    let key = state.path().join("deploy_key");
+    let made = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "correct horse", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let passphrase = state.path().join("passphrase");
+    std::fs::write(&passphrase, "correct horse\n").unwrap();
+    let pinned = state.path().join("known_hosts");
+    std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
+
+    let access = SshAccess::new(SshConfig {
+        key: KeySource::Provided(key.clone()),
+        passphrase_file: Some(passphrase.clone()),
+        hosts: HostKeySource::Pinned(pinned),
+    });
+    sshd.authorize(&public_key(&access));
+    let repo = bare_repo(state.path(), "1.0");
+    let url = sshd.url(&repo);
+    let checkout = state.path().join("checkout");
+    checkout_or_fetch_repo_ref(&url, "HEAD", &checkout, Access::Server(&access)).unwrap();
+    assert!(
+        std::fs::read_to_string(checkout.join("PKGBUILD"))
+            .unwrap()
+            .contains("1.0")
+    );
+
+    // The wrong one is the reason, before anything connects.
+    std::fs::write(&passphrase, "battery staple\n").unwrap();
+    let wrong = SshAccess::new(SshConfig {
+        key: KeySource::Provided(key),
+        passphrase_file: Some(passphrase),
+        hosts: HostKeySource::Pinned(state.path().join("known_hosts")),
+    });
+    let error = ls_remote(&url, "HEAD", Access::Server(&wrong)).unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("does not open"), "{error}");
 }

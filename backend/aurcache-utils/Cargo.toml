@@ -18,7 +18,10 @@ git2 = { version = "0.21.0", features = ["https", "ssh", "vendored-openssl"] }
 # The server's SSH key: generating it, reading it back, and the known_hosts
 # format host keys are recorded in. In Rust rather than `ssh-keygen`, which the
 # server image does not ship.
-ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
+# `encryption` to check at start that a key's passphrase opens it.
+ssh-key = { version = "0.6.7", features = ["ed25519", "encryption", "getrandom"] }
+# Wiping a key's passphrase, and its file's bytes, from memory once dropped.
+zeroize = "1.8.2"
 # Matching the hashed host names `ssh-keyscan -H` writes.
 hmac = "0.13.0"
 sha1 = "0.11.0"

@@ -56,15 +56,49 @@ services:
 ```
 
 When `AURCACHE_GIT_SSH_KEY` is set, no key is generated, and a missing file is
-reported as such at start rather than replaced. The key must have no
-passphrase: the server has nobody to ask for one. It is best in OpenSSH's own
+reported as such at start rather than replaced. It is best in OpenSSH's own
 format (what `ssh-keygen` writes); a key in an older format needs its `.pub`
 beside it.
 
-PKGBUILDs are parsed in a sandbox that cannot read `AURCACHE_SSH_DIR` or the key
-`AURCACHE_GIT_SSH_KEY` names. On a kernel without Landlock the sandbox relies on
-file permissions instead, and refuses to parse anything while the key is
-readable by other users: keep it `0600`, or `0400`.
+### A key with a passphrase
+
+A key protected by a passphrase works when the server is given the passphrase
+in a file:
+
+```yaml
+    environment:
+      AURCACHE_GIT_SSH_KEY: /run/secrets/aurcache_ssh_key
+      AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE: /run/secrets/aurcache_ssh_passphrase
+```
+
+The file's first line is the passphrase; a trailing newline is not part of it.
+It is read once, at start, so a changed passphrase takes a restart. It is never
+logged, shown or put in a dump. The point is that the key file alone, on the
+volume or in a backup of it, is no use to whoever holds it: keep the passphrase
+somewhere else.
+
+This applies to a key you supply, and to the one the server generated if you
+protect it yourself afterwards:
+
+```sh
+ssh-keygen -p -f /app/data/ssh/id_ed25519
+```
+
+The server writes the key it generates without a passphrase, since one it chose
+and stored beside the key would protect nothing.
+
+At start the server checks that the passphrase opens the key. A wrong or missing
+passphrase does not stop the server: everything else works, and each SSH source
+fails, saying which file does not open which key. The settings page shows the
+same reason in place of the key.
+
+### Keeping the key from PKGBUILDs
+
+PKGBUILDs are parsed in a sandbox that cannot read `AURCACHE_SSH_DIR`, the key
+`AURCACHE_GIT_SSH_KEY` names, or the passphrase file. On a kernel without
+Landlock the sandbox relies on file permissions instead, and refuses to parse
+anything while one of them is readable by other users: keep them `0600`, or
+`0400`.
 
 ## Host keys
 

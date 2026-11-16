@@ -47,6 +47,9 @@ pub enum SshKey {
         /// `SHA256:...`, as `ssh-keygen -l` prints it.
         fingerprint: String,
         origin: KeyOrigin,
+        /// Whether the key is opened with the passphrase in
+        /// `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`. Never the passphrase.
+        passphrase_protected: bool,
     },
     /// No key could be loaded; SSH sources fail until this is fixed.
     Unavailable { reason: String },

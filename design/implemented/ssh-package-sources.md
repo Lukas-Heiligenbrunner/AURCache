@@ -53,7 +53,7 @@ What it costs, and is documented:
   what `known_hosts` already holds as OpenSSH would. A host recorded only by
   another key type is refused as changed; the docs say to record every type
   (`ssh-keyscan` without `-t`).
-- No ssh-agent, no hardware keys, no passphrase (the server has nobody to ask).
+- No ssh-agent and no hardware keys. A passphrase only from a file (see below).
 - libgit2 replaces a callback's error message with a generic one ("invalid or
   unknown remote ssh hostkey"). `git.rs` keeps the callback's reason beside it
   (`Refusal`) and reports that instead.
@@ -72,6 +72,16 @@ What it costs, and is documented:
 
 A key that cannot be loaded does not stop the server: everything else works,
 and each SSH source fails with the reason (`SshKey::Unavailable`).
+
+Either key may be protected by a passphrase, given in a file named by
+`AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`. It is read once at start, held in a
+`Zeroizing` string with a redacting `Debug`, and passed to libssh2 as the
+fourth argument of `Cred::ssh_key`. For an OpenSSH-format key the server checks
+at start that it decrypts the key (`ssh-key`'s `encryption` feature), so a
+wrong passphrase is the stated reason rather than an authentication failure
+later; an older format is left to libssh2. The generated key is written
+unprotected: a passphrase the server chose and stored beside it would protect
+nothing. The operator can protect it afterwards with `ssh-keygen -p`.
 
 The public half is logged at start, returned by `GET /api/ssh`, shown on the
 settings page and in the add dialog once the entry is an SSH remote, and
@@ -95,8 +105,9 @@ response changing shape, and `aurcli ssh key [NAME]` is a subcommand of an
 
 ### Keeping it from PKGBUILDs
 
-`pkgbuild::private_state` names `AURCACHE_SSH_DIR` and the key
-`AURCACHE_GIT_SSH_KEY` points at, so a PKGBUILD parse cannot read either. On a
+`pkgbuild::private_state` names `AURCACHE_SSH_DIR`, the key
+`AURCACHE_GIT_SSH_KEY` points at and the passphrase file, so a PKGBUILD parse
+cannot read any of them. On a
 kernel without Landlock the parse sandbox checks file modes instead and refuses
 to parse while the key is readable by other users -- a world-readable Docker
 secret then stops every parse, with a message saying which file. That is the

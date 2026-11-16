@@ -183,6 +183,7 @@ with the server's own SSH key; see [SSH package sources](./ssh-sources.md).
 | Variable                 | Description                                                  | Default |
 |--------------------------|--------------------------------------------------------------|---------|
 | AURCACHE_GIT_SSH_KEY     | A private key to clone with. When set, no key is generated   | a key generated in `AURCACHE_SSH_DIR` |
+| AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE | A file holding the passphrase of the key the server clones with; read once, at start | none: the key has no passphrase |
 | AURCACHE_SSH_KNOWN_HOSTS | A `known_hosts` file: only the host keys in it are trusted   | each host trusted on first contact, and held to that key |
 
 Builds run on [build workers](../workers/split-chroot.md), which are configured
