@@ -28,9 +28,10 @@ use std::io::Read;
 
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
-    DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
-    PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    DumpSecrets, DumpSettings, DumpSsh, DumpSshKey, DumpToken, DumpWorker, ExistingPackagePolicy,
+    MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome,
+    SETTINGS_FILE, SSH_KEY_FILE, SSH_KNOWN_HOSTS_FILE, SSH_PUBLIC_KEY_FILE, SecretsPolicy,
+    TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -183,8 +184,15 @@ fn load_secrets(
                      verify them; it was assembled wrongly"
                 );
             }
-            if files.contains_key(TOKENS_FILE) {
-                anyhow::bail!("this dump carries {TOKENS_FILE} but no CA; secrets travel together");
+            for secret in [
+                TOKENS_FILE,
+                SSH_KEY_FILE,
+                SSH_PUBLIC_KEY_FILE,
+                SSH_KNOWN_HOSTS_FILE,
+            ] {
+                if files.contains_key(secret) {
+                    anyhow::bail!("this dump carries {secret} but no CA; secrets travel together");
+                }
             }
             return Ok(None);
         }
@@ -202,7 +210,26 @@ fn load_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        ssh: load_ssh(files)?,
     }))
+}
+
+/// The SSH key and host keys, if the archive carries them.
+fn load_ssh(files: &BTreeMap<String, String>) -> anyhow::Result<DumpSsh> {
+    let key = match (files.get(SSH_KEY_FILE), files.get(SSH_PUBLIC_KEY_FILE)) {
+        (Some(private_key), public_key) => Some(DumpSshKey {
+            private_key: private_key.clone(),
+            public_key: public_key.map(|line| line.trim().to_string()),
+        }),
+        (None, Some(_)) => {
+            anyhow::bail!("{SSH_PUBLIC_KEY_FILE} is here but {SSH_KEY_FILE} is not")
+        }
+        (None, None) => None,
+    };
+    Ok(DumpSsh {
+        key,
+        known_hosts: files.get(SSH_KNOWN_HOSTS_FILE).cloned(),
+    })
 }
 
 fn parse<T: serde::de::DeserializeOwned>(
@@ -358,6 +385,14 @@ pub async fn apply(
             .await;
         }
     }
+    if let Err(e) = restore_ssh(services, &dump, &options) {
+        report_failure(
+            &progress,
+            "",
+            format!("the packages were imported, but the SSH key was not: {e:#}"),
+        )
+        .await;
+    }
 
     // PASS 2: sources. Every imported package's `provides` and split package
     // names, so that pass 3 can recognise them. Until this is done for *all* of
@@ -492,6 +527,69 @@ fn write_secrets(
         secrets.ca_key_pem.clone(),
     )?;
     Ok(true)
+}
+
+/// Put the dump's SSH key and host keys in place, when secrets are taken.
+///
+/// After the rows, for the same reason as the CA: files are not something a
+/// rolled-back transaction takes back. What happened is logged, and what an
+/// operator has to act on -- a key the remotes may not know -- is in the
+/// activity log too.
+fn restore_ssh(
+    services: &Services,
+    dump: &LoadedDump,
+    options: &RestoreOptions,
+) -> anyhow::Result<()> {
+    use crate::ssh::{HostsRestored, KeyRestored};
+
+    let Some(secrets) = &dump.secrets else {
+        return Ok(());
+    };
+    if !take_secrets(options) {
+        return Ok(());
+    }
+    let restored = services.store.ssh().restore(&secrets.ssh)?;
+    match restored.key {
+        KeyRestored::NotCarried | KeyRestored::Unchanged => {}
+        KeyRestored::Installed { fingerprint } => {
+            tracing::info!("Restored the dump's SSH key ({fingerprint}); cloning with it");
+            services
+                .activity
+                .emit(Event::RestoreSshKeyReplaced { fingerprint });
+        }
+        KeyRestored::SameAsConfigured => tracing::info!(
+            "Restored the dump's SSH key; AURCACHE_GIT_SSH_KEY names the same key, which stays \
+             the one in use"
+        ),
+        KeyRestored::Superseded {
+            fingerprint,
+            configured,
+        } => {
+            tracing::warn!(
+                "Restored the dump's SSH key ({fingerprint}), but AURCACHE_GIT_SSH_KEY names a \
+                 different key ({}), which stays the one in use",
+                configured.display()
+            );
+            services.activity.emit(Event::RestoreSshKeySuperseded {
+                fingerprint,
+                configured: configured.display().to_string(),
+            });
+        }
+    }
+    match restored.known_hosts {
+        HostsRestored::NotCarried => {}
+        HostsRestored::Installed { file } => {
+            tracing::info!(
+                "Restored the dump's trusted SSH host keys to {}",
+                file.display()
+            );
+        }
+        HostsRestored::Pinned { file } => tracing::info!(
+            "Kept AURCACHE_SSH_KNOWN_HOSTS ({}) rather than the dump's trusted SSH host keys",
+            file.display()
+        ),
+    }
+    Ok(())
 }
 
 /// What pass 1 did.

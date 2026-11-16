@@ -61,9 +61,10 @@ fn dump_file_name(created_at: i64) -> String {
 /// Export packages, settings and approved workers as a `.tar.gz`.
 ///
 /// Authored state only -- build history, logs and the resolved dependency graph
-/// are rebuilt by the next resolve and are not carried. No secrets: the CA and
-/// worker certificates are deliberately absent, so this is safe to keep
-/// alongside ordinary backups.
+/// are rebuilt by the next resolve and are not carried. No secrets unless
+/// `include_secrets` asks: the CA, worker certificates and SSH key are
+/// otherwise deliberately absent, so this is safe to keep alongside ordinary
+/// backups.
 #[get("/dump?<include_secrets>")]
 pub async fn dump(
     services: &State<Services>,
@@ -81,14 +82,17 @@ pub async fn dump(
         // even when it is entirely legitimate.
         warn!(
             "Exporting a dump WITH SECRETS (CA private key, worker certificates, \
-             token hashes), requested by {}",
+             token hashes, SSH key), requested by {}",
             a.username.as_deref().unwrap_or("an unauthenticated caller")
         );
     }
     let dump = aurcache_utils::dump::build_dump(
         &services.db,
         &version.0,
-        with_secrets.then(|| ca_dir.0.as_path()),
+        with_secrets.then(|| aurcache_utils::dump::SecretSources {
+            ca_dir: ca_dir.0.as_path(),
+            ssh: services.store.ssh(),
+        }),
     )
     .await?;
     services.activity.emit_by(

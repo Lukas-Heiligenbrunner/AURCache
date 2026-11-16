@@ -107,9 +107,10 @@ pub(crate) enum ApiCommand {
         /// directory.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Also export the CA private key, worker certificates and API token
-        /// hashes. The file becomes a credential: anyone holding it can mint a
-        /// worker this server accepts. Written owner-readable only.
+        /// Also export the CA private key, worker certificates, API token
+        /// hashes and the SSH key. The file becomes a credential: anyone
+        /// holding it can mint a worker this server accepts, and read every
+        /// repository the SSH key was added to. Written owner-readable only.
         #[arg(long)]
         include_secrets: bool,
     },
@@ -143,8 +144,9 @@ pub(crate) struct RestoreArgs {
     /// package, setting and worker this instance has is removed first.
     #[arg(long)]
     pub(crate) clear: bool,
-    /// Take the dump's CA, worker certificates and token hashes. Replacing
-    /// the CA invalidates every certificate this server's workers hold.
+    /// Take the dump's CA, worker certificates, token hashes and SSH key.
+    /// Replacing the CA invalidates every certificate this server's workers
+    /// hold.
     #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
     pub(crate) secrets: Secrets,
 }
@@ -860,7 +862,7 @@ pub(crate) struct RawArgs {
 /// What an import should do about the dump's secrets.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
 pub(crate) enum Secrets {
-    /// Leave this server's CA and tokens alone.
+    /// Leave this server's CA, tokens and SSH key alone.
     Ignore,
     /// Take the dump's, replacing what is here.
     Copy,

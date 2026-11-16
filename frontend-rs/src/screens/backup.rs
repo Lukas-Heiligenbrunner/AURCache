@@ -83,9 +83,11 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                     div {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
-                            "The CA private key, the certificates your workers hold, and \
-                             API token hashes. Restoring these makes a move invisible to \
-                             your workers: they reconnect instead of re-enrolling."
+                            "The CA private key, the certificates your workers hold, API \
+                             token hashes, and the SSH key private sources are cloned with. \
+                             Restoring these makes a move invisible to your workers and your \
+                             git remotes: workers reconnect instead of re-enrolling, and no \
+                             key has to be added to a repository again."
                         }
                     }
                 }

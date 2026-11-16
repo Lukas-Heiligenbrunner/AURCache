@@ -37,6 +37,15 @@ pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
 /// API token hashes, present only in a dump taken with secrets.
 pub const TOKENS_FILE: &str = "tokens.json";
+/// The SSH key the server clones package sources with, exactly as it was
+/// stored -- still encrypted, if it was. Present only in a dump taken with
+/// secrets, and never with its passphrase.
+pub const SSH_KEY_FILE: &str = "ssh/key";
+/// That key's public half.
+pub const SSH_PUBLIC_KEY_FILE: &str = "ssh/key.pub";
+/// The SSH host keys the server trusted on first contact. Present only in a
+/// dump taken with secrets, and only when the server keeps that file itself.
+pub const SSH_KNOWN_HOSTS_FILE: &str = "ssh/known_hosts";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -48,9 +57,10 @@ pub struct DumpManifest {
     pub aurcache_version: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Whether the archive carries the CA, worker certificates and token
-    /// hashes. A dump with this set is dangerous to share -- the CA private
-    /// key mints worker identities the server accepts.
+    /// Whether the archive carries the CA, worker certificates, token hashes
+    /// and the SSH key. A dump with this set is dangerous to share -- the CA
+    /// private key mints worker identities the server accepts, and the SSH key
+    /// reads every repository it was added to.
     pub includes_secrets: bool,
 }
 
@@ -151,6 +161,29 @@ pub struct DumpSecrets {
     pub ca_cert_pem: String,
     pub ca_key_pem: String,
     pub tokens: Vec<DumpToken>,
+    pub ssh: DumpSsh,
+}
+
+/// The server's SSH state, so that a restored or migrated instance keeps
+/// cloning from the remotes that know its key, without adding a new one to
+/// each of them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DumpSsh {
+    /// The key in use, generated or supplied, byte for byte as stored.
+    pub key: Option<DumpSshKey>,
+    /// `known_hosts` as trust on first use recorded it.
+    pub known_hosts: Option<String>,
+}
+
+/// A private key file and what is known of its public half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DumpSshKey {
+    /// The file's contents. Encrypted if the key was; the passphrase is
+    /// never carried.
+    pub private_key: String,
+    /// One line, as in a `.pub` file. Absent when the server could read no
+    /// public half, as for a key it could not open.
+    pub public_key: Option<String>,
 }
 
 /// What to do about secrets a dump carries.
@@ -163,7 +196,7 @@ pub struct DumpSecrets {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
-    /// Leave this instance's CA and tokens as they are.
+    /// Leave this instance's CA, tokens and SSH key as they are.
     #[default]
     Ignore,
     /// Take the dump's, replacing what is here.
@@ -264,8 +297,8 @@ pub struct RestoreOptions {
     /// existing package by the time the dump is written.
     #[serde(default)]
     pub clear: bool,
-    /// What to do about the CA, worker certificates and token hashes, when the
-    /// dump carries any. Ignored when it does not.
+    /// What to do about the CA, worker certificates, token hashes and SSH
+    /// key, when the dump carries any. Ignored when it does not.
     #[serde(default)]
     pub secrets: SecretsPolicy,
 }

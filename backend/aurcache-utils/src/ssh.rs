@@ -35,11 +35,12 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{Context, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
+use aurcache_common::api::dump::{DumpSsh, DumpSshKey};
 use aurcache_common::api::ssh::{
     HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
@@ -128,6 +129,9 @@ impl HostKeySource {
 /// its passphrase if it has one, and where host keys are judged from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshConfig {
+    /// The server's own SSH directory: where it generates its key and records
+    /// host keys unless told otherwise, and where a restored key goes.
+    pub dir: PathBuf,
     pub key: KeySource,
     pub passphrase_file: Option<PathBuf>,
     pub hosts: HostKeySource,
@@ -138,6 +142,7 @@ impl SshConfig {
     #[must_use]
     pub fn configured() -> Self {
         Self {
+            dir: aurcache_common::fs::ssh_dir(),
             key: KeySource::configured(),
             passphrase_file: AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE
                 .get_os()
@@ -224,7 +229,11 @@ enum Key {
 /// keys it trusts.
 #[derive(Debug)]
 pub struct SshAccess {
-    key: Key,
+    /// What the key was loaded from. `None` for access built without any.
+    config: Option<SshConfig>,
+    /// Behind a lock so that a key a restore put in place is used, and
+    /// reported, without a restart.
+    key: RwLock<Key>,
     hosts: HostKeys,
 }
 
@@ -250,16 +259,10 @@ impl SshAccess {
     /// or its host-key checks.
     #[must_use]
     pub fn new(config: SshConfig) -> Self {
-        let key = match SshBackend::linked().unusable() {
-            Some(reason) => Key::Unavailable(reason),
-            None => match ensure(&config.key, config.passphrase_file.as_deref()) {
-                Ok(identity) => Key::Ready(identity),
-                Err(e) => Key::Unavailable(format!("{e:#}")),
-            },
-        };
         Self {
-            key,
-            hosts: HostKeys::new(config.hosts),
+            key: RwLock::new(load_key(&config)),
+            hosts: HostKeys::new(config.hosts.clone()),
+            config: Some(config),
         }
     }
 
@@ -276,16 +279,23 @@ impl SshAccess {
     #[must_use]
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            key: Key::Unavailable(reason.into()),
+            config: None,
+            key: RwLock::new(Key::Unavailable(reason.into())),
             hosts: HostKeys::new(HostKeySource::Pinned(PathBuf::new())),
         }
     }
 
+    fn key(&self) -> std::sync::RwLockReadGuard<'_, Key> {
+        self.key
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The key to offer, or why there is none.
-    pub(crate) fn identity(&self) -> Result<&Identity, &str> {
-        match &self.key {
-            Key::Ready(identity) => Ok(identity),
-            Key::Unavailable(reason) => Err(reason),
+    pub(crate) fn identity(&self) -> Result<Identity, String> {
+        match &*self.key() {
+            Key::Ready(identity) => Ok(identity.clone()),
+            Key::Unavailable(reason) => Err(reason.clone()),
         }
     }
 
@@ -296,7 +306,7 @@ impl SshAccess {
     /// What the API reports: nothing secret.
     #[must_use]
     pub fn info(&self) -> SshInfo {
-        let key = match &self.key {
+        let key = match &*self.key() {
             Key::Ready(identity) => SshKey::Ready {
                 public_key: identity.public_key_line(),
                 fingerprint: identity.fingerprint(),
@@ -315,7 +325,7 @@ impl SshAccess {
     }
 
     fn log(&self) {
-        match &self.key {
+        match &*self.key() {
             Key::Ready(identity) => tracing::info!(
                 "SSH key for package sources: {}\n    \
                  Add this public key to the git remotes AURCache clones over SSH:\n    {}",
@@ -327,6 +337,196 @@ impl SshAccess {
                  fetched: {reason}"
             ),
         }
+    }
+}
+
+/// What a restore did with the key a dump carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyRestored {
+    /// The dump carries no key.
+    NotCarried,
+    /// The server's own key file already held it.
+    Unchanged,
+    /// Now the server's own key, and the one it clones with.
+    Installed { fingerprint: String },
+    /// In the server's own key file, while the key it clones with is the one
+    /// `AURCACHE_GIT_SSH_KEY` names -- which is the same key.
+    SameAsConfigured,
+    /// In the server's own key file, while the key it clones with is the
+    /// different one `AURCACHE_GIT_SSH_KEY` names.
+    Superseded {
+        fingerprint: String,
+        configured: PathBuf,
+    },
+}
+
+/// What a restore did with the host keys a dump carried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostsRestored {
+    NotCarried,
+    /// Written over the server's own `known_hosts`.
+    Installed {
+        file: PathBuf,
+    },
+    /// Left alone: the operator pins host keys in a file of their own.
+    Pinned {
+        file: PathBuf,
+    },
+}
+
+/// What a restore did with a dump's SSH state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshRestored {
+    pub key: KeyRestored,
+    pub known_hosts: HostsRestored,
+}
+
+impl SshAccess {
+    /// What a dump with secrets carries of SSH: the key in use, generated or
+    /// supplied, byte for byte as it is stored, and the host keys trusted on
+    /// first use.
+    ///
+    /// Read from the files, never from what is loaded: nothing hands out a
+    /// key already in memory. The passphrase is never part of it.
+    pub fn export(&self) -> anyhow::Result<DumpSsh> {
+        let Some(config) = &self.config else {
+            return Ok(DumpSsh::default());
+        };
+        let path = config.key.path();
+        let key = read_optional(path)?.map(|private_key| DumpSshKey {
+            private_key,
+            public_key: match &*self.key() {
+                Key::Ready(identity) => Some(identity.public_key_line()),
+                Key::Unavailable(_) => fs::read_to_string(public_key_path(path))
+                    .ok()
+                    .map(|line| line.trim().to_string()),
+            },
+        });
+        let known_hosts = match &config.hosts {
+            HostKeySource::TrustOnFirstUse(file) => read_optional(file)?,
+            HostKeySource::Pinned(_) => None,
+        };
+        Ok(DumpSsh { key, known_hosts })
+    }
+
+    /// Put a dump's SSH state in place.
+    ///
+    /// The key goes to the server's own key file, and the server clones with
+    /// it from then on -- unless `AURCACHE_GIT_SSH_KEY` names a key, which
+    /// still wins, and is never written to. Host keys replace the server's own
+    /// `known_hosts`; a file the operator pins is left alone.
+    pub fn restore(&self, dump: &DumpSsh) -> anyhow::Result<SshRestored> {
+        let Some(config) = &self.config else {
+            bail!("this server was started without an SSH configuration to restore into");
+        };
+        let key = match &dump.key {
+            None => KeyRestored::NotCarried,
+            Some(key) => self.restore_key(config, key)?,
+        };
+        let known_hosts = match (&dump.known_hosts, &config.hosts) {
+            (None, _) => HostsRestored::NotCarried,
+            (Some(_), HostKeySource::Pinned(file)) => HostsRestored::Pinned { file: file.clone() },
+            (Some(text), HostKeySource::TrustOnFirstUse(file)) => {
+                self.hosts.replace(file, text)?;
+                HostsRestored::Installed { file: file.clone() }
+            }
+        };
+        Ok(SshRestored { key, known_hosts })
+    }
+
+    fn restore_key(&self, config: &SshConfig, key: &DumpSshKey) -> anyhow::Result<KeyRestored> {
+        let own = match &config.key {
+            KeySource::Generated(path) => path.clone(),
+            KeySource::Provided(_) => config.dir.join(KEY_FILE),
+        };
+        if fs::read(&own).ok().as_deref() == Some(key.private_key.as_bytes()) {
+            return Ok(KeyRestored::Unchanged);
+        }
+        let public = match &key.public_key {
+            Some(line) => {
+                Some(PublicKey::from_openssh(line.trim()).context("the dump's SSH public key")?)
+            }
+            None => PrivateKey::from_openssh(&key.private_key)
+                .ok()
+                .map(|k| k.public_key().clone()),
+        };
+        create_private_dir(&own)?;
+        aurcache_common::fs::write_private(&own, key.private_key.as_bytes())
+            .with_context(|| format!("writing {}", own.display()))?;
+        let pub_path = public_key_path(&own);
+        match &public {
+            Some(public) => fs::write(&pub_path, format!("{}\n", public.to_openssh()?))
+                .with_context(|| format!("writing {}", pub_path.display()))?,
+            // A `.pub` left from the key just replaced would describe the wrong one.
+            None => match fs::remove_file(&pub_path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("removing {}", pub_path.display()));
+                }
+                _ => {}
+            },
+        }
+        let fingerprint = public.as_ref().map_or_else(
+            || "an unreadable key".to_string(),
+            |p| p.fingerprint(HashAlg::Sha256).to_string(),
+        );
+        Ok(match &config.key {
+            KeySource::Generated(_) => {
+                let reloaded = load_key(config);
+                *self
+                    .key
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = reloaded;
+                KeyRestored::Installed { fingerprint }
+            }
+            KeySource::Provided(configured) => {
+                let in_use = self.identity().ok().map(|identity| identity.public_key);
+                match (in_use, public) {
+                    (Some(a), Some(b)) if a.key_data() == b.key_data() => {
+                        KeyRestored::SameAsConfigured
+                    }
+                    _ => KeyRestored::Superseded {
+                        fingerprint,
+                        configured: configured.clone(),
+                    },
+                }
+            }
+        })
+    }
+}
+
+/// A file's contents, or `None` when there is no such file.
+fn read_optional(path: &Path) -> anyhow::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Create the directory `file` goes in, closed to other users.
+fn create_private_dir(file: &Path) -> anyhow::Result<()> {
+    let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("closing {} to other users", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// The key `config` names, or why it cannot be used: none at all when the
+/// linked libgit2 could not offer one.
+fn load_key(config: &SshConfig) -> Key {
+    if let Some(reason) = SshBackend::linked().unusable() {
+        return Key::Unavailable(reason);
+    }
+    match ensure(&config.key, config.passphrase_file.as_deref()) {
+        Ok(identity) => Key::Ready(identity),
+        Err(e) => Key::Unavailable(format!("{e:#}")),
     }
 }
 
@@ -409,21 +609,6 @@ fn generate(path: &Path) -> anyhow::Result<()> {
         .context("encoding the public key")?;
     fs::write(public_key_path(path), format!("{public}\n"))
         .with_context(|| format!("writing {}", public_key_path(path).display()))?;
-    Ok(())
-}
-
-/// Create the directory `file` goes in, closed to other users.
-fn create_private_dir(file: &Path) -> anyhow::Result<()> {
-    let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) else {
-        return Ok(());
-    };
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("closing {} to other users", dir.display()))?;
-    }
     Ok(())
 }
 
@@ -528,6 +713,17 @@ impl HostKeys {
             record: Mutex::new(()),
             log: ActivityLog::discarding(),
         }
+    }
+
+    /// Replace the server's own `known_hosts` with `text`, as a restore does.
+    fn replace(&self, file: &Path, text: &str) -> anyhow::Result<()> {
+        let _guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        create_private_dir(file)?;
+        aurcache_common::fs::write_private(file, text.as_bytes())
+            .with_context(|| format!("writing {}", file.display()))
     }
 
     fn policy(&self) -> HostKeyPolicy {
@@ -1075,6 +1271,7 @@ mod tests {
         let Writer { log, task } = spawn(db.clone());
         let dir = tempfile::tempdir().unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.path().join(KNOWN_HOSTS_FILE)),
@@ -1192,6 +1389,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deploy_key");
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Provided(path.clone()),
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
@@ -1211,6 +1409,7 @@ mod tests {
         generate(&path).unwrap();
         let private = fs::read_to_string(&path).unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Provided(path),
             passphrase_file: None,
             hosts: HostKeySource::Pinned(dir.path().join("known_hosts")),
@@ -1248,6 +1447,7 @@ mod tests {
         )
         .unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts: HostKeySource::Pinned(file),
@@ -1279,6 +1479,7 @@ mod tests {
     fn no_file_lists_nothing_and_an_unreadable_one_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let config = |hosts| SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts,
@@ -1309,6 +1510,7 @@ mod tests {
         let passphrase_file = dir.join("passphrase");
         fs::write(&passphrase_file, written).unwrap();
         SshConfig {
+            dir: dir.to_path_buf(),
             key: KeySource::Provided(path),
             passphrase_file: Some(passphrase_file),
             hosts: HostKeySource::Pinned(dir.join("known_hosts")),

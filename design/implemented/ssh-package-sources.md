@@ -198,9 +198,40 @@ did in 2023), and a release carrying a stale key fails closed for every
 deployment until it is upgraded. An operator who wants pinning has
 `AURCACHE_SSH_KNOWN_HOSTS`, filled by one `ssh-keyscan`.
 
+## Dumps
+
+The rule: a dump without secrets has nothing of SSH in it, so it restores
+anywhere and needs no key. A dump with secrets carries what keeps private
+sources cloning after a restore or a migration, so that no key has to be added
+to every repository again. `SshAccess::export` and `SshAccess::restore` are
+the whole of it, and the dump and restore code only call them; the state is
+`DumpSecrets::ssh` (`DumpSsh`).
+
+- **Carried, with secrets only:** the key the server uses, generated or
+  supplied, read from its file and written to `ssh/key` byte for byte (an
+  encrypted key stays encrypted), its public half as `ssh/key.pub`, and the
+  trust-on-first-use `known_hosts` as `ssh/known_hosts`. Like the CA, the key
+  is read from the file, never from what is loaded. The passphrase is never
+  carried, and a pinned `AURCACHE_SSH_KNOWN_HOSTS` is the operator's file, so it
+  is not carried either.
+- **On a restore that takes secrets** (`--secrets copy`, or `--clear`, as for
+  the CA): the key goes to the server's own key file (`AURCACHE_SSH_DIR/id_ed25519`,
+  whatever its type), replacing a freshly generated one, and is used at once:
+  the loaded key sits behind a lock and is reloaded. If `AURCACHE_GIT_SSH_KEY`
+  is set, that file still wins and is never written to; the restore logs a
+  warning and an activity entry (`restore.ssh_key_superseded`) when it differs
+  from the dump's key. A replaced key is `restore.ssh_key_replaced`. The host
+  keys replace the server's own `known_hosts`, and a pinned file is left alone.
+- **Validation:** SSH files in a dump without the CA are refused, as tokens
+  are -- secrets travel together -- and so is a public key without its private
+  key. The schema version is unchanged: the files are optional, and an older
+  importer reading a newer dump only drops them, which leaves it where it was
+  before this existed.
+
 ## Not covered
 
-- A dump with secrets carries the worker CA, not the SSH key. Restoring onto a
-  new machine therefore generates a new key, which has to be added to the
-  remotes again (or `AURCACHE_GIT_SSH_KEY` points at the old one).
+- One key for every SSH remote. Choosing a key per repository (GitHub's deploy
+  keys are each bound to one) would mean named keys and rules mapping a remote
+  to a key; they could join `SshInfo` as an optional field beside `key`, and
+  the CLI's `ssh` group has room for `aurcli ssh keys`.
 - The VCS check does not resolve SSH sources a PKGBUILD names (see Roles).

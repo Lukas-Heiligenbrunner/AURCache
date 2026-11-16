@@ -517,6 +517,19 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
+    /// A restore put the dump's SSH key in place, and the server now clones
+    /// with it: remotes that knew the key it had before do not know this one.
+    RestoreSshKeyReplaced => ("restore.ssh_key_replaced", "Backups", "SSH key replaced") {
+        fingerprint: String,
+    },
+
+    /// A restore put the dump's SSH key in the server's own key file, but the
+    /// server clones with the different key `AURCACHE_GIT_SSH_KEY` names.
+    RestoreSshKeySuperseded => ("restore.ssh_key_superseded", "Backups", "Restored SSH key not in use") {
+        fingerprint: String,
+        configured: String,
+    },
+
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
@@ -793,6 +806,8 @@ impl Event {
             | Self::SshHostTrusted { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
+            | Self::RestoreSshKeyReplaced { .. }
+            | Self::RestoreSshKeySuperseded { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1233,6 +1248,18 @@ impl Event {
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
+            Self::RestoreSshKeyReplaced { fingerprint } => vec![text(format!(
+                "a restore replaced the SSH key package sources are cloned with, which is \
+                 now {fingerprint}; a remote that knew only the previous key needs this one"
+            ))],
+            Self::RestoreSshKeySuperseded {
+                fingerprint,
+                configured,
+            } => vec![text(format!(
+                "a restore kept the dump's SSH key ({fingerprint}), but this server clones \
+                 with {configured} (AURCACHE_GIT_SSH_KEY), a different key; the remotes that \
+                 knew the dump's key need this one"
+            ))],
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]
             }
@@ -1519,6 +1546,13 @@ mod tests {
                 error: error(),
             },
             Event::RestoreCaReplaced {},
+            Event::RestoreSshKeyReplaced {
+                fingerprint: "SHA256:abc".to_string(),
+            },
+            Event::RestoreSshKeySuperseded {
+                fingerprint: "SHA256:abc".to_string(),
+                configured: "/run/secrets/key".to_string(),
+            },
             Event::WorkersUntrusted {
                 workers: vec!["builder-01".to_string()],
             },

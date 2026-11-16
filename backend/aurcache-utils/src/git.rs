@@ -105,7 +105,7 @@ enum Route<'a> {
         /// Who to log in as: the URL's account, or `git`, which is every
         /// forge's.
         user: String,
-        identity: &'a Identity,
+        identity: Box<Identity>,
         access: &'a SshAccess,
     },
 }
@@ -148,7 +148,7 @@ fn route<'a>(url: &str, access: Access<'a>) -> anyhow::Result<Route<'a>> {
     Ok(Route::Ssh {
         user: remote.user.clone().unwrap_or_else(|| "git".to_string()),
         remote,
-        identity,
+        identity: Box::new(identity),
         access,
     })
 }
@@ -191,7 +191,7 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
     else {
         return callbacks;
     };
-    let (identity, access) = (*identity, *access);
+    let (identity, access) = (Identity::clone(identity), *access);
 
     let user = user.clone();
     let rejected = format!(
@@ -572,6 +572,7 @@ mod tests {
 
     fn server_access(dir: &Path) -> SshAccess {
         SshAccess::new(SshConfig {
+            dir: dir.to_path_buf(),
             key: KeySource::Generated(dir.join("id_ed25519")),
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.join("known_hosts")),
