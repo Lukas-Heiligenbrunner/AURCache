@@ -383,6 +383,15 @@ impl Executor for DockerExecutor {
         client: Arc<WorkerClient>,
         claimed: ClaimedJob,
     ) -> Result<CompleteReport> {
+        if let Some(reason) = refusal(&claimed.job.capabilities) {
+            log(
+                &client,
+                claimed.job.build_id,
+                &format!("[worker] {reason}\n"),
+            )
+            .await;
+            return Ok(report::refused(reason));
+        }
         // Once, here: everything this build does reads this copy.
         let cfg = self.cfg.current();
         self.build(&cfg, &client, &claimed).await
@@ -407,6 +416,25 @@ impl Executor for DockerExecutor {
             .replace(self.cfg.current().with_settings(&settings));
         settings
     }
+}
+
+/// Why a build asking for `capabilities` cannot run here, if it cannot.
+///
+/// This executor grants none. Adding one to the container would not reach the
+/// build: the builder image runs makepkg as an unprivileged user, whom the
+/// kernel gives no capability its container holds. Failing the build says so,
+/// where running it without would fail it later for a reason that names
+/// nothing.
+fn refusal(capabilities: &[String]) -> Option<String> {
+    (!capabilities.is_empty()).then(|| {
+        format!(
+            "this build asks for {}, and the legacy container worker grants no \
+             capabilities. Build this package on a chroot worker that allows them \
+             (WORKER_BUILD_CAPABILITIES), or remove them from the package's \
+             build_capabilities setting.",
+            capabilities.join(",")
+        )
+    })
 }
 
 /// Bind the build directory's `name` over `target`, a file a package owns.
@@ -457,6 +485,16 @@ fn docker_arch(arch: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build asking for nothing runs; one asking for anything is refused,
+    /// by name, since the container cannot give it to the build.
+    #[test]
+    fn a_build_asking_for_capabilities_is_refused() {
+        assert_eq!(refusal(&[]), None);
+        let reason = refusal(&["CAP_NET_ADMIN".to_string()]).expect("refused");
+        assert!(reason.contains("CAP_NET_ADMIN"), "{reason}");
+        assert!(reason.contains("chroot worker"), "{reason}");
+    }
 
     #[test]
     fn maps_arch_names_to_docker_platforms() {

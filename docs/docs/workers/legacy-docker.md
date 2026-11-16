@@ -15,7 +15,9 @@ The legacy builder runs each package in a container spawned from a reused
 builder image, against a mounted Docker socket, instead of in a clean chroot.
 It is the more limited of the two strategies: it builds in a reused image
 rather than a clean chroot, and supports neither the source and package caches
-nor [build credentials](./credentials.md).
+nor [build credentials](./credentials.md). It grants no
+[build capabilities](./capabilities.md) either, and fails a build whose package
+asks for any.
 
 It is the [hybrid image](./hybrid.md)'s builder. With `BUILD_ARTIFACT_DIR` set
 — in the old code that variable *was* the definition of host build mode — it
