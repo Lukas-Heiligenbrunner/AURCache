@@ -275,6 +275,20 @@ pub struct JobDescriptor {
     /// not send one, where the worker's own applies alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Linux capabilities the build asks for beyond what the worker's sandbox
+    /// grants, by name (`CAP_NET_ADMIN`): the package's `build_capabilities`.
+    ///
+    /// A request, not a grant. A worker builds only with every one of them,
+    /// and only if its operator allows them; otherwise it fails the build,
+    /// saying which. Absent means none, which is all a server that does not
+    /// send it ever asks for. A worker that does not read it builds without
+    /// them, where a build that needs one fails as it would have anyway.
+    ///
+    /// Names rather than a closed enumeration, so a capability this side does
+    /// not know arrives as itself and is refused by name rather than failing
+    /// the whole job to decode.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     /// Full version (`pkgver-pkgrel`) the build is expected to produce.
     ///
     /// Read only by a worker that fabricates its archives (the demo worker):
@@ -458,6 +472,7 @@ mod tests {
             },
             expected_packages: vec!["hello".into(), "hello-docs".into()],
             timeout_secs: Some(3600),
+            capabilities: vec!["CAP_NET_ADMIN".into()],
             expected_version: "1.0-1".into(),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {
@@ -473,6 +488,7 @@ mod tests {
         assert_eq!(job.mirrorlist, back.mirrorlist);
         assert_eq!(job.expected_packages, back.expected_packages);
         assert_eq!(job.expected_version, back.expected_version);
+        assert_eq!(job.capabilities, back.capabilities);
     }
 
     fn range(min: u32, max: u32) -> ProtocolRange {

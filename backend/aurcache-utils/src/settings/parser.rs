@@ -34,6 +34,13 @@ impl ParseSetting for ByteSize {
     }
 }
 
+/// A list of capability names, `CAP_NET_ADMIN, net_raw`; empty is none.
+impl ParseSetting for aurcache_common::capability::Capabilities {
+    fn parse_setting(s: &str) -> Result<Self, String> {
+        s.parse().map_err(|e| format!("{e}"))
+    }
+}
+
 impl ParseSetting for String {
     fn parse_setting(s: &str) -> Result<Self, String> {
         Ok(s.to_string())

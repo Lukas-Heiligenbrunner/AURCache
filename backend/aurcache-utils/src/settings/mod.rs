@@ -10,7 +10,7 @@ mod parser;
 pub use parser::{ByteSize, ParseSetting, Seconds};
 
 use aurcache_common::settings::{
-    ApplicationSettings, Scope, Setting, SettingSource, SettingsEntry, SettingsMeta,
+    ApplicationSettings, Setting, SettingSource, SettingsEntry, SettingsMeta,
 };
 use aurcache_db::settings;
 use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
@@ -43,6 +43,7 @@ impl<T> Copy for Key<T> {}
 /// Every setting, typed. The one place a setting's type is stated.
 pub mod key {
     use super::{ByteSize, Key, Seconds, Setting};
+    use aurcache_common::capability::Capabilities;
 
     pub const VERSION_CHECK_INTERVAL: Key<Seconds> = Key::of(Setting::VersionCheckInterval);
     /// A crontab schedule; empty is off.
@@ -55,6 +56,7 @@ pub mod key {
     pub const MAKEPKG_CONF: Key<String> = Key::of(Setting::MakepkgConf);
     pub const PACMAN_CONF: Key<String> = Key::of(Setting::PacmanConf);
     pub const PARSE_NETWORK: Key<bool> = Key::of(Setting::ParseNetwork);
+    pub const BUILD_CAPABILITIES: Key<Capabilities> = Key::of(Setting::BuildCapabilities);
 }
 
 /// One setting's value for `pkg_id` (`None` for the whole server), and where it
@@ -82,7 +84,7 @@ pub async fn get<T: ParseSetting>(
 /// Whether the environment answers for `setting` whatever is stored.
 fn env_decides(setting: Setting, pkg_id: Option<i32>) -> bool {
     let meta = setting.meta();
-    let package_may_override = pkg_id.is_some() && meta.scope == Scope::Package;
+    let package_may_override = pkg_id.is_some() && meta.scope.per_package();
     !package_may_override
         && meta
             .env_name
@@ -163,9 +165,9 @@ fn resolve<T: ParseSetting>(stored: &Stored, key: Key<T>) -> SettingsEntry<T> {
 
     // 1. The value set for the package: explicit intent for one package wins
     //    over the deployment-wide environment. Only for a setting a package
-    //    can override; anything else has one value for the whole server.
+    //    can set; anything else has one value for the whole server.
     if let Some(pid) = stored.pkg_id
-        && setting.scope == Scope::Package
+        && setting.scope.per_package()
         && let Some(v) = stored.package.get(setting.key)
     {
         return SettingsEntry {
@@ -184,8 +186,10 @@ fn resolve<T: ParseSetting>(stored: &Stored, key: Key<T>) -> SettingsEntry<T> {
         };
     }
 
-    // 3. The value set for the server.
-    if let Some(v) = stored.global.get(setting.key) {
+    // 3. The value set for the server, for a setting that has one.
+    if setting.scope.server_wide()
+        && let Some(v) = stored.global.get(setting.key)
+    {
         return SettingsEntry {
             value: parse_or_default(v, &format!("global setting {}", setting.key)),
             source: SettingSource::Global,
@@ -246,6 +250,13 @@ pub async fn all(
         build_on_new_version: resolve(&stored, key::BUILD_ON_NEW_VERSION),
         persistent_builddir: resolve(&stored, key::PERSISTENT_BUILDDIR),
         parse_network: resolve(&stored, key::PARSE_NETWORK),
+        build_capabilities: {
+            let entry = resolve(&stored, key::BUILD_CAPABILITIES);
+            SettingsEntry {
+                value: entry.value.names(),
+                source: entry.source,
+            }
+        },
     })
 }
 
@@ -265,25 +276,30 @@ pub enum Write {
     /// A value was given for a package, for a setting that applies to the whole
     /// server; nothing was stored.
     GlobalOnly(Setting),
+    /// A value was given for the whole server, for a setting only a package
+    /// can hold; nothing was stored.
+    PackageOnly(Setting),
 }
 
 /// Store and remove values: removals first, then every new value in one
 /// upsert.
 ///
 /// All or nothing: a package value for a server-wide setting refuses the
-/// whole set, since nothing would ever read it. Removing one stays allowed --
+/// whole set, since nothing would ever read it, and so does a server-wide
+/// value for a setting only a package can hold. Removing one stays allowed --
 /// it is how a stray row goes.
 pub async fn write<C: sea_orm::ConnectionTrait>(
     db: &C,
     changes: impl IntoIterator<Item = Change>,
 ) -> anyhow::Result<Write> {
     let changes: Vec<Change> = changes.into_iter().collect();
-    if let Some(change) = changes.iter().find(|change| {
-        change.pkg_id.is_some()
-            && change.value.is_some()
-            && change.setting.meta().scope == Scope::Global
-    }) {
-        return Ok(Write::GlobalOnly(change.setting));
+    for change in changes.iter().filter(|change| change.value.is_some()) {
+        let scope = change.setting.meta().scope;
+        match change.pkg_id {
+            Some(_) if !scope.per_package() => return Ok(Write::GlobalOnly(change.setting)),
+            None if !scope.server_wide() => return Ok(Write::PackageOnly(change.setting)),
+            _ => {}
+        }
     }
 
     let mut inserts = Vec::new();
@@ -443,5 +459,44 @@ mod tests {
         assert_eq!(package.max_artifact_size.source, SettingSource::Package);
         let other = super::all(&db, Some(2)).await.unwrap();
         assert_eq!(other.max_artifact_size.source, SettingSource::Global);
+    }
+
+    /// Capabilities are one package's: a server-wide value is refused, and
+    /// one package's is neither another's nor the server's.
+    #[tokio::test]
+    async fn capabilities_are_held_by_one_package() {
+        let db = db().await;
+        let for_server = Change {
+            setting: Setting::BuildCapabilities,
+            pkg_id: None,
+            value: Some("CAP_NET_ADMIN".to_string()),
+        };
+        assert_eq!(
+            write(&db, [for_server]).await.unwrap(),
+            super::Write::PackageOnly(Setting::BuildCapabilities)
+        );
+        let for_package = Change {
+            setting: Setting::BuildCapabilities,
+            pkg_id: Some(1),
+            value: Some("net_raw, net_admin".to_string()),
+        };
+        assert_eq!(
+            write(&db, [for_package]).await.unwrap(),
+            super::Write::Written
+        );
+
+        let entry = get(&db, key::BUILD_CAPABILITIES, Some(1)).await.unwrap();
+        assert_eq!(entry.source, SettingSource::Package);
+        assert_eq!(entry.value.names(), ["CAP_NET_ADMIN", "CAP_NET_RAW"]);
+        let page = super::all(&db, Some(1)).await.unwrap();
+        assert_eq!(
+            page.build_capabilities.value,
+            ["CAP_NET_ADMIN", "CAP_NET_RAW"]
+        );
+        for pkg_id in [None, Some(2)] {
+            let entry = get(&db, key::BUILD_CAPABILITIES, pkg_id).await.unwrap();
+            assert_eq!(entry.source, SettingSource::Default);
+            assert!(entry.value.is_empty());
+        }
     }
 }

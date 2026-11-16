@@ -185,6 +185,8 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
         expected_packages: vec!["hello".to_string(), "hello-docs".to_string()],
         // Protocol 1's fixture predates it; absent, it is what it was then.
         timeout_secs: None,
+        // Likewise; absent, no capability is asked for.
+        capabilities: Vec::new(),
         expected_version: "2.12.1-2".to_string(),
     }
 }
@@ -318,6 +320,48 @@ fn registration_messages_still_decode() {
             heartbeat_interval_secs: 15,
         }],
     );
+}
+
+/// A job's capabilities are optional within protocol 1: the committed jobs,
+/// which predate them, ask for none, and a job that asks for some keeps them
+/// through a round trip -- and still reads for a peer that ignores them.
+#[test]
+fn capabilities_are_an_optional_job_field() {
+    let path = fixtures("1").join("job_descriptor.json");
+    let fixture: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for sample in fixture {
+        assert!(sample.get("capabilities").is_none());
+        let job: JobDescriptor = decode(sample);
+        assert!(job.capabilities.is_empty());
+        let encoded = serde_json::to_value(&job).unwrap();
+        assert!(
+            encoded.get("capabilities").is_none(),
+            "a job asking for nothing is sent as protocol 1 first wrote it"
+        );
+    }
+
+    let job = JobDescriptor {
+        capabilities: vec!["CAP_NET_ADMIN".to_string(), "CAP_NET_RAW".to_string()],
+        ..job_descriptor(MirrorlistOffer::Nothing)
+    };
+    let encoded = serde_json::to_value(&job).unwrap();
+    assert_eq!(
+        encoded["capabilities"],
+        serde_json::json!(["CAP_NET_ADMIN", "CAP_NET_RAW"])
+    );
+    let back: JobDescriptor = decode(encoded.clone());
+    assert_eq!(back.capabilities, job.capabilities);
+
+    /// What a worker reading only protocol 1's first fields keeps of it.
+    #[derive(serde::Deserialize)]
+    struct EarlierJob {
+        build_id: i32,
+        pkgbase: String,
+    }
+    let earlier: EarlierJob = decode(encoded);
+    assert_eq!(earlier.build_id, 42);
+    assert_eq!(earlier.pkgbase, "hello");
 }
 
 /// The fixtures cover every protocol this crate speaks.

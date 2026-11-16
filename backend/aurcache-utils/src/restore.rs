@@ -33,7 +33,7 @@ use aurcache_common::api::dump::{
     SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
-use aurcache_common::settings::{Scope, Setting};
+use aurcache_common::settings::Setting;
 use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
 use flate2::read::GzDecoder;
@@ -815,8 +815,9 @@ async fn insert_row<C: sea_orm::ConnectionTrait>(
 
 /// Settings, keyed back from pkgbase onto row ids.
 ///
-/// Only the settings this version knows, and a package value only for one a
-/// package may override: anything else is a row nothing would read.
+/// Only the settings this version knows, a package value only for one a
+/// package may set, and a server-wide value only for one that has it:
+/// anything else is a row nothing would read.
 async fn write_settings<C: sea_orm::ConnectionTrait>(
     db: &C,
     dump: &LoadedDump,
@@ -824,7 +825,12 @@ async fn write_settings<C: sea_orm::ConnectionTrait>(
 ) -> anyhow::Result<()> {
     let change = |pkg_id: Option<i32>, key: &str, value: &str| {
         let setting = Setting::from_key(key)?;
-        (pkg_id.is_none() || setting.meta().scope == Scope::Package).then(|| Change {
+        let scope = setting.meta().scope;
+        let applies = match pkg_id {
+            Some(_) => scope.per_package(),
+            None => scope.server_wide(),
+        };
+        applies.then(|| Change {
             setting,
             pkg_id,
             value: Some(value.to_string()),
@@ -852,6 +858,10 @@ async fn write_settings<C: sea_orm::ConnectionTrait>(
         crate::settings::Write::Written => Ok(()),
         crate::settings::Write::GlobalOnly(setting) => anyhow::bail!(
             "{} applies to the whole server and cannot be set per package",
+            setting.meta().key
+        ),
+        crate::settings::Write::PackageOnly(setting) => anyhow::bail!(
+            "{} is set for one package at a time and has no server-wide value",
             setting.meta().key
         ),
     }

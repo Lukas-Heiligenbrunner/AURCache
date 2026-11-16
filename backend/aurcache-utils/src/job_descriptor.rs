@@ -81,6 +81,13 @@ pub async fn descriptor(
         .value
         .0;
 
+    // What the build asks its worker to grant. Validated when it was set;
+    // the worker still decides, against what its operator allows.
+    let capabilities = settings::get(db, settings::key::BUILD_CAPABILITIES, Some(build.pkg_id))
+        .await?
+        .value
+        .names();
+
     // Before `pkg.name` moves into the descriptor below.
     let packages = crate::publish::expected_pkgnames(&pkg);
     Ok(JobDescriptor {
@@ -89,6 +96,7 @@ pub async fn descriptor(
         expected_packages: packages,
         expected_version: build.version.clone(),
         timeout_secs: Some(timeout),
+        capabilities,
         arch,
         build_flags,
         persistent_builddir,

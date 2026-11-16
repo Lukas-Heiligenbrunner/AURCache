@@ -103,6 +103,13 @@ async fn write(
                 setting.meta().key
             ),
         )),
+        store::Write::PackageOnly(setting) => Err(err(
+            Status::BadRequest,
+            format!(
+                "{} is set for one package at a time and has no server-wide value",
+                setting.meta().key
+            ),
+        )),
     }
 }
 

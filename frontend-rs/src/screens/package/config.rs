@@ -40,17 +40,23 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
                     on_changed,
                 }
                 PersistBuildDirField { key: "persist-{pkg.name}", pkgbase: pkg.name.clone(), entry }
-                PackageLimitField {
+                PackageTextField {
                     key: "artifact-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::ArtifactSize,
+                    field: PackageText::ArtifactSize,
                 }
-                PackageLimitField {
+                PackageTextField {
                     key: "timeout-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::JobTimeout,
+                    field: PackageText::JobTimeout,
+                }
+                PackageTextField {
+                    key: "capabilities-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    field: PackageText::Capabilities,
                 }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
@@ -185,20 +191,22 @@ fn PersistBuildDirField(
     }
 }
 
-/// A server setting this package may set for itself: the largest file its
-/// builds may upload, or how long one may run.
+/// A setting this package may set for itself, written as text: the largest
+/// file its builds may upload, how long one may run, or the capabilities its
+/// builds ask their worker for.
 ///
-/// Both resolve per package (see `Setting::MaxArtifactSize`), so one outsized
-/// or slow package can be allowed more without raising the limit for all.
-/// Shown as it is written (`20G`, `3h`), with where the value comes from;
-/// typing a new one offers Save, and a package override offers Reset.
+/// The limits resolve per package (see `Setting::MaxArtifactSize`), so one
+/// outsized or slow package can be allowed more without raising the limit for
+/// all; capabilities exist only per package. Shown as it is written (`20G`,
+/// `3h`, `CAP_NET_ADMIN`), with where the value comes from; typing a new one
+/// offers Save, and a package value offers Reset.
 #[component]
-fn PackageLimitField(
+fn PackageTextField(
     pkgbase: String,
     mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
-    limit: PackageLimit,
+    field: PackageText,
 ) -> Element {
-    let setting = limit.setting();
+    let setting = field.setting();
     use crate::setting_editor::{
         MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
     };
@@ -209,7 +217,7 @@ fn PackageLimitField(
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|settings| limit.shown(settings).value);
+        .map(|settings| field.shown(settings).value);
     let mut draft = use_editor_draft(loaded);
     let scope = SettingScope::Package(pkgbase);
     let save_scope = scope.clone();
@@ -241,7 +249,7 @@ fn PackageLimitField(
 
     rsx! {
         div { class: "flex gap-2 py-1 text-sm items-center",
-            span { class: "opacity-60 w-32 shrink-0", "{limit.label()}" }
+            span { class: "opacity-60 w-32 shrink-0", "{field.label()}" }
             div { class: "min-w-0 flex-1",
                 match &*entry.read_unchecked() {
                     None => rsx! { span { class: "loading loading-spinner loading-xs" } },
@@ -249,7 +257,7 @@ fn PackageLimitField(
                         span { class: "text-xs text-error", "Could not load the setting: {e}" }
                     },
                     Some(Ok(settings)) => {
-                        let SettingsEntry { value: current, source } = limit.shown(settings);
+                        let SettingsEntry { value: current, source } = field.shown(settings);
                         // No lock for an environment variable: a package's own
                         // value outranks it (Package -> Env -> Global -> Default),
                         // so an override here still applies.
@@ -258,8 +266,8 @@ fn PackageLimitField(
                             div { class: "flex items-center gap-2 flex-wrap",
                                 input {
                                     r#type: "text",
-                                    class: "input input-bordered input-xs w-24 font-mono",
-                                    placeholder: limit.placeholder(),
+                                    class: "input input-bordered input-xs font-mono {field.width()}",
+                                    placeholder: field.placeholder(),
                                     disabled: busy(),
                                     value: draft().text(),
                                     oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
@@ -285,7 +293,7 @@ fn PackageLimitField(
                                 if source == SettingSource::Package && !busy() {
                                     button {
                                         class: "btn btn-ghost btn-xs",
-                                        title: "Discard this package's limit and use the global one again",
+                                        title: field.reset_title(),
                                         onclick: reset,
                                         "Reset"
                                     }
@@ -302,18 +310,21 @@ fn PackageLimitField(
     }
 }
 
-/// The limits a package may set for itself, each shown by [`PackageLimitField`].
+/// The text settings a package may set for itself, each shown by
+/// [`PackageTextField`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackageLimit {
+enum PackageText {
     ArtifactSize,
     JobTimeout,
+    Capabilities,
 }
 
-impl PackageLimit {
+impl PackageText {
     const fn setting(self) -> Setting {
         match self {
             Self::ArtifactSize => Setting::MaxArtifactSize,
             Self::JobTimeout => Setting::JobTimeout,
+            Self::Capabilities => Setting::BuildCapabilities,
         }
     }
 
@@ -321,6 +332,7 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "Max artifact size",
             Self::JobTimeout => "Job timeout",
+            Self::Capabilities => "Capabilities",
         }
     }
 
@@ -328,6 +340,24 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "20G",
             Self::JobTimeout => "1h",
+            Self::Capabilities => "CAP_NET_ADMIN",
+        }
+    }
+
+    /// A list of names needs more room than a size or a duration.
+    const fn width(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => "w-24",
+            Self::Capabilities => "w-48",
+        }
+    }
+
+    const fn reset_title(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => {
+                "Discard this package's limit and use the global one again"
+            }
+            Self::Capabilities => "Ask for no capability again",
         }
     }
 
@@ -343,6 +373,10 @@ impl PackageLimit {
                     settings.job_timeout.value,
                 )),
                 source: settings.job_timeout.source,
+            },
+            Self::Capabilities => SettingsEntry {
+                value: settings.build_capabilities.value.join(","),
+                source: settings.build_capabilities.source,
             },
         }
     }

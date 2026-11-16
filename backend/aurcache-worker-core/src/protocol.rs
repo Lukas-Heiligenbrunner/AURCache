@@ -228,6 +228,7 @@ mod tests {
             vcs_sources: Vec::new(),
             expected_packages: vec!["hello".into()],
             timeout_secs,
+            capabilities: Vec::new(),
             expected_version: "1-1".into(),
         }
     }

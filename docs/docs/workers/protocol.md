@@ -133,6 +133,10 @@ what they receive:
      The worker appends the `[repo]` section from its registration answer,
      with the host filled in.
    - `build_flags`: arguments added to makepkg's command line, as given.
+   - `capabilities`, when present: the Linux capabilities the build asks for,
+     by name (`CAP_NET_ADMIN`). A request: a worker builds with every one of
+     them or fails the build (`failed`), naming those it does not grant.
+     Absent means none.
    - `pgp_keys` to import, and `vcs_sources`: the `git+` sources whose commit
      to report back.
    - `expected_packages` and `expected_version`: what the build should

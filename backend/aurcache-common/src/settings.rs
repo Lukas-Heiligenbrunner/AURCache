@@ -44,6 +44,10 @@ pub struct ApplicationSettings {
     /// Let a PKGBUILD reach the network while the server parses it.
     /// See [`Setting::ParseNetwork`].
     pub parse_network: SettingsEntry<bool>,
+    /// Linux capabilities this package's builds ask their worker for, by
+    /// name (`CAP_NET_ADMIN`); empty for none. See
+    /// [`Setting::BuildCapabilities`].
+    pub build_capabilities: SettingsEntry<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +65,22 @@ pub enum Scope {
     Global,
     /// A server-wide value that a package may override.
     Package,
+    /// A value for one package at a time, with no server-wide one.
+    PackageOnly,
+}
+
+impl Scope {
+    /// Whether a package may hold a value of its own.
+    #[must_use]
+    pub const fn per_package(self) -> bool {
+        matches!(self, Self::Package | Self::PackageOnly)
+    }
+
+    /// Whether the server may hold one value for every package.
+    #[must_use]
+    pub const fn server_wide(self) -> bool {
+        matches!(self, Self::Global | Self::Package)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +95,7 @@ pub enum Setting {
     MakepkgConf,
     PacmanConf,
     ParseNetwork,
+    BuildCapabilities,
 }
 
 /// Keys of settings that no longer exist, which may still be stored or dumped.
@@ -121,7 +142,7 @@ impl Setting {
     /// separately: two lists drift, and a setting served by `GET /settings`
     /// but unknown to `PATCH /settings/<key>` cannot be changed through the
     /// API at all.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::VersionCheckInterval,
         Self::AutoUpdateSchedule,
         Self::BuildOnNewVersion,
@@ -132,6 +153,7 @@ impl Setting {
         Self::MakepkgConf,
         Self::PacmanConf,
         Self::ParseNetwork,
+        Self::BuildCapabilities,
     ];
 
     /// This setting's stable key, environment variable, built-in default and
@@ -241,6 +263,22 @@ impl Setting {
                 default: "false",
                 scope: Scope::Global,
             },
+            // Capabilities a package's builds ask for beyond what the build
+            // sandbox grants, such as `CAP_NET_ADMIN` for a test suite that
+            // makes a TUN device. A request, not a grant: the worker grants
+            // only what its operator allows (`WORKER_BUILD_CAPABILITIES`), and
+            // fails the build otherwise.
+            //
+            // Only per package, with neither a server-wide value nor an
+            // environment variable: what a capability lets a build do is what
+            // that one package's PKGBUILD may then do on the worker, which is
+            // a decision about that package.
+            Self::BuildCapabilities => SettingsMeta {
+                key: "build_capabilities",
+                env_name: None,
+                default: "",
+                scope: Scope::PackageOnly,
+            },
         }
     }
 
@@ -286,8 +324,22 @@ impl Setting {
             Self::AutoUpdateSchedule => crate::schedule::Schedule::parse(value, 0)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
+            Self::BuildCapabilities => validate_capabilities(value),
             Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
+    }
+}
+
+/// Capability names a package may ask for: known ones, none of which breaks
+/// confinement, since no worker would grant those.
+fn validate_capabilities(value: &str) -> Result<(), String> {
+    let caps: crate::capability::Capabilities = value.parse().map_err(|e| format!("{e}"))?;
+    match caps.iter().find(|cap| cap.breaks_confinement()) {
+        Some(cap) => Err(format!(
+            "{cap} cannot be granted to a build: it reaches past the build's sandbox \
+             to the worker itself"
+        )),
+        None => Ok(()),
     }
 }
 
@@ -335,6 +387,27 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_are_validated() {
+        let setting = Setting::BuildCapabilities;
+        for valid in ["", "CAP_NET_ADMIN", "net_admin, net_raw", "CAP_SYS_TIME"] {
+            assert_eq!(setting.validate(valid), Ok(()), "{valid:?}");
+        }
+        assert!(setting.validate("CAP_NET_ADMN").is_err());
+        let refused = setting.validate("net_admin,sys_admin").unwrap_err();
+        assert!(refused.contains("CAP_SYS_ADMIN"), "{refused}");
+    }
+
+    /// Granting a capability is a decision about one package, so there is
+    /// nothing to set for the whole server.
+    #[test]
+    fn capabilities_are_per_package_only() {
+        let meta = Setting::BuildCapabilities.meta();
+        assert!(meta.scope.per_package());
+        assert!(!meta.scope.server_wide());
+        assert_eq!(meta.env_name, None);
+    }
+
+    #[test]
     fn the_schedule_setting_is_validated() {
         let setting = Setting::AutoUpdateSchedule;
         assert_eq!(setting.validate(""), Ok(()));
@@ -366,6 +439,7 @@ mod tests {
                 Setting::MakepkgConf => 7,
                 Setting::PacmanConf => 8,
                 Setting::ParseNetwork => 9,
+                Setting::BuildCapabilities => 10,
             }
         }
 
