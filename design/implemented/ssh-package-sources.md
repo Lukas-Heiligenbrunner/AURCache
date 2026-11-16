@@ -76,7 +76,7 @@ and each SSH source fails with the reason (`SshKey::Unavailable`).
 The public half is logged at start, returned by `GET /api/ssh`
 (`SshInfo`: public key, fingerprint, origin, host-key policy), shown on the
 settings page and in the add dialog once the entry is an SSH remote, and
-printed by `aurcli ssh-key` (the key alone on the first line).
+printed by `aurcli ssh key` (the key alone on the first line).
 
 ### Keeping it
 

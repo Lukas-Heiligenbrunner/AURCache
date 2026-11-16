@@ -77,9 +77,11 @@ pub(crate) enum ApiCommand {
     Doctor,
     /// Inspect the authenticated user.
     UserInfo,
-    /// Print the SSH key the server clones package sources with, to add to a
-    /// private repository as a deploy key.
-    SshKey,
+    /// The SSH identity the server clones package sources with.
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     /// Get dashboard statistics.
     Stats,
     /// Get monthly graph datapoints.
@@ -145,6 +147,13 @@ pub(crate) struct RestoreArgs {
     /// the CA invalidates every certificate this server's workers hold.
     #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
     pub(crate) secrets: Secrets,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum SshCommand {
+    /// Print the server's SSH key, to add to a private repository as a deploy
+    /// key. The key alone is on the first line.
+    Key,
 }
 
 #[derive(Subcommand, Debug, Clone)]

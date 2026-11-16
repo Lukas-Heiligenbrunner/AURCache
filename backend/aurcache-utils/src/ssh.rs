@@ -15,7 +15,7 @@
 //!    use?" ambiguous exactly when an authentication failure is being debugged.
 //! 2. Otherwise an ed25519 key is generated under [`ssh_dir`] on first start.
 //!    Its public half is logged, shown on the settings page and printed by
-//!    `aurcli ssh-key`, to be added to the remote as a deploy key.
+//!    `aurcli ssh key`, to be added to the remote as a deploy key.
 //!
 //! Host keys are never taken on trust silently:
 //!

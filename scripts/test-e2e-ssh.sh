@@ -26,7 +26,7 @@ set -euo pipefail
 #      agent's socket bound in there.
 #   3. the server's own key — a package whose repository only SSH reaches. The
 #      add MUST be refused while the server's generated key is unknown to the
-#      git server, saying so, and succeed once `ssh-key`'s output is authorised.
+#      git server, saying so, and succeed once `ssh key`'s output is authorised.
 #   4. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
@@ -172,9 +172,9 @@ fi
 # ---- Phase 3: the server clones a package's own source with its key --------
 log "=== Phase: the server's own key (a package source over SSH) ==="
 readonly SSH_SOURCE="ssh://git@gitssh/srv/ssh-only/pkg.git"
-server_key="$(aurcache_cli ssh-key | head -n 1)"
+server_key="$(aurcache_cli ssh key | head -n 1)"
 if [[ $server_key != "ssh-ed25519 "* ]]; then
-    log "ERROR: \`ssh-key\` printed no key (got: '${server_key:-<nothing>}')"
+    log "ERROR: \`ssh key\` printed no key (got: '${server_key:-<nothing>}')"
     dump_logs_on_failure
     exit 1
 fi

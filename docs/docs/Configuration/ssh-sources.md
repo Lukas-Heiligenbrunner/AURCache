@@ -29,7 +29,7 @@ INFO SSH key for package sources: ./data/ssh/id_ed25519
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... aurcache-server
 ```
 
-The same key is on the **Settings** page, and `aurcli ssh-key` prints it, the
+The same key is on the **Settings** page, and `aurcli ssh key` prints it, the
 key alone on the first line. Add it to the repository as a **deploy key**
 (read-only access is all it needs), or to an account that can read the
 repositories you build from.
@@ -118,7 +118,7 @@ With your own file, replace the entry with the host's new key.
 ## Troubleshooting
 
 - **"refused the server's SSH key"**: the remote does not know the key. Add the
-  public key from `aurcli ssh-key`, and check the fingerprint the message gives
+  public key from `aurcli ssh key`, and check the fingerprint the message gives
   is the one you added.
 - **"needs the server's SSH key, which it has none of"**: the key could not be
   loaded at start; the rest of the message, and the server log, say why.

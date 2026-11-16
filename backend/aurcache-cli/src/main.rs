@@ -16,7 +16,7 @@ mod workers;
 use crate::builds::run_builds_command;
 use crate::cli::{
     ApiCommand, Cli, Command, ConfigCommand, OutputFormat, RawArgs, RepoCommand, RepoConfigArgs,
-    TokenCommand,
+    SshCommand, TokenCommand,
 };
 use crate::dump::{dump_command, restore_command};
 use crate::output::{
@@ -92,7 +92,9 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
         ApiCommand::Health => run_health(client, format).await,
         ApiCommand::Doctor => doctor::run_doctor(client, format).await,
         ApiCommand::UserInfo => render_user_info(client, format).await,
-        ApiCommand::SshKey => render_ssh_key(client, format).await,
+        ApiCommand::Ssh {
+            command: SshCommand::Key,
+        } => render_ssh_key(client, format).await,
         ApiCommand::Stats => render_stats(client, format).await,
         ApiCommand::Graph => render_graph(client, format).await,
         ApiCommand::Search { query } => render_search_results(client, format, &query).await,
