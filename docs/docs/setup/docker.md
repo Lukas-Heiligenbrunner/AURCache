@@ -73,6 +73,19 @@ namespaces an ordinary container forbids. `privileged: true` plus a tmpfs `/run`
 is the tightest configuration that works everywhere; if your host allows it you
 can narrow this to specific capabilities with seccomp/apparmor unconfined.
 
+Narrowing it hides the host's other devices from the worker, which matters most
+on a NAS, but it is not a security boundary: `SYS_ADMIN` in the host's user
+namespace, with seccomp and AppArmor off, is close to root on the host. A user
+namespace would be one, but the chroot worker does not run in one yet: its
+storage pool needs a loop device and a btrfs mount, and `systemd-nspawn` has not
+been shown to work there. To keep a misbehaving build or worker off the host,
+run the worker in a virtual machine and enroll it as a [remote
+worker](#more-workers). The options and what has been tried are in [Running
+workers without host
+root](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/design/proposed/unprivileged-workers.md),
+a proposal not yet implemented. The [hybrid image](../workers/hybrid.md#without-privileged)'s
+container builder can run without `privileged`, with the same caveat.
+
 Only the **worker** needs this. The server handles no build payloads and runs
 unprivileged.
 
