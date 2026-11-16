@@ -58,6 +58,7 @@ run_phase() {
     local phase="$1" key="$2" output
     log "=== Phase: $phase ==="
     dc down -v --remove-orphans >/dev/null 2>&1 || true
+    fresh_worker_data >/dev/null
     # Must be exported, not just prefixed: `VAR=x dc …` sets it for the shell
     # function but does not reliably reach `docker compose` beneath it, which
     # silently made the "authorised" phase identical to the unauthorised one.

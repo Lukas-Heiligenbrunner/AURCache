@@ -55,6 +55,7 @@ build_and_start() {
 
     log "=== Building images (server + worker) ==="
     dc build
+    fresh_worker_data >/dev/null
 
     log "=== Starting services ==="
     dc up -d
