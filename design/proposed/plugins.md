@@ -1602,7 +1602,7 @@ without being in AURCache. Everything should be measured against that.
   around the build, is a way to undo that. Build-environment wishes (ccache,
   sccache, a custom `makepkg.conf`) are worker settings, in tree.
 - **Mutating artifacts.** No gate lets a plugin rewrite, add, or re-sign a file
-  before publishing. Signing is `design/proposed/signed-repository.md`'s job, in
+  before publishing. Signing is `design/in-progress/signed-repository.md`'s job, in
   tree, with the key under the server's control. A plugin can say *whether*;
   never *what*.
 - **Source-provider hooks.** Example 12 showed that a git repository is already
