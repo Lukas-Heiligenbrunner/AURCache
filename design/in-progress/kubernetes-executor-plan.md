@@ -544,6 +544,25 @@ pub async fn check<C: Cluster>(cluster: &C, cfg: &Config, agent_image: &str, tar
     -> ProbeOutcome;
 ```
 
+Checked against kube 5.1 when WP0 wrote `cluster.rs`; the trait stands as
+above. Two facts the implementations depend on:
+
+- **The rustls provider.** kube's client builds its TLS configuration from
+  rustls' process-wide default provider, and the workspace's rustls has both
+  `ring` (through `aurcache-common`'s `db` feature, sqlx's TLS) and
+  `aws-lc-rs` (reqwest's) compiled in, so neither is the default by itself.
+  `main.rs` (WP9) calls
+  `rustls::crypto::aws_lc_rs::default_provider().install_default()` before
+  `KubeCluster::connect`, and so does any test of WP5's that connects. The
+  crate depends on `rustls` directly for that, and enables kube's
+  `aws-lc-rs` feature beside the four named in WP0.
+- **An exec lives as long as its `AttachedProcess`.** Dropping it aborts the
+  task that pumps the WebSocket. `KubeCluster::exec` moves it into the
+  `ended` future, which the caller keeps until it has read stdout. stdout is
+  a `ReadHalf<SimplexStream>` bounded by `AttachParams::max_stdout_buf_size`;
+  stderr has its own bounded pipe and must be drained too, or the pump
+  blocks before the status arrives.
+
 ### 4.6 The Kubernetes worker's environment
 
 Beside what every worker reads (`AURCACHE_URL`, `WORKER_DATA_DIR`,
