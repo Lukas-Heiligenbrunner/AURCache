@@ -23,6 +23,8 @@ pub struct PackageEntry {
     /// `{pkgname}-{pkgver}`: the directory this entry occupies in both
     /// databases.
     pub dir_name: String,
+    /// The file's SHA-256, lowercase hex, as `%SHA256SUM%` records it.
+    pub sha256sum: String,
     /// The `desc` file both databases carry.
     pub(crate) desc: String,
     /// The `files` file only `repo.files` carries.
@@ -85,12 +87,13 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
     desc.filename.clone_from(&filename);
     desc.md5sum = md5sum;
     desc.csize = csize.to_string();
-    desc.sha256sum = sha256sum;
+    desc.sha256sum.clone_from(&sha256sum);
 
     files.sort_unstable();
     Ok(PackageEntry {
         filename,
         dir_name,
+        sha256sum,
         desc: desc.to_string(),
         files: format!("%FILES%\n{}", files.join("\n")),
     })
@@ -154,6 +157,56 @@ mod tests {
         fs::write(&path, zstd::stream::encode_all(&bytes[..], 0).unwrap()).unwrap();
 
         assert!(describe_package(&path).is_err());
+    }
+
+    /// A detached signature beside a package goes into its entry as
+    /// `%PGPSIG%` and reads back from the database as the same bytes; without
+    /// one, the entry carries no `%PGPSIG%` at all.
+    #[test]
+    fn a_detached_signature_round_trips_through_the_database() {
+        let mut bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut bytes);
+            let content = b"pkgname = demo\npkgver = 1.0-1\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, ".PKGINFO", &content[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("demo-1.0-1-x86_64.pkg.tar.zst");
+        fs::write(&path, zstd::stream::encode_all(&bytes[..], 0).unwrap()).unwrap();
+
+        let unsigned = describe_package(&path).unwrap();
+        assert!(!unsigned.desc.contains("%PGPSIG%"));
+
+        let signature = [0x88_u8, 0x75, 0x04, 0x00, 0x16, 0x0a, 0x00, 0x1d];
+        fs::write(
+            tmp.path().join("demo-1.0-1-x86_64.pkg.tar.zst.sig"),
+            signature,
+        )
+        .unwrap();
+        let signed = describe_package(&path).unwrap();
+        assert!(signed.desc.contains("%PGPSIG%\niHUEABYKAB0=\n"));
+
+        let (db, files) = (tmp.path().join("repo.db"), tmp.path().join("repo.files"));
+        crate::write_updated_databases(
+            &tmp.path().join("none.db"),
+            &tmp.path().join("none.files"),
+            &[],
+            &[signed],
+            &db,
+            &files,
+        )
+        .unwrap();
+        let listed = crate::listed_packages(&db).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].signature.as_deref(), Some(&signature[..]));
+        assert_eq!(listed[0].sha256sum.as_deref().map(str::len), Some(64));
     }
 
     /// The streamed checksums are the checksums of the whole file, across

@@ -164,6 +164,36 @@ async fn a_published_build_is_in_the_repository_and_recorded() {
     assert!(!repo.staging_dir(1).exists(), "staging is cleared");
 }
 
+/// A server that signs publishes each package with its detached signature,
+/// the same signature in its entry, and the database signed beside it.
+#[tokio::test]
+async fn a_signing_server_publishes_the_package_signed() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path())
+        .with_key(aurcache_signing::InstanceKey::generate(None).unwrap());
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "hello", "2.12.1-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    let key = repo.key().unwrap();
+    let dir = tmp.path().join("x86_64");
+    let package = dir.join(filename("hello", "2.12.1-1"));
+    let signature = std::fs::read(dir.join(format!("{}.sig", filename("hello", "2.12.1-1"))))
+        .expect("the package is published with its signature");
+    assert!(key.verifies(&signature, &std::fs::read(&package).unwrap()));
+    let entries = pacman_repo_utils::listed_packages(&dir.join("repo.db.tar.gz")).unwrap();
+    assert_eq!(entries[0].signature.as_ref(), Some(&signature));
+    let db_signature = std::fs::read(dir.join("repo.db.tar.gz.sig")).unwrap();
+    assert!(key.verifies(
+        &db_signature,
+        &std::fs::read(dir.join("repo.db.tar.gz")).unwrap()
+    ));
+}
+
 /// A new version replaces the old one in the database and the `files` rows at
 /// once; the old file stays downloadable until the sweep, for clients that
 /// synced before.

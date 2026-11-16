@@ -23,6 +23,8 @@ pub mod restore;
 pub mod scheduled;
 pub mod services;
 pub mod settings;
+/// Signing what the repository published before it signed.
+pub mod signing;
 pub mod snapshot;
 /// The numbers the stats page and the dashboard show.
 pub mod stats;
