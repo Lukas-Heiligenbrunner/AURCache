@@ -1,0 +1,199 @@
+# Chroot build workers for x86_64. Each replica is one worker: it enrolls with
+# the server, claims builds for its node's architecture, builds each package in
+# a clean devtools chroot, and uploads the result.
+#
+# A StatefulSet, because a worker is known by its key, which it keeps in its
+# data volume: each replica keeps its own volumes across restarts and node
+# moves, and so stays the same, approved worker. Scale with
+# `kubectl -n aurcache scale statefulset aurcache-worker --replicas=N`; each
+# new replica enrolls as a new worker.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Only there because a StatefulSet names one. Workers serve nothing.
+  name: aurcache-workers
+  labels:
+    app.kubernetes.io/name: aurcache-worker
+    app.kubernetes.io/component: worker
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: aurcache-worker
+    app.kubernetes.io/component: worker
+    aurcache.io/arch: x86_64
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: aurcache-worker
+  labels:
+    app.kubernetes.io/name: aurcache-worker
+    app.kubernetes.io/component: worker
+    aurcache.io/arch: x86_64
+spec:
+  serviceName: aurcache-workers
+  replicas: 1
+  # Workers do not depend on one another: start and replace them all at once.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aurcache-worker
+      app.kubernetes.io/component: worker
+      aurcache.io/arch: x86_64
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aurcache-worker
+        app.kubernetes.io/component: worker
+        aurcache.io/arch: x86_64
+    spec:
+      # A worker builds in a chroot of its own architecture, so it builds for
+      # that architecture only. It reports what it is on its own; this only
+      # keeps it on nodes of the right one.
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      # One worker per node where the cluster allows it. Two on one node work,
+      # but compete for its CPU, memory and disk.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: aurcache-worker
+              aurcache.io/arch: x86_64
+      # See the server's Deployment: no AURCACHE_*_PORT variables from
+      # Services in this namespace.
+      enableServiceLinks: false
+      # A stopped worker's builds are requeued once their lease runs out (a
+      # minute by default) and start again elsewhere. To drain a node without
+      # losing work, stop the worker's intake first:
+      #     aurcli worker pause <id> --wait
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # The worker runs as the image's `aurcache` user, and gives each build
+        # a separate `builder` user, so its data directory needs the owners
+        # and modes the worker package declares. A volume Docker creates is
+        # filled from the image with them; a PersistentVolume starts out
+        # empty and root's. This applies that declaration, as root, at every
+        # start. It only creates and fixes those few directories, never what
+        # is in them.
+        - name: data-dir
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+          command:
+            - systemd-tmpfiles
+            - --create
+            - /usr/lib/tmpfiles.d/aurcache-worker.conf
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/aurcache-worker
+      containers:
+        - name: worker
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+          # devtools builds each package in a systemd-nspawn chroot, which needs
+          # the namespaces and mounts an ordinary pod forbids, and the storage
+          # pool needs to format and mount a btrfs filesystem. `privileged`
+          # plus a tmpfs `/run` (the `run` volume) is the configuration that
+          # works out of the box, as with Docker.
+          securityContext:
+            privileged: true
+          env:
+            - name: RUST_LOG
+              value: info
+            # The server's worker port, through its Service. The host must be
+            # one of the server's AURCACHE_TLS_SANS.
+            - name: AURCACHE_URL
+              value: https://aurcache:8083
+            # Where this worker fetches AURCache-built dependencies: the
+            # repository, in-cluster. The server's AURCACHE_PUBLIC_URL is the
+            # address pacman clients use, which need not be reachable from in
+            # here.
+            - name: AURCACHE_REPO_URL
+              value: http://aurcache:8081
+            # Matches the server's: a worker presenting it is approved on its
+            # own. Optional, as there.
+            - name: AURCACHE_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aurcache-enrollment
+                  key: token
+                  optional: true
+            # Pin the server's CA. In-cluster the worker trusts the server it
+            # first reaches; across a network you do not trust, set this to
+            # the fingerprint from the server's startup log ("Worker CA
+            # fingerprint (pin this on workers)").
+            # - name: AURCACHE_SERVER_CA_FINGERPRINT
+            #   value: <sha256>
+            #
+            # How many packages this worker builds in parallel. `_DEFAULT`
+            # makes it a starting point you can change from the worker's page
+            # in AURCache; the plain WORKER_CONCURRENCY would pin it here.
+            - name: WORKER_CONCURRENCY_DEFAULT
+              value: "2"
+            # The storage pool: the raw block volume `pool`, attached at this
+            # path. The worker formats it with btrfs the first time (a device
+            # that already holds a filesystem it did not create is refused,
+            # never formatted) and mounts it itself.
+            - name: WORKER_POOL
+              value: /dev/aurcache-pool
+            # Everything the worker stores in the pool: the base chroot, its
+            # caches and every running build. The filesystem is made 5%
+            # larger than this, so keep it at least that far under the pool
+            # volume's size. A starting point, which AURCache can change.
+            - name: WORKER_DISK_MAX_DEFAULT
+              value: 190G
+          # Limits on the pod bound the worker and every build it runs, as
+          # they would a container's. Within them, AURCache's per-build and
+          # total limits (WORKER_BUILD_MEMORY_MAX, WORKER_TOTAL_BUILD_*) decide
+          # which build gives way first; keep the total under the pod's limit.
+          # resources:
+          #   requests:
+          #     cpu: "4"
+          #     memory: 8Gi
+          #   limits:
+          #     memory: 16Gi
+          volumeMounts:
+            # Identity (the key the server knows this worker by), its
+            # generated SSH key, and the pool's mount point. Lose it and the
+            # worker enrolls again as a new, unapproved machine.
+            - name: data
+              mountPath: /var/lib/aurcache-worker
+            - name: run
+              mountPath: /run
+          volumeDevices:
+            - name: pool
+              devicePath: /dev/aurcache-pool
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # storageClassName: <yours>
+        resources:
+          requests:
+            storage: 1Gi
+    # The storage pool, as a raw block device: no filesystem on it but the
+    # worker's own btrfs, and no loop device. Needs a storage class whose
+    # provisioner supports `volumeMode: Block` (most CSI block drivers do:
+    # cloud disks, Ceph RBD, Longhorn, TopoLVM, OpenEBS LVM). For one that
+    # does not, use components/pool-image. Keep this second in the list;
+    # that component removes it by position.
+    - metadata:
+        name: pool
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        volumeMode: Block
+        # storageClassName: <yours>
+        resources:
+          requests:
+            storage: 200Gi

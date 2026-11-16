@@ -1,0 +1,55 @@
+# The server's database in PostgreSQL rather than in SQLite on its volume.
+#
+# Bring your own PostgreSQL (an operator such as CloudNativePG, a managed
+# instance, or a StatefulSet of your own) and give the server its address and
+# credentials in a Secret:
+#
+#     kubectl -n aurcache create secret generic aurcache-postgres \
+#       --from-literal=host=<host>[:<port>] \
+#       --from-literal=user=<user> \
+#       --from-literal=password=<password> \
+#       --from-literal=database=<database>
+#
+# The server writes the password into a postgres:// URL as it is, so keep it to
+# letters, digits and `-_.~`. The data volume is still needed: the repository,
+# the worker CA and the build logs stay on it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: Deployment
+      name: aurcache
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: aurcache
+      spec:
+        template:
+          spec:
+            containers:
+              - name: aurcache
+                env:
+                  - name: DB_TYPE
+                    value: POSTGRESQL
+                  - name: DB_HOST
+                    valueFrom:
+                      secretKeyRef:
+                        name: aurcache-postgres
+                        key: host
+                  - name: DB_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: aurcache-postgres
+                        key: user
+                  - name: DB_PWD
+                    valueFrom:
+                      secretKeyRef:
+                        name: aurcache-postgres
+                        key: password
+                  - name: DB_NAME
+                    valueFrom:
+                      secretKeyRef:
+                        name: aurcache-postgres
+                        key: database
