@@ -261,7 +261,7 @@ pub(crate) fn format_timestamp(timestamp: Option<i64>) -> String {
         .and_then(|timestamp| jiff::Timestamp::from_second(timestamp).ok())
         // RFC 3339 in the local offset, without jiff's `[zone]` suffix.
         .map(|timestamp| {
-            let local = timestamp.to_zoned(jiff::tz::TimeZone::system());
+            let local = timestamp.to_zoned_datetime(jiff::tz::TimeZone::system());
             timestamp.display_with_offset(local.offset()).to_string()
         })
         .unwrap_or_else(|| "-".to_string())

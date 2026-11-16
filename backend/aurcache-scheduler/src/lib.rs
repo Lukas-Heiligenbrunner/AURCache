@@ -51,7 +51,7 @@ pub(crate) async fn sleep_until_next_fire(
     what: &str,
     at_most: Duration,
 ) -> Wake {
-    let now = jiff::Zoned::now();
+    let now = jiff::ZonedDateTime::now();
     let Some(next) = schedule.next_after(&now) else {
         return Wake::Exhausted;
     };
