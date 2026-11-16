@@ -20,7 +20,7 @@ use rocket::{Config, catchers, routes};
 use rocket_async_compression::{Compression, Level};
 use rocket_oauth2::HyperRustlsAdapter;
 use sea_orm::DatabaseConnection;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -45,21 +45,11 @@ fn get_secret_key() -> SecretKey {
 /// Build the mutual-TLS configuration for the worker protocol port: a server
 /// certificate issued by the internal CA, with client certificates optional
 /// (`mandatory = false`) so enrollment endpoints remain reachable without one.
-fn worker_tls_config(ca: &aurcache_ca::Ca) -> Option<rocket::config::TlsConfig> {
+fn worker_tls_config(ca: &aurcache_ca::Ca, address: IpAddr) -> Option<rocket::config::TlsConfig> {
     use rocket::config::{MutualTls, TlsConfig};
 
-    let sans = aurcache_common::server_env::AURCACHE_TLS_SANS
-        .get()
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect::<Vec<_>>()
-        })
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec!["localhost".to_string()]);
+    let configured = aurcache_common::server_env::AURCACHE_TLS_SANS.get().ok();
+    let sans = server_sans(configured.as_deref(), address);
 
     let aurcache_ca::ServerCert { cert_pem, key_pem } = match ca.issue_server_cert(sans) {
         Ok(cert) => cert,
@@ -73,6 +63,34 @@ fn worker_tls_config(ca: &aurcache_ca::Ca) -> Option<rocket::config::TlsConfig> 
     let tls = TlsConfig::from_bytes(cert_pem.as_bytes(), key_pem.as_bytes())
         .with_mutual(MutualTls::from_bytes(&ca_pem).mandatory(false));
     Some(tls)
+}
+
+/// The names the worker listener's certificate is valid for:
+/// `AURCACHE_TLS_SANS`, else `localhost`.
+///
+/// A listener bound to one address can only be reached at that address, so it
+/// is added when the list does not have it already: a worker dialling the
+/// address itself then verifies the certificate without the operator having
+/// to repeat it. Binding every interface adds nothing, since no worker dials
+/// `0.0.0.0` or `::`.
+fn server_sans(configured: Option<&str>, address: IpAddr) -> Vec<String> {
+    let mut sans: Vec<String> = configured
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if sans.is_empty() {
+        sans.push("localhost".to_string());
+    }
+    let listed = sans
+        .iter()
+        .any(|san| san.parse::<IpAddr>().is_ok_and(|ip| ip == address));
+    if !address.is_unspecified() && !listed {
+        sans.push(address.to_string());
+    }
+    sans
 }
 
 /// Where the worker CA lives, supplied by the binary.
@@ -145,17 +163,23 @@ impl Modify for SecurityAddon {
     }
 }
 
-/// Start the human-facing API/UI listener.
+/// Start the human-facing API/UI listener on `address`.
 ///
 /// `services` carries the process-wide [`SnapshotStore`]; it must be the same
 /// instance handed to the schedulers and the worker listener so every path
 /// shares one set of on-disk git checkouts (see `main.rs`).
 #[must_use]
-pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory) -> JoinHandle<()> {
+pub fn init_api(
+    services: Services,
+    version: ServerVersion,
+    ca_dir: CaDirectory,
+    address: IpAddr,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let port = aurcache_common::ports::AURCACHE_HTTP_PORT;
         let config = Config {
-            address: aurcache_ip().into(),
-            port: aurcache_common::ports::AURCACHE_HTTP_PORT,
+            address,
+            port,
             secret_key: get_secret_key(),
             ..Default::default()
         };
@@ -225,6 +249,10 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
         #[cfg(feature = "static")]
         let rock = rock.mount("/", CustomHandler);
 
+        info!(
+            "Starting the API and web UI on {}",
+            SocketAddr::new(address, port)
+        );
         let rock = rock.launch().await;
         match rock {
             Ok(_) => info!("Rocket shut down gracefully."),
@@ -234,7 +262,7 @@ pub fn init_api(services: Services, version: ServerVersion, ca_dir: CaDirectory)
 }
 
 /// Dedicated remote-worker protocol listener: HTTPS with **optional** mutual TLS
-/// on `AURCACHE_WORKER_PORT` (default 8083). Enrollment endpoints are reachable
+/// on `address`, port `AURCACHE_WORKER_PORT` (default 8083). Enrollment endpoints are reachable
 /// without a client certificate; job endpoints require an approved worker's
 /// certificate. This is intentionally separate from [`init_api`] so the
 /// human-facing API/UI need no TLS of their own (front them with a reverse proxy
@@ -254,9 +282,10 @@ pub fn init_worker_api(
     store: Arc<SnapshotStore>,
     repo: Arc<Repository>,
     activity: ActivityLog,
+    address: IpAddr,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(tls) = worker_tls_config(&ca) else {
+        let Some(tls) = worker_tls_config(&ca, address) else {
             error!("Worker TLS could not be configured; worker protocol listener disabled");
             // Parked rather than returned: the server runs for as long as every
             // one of its tasks does, and the API and the repository are still
@@ -267,14 +296,17 @@ pub fn init_worker_api(
         let port = worker_port();
 
         let config = Config {
-            address: worker_ip().into(),
+            address,
             port,
             secret_key: get_secret_key(),
             tls: Some(tls),
             ..Default::default()
         };
 
-        info!("Starting remote-worker mTLS protocol listener on port {port}");
+        info!(
+            "Starting remote-worker mTLS protocol listener on {}",
+            SocketAddr::new(address, port)
+        );
         let launch_result = rocket::custom(config)
             // A worker enrolling or being auto-approved is worth a line in the
             // log, and this listener is where both happen.
@@ -307,40 +339,22 @@ pub(crate) fn worker_port() -> u16 {
         .unwrap_or(aurcache_common::ports::AURCACHE_WORKER_PORT)
 }
 
-pub(crate) fn worker_ip() -> Ipv4Addr {
-    aurcache_common::server_env::AURCACHE_WORKER_IP
-        .get()
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(aurcache_common::addresses::AURCACHE_WORKER_IP)
-}
-
-pub(crate) fn mirror_ip() -> Ipv4Addr {
-    aurcache_common::server_env::AURCACHE_MIRROR_IP
-        .get()
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(aurcache_common::addresses::AURCACHE_MIRROR_IP)
-}
-
-pub(crate) fn aurcache_ip() -> Ipv4Addr {
-    aurcache_common::server_env::AURCACHE_HTTP_IP
-        .get()
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(aurcache_common::addresses::AURCACHE_HTTP_IP)
-}
-
+/// Start the pacman repository's file server on `address`.
 #[must_use]
-pub fn init_repo(repo: Arc<Repository>) -> JoinHandle<()> {
+pub fn init_repo(repo: Arc<Repository>, address: IpAddr) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let port = aurcache_common::ports::AURCACHE_MIRROR_PORT;
         let config = Config {
-            address: mirror_ip().into(),
-            port: aurcache_common::ports::AURCACHE_MIRROR_PORT,
+            address,
+            port,
             secret_key: get_secret_key(),
             ..Default::default()
         };
 
+        info!(
+            "Starting the pacman repository on {}",
+            SocketAddr::new(address, port)
+        );
         let launch_result = rocket::custom(config)
             // A missing signature is a 404 pacman expects, so it is not
             // logged; it gets an answer without Rocket warning for each one.
@@ -377,5 +391,49 @@ mod tests {
             "restore progress is documented"
         );
         serde_json::to_string(&spec).expect("the document serialises");
+    }
+}
+
+#[cfg(test)]
+mod san_tests {
+    use super::server_sans;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    const ANY: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+    #[test]
+    fn every_interface_keeps_the_list_as_configured() {
+        assert_eq!(server_sans(None, ANY), ["localhost"]);
+        assert_eq!(server_sans(Some(" , "), ANY), ["localhost"]);
+        assert_eq!(
+            server_sans(Some("aur.example.com, localhost"), ANY),
+            ["aur.example.com", "localhost"]
+        );
+        assert_eq!(
+            server_sans(None, IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+            ["localhost"]
+        );
+    }
+
+    #[test]
+    fn one_address_is_added_to_the_list() {
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20));
+        assert_eq!(server_sans(None, lan), ["localhost", "192.168.1.20"]);
+        assert_eq!(
+            server_sans(Some("aur.example.com"), lan),
+            ["aur.example.com", "192.168.1.20"]
+        );
+        let v6: IpAddr = "fd00::20".parse().unwrap();
+        assert_eq!(server_sans(None, v6), ["localhost", "fd00::20"]);
+    }
+
+    /// Written another way it is still the same address, and listed once.
+    #[test]
+    fn an_address_already_listed_is_not_repeated() {
+        let v6: IpAddr = "fd00::20".parse().unwrap();
+        assert_eq!(
+            server_sans(Some("fd00:0::20,aur.example.com"), v6),
+            ["fd00:0::20", "aur.example.com"]
+        );
     }
 }
