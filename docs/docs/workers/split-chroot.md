@@ -201,6 +201,15 @@ See [Mirrorlist](../Configuration/mirrorlist.md) for the server side.
 
 See [Build credentials](./credentials.md).
 
+## Build capabilities
+
+| Variable | Type | Description | Default |
+|---|---|---|---|
+| `WORKER_BUILD_CAPABILITIES` | String | Linux capabilities a build may be granted when its package asks for them, comma separated | none |
+
+Read from this machine's environment only; AURCache cannot set it. See
+[Build capabilities](./capabilities.md) for what granting one exposes.
+
 ## Caches
 
 Workers keep two caches: downloaded upstream sources (`SRCDEST` — tarballs and
