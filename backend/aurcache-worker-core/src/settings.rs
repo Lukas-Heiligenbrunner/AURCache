@@ -454,8 +454,8 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
 /// Keyserver `gpg --recv-keys` asks for a PKGBUILD's `validpgpkeys`.
 ///
-/// One spelling shared by the chroot executor's setting default and the legacy
-/// container executor's build script, so both ask the same place. Safe for the
+/// One spelling shared by the chroot executor's setting default and the Docker
+/// worker's build script, so both ask the same place. Safe for the
 /// server to set, unlike the rest of the signature path: the keys a build will
 /// accept are pinned by the PKGBUILD, so a keyserver can withhold a key but
 /// cannot substitute one.

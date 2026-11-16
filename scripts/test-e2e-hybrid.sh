@@ -11,7 +11,7 @@
 #   * the worker enrolls over loopback using the shared secret the entrypoint
 #     generates, with no enrollment volume and no exposed mTLS port;
 #   * with no Docker socket mounted, the entrypoint starts Podman inside the
-#     container, as the old DinD image did, and the legacy builder drives it;
+#     container, as the old DinD image did, and the Docker worker drives it;
 #   * a package builds and lands in the repository.
 #
 # Usage: scripts/test-e2e-hybrid.sh [package] [port] [timeout]

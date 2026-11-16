@@ -14,7 +14,7 @@
 #
 # Note what is *absent*: no Docker socket and no BUILD_ARTIFACT_DIR. That is
 # DinD mode, so the entrypoint starts Podman inside the container, as the old
-# image did, and the embedded legacy builder spawns each build there. Driven by
+# image did, and the embedded Docker worker spawns each build there. Driven by
 # scripts/test-e2e-hybrid.sh.
 # =============================================================================
 

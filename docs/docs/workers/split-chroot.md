@@ -6,8 +6,8 @@ sidebar_position: 2
 
 :::note Upgrading from a single container
 If you are still running AURCache as one container, it keeps working through the
-[hybrid compatibility image](./hybrid.md),
-which is deprecated. Everything on this page applies to a worker you run
+[hybrid compatibility image](./hybrid.md).
+Everything on this page applies to a worker you run
 yourself.
 :::
 
@@ -311,7 +311,7 @@ packaged unit has it). A worker that has limits configured
 but cannot enforce them **refuses every build** and says so at startup, rather
 than running builds without the limits it was given.
 
-The legacy container builder keeps its own `CPU_LIMIT` (milli-CPUs) and
+The [Docker worker](./docker.md) keeps its own `CPU_LIMIT` (milli-CPUs) and
 `MEMORY_LIMIT` (MB, negative for unlimited). Like the settings above, they are
 listed on the worker's page and can be set there, and read `CPU_LIMIT_DEFAULT`
 and `MEMORY_LIMIT_DEFAULT` as defaults AURCache may override; the plain names
