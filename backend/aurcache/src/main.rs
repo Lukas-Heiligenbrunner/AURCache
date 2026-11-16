@@ -99,8 +99,11 @@ async fn main() {
     // re-downloading. Handing any of these its own instance would put two
     // stores on the same checkout directories with no shared locking.
     // The database comes along so the store can read `parse_network` when it
-    // parses a PKGBUILD; without it every parse would use the default.
-    let store = Arc::new(SnapshotStore::new().with_db(db.clone()));
+    // parses a PKGBUILD; without it every parse would use the default. So does
+    // the SSH key a private source is cloned with, generated on first start
+    // and logged so it can be added to the remote.
+    let ssh = Arc::new(aurcache_utils::ssh::SshAccess::load());
+    let store = Arc::new(SnapshotStore::new().with_db(db.clone()).with_ssh(ssh));
 
     // One AUR client for the whole server, for the same reason as the store
     // above: it owns the cached official repository databases and the names

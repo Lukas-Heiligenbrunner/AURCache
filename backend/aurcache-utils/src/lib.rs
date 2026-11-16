@@ -24,6 +24,8 @@ pub mod scheduled;
 pub mod services;
 pub mod settings;
 pub mod snapshot;
+/// The SSH key the server clones package sources with.
+pub mod ssh;
 /// The numbers the stats page and the dashboard show.
 pub mod stats;
 pub mod vcs_check;

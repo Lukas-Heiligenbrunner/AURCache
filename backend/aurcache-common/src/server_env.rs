@@ -78,6 +78,8 @@ pub const AURCACHE_REPO_PORT: Var = Var("AURCACHE_REPO_PORT");
 // Where the server keeps its state.
 
 pub const AURCACHE_CA_DIR: Var = Var("AURCACHE_CA_DIR");
+/// The server's SSH key and the host keys it has trusted.
+pub const AURCACHE_SSH_DIR: Var = Var("AURCACHE_SSH_DIR");
 pub const AURCACHE_BUILD_LOG_PATH: Var = Var("AURCACHE_BUILD_LOG_PATH");
 pub const AURCACHE_SOURCE_CACHE_PATH: Var = Var("AURCACHE_SOURCE_CACHE_PATH");
 pub const AURCACHE_MIRRORLIST_DIR: Var = Var("AURCACHE_MIRRORLIST_DIR");
@@ -97,6 +99,13 @@ pub const MIRRORLIST_SERVERS_ARMV7H: Var = Var("MIRRORLIST_SERVERS_ARMV7H");
 
 pub const AUR_RPC_URL: Var = Var("AUR_RPC_URL");
 pub const AUR_GIT_URL: Var = Var("AUR_GIT_URL");
+
+// Cloning package sources over SSH.
+
+/// A private key to clone with, in place of the one the server generates.
+pub const AURCACHE_GIT_SSH_KEY: Var = Var("AURCACHE_GIT_SSH_KEY");
+/// The only host keys to trust, in place of trusting each host on first use.
+pub const AURCACHE_SSH_KNOWN_HOSTS: Var = Var("AURCACHE_SSH_KNOWN_HOSTS");
 
 // Parsing PKGBUILDs.
 
@@ -158,6 +167,7 @@ pub const ALL: &[Var] = &[
     AURCACHE_REPO_LISTEN_ADDRESS,
     AURCACHE_REPO_PORT,
     AURCACHE_CA_DIR,
+    AURCACHE_SSH_DIR,
     AURCACHE_BUILD_LOG_PATH,
     AURCACHE_SOURCE_CACHE_PATH,
     AURCACHE_MIRRORLIST_DIR,
@@ -172,6 +182,8 @@ pub const ALL: &[Var] = &[
     MIRRORLIST_SERVERS_ARMV7H,
     AUR_RPC_URL,
     AUR_GIT_URL,
+    AURCACHE_GIT_SSH_KEY,
+    AURCACHE_SSH_KNOWN_HOSTS,
     AURCACHE_PROTECTED_DIR,
     AURCACHE_SANDBOX,
     AURCACHE_PKGBUILD_BRIDGE,

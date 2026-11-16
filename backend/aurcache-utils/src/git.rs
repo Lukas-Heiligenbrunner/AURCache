@@ -1,6 +1,160 @@
 use anyhow::{anyhow, bail};
-use git2::{Direction, Oid, Repository};
+use aurcache_common::source::{SshRemote, ssh_remote};
+use git2::{
+    CertificateCheckStatus, Cred, CredentialType, Direction, FetchOptions, Oid, RemoteCallbacks,
+    Repository,
+};
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
+
+use crate::ssh::{Identity, SshAccess};
+
+/// What a git operation may reach its remote with.
+#[derive(Clone, Copy, Debug)]
+pub enum Access<'a> {
+    /// The server's SSH key, with host keys judged as it is configured to:
+    /// for a package's own source, which the server clones to read.
+    Server(&'a SshAccess),
+    /// No credential at all. An SSH remote is refused before connecting.
+    Anonymous,
+}
+
+/// How one URL is reached.
+#[derive(Debug)]
+enum Route<'a> {
+    /// Not over SSH: git's own defaults, as for `https://`.
+    Default,
+    /// Over SSH, offering the server's key and checking the host's.
+    Ssh {
+        remote: SshRemote,
+        /// Who to log in as: the URL's account, or `git`, which is every
+        /// forge's.
+        user: String,
+        identity: &'a Identity,
+        access: &'a SshAccess,
+    },
+}
+
+/// Decide how `url` is reached with `access`, or why it cannot be.
+fn route<'a>(url: &str, access: Access<'a>) -> anyhow::Result<Route<'a>> {
+    let Some(remote) = ssh_remote(url) else {
+        return Ok(Route::Default);
+    };
+    // Named by host rather than by URL: a URL can carry a password.
+    let host = remote.known_hosts_name();
+    let access = match access {
+        Access::Server(access) => access,
+        Access::Anonymous => bail!(
+            "{host} is reached over SSH, and the server offers its SSH key only for a \
+             package's own source. Sources a PKGBUILD downloads are fetched by workers, \
+             with their own keys"
+        ),
+    };
+    let identity = access.identity().map_err(|reason| {
+        anyhow!("cloning from {host} needs the server's SSH key, which it has none of: {reason}")
+    })?;
+    Ok(Route::Ssh {
+        user: remote.user.clone().unwrap_or_else(|| "git".to_string()),
+        remote,
+        identity,
+        access,
+    })
+}
+
+/// Why a callback refused a connection.
+///
+/// Kept beside the callbacks because libgit2 replaces what a callback says
+/// with a generic message ("invalid or unknown remote ssh hostkey"), and the
+/// point of refusing is to say which host, which key, and what to do.
+#[derive(Clone, Default)]
+struct Refusal(Rc<RefCell<Option<String>>>);
+
+impl Refusal {
+    /// Record `why`, as the error the callback returns.
+    fn refuse(&self, why: String) -> git2::Error {
+        let error = git2::Error::from_str(&why);
+        *self.0.borrow_mut() = Some(why);
+        error
+    }
+
+    /// `error`, or the reason a callback gave for it.
+    fn explain(&self, error: git2::Error) -> anyhow::Error {
+        match self.0.borrow_mut().take() {
+            Some(why) => anyhow!(why),
+            None => error.into(),
+        }
+    }
+}
+
+/// The callbacks `route` needs: none for a plain remote, the key and the
+/// host-key check for an SSH one. A refusal is recorded in `refusal`.
+fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
+    let mut callbacks = RemoteCallbacks::new();
+    let Route::Ssh {
+        remote,
+        user,
+        identity,
+        access,
+    } = route
+    else {
+        return callbacks;
+    };
+    let (identity, access) = (*identity, *access);
+
+    let user = user.clone();
+    let rejected = format!(
+        "{} refused the server's SSH key ({}). Add its public key to the repository, \
+         as a deploy key, or to an account that can read it: it is on the settings \
+         page, and `aurcache-cli ssh-key` prints it",
+        remote.known_hosts_name(),
+        identity.fingerprint()
+    );
+    // libgit2 asks again after a refusal, for as long as the callback answers;
+    // there is one key, so a second request is the answer.
+    let mut offered = false;
+    let credentials_refusal = refusal.clone();
+    callbacks.credentials(move |_url, from_url, allowed| {
+        let user = from_url.unwrap_or(&user);
+        if allowed.contains(CredentialType::USERNAME) {
+            return Cred::username(user);
+        }
+        if allowed.contains(CredentialType::SSH_KEY) && !offered {
+            offered = true;
+            return Cred::ssh_key(user, None, identity.private_key(), None);
+        }
+        Err(credentials_refusal.refuse(rejected.clone()))
+    });
+
+    let remote = remote.clone();
+    let refusal = refusal.clone();
+    callbacks.certificate_check(move |cert, _host| {
+        let Some(hostkey) = cert.as_hostkey() else {
+            // A TLS certificate: libgit2 checks those itself.
+            return Ok(CertificateCheckStatus::CertificatePassthrough);
+        };
+        let name = remote.known_hosts_name();
+        let blob = hostkey
+            .hostkey()
+            .ok_or_else(|| refusal.refuse(format!("{name} sent no host key to check")))?;
+        let key = ssh_key::PublicKey::from_bytes(blob).map_err(|e| {
+            refusal.refuse(format!("{name} sent a host key that does not parse: {e}"))
+        })?;
+        access
+            .hosts()
+            .verify(&remote, &key)
+            .map(|()| CertificateCheckStatus::CertificateOk)
+            .map_err(|e| refusal.refuse(format!("{e:#}")))
+    });
+    callbacks
+}
+
+/// Fetch options for `route`.
+fn fetch_options<'a>(route: &Route<'a>, refusal: &Refusal) -> FetchOptions<'a> {
+    let mut options = FetchOptions::new();
+    options.remote_callbacks(callbacks(route, refusal));
+    options
+}
 
 /// Resolve `git_ref` against the *fetched remote* state, falling back to a
 /// local resolve.
@@ -154,7 +308,10 @@ pub fn checkout_or_fetch_repo_ref(
     git_repo: &str,
     git_ref: &str,
     path: &Path,
+    access: Access<'_>,
 ) -> anyhow::Result<Oid> {
+    let route = route(git_repo, access)?;
+    let refusal = Refusal::default();
     let repo = if path.join(".git").exists() {
         let repo = Repository::open(path)?;
         // Make sure `origin` still points at the expected URL (it may have
@@ -172,13 +329,22 @@ pub fn checkout_or_fetch_repo_ref(
             // `git_ref` can later be resolved by `revparse_ext`. Also try to fetch
             // `git_ref` directly, to cover the case of a raw commit SHA that isn't
             // reachable from any branch/tag tip.
-            remote.fetch(&[] as &[&str], None, None)?;
-            let _ = remote.fetch(&[git_ref], None, None);
+            remote
+                .fetch(
+                    &[] as &[&str],
+                    Some(&mut fetch_options(&route, &refusal)),
+                    None,
+                )
+                .map_err(|e| refusal.explain(e))?;
+            let _ = remote.fetch(&[git_ref], Some(&mut fetch_options(&route, &refusal)), None);
         }
         repo
     } else {
         std::fs::create_dir_all(path)?;
-        Repository::clone(git_repo, path)?
+        git2::build::RepoBuilder::new()
+            .fetch_options(fetch_options(&route, &refusal))
+            .clone(git_repo, path)
+            .map_err(|e| refusal.explain(e))?
     };
 
     // A repository with no commits cannot have the ref resolved out of it, and
@@ -222,14 +388,18 @@ fn ls_remote_candidates(git_ref: &str) -> Vec<String> {
 /// a branch name, tag name, or `HEAD`; ambiguous short names are resolved the
 /// same way the remote's advertised ref list would allow (exact ref name,
 /// then `refs/heads/<name>`, then `refs/tags/<name>`).
-pub fn ls_remote(git_repo: &str, git_ref: &str) -> anyhow::Result<String> {
+pub fn ls_remote(git_repo: &str, git_ref: &str, access: Access<'_>) -> anyhow::Result<String> {
+    let route = route(git_repo, access)?;
     // A throwaway repository is required to create a remote in git2, even
     // for a purely in-memory listing; it performs no disk I/O for the actual
     // remote sources.
     let dir = tempfile::tempdir()?;
     let repo = Repository::init_bare(dir.path())?;
     let mut remote = repo.remote_anonymous(git_repo)?;
-    remote.connect(Direction::Fetch)?;
+    let refusal = Refusal::default();
+    remote
+        .connect_auth(Direction::Fetch, Some(callbacks(&route, &refusal)), None)
+        .map_err(|e| refusal.explain(e))?;
 
     let heads = remote.list()?;
     let candidates = ls_remote_candidates(git_ref);
@@ -250,7 +420,72 @@ pub fn ls_remote(git_repo: &str, git_ref: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh::{HostKeySource, KeySource};
     use git2::Signature;
+
+    fn server_access(dir: &Path) -> SshAccess {
+        SshAccess::from_sources(
+            &KeySource::Generated(dir.join("id_ed25519")),
+            HostKeySource::TrustOnFirstUse(dir.join("known_hosts")),
+        )
+    }
+
+    /// Only an SSH remote is offered the key: anything else is reached as it
+    /// always was, whatever access the caller holds.
+    #[test]
+    fn only_ssh_remotes_are_offered_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = server_access(dir.path());
+        for url in [
+            "https://github.com/user/repo.git",
+            "git://host/repo",
+            "/srv/git/repo.git",
+            "file:///srv/git/repo.git",
+        ] {
+            for access in [Access::Server(&access), Access::Anonymous] {
+                assert!(
+                    matches!(route(url, access), Ok(Route::Default)),
+                    "{url} with {access:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_ssh_remote_logs_in_as_its_account_or_as_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = server_access(dir.path());
+        let user = |url| match route(url, Access::Server(&access)).unwrap() {
+            Route::Ssh { user, .. } => user,
+            Route::Default => panic!("{url} was not routed over SSH"),
+        };
+        assert_eq!(user("aur@aur.archlinux.org:paru.git"), "aur");
+        assert_eq!(user("ssh://deploy@git.example.com:2222/r.git"), "deploy");
+        assert_eq!(user("ssh://git.example.com/r.git"), "git");
+        assert_eq!(user("github.com:user/repo.git"), "git");
+    }
+
+    /// A remote a PKGBUILD names is never offered the server's key.
+    #[test]
+    fn anonymous_access_refuses_an_ssh_remote_before_connecting() {
+        let error = route("git@github.com:EpicGames/UnrealEngine", Access::Anonymous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fetched by workers"), "{error}");
+    }
+
+    /// Without a key, the reason it has none is what the clone reports.
+    #[test]
+    fn a_missing_key_says_why() {
+        let access = SshAccess::unavailable("AURCACHE_GIT_SSH_KEY points at /nope");
+        let error = route("git@github.com:u/r.git", Access::Server(&access))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("AURCACHE_GIT_SSH_KEY points at /nope"),
+            "{error}"
+        );
+    }
 
     fn commit(repo: &Repository, pkgver: &str) {
         let workdir = repo.workdir().unwrap();
@@ -291,7 +526,7 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
         assert!(
             std::fs::read_to_string(path.join("PKGBUILD"))
                 .unwrap()
@@ -301,7 +536,7 @@ mod tests {
         // The AUR maintainer pushes a new pkgver.
         commit(&upstream, "2.0");
 
-        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
         assert_ne!(first, second, "checkout did not advance to the new commit");
         assert!(
             std::fs::read_to_string(path.join("PKGBUILD"))
@@ -343,13 +578,13 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
 
         force_push_unrelated_history(&upstream, "9.9");
         let rewritten = upstream.head().unwrap().target().unwrap();
         assert_ne!(first, rewritten, "test did not actually rewrite history");
 
-        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
         assert_eq!(
             second, rewritten,
             "checkout did not reset onto the force-pushed commit"
@@ -386,7 +621,7 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
 
         // Drop the symref the clone recorded, leaving only `origin/trunk`.
         Repository::open(&path)
@@ -398,7 +633,7 @@ mod tests {
 
         commit(&upstream, "2.0");
 
-        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
         assert_ne!(
             first, second,
             "checkout did not advance without an origin/HEAD to follow"
@@ -435,11 +670,11 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
 
         commit(&upstream, "2.0");
 
-        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, "HEAD", &path, Access::Anonymous).unwrap();
         assert_ne!(
             first, second,
             "checkout did not follow a default branch named `trunk`"
@@ -462,9 +697,9 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, &branch, &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, &branch, &path, Access::Anonymous).unwrap();
         commit(&upstream, "2.0");
-        let second = checkout_or_fetch_repo_ref(&url, &branch, &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, &branch, &path, Access::Anonymous).unwrap();
 
         assert_ne!(first, second, "branch checkout did not advance");
         assert!(
@@ -486,9 +721,9 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, &pinned, &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, &pinned, &path, Access::Anonymous).unwrap();
         commit(&upstream, "2.0");
-        let second = checkout_or_fetch_repo_ref(&url, &pinned, &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, &pinned, &path, Access::Anonymous).unwrap();
 
         assert_eq!(first, second, "pinned SHA must not follow upstream");
         assert!(
@@ -540,11 +775,11 @@ mod tests {
         let path = cache.path().join("pkg");
         let url = upstream_dir.path().to_string_lossy().to_string();
 
-        let first = checkout_or_fetch_repo_ref(&url, "v1.0", &path).unwrap();
+        let first = checkout_or_fetch_repo_ref(&url, "v1.0", &path, Access::Anonymous).unwrap();
         assert_eq!(first, tagged, "tag should resolve to the tagged commit");
 
         commit(&upstream, "2.0");
-        let second = checkout_or_fetch_repo_ref(&url, "v1.0", &path).unwrap();
+        let second = checkout_or_fetch_repo_ref(&url, "v1.0", &path, Access::Anonymous).unwrap();
 
         assert_eq!(second, tagged, "tag must not drift to the branch tip");
         assert!(

@@ -198,14 +198,17 @@ const PRIVATE_PATHS: [&str; 1] = ["/etc/aurcache"];
 /// beside them is public, and the parse is not kept from what anyone can
 /// download.
 fn private_state() -> Vec<PathBuf> {
-    vec![
+    let mut paths = vec![
         // SQLite's directory; see `aurcache_db::init_db`.
         PathBuf::from("./db"),
         aurcache_common::fs::ca_dir(),
         aurcache_common::fs::build_log_root(),
         // Every package's checkout, private sources included.
         crate::snapshot::default_checkout_root(),
-    ]
+    ];
+    // The key private sources are cloned with, wherever it is kept.
+    paths.extend(crate::ssh::private_paths());
+    paths
 }
 
 impl Bridge {
@@ -472,7 +475,13 @@ pub(crate) mod tests {
             bridge.private
         );
         assert!(bridge.private.contains(&PathBuf::from("/etc/aurcache")));
-        assert_eq!(bridge.private.len(), 5, "{:?}", bridge.private);
+        // The SSH key private sources are cloned with.
+        assert!(
+            bridge.private.contains(&cwd.join("data/ssh")),
+            "{:?}",
+            bridge.private
+        );
+        assert_eq!(bridge.private.len(), 6, "{:?}", bridge.private);
         assert!(
             bridge.private.iter().all(|p| p.is_absolute()),
             "{:?}",

@@ -55,6 +55,112 @@ pub fn looks_like_git_url(s: &str) -> bool {
     s.contains('@') || s.contains("://")
 }
 
+/// Where an SSH git remote is: the account, the host, and the port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshRemote {
+    /// The account the URL names (`git` in `git@github.com:user/repo`), if
+    /// it names one.
+    pub user: Option<String>,
+    /// The host, without the brackets an IPv6 literal is written in.
+    pub host: String,
+    /// The port, when the URL gives one.
+    pub port: Option<u16>,
+}
+
+impl SshRemote {
+    /// How a `known_hosts` file names this host: bare on the default port,
+    /// `[host]:port` on any other, as OpenSSH writes it.
+    #[must_use]
+    pub fn known_hosts_name(&self) -> String {
+        match self.port {
+            None | Some(22) => self.host.clone(),
+            Some(port) => format!("[{}]:{port}", self.host),
+        }
+    }
+}
+
+/// The SSH remote `url` names, or `None` when it is reached some other way.
+///
+/// The forms git itself reads as SSH: a URL with an `ssh://` scheme (or
+/// `git+ssh://`, `ssh+git://`), and the scp-like `[user@]host:path`. As for
+/// git, the scp-like form needs a colon before any slash: `./a:b` and
+/// `/srv/a:b` are local paths, not hosts called `.` and `/srv/a`.
+///
+/// Shared because the server and the add dialog ask the same question of
+/// the same string -- the server to know whether to offer its key and check
+/// a host key, the dialog to say which key that will be -- and two answers
+/// would drift apart.
+#[must_use]
+pub fn ssh_remote(url: &str) -> Option<SshRemote> {
+    let url = url.trim();
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let scheme = scheme.to_ascii_lowercase();
+            if !matches!(scheme.as_str(), "ssh" | "git+ssh" | "ssh+git") {
+                return None;
+            }
+            let authority = rest.split('/').next()?;
+            let (user, host_port) = match authority.rsplit_once('@') {
+                // A password, if the URL carries one, is not the account.
+                Some((userinfo, host)) => (userinfo.split(':').next(), host),
+                None => (None, authority),
+            };
+            let (host, port) = split_host_port(host_port)?;
+            remote(user, host, port)
+        }
+        None => {
+            // `user@` ends at the first `@`, and only when nothing before it
+            // is part of a path or a port.
+            let (user, rest) = match url.find('@') {
+                Some(at) if !url[..at].contains(['/', ':']) => (Some(&url[..at]), &url[at + 1..]),
+                _ => (None, url),
+            };
+            let host = if let Some(bracketed) = rest.strip_prefix('[') {
+                let (inside, after) = bracketed.split_once(']')?;
+                after.starts_with(':').then_some(inside)?
+            } else {
+                let (host, _) = rest.split_once(':')?;
+                (!host.contains('/')).then_some(host)?
+            };
+            remote(user, host, None)
+        }
+    }
+}
+
+/// `host[:port]` or `[v6-literal][:port]`, or `None` when the port is not one.
+fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (inside, after) = bracketed.split_once(']')?;
+        match after.strip_prefix(':') {
+            Some(port) => (inside, Some(port)),
+            None if after.is_empty() => (inside, None),
+            None => return None,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    let port = match port {
+        // `host:` is git's way of writing the default port.
+        None | Some("") => None,
+        Some(port) => Some(port.parse().ok()?),
+    };
+    Some((host, port))
+}
+
+fn remote(user: Option<&str>, host: &str, port: Option<u16>) -> Option<SshRemote> {
+    if host.is_empty() {
+        return None;
+    }
+    Some(SshRemote {
+        user: user.filter(|u| !u.is_empty()).map(str::to_string),
+        host: host.to_string(),
+        port,
+    })
+}
+
 /// How to write a source on screen: the AUR name, the git remote with its
 /// ref and subfolder, or a placeholder for an upload.
 ///
@@ -142,7 +248,103 @@ impl Display for SourceData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceData, looks_like_git_url};
+    use super::{SourceData, SshRemote, looks_like_git_url, ssh_remote};
+
+    fn ssh(user: Option<&str>, host: &str, port: Option<u16>) -> SshRemote {
+        SshRemote {
+            user: user.map(str::to_string),
+            host: host.to_string(),
+            port,
+        }
+    }
+
+    #[test]
+    fn ssh_scheme_urls_are_ssh_remotes() {
+        assert_eq!(
+            ssh_remote("ssh://git@github.com/user/repo.git"),
+            Some(ssh(Some("git"), "github.com", None))
+        );
+        assert_eq!(
+            ssh_remote("ssh://git@git.example.com:2222/srv/repo.git"),
+            Some(ssh(Some("git"), "git.example.com", Some(2222)))
+        );
+        // makepkg's spelling, and the reverse one git also accepts.
+        assert_eq!(
+            ssh_remote("git+ssh://aur@aur.archlinux.org/paru.git"),
+            Some(ssh(Some("aur"), "aur.archlinux.org", None))
+        );
+        assert_eq!(
+            ssh_remote("SSH+GIT://host/repo"),
+            Some(ssh(None, "host", None))
+        );
+        assert_eq!(
+            ssh_remote("ssh://git@[2001:db8::1]:2222/repo"),
+            Some(ssh(Some("git"), "2001:db8::1", Some(2222)))
+        );
+        assert_eq!(ssh_remote("ssh://[::1]/repo"), Some(ssh(None, "::1", None)));
+        // The account, not the password beside it.
+        assert_eq!(
+            ssh_remote("ssh://deploy:hunter2@host/repo"),
+            Some(ssh(Some("deploy"), "host", None))
+        );
+        assert_eq!(
+            ssh_remote("ssh://host:/repo"),
+            Some(ssh(None, "host", None))
+        );
+    }
+
+    #[test]
+    fn scp_like_remotes_are_ssh_remotes() {
+        assert_eq!(
+            ssh_remote("git@github.com:user/repo.git"),
+            Some(ssh(Some("git"), "github.com", None))
+        );
+        assert_eq!(
+            ssh_remote("aur@aur.archlinux.org:paru"),
+            Some(ssh(Some("aur"), "aur.archlinux.org", None))
+        );
+        assert_eq!(ssh_remote("host:repo.git"), Some(ssh(None, "host", None)));
+        assert_eq!(
+            ssh_remote("git@[::1]:repo.git"),
+            Some(ssh(Some("git"), "::1", None))
+        );
+        // Pasted with the line it came from.
+        assert_eq!(
+            ssh_remote("  git@gitlab.com:group/sub/repo.git\n"),
+            Some(ssh(Some("git"), "gitlab.com", None))
+        );
+    }
+
+    #[test]
+    fn other_remotes_are_not_ssh_remotes() {
+        for url in [
+            "https://github.com/user/repo.git",
+            "http://user@host:8080/repo.git",
+            "git://host/repo",
+            "file:///srv/git/repo.git",
+            "/srv/git/repo.git",
+            // A colon after a slash is part of a path, as git reads it.
+            "./a:b",
+            "/srv/a:b",
+            "dir/a:b",
+            "paru-git",
+            // Not a port: refused rather than guessed at.
+            "ssh://host:ssh/repo",
+            "ssh:///repo",
+            "@:repo",
+        ] {
+            assert_eq!(ssh_remote(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn known_hosts_names_follow_openssh() {
+        let name = |url| ssh_remote(url).unwrap().known_hosts_name();
+        assert_eq!(name("git@github.com:u/r"), "github.com");
+        assert_eq!(name("ssh://git@github.com:22/u/r"), "github.com");
+        assert_eq!(name("ssh://git@host:2222/r"), "[host]:2222");
+        assert_eq!(name("ssh://[::1]:2222/r"), "[::1]:2222");
+    }
 
     #[test]
     fn detects_scp_like_git_urls() {
