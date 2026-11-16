@@ -29,6 +29,10 @@ pub struct Config {
     /// Extra `host:chroot` bind mounts exposed to every build, for credentials
     /// that are not SSH (a `.netrc`, an API token, a licence file).
     pub bind_mounts: Vec<crate::build::BindMount>,
+    /// The Linux capabilities a build may be granted when its package asks
+    /// for them (`WORKER_BUILD_CAPABILITIES`); none unless named. The
+    /// machine's alone, like the bind mounts: it widens what a build reaches.
+    pub build_capabilities: aurcache_common::capability::Capabilities,
     /// Directory the storage pool lives under by default: its image and its
     /// mount point.
     pub chroot_dir: PathBuf,
@@ -104,8 +108,11 @@ impl Config {
     /// Build a [`Config`] from the process environment, applying zero-config
     /// defaults for everything not explicitly set, with the tunables read
     /// from `core`'s resolution of the declared settings.
-    #[must_use]
-    pub fn from_env(core: &CoreConfig) -> Self {
+    ///
+    /// # Errors
+    /// A `WORKER_BUILD_CAPABILITIES` that cannot be granted as written; see
+    /// [`crate::capabilities::allowed`].
+    pub fn from_env(core: &CoreConfig) -> anyhow::Result<Self> {
         // The chroot lives under the data dir by default so that persisting one
         // volume persists the identity *and* the expensive base chroot; a
         // worker whose data dir moved to a bigger disk should not silently
@@ -115,13 +122,17 @@ impl Config {
             .unwrap_or_else(|| core.data_dir.join("chroot"));
 
         let pool = env_opt("WORKER_POOL").map(PathBuf::from);
-        Self {
+        let build_capabilities = crate::capabilities::allowed(
+            &env_opt(crate::capabilities::ALLOWED_ENV).unwrap_or_default(),
+        )?;
+        Ok(Self {
             data_dir: core.data_dir.clone(),
             git_ssh_key: env_opt("WORKER_GIT_SSH_KEY").map(PathBuf::from),
             ssh_known_hosts: env_opt("WORKER_SSH_KNOWN_HOSTS").map(PathBuf::from),
             bind_mounts: env_opt("WORKER_BIND_MOUNTS")
                 .map(|raw| crate::credentials::parse_bind_mounts(&raw))
                 .unwrap_or_default(),
+            build_capabilities,
             chroot_dir: chroot_dir.clone(),
             cache_dir: pool_mountpoint(pool.clone(), &chroot_dir).join(CACHE_SUBVOLUME),
             build_user: env_opt("WORKER_BUILD_USER").unwrap_or_else(|| "builder".to_string()),
@@ -132,7 +143,7 @@ impl Config {
             ),
             pool_mountpoint: pool_mountpoint(pool, &chroot_dir),
             tunables: Tunables::from_settings(&core.settings),
-        }
+        })
     }
 
     /// Who owns the cache subvolume: the build user and its group, as the
@@ -173,6 +184,7 @@ impl Config {
             "test".into(),
             crate::settings::chroot_settings(),
         ))
+        .expect("a test environment the worker can start in")
     }
 }
 
@@ -405,7 +417,7 @@ mod tests {
             core.tunables.build_timeout,
             Some(Duration::from_secs(3 * 60 * 60))
         );
-        let cfg = Config::from_env(&core).tunables;
+        let cfg = Config::from_env(&core).unwrap().tunables;
         assert_eq!(cfg.builddir_max_bytes, 200 * 1024 * 1024 * 1024);
         assert_eq!(cfg.builddir_min_free, 50 * 1024 * 1024 * 1024);
         assert_eq!(cfg.keyserver, "hkps://keyserver.ubuntu.com");

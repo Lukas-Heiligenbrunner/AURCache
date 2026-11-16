@@ -122,6 +122,15 @@ fn timed_out(elapsed: Duration, limit: Timeout) -> CompleteReport {
     )
 }
 
+/// The terminal report for a build this worker refuses to run as the job
+/// describes it -- it asks for something the worker does not grant -- so
+/// it fails without running. Failed rather than interrupted: the same worker
+/// would refuse it again, and a retry would only use up its attempts.
+#[must_use]
+pub fn refused(reason: impl std::fmt::Display) -> CompleteReport {
+    failure(None, reason.to_string())
+}
+
 /// A failed build with nothing measured about it.
 fn failure(exit_code: Option<i32>, reason: String) -> CompleteReport {
     CompleteReport {

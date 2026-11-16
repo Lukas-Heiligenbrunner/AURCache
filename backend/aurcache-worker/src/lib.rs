@@ -12,6 +12,8 @@ pub mod build;
 pub mod build_firewall;
 pub mod built_sources;
 pub mod cache;
+/// The Linux capabilities this worker grants builds that ask for them.
+pub mod capabilities;
 pub mod cgroup;
 pub mod chroots;
 pub mod config;

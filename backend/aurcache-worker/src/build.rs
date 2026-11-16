@@ -34,7 +34,7 @@ pub const SCRIPT: &str = "/usr/lib/aurcache/bin/aurcache-build";
 /// Must equal `INTERFACE` in `packaging/patch-makechrootpkg.py`; bump both
 /// when the worker starts relying on something a copy derived by the previous
 /// patcher would not do.
-pub const INTERFACE: &str = "1";
+pub const INTERFACE: &str = "2";
 
 /// Refuse to start unless [`SCRIPT`] is there and speaks [`INTERFACE`].
 ///
@@ -245,7 +245,9 @@ mod tests {
         );
         assert!(!cmd.iter().any(|a| a == "systemd-run"));
         assert!(!cmd.iter().any(|a| a == "--pkgdest"));
-        assert!(joined.contains("aurcache-build --interface=1 -r /chroot -l job-42"));
+        assert!(joined.contains(&format!(
+            "aurcache-build --interface={INTERFACE} -r /chroot -l job-42"
+        )));
         // Builds must never inherit the worker's user via SUDO_USER.
         assert!(joined.contains("-U builder"));
         assert!(joined.contains("-- --nocheck"));

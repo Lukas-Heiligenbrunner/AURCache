@@ -53,7 +53,7 @@ DST = os.environ.get("AURCACHE_BUILD_DST", "/usr/lib/aurcache/bin/aurcache-build
 # The interface the copy speaks, as `aurcache_worker::build::INTERFACE` (a unit
 # test there checks the two agree). Bump both when the worker starts relying on
 # something a copy derived by the previous version of this file would not do.
-INTERFACE = "1"
+INTERFACE = "2"
 
 
 def _no_follow(description: str, var: str) -> tuple[str, str, str]:
@@ -228,7 +228,8 @@ prepare_chroot
         'SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER "${BASH_SOURCE[0]}" "$@"',
         "check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,"
         "SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER,AURCACHE_DROPIN,"
-        f'AURCACHE_NSPAWN_KEEP_UNIT "${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
+        "AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_BUILD_CAPABILITIES "
+        f'"${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
     ),
     (
         "direct `source PKGBUILD` for pkgbase/pkgname",
@@ -294,6 +295,78 @@ if (( ${#_aurcache_nspawn_args[@]} )); then
 fi
 
 bindmounts_ro=()""",
+    ),
+    (
+        # The capabilities the worker grants this build, as
+        # `AURCACHE_BUILD_CAPABILITIES` (`CAP_NET_ADMIN,CAP_NET_RAW`), which it
+        # sets only after checking each against what its operator allows
+        # (`WORKER_BUILD_CAPABILITIES`).
+        #
+        # Two halves. `--capability=` keeps them in the build container's
+        # bounding set, from which systemd-nspawn otherwise drops them. That
+        # alone reaches no build: makepkg runs as `builduser`, and the kernel
+        # clears every capability a process holds when it changes from root to
+        # another user. So the container is also told, as
+        # `AURCACHE_BUILD_AMBIENT`, to hand them to `builduser` as ambient
+        # capabilities, which survive that change and every `execve` after it
+        # -- the next patch. setpriv spells them `+net_admin`, lowercase and
+        # without the prefix.
+        #
+        # On the build's container only, never on the ones that install or
+        # upgrade its packages, which run nothing of the PKGBUILD's.
+        "the build container keeps the capabilities the worker grants",
+        '\t"${bindmounts_tmpfs[@]}"\n)\n',
+        """\t"${bindmounts_tmpfs[@]}"
+)
+if [[ -n ${AURCACHE_BUILD_CAPABILITIES:-} ]]; then
+\t_aurcache_ambient=
+\tIFS=, read -ra _aurcache_caps <<<"$AURCACHE_BUILD_CAPABILITIES"
+\tfor _aurcache_cap in "${_aurcache_caps[@]}"; do
+\t\t_aurcache_cap=${_aurcache_cap,,}
+\t\t_aurcache_ambient+=,+${_aurcache_cap#cap_}
+\tdone
+\tnspawn_build_args+=(
+\t\t--capability="$AURCACHE_BUILD_CAPABILITIES"
+\t\t--setenv=AURCACHE_BUILD_AMBIENT="${_aurcache_ambient#,}"
+\t)
+fi
+""",
+    ),
+    (
+        # The other half: makepkg run as `builduser` holding the granted
+        # capabilities. `sudo` cannot do it -- it is setuid, and executing a
+        # setuid program clears ambient capabilities -- so setpriv (util-linux,
+        # in every chroot `base-devel` makes) changes user instead, keeping
+        # them as ambient. Ambient needs them inheritable too, and the
+        # inheritable set is narrowed to exactly them: the container's root
+        # holds far more there, and none of it is the build's. It does what `sudo -iu` did for the
+        # build: the user's groups, a reset environment with its HOME, a login
+        # shell, and the three variables sudo was told to keep, each only if
+        # it is set.
+        #
+        # Unset `AURCACHE_BUILD_AMBIENT` (a build granted nothing, or anyone
+        # running this copy by hand) takes the stock `sudo` path untouched.
+        "makepkg as builduser, holding the capabilities the build is granted",
+        "\tsudo --preserve-env=SOURCE_DATE_EPOCH \\\n"
+        "\t\t--preserve-env=BUILDTOOL \\\n"
+        "\t\t--preserve-env=BUILDTOOLVER \\\n"
+        "\t\t-iu builduser bash -c 'cd /startdir; makepkg \"$@\"' -bash \"$@\"\n",
+        """\tif [[ -n ${AURCACHE_BUILD_AMBIENT:-} ]]; then
+\t\tsetpriv --reuid=builduser --regid=builduser --init-groups \\
+\t\t\t--inh-caps="-all,$AURCACHE_BUILD_AMBIENT" \\
+\t\t\t--ambient-caps="$AURCACHE_BUILD_AMBIENT" \\
+\t\t\t--reset-env \\
+\t\t\tenv ${SOURCE_DATE_EPOCH+"SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"} \\
+\t\t\t${BUILDTOOL+"BUILDTOOL=$BUILDTOOL"} \\
+\t\t\t${BUILDTOOLVER+"BUILDTOOLVER=$BUILDTOOLVER"} \\
+\t\t\tbash -lc 'cd /startdir; makepkg "$@"' -bash "$@"
+\telse
+\t\tsudo --preserve-env=SOURCE_DATE_EPOCH \\
+\t\t\t--preserve-env=BUILDTOOL \\
+\t\t\t--preserve-env=BUILDTOOLVER \\
+\t\t\t-iu builduser bash -c 'cd /startdir; makepkg "$@"' -bash "$@"
+\tfi
+""",
     ),
     # The three loops that hand the build's outputs back run `chown` as host
     # root on every entry of the copy's `pkgdest`, `srcpkgdest` and `logdest`.

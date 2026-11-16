@@ -5,6 +5,7 @@
 //! the caller's wrapper.
 
 use anyhow::{Context, Result};
+use aurcache_common::capability::Capabilities;
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -19,6 +20,7 @@ use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, BindMount};
 use crate::cache::Cache;
+use crate::capabilities::Grant;
 use crate::cgroup::Hierarchy;
 use crate::chroots::Lease;
 use crate::config::Config;
@@ -86,6 +88,24 @@ async fn run_job_inner(
     shared: &Shared,
 ) -> Result<CompleteReport> {
     let job = &claimed.job;
+    // Before anything is fetched or prepared: a build this worker will not
+    // grant what it asks for is refused outright.
+    let capabilities = match crate::capabilities::grant(&job.capabilities, &cfg.build_capabilities)
+    {
+        Grant::Granted(capabilities) => capabilities,
+        Grant::Refused(reason) => {
+            log(client, job.build_id, &format!("[worker] {reason}\n")).await;
+            return Ok(report::refused(reason));
+        }
+    };
+    if !capabilities.is_empty() {
+        log(
+            client,
+            job.build_id,
+            &format!("[worker] granting this build {capabilities}\n"),
+        )
+        .await;
+    }
     let prepared = prepare_job(cfg, client, job, claimed.mirrorlist.as_deref(), shared).await?;
     if claimed.cancel.is_cancelled() {
         return Ok(report::canceled());
@@ -101,6 +121,7 @@ async fn run_job_inner(
         dropin: &prepared.dropin,
         lease: &lease,
         chroots: &shared.chroots,
+        capabilities: &capabilities,
     };
     let outcome = execute_prepared_job(&context, client, claimed, &prepared).await;
     let caches = &prepared.caches;
@@ -659,6 +680,9 @@ struct WorkerContext<'a> {
     /// This build's makepkg overrides, which `makechrootpkg` installs into the
     /// chroot copy it makes for it.
     dropin: &'a Path,
+    /// The capabilities this build is granted: all it asked for, each of
+    /// which this worker allows.
+    capabilities: &'a Capabilities,
 }
 
 /// The completed process and its resource report, ready for artifact handling.
@@ -777,6 +801,13 @@ async fn execute_build_process(
         // builds share one -- and the host-side source download reads the same
         // copy, which a bind mount inside the container would not reach.
         cmd.env("AURCACHE_DROPIN", ctx.dropin);
+        // The capabilities granted, which `aurcache-build` adds to the build
+        // container and hands its build user; see
+        // `packaging/patch-makechrootpkg.py`. Only when there are some, so a
+        // build that asked for none runs exactly as one always has.
+        if !ctx.capabilities.is_empty() {
+            cmd.env("AURCACHE_BUILD_CAPABILITIES", ctx.capabilities.to_string());
+        }
         cmd.spawn()
     };
 

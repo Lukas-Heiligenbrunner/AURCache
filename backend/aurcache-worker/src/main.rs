@@ -51,7 +51,15 @@ async fn main() -> Result<()> {
         aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
         chroot_settings(),
     );
-    let cfg = Config::from_env(&core);
+    let cfg = Config::from_env(&core)?;
+    if !cfg.build_capabilities.is_empty() {
+        tracing::warn!(
+            "Builds whose package asks for them may be granted {} ({}): each widens what \
+             that package's PKGBUILD can do to this machine",
+            cfg.build_capabilities,
+            aurcache_worker::capabilities::ALLOWED_ENV,
+        );
+    }
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Prepare => {

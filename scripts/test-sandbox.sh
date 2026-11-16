@@ -11,6 +11,10 @@
 # without the sandbox. A widened allow-list that reopens a hole turns the
 # "unconfined" leg green in the confined run, and this test red.
 #
+# The same image then checks the capabilities a worker grants a build
+# (`AURCACHE_BUILD_CAPABILITIES`), both ways again: granted, the build user
+# makes a TUN device in check(); withheld, the same check() is refused.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -29,6 +33,7 @@ sandbox=$(cargo_executable aurcache-sandbox build --release \
 cp "$sandbox" "$WORKDIR/"
 cp docker/nspawn-wrapper.sh packaging/patch-makechrootpkg.py packaging/sandbox-protected "$WORKDIR/"
 cp docker/testpkg/hostile-fixture/PKGBUILD "$WORKDIR/"
+cp docker/testpkg/capability-fixture/PKGBUILD "$WORKDIR/capability.PKGBUILD"
 
 cat > "$WORKDIR/Dockerfile" <<'EOF'
 FROM archlinux/archlinux:latest
@@ -43,6 +48,7 @@ COPY patch-makechrootpkg.py /usr/local/bin/patch-makechrootpkg
 # policy rather than a copy of it that could drift.
 COPY sandbox-protected /etc/aurcache/sandbox-protected
 COPY PKGBUILD /fixture/PKGBUILD
+COPY capability.PKGBUILD /capability/PKGBUILD
 RUN chmod +x /usr/local/bin/aurcache-sandbox /usr/local/bin/systemd-nspawn \
       /usr/local/bin/patch-makechrootpkg \
  && /usr/local/bin/patch-makechrootpkg \
@@ -53,15 +59,35 @@ EOF
 
 cat > "$WORKDIR/probe.sh" <<'EOF'
 #!/bin/bash
-# $1 = "confined" | "unconfined"
+# $1 = "confined" | "unconfined" | "granted" | "withheld"
 set -u
 mode=$1
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 
+# The capability legs: the patched copy, asked to grant CAP_NET_ADMIN or
+# asked for nothing, building a fixture whose check() makes a TUN device.
+if [[ $mode == granted || $mode == withheld ]]; then
+    caps=
+    [[ $mode == granted ]] && caps=CAP_NET_ADMIN
+    # The sandbox refuses a policy whose protected paths have no parent.
+    rm -rf /job && mkdir -p /job/{srcdest,pkg} /chroot /var/lib/aurcache-worker
+    cp /capability/PKGBUILD /job/pkg/PKGBUILD
+    chown -R builder: /job
+    mkarchroot -C /etc/pacman.conf -M /etc/makepkg.conf /chroot/root base-devel git >/dev/null 2>&1
+    cd /job/pkg
+    build=/usr/lib/aurcache/bin/aurcache-build
+    sudo -u builder env SRCDEST=/job/srcdest AURCACHE_BUILD_CAPABILITIES="$caps" \
+        "$build" "--interface=$("$build" --interface)" -c -r /chroot -l job1 >/tmp/build.log 2>&1
+    echo "build_exit=$?"
+    echo "ambient=$(grep -m1 '^CapAmb:' /tmp/build.log | awk '{print $2}')"
+    echo "eperm=$(grep -q 'Operation not permitted' /tmp/build.log && echo yes || echo no)"
+    exit 0
+fi
+
 # The only difference between the legs is which script builds: the patched
 # copy, as the worker runs it, or the stock one from /usr/bin.
 if [[ $mode == confined ]]; then
-    build=(/usr/lib/aurcache/bin/aurcache-build --interface=1)
+    build=(/usr/lib/aurcache/bin/aurcache-build "--interface=$(/usr/lib/aurcache/bin/aurcache-build --interface)")
 else
     build=(/usr/bin/makechrootpkg)
 fi
@@ -112,6 +138,14 @@ echo "==> leg 2/2: WITH the sandbox (the fixture must be contained)"
 confined=$(run confined) || { echo "$confined"; exit 1; }
 echo "$confined" | sed 's/^/    /'
 
+echo "==> capabilities 1/2: CAP_NET_ADMIN granted (check() must make a TUN device)"
+granted=$(run granted) || { echo "$granted"; exit 1; }
+echo "$granted" | sed 's/^/    /'
+
+echo "==> capabilities 2/2: nothing granted (the same check() must be refused)"
+withheld=$(run withheld) || { echo "$withheld"; exit 1; }
+echo "$withheld" | sed 's/^/    /'
+
 fail=0
 check() { # name expected actual
     if [[ $3 == "$2" ]]; then echo "    ok   $1"; else echo "    FAIL $1: expected '$2', got '$3'"; fail=1; fi
@@ -134,6 +168,13 @@ check "confined:   ssh key unreadable"     blocked "$(get sshkey   "$confined")"
 check "confined:   mTLS identity unreadable" blocked "$(get mtlskey "$confined")"
 check "confined:   mktemp still works"     works   "$(get mktemp    "$confined")"
 check "confined:   build still succeeds"    0       "$(get build_exit "$confined")"
+# Granted, the build user itself holds the capability (bit 12, CAP_NET_ADMIN)
+# and uses it. Withheld, it holds nothing and the same check() fails for want
+# of it, which is what makes the granted leg mean anything.
+check "granted:    build user holds it"     0000000000001000 "$(get ambient "$granted")"
+check "granted:    check() makes a TUN"     0       "$(get build_exit "$granted")"
+check "withheld:   build user holds none"   0000000000000000 "$(get ambient "$withheld")"
+check "withheld:   check() is refused"      yes     "$(get eperm "$withheld")"
 
 if (( fail )); then
     echo "==> FAILED"

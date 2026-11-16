@@ -28,8 +28,8 @@ pub async fn run_capture(mut cmd: Command) -> Result<Captured> {
 }
 
 /// The variables `sudo` must pass through to devtools; see [`command`].
-const DEVTOOLS_ENV: &str =
-    "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,AURCACHE_NSPAWN_KEEP_UNIT";
+const DEVTOOLS_ENV: &str = "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,\
+                            AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_BUILD_CAPABILITIES";
 
 /// Build a `Command` that runs a privileged `devtools` program via `sudo`.
 ///
@@ -39,12 +39,13 @@ const DEVTOOLS_ENV: &str =
 /// `SUDO_USER` inference, so it is `builder` and never `aurcache` -- see
 /// `build::build_command`.
 ///
-/// Four variables are preserved, because sudo would otherwise drop all of
+/// Five variables are preserved, because sudo would otherwise drop all of
 /// them: `GNUPGHOME` names this build's keyring replica (see
 /// [`prepare_job_keyring`]), `SRCDEST` the source cache `makechrootpkg` binds
 /// itself, `AURCACHE_DROPIN` the makepkg overrides it installs into this
-/// build's chroot copy, and `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
-/// stays in the build's cgroup. `PKGDEST` reaches the build through
+/// build's chroot copy, `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
+/// stays in the build's cgroup, and `AURCACHE_BUILD_CAPABILITIES` the
+/// capabilities the build is granted. `PKGDEST` reaches the build through
 /// `makepkg.conf` instead, so preserving it here would be a no-op.
 pub fn command(program: &str) -> Command {
     let mut cmd = Command::new("sudo");

@@ -1,0 +1,22 @@
+# Regression fixture for capabilities granted to a build. NOT a real package.
+#
+# check() makes a TUN device, as the test suites that need CAP_NET_ADMIN do
+# (wstunnel's, for one). It runs as the build user inside the chroot, so it
+# succeeds only when the capability reached that user -- not merely the build
+# container, which is the half that is easy to get right and useless alone.
+pkgname=capability-fixture
+pkgver=1
+pkgrel=1
+arch=('any')
+license=('MIT')
+makedepends=('iproute2')
+
+check() {
+	grep '^Cap' /proc/self/status
+	ip tuntap add mode tun name aurcache-cap0
+	ip link delete aurcache-cap0
+}
+
+package() {
+	:
+}

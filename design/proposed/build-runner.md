@@ -36,7 +36,7 @@ the sudoers file cannot change that while `makechrootpkg` is what it grants.
 
 ### What we have done to it so far
 
-`packaging/patch-makechrootpkg.py` applies eleven patches to a copy of the
+`packaging/patch-makechrootpkg.py` applies thirteen patches to a copy of the
 script, `aurcache-build`, re-derived on every devtools upgrade by a pacman
 hook:
 
@@ -50,6 +50,8 @@ hook:
 | `AURCACHE_*` and `--interface` across `check_root`'s re-exec | sudo drops the rest; the argument was shifted |
 | Landlock around `source PKGBUILD` | the PKGBUILD runs on the host there too |
 | `arch-nspawn` wrapper: `--keep-unit`, `--restrict-address-families=` | the container escaped the build's cgroup; a systemd default is changing |
+| the build container keeps the granted capabilities (`--capability=`) | systemd-nspawn drops them otherwise |
+| makepkg through `setpriv` with them ambient, instead of `sudo -iu` | a change from root to `builduser` clears every capability, and sudo is setuid |
 | skip non-regular files in `pkgdest`, `srcpkgdest`, `logdest`; `chown -h` (three patches) | a build could make host root `chown` any host file, see below |
 
 Each patch must apply exactly once, or the image build fails. That is the
@@ -57,7 +59,7 @@ right failure, and it makes every devtools release a possible broken
 release here. The worker meanwhile already does, itself, the parts devtools
 is best at: the chroot copy is a pool snapshot, deletion and keeping a failed
 build are the worker's, and so are the quota and the cgroup. The worker
-calls `aurcache-build --interface=1 -r -l -U -u -d` and none of
+calls `aurcache-build --interface=2 -r -l -U -u -d` and none of
 `-c -T -I -n -C -x`.
 
 ### `arch-nspawn` decides binds from the chroot's own `pacman.conf`

@@ -289,6 +289,7 @@ mod tests {
             .collect();
         for forbidden in [
             "WORKER_BIND_MOUNTS",
+            "WORKER_BUILD_CAPABILITIES",
             "WORKER_BUILD_USER",
             "WORKER_CHROOT_DIR",
             "WORKER_POOL",
