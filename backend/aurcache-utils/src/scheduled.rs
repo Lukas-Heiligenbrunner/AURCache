@@ -103,7 +103,7 @@ pub fn preview(job: Job, expr: &str, count: usize) -> SchedulePreview {
         }
     };
     let mut at = Vec::with_capacity(count);
-    let mut now = jiff::Zoned::now();
+    let mut now = jiff::ZonedDateTime::now();
     while at.len() < count {
         let Some(next) = schedule.next_after(&now) else {
             break;

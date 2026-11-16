@@ -101,7 +101,7 @@ pub(crate) async fn dump_command(
     let path = output.unwrap_or_else(|| {
         PathBuf::from(format!(
             "aurcache-dump-{}.tar.gz",
-            jiff::Zoned::now().strftime("%Y%m%d")
+            jiff::ZonedDateTime::now().strftime("%Y%m%d")
         ))
     });
 

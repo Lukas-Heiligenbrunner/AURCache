@@ -181,7 +181,7 @@ impl Schedule {
     /// 03:30). A time it repeats runs once, the first time.
     #[cfg(feature = "clock")]
     #[must_use]
-    pub fn next_after(&self, now: &jiff::Zoned) -> Option<jiff::Zoned> {
+    pub fn next_after(&self, now: &jiff::ZonedDateTime) -> Option<jiff::ZonedDateTime> {
         // Every combination of month, day and weekday comes round within 28
         // years; a schedule that has not run by then never will.
         const HORIZON_DAYS: i32 = 28 * 366;
@@ -193,7 +193,7 @@ impl Schedule {
                     for minute in bits(self.minutes) {
                         let at = day
                             .at(i8::try_from(hour).ok()?, i8::try_from(minute).ok()?, 0, 0)
-                            .to_zoned(zone.clone())
+                            .to_zoned_datetime(zone.clone())
                             .ok()?;
                         if at > *now {
                             return Some(at);
@@ -391,7 +391,7 @@ fn shift_weekday(item: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn at(text: &str) -> jiff::Zoned {
+    fn at(text: &str) -> jiff::ZonedDateTime {
         text.parse().unwrap()
     }
 

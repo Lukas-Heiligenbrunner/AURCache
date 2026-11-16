@@ -66,6 +66,6 @@ fn local_timezone() -> Timezone {
     };
     Timezone {
         name,
-        utc_offset: jiff::Zoned::now().offset().seconds(),
+        utc_offset: jiff::ZonedDateTime::now().offset().seconds(),
     }
 }

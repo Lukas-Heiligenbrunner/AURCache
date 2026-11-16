@@ -42,12 +42,12 @@ struct GraphMonth {
 ///
 /// A month starts at the start of its first day in that zone, which jiff
 /// resolves where a daylight-saving change skips or repeats midnight.
-fn graph_months(now: &jiff::Zoned) -> Vec<GraphMonth> {
+fn graph_months(now: &jiff::ZonedDateTime) -> Vec<GraphMonth> {
     let first = now.date().first_of_month();
     (0_i8..12)
         .filter_map(|back| {
             let day = first.checked_sub(jiff::Span::new().months(back)).ok()?;
-            let start = day.to_zoned(now.time_zone().clone()).ok()?;
+            let start = day.to_zoned_datetime(now.time_zone().clone()).ok()?;
             Some(GraphMonth {
                 year: i32::from(day.year()),
                 month: i32::from(day.month()),
@@ -70,7 +70,7 @@ pub async fn graph(db: &DatabaseConnection) -> anyhow::Result<Vec<GraphDataPoint
         successful: i64,
     }
 
-    let months = graph_months(&jiff::Zoned::now());
+    let months = graph_months(&jiff::ZonedDateTime::now());
     let Some(oldest) = months.last() else {
         return Ok(Vec::new());
     };
@@ -1172,7 +1172,7 @@ mod tests {
     fn the_graph_covers_the_last_twelve_months() {
         let now = jiff::civil::date(2026, 2, 15)
             .at(12, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap();
         let months = graph_months(&now);
         assert_eq!(months.len(), 12);
@@ -1200,7 +1200,7 @@ mod tests {
         let zone = jiff::tz::TimeZone::fixed(jiff::tz::offset(2));
         let now = jiff::civil::date(2026, 2, 15)
             .at(12, 0, 0, 0)
-            .to_zoned(zone)
+            .to_zoned_datetime(zone)
             .unwrap();
         let february = graph_months(&now)[0];
         assert_eq!((february.year, february.month), (2026, 2));
