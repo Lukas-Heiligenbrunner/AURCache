@@ -23,16 +23,24 @@ fi
 #
 # The native unit gets this for free: systemd's `Delegate=yes` chowns the unit's
 # subtree to its `User=`. A container has no systemd to do it, so do the same
-# thing here with the sudo the worker already has. Chowning the namespace root
-# reaches only this container's own subtree -- in a private cgroup namespace
-# that directory *is* the container's cgroup.
+# thing here with the sudo the worker already has, to this container's own
+# cgroup and nothing above it.
+#
+# Which directory that is comes from /proc/self/cgroup, the same place the
+# worker looks. In a private cgroup namespace (Docker's default) it reads `/`,
+# so this is /sys/fs/cgroup itself. In the host's -- which containerd gives a
+# privileged container by default, a Kubernetes pod's included --
+# /sys/fs/cgroup is the node's root cgroup, and the container's own is a path
+# below it.
 #
 # Best-effort: an unprivileged container has /sys/fs/cgroup read-only, and the
 # worker then reports no memory figure and builds exactly as before.
-if [ -d /sys/fs/cgroup ]; then
-    for f in /sys/fs/cgroup \
-             /sys/fs/cgroup/cgroup.procs \
-             /sys/fs/cgroup/cgroup.subtree_control; do
+own_cgroup=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null || true)
+if [ -n "$own_cgroup" ] && [ -d "/sys/fs/cgroup${own_cgroup%/}" ]; then
+    cgroup_dir="/sys/fs/cgroup${own_cgroup%/}"
+    for f in "$cgroup_dir" \
+             "$cgroup_dir/cgroup.procs" \
+             "$cgroup_dir/cgroup.subtree_control"; do
         sudo chown "$(id -u):$(id -g)" "$f" 2>/dev/null || true
     done
 fi
