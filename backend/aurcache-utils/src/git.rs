@@ -106,7 +106,7 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
     let rejected = format!(
         "{} refused the server's SSH key ({}). Add its public key to the repository, \
          as a deploy key, or to an account that can read it: it is on the settings \
-         page, and `aurcache-cli ssh-key` prints it",
+         page, and `aurcli ssh-key` prints it",
         remote.known_hosts_name(),
         identity.fingerprint()
     );
