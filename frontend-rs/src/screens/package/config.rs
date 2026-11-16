@@ -348,7 +348,7 @@ impl PackageText {
     const fn width(self) -> &'static str {
         match self {
             Self::ArtifactSize | Self::JobTimeout => "w-24",
-            Self::Capabilities => "w-48",
+            Self::Capabilities => "w-36",
         }
     }
 
