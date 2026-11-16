@@ -1,0 +1,74 @@
+# The firewall around build pods. A build runs code from a package's PKGBUILD,
+# so it may reach the internet (sources, mirrors, keyservers) and the server's
+# repository, and nothing else: not the server's worker port, which is how a
+# worker registers, not the cluster, not the nodes, and not the cloud
+# provider's metadata endpoint.
+#
+# It only does something where the cluster's CNI enforces NetworkPolicy. The
+# dispatcher tests this when it starts and says so in its log if it does not.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aurcache-builds
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-builds
+    app.kubernetes.io/component: kube-worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: aurcache-worker-kube
+  policyTypes:
+    - Ingress
+    - Egress
+  # Nothing connects to a build: the dispatcher reaches it through the API
+  # server.
+  ingress: []
+  egress:
+    # Name resolution.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The server's repository, for dependencies AURCache built. These are the
+    # server pod's own ports, which is what a NetworkPolicy matches, not its
+    # Service's: 80 for the nginx container in front of the repository, 8081
+    # for the server's built-in handler. The worker port, 8083, is left out on
+    # purpose.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aurcache
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aurcache
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8081
+    # The internet, minus every private range. This keeps builds off the pod,
+    # service and node networks of any cluster without naming yours, and off
+    # 169.254.0.0/16, where cloud providers serve the node's credentials. A
+    # mirror or keyserver on a private address needs a rule of its own here.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10

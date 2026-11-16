@@ -1,0 +1,65 @@
+# The Kubernetes worker
+
+Manifests for a worker that builds each package in a pod of its own, with no
+privileged pod and no access to a node. Apply them after the server's, from the
+repository root:
+
+```bash
+kubectl apply -k kubernetes/kube-worker/
+```
+
+This is a kustomization of its own, not part of the one above it: its resources
+live in two namespaces, and name them, where the server's kustomization moves
+everything into one.
+
+## What it needs
+
+- The server, running as the manifests in `kubernetes/` set it up: a Service
+  `aurcache` in the namespace `aurcache`, whose pods carry the labels
+  `app.kubernetes.io/name: aurcache` and `app.kubernetes.io/component: server`.
+- A CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, kindnet; not
+  flannel alone). Without one, builds can reach whatever a pod in the cluster
+  can. The worker tests this when it starts and logs an error if it can.
+- A default StorageClass, or one named in `worker.yaml`, for a 1 Gi volume.
+- Nodes labelled `kubernetes.io/arch` (every node is), for each architecture
+  you build for.
+
+## What it creates
+
+| File | Purpose |
+|---|---|
+| `kustomization.yaml` | The default set. Options are commented in it. |
+| `namespace.yaml` | The `aurcache-builds` namespace, where build pods run, labelled for the Pod Security `baseline` level. |
+| `rbac.yaml` | The worker's ServiceAccount, its Roles and RoleBindings (see below), and `aurcache-build`, the account build pods run as, which is bound to nothing. |
+| `networkpolicy.yaml` | The firewall around build pods: DNS, the server's repository, and the internet outside private address ranges. |
+| `worker.yaml` | The worker: a Deployment (one replica, `Recreate`, passing the `restricted` level) and the 1 Gi volume that holds its identity. |
+| `resourcequota.yaml` | An optional ceiling on all builds together. Not applied unless enabled in `kustomization.yaml`. |
+
+The worker lives in the `aurcache` namespace beside the server, so the
+`aurcache-enrollment` Secret that approves workers automatically is the one the
+server already reads.
+
+## Permissions
+
+The worker holds no cluster-wide role. In `aurcache-builds` it may create, get,
+list, watch and delete pods (and delete them by label, to clean up after
+itself), open exec sessions into them and read their logs. In `aurcache` it may
+read pods, to learn which image it runs. Build pods get no token for the
+Kubernetes API at all.
+
+## Running more than one
+
+Never raise `replicas` above 1: a worker is known by its key, and two pods with
+one key each report only their own builds. For more builds at once, raise
+`WORKER_CONCURRENCY_DEFAULT`. For a second worker, for another set of
+architectures or its own credentials, copy `worker.yaml` and the
+ServiceAccount, Roles and RoleBindings in `rbac.yaml` under other names; it
+enrolls as a worker of its own and can share `aurcache-builds`.
+
+## Checking a change
+
+No cluster is needed to render the result:
+
+```bash
+kubectl kustomize kubernetes/kube-worker/
+```

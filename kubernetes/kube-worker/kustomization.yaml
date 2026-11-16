@@ -1,0 +1,66 @@
+# =============================================================================
+# The Kubernetes worker
+# =============================================================================
+# A worker that builds each package in a pod of its own, without privileges. It
+# runs next to the server and does the building elsewhere in the cluster:
+#
+#     kubectl apply -k kubernetes/kube-worker/
+#
+# Apply the server's manifests first (`kubectl apply -k kubernetes/`): this
+# expects the server's Service `aurcache` in the namespace `aurcache`, and
+# puts its own pieces in two namespaces:
+#
+#   aurcache         the worker itself (the "dispatcher"), one small pod
+#   aurcache-builds  the build pods, in a namespace of their own
+#
+# The dispatcher is the identity the server knows: it enrolls, claims builds,
+# and reports them. For each build it creates a pod in `aurcache-builds`, feeds
+# it the job, takes the packages out of it and deletes it. Build pods never
+# reach the server's worker port and hold no credential.
+#
+# The worker shows up on the Workers page as pending: approve it there, or
+# create the `aurcache-enrollment` Secret (see the end of this file) before
+# applying and it is approved on its own.
+#
+# What the cluster needs: a CNI that enforces NetworkPolicy (Calico, Cilium,
+# kube-router; not flannel alone), or acceptance that builds can reach the rest
+# of the cluster. See README.md in this directory.
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No `namespace:` here: the resources span two namespaces and name their own.
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: aurcache
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - networkpolicy.yaml
+  - worker.yaml
+  # A ceiling on what all builds together can ask of the cluster. Read it
+  # before enabling it.
+  # - resourcequota.yaml
+
+# Pin a release instead of following `latest`:
+#
+#     kustomize edit set image \
+#       ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:<version>
+#
+# The dispatcher's image is also the image of the agent that runs in every
+# build pod, so one tag moves both.
+#
+# images:
+#   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
+#     newTag: "<version>"
+
+# Automatic approval of workers (optional). The server approves a new worker
+# that presents the same token as its own `aurcache-enrollment` Secret, which
+# this worker reads from the same namespace. Kept out of this directory so no
+# token is ever committed with it:
+#
+#     kubectl -n aurcache create secret generic aurcache-enrollment \
+#       --from-literal=token="$(openssl rand -hex 32)"
