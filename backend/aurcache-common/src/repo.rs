@@ -9,8 +9,6 @@
 //! So the split is always the same, and it is worth having in one place: take
 //! everything but the host from the server, and the host from whoever is asking.
 
-use crate::ports::AURCACHE_REPO_PORT;
-
 /// What the repository is called. It names the databases (`repo.db`,
 /// `repo.files`), and pacman fetches `<section>.db`, so every `[repo]` section
 /// written for it -- the workers', a user's `pacman.conf` -- has to say the
@@ -18,12 +16,13 @@ use crate::ports::AURCACHE_REPO_PORT;
 pub const REPO_NAME: &str = "repo";
 
 /// The `Server =` line for a repository published at `public_url`, as reached by
-/// a client that gets to the instance at `host`.
+/// a client that gets to the instance at `host`. `listen_port` is the port the
+/// repository listens on, which a `public_url` naming no port means.
 ///
 /// `$arch` is appended for pacman to expand, so one line serves every
 /// architecture the instance builds.
 #[must_use]
-pub fn server_url_for_host(public_url: &str, host: &str) -> String {
+pub fn server_url_for_host(public_url: &str, host: &str, listen_port: u16) -> String {
     let trimmed = public_url.trim_end_matches('/');
     let (scheme, rest) = trimmed
         .split_once("://")
@@ -37,15 +36,13 @@ pub fn server_url_for_host(public_url: &str, host: &str) -> String {
     // colons of its own, so the port is read past the `]`, not after the
     // last `:` (which would read `:1]` out of `[::1]` as a port).
     let port = if let Some(inside) = authority.strip_prefix('[') {
-        inside.split_once("]:").map_or_else(
-            || format!(":{AURCACHE_REPO_PORT}"),
-            |(_, p)| format!(":{p}"),
-        )
+        inside
+            .split_once("]:")
+            .map_or_else(|| format!(":{listen_port}"), |(_, p)| format!(":{p}"))
     } else {
-        authority.rsplit_once(':').map_or_else(
-            || format!(":{AURCACHE_REPO_PORT}"),
-            |(_, p)| format!(":{p}"),
-        )
+        authority
+            .rsplit_once(':')
+            .map_or_else(|| format!(":{listen_port}"), |(_, p)| format!(":{p}"))
     };
 
     // Brackets for a bare IPv6 literal: without them the port merges into
@@ -89,14 +86,13 @@ pub fn host_from_url(url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{host_from_url, server_url_for_host};
-    use crate::ports::AURCACHE_REPO_PORT;
 
     /// Only the host changes: the rest describes how the repository is
     /// published and stays the server's decision.
     #[test]
     fn replaces_only_the_host() {
         assert_eq!(
-            server_url_for_host("http://aurcache.example.com:9000/repo", "HOST"),
+            server_url_for_host("http://aurcache.example.com:9000/repo", "HOST", 9081),
             "http://HOST:9000/repo/$arch"
         );
     }
@@ -104,15 +100,15 @@ mod tests {
     #[test]
     fn supplies_the_repository_port_when_the_url_omits_it() {
         assert_eq!(
-            server_url_for_host("http://aurcache.example.com", "HOST"),
-            format!("http://HOST:{AURCACHE_REPO_PORT}/$arch")
+            server_url_for_host("http://aurcache.example.com", "HOST", 9081),
+            "http://HOST:9081/$arch"
         );
     }
 
     #[test]
     fn keeps_https_and_ignores_a_trailing_slash() {
         assert_eq!(
-            server_url_for_host("https://aurcache.example.com:8081/", "HOST"),
+            server_url_for_host("https://aurcache.example.com:8081/", "HOST", 9081),
             "https://HOST:8081/$arch"
         );
     }
@@ -121,7 +117,7 @@ mod tests {
     #[test]
     fn a_missing_scheme_reads_as_http() {
         assert_eq!(
-            server_url_for_host("aurcache.example.com:8081", "HOST"),
+            server_url_for_host("aurcache.example.com:8081", "HOST", 9081),
             "http://HOST:8081/$arch"
         );
     }
@@ -131,14 +127,14 @@ mod tests {
     ///
     /// Inherited from the worker template this was extracted from, and wrong
     /// for one case: a reverse proxy publishing on 443 under a path gets a
-    /// spurious `:8081`. Setting `AURCACHE_PUBLIC_URL` with an explicit port
+    /// spurious repository port. Setting `AURCACHE_PUBLIC_URL` with an explicit port
     /// (`https://host:443/arch`) is the workaround. Changing it would change
     /// what every worker is told, so it is deliberately not changed here.
     #[test]
     fn a_path_is_preserved_and_a_missing_port_is_supplied() {
         assert_eq!(
-            server_url_for_host("https://aurcache.example.com/arch", "HOST"),
-            format!("https://HOST:{AURCACHE_REPO_PORT}/arch/$arch")
+            server_url_for_host("https://aurcache.example.com/arch", "HOST", 9081),
+            "https://HOST:9081/arch/$arch"
         );
     }
 
@@ -147,7 +143,7 @@ mod tests {
     #[test]
     fn an_ipv6_host_is_bracketed() {
         assert_eq!(
-            server_url_for_host("http://aurcache.example.com:9000/repo", "::1"),
+            server_url_for_host("http://aurcache.example.com:9000/repo", "::1", 9081),
             "http://[::1]:9000/repo/$arch"
         );
     }
@@ -157,12 +153,12 @@ mod tests {
     #[test]
     fn an_ipv6_public_url_keeps_its_port() {
         assert_eq!(
-            server_url_for_host("http://[fd00::1]:9000/repo", "worker"),
+            server_url_for_host("http://[fd00::1]:9000/repo", "worker", 9081),
             "http://worker:9000/repo/$arch"
         );
         assert_eq!(
-            server_url_for_host("http://[fd00::1]/repo", "worker"),
-            format!("http://worker:{AURCACHE_REPO_PORT}/repo/$arch")
+            server_url_for_host("http://[fd00::1]/repo", "worker", 9081),
+            "http://worker:9081/repo/$arch"
         );
     }
 

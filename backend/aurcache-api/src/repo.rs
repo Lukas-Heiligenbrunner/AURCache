@@ -1,6 +1,7 @@
+use crate::listen::ListenAddresses;
 use aurcache_common::api::repo::RepoInfo;
-use rocket::get;
 use rocket::serde::json::Json;
+use rocket::{State, get};
 use utoipa::OpenApi;
 
 use crate::auth::Authenticated;
@@ -20,8 +21,10 @@ pub struct RepoApi;
     )
 )]
 #[get("/repo/info")]
-pub fn repo_info(_a: Authenticated) -> Json<RepoInfo> {
+pub fn repo_info(listen: &State<ListenAddresses>, _a: Authenticated) -> Json<RepoInfo> {
+    let port = listen.repo.port();
     Json(RepoInfo {
-        public_url: crate::worker::public_repo_url(),
+        public_url: crate::worker::public_repo_url(port),
+        listen_port: Some(port),
     })
 }

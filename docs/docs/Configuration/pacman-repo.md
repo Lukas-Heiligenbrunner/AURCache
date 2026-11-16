@@ -13,11 +13,14 @@ SigLevel = Optional TrustAll
 Server = http://<server_ip>:8081/$arch
 ```
 
+8081 is the default; a server that sets `AURCACHE_REPO_PORT` serves the
+repository on that port instead.
+
 ## Let the CLI fill it in
 
 `aurcli` is already configured to talk to the instance, and the repository
-is the same host on the mirror port — so it can print the stanza with nothing
-left to substitute:
+is the same host on the repository port — so it can print the stanza with
+nothing left to substitute:
 
 ```bash
 $ aurcli repo config
@@ -49,13 +52,17 @@ aurcli repo config | sudo tee -a /etc/pacman.conf
 
 With a token configured, it asks the server how it actually publishes the
 repository rather than assuming the default port — a deployment behind a reverse
-proxy, on another port, or under a path is described correctly. The host is still
+proxy, on another port (`AURCACHE_REPO_PORT` or `AURCACHE_PUBLIC_URL`), or under
+a path is described correctly. The host is still
 decided locally, because the server only sees how *it* was reached: a published
 address that names a real host is kept, and the `localhost` default is replaced
 with the address that works from here.
 
 Without a token it falls back to the configured URL's host on the default port,
-so it still works before the instance is otherwise set up. `--offline` forces
+8081, so it still works before the instance is otherwise set up. That is a
+guess: the CLI cannot see the server's `AURCACHE_REPO_PORT`, and the API URL's
+port says nothing about the repository's, so against a server that moved it pass
+`--port`. `--offline` forces
 that fallback; `--port`, `--name` and `--siglevel` override the result outright.
 
 `$arch` is pacman's own variable and is deliberately left unexpanded: one stanza

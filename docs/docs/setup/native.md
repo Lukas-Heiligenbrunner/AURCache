@@ -41,10 +41,10 @@ systemctl enable --now aurcache
 ```
 
 It listens on **8080** (API and web UI), **8081** (the pacman repository) and
-**8083** (workers), on every IPv4 interface; `AURCACHE_HTTP_LISTEN_ADDRESS`,
-`AURCACHE_REPO_LISTEN_ADDRESS` and `AURCACHE_WORKER_LISTEN_ADDRESS` narrow each to one address, or
-widen it to IPv6 with `::` (see [Listening
-addresses](../Configuration/environment-variables.md#listening-addresses)).
+**8083** (workers), on every IPv4 interface. Each listener has an address and a
+port variable in `server.env`, to keep it to one interface, add IPv6 or move it
+off a port something else holds; see [Where the server
+listens](../Configuration/environment-variables.md#where-the-server-listens).
 State lives in `/var/lib/aurcache`: the repository, the
 database, the worker CA and the build logs.
 
@@ -166,7 +166,8 @@ other users: running it yourself gets the packaged one.
 Install both packages. They share the `aurcache` user and their state
 directories are separate, so no extra configuration is needed — point
 `AURCACHE_URL` in `worker.env` at `https://localhost:8083`, which is also its
-default.
+default. A server moved to another worker port with `AURCACHE_WORKER_PORT`
+needs that port in `AURCACHE_URL` too.
 
 ## Building the packages yourself
 

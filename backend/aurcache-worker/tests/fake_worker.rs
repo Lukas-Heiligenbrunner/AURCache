@@ -147,7 +147,8 @@ async fn fake_worker_protocol_roundtrip() {
         std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
         std::sync::Arc::new(aurcache_utils::repository::Repository::new(&repo_root)),
         aurcache_activitylog::activity_utils::ActivityLog::discarding(),
-        aurcache_api::listen::DEFAULT_LISTEN_ADDRESS,
+        // Read as the server reads them, so AURCACHE_WORKER_PORT above applies.
+        aurcache_api::listen::ListenAddresses::from_env().unwrap(),
     );
 
     // Wait for the TLS listener to accept and serve the CA.

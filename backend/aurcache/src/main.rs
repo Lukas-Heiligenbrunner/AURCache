@@ -27,10 +27,10 @@ mod startup;
 async fn main() {
     _ = dotenv();
     init_logger();
-    // Before anything else: a listener address that does not parse is a
+    // Before anything else: a listener address or port that does not parse is a
     // configuration mistake, and better refused now than after migrations ran
     // and the other listeners came up.
-    let bind = ListenAddresses::from_env().unwrap_or_else(|e| {
+    let listen = ListenAddresses::from_env().unwrap_or_else(|e| {
         tracing::error!("{e}");
         std::process::exit(1);
     });
@@ -168,11 +168,10 @@ async fn main() {
         services.clone(),
         ServerVersion(version),
         CaDirectory(ca_dir.clone()),
-        bind.api,
+        listen,
     );
-    let worker_api_handle =
-        init_worker_api(db, ca, store, Arc::clone(&repo), activity, bind.worker);
-    let repo_handle = init_repo(repo, bind.repo);
+    let worker_api_handle = init_worker_api(db, ca, store, Arc::clone(&repo), activity, listen);
+    let repo_handle = init_repo(repo, listen.repo);
 
     tokio::select! {
         _ = version_check_handle => {

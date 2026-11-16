@@ -29,7 +29,9 @@ log() { printf '[hybrid] %s\n' "$*" >&2; }
 # revoked, nor disturb one already approved.
 # ---------------------------------------------------------------------------
 export AURCACHE_ENROLLMENT_TOKEN="${AURCACHE_ENROLLMENT_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -d '\n')}"
-export AURCACHE_URL="${AURCACHE_URL:-https://localhost:8083}"
+# The worker dials the server's own worker listener, on whichever port the
+# server was given.
+export AURCACHE_URL="${AURCACHE_URL:-https://localhost:${AURCACHE_WORKER_PORT:-8083}}"
 # Proves to the server that the worker presenting it is this container's own,
 # so its row is re-keyed rather than duplicated when the worker comes back under
 # a new identity -- which it does whenever the container is recreated with fresh

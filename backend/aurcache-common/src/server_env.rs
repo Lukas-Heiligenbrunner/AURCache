@@ -66,8 +66,12 @@ pub const RETIRED_PACKAGE_GRACE: Var = Var("RETIRED_PACKAGE_GRACE");
 pub const ACTIVITY_RETENTION: Var = Var("ACTIVITY_RETENTION");
 /// The address the web UI and API listen on.
 pub const AURCACHE_HTTP_LISTEN_ADDRESS: Var = Var("AURCACHE_HTTP_LISTEN_ADDRESS");
+/// The port the web UI and API listen on.
+pub const AURCACHE_HTTP_PORT: Var = Var("AURCACHE_HTTP_PORT");
 /// The address the pacman repository listens on.
 pub const AURCACHE_REPO_LISTEN_ADDRESS: Var = Var("AURCACHE_REPO_LISTEN_ADDRESS");
+/// The port the pacman repository listens on.
+pub const AURCACHE_REPO_PORT: Var = Var("AURCACHE_REPO_PORT");
 
 // Where the server keeps its state.
 
@@ -147,7 +151,9 @@ pub const ALL: &[Var] = &[
     RETIRED_PACKAGE_GRACE,
     ACTIVITY_RETENTION,
     AURCACHE_HTTP_LISTEN_ADDRESS,
+    AURCACHE_HTTP_PORT,
     AURCACHE_REPO_LISTEN_ADDRESS,
+    AURCACHE_REPO_PORT,
     AURCACHE_CA_DIR,
     AURCACHE_BUILD_LOG_PATH,
     AURCACHE_SOURCE_CACHE_PATH,

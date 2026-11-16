@@ -116,11 +116,11 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
 /// So ask when a token makes that possible, and fall back to the guess when it
 /// does not: a first-time user with no token still gets a usable answer, which
 /// is the whole reason this command works offline.
-async fn published_repo_url(
+async fn published_repo(
     api_url: &str,
     cli_token: Option<String>,
     args: &RepoConfigArgs,
-) -> Option<String> {
+) -> Option<aurcache_client::RepoInfo> {
     // An explicit --port is the user overriding us; asking would be pointless.
     if args.offline || args.port.is_some() {
         return None;
@@ -129,7 +129,7 @@ async fn published_repo_url(
     let token = config::stored_token(cli_token).ok().flatten()?;
     let client = AurCacheClient::new(api_url.to_string(), Some(token)).ok()?;
     match client.repo_info().await {
-        Ok(info) => Some(info.public_url),
+        Ok(info) => Some(info),
         Err(e) => {
             eprintln!(
                 "Warning: could not ask {api_url} how it publishes the repository \
@@ -149,13 +149,13 @@ async fn run_repo_config(
     args: RepoConfigArgs,
 ) -> Result<()> {
     let api_url = config::resolve_url_only(cli_url)?;
-    let published = published_repo_url(&api_url, cli_token, &args).await;
+    let published = published_repo(&api_url, cli_token, &args).await;
     let config = repo::repo_config(
         &api_url,
         args.port,
         args.name,
         args.siglevel,
-        published.as_deref(),
+        published.as_ref(),
     )?;
 
     if !args.install {
