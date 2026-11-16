@@ -5,7 +5,7 @@ use crate::cli::OutputFormat;
 use anyhow::{Context, Result};
 use aurcache_client::{
     GraphDataPoint, HostKeyPolicy, KeyOrigin, ListStats, OperationProgress, SearchResult,
-    ServerInfo, SshInfo, SshKey, UserInfo,
+    ServerInfo, SshKey, UserInfo,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -159,16 +159,17 @@ pub(crate) fn print_user_info(user: &UserInfo) {
     println!("has_api_token: {}", user.has_api_token);
 }
 
-/// The server's SSH key: the public key alone on the first line, ready to
-/// paste into a forge's deploy-key form, and what to know about it below.
-pub(crate) fn format_ssh_info(info: &SshInfo) -> String {
-    let hosts = match info.host_keys {
+/// One of the server's SSH keys: the public key alone on the first line,
+/// ready to paste into a forge's deploy-key form, and what to know about it
+/// below.
+pub(crate) fn format_ssh_key(key: &SshKey, host_keys: HostKeyPolicy) -> String {
+    let hosts = match host_keys {
         HostKeyPolicy::Pinned => "host keys: only those in AURCACHE_SSH_KNOWN_HOSTS",
         HostKeyPolicy::TrustOnFirstUse => {
             "host keys: recorded on first contact; a changed key is refused"
         }
     };
-    match &info.key {
+    match key {
         SshKey::Ready {
             public_key,
             fingerprint,
@@ -321,15 +322,12 @@ mod tests {
     /// goes into a forge's key form.
     #[test]
     fn the_ssh_key_comes_first_on_a_line_of_its_own() {
-        let info = SshInfo {
-            key: SshKey::Ready {
-                public_key: "ssh-ed25519 AAAA aurcache-server".to_string(),
-                fingerprint: "SHA256:abc".to_string(),
-                origin: KeyOrigin::Generated,
-            },
-            host_keys: HostKeyPolicy::TrustOnFirstUse,
+        let key = SshKey::Ready {
+            public_key: "ssh-ed25519 AAAA aurcache-server".to_string(),
+            fingerprint: "SHA256:abc".to_string(),
+            origin: KeyOrigin::Generated,
         };
-        let text = format_ssh_info(&info);
+        let text = format_ssh_key(&key, HostKeyPolicy::TrustOnFirstUse);
         assert_eq!(
             text.lines().next(),
             Some("ssh-ed25519 AAAA aurcache-server")

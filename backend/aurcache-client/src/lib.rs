@@ -40,7 +40,9 @@ pub use aurcache_common::api::package::{
 pub use aurcache_common::api::package::{SourceFileContent, SourceFileList, SourceFileUpdate};
 pub use aurcache_common::api::repo::RepoInfo;
 pub use aurcache_common::api::settings::{SchedulePreview, SettingResponse, SettingValue};
-pub use aurcache_common::api::ssh::{HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
+pub use aurcache_common::api::ssh::{
+    DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey,
+};
 pub use aurcache_common::api::stats::{
     ApiTokenResponse, DashboardView, GraphDataPoint, ListStats, LongBuild, OutOfDateSlice,
     QueueSlice, UserInfo,

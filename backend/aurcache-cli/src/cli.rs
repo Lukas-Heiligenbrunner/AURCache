@@ -151,9 +151,13 @@ pub(crate) struct RestoreArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum SshCommand {
-    /// Print the server's SSH key, to add to a private repository as a deploy
-    /// key. The key alone is on the first line.
-    Key,
+    /// Print one of the server's SSH keys, to add to a private repository as
+    /// a deploy key. The key alone is on the first line.
+    Key {
+        /// Which key: the server's own is `default`.
+        #[arg(default_value = aurcache_client::DEFAULT_KEY)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

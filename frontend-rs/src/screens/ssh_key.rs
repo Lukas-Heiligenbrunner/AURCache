@@ -5,7 +5,7 @@
 //! private repository refuses the clone until the key has been added to it.
 
 use crate::screens::settings::Section;
-use aurcache_client::{HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
+use aurcache_client::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
 use dioxus::prelude::*;
 
 /// The server's SSH key, read once per mount.
@@ -23,7 +23,7 @@ fn use_ssh_info() -> Resource<Result<SshInfo, String>> {
 pub fn SshKeySection() -> Element {
     let info = use_ssh_info();
     rsx! {
-        Section { title: "SSH key",
+        Section { title: "SSH keys",
             div { class: "py-3 space-y-2",
                 p { class: "text-sm opacity-70",
                     "Packages added from a git repository over SSH are cloned with this key. \
@@ -46,9 +46,12 @@ pub fn SshKeySection() -> Element {
 pub fn SshSourceHint() -> Element {
     let info = use_ssh_info();
     let guard = info.read_unchecked();
+    // Nothing useful to say until it loads, and a failure here is the
+    // settings page's to report: the add itself still works.
     let Some(Ok(info)) = &*guard else {
-        // Nothing useful to say until it loads, and a failure here is the
-        // settings page's to report: the add itself still works.
+        return rsx! {};
+    };
+    let Some(key) = info.key(DEFAULT_KEY) else {
         return rsx! {};
     };
     rsx! {
@@ -56,13 +59,15 @@ pub fn SshSourceHint() -> Element {
             p { class: "opacity-70",
                 "Cloned over SSH with the server's key. A private repository needs it added as a deploy key:"
             }
-            SshKeyView { info: info.clone() }
+            KeyView { ssh_key: key.clone() }
         }
     }
 }
 
-/// The key, its fingerprint and where it came from, and how hosts are
-/// trusted; or why there is no key.
+/// Every key the server holds, and how hosts are trusted.
+///
+/// A key is labelled with its name only when there is more than one: with a
+/// single key, `default` says nothing a reader needs.
 #[component]
 pub fn SshKeyView(info: SshInfo) -> Element {
     let hosts = match info.host_keys {
@@ -71,7 +76,25 @@ pub fn SshKeyView(info: SshInfo) -> Element {
             "A host's key is recorded the first time the server connects, and a different key from it later is refused."
         }
     };
-    match info.key {
+    let labelled = info.keys.len() > 1;
+    rsx! {
+        for named in info.keys {
+            div { class: "space-y-1",
+                if labelled {
+                    div { class: "font-medium text-sm font-mono", "{named.name}" }
+                }
+                KeyView { ssh_key: named.key }
+            }
+        }
+        p { class: "text-xs opacity-60", "{hosts}" }
+    }
+}
+
+/// One key: its public half with a copy button, its fingerprint and where it
+/// came from; or why it cannot be used.
+#[component]
+fn KeyView(ssh_key: SshKey) -> Element {
+    match ssh_key {
         SshKey::Ready {
             public_key,
             fingerprint,
@@ -90,13 +113,13 @@ pub fn SshKeyView(info: SshInfo) -> Element {
                 }
                 p { class: "text-xs opacity-60",
                     span { class: "font-mono", "{fingerprint}" }
-                    ", {origin}. {hosts}"
+                    ", {origin}."
                 }
             }
         }
         SshKey::Unavailable { reason } => rsx! {
             div { class: "alert alert-warning text-sm",
-                span { "The server has no SSH key, so packages from SSH remotes cannot be fetched: {reason}" }
+                span { "This SSH key cannot be used, so packages from SSH remotes cannot be fetched: {reason}" }
             }
         },
     }
@@ -136,25 +159,33 @@ fn CopyButton(text: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::{SshKeyView, SshKeyViewProps};
-    use aurcache_client::{HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
+    use aurcache_client::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
     use dioxus::prelude::*;
 
-    fn render(info: SshInfo) -> String {
+    fn render(keys: Vec<NamedKey>, host_keys: HostKeyPolicy) -> String {
+        let info = SshInfo { keys, host_keys };
         let mut dom = VirtualDom::new_with_props(SshKeyView, SshKeyViewProps { info });
         dom.rebuild_in_place();
         dioxus_ssr::render(&dom)
     }
 
-    #[test]
-    fn a_ready_key_shows_the_key_its_fingerprint_and_the_host_policy() {
-        let html = render(SshInfo {
+    fn ready(name: &str, public_key: &str) -> NamedKey {
+        NamedKey {
+            name: name.to_string(),
             key: SshKey::Ready {
-                public_key: "ssh-ed25519 AAAAkey aurcache-server".to_string(),
+                public_key: public_key.to_string(),
                 fingerprint: "SHA256:abc".to_string(),
                 origin: KeyOrigin::Generated,
             },
-            host_keys: HostKeyPolicy::TrustOnFirstUse,
-        });
+        }
+    }
+
+    #[test]
+    fn a_ready_key_shows_the_key_its_fingerprint_and_the_host_policy() {
+        let html = render(
+            vec![ready(DEFAULT_KEY, "ssh-ed25519 AAAAkey aurcache-server")],
+            HostKeyPolicy::TrustOnFirstUse,
+        );
         assert!(
             html.contains("ssh-ed25519 AAAAkey aurcache-server"),
             "{html}"
@@ -162,16 +193,36 @@ mod tests {
         assert!(html.contains("SHA256:abc"), "{html}");
         assert!(html.contains("generated by the server"), "{html}");
         assert!(html.contains("recorded the first time"), "{html}");
+        // One key needs no name.
+        assert!(!html.contains(">default<"), "{html}");
+    }
+
+    #[test]
+    fn several_keys_are_told_apart_by_name() {
+        let html = render(
+            vec![
+                ready(DEFAULT_KEY, "ssh-ed25519 AAAAone"),
+                ready("org-repo", "ssh-ed25519 AAAAtwo"),
+            ],
+            HostKeyPolicy::Pinned,
+        );
+        assert!(html.contains(">default<"), "{html}");
+        assert!(html.contains(">org-repo<"), "{html}");
+        assert!(html.contains("AAAAtwo"), "{html}");
     }
 
     #[test]
     fn a_missing_key_says_why() {
-        let html = render(SshInfo {
-            key: SshKey::Unavailable {
-                reason: "AURCACHE_GIT_SSH_KEY points at /nope, which does not exist".to_string(),
-            },
-            host_keys: HostKeyPolicy::Pinned,
-        });
+        let html = render(
+            vec![NamedKey {
+                name: DEFAULT_KEY.to_string(),
+                key: SshKey::Unavailable {
+                    reason: "AURCACHE_GIT_SSH_KEY points at /nope, which does not exist"
+                        .to_string(),
+                },
+            }],
+            HostKeyPolicy::Pinned,
+        );
         assert!(html.contains("points at /nope"), "{html}");
         assert!(!html.contains("Copy"), "{html}");
     }

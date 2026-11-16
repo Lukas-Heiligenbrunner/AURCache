@@ -167,9 +167,11 @@ fn bare_repo(dir: &Path, pkgver: &str) -> PathBuf {
 }
 
 fn public_key(access: &SshAccess) -> String {
-    match access.info().key {
-        aurcache_common::api::ssh::SshKey::Ready { public_key, .. } => public_key,
-        aurcache_common::api::ssh::SshKey::Unavailable { reason } => panic!("{reason}"),
+    use aurcache_common::api::ssh::{DEFAULT_KEY, SshKey};
+    match access.info().key(DEFAULT_KEY).cloned() {
+        Some(SshKey::Ready { public_key, .. }) => public_key,
+        Some(SshKey::Unavailable { reason }) => panic!("{reason}"),
+        None => panic!("no default key"),
     }
 }
 

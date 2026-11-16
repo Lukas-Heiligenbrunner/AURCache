@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, bail};
-use aurcache_common::api::ssh::{HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
+use aurcache_common::api::ssh::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
 use aurcache_common::server_env::{AURCACHE_GIT_SSH_KEY, AURCACHE_SSH_KNOWN_HOSTS};
 use aurcache_common::source::SshRemote;
 use hmac::{KeyInit, Mac};
@@ -215,7 +215,10 @@ impl SshAccess {
             },
         };
         SshInfo {
-            key,
+            keys: vec![NamedKey {
+                name: DEFAULT_KEY.to_string(),
+                key,
+            }],
             host_keys: self.hosts.policy(),
         }
     }
@@ -804,7 +807,7 @@ mod tests {
             &KeySource::Provided(path.clone()),
             HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
         );
-        let SshKey::Unavailable { reason } = access.info().key else {
+        let Some(SshKey::Unavailable { reason }) = access.info().key(DEFAULT_KEY).cloned() else {
             panic!("a missing key loaded");
         };
         assert!(reason.contains("does not exist"), "{reason}");
@@ -823,7 +826,7 @@ mod tests {
             HostKeySource::Pinned(dir.path().join("known_hosts")),
         );
         let info = access.info();
-        let SshKey::Ready { origin, .. } = &info.key else {
+        let Some(SshKey::Ready { origin, .. }) = info.key(DEFAULT_KEY) else {
             panic!("{info:?}");
         };
         assert_eq!(*origin, KeyOrigin::Provided);

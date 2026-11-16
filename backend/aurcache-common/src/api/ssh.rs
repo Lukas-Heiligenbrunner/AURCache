@@ -2,16 +2,38 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What the server offers an SSH remote, and which remotes it trusts.
+/// The name of the key the server uses for every SSH remote.
+pub const DEFAULT_KEY: &str = "default";
+
+/// What the server offers SSH remotes, and which remotes it trusts.
 ///
-/// Nothing secret: the public half of the key, and how host keys are judged.
-/// It exists so the key can be added to a remote (as a deploy key, or to an
+/// Nothing secret: the public half of each key, and how host keys are judged.
+/// It exists so a key can be added to a remote (as a deploy key, or to an
 /// account) without reading the server's log.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SshInfo {
-    pub key: SshKey,
+    /// Every key the server holds, by name. A list so that keys for
+    /// particular repositories can join the one named [`DEFAULT_KEY`]
+    /// without the shape changing.
+    pub keys: Vec<NamedKey>,
     pub host_keys: HostKeyPolicy,
+}
+
+impl SshInfo {
+    /// The key called `name`, if the server holds one.
+    #[must_use]
+    pub fn key(&self, name: &str) -> Option<&SshKey> {
+        self.keys.iter().find(|k| k.name == name).map(|k| &k.key)
+    }
+}
+
+/// One of the server's SSH keys.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NamedKey {
+    pub name: String,
+    pub key: SshKey,
 }
 
 /// The server's SSH key, or why it has none.
