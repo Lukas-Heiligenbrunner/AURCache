@@ -1,0 +1,137 @@
+[
+  {
+    "interface": 1,
+    "ended": {
+      "how": "exited",
+      "code": 0
+    },
+    "peak_memory_bytes": 121000000,
+    "oom_kills": 0,
+    "disk_bytes": 52428800,
+    "vcs_commits": {
+      "git+https://example.test/repo.git#branch=main": "6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "exited",
+      "code": 4
+    },
+    "peak_memory_bytes": 121000000,
+    "oom_kills": 0,
+    "disk_bytes": 52428800,
+    "vcs_commits": {
+      "git+https://example.test/repo.git#branch=main": "6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "signaled",
+      "signal": 9
+    },
+    "peak_memory_bytes": 121000000,
+    "oom_kills": 0,
+    "disk_bytes": 52428800,
+    "vcs_commits": {
+      "git+https://example.test/repo.git#branch=main": "6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "spec",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "config",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "keyring",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "sync",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "user",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "source",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "keys",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "credential",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
+  }
+]
