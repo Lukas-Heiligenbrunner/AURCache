@@ -804,8 +804,12 @@ async fn execute_build_process(
         // The capabilities granted, which `aurcache-build` adds to the build
         // container and hands its build user; see
         // `packaging/patch-makechrootpkg.py`. Only when there are some, so a
-        // build that asked for none runs exactly as one always has.
-        if !ctx.capabilities.is_empty() {
+        // build that asked for none runs exactly as one always has -- and
+        // removed otherwise, so a value in the worker's own environment never
+        // reaches a build past the check above.
+        if ctx.capabilities.is_empty() {
+            cmd.env_remove("AURCACHE_BUILD_CAPABILITIES");
+        } else {
             cmd.env("AURCACHE_BUILD_CAPABILITIES", ctx.capabilities.to_string());
         }
         cmd.spawn()
