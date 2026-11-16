@@ -66,7 +66,7 @@ From a checkout of the repository:
 
 ```bash
 # Optional: approve workers automatically (see below)
-kubectl create namespace aurcache
+kubectl apply -f kubernetes/namespace.yaml
 kubectl -n aurcache create secret generic aurcache-enrollment \
   --from-literal=token="$(openssl rand -hex 32)"
 
@@ -380,8 +380,10 @@ available.
 
 **A worker's PVC stays `Pending`.** Its storage class cannot provision the
 volume: often `volumeMode: Block`, which `local-path` and other host-path
-provisioners do not support. Use `components/pool-image`, or name a class that
-can in the `pool` claim template.
+provisioners do not support. `kubectl -n aurcache describe pvc
+pool-aurcache-worker-0` says so in its events (`rancher.io/local-path does not
+support block volume provisioning`, for one). Use `components/pool-image`, or
+name a class that can in the `pool` claim template.
 
 **The worker logs that it cannot open its storage pool.** The node's kernel is
 older than 6.7, or has no btrfs. Run the worker on nodes that have both (a
