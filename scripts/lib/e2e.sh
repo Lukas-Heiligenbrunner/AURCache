@@ -175,8 +175,43 @@ cleanup() {
 
     log "=== Cleaning up ==="
     # Named volumes make cleanup trivial and root-owned-file-proof.
+    if [ -n "${E2E_WORKER_DATA:-}" ]; then
+        dc stop -t 10 >/dev/null 2>&1 || true
+        fresh_worker_data >/dev/null 2>&1 || true
+    fi
     dc down -v --remove-orphans -t 10 >/dev/null 2>&1 || true
     if ((${#E2E_CLEANUP_PATHS[@]})); then rm -rf "${E2E_CLEANUP_PATHS[@]}"; fi
+}
+
+# Give the worker a fresh data directory, as `down -v` does its volume.
+#
+# `E2E_WORKER_DATA` (see compose/docker-compose.e2e.yaml) puts the worker's
+# storage in a host directory instead, which `down -v` leaves alone: a worker
+# started on it would keep the identity it enrolled with against a CA the
+# stack no longer has. Emptied from inside the image, as root, since what is
+# there belongs to the image's users, and handed back to the worker's.
+#
+# Emptying runs as root on whatever the variable names, so it only ever
+# empties a directory this function made: an absolute path that is empty or
+# carries its marker. A typo naming a directory with anything else in it is
+# refused, not emptied.
+fresh_worker_data() {
+    [ -n "${E2E_WORKER_DATA:-}" ] || return 0
+    local marker=.aurcache-e2e-worker-data
+    case "$E2E_WORKER_DATA" in
+        /) log "ERROR: E2E_WORKER_DATA must not be /" >&2; return 1 ;;
+        /*) ;;
+        *) log "ERROR: E2E_WORKER_DATA must be an absolute path" >&2; return 1 ;;
+    esac
+    mkdir -p "$E2E_WORKER_DATA"
+    if [ ! -e "$E2E_WORKER_DATA/$marker" ] && [ -n "$(ls -A "$E2E_WORKER_DATA")" ]; then
+        log "ERROR: $E2E_WORKER_DATA is not empty and was not made for the e2e worker; refusing to empty it" >&2
+        return 1
+    fi
+    dc run --rm --no-deps --user root --entrypoint sh builder -c \
+        "find /var/lib/aurcache-worker -mindepth 1 -delete &&
+         touch /var/lib/aurcache-worker/$marker &&
+         chown aurcache:aurcache /var/lib/aurcache-worker"
 }
 
 wait_for_service() {
