@@ -37,3 +37,6 @@ The repo ships several topologies under `compose/`:
 
 `aurcli setup compose` writes these topologies with the same comments and
 defaults — see [Docker Compose setup](../docker.md#generating-these-files).
+
+Manifests for the same images on a cluster are under `kubernetes/`; see
+[Kubernetes](../kubernetes.md).
