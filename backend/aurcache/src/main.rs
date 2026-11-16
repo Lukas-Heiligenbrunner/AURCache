@@ -2,8 +2,8 @@ use crate::logger::init_logger;
 use crate::startup::pre_startup_tasks;
 use aurcache_activitylog::activity_utils as activitylog;
 use aurcache_activitylog::events::Event;
-use aurcache_api::bind::BindAddresses;
 use aurcache_api::init::{CaDirectory, ServerVersion, init_api, init_repo, init_worker_api};
+use aurcache_api::listen::ListenAddresses;
 use aurcache_db::init::init_db;
 use aurcache_deps::AurClient;
 use aurcache_scheduler::activity_retention::start_activity_retention;
@@ -30,7 +30,7 @@ async fn main() {
     // Before anything else: a listener address that does not parse is a
     // configuration mistake, and better refused now than after migrations ran
     // and the other listeners came up.
-    let bind = BindAddresses::from_env().unwrap_or_else(|e| {
+    let bind = ListenAddresses::from_env().unwrap_or_else(|e| {
         tracing::error!("{e}");
         std::process::exit(1);
     });

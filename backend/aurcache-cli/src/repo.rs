@@ -8,7 +8,7 @@
 
 use crate::url::{is_loopback, scheme_from_url};
 use anyhow::{Context, Result, anyhow, bail};
-use aurcache_common::ports::AURCACHE_MIRROR_PORT;
+use aurcache_common::ports::AURCACHE_REPO_PORT;
 use aurcache_common::repo::host_from_url;
 use serde::Serialize;
 use std::fs;
@@ -88,7 +88,7 @@ pub fn repo_config(
 ) -> Result<RepoConfig> {
     let server = match (port, published) {
         (None, Some(public_url)) => server_url_from_public(public_url, api_url)?,
-        (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_MIRROR_PORT))?,
+        (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_REPO_PORT))?,
     };
     let name = name.unwrap_or_else(|| DEFAULT_REPO_NAME.to_string());
     let siglevel = siglevel.unwrap_or_else(|| DEFAULT_SIGLEVEL.to_string());

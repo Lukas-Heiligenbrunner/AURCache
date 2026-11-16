@@ -343,7 +343,7 @@ pub(crate) fn worker_port() -> u16 {
 #[must_use]
 pub fn init_repo(repo: Arc<Repository>, address: IpAddr) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let port = aurcache_common::ports::AURCACHE_MIRROR_PORT;
+        let port = aurcache_common::ports::AURCACHE_REPO_PORT;
         let config = Config {
             address,
             port,

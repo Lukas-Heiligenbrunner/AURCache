@@ -41,8 +41,8 @@ systemctl enable --now aurcache
 ```
 
 It listens on **8080** (API and web UI), **8081** (the pacman repository) and
-**8083** (workers), on every IPv4 interface; `AURCACHE_HTTP_IP`,
-`AURCACHE_MIRROR_IP` and `AURCACHE_WORKER_IP` narrow each to one address, or
+**8083** (workers), on every IPv4 interface; `AURCACHE_HTTP_LISTEN_ADDRESS`,
+`AURCACHE_REPO_LISTEN_ADDRESS` and `AURCACHE_WORKER_LISTEN_ADDRESS` narrow each to one address, or
 widen it to IPv6 with `::` (see [Listening
 addresses](../Configuration/environment-variables.md#listening-addresses)).
 State lives in `/var/lib/aurcache`: the repository, the

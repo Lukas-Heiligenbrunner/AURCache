@@ -1,47 +1,49 @@
-//! The addresses the server's three listeners bind.
+//! Where the server's three listeners accept connections.
 //!
 //! Each listener binds every interface unless its variable names one address.
 //! The values are read once at startup, before anything else runs, so a typo
 //! stops the server with the variable's name rather than leaving one listener
 //! on an address nobody asked for.
 
-use aurcache_common::server_env::{AURCACHE_HTTP_IP, AURCACHE_MIRROR_IP, AURCACHE_WORKER_IP, Var};
+use aurcache_common::server_env::{
+    AURCACHE_HTTP_LISTEN_ADDRESS, AURCACHE_REPO_LISTEN_ADDRESS, AURCACHE_WORKER_LISTEN_ADDRESS, Var,
+};
 use std::net::{IpAddr, Ipv4Addr};
 
 /// What a listener binds when its variable is unset: every IPv4 interface.
-pub const DEFAULT_BIND_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+pub const DEFAULT_LISTEN_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// Where each listener accepts connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BindAddresses {
-    /// The web UI and the API, `AURCACHE_HTTP_IP`.
+pub struct ListenAddresses {
+    /// The web UI and the API, `AURCACHE_HTTP_LISTEN_ADDRESS`.
     pub api: IpAddr,
-    /// The pacman repository, `AURCACHE_MIRROR_IP`.
+    /// The pacman repository, `AURCACHE_REPO_LISTEN_ADDRESS`.
     pub repo: IpAddr,
-    /// The worker protocol, `AURCACHE_WORKER_IP`.
+    /// The worker protocol, `AURCACHE_WORKER_LISTEN_ADDRESS`.
     pub worker: IpAddr,
 }
 
-impl BindAddresses {
+impl ListenAddresses {
     /// The addresses the environment names, the default for any it leaves
     /// unset or empty.
-    pub fn from_env() -> Result<Self, InvalidBindAddress> {
+    pub fn from_env() -> Result<Self, InvalidListenAddress> {
         Ok(Self {
-            api: read(AURCACHE_HTTP_IP)?,
-            repo: read(AURCACHE_MIRROR_IP)?,
-            worker: read(AURCACHE_WORKER_IP)?,
+            api: read(AURCACHE_HTTP_LISTEN_ADDRESS)?,
+            repo: read(AURCACHE_REPO_LISTEN_ADDRESS)?,
+            worker: read(AURCACHE_WORKER_LISTEN_ADDRESS)?,
         })
     }
 }
 
 /// A variable whose value is not an IP address.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InvalidBindAddress {
+pub struct InvalidListenAddress {
     pub var: Var,
     pub value: String,
 }
 
-impl std::fmt::Display for InvalidBindAddress {
+impl std::fmt::Display for InvalidListenAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -52,19 +54,19 @@ impl std::fmt::Display for InvalidBindAddress {
     }
 }
 
-impl std::error::Error for InvalidBindAddress {}
+impl std::error::Error for InvalidListenAddress {}
 
-fn read(var: Var) -> Result<IpAddr, InvalidBindAddress> {
+fn read(var: Var) -> Result<IpAddr, InvalidListenAddress> {
     parse(var, var.get().ok().as_deref())
 }
 
 /// `value` as `var`'s address. Unset and blank both mean the default, so a
 /// compose file can pass the variable through without a value of its own.
-fn parse(var: Var, value: Option<&str>) -> Result<IpAddr, InvalidBindAddress> {
+fn parse(var: Var, value: Option<&str>) -> Result<IpAddr, InvalidListenAddress> {
     let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(DEFAULT_BIND_ADDRESS);
+        return Ok(DEFAULT_LISTEN_ADDRESS);
     };
-    value.parse().map_err(|_| InvalidBindAddress {
+    value.parse().map_err(|_| InvalidListenAddress {
         var,
         value: value.to_string(),
     })
@@ -72,20 +74,23 @@ fn parse(var: Var, value: Option<&str>) -> Result<IpAddr, InvalidBindAddress> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_BIND_ADDRESS, InvalidBindAddress, parse};
-    use aurcache_common::server_env::AURCACHE_HTTP_IP;
+    use super::{DEFAULT_LISTEN_ADDRESS, InvalidListenAddress, parse};
+    use aurcache_common::server_env::AURCACHE_HTTP_LISTEN_ADDRESS;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     fn ok(value: &str) -> IpAddr {
-        parse(AURCACHE_HTTP_IP, Some(value)).expect("an address")
+        parse(AURCACHE_HTTP_LISTEN_ADDRESS, Some(value)).expect("an address")
     }
 
     #[test]
     fn unset_or_blank_is_every_ipv4_interface() {
-        assert_eq!(DEFAULT_BIND_ADDRESS, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        assert_eq!(parse(AURCACHE_HTTP_IP, None), Ok(DEFAULT_BIND_ADDRESS));
-        assert_eq!(ok(""), DEFAULT_BIND_ADDRESS);
-        assert_eq!(ok("  "), DEFAULT_BIND_ADDRESS);
+        assert_eq!(DEFAULT_LISTEN_ADDRESS, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            parse(AURCACHE_HTTP_LISTEN_ADDRESS, None),
+            Ok(DEFAULT_LISTEN_ADDRESS)
+        );
+        assert_eq!(ok(""), DEFAULT_LISTEN_ADDRESS);
+        assert_eq!(ok("  "), DEFAULT_LISTEN_ADDRESS);
     }
 
     #[test]
@@ -112,16 +117,19 @@ mod tests {
     #[test]
     fn refuses_anything_else_naming_the_variable() {
         for value in ["localhost", "0.0.0.0:8080", "[::1]", "300.1.1.1", "eth0"] {
-            let err = parse(AURCACHE_HTTP_IP, Some(value)).unwrap_err();
+            let err = parse(AURCACHE_HTTP_LISTEN_ADDRESS, Some(value)).unwrap_err();
             assert_eq!(
                 err,
-                InvalidBindAddress {
-                    var: AURCACHE_HTTP_IP,
+                InvalidListenAddress {
+                    var: AURCACHE_HTTP_LISTEN_ADDRESS,
                     value: value.to_string(),
                 }
             );
             let message = err.to_string();
-            assert!(message.starts_with("AURCACHE_HTTP_IP is `"), "{message}");
+            assert!(
+                message.starts_with("AURCACHE_HTTP_LISTEN_ADDRESS is `"),
+                "{message}"
+            );
             assert!(message.contains(value), "{message}");
         }
     }

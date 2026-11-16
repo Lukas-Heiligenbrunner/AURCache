@@ -3,7 +3,6 @@
 mod aur;
 mod auth;
 pub mod backend;
-pub mod bind;
 mod build;
 pub mod custom_file_server;
 mod dump;
@@ -11,6 +10,7 @@ mod dump;
 pub mod embed;
 mod health;
 pub mod init;
+pub mod listen;
 mod log;
 mod package;
 mod repo;

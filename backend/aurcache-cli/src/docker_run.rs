@@ -7,7 +7,7 @@
 
 use crate::compose::{ENROLLMENT_DIR, SERVER_SERVICE, WorkerEnv};
 use anyhow::{Context, Result, bail};
-use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_MIRROR_PORT, AURCACHE_WORKER_PORT};
+use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_REPO_PORT, AURCACHE_WORKER_PORT};
 use aurcache_common::shell::quote_argument;
 use serde::Serialize;
 use std::process::Command;
@@ -75,11 +75,7 @@ pub fn server_run(spec: &ServerRunSpec) -> DockerRun {
         "unless-stopped".into(),
     ];
 
-    for port in [
-        AURCACHE_HTTP_PORT,
-        AURCACHE_MIRROR_PORT,
-        AURCACHE_WORKER_PORT,
-    ] {
+    for port in [AURCACHE_HTTP_PORT, AURCACHE_REPO_PORT, AURCACHE_WORKER_PORT] {
         args.push("-p".into());
         args.push(format!("{port}:{port}"));
     }
