@@ -146,6 +146,11 @@ pub type DumpPackages = BTreeMap<String, DumpPackage>;
 /// The CA certificate and its private key travel together with the worker
 /// certificates, as one unit: a signed certificate is only meaningful under the
 /// CA that signed it.
+///
+/// The repository's signing key never does. Every client that trusts it
+/// installs as root whatever it signs, from anywhere, for as long as it is
+/// trusted -- long after the instance a dump was taken from is gone. It moves
+/// only as the file it is, copied on purpose.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DumpSecrets {
     pub ca_cert_pem: String,

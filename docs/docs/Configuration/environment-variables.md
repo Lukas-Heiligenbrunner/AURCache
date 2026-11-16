@@ -136,7 +136,7 @@ Compose setup](../setup/docker.md#what-to-persist) for what to persist.
 
 | Variable                   | Description                                                        | Default |
 |----------------------------|--------------------------------------------------------------------|---------|
-| AURCACHE_CA_DIR            | The internal CA that signs every worker's certificate. Losing it orphans every enrolled worker | `./data/ca` |
+| AURCACHE_CA_DIR            | The internal CA that signs every worker's certificate, and the repository's signing key when it is signed. Losing it orphans every enrolled worker, and has every client trust a new key | `./data/ca` |
 | AURCACHE_BUILD_LOG_PATH    | Build logs, one file per build                                     | `./build_logs` |
 | AURCACHE_SOURCE_CACHE_PATH | Checkouts of package sources, reused between builds; safe to lose  | `./source_cache` |
 | AURCACHE_MIRRORLIST_DIR    | Mirrorlists, one per architecture; see [Mirrorlist](./mirrorlist.md) | `./repo` |
@@ -148,6 +148,17 @@ a volume, the server keeps them in the repository, as `repo/.ca` and
 `repo/.build_logs`, which is what a 0.5 compose file persists. Once their
 directories are on a volume it moves them there at start; see [Hybrid
 image](../workers/hybrid.md#migrating).
+
+## Signing the repository
+
+Off unless `AURCACHE_SIGN` is set; see [Signing the
+repository](./pacman-repo.md#signing-the-repository).
+
+| Variable                             | Description                                                        | Default |
+|--------------------------------------|--------------------------------------------------------------------|---------|
+| AURCACHE_SIGN                        | Sign every package and both databases with the instance's key (`true`/`false`) | `false` |
+| AURCACHE_SIGNING_KEY_FILE            | An OpenPGP secret key the operator supplies, armored or binary, which the server reads and never writes | `signing-key.asc` in `AURCACHE_CA_DIR`, created on first use |
+| AURCACHE_SIGNING_KEY_PASSPHRASE_FILE | A file holding the passphrase that locks the key; one final newline is ignored | none: the key is not locked |
 
 ## Mirrors
 

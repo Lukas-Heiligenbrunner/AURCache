@@ -37,6 +37,7 @@ serde_with = "3.24.0"
 subtle = {workspace = true}
 
 aurcache-ca = {path = "../aurcache-ca"}
+aurcache-signing = {path = "../aurcache-signing"}
 aurcache-db = {path = "../aurcache-db"}
 aurcache-deps = {path = "../aurcache-deps"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}

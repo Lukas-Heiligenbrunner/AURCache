@@ -14,6 +14,7 @@ const SERVER_CRATES: &[&str] = &[
     "aurcache-db",
     "aurcache-deps",
     "aurcache-scheduler",
+    "aurcache-signing",
     "aurcache-utils",
     "pacman-mirrors",
     "pacman-repo-utils",

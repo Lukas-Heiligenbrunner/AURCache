@@ -4,6 +4,7 @@ pub mod lease_reaper;
 pub mod mirrorlist;
 pub mod official_repos;
 pub mod retired_packages;
+pub mod signing_backfill;
 pub mod update_version_check;
 
 use aurcache_common::schedule::Schedule;

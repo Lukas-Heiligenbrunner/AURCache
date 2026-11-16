@@ -12,6 +12,7 @@ use aurcache_scheduler::lease_reaper::start_lease_reaper;
 use aurcache_scheduler::mirrorlist;
 use aurcache_scheduler::official_repos::start_official_repo_refresh;
 use aurcache_scheduler::retired_packages::start_retired_package_sweep;
+use aurcache_scheduler::signing_backfill::start_signing_backfill;
 use aurcache_scheduler::update_version_check::start_update_version_checking;
 use aurcache_utils::repository::{REPO_ROOT, Repository};
 use aurcache_utils::services::Services;
@@ -114,10 +115,24 @@ async fn main() {
     let client = Arc::new(AurClient::new());
     let official_repo_handle = start_official_repo_refresh(Arc::clone(&client), activity.clone());
 
+    // The key the repository is signed with, when `AURCACHE_SIGN` asks for
+    // one. Fatal when it cannot be loaded: carrying on unsigned would take
+    // the databases' signatures down, and every client that requires them
+    // with it.
+    let signing_key =
+        aurcache_signing::from_env(&ca_dir).expect("could not load the repository signing key");
+    if let Some(key) = &signing_key {
+        tracing::info!("Repository signing key fingerprint: {}", key.fingerprint());
+    }
+
     // The pacman repository. One instance, because its lock is what keeps two
     // changes to it from interleaving: the worker protocol publishing builds,
     // package removals and restores all go through this one.
-    let repo = Arc::new(repo.with_log(activity.clone()));
+    let repo = repo.with_log(activity.clone());
+    let repo = Arc::new(match signing_key {
+        Some(key) => repo.with_key(key),
+        None => repo,
+    });
     // Not fatal: a server that will not start cannot say what is wrong, and the
     // next repository update and every publication retry recover again.
     if let Err(e) = repo.recover(&db).await {
@@ -141,6 +156,10 @@ async fn main() {
 
     // Builds a restart caught mid-publish pick up where they were.
     startup::resume_publishing(&db, &repo, &activity).await;
+
+    // What was published before the repository signed, or under another
+    // key, is signed in the background; until it is, the repository says so.
+    start_signing_backfill(db.clone(), Arc::clone(&repo));
 
     // Before anything else can resolve a source: a prune cannot distinguish a
     // clone in flight from a stranded one.

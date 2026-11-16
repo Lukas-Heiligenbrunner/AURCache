@@ -532,6 +532,14 @@ events! {
 
     /// The sweep of retired package files did not run, so they stay on disk.
     RepoSweepFailed => ("repo.sweep_failed", "Server and repository", "Sweep failed") { error: String },
+
+    /// Packages published before the repository signed, or signed by another
+    /// key, were signed with its key.
+    RepoSigned => ("repo.signed", "Server and repository", "Published packages signed") { packages: usize },
+
+    /// Not everything published could be signed yet, so a client requiring
+    /// signatures refuses what is left; it is tried again later.
+    RepoSigningIncomplete => ("repo.signing_incomplete", "Server and repository", "Signing incomplete") { error: String },
 }
 
 /// One kind, as a person picking it from a list would read it.
@@ -752,7 +760,8 @@ impl Event {
             | Self::TokenRegenerated {}
             | Self::DumpExported { .. }
             | Self::RestoreApplied { .. }
-            | Self::RepoSwept { .. } => Severity::Info,
+            | Self::RepoSwept { .. }
+            | Self::RepoSigned { .. } => Severity::Info,
             Self::SourceRefreshFailed { .. }
             | Self::SourceinfoFailed { .. }
             | Self::VcsSyncFailed { .. }
@@ -782,7 +791,8 @@ impl Event {
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
             | Self::RepoCommitRetried { .. }
-            | Self::RepoSweepFailed { .. } => Severity::Warning,
+            | Self::RepoSweepFailed { .. }
+            | Self::RepoSigningIncomplete { .. } => Severity::Warning,
             Self::UpdateQueueFailed { .. }
             | Self::DependentsTriggerFailed { .. }
             | Self::BuildMarkFailed { .. }
@@ -1234,6 +1244,12 @@ impl Event {
             Self::RepoSweepFailed { error } => vec![text(format!(
                 "the sweep of retired repository files failed: {error}"
             ))],
+            Self::RepoSigned { packages } => vec![text(format!(
+                "signed {packages} package(s) the repository already published"
+            ))],
+            Self::RepoSigningIncomplete { error } => vec![text(format!(
+                "not every published package is signed yet, trying again later: {error}"
+            ))],
         }
     }
 
@@ -1508,6 +1524,8 @@ mod tests {
                 files: vec!["hello-1-1.pkg.tar.zst".to_string()],
             },
             Event::RepoSweepFailed { error: error() },
+            Event::RepoSigned { packages: 12 },
+            Event::RepoSigningIncomplete { error: error() },
         ]
     }
 
