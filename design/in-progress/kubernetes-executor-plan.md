@@ -597,6 +597,20 @@ flags reach build scripts and proc macros, which cannot be static.
 
 ---
 
+### 4.8 Settled by the manifests (WP7)
+
+The manifests in `kubernetes/kube-worker/` pin these, and the code must match them:
+
+- **Dispatcher namespace:** `aurcache`, beside the server. It reads the `aurcache-enrollment` Secret there, and reaches the server at `aurcache.aurcache.svc`. Its ServiceAccount is `aurcache-kube-worker`, which may only `get` pods in `aurcache`: it reads its own pod for the image digest.
+- **Build namespace:** `aurcache-builds`, at Pod Security `baseline`. Build pods set `serviceAccountName: aurcache-build`. That ServiceAccount has `automountServiceAccountToken: false` and no permissions.
+- **RBAC in `aurcache-builds`:**
+  - pods: create, get, list, watch, delete and `deletecollection` (`Cluster::sweep` uses a label-selected delete-collection);
+  - pods/exec: create and get;
+  - pods/log: get.
+- **Dispatcher image:** `ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:<tag>`. Its default entrypoint starts `aurcache-worker-kube`, and the Deployment sets no `command`. It runs as uid/gid 65532, with `fsGroup` 65532, a read-only root filesystem and an emptyDir at `/tmp`. `docker/kube-worker.Dockerfile` (WP10) uses that uid, or leaves the uid to the pod spec, and the binary must not write outside `/tmp` and its data PVC.
+- **Pod identity:** the downward API gives the dispatcher `POD_NAME` and `POD_NAMESPACE`.
+- **Build-limit variables:** `WORKER_BUILD_MEMORY_MAX_DEFAULT`, `WORKER_BUILD_CPUS_DEFAULT` and `WORKER_BUILD_DISK_MAX_DEFAULT` are the names the manifests document. They follow section 4.6's `_DEFAULT` convention; WP4 confirms them or updates the manifests' comments.
+
 ## 5. Rules for everyone working on this
 
 - **Read first**: `AGENTS.md` (its conventions are binding), then
