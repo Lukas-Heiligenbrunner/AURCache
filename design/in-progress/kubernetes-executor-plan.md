@@ -627,7 +627,7 @@ The manifests in `kubernetes/kube-worker/` pin these, and the code must match th
   - pods/exec: create and get;
   - pods/log: get.
 - **Dispatcher image:** `ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:<tag>`. Its default entrypoint starts `aurcache-worker-kube`, and the Deployment sets no `command`. It runs as uid/gid 65532, with `fsGroup` 65532, a read-only root filesystem and an emptyDir at `/tmp`. `docker/kube-worker.Dockerfile` (WP10) uses that uid, or leaves the uid to the pod spec, and the binary must not write outside `/tmp` and its data PVC.
-- **Pod identity:** the downward API gives the dispatcher `POD_NAME` and `POD_NAMESPACE`.
+- **Pod identity:** the downward API gives the dispatcher `WORKER_KUBE_POD_NAME` and `WORKER_KUBE_POD_NAMESPACE` (section 4.6).
 - **Build-limit variables:** `WORKER_BUILD_MEMORY_MAX_DEFAULT`, `WORKER_BUILD_CPUS_DEFAULT` and `WORKER_BUILD_DISK_MAX_DEFAULT` are the names the manifests document. They follow section 4.6's `_DEFAULT` convention; WP4 confirms them or updates the manifests' comments.
 
 ## 5. Rules for everyone working on this
