@@ -15,7 +15,9 @@ aurcli restore backup.tar.gz --clear     # replace: removes every package, setti
 `--include-secrets` also exports the CA private key, worker certificates and
 API token hashes — the file becomes a credential and is written owner-readable
 only. Taking the dump's secrets on restore replaces the CA, which invalidates
-every certificate the server's workers hold.
+every certificate the server's workers hold. The repository's [signing
+key](../Configuration/pacman-repo.md#the-key) is never in a dump, with secrets
+or without: back up `signing-key.asc` from the CA directory yourself.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.
