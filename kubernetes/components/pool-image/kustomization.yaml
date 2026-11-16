@@ -1,0 +1,52 @@
+# The workers' storage pools in an image file on their data volume, instead of
+# on a raw block volume of their own.
+#
+# For a storage class that only provisions filesystems. The worker creates a
+# sparse `pool.img` under its data directory and loop-mounts it, so the pool
+# takes space on the volume as builds write and gives it back as they are
+# deleted. That costs a loop device and a filesystem nested in another, which
+# the block volume avoids. The data volume grows to hold it.
+#
+# Applies to every worker StatefulSet, the arm64 ones included.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  - target:
+      kind: StatefulSet
+      labelSelector: app.kubernetes.io/component=worker
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: any
+      spec:
+        template:
+          spec:
+            containers:
+              - name: worker
+                env:
+                  - name: WORKER_POOL
+                    $patch: delete
+                volumeDevices:
+                  - devicePath: /dev/aurcache-pool
+                    $patch: delete
+  # volumeClaimTemplates has no merge key, so its entries go by position; the
+  # `test`s make this fail rather than remove the wrong one if they move.
+  - target:
+      kind: StatefulSet
+      labelSelector: app.kubernetes.io/component=worker
+    patch: |-
+      - op: test
+        path: /spec/volumeClaimTemplates/1/metadata/name
+        value: pool
+      - op: remove
+        path: /spec/volumeClaimTemplates/1
+      - op: test
+        path: /spec/volumeClaimTemplates/0/metadata/name
+        value: data
+      # The image grows to WORKER_DISK_MAX plus 5% at most, beside the
+      # worker's identity. Raise both together.
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: 200Gi

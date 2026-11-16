@@ -1,0 +1,35 @@
+# The same workers on arm64 nodes, building aarch64 packages. The worker image
+# is multi-arch, so the node pulls its own variant of the same tag.
+#
+# A copy of ../worker under other names (aurcache-worker-arm64), with its own
+# selector and its own volumes. For armv7h, copy this directory with `arm` and
+# `armv7h` in place of `arm64` and `aarch64`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../worker
+
+nameSuffix: -arm64
+
+# Kept apart from the x86_64 workers' pods: each StatefulSet selects only its
+# own architecture's.
+labels:
+  - pairs:
+      aurcache.io/arch: aarch64
+    includeSelectors: true
+    includeTemplates: true
+
+patches:
+  - target:
+      kind: StatefulSet
+    patch: |-
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: any
+      spec:
+        template:
+          spec:
+            nodeSelector:
+              kubernetes.io/arch: arm64

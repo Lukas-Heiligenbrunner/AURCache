@@ -1,0 +1,167 @@
+# The AURCache server: package database, web UI, API, the pacman repository
+# and the endpoint workers connect to. It builds nothing and runs unprivileged.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aurcache-data
+  labels:
+    app.kubernetes.io/name: aurcache
+    app.kubernetes.io/component: server
+spec:
+  # Everything the server keeps lives under /app, so this one volume persists
+  # all of it: the SQLite database, the package repository, the internal
+  # worker CA, each build's log, and the source cache. Losing the CA orphans
+  # every enrolled worker, so this is the volume to back up.
+  #
+  # The repository is most of it. Size it for the packages you build, with
+  # room for the previous version of each while a newer one replaces it.
+  accessModes:
+    - ReadWriteOnce
+  # storageClassName: <yours>   # the cluster's default class when unset
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache
+    app.kubernetes.io/component: server
+spec:
+  # Exactly one. The server is the only writer of the repository and of a
+  # SQLite database, and the volume above is ReadWriteOnce. Recreate rather
+  # than RollingUpdate so an update never runs two servers on one volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aurcache
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aurcache
+        app.kubernetes.io/component: server
+    spec:
+      # Kubernetes would otherwise set AURCACHE_*_PORT variables for every
+      # Service in the namespace whose name starts with `aurcache`, and the
+      # server reads AURCACHE_WORKER_PORT as a port number.
+      enableServiceLinks: false
+      containers:
+        - name: aurcache
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
+          # The image runs the server as root on purpose: each PKGBUILD parse
+          # runs as a separate, unprivileged user, and switching to it takes
+          # the default SETUID and SETGID capabilities. Do not set
+          # runAsNonRoot or drop those.
+          ports:
+            - name: http
+              containerPort: 8080   # Web UI + API (plain HTTP)
+            - name: repo-builtin
+              containerPort: 8081   # the server's own repository handler; the `repo` container below serves the same files faster
+            - name: worker
+              containerPort: 8083   # Worker protocol (HTTPS + mutual TLS)
+          env:
+            - name: LOG_LEVEL
+              value: info
+            # The timezone cron schedules (the auto-update one) are read in.
+            # UTC when unset.
+            # - name: TZ
+            #   value: Europe/Paris
+            #
+            # The server's TLS certificate must be valid for the hostname a
+            # worker dials. Workers in this namespace use the Service name
+            # `aurcache`; the namespaced form is for workers in another one.
+            # Add the public hostname of the worker port if workers outside
+            # the cluster connect to it. The certificate is issued again at
+            # every start, so a change here takes a restart, nothing more.
+            - name: AURCACHE_TLS_SANS
+              value: aurcache,aurcache.aurcache.svc,aurcache.aurcache.svc.cluster.local,localhost
+            # Public base URL pacman clients use to fetch built packages. Set
+            # this to the address your Ingress or LoadBalancer gives the
+            # repository; workers in this namespace reach it in-cluster
+            # instead (AURCACHE_REPO_URL on the worker).
+            - name: AURCACHE_PUBLIC_URL
+              value: http://localhost:8081
+            # Approve a worker that presents this token. Optional: without
+            # the Secret, approve each worker on the Workers page.
+            - name: AURCACHE_ENROLLMENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aurcache-enrollment
+                  key: token
+                  optional: true
+            # Or approve exactly the workers you name, by the fingerprint
+            # each prints on its first start:
+            # - name: AURCACHE_PREAPPROVED_WORKERS
+            #   value: <fingerprint>[,<fingerprint>...]
+          volumeMounts:
+            - name: data
+              mountPath: /app
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          # No liveness probe: the first start after an upgrade migrates the
+          # database, which can take a while, and a restart halfway through
+          # helps nobody.
+
+        - name: repo
+          # The pacman repository, served statically: the same files the
+          # server's own handler on 8081 serves, at line rate instead of
+          # ~200 MB/s (nginx uses sendfile). Reads the data volume read-only;
+          # the server stays its only writer. A container in the server's pod
+          # rather than a Deployment of its own, because the volume is
+          # ReadWriteOnce.
+          image: nginx:alpine
+          ports:
+            - name: repo
+              containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /app
+              readOnly: true
+            - name: repo-nginx
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: repo
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: aurcache-data
+        - name: repo-nginx
+          configMap:
+            name: aurcache-repo-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache
+    app.kubernetes.io/component: server
+spec:
+  selector:
+    app.kubernetes.io/name: aurcache
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http      # Web UI + API
+    - name: repo
+      port: 8081
+      targetPort: repo      # Pacman repository, through nginx
+    # The worker protocol. Mutual TLS end to end: whatever sits in front of
+    # this port for workers outside the cluster must pass TLS through rather
+    # than terminate it, or no worker can present its certificate.
+    - name: worker
+      port: 8083
+      targetPort: worker
