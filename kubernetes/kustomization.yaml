@@ -70,6 +70,6 @@ components:
 # someone clicks Approve on the Workers page. Kept out of this directory so no
 # token is ever committed with it:
 #
-#     kubectl create namespace aurcache
+#     kubectl apply -f kubernetes/namespace.yaml
 #     kubectl -n aurcache create secret generic aurcache-enrollment \
 #       --from-literal=token="$(openssl rand -hex 32)"
