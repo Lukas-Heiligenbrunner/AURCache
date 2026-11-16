@@ -20,14 +20,14 @@ use crate::cli::{
 };
 use crate::dump::{dump_command, restore_command};
 use crate::output::{
-    option_text, print_graph, print_health, print_raw_response, print_search_results, print_stats,
-    print_user_info, render,
+    format_ssh_info, option_text, print_graph, print_health, print_raw_response,
+    print_search_results, print_stats, print_user_info, render,
 };
 use crate::packages::run_packages_command;
 use crate::setup::run_setup_command;
 use crate::workers::run_worker_command;
 use anyhow::{Context, Result};
-use aurcache_client::{AurCacheClient, Method};
+use aurcache_client::{AurCacheClient, Method, SshKey};
 use clap::{CommandFactory, Parser};
 use config::{
     ClientConfig, load_config, resolve_runtime_config, save_config, set_token, set_url,
@@ -92,6 +92,7 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
         ApiCommand::Health => run_health(client, format).await,
         ApiCommand::Doctor => doctor::run_doctor(client, format).await,
         ApiCommand::UserInfo => render_user_info(client, format).await,
+        ApiCommand::SshKey => render_ssh_key(client, format).await,
         ApiCommand::Stats => render_stats(client, format).await,
         ApiCommand::Graph => render_graph(client, format).await,
         ApiCommand::Search { query } => render_search_results(client, format, &query).await,
@@ -204,6 +205,16 @@ async fn run_health(client: &AurCacheClient, format: OutputFormat) -> Result<()>
 async fn render_user_info(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
     let user = client.user_info().await?;
     render(format, &user, print_user_info)
+}
+
+/// The server's SSH key; a failure when it has none, so a script notices.
+async fn render_ssh_key(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
+    let info = client.ssh_info().await?;
+    render(format, &info, |info| println!("{}", format_ssh_info(info)))?;
+    match info.key {
+        SshKey::Ready { .. } => Ok(()),
+        SshKey::Unavailable { reason } => anyhow::bail!("the server has no SSH key: {reason}"),
+    }
 }
 
 async fn render_stats(client: &AurCacheClient, format: OutputFormat) -> Result<()> {

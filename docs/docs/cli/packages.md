@@ -12,6 +12,8 @@ aurcli pkg list -q                      # names only, for piping
 aurcli pkg get hello
 aurcli pkg add hello
 aurcli pkg add https://github.com/you/pkg.git --ref v1.2 --platform x86_64
+aurcli pkg add git@github.com:you/private-pkg.git   # over SSH, with the server's key
+aurcli ssh-key                          # that key, to add to the repository
 aurcli pkg add --from-installed         # bulk-add what `pacman -Qm` reports, behind a confirmation
 aurcli pkg update hello
 aurcli pkg patch hello --platform x86_64

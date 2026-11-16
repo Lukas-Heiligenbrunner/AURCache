@@ -77,6 +77,9 @@ pub(crate) enum ApiCommand {
     Doctor,
     /// Inspect the authenticated user.
     UserInfo,
+    /// Print the SSH key the server clones package sources with, to add to a
+    /// private repository as a deploy key.
+    SshKey,
     /// Get dashboard statistics.
     Stats,
     /// Get monthly graph datapoints.
