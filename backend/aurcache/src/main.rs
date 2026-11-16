@@ -2,6 +2,7 @@ use crate::logger::init_logger;
 use crate::startup::pre_startup_tasks;
 use aurcache_activitylog::activity_utils as activitylog;
 use aurcache_activitylog::events::Event;
+use aurcache_api::bind::BindAddresses;
 use aurcache_api::init::{CaDirectory, ServerVersion, init_api, init_repo, init_worker_api};
 use aurcache_db::init::init_db;
 use aurcache_deps::AurClient;
@@ -26,6 +27,13 @@ mod startup;
 async fn main() {
     _ = dotenv();
     init_logger();
+    // Before anything else: a listener address that does not parse is a
+    // configuration mistake, and better refused now than after migrations ran
+    // and the other listeners came up.
+    let bind = BindAddresses::from_env().unwrap_or_else(|e| {
+        tracing::error!("{e}");
+        std::process::exit(1);
+    });
     let version = aurcache_common::version::full_version(env!("CARGO_PKG_VERSION"));
     pre_startup_tasks(&version).expect("could not take over the hybrid image's CA and build logs");
 
@@ -160,9 +168,11 @@ async fn main() {
         services.clone(),
         ServerVersion(version),
         CaDirectory(ca_dir.clone()),
+        bind.api,
     );
-    let worker_api_handle = init_worker_api(db, ca, store, Arc::clone(&repo), activity);
-    let repo_handle = init_repo(repo);
+    let worker_api_handle =
+        init_worker_api(db, ca, store, Arc::clone(&repo), activity, bind.worker);
+    let repo_handle = init_repo(repo, bind.repo);
 
     tokio::select! {
         _ = version_check_handle => {

@@ -3,6 +3,7 @@
 mod aur;
 mod auth;
 pub mod backend;
+pub mod bind;
 mod build;
 pub mod custom_file_server;
 mod dump;

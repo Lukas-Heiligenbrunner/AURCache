@@ -16,7 +16,6 @@ pub mod digest;
 #[cfg(feature = "fs")]
 pub mod fs;
 pub mod ports;
-pub mod addresses;
 pub mod repo;
 pub mod schedule;
 pub mod server_env;
