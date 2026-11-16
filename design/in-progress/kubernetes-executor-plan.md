@@ -84,6 +84,15 @@ These are the ones planning added, each argued in the design documents:
 
 ---
 
+### Answered by the user after planning
+
+- **Test cluster:** use `kind` on freyja, with its storage on a TrueNAS zvol attached over iSCSI (`/mnt/aurcache-scratch`, 1T btrfs). Mount node data there through `extraMounts` so it stays off the nearly full root filesystem, and put the `kind` binary in `/mnt/aurcache-scratch/tools/kind/`. A k3s VM on njord is also available: see `/mnt/aurcache-scratch/k8s/README.md`.
+- **Build directories** go under `/mnt/aurcache-scratch/target/wt-k8s-<wp>/`, not `/mnt/cargo-target`.
+- **Hybrid image:** stays a compatibility image. Only the Docker worker inside it is un-deprecated.
+- **Docker worker:** switches to the new root-step-then-drop flow, with an upgrade note. The builder image must stay compatible with older workers that may still start it through its entrypoint and sudo, so the agent is brought by the worker and `docker/builder.Dockerfile` does not change.
+- **Docs URL:** rename `legacy-docker` to `docker`, with `@docusaurus/plugin-client-redirects` keeping the old address working.
+- **Defaults kept:** Kubernetes limits unset by default; no standalone Docker worker image in this PR; the NetworkPolicy probe (WP12) stays in scope, and is cut first if needed.
+
 ## 3. Crates and files
 
 ```
