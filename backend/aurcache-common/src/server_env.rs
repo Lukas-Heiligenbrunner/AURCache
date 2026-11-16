@@ -137,6 +137,16 @@ pub const REAP_INTERVAL: Var = Var("REAP_INTERVAL");
 pub const REAP_BACKSTOP_GRACE: Var = Var("REAP_BACKSTOP_GRACE");
 pub const WORKER_CERT_VALIDITY_DAYS: Var = Var("WORKER_CERT_VALIDITY_DAYS");
 
+// Signing the repository.
+
+/// Whether the repository is signed. Off unless set to a true value.
+pub const AURCACHE_SIGN: Var = Var("AURCACHE_SIGN");
+/// A signing key the operator supplies, which the server reads and never
+/// writes, in place of the one it keeps in its CA directory.
+pub const AURCACHE_SIGNING_KEY_FILE: Var = Var("AURCACHE_SIGNING_KEY_FILE");
+/// A file holding the passphrase that locks the signing key.
+pub const AURCACHE_SIGNING_KEY_PASSPHRASE_FILE: Var = Var("AURCACHE_SIGNING_KEY_PASSPHRASE_FILE");
+
 /// Every variable above.
 pub const ALL: &[Var] = &[
     DB_TYPE,
@@ -198,4 +208,7 @@ pub const ALL: &[Var] = &[
     REAP_INTERVAL,
     REAP_BACKSTOP_GRACE,
     WORKER_CERT_VALIDITY_DAYS,
+    AURCACHE_SIGN,
+    AURCACHE_SIGNING_KEY_FILE,
+    AURCACHE_SIGNING_KEY_PASSPHRASE_FILE,
 ];

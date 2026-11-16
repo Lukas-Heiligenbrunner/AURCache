@@ -22,6 +22,25 @@ pub struct RepoInfo {
     /// that does not report it, which listens on the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
+    /// How the repository is signed; `None` when it is not. A server that
+    /// predates signing sends nothing, which reads as `None` too.
+    #[serde(default)]
+    pub signing: Option<SigningInfo>,
+}
+
+/// The key a signed repository's packages and databases are signed with.
+///
+/// The public key itself is served at `GET /api/repo/key`, without
+/// authentication, as the repository is.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SigningInfo {
+    /// The fingerprint of the key clients trust, as `pacman-key --lsign-key`
+    /// takes it: 40 uppercase hex digits.
+    pub fingerprint: String,
+    /// Whether packages published before signing began may still be unsigned.
+    /// A client requiring signatures fails on those until this is false.
+    pub backfilling: bool,
 }
 
 fn default_name() -> String {

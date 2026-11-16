@@ -20,6 +20,7 @@ aurcache-db = {path = "../aurcache-db"}
 aurcache-deps = {path = "../aurcache-deps"}
 aurcache-api = { path = "../aurcache-api" }
 aurcache-ca = { path = "../aurcache-ca" }
+aurcache-signing = { path = "../aurcache-signing" }
 aurcache-scheduler = {path = "../aurcache-scheduler"}
 aurcache-common = {path = "../aurcache-common"}
 aurcache-utils = {path = "../aurcache-utils"}

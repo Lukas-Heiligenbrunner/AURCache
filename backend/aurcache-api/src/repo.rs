@@ -1,5 +1,7 @@
 use crate::listen::ListenAddresses;
-use aurcache_common::api::repo::RepoInfo;
+use aurcache_common::api::repo::{RepoInfo, SigningInfo};
+use aurcache_utils::services::Services;
+use rocket::http::{ContentType, Status};
 use rocket::serde::json::Json;
 use rocket::{State, get};
 use utoipa::OpenApi;
@@ -7,7 +9,7 @@ use utoipa::OpenApi;
 use crate::auth::Authenticated;
 
 #[derive(OpenApi)]
-#[openapi(paths(repo_info), components(schemas(RepoInfo)))]
+#[openapi(paths(repo_info, repo_key), components(schemas(RepoInfo, SigningInfo)))]
 pub struct RepoApi;
 
 /// How this instance publishes its repository.
@@ -23,7 +25,7 @@ pub struct RepoApi;
 #[get("/repo/info")]
 pub fn repo_info(
     listen: &State<ListenAddresses>,
-    services: &State<aurcache_utils::services::Services>,
+    services: &State<Services>,
     _a: Authenticated,
 ) -> Json<RepoInfo> {
     let port = listen.repo.port();
@@ -31,5 +33,27 @@ pub fn repo_info(
         name: services.repo.name().to_string(),
         public_url: crate::worker::public_repo_url(port),
         listen_port: Some(port),
+        signing: services.repo.signing_info(),
     })
+}
+
+/// The public key the repository is signed with, armored, for
+/// `pacman-key --add`.
+///
+/// Unauthenticated, like the repository it lets a client verify: a public key
+/// is no secret, and a client sets it up before it has any token. Trust it by
+/// the fingerprint `GET /repo/info` reports, not by where it came from.
+#[utoipa::path(
+    responses(
+            (status = 200, description = "The armored public key", content_type = "application/pgp-keys", body = String),
+            (status = 404, description = "This instance does not sign its repository"),
+    )
+)]
+#[get("/repo/key")]
+pub fn repo_key(services: &State<Services>) -> Result<(ContentType, String), Status> {
+    let key = services.repo.key().ok_or(Status::NotFound)?;
+    Ok((
+        ContentType::new("application", "pgp-keys"),
+        key.public_key().to_string(),
+    ))
 }
