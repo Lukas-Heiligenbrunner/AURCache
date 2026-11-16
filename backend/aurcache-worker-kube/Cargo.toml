@@ -33,6 +33,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = "0.11.1"
 hex = "0.4.3"
+# The host and port a URL is dialled on, for the NetworkPolicy probe's targets.
+url = "2.5.8"
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-worker-container = { path = "../aurcache-worker-container" }
