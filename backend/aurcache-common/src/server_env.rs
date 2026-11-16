@@ -65,9 +65,9 @@ pub const AURCACHE_CONTAINER_IMAGE: Var = Var("AURCACHE_CONTAINER_IMAGE");
 pub const RETIRED_PACKAGE_GRACE: Var = Var("RETIRED_PACKAGE_GRACE");
 pub const ACTIVITY_RETENTION: Var = Var("ACTIVITY_RETENTION");
 /// The address the web UI and API listen on.
-pub const AURCACHE_HTTP_IP: Var = Var("AURCACHE_HTTP_IP");
+pub const AURCACHE_HTTP_LISTEN_ADDRESS: Var = Var("AURCACHE_HTTP_LISTEN_ADDRESS");
 /// The address the pacman repository listens on.
-pub const AURCACHE_MIRROR_IP: Var = Var("AURCACHE_MIRROR_IP");
+pub const AURCACHE_REPO_LISTEN_ADDRESS: Var = Var("AURCACHE_REPO_LISTEN_ADDRESS");
 
 // Where the server keeps its state.
 
@@ -112,7 +112,7 @@ pub const OAUTH_ALLOWED_USERS: Var = Var("OAUTH_ALLOWED_USERS");
 // Workers.
 
 /// The address the worker protocol listens on.
-pub const AURCACHE_WORKER_IP: Var = Var("AURCACHE_WORKER_IP");
+pub const AURCACHE_WORKER_LISTEN_ADDRESS: Var = Var("AURCACHE_WORKER_LISTEN_ADDRESS");
 pub const AURCACHE_WORKER_PORT: Var = Var("AURCACHE_WORKER_PORT");
 pub const AURCACHE_TLS_SANS: Var = Var("AURCACHE_TLS_SANS");
 /// Named in the copy-and-run command the Workers page shows.
@@ -146,8 +146,8 @@ pub const ALL: &[Var] = &[
     AURCACHE_CONTAINER_IMAGE,
     RETIRED_PACKAGE_GRACE,
     ACTIVITY_RETENTION,
-    AURCACHE_HTTP_IP,
-    AURCACHE_MIRROR_IP,
+    AURCACHE_HTTP_LISTEN_ADDRESS,
+    AURCACHE_REPO_LISTEN_ADDRESS,
     AURCACHE_CA_DIR,
     AURCACHE_BUILD_LOG_PATH,
     AURCACHE_SOURCE_CACHE_PATH,
@@ -173,7 +173,7 @@ pub const ALL: &[Var] = &[
     OAUTH_USERINFO_URI,
     OAUTH_REDIRECT_URI,
     OAUTH_ALLOWED_USERS,
-    AURCACHE_WORKER_IP,
+    AURCACHE_WORKER_LISTEN_ADDRESS,
     AURCACHE_WORKER_PORT,
     AURCACHE_TLS_SANS,
     AURCACHE_WORKER_IMAGE,

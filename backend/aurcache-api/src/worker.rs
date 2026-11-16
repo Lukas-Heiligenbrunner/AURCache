@@ -66,7 +66,7 @@ pub(crate) fn public_repo_url() -> String {
         .unwrap_or_else(|_| {
             format!(
                 "http://localhost:{}",
-                aurcache_common::ports::AURCACHE_MIRROR_PORT
+                aurcache_common::ports::AURCACHE_REPO_PORT
             )
         })
 }
@@ -948,7 +948,7 @@ mod repo_template_tests {
         let t = render_repo_template("http://aurcache.example.com");
         assert!(t.contains(&format!(
             "Server = http://{REPO_HOST_PLACEHOLDER}:{}/$arch",
-            aurcache_common::ports::AURCACHE_MIRROR_PORT
+            aurcache_common::ports::AURCACHE_REPO_PORT
         )));
     }
 

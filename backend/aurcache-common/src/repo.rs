@@ -9,7 +9,7 @@
 //! So the split is always the same, and it is worth having in one place: take
 //! everything but the host from the server, and the host from whoever is asking.
 
-use crate::ports::AURCACHE_MIRROR_PORT;
+use crate::ports::AURCACHE_REPO_PORT;
 
 /// What the repository is called. It names the databases (`repo.db`,
 /// `repo.files`), and pacman fetches `<section>.db`, so every `[repo]` section
@@ -38,12 +38,12 @@ pub fn server_url_for_host(public_url: &str, host: &str) -> String {
     // last `:` (which would read `:1]` out of `[::1]` as a port).
     let port = if let Some(inside) = authority.strip_prefix('[') {
         inside.split_once("]:").map_or_else(
-            || format!(":{AURCACHE_MIRROR_PORT}"),
+            || format!(":{AURCACHE_REPO_PORT}"),
             |(_, p)| format!(":{p}"),
         )
     } else {
         authority.rsplit_once(':').map_or_else(
-            || format!(":{AURCACHE_MIRROR_PORT}"),
+            || format!(":{AURCACHE_REPO_PORT}"),
             |(_, p)| format!(":{p}"),
         )
     };
@@ -89,7 +89,7 @@ pub fn host_from_url(url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{host_from_url, server_url_for_host};
-    use crate::ports::AURCACHE_MIRROR_PORT;
+    use crate::ports::AURCACHE_REPO_PORT;
 
     /// Only the host changes: the rest describes how the repository is
     /// published and stays the server's decision.
@@ -105,7 +105,7 @@ mod tests {
     fn supplies_the_repository_port_when_the_url_omits_it() {
         assert_eq!(
             server_url_for_host("http://aurcache.example.com", "HOST"),
-            format!("http://HOST:{AURCACHE_MIRROR_PORT}/$arch")
+            format!("http://HOST:{AURCACHE_REPO_PORT}/$arch")
         );
     }
 
@@ -138,7 +138,7 @@ mod tests {
     fn a_path_is_preserved_and_a_missing_port_is_supplied() {
         assert_eq!(
             server_url_for_host("https://aurcache.example.com/arch", "HOST"),
-            format!("https://HOST:{AURCACHE_MIRROR_PORT}/arch/$arch")
+            format!("https://HOST:{AURCACHE_REPO_PORT}/arch/$arch")
         );
     }
 
@@ -162,7 +162,7 @@ mod tests {
         );
         assert_eq!(
             server_url_for_host("http://[fd00::1]/repo", "worker"),
-            format!("http://worker:{AURCACHE_MIRROR_PORT}/repo/$arch")
+            format!("http://worker:{AURCACHE_REPO_PORT}/repo/$arch")
         );
     }
 

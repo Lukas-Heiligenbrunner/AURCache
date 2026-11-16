@@ -11,7 +11,7 @@
 //! `compose/docker-compose.remote-worker.yaml` (worker). When those change,
 //! these should follow.
 
-use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_MIRROR_PORT, AURCACHE_WORKER_PORT};
+use aurcache_common::ports::{AURCACHE_HTTP_PORT, AURCACHE_REPO_PORT, AURCACHE_WORKER_PORT};
 use clap::ValueEnum;
 use serde::Serialize;
 use std::fmt::Write as _;
@@ -595,7 +595,7 @@ fn repo_service() -> String {
          \x20   # Static file server for the pacman repository.\n\
          \x20   image: {NGINX_IMAGE}\n\
          \x20   ports:\n\
-         \x20     - \"{AURCACHE_MIRROR_PORT}:80\"   # Pacman repository (plain HTTP, for `pacman -Sy`)\n\
+         \x20     - \"{AURCACHE_REPO_PORT}:80\"   # Pacman repository (plain HTTP, for `pacman -Sy`)\n\
          \x20   volumes:\n\
          \x20     - aurcache_data:/app:ro   # read the repository (served from /app/repo)\n\
          \x20   configs:\n\
@@ -823,7 +823,7 @@ mod tests {
         POSTGRES_MAJOR, PoolBacking, PoolSetup, SERVER_SERVICE, WorkerEnv, is_plain_password,
         render_compose,
     };
-    use aurcache_common::ports::AURCACHE_MIRROR_PORT;
+    use aurcache_common::ports::AURCACHE_REPO_PORT;
     use yaml_rust2::{Yaml, YamlLoader};
 
     fn params(role: ComposeRole) -> ComposeParams {
@@ -839,7 +839,7 @@ mod tests {
     fn the_defaults_agree_with_what_they_are_made_of() {
         assert_eq!(
             DEFAULT_PUBLIC_URL,
-            format!("http://localhost:{AURCACHE_MIRROR_PORT}")
+            format!("http://localhost:{AURCACHE_REPO_PORT}")
         );
         assert_eq!(DEFAULT_TLS_SANS.split(',').next(), Some(SERVER_SERVICE));
     }
@@ -1368,13 +1368,13 @@ mod tests {
             assert!(
                 repo_ports
                     .iter()
-                    .any(|p| *p == format!("{AURCACHE_MIRROR_PORT}:80")),
+                    .any(|p| *p == format!("{AURCACHE_REPO_PORT}:80")),
                 "{role:?}: {repo_ports:?}"
             );
             assert!(
                 !ports(&doc, "aurcache")
                     .iter()
-                    .any(|p| p.contains(&AURCACHE_MIRROR_PORT.to_string())),
+                    .any(|p| p.contains(&AURCACHE_REPO_PORT.to_string())),
                 "{role:?}: the server keeps only API and worker protocol"
             );
             let volumes = doc["services"]["repo"]["volumes"]

@@ -56,8 +56,8 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | AURCACHE_PROTECTED_DIR | Paths         | Further directories a PKGBUILD parse may not read, colon-separated, added to the built-in list; see [Package parsing](./package-parsing.md) | none |
 | AURCACHE_SANDBOX       | Path          | The `aurcache-sandbox` a parse runs under, for an install outside the default place; absolute | `/usr/bin/aurcache-sandbox` |
 | AURCACHE_PKGBUILD_BRIDGE | Path        | The `alpm-pkgbuild-bridge` script a parse runs, likewise | `/usr/bin/alpm-pkgbuild-bridge` |
-| AURCACHE_HTTP_IP       | IP address    | Address the web UI and API listen on (port 8080); see [Listening addresses](#listening-addresses) | `0.0.0.0` |
-| AURCACHE_MIRROR_IP     | IP address    | Address the pacman repository listens on (port 8081)                  | `0.0.0.0` |
+| AURCACHE_HTTP_LISTEN_ADDRESS       | IP address    | Address the web UI and API listen on (port 8080); see [Listening addresses](#listening-addresses) | `0.0.0.0` |
+| AURCACHE_REPO_LISTEN_ADDRESS     | IP address    | Address the pacman repository listens on (port 8081)                  | `0.0.0.0` |
 
 Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
 `OAUTH_AUTH_URI`, `OAUTH_TOKEN_URI`, `OAUTH_USERINFO_URI`,
@@ -66,7 +66,7 @@ Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
 
 ### Listening addresses
 
-`AURCACHE_HTTP_IP`, `AURCACHE_MIRROR_IP` and `AURCACHE_WORKER_IP` each take
+`AURCACHE_HTTP_LISTEN_ADDRESS`, `AURCACHE_REPO_LISTEN_ADDRESS` and `AURCACHE_WORKER_LISTEN_ADDRESS` each take
 one IPv4 or IPv6 address, without a port or brackets: `127.0.0.1` keeps a
 listener to this machine, `192.168.1.20` to one interface, and `::` listens on
 every interface over IPv6 and, on most Linux systems, IPv4 as well. Unset or
@@ -78,7 +78,7 @@ interface *is* the container's own, and which host addresses reach it is the
 port mapping's choice (`127.0.0.1:8080:8080`).
 
 Workers verify the worker listener's certificate against the name they dial
-it by, which is why `AURCACHE_TLS_SANS` lists them. When `AURCACHE_WORKER_IP`
+it by, which is why `AURCACHE_TLS_SANS` lists them. When `AURCACHE_WORKER_LISTEN_ADDRESS`
 names one address, that address is added to the certificate as well, so a
 worker can dial it directly. A worker on the same machine that dials
 `localhost` needs the listener on a loopback address or on every interface,
@@ -158,7 +158,7 @@ own environment. See [Build Workers](../workers/index.md).
 
 | Variable                | Type    | Description                                                  | Default |
 |-------------------------|---------|--------------------------------------------------------------|---------|
-| AURCACHE_WORKER_IP      | IP address | Address the worker protocol listener listens on; see [Listening addresses](#listening-addresses) | `0.0.0.0` |
+| AURCACHE_WORKER_LISTEN_ADDRESS      | IP address | Address the worker protocol listener listens on; see [Listening addresses](#listening-addresses) | `0.0.0.0` |
 | AURCACHE_WORKER_PORT    | Integer | Port for the worker protocol listener                        | 8083    |
 | AURCACHE_TLS_SANS       | String  | Hostnames the worker listener's certificate is valid for, comma-separated; an IP address may be listed too | localhost |
 | AURCACHE_WORKER_IMAGE   | String  | Image named in the copy-and-run command the **Workers** page shows; changes nothing about how workers connect | `ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest` |
