@@ -162,6 +162,10 @@ permissions a chroot build requires — `privileged: true`, or `SYS_ADMIN` /
 rules, which pairs well with [routing](./routing.md) when a package must be
 built on a specific machine.
 
+On Kubernetes, workers are a StatefulSet of privileged pods, one per
+architecture, each replica with its own volumes for its identity and its
+storage pool. See [Kubernetes](../setup/kubernetes.md).
+
 ## Routing
 
 | Variable | Type | Description | Default |

@@ -4,6 +4,10 @@ sidebar_position: 2
 
 # Requirements
 
+Both run as containers, under Docker, Podman or
+[Kubernetes](../setup/kubernetes.md), or as [native
+packages](../setup/native.md).
+
 ## Server
 
 * Docker or Podman

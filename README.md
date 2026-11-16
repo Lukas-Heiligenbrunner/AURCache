@@ -41,6 +41,8 @@ within seconds. Scale local build throughput by raising the worker's concurrency
 on its page in the web UI. To attach a worker on separate
 hardware or a foreign architecture (e.g. aarch64), see
 [`docker-compose.remote-worker.yaml`](compose/docker-compose.remote-worker.yaml).
+For Kubernetes, see [`kubernetes/`](kubernetes/) and its
+[documentation](https://lukas-heiligenbrunner.github.io/AURCache/docs/setup/kubernetes).
 
 Already running AURCache as a single container? It keeps working — the
 `aurcache` image now bundles a build worker for exactly that case. It is

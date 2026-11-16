@@ -23,7 +23,8 @@ server this worker is trusted. For more build throughput, raise the worker's
 concurrency on its page in the web UI (or `WORKER_CONCURRENCY_DEFAULT`): each
 build already uses every core, so concurrency buys builds at once, not faster
 builds. For a worker on another machine, where there is no shared volume, see
-[Build Workers](../workers/split-chroot.md).
+[Build Workers](../workers/split-chroot.md). To run AURCache on a cluster
+instead, see [Kubernetes](../setup/kubernetes.md).
 
 ## With PostgreSQL
 
