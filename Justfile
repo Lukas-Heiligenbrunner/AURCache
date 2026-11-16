@@ -45,3 +45,7 @@ test-browser:
 # The storage pool and cgroup tests, as root in a privileged container
 test-kernel:
   ./scripts/test-kernel.sh
+
+# What pacman makes of a signed repository, in an Arch container
+test-signed-repo:
+  ./scripts/test-signed-repo.sh
