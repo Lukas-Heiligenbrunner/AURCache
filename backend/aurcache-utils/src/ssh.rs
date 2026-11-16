@@ -608,6 +608,7 @@ mod tests {
             user: Some("git".to_string()),
             host: host.to_string(),
             port,
+            path: "/srv/repo.git".to_string(),
         }
     }
 
