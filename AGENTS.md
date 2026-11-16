@@ -96,7 +96,7 @@ they cover, rather than running all four as a matter of course:
 
 - `test-e2e-hybrid.sh` — for changes to the hybrid image itself (its
   entrypoint, the embedded worker's loopback enrollment, the Podman it runs in
-  DinD mode) or to the legacy docker builder, which is its only builder.
+  DinD mode) or to the Docker worker, which is its only builder.
 - `test-e2e-hybrid-legacy.sh` — the same image in host mode, against the
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container.
@@ -149,8 +149,9 @@ defect this frontend has had was of that kind.
 - Workers are separate processes. `backend/aurcache-worker-core` is everything that makes one a worker
   (enrollment over mTLS, the job protocol, claim/heartbeat/report) behind an `Executor`;
   `backend/aurcache-worker` is the `devtools` chroot executor, on the storage pool in
-  `backend/aurcache-chroot`; `aurcache-worker-docker` is the deprecated per-build container executor
-  the hybrid image uses, and `aurcache-worker-demo` produces synthetic packages for demo instances.
+  `backend/aurcache-chroot`; `aurcache-worker-docker` is the per-build container executor
+  (the hybrid image embeds it), `aurcache-worker-kube` is the pod-per-build one, `aurcache-build-agent` and
+  `aurcache-worker-container` are what those two share, and `aurcache-worker-demo` produces synthetic packages for demo instances.
   `backend/aurcache-sandbox` confines PKGBUILD code with Landlock, for the server's parse and a build.
 - `backend/aurcache-cli` is a typed CLI for the HTTP API (`cargo run -p aurcache-cli -- ...`); the reusable
   Rust client library backing it lives in `backend/aurcache-client`. It authenticates via

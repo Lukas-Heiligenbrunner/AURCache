@@ -587,10 +587,6 @@ fn kind_label(worker: &Worker) -> Option<String> {
 /// The kind is whatever the worker called itself, so this renders an unknown
 /// value rather than falling back to a default -- a new executor should show up
 /// on this page without the frontend having been taught about it.
-///
-/// The one exception is the legacy container builder, which is deprecated and
-/// worth flagging: "which of my workers are still on it" is the question an
-/// operator asks before removing it.
 #[component]
 pub(crate) fn KindBadge(worker: Worker) -> Element {
     let Some(label) = kind_label(&worker) else {
@@ -602,19 +598,9 @@ pub(crate) fn KindBadge(worker: Worker) -> Element {
             }
         };
     };
-    let (class, title) = if worker.kind.as_deref() == Some("docker") {
-        (
-            "badge-warning",
-            "The legacy container builder, which is deprecated. Migrate to the chroot worker.",
-        )
-    } else {
-        (
-            "badge-ghost",
-            "The build strategy this worker reported, and the version it runs.",
-        )
-    };
+    let title = "The build strategy this worker reported, and the version it runs.";
     rsx! {
-        span { class: "badge {class} badge-sm font-mono whitespace-nowrap", title: "{title}", "{label}" }
+        span { class: "badge badge-ghost badge-sm font-mono whitespace-nowrap", title: "{title}", "{label}" }
     }
 }
 

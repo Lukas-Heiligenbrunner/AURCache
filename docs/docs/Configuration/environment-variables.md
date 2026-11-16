@@ -147,10 +147,9 @@ Builds run on [build workers](../workers/split-chroot.md), which are configured
 on the worker itself rather than here — including how many builds it runs at
 once and how long it will let one run.
 
-:::note Legacy build settings
+:::note Per-build container settings
 `BUILDER_IMAGE`, `CPU_LIMIT`, `MEMORY_LIMIT` and `BUILD_ARTIFACT_DIR`
-configured the per-build Docker container that AURCache used to spawn. In the
-split setup they do nothing on the server: a worker limits its own builds with
+configure the per-build container of the [Docker worker](../workers/docker.md). On the server they do nothing: a worker limits its own builds with
 [`WORKER_BUILD_MEMORY_MAX`, `WORKER_BUILD_CPUS` and their `WORKER_TOTAL_BUILD_*` totals](../workers/split-chroot.md#resource-limits),
 and uploads packages over the API rather than through a shared directory.
 

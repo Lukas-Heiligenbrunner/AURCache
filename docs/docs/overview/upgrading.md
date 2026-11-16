@@ -97,8 +97,8 @@ private key.
 ## Other architectures
 
 Packages for `aarch64` and `armv7h` build as they did, through the host's
-qemu/binfmt handlers; see [the legacy container
-builder](../workers/legacy-docker.md#other-architectures).
+qemu/binfmt handlers; see [the Docker
+worker](../workers/docker.md#other-architectures).
 
 ## Afterwards
 

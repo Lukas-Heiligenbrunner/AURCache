@@ -31,4 +31,4 @@ same file under its own project name and ports (see its header):
 | `docker-compose.e2e.yaml` | Server + one real privileged build worker; the default target of `scripts/test-e2e.sh`. |
 | `docker-compose.e2e-ssh.yaml` | Overlay applied on top of the e2e file by `scripts/test-e2e-ssh.sh`; adds a throwaway git server for the SSH-credential test. |
 | `docker-compose.e2e-hybrid.yaml` | Single-container hybrid image shaped like a pre-worker deployment; asserts upgrades keep building with no edits (`scripts/test-e2e-hybrid.sh`). |
-| `docker-compose.e2e-hybrid-legacy.yaml` | Hybrid image with the Docker socket mounted, selecting the deprecated legacy container builder (`scripts/test-e2e-hybrid-legacy.sh`). |
+| `docker-compose.e2e-hybrid-legacy.yaml` | Hybrid image with the Docker socket mounted, selecting the Docker worker (`scripts/test-e2e-hybrid-legacy.sh`). |
