@@ -270,7 +270,9 @@ What the root step still installs is chosen by the build: any package in the
 job's sync repositories, including the AURCache repository. A hostile package
 already published there runs its install scriptlet as root in the pod of
 every build that depends on it. That is true of the chroot worker today, and
-it is why user namespaces matter below.
+it is why user namespaces matter below. It is also why the SSH build
+credential is never in the pod, and why its socket is gone before any
+dependency is installed ("Credentials and PGP keys").
 
 ---
 
@@ -533,7 +535,6 @@ spec:
     volumeMounts:
     - {name: work, mountPath: /work}
     - {name: tools, mountPath: /aurcache/bin, readOnly: true}
-    - {name: credentials, mountPath: /aurcache/credentials, readOnly: true}   # when configured
   - name: hold                               # keeps the pod up for the hand-back
     image: <agent image>
     command: [/usr/local/bin/aurcache-build-agent, hold]
@@ -545,8 +546,6 @@ spec:
     emptyDir: {sizeLimit: <build_disk_max>}  # no sizeLimit without a disk limit
   - name: tools
     emptyDir: {sizeLimit: 64Mi}
-  - name: credentials                        # when configured
-    secret: {secretName: <WORKER_KUBE_CREDENTIAL_SECRET>, defaultMode: 0400}
 ```
 
 Notes on the choices:
@@ -571,8 +570,8 @@ Notes on the choices:
 - **The build user is the agent's**, added at start with a fixed uid, not the
   image's `ab`, whose uid is whatever `useradd --system` picked when the
   image was built (968 in the published one).
-- **No `fsGroup`**: with one, Secret files become readable by that group, and
-  the credential must be readable by root alone.
+- **No Secret** of any kind is mounted: the SSH build credential stays with
+  the dispatcher ("Credentials and PGP keys").
 - **`hold`** is a regular container rather than a native sidecar, because a
   native sidecar is stopped as soon as the build container exits, and the
   dispatcher needs the pod up after the build to take the packages out. It
@@ -726,26 +725,139 @@ from inside, so `DiskUsage::chroot` is `None`.
 
 ### Credentials and PGP keys
 
-**SSH build credentials** come from a Secret the operator provides, and from
-nowhere else: `WORKER_KUBE_CREDENTIAL_SECRET` names it, in the builds'
-namespace, with the key under `ssh-privatekey` (as in a
-`kubernetes.io/ssh-auth` Secret) and the hosts' keys under `known_hosts`. It
-is mounted `0400` into the build container only.
+**SSH build credentials** never enter a build pod. The dispatcher holds the
+key and answers for it; a build can ask for signatures, for as long as it is
+fetching its sources, and never obtains the key.
 
-`known_hosts` is required. The dispatcher cannot read the Secret, so it always
-names the file, and the agent stops a build whose credential has none, with a
-message that says what to add. The alternative, an ssh that accepts the first
-key a host shows, protects nothing here: a pod is new for every build, so the
-first time is every time. The agent, as root, reads it,
-starts `ssh-agent` *as the build user* and loads the key into it through
-`ssh-add -` on a pipe, before any build code runs; then makepkg's
-`SSH_AUTH_SOCK` and `GIT_SSH_COMMAND` point at it. That is the property the
-chroot worker gives (`aurcache-worker/src/agent.rs`: the agent runs as the
-build user because `ssh-agent` checks the peer uid): the build can *use* the
-key for the length of the build but cannot read it, since the file is root's
-and `ssh-agent` marks itself non-dumpable. It is one key per dispatcher,
-given to every build it runs, as one key per chroot worker is;
-`WORKER_PACKAGES` routes the packages that need it.
+The key and the hosts' keys come from a Secret the operator provides, in the
+dispatcher's own namespace, mounted into the dispatcher's pod alone (the key
+under `ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret, and
+`known_hosts` beside it). `WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS`
+name the two files, as on the chroot worker. `known_hosts` is required: a pod
+is new for every build, so an ssh that accepts the first key a host shows
+would accept any host, every time. The dispatcher refuses to start with a key
+and no host keys, and with a key it cannot use (protected by a passphrase, or
+of a type it does not sign with).
+
+Why not in the pod. The key used to be mounted `0400` into the build
+container, root's alone, and the agent loaded it into an `ssh-agent` running
+as the build user. That kept it from the build *user*, and from nothing else
+that runs as root in the pod: a dependency's install scriptlet runs as root
+there (see "What the root step still installs" above), and one that copied
+`/aurcache/credentials/ssh-privatekey` out was shown to work. One deploy key
+shared by every build of a dispatcher, taken by any package in any repository
+a build installs from, is not a boundary.
+
+**The dispatcher's agent.** The dispatcher reads the key at the start of each
+build (so a rotated Secret takes effect at the next build) and answers the
+agent protocol itself, in process. It answers two requests and refuses every
+other one with `SSH_AGENT_FAILURE`:
+
+- `SSH_AGENTC_REQUEST_IDENTITIES`: the one public key;
+- `SSH_AGENTC_SIGN_REQUEST` for that key: Ed25519; RSA as `rsa-sha2-256` or
+  `rsa-sha2-512`, by the request's flags (SHA-1 `ssh-rsa` signatures are
+  refused, as OpenSSH and GitHub refuse them); ECDSA on P-256 and P-384.
+
+Adding, removing or locking keys, extensions (`session-bind@openssh.com`
+among them, which OpenSSH's client treats as optional) and everything else are
+refused, so a build cannot change what another is served. The keys are read
+from the unencrypted OpenSSH format `ssh-keygen` writes. Signing is *ring*'s
+(constant-time, RSA blinded), already in the dependency tree through rustls;
+the RustCrypto `rsa` crate is not used, as its signing is not constant-time
+(RUSTSEC-2023-0071) and a build can ask for as many signatures as it likes.
+OpenSSH's own `ssh-agent` would have been the other way, behind a proxy that
+lets the same two requests through; it needs `ssh-agent` and `ssh-add` in the
+dispatcher's image, a socket and a child process, for no gain in what a build
+can do.
+
+**The link.** There is no filesystem shared by the dispatcher and a pod, and
+the NetworkPolicy keeps builds from reaching anything in the cluster, so the
+requests travel over an exec stream, as everything else between the two
+does. The agent in the pod (PID 1, root) is the one end of it:
+
+1. With `ssh` in the spec, the agent first listens on `link.sock` in a
+   directory only root can enter (`<scratch>/ssh-link/`), before anything of
+   the job runs.
+2. Once the build container runs, the dispatcher execs
+   `aurcache-build-agent ssh-link --socket <scratch>/ssh-link/link.sock` into
+   it, **once per build, and never again**, whatever becomes of that exec.
+   `ssh-link` connects (retrying for a minute, for an agent that has not
+   listened yet) and copies bytes between the socket and its stdin and
+   stdout; it understands nothing.
+3. When the build needs the key (below), the agent accepts that one
+   connection, checks the peer is root, closes the listener, and the two ends
+   exchange a hello (`aurcache-ssh-link 1`). The agent then listens on
+   `<scratch>/ssh/agent.sock`, owned by the build user and mode `0600`, in a
+   directory of root's that only the build group can enter: the same reach
+   as the chroot worker's socket.
+4. Each agent request a build-user connection sends (a length-prefixed
+   message of at most 256 KiB, OpenSSH's own limit) goes to the dispatcher as
+   a frame with an id, and the answer comes back under the same id; the
+   dispatcher keeps no state per connection. Requests are answered one at a
+   time per build.
+5. To close it, the agent stops listening, removes the socket, shuts every
+   connection, sends a closing frame, and kills every other process in the
+   container (`ssh-link` among them) before anything else runs. The
+   dispatcher stops at the closing frame or the end of the stream, and since
+   it execs once, nothing can open the link again.
+
+If the exec never comes, or the link breaks before the agent closes it, the
+build stops at its `credential` step and is reported as interrupted, so the
+server builds it again; it is not reported as the package's failure.
+
+**When the socket is up.** Only while the sources are fetched, and before
+anything is installed for the build:
+
+1. As root, before the build user has any process: what the root step always
+   does, then `pacman -S --needed openssh git` from the job's repositories.
+2. As the build user: unpack the source, import the PGP keys.
+3. **The window.** The link is accepted and the socket opened; makepkg runs
+   once as `makepkg --verifysource --skipinteg` (plus `--ignorearch` when the
+   job's flags have it), which downloads every source into `SRCDEST`, VCS
+   clones included, and does nothing else: no dependency is installed, no
+   function of the PKGBUILD runs. The pacman helper refuses every request
+   while this runs.
+4. Every process but the agent is killed, `ssh-link` included, and the link
+   is closed as above.
+5. The helper opens, and makepkg runs as it always does, `makepkg -s
+   --holdver <the job's flags>`, without `SSH_AUTH_SOCK`: `--holdver` keeps it
+   from updating the VCS clones it now finds in `SRCDEST`, and the files are
+   there already, so it downloads nothing it fetched in step 3.
+
+That download is best-effort: makepkg can fail there where the build itself
+would not, for a VCS source whose client (`mercurial`, `subversion`,
+`breezy`, `fossil`) is only installed with the build's `makedepends`. The
+build goes on, and makepkg fetches what is missing in step 5 the way it would
+have, without the key. Only `git` and `openssh` are installed for step 3, as
+git is the transport of nearly every source that needs a key.
+
+**What a build can still do with the key, and who.** Code that can connect to
+the socket while it is up can ask for signatures with it, for any host and
+any purpose, as with any agent; it can never obtain the key, which is in no
+file, no process and no memory of the pod. During the window that code is the
+package's own: the PKGBUILD's top level as makepkg sources it, makepkg, git
+and ssh, all as the build user. Root in the pod is the agent alone, and
+whatever the image's own upgrade ran before. Dependencies, their install
+scriptlets, their hooks, and `prepare()`, `build()`, `check()` and
+`package()` all run after the link is gone, and can neither sign nor read
+anything. A dependency's root scriptlet that leaves a process behind finds no
+socket, and no exec to take over: `ssh-link` was killed before it ran, and the
+dispatcher opens no second one.
+
+Compared with the chroot worker: its socket is bound into the chroot for the
+whole build, and `makechrootpkg` downloads the sources on the host with it as
+well, so there the dependencies' scriptlets (root in the chroot), `prepare()`
+and `build()` can all ask for signatures too, and the key is protected from
+them only by being on the host. The container workers give less time and
+fewer parties, at one cost: a PKGBUILD that clones over SSH in `prepare()` or
+`build()` rather than through `source=` (the chroot worker's comment names
+`unreal-engine`) cannot authenticate here. That is deliberate. Supporting it
+means leaving the socket up while dependencies install, and so while code
+from any repository the build installs from runs as root in the pod, which is
+the exposure this removes.
+
+It is one key per dispatcher, given to every build it runs, as one key per
+chroot worker is; `WORKER_PACKAGES` routes the packages that need it.
 
 The generated-key onboarding (`docs/docs/workers/credentials.md`) does not
 carry over: a key generated in a pod dies with it. A dispatcher generating
@@ -1265,9 +1377,7 @@ keys shipped by the dispatcher; the caching mirror's guidance; uploading
 straight from the pod; persistent build trees on the same volumes as the
 source cache; adoption of running pods across a restart; the dispatcher's
 key from a Secret, so it needs no volume; a startup check that a node exists
-for each advertised architecture (it needs `list` on nodes, a ClusterRole);
-SSH build credentials for the Docker worker, which the agent already
-supports.
+for each advertised architecture (it needs `list` on nodes, a ClusterRole).
 
 ---
 
@@ -1280,7 +1390,7 @@ supports.
 | user namespaces | off by default; `WORKER_KUBE_USER_NAMESPACES=true` turns them on |
 | artifact transport | `pods/exec`, streamed from the pod into the upload, nothing staged on the dispatcher. No protocol change. A direct upload from the pod is a later optimisation |
 | where builds run | a namespace of their own; cleanup is the startup sweep and `activeDeadlineSeconds` |
-| the SSH build credential | a Secret the operator provides, `known_hosts` included; nothing is generated |
+| the SSH build credential | a Secret the operator provides, `known_hosts` included, mounted into the dispatcher alone; builds reach it over an exec stream while their sources are fetched, and never hold it |
 | caches | none in the first release |
 | `persistent_builddir`, kept failed builds | not supported: the first builds in a fresh tree and says nothing, the second is not offered |
 | the Docker worker | no longer deprecated, and moved to the same agent, capabilities and privilege drop (`container-workers.md`) |
