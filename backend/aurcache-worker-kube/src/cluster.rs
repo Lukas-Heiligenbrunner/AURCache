@@ -64,6 +64,9 @@ pub enum CreateError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admission {
     Admitted,
+    /// The cluster answered, and a pod created now would not be: admission
+    /// said no, the namespace is not there, or the API server is failing or
+    /// turning requests away.
     Refused {
         message: String,
     },

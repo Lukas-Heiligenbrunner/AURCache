@@ -139,18 +139,9 @@ impl Cluster for KubeCluster {
             dry_run: true,
             ..PostParams::default()
         };
-        let err = match self.pods.create(&params, pod).await {
-            Ok(_) => return Admission::Admitted,
-            Err(err) => err,
-        };
-        match rejection(&err) {
-            Rejection::Refused { message } => Admission::Refused { message },
-            Rejection::Exists => Admission::Unknown {
-                message: "a pod of that name exists, so the dry run could not judge it".to_owned(),
-            },
-            Rejection::Other => Admission::Unknown {
-                message: err.to_string(),
-            },
+        match self.pods.create(&params, pod).await {
+            Ok(_) => Admission::Admitted,
+            Err(err) => admission(&err),
         }
     }
 
@@ -295,6 +286,32 @@ fn rejection(err: &kube::Error) -> Rejection {
             message: describe(status),
         },
         _ => Rejection::Other,
+    }
+}
+
+/// How an API error answers whether the cluster would admit a pod.
+///
+/// Whatever the API server itself answers with, other than a taken name,
+/// is what a pod created now would get too: not only admission's refusals,
+/// but a namespace that is not there (404), a webhook the server must ask
+/// and cannot (5xx), and a server shedding load (429). Only a question that
+/// reached no server leaves the answer open.
+fn admission(err: &kube::Error) -> Admission {
+    let kube::Error::Api(status) = err else {
+        return Admission::Unknown {
+            message: err.to_string(),
+        };
+    };
+    match status.code {
+        409 => Admission::Unknown {
+            message: "a pod of that name exists, so the dry run could not judge it".to_owned(),
+        },
+        400..=599 => Admission::Refused {
+            message: describe(status),
+        },
+        _ => Admission::Unknown {
+            message: err.to_string(),
+        },
     }
 }
 
@@ -571,6 +588,40 @@ mod tests {
             rejection(&api(409, "AlreadyExists", "exists")),
             Rejection::Exists
         );
+    }
+
+    /// What the API server answers a dry run with is what a pod would get.
+    #[test]
+    fn a_dry_run_the_server_answers_no_to_is_a_refusal() {
+        for (code, reason, message) in [
+            (403, "Forbidden", "exceeded quota: builds"),
+            (404, "NotFound", "namespaces \"aurcache-builds\" not found"),
+            (422, "Invalid", "spec.containers: Required value"),
+            (429, "TooManyRequests", "slow down"),
+            (500, "InternalError", "failed calling webhook"),
+            (503, "ServiceUnavailable", "the server is currently unable"),
+        ] {
+            assert_eq!(
+                admission(&api(code, reason, message)),
+                Admission::Refused {
+                    message: message.to_owned()
+                },
+                "for {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dry_run_that_could_not_judge_is_no_answer() {
+        for err in [
+            api(409, "AlreadyExists", "exists"),
+            kube::Error::LinesCodecMaxLineLengthExceeded,
+        ] {
+            assert!(
+                matches!(admission(&err), Admission::Unknown { .. }),
+                "for {err}"
+            );
+        }
     }
 
     #[test]
