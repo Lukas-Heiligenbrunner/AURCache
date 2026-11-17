@@ -17,8 +17,10 @@ metadata:
     app.kubernetes.io/component: kube-worker
 spec:
   hard:
-    # Builds running at once.
-    count/pods: "8"
+    # Builds running at once. `pods` counts the pods that have not ended;
+    # `count/pods` would count every pod object, one that failed and was not
+    # yet deleted included.
+    pods: "8"
     # requests.cpu: "32"
     # requests.memory: 64Gi
     # requests.ephemeral-storage: 400Gi
