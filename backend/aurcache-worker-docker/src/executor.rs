@@ -98,6 +98,15 @@ impl DockerExecutor {
         );
         tracing::info!("build containers will use network: {network:?}");
         tracing::info!("builds run with the agent at {}", agent.display());
+        if workdir::noexec(&cfg.dirs.local) {
+            tracing::warn!(
+                "{} is on a filesystem mounted noexec, and each build runs the agent from \
+                 its directory there. If the Docker daemon sees it the same way, every build \
+                 fails to start: put BUILD_ARTIFACT_DIR on a filesystem that allows \
+                 executing",
+                cfg.dirs.local.display()
+            );
+        }
         Ok(Self {
             cfg: Live::new(cfg),
             docker,
