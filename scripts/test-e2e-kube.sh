@@ -7,7 +7,7 @@
 # with the CLI:
 #
 #   1. the worker enrolls through the `aurcache-enrollment` Secret, shows as
-#      `kubernetes`, and finds the agent image from its own pod;
+#      `kubernetes`, and takes the build agent from the image it runs itself;
 #   2. the worker finds the builds' NetworkPolicy enforced; and asked by hand,
 #      a pod labelled like a build cannot open the server's worker port but
 #      reaches its repository, where a pod outside the policy reaches both;
@@ -22,12 +22,15 @@
 #   7. the worker's pod is deleted while a build runs; it stops within its
 #      grace period, having deleted the build pod and handed the build back,
 #      and the server queues a new one;
-#   8. a package of 2 GiB (docker/testpkg/big) builds and is published; the
+#   8. with a credential Secret that does not exist, a build pod never
+#      starts: the build is handed back as the worker's once the schedule
+#      timeout has passed, and builds again once the worker is put right;
+#   9. a package of 2 GiB (docker/testpkg/big) builds and is published; the
 #      relay's throughput and the worker container's peak memory are printed,
 #      and the run fails if that memory reached 256 MiB;
-#   9. build pods in user namespaces, where the cluster's nodes run one;
+#  10. build pods in user namespaces, where the cluster's nodes run one;
 #      skipped, saying why, where they do not;
-#  10. without the NetworkPolicy, the worker says it is not enforced, and the
+#  11. without the NetworkPolicy, the worker says it is not enforced, and the
 #      server hears it.
 #
 #   ./scripts/test-e2e-kube.sh [package] [timeout]
@@ -61,8 +64,8 @@
 #                         building or deploying anything; it is kept again
 #                         unless CLEANUP=1
 #   E2E_LEGS              which legs to run, space-separated, of: enrollment
-#                         policy quota repository cancel restart stop big
-#                         userns open-policy (default: all, in that order)
+#                         policy quota repository cancel restart stop stuck
+#                         big userns open-policy (default: all, in that order)
 #   CLEANUP               as for the other e2e suites: 1 always tears down, 0
 #                         never; unset, a failed run is left up
 set -euo pipefail
@@ -362,6 +365,19 @@ secretGenerator:
       - token=$token
     options:
       disableNameSuffixHash: true
+# The base copied its own image into WORKER_KUBE_AGENT_IMAGE before the
+# images above were set, so it is copied again here.
+replacements:
+  - source:
+      kind: Deployment
+      name: aurcache-kube-worker
+      fieldPath: spec.template.spec.containers.[name=worker].image
+    targets:
+      - select:
+          kind: Deployment
+          name: aurcache-kube-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=WORKER_KUBE_AGENT_IMAGE].value
 configMapGenerator:
   - name: kube-e2e-packages
     namespace: kube-e2e
@@ -450,24 +466,20 @@ check_enrollment() {
     log "    worker: $(jq -r '"\(.name), \(.kind), \(.status), arches \(.arches | join(","))"' <<<"$worker")"
     result "enrolled through the Secret, approved, kind kubernetes"
 
-    # The agent image, read from the worker's own pod: what its container
-    # status says it runs, by digest when that is pullable.
-    local line agent own spec
+    # The agent image is the worker's own, as the manifests name it: the
+    # worker holds no permission to read its pod.
+    local line agent spec
     expect_said "Build pods go to namespace aurcache-builds and take the build agent from" "" 60
     line=$(dispatcher_log | grep -E "take the build agent from" | tail -n 1)
     agent=${line##* from }
-    own=$(k -n aurcache get pod "$(dispatcher_pod)" -o jsonpath='{.status.containerStatuses[0].imageID}')
     spec=$(k -n aurcache get pod "$(dispatcher_pod)" -o jsonpath='{.spec.containers[0].image}')
     log "    agent image: $agent"
-    log "    the pod's image: $spec, id $own"
-    if [ "$agent" != "$own" ] && [ "$agent" != "$spec" ]; then
-        fail "the agent image is neither the worker pod's image id nor its image"
+    [ "$agent" = "$spec" ] || fail "the agent image is not the image the worker's pod runs ($spec)"
+    if k auth can-i get pods -n aurcache \
+        --as=system:serviceaccount:aurcache:aurcache-kube-worker >/dev/null 2>&1; then
+        fail "the worker's ServiceAccount may read pods in its own namespace"
     fi
-    if [[ $agent == *@sha256:* ]]; then
-        result "agent image from the worker's own pod, by digest ($agent)"
-    else
-        result "agent image from the worker's own pod, by name: its id ($own) is not pullable"
-    fi
+    result "the build agent comes from the worker's own image, and the worker may read no pod beside the server"
     expect_said "Build pods share their node's user namespace" "" 10
     result "warned that build pods share the node's user namespace"
     if dispatcher_log | grep -qE "Deleted [0-9]+ build pod"; then
@@ -555,7 +567,7 @@ check_quota_then_build() {
     log "=== 3. A full quota holds claims back; then $PACKAGE builds ==="
     local since pid ref
     since=$(now)
-    k -n aurcache-builds create quota kube-e2e-full --hard=count/pods=0 >/dev/null
+    k -n aurcache-builds create quota kube-e2e-full --hard=pods=0 >/dev/null
     add_in_background "$SCRATCH/add-$PACKAGE.log" "$PACKAGE" --platform x86_64 \
         --wait --wait-timeout "$BUILD_TIMEOUT" --wait-stall-after 600
     pid=$ADD_PID
@@ -772,11 +784,65 @@ check_stop() {
     wait_for 60 "the pod of $again to go" no_build_pods || fail "the pod of $again outlived its cancel"
 }
 
+# The last line of the output of build `$1` that is not blank.
+last_word() { build_output "$1" | grep -v '^\s*$' | tail -n 1; }
+
+build_succeeded() { [ "$(build_status "$1")" = 1 ]; }
+
+# Whether the newest build of package `$1` succeeded.
+newest_succeeded() { build_succeeded "$(latest_build_ref "$1")"; }
+
+check_stuck() {
+    log "=== 8. A build pod that cannot start ==="
+    local since before ref
+    since=$(now)
+    # A Secret that does not exist: the pod is scheduled, and its volumes
+    # never mount.
+    k -n aurcache set env deploy/aurcache-kube-worker \
+        WORKER_KUBE_CREDENTIAL_SECRET=kube-e2e-no-such-secret \
+        WORKER_KUBE_SCHEDULE_TIMEOUT=30s >/dev/null
+    k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
+        || fail "the worker did not start again"
+    expect_said "take the build agent from" "$since" 120
+    wait_for 120 "the worker to be approved again" worker_approved || fail "the worker did not come back"
+
+    before=$(latest_build_ref kube-e2e-dep)
+    aurcache_cli builds retry "$before" | sed 's/^/    /'
+    wait_for 60 "a new build of kube-e2e-dep" ref_moved kube-e2e-dep "$before" \
+        || fail "the retry queued nothing"
+    ref=$(latest_build_ref kube-e2e-dep)
+    CURRENT_BUILD_REF=$ref
+    # Well inside the build's own timeout, which is what it used to wait for.
+    wait_for 150 "$ref to be handed back" build_over "$ref" \
+        || fail "$ref was still waiting for its pod 150s on, with a 30s allowance to start"
+    log "    $ref: $(last_word "$ref")"
+    build_said "$ref" "did not start within 30s" \
+        || fail "the log of $ref does not say its pod did not start"
+    k -n aurcache-builds get events --field-selector reason=FailedMount \
+        -o custom-columns=MESSAGE:.message --no-headers 2>/dev/null | tail -n 1 | sed 's/^/    | /'
+    result "$ref: its pod never started, and the build was handed back as the worker's"
+
+    since=$(now)
+    k -n aurcache set env deploy/aurcache-kube-worker \
+        WORKER_KUBE_CREDENTIAL_SECRET- WORKER_KUBE_SCHEDULE_TIMEOUT- >/dev/null
+    k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
+        || fail "the worker did not start again"
+    expect_said "take the build agent from" "$since" 120
+    wait_for 120 "the worker to be approved again" worker_approved || fail "the worker did not come back"
+    # The server queued the package again each time; with the worker put
+    # right, the build that is queued now goes through.
+    wait_for "$BUILD_TIMEOUT" "kube-e2e-dep to build again" newest_succeeded kube-e2e-dep \
+        || fail "kube-e2e-dep did not build once the worker was put right"
+    CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-dep)
+    wait_for 60 "the build pods to go" no_build_pods || fail "a build pod was left"
+    result "$CURRENT_BUILD_REF built once the Secret was no longer asked for"
+}
+
 # Whether package `$1` has a build newer than `$2`.
 ref_moved() { [ "$(latest_build_ref "$1")" != "$2" ]; }
 
 check_big() {
-    log "=== 8. A package of 2 GiB ==="
+    log "=== 9. A package of 2 GiB ==="
     if [ "${E2E_BIG:-1}" = 0 ]; then
         result "skipped: the 2 GiB package (E2E_BIG=0)"
         return
@@ -839,7 +905,7 @@ check_big() {
 }
 
 check_user_namespaces() {
-    log "=== 9. Build pods in user namespaces ==="
+    log "=== 10. Build pods in user namespaces ==="
     if [ "${E2E_USER_NAMESPACES:-auto}" = 0 ]; then
         result "skipped: user namespaces (E2E_USER_NAMESPACES=0)"
         return
@@ -906,7 +972,7 @@ server_logged() {
 }
 
 check_open_policy() {
-    log "=== 10. Without the NetworkPolicy ==="
+    log "=== 11. Without the NetworkPolicy ==="
     local since
     k -n aurcache-builds delete networkpolicy aurcache-builds >/dev/null
     since=$(now)
@@ -1002,8 +1068,8 @@ cleanup() {
 # =============================================================================
 
 # Every leg, in order. Some build on what an earlier one left: `restart` and
-# `stop` on `cancel`'s package, `userns` on `repository`'s.
-LEGS=(enrollment policy quota repository cancel restart stop big userns open-policy)
+# `stop` on `cancel`'s package, `stuck` and `userns` on `repository`'s.
+LEGS=(enrollment policy quota repository cancel restart stop stuck big userns open-policy)
 if [ -n "${E2E_LEGS:-}" ]; then read -r -a LEGS <<<"$E2E_LEGS"; fi
 
 RUN_STARTED=$SECONDS
@@ -1030,6 +1096,7 @@ for leg in "${LEGS[@]}"; do
         cancel) check_cancel ;;
         restart) check_restart ;;
         stop) check_stop ;;
+        stuck) check_stuck ;;
         big) check_big ;;
         userns) check_user_namespaces ;;
         open-policy) check_open_policy ;;
