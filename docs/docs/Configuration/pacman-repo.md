@@ -162,7 +162,10 @@ the CA: losing it means a new key, which every client has to trust again.
   with `gpg --export-secret-subkeys`, its primary key kept offline. Its newest
   valid signing subkey signs, as GnuPG picks; the server warns from 30 days
   before that subkey expires, then signs with the next valid one, and refuses
-  to start with a key where nothing signs.
+  to start with a key where nothing signs. Now and then a key GnuPG exports
+  unprotected cannot be read here, though GnuPG reads it (about one Ed25519
+  secret in 256, and a key and each of its subkeys has one); the server says
+  so, and locking the key with a passphrase (`gpg --passwd`) gets around it.
 - `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names a file holding a passphrase:
   a key the server creates is locked with it, and a supplied one unlocked
   with it. It protects a copy of the key file — a backup, a volume snapshot —

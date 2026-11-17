@@ -235,7 +235,13 @@ expired signs with its new one, and a key exported with
 with its subkey. The choice is made again for every signature, so a subkey
 that expires while the server runs gives way to the next; the server warns
 from 30 days before the one it signs with expires, and refuses at start a key
-in which nothing signs.
+in which nothing signs. rPGP 0.21 refuses about one unprotected Ed25519
+secret in 256 that GnuPG writes: it checks the secret's checksum over its own,
+canonical encoding of the MPI, and GnuPG writes a secret whose first byte is
+zero with a bit count of 256. Not reported upstream as of 0.21.1; a
+passphrase moves the check to the decrypted bytes, which rPGP gets right, so
+the server's refusal says to lock the key (fixture and test in
+`aurcache-signing`).
 
 A passphrase protects the file only from someone who cannot also read the
 passphrase, and the server reads it at every publish. It is optional
