@@ -1,6 +1,6 @@
 //! A claimed job as the agent's `BuildSpec`.
 
-use aurcache_build_agent::spec::{BuildSpec, Credential, INTERFACE};
+use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobDescriptor;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::repo::{RepoSection, append_to_pacman_conf};
@@ -13,7 +13,8 @@ pub struct SpecOptions {
     pub keyserver: String,
     /// Where the build's own trees go, inside the container.
     pub scratch: PathBuf,
-    pub credential: Option<Credential>,
+    /// The hosts' keys, when the worker holds an SSH key for the build.
+    pub ssh: Option<SshAccess>,
 }
 
 /// The spec for `claimed`, with the AURCache repository section appended to
@@ -46,7 +47,7 @@ fn describe(
         vcs_sources: job.vcs_sources.clone(),
         cpus: options.cpus,
         scratch: options.scratch,
-        credential: options.credential,
+        ssh: options.ssh,
     }
 }
 
@@ -131,9 +132,8 @@ mod tests {
             cpus: Some(1.5),
             keyserver: "hkps://keyserver.example".into(),
             scratch: "/scratch".into(),
-            credential: Some(Credential {
-                key: "/run/key".into(),
-                known_hosts: Some("/run/known_hosts".into()),
+            ssh: Some(SshAccess {
+                known_hosts: "github.com ssh-ed25519 AAAA\n".into(),
             }),
         }
     }
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(spec.cpus, Some(1.5));
         assert_eq!(spec.keyserver, "hkps://keyserver.example");
         assert_eq!(spec.scratch, PathBuf::from("/scratch"));
-        assert_eq!(spec.credential, options().credential);
+        assert_eq!(spec.ssh, options().ssh);
         assert_eq!(spec.mirrorlist, None);
     }
 

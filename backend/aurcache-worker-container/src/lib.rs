@@ -7,8 +7,9 @@
 //! one terminal report ([`outcome`]), so a build ends for the same reason
 //! whichever of them ran it. They also treat the same way what an
 //! agent-run build does not do ([`unsupported`]), find the agent binary the
-//! same way ([`agent`]), name architectures the same way ([`arch`]), and
-//! name what they create after themselves the same way ([`tag`]).
+//! same way ([`agent`]), name architectures the same way ([`arch`]), name
+//! what they create after themselves the same way ([`tag`]), and answer for
+//! the SSH key a build uses without holding it ([`ssh`]).
 //!
 //! See `design/in-progress/container-workers.md`, "The worker's side".
 
@@ -17,5 +18,6 @@ pub mod arch;
 pub mod input;
 pub mod outcome;
 pub mod spec;
+pub mod ssh;
 pub mod tag;
 pub mod unsupported;

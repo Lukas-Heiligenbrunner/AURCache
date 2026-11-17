@@ -971,12 +971,16 @@ dependencies = [
  "aurcache-build-agent",
  "aurcache-common",
  "aurcache-worker-core",
+ "base64 0.22.1",
  "flate2",
+ "num-bigint 0.4.8",
+ "ring",
  "serde_json",
  "tar",
  "tempfile",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
