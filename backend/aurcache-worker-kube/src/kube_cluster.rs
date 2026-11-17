@@ -17,7 +17,7 @@ use crate::pod;
 use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
 use futures::future::BoxFuture;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Container, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status as ExitStatus;
 use kube::api::{
     Api, AttachParams, AttachedProcess, DeleteParams, ListParams, LogParams, PostParams,
@@ -326,27 +326,41 @@ fn describe(status: &Status) -> String {
     }
 }
 
-/// The first container's image, by the digest it was pulled at when its
-/// status has one that can be pulled again.
+/// The image of this worker's own container in `pod`, by the digest it was
+/// pulled at when its status has one that can be pulled again.
 fn running_image(pod: &Pod) -> Result<String> {
-    let first = pod
+    let own = pod
         .spec
         .as_ref()
-        .and_then(|spec| spec.containers.first())
+        .and_then(|spec| own_container(&spec.containers))
         .context("the pod has no containers")?;
     let pulled = pod
         .status
         .as_ref()
         .and_then(|status| status.container_statuses.as_ref())
-        .and_then(|statuses| statuses.iter().find(|status| status.name == first.name))
+        .and_then(|statuses| statuses.iter().find(|status| status.name == own.name))
         .and_then(|status| pullable(&status.image_id));
     match pulled {
         Some(image) => Ok(image),
-        None => first
+        None => own
             .image
             .clone()
-            .with_context(|| format!("container {} names no image", first.name)),
+            .with_context(|| format!("container {} names no image", own.name)),
     }
+}
+
+/// This worker's container among a pod's: the one told which pod it is in,
+/// which is how it came to ask, and the first where none is, so that a
+/// sidecar listed before it is not taken for it.
+fn own_container(containers: &[Container]) -> Option<&Container> {
+    let told = |container: &&Container| {
+        container
+            .env
+            .iter()
+            .flatten()
+            .any(|var| var.name == crate::config::POD_NAME)
+    };
+    containers.iter().find(told).or_else(|| containers.first())
 }
 
 /// `image_id` as a reference that pulls the same image: `<repository>@<digest>`.
@@ -553,7 +567,7 @@ fn finished(status: &ExitStatus, stderr: &str) -> ExecEnd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{Container, ContainerStatus, PodSpec, PodStatus};
+    use k8s_openapi::api::core::v1::{ContainerStatus, PodSpec, PodStatus};
 
     fn api(code: u16, reason: &str, message: &str) -> kube::Error {
         kube::Error::Api(Box::new(Status::failure(message, reason).with_code(code)))
@@ -776,6 +790,19 @@ mod tests {
                 ("first", &id),
             ],
         );
+        assert_eq!(running_image(&pod).unwrap(), id);
+    }
+
+    /// A sidecar listed first is not this worker.
+    #[test]
+    fn the_container_told_its_pods_name_is_this_workers() {
+        let id = format!("ghcr.io/x/worker@{DIGEST}");
+        let mut pod = with_images("proxy:1", &[("first", "proxy@sha256:ff"), ("second", &id)]);
+        let containers = &mut pod.spec.as_mut().unwrap().containers;
+        containers[1].env = Some(vec![k8s_openapi::api::core::v1::EnvVar {
+            name: "WORKER_KUBE_POD_NAME".to_owned(),
+            ..Default::default()
+        }]);
         assert_eq!(running_image(&pod).unwrap(), id);
     }
 
