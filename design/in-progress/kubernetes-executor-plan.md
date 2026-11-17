@@ -275,7 +275,8 @@ impl Scratch {
     pub fn home(&self) -> PathBuf;
     pub fn makepkg_conf(&self) -> PathBuf;             // <root>/makepkg.conf
     pub fn pacman_socket(&self) -> PathBuf;            // <root>/run/pacman.sock
-    pub fn ssh_socket(&self) -> PathBuf;               // <root>/run/ssh-agent.sock
+    pub fn ssh_socket(&self) -> PathBuf;               // <root>/ssh/agent.sock
+    pub fn ssh_link(&self) -> PathBuf;                 // <root>/ssh-link/link.sock
 }
 
 // pacman_request.rs
@@ -480,7 +481,7 @@ pub struct Config {
     pub builder_image: String,
     pub pull_policy: String,
     pub agent_image: AgentImage,
-    pub credential_secret: Option<String>,
+    pub credential: Option<CredentialFiles>,       // WORKER_GIT_SSH_KEY, WORKER_SSH_KNOWN_HOSTS
     pub user_namespaces: bool,
     pub extras: PodExtras,
     pub network_probe: bool,
@@ -581,7 +582,7 @@ Beside what every worker reads (`AURCACHE_URL`, `WORKER_DATA_DIR`,
 | `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | no | for the builder image; `IfNotPresent` for an image loaded by hand |
 | `WORKER_KUBE_AGENT_IMAGE` | the dispatcher's own pod's image | no | the `stage` and `hold` containers' image |
 | `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none; the manifests set them from the downward API | no | which pod to read that image from |
-| `WORKER_KUBE_CREDENTIAL_SECRET` | none | no | a Secret in the builds' namespace: `ssh-privatekey`, optionally `known_hosts` |
+| `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | no | the SSH key and its hosts' keys, files in the dispatcher's pod; both or neither (`kubernetes-executor.md`, "Credentials and PGP keys") |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | no | `hostUsers: false` on build pods |
 | `WORKER_KUBE_POD_TEMPLATE` | none | no | path of a JSON file: `tolerations`, `affinity`, `nodeSelector`, `priorityClassName`, `runtimeClassName`, `imagePullSecrets`, `schedulerName`, `topologySpreadConstraints`, `labels`, `annotations`; an unknown field is an error at startup |
 | `WORKER_KUBE_NETWORK_PROBE` | `true` | no | run the NetworkPolicy probe at startup |
