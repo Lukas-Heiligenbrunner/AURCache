@@ -752,7 +752,7 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut cfg = config();
         cfg.namespace = var("AURCACHE_KUBE_TEST_NAMESPACE");
-        cfg.dispatcher = "wp12live".into();
+        cfg.dispatcher = "probelive".into();
         let cluster = crate::kube_cluster::KubeCluster::connect(&cfg.namespace, &cfg.dispatcher)
             .await
             .unwrap();
@@ -775,6 +775,6 @@ mod tests {
             _ => assert!(matches!(outcome, ProbeOutcome::Open { .. }), "{outcome:?}"),
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(cluster.pod("aurcache-probe-wp12live").is_none());
+        assert!(cluster.pod("aurcache-probe-probelive").is_none());
     }
 }

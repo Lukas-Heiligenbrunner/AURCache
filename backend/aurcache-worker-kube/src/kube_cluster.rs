@@ -846,7 +846,7 @@ mod tests {
 /// ```text
 /// kubectl create namespace aurcache
 /// kubectl apply -f kubernetes/kube-worker/namespace.yaml -f kubernetes/kube-worker/rbac.yaml
-/// kubectl -n aurcache-builds create quota wp5-deadline --hard=pods=1 --scopes=Terminating
+/// kubectl -n aurcache-builds create quota live-deadline --hard=pods=1 --scopes=Terminating
 /// kubectl -n aurcache create token aurcache-kube-worker   # into a kubeconfig
 /// AURCACHE_KUBE_TESTS=1 KUBECONFIG=... cargo test -p aurcache-worker-kube --lib \
 ///     kube_cluster::live -- --ignored --test-threads=1 --nocapture
@@ -875,13 +875,13 @@ mod live {
             .unwrap_or_else(|_| "aurcache-builds".to_owned())
     }
 
-    /// A name no earlier run used: `wp5-<tag>-<clock>`.
+    /// A name no earlier run used: `live-<tag>-<clock>`.
     fn unique(tag: &str) -> String {
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        format!("wp5-{tag}-{nanos:08x}")
+        format!("live-{tag}-{nanos:08x}")
     }
 
     async fn connect(dispatcher: &str) -> KubeCluster {
