@@ -228,8 +228,14 @@ paths.
 `AURCACHE_SIGNING_KEY_FILE` points at a key the operator supplies (a Docker
 secret, a separate mount); the server only reads it, and refuses to start
 when it is missing. It may be armored or binary; the newest subkey bound for
-signing, neither revoked nor expired, signs, else the primary key — as GnuPG
-picks, so a key whose old subkey expired signs with its new one.
+signing, neither revoked nor expired and with its secret in the file, signs,
+else the primary key if it signs — as GnuPG picks, so a key whose old subkey
+expired signs with its new one, and a key exported with
+`gpg --export-secret-subkeys` (a stub where the primary's secret was) signs
+with its subkey. The choice is made again for every signature, so a subkey
+that expires while the server runs gives way to the next; the server warns
+from 30 days before the one it signs with expires, and refuses at start a key
+in which nothing signs.
 
 A passphrase protects the file only from someone who cannot also read the
 passphrase, and the server reads it at every publish. It is optional

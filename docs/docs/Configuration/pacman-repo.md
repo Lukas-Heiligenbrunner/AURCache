@@ -158,7 +158,11 @@ the CA: losing it means a new key, which every client has to trust again.
 - `AURCACHE_SIGNING_KEY_FILE` points at a key you supply instead — a Docker
   secret, a separate mount. The server reads it and never writes it. It may be
   armored or binary, and needs a primary key or subkey that signs; a key
-  exported with `gpg --export-secret-keys` works.
+  exported with `gpg --export-secret-keys` works, and so does one exported
+  with `gpg --export-secret-subkeys`, its primary key kept offline. Its newest
+  valid signing subkey signs, as GnuPG picks; the server warns from 30 days
+  before that subkey expires, then signs with the next valid one, and refuses
+  to start with a key where nothing signs.
 - `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names a file holding a passphrase:
   a key the server creates is locked with it, and a supplied one unlocked
   with it. It protects a copy of the key file — a backup, a volume snapshot —
