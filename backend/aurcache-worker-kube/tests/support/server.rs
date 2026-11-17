@@ -87,6 +87,8 @@ impl Server {
             Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
             Arc::new(aurcache_utils::repository::Repository::new(&repo_root)),
             aurcache_activitylog::activity_utils::ActivityLog::discarding(),
+            // Read as the server reads them, so the port set above applies.
+            aurcache_api::listen::ListenAddresses::from_env().unwrap(),
         ));
         let base = format!("https://localhost:{port}");
         let mut up = false;
