@@ -5,7 +5,9 @@
 # sparse `pool.img` under its data directory and loop-mounts it, so the pool
 # takes space on the volume as builds write and gives it back as they are
 # deleted. That costs a loop device and a filesystem nested in another, which
-# the block volume avoids. The data volume grows to hold it.
+# the block volume avoids. The data volume grows to hold it: 210Gi, for the
+# image's 199.5 GiB at most (WORKER_DISK_MAX_DEFAULT=190G plus 5%) and the
+# filesystem's own overhead.
 #
 # A storage class that does not enforce the size it is asked for -- local-path
 # and other host-path provisioners -- gives the image the node's own disk, and
@@ -57,8 +59,9 @@ patches:
       - op: test
         path: /spec/volumeClaimTemplates/0/metadata/name
         value: data
-      # The image grows to WORKER_DISK_MAX plus 5% at most, beside the
-      # worker's identity. Raise both together.
+      # The image grows to WORKER_DISK_MAX plus 5% (at least 2 GiB) at most,
+      # beside the worker's identity, on a filesystem that keeps some of the
+      # volume for itself. Raise both together.
       - op: replace
         path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
-        value: 200Gi
+        value: 210Gi
