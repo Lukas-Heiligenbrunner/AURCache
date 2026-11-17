@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// What the agent and a worker must agree on to work together.
-pub const INTERFACE: u32 = 2;
+pub const INTERFACE: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuildSpec {

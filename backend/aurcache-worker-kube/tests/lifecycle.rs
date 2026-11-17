@@ -665,7 +665,7 @@ async fn a_package_the_server_refuses_is_not_retried() {
 /// A name that is not a package's never reaches a URL, or the pod.
 #[tokio::test(start_paused = true)]
 async fn a_manifest_naming_something_that_is_not_a_package_is_refused() {
-    let manifest = r#"{"interface":2,"report":{"interface":2,"ended":{"how":"exited","code":0},
+    let manifest = r#"{"interface":1,"report":{"interface":1,"ended":{"how":"exited","code":0},
         "peak_memory_bytes":null,"oom_kills":null,"disk_bytes":null,"vcs_commits":{}},
         "artifacts":[{"name":"../x","size":1,"sha256":"00"}]}"#;
     let rig = Rig::new(Script {
@@ -683,12 +683,12 @@ async fn a_manifest_naming_something_that_is_not_a_package_is_refused() {
 #[tokio::test(start_paused = true)]
 async fn a_manifest_from_another_interface_is_refused() {
     let rig = Rig::new(Script {
-        manifest: Some(r#"{"interface":3,"report":null,"artifacts":[]}"#.to_string()),
+        manifest: Some(r#"{"interface":2,"report":null,"artifacts":[]}"#.to_string()),
         ..Script::default()
     });
     let built = rig.build(&claimed(7, None)).await;
     assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
-    assert!(reason(&built).contains("interface 3"), "{}", reason(&built));
+    assert!(reason(&built).contains("interface 2"), "{}", reason(&built));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1008,4 +1008,38 @@ async fn no_ssh_link_without_a_key() {
             .iter()
             .any(|exec| exec.contains("ssh-link"))
     );
+}
+
+/// A key that cannot be read holds claims back, and claiming resumes once it
+/// can be: every build would otherwise end without it and be queued again.
+#[tokio::test(start_paused = true)]
+async fn no_claim_while_the_ssh_key_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("ssh-privatekey");
+    let hosts = dir.path().join("known_hosts");
+    let mut cfg = support::config();
+    cfg.credential = Some(aurcache_worker_container::ssh::CredentialFiles {
+        key: key.clone(),
+        known_hosts: hosts.clone(),
+    });
+    let cluster = support::FakeCluster::new(Script::default());
+    let executor = aurcache_worker_kube::executor::KubeExecutor::new(
+        cfg,
+        Arc::clone(&cluster),
+        "agent:1".to_string(),
+    );
+    assert!(!executor.ready_for_work(0).await, "no key file");
+    assert!(
+        cluster.calls().is_empty(),
+        "nothing is asked of the cluster without a key"
+    );
+
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .expect("ssh-keygen");
+    assert!(made.success());
+    std::fs::write(&hosts, "example.test ssh-ed25519 AAAA\n").unwrap();
+    assert!(executor.ready_for_work(0).await, "the key reads again");
 }

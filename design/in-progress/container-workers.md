@@ -138,7 +138,7 @@ in an arm64 container, starting an emulated build.
 
 **An interface number.** The agent and the worker are the same build when
 things are set up right, and the Kubernetes worker can be set up wrong (an
-agent image named by hand). The spec and the report carry `interface: 2`,
+agent image named by hand). The spec and the report carry `interface: 1`,
 and the agent refuses a spec with any other number, as `aurcache-build`
 refuses a worker that expects another interface (`build-runner.md`, step 0).
 

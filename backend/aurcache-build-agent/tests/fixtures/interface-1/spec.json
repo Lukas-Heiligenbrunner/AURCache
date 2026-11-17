@@ -21,9 +21,8 @@
     ],
     "cpus": 2.5,
     "scratch": "/work/scratch",
-    "credential": {
-      "key": "/aurcache/credentials/ssh-privatekey",
-      "known_hosts": "/aurcache/credentials/known_hosts"
+    "ssh": {
+      "known_hosts": "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
     }
   },
   {
@@ -38,23 +37,6 @@
     "vcs_sources": [],
     "cpus": null,
     "scratch": "/var/lib/aurcache-build",
-    "credential": null
-  },
-  {
-    "interface": 1,
-    "pkgbase": "hello",
-    "build_flags": [],
-    "makepkg_conf": "",
-    "pacman_conf": "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[aurcache]\nSigLevel = Optional TrustAll\nServer = http://aurcache.test/x86_64\n",
-    "mirrorlist": null,
-    "pgp_keys": [],
-    "keyserver": "hkps://keyserver.ubuntu.com",
-    "vcs_sources": [],
-    "cpus": null,
-    "scratch": "/var/lib/aurcache-build",
-    "credential": {
-      "key": "/aurcache/credentials/ssh-privatekey",
-      "known_hosts": null
-    }
+    "ssh": null
   }
 ]

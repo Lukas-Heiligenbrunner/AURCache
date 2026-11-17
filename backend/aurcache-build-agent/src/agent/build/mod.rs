@@ -59,6 +59,15 @@ const ENDING: Duration = Duration::from_secs(60);
 /// is normally there long before.
 const LINK_WAIT: Duration = Duration::from_secs(120);
 
+/// How long the worker's link is waited for, to be told it is not needed.
+const LINK_DECLINE: Duration = Duration::from_secs(10);
+
+/// The longest the source download may run with the SSH window open. It bounds
+/// how long a PKGBUILD's top level, which makepkg sources here, can ask the
+/// key for signatures: a source fetch is minutes, not the build timeout's
+/// hours.
+const DOWNLOAD_WINDOW: Duration = Duration::from_secs(20 * 60);
+
 /// What root finds programs through when it was started with nothing set.
 const ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
 
@@ -114,6 +123,7 @@ pub fn unpack(archive: &Path, into: &Path) -> ExitCode {
 fn build(work: &Work, log_file: Option<&Path>) -> Result<(), String> {
     init::placed().map_err(|e| e.to_string())?;
     init::stop_on_signal().map_err(|e| format!("installing the stop handler: {e}"))?;
+    init::seal_memory().map_err(|e| format!("making the agent non-dumpable: {e}"))?;
     // SAFETY: no other thread exists yet, so nothing reads the environment
     // or creates a file while these change.
     unsafe {
@@ -288,31 +298,35 @@ fn make_with(
     }
     let sources = match (&spec.ssh, listening) {
         (Some(ssh), Some(listening)) => {
-            let fetching = Fetching {
-                spec,
-                work,
-                scratch: &scratch,
-                agent: &agent,
-                user: &user,
-                output,
-            };
-            download(&fetching, ssh, listening)?;
-            Sources::Fetched
+            // The job's configuration, without the socket, so the PKGBUILD
+            // reads as it will in the build.
+            let conf = write_conf(spec, work, &scratch, &agent).map_err(at(SetupStep::Config))?;
+            let startdir = scratch.startdir(&spec.pkgbase);
+            if makepkg::fetches_over_ssh(&startdir, &conf, &user) {
+                let fetching = Fetching {
+                    spec,
+                    work,
+                    scratch: &scratch,
+                    agent: &agent,
+                    user: &user,
+                    output,
+                };
+                download(&fetching, ssh, listening)?;
+                Sources::Fetched
+            } else {
+                // No source needs the key: the window never opens, and the
+                // worker is told so.
+                listening.decline(LINK_DECLINE);
+                output.say("no source is fetched over SSH; the worker's SSH key is not used");
+                Sources::ToFetch
+            }
         }
         _ => Sources::ToFetch,
     };
     helper.open();
 
-    let conf = scratch.makepkg_conf();
-    let rendered = makepkg_conf::render(&Rendering {
-        job: &spec.makepkg_conf,
-        work,
-        scratch: &scratch,
-        cpus: spec.cpus,
-        agent: &agent,
-        ssh: None,
-    });
-    std::fs::write(&conf, rendered).map_err(at(SetupStep::Config))?;
+    // Again after a download, whose configuration named the socket.
+    let conf = write_conf(spec, work, &scratch, &agent).map_err(at(SetupStep::Config))?;
 
     output.say("running makepkg");
     let status = makepkg::run(
@@ -330,6 +344,26 @@ fn make_with(
         message: format!("makepkg could not be started: {e}"),
     })?;
     Ok(Made { status, user })
+}
+
+/// Write the build's `makepkg.conf`, without the SSH socket; its path.
+fn write_conf(
+    spec: &BuildSpec,
+    work: &Work,
+    scratch: &Scratch,
+    agent: &Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let conf = scratch.makepkg_conf();
+    let rendered = makepkg_conf::render(&Rendering {
+        job: &spec.makepkg_conf,
+        work,
+        scratch,
+        cpus: spec.cpus,
+        agent,
+        ssh: None,
+    });
+    std::fs::write(&conf, rendered)?;
+    Ok(conf)
 }
 
 /// What a download with the worker's SSH key runs with.
@@ -361,6 +395,17 @@ fn download(fetching: &Fetching<'_>, ssh: &SshAccess, listening: Listening) -> R
     let link = listening
         .accept(LINK_WAIT)
         .map_err(at(SetupStep::Credential))?;
+    // Before the socket opens: kill everything but the agent and the
+    // `ssh-link` that carries the link, so a daemon an earlier install
+    // scriptlet left as root cannot reach the key over the socket or through
+    // `ssh-link`'s descriptors.
+    if children::seal_except(link.peer(), ENDING) == Quiet::Lingering {
+        return Err(Failed {
+            step: SetupStep::Credential,
+            message: "a process outlived the kill before the SSH window; nothing is signed"
+                .to_string(),
+        });
+    }
     let known_hosts = credential::known_hosts(
         &ssh.known_hosts,
         &spec.scratch.join(credential::KNOWN_HOSTS),
@@ -382,7 +427,7 @@ fn download(fetching: &Fetching<'_>, ssh: &SshAccess, listening: Listening) -> R
     });
     let downloaded = std::fs::write(&conf, rendered).and_then(|()| {
         output.say("downloading the sources, with the worker's SSH key");
-        makepkg::run(
+        makepkg::run_within(
             &makepkg::Run {
                 startdir: &scratch.startdir(&spec.pkgbase),
                 conf: &conf,
@@ -391,6 +436,7 @@ fn download(fetching: &Fetching<'_>, ssh: &SshAccess, listening: Listening) -> R
             },
             user,
             output,
+            Some(DOWNLOAD_WINDOW),
         )
     });
     let link = relay.close();
@@ -404,12 +450,20 @@ fn download(fetching: &Fetching<'_>, ssh: &SshAccess, listening: Listening) -> R
         });
     }
     match downloaded {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => {
+        Ok(makepkg::Within::Ended(status)) if status.success() => Ok(()),
+        Ok(makepkg::Within::Ended(status)) => {
             output.say(&format!(
                 "downloading the sources with the SSH key failed (makepkg {}); the build \
                  fetches what is missing without it",
                 run::describe(status)
+            ));
+            Ok(())
+        }
+        Ok(makepkg::Within::TimedOut) => {
+            output.say(&format!(
+                "the source download did not finish within {} seconds and was stopped; the \
+                 build fetches what is missing without the SSH key",
+                DOWNLOAD_WINDOW.as_secs()
             ));
             Ok(())
         }
@@ -478,7 +532,7 @@ mod tests {
     use super::{is_one_name, read_spec};
     use aurcache_build_agent::layout::Work;
 
-    const SPEC: &str = include_str!("../../../tests/fixtures/interface-2/spec.json");
+    const SPEC: &str = include_str!("../../../tests/fixtures/interface-1/spec.json");
 
     /// A job's work directory, for as long as this is held.
     struct Job {
@@ -512,9 +566,9 @@ mod tests {
     /// it is read: its other fields may mean something else.
     #[test]
     fn another_interface_is_refused_by_its_number() {
-        let other = job(&serde_json::json!({"interface": 3, "packages": []}));
+        let other = job(&serde_json::json!({"interface": 2, "packages": []}));
         let refused = read_spec(&other.work).unwrap_err();
-        assert!(refused.contains("interface 3"), "{refused}");
+        assert!(refused.contains("interface 2"), "{refused}");
 
         let mut spec = fixture();
         spec["interface"] = 0.into();
