@@ -40,6 +40,8 @@ pub struct Config {
     /// hex digits of its fingerprint.
     pub dispatcher: String,
     pub builder_image: String,
+    /// The pull policy of every image a pod of this worker's runs: the
+    /// builder's, and the agent's.
     pub pull_policy: String,
     pub agent_image: AgentImage,
     pub credential_secret: Option<String>,

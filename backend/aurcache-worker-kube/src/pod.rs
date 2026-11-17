@@ -182,6 +182,7 @@ fn stage(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: STAGE.to_string(),
         image: Some(inputs.agent_image.to_string()),
+        image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(
             [&agent_path(), "stage", "--work", WORK, "--tools", TOOLS]
                 .map(String::from)
@@ -226,6 +227,7 @@ fn hold(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: HOLD.to_string(),
         image: Some(inputs.agent_image.to_string()),
+        image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(vec![agent_path(), "hold".to_string()]),
         security_context: Some(unprivileged()),
         resources: Some(ResourceRequirements {
@@ -478,6 +480,7 @@ mod tests {
                     "initContainers": [{
                         "name": "stage",
                         "image": "reg/agent@sha256:1",
+                        "imagePullPolicy": "Always",
                         "command": ["/usr/local/bin/aurcache-build-agent", "stage",
                                     "--work", "/work", "--tools", "/aurcache/bin"],
                         "securityContext": unprivileged,
@@ -513,6 +516,7 @@ mod tests {
                         {
                             "name": "hold",
                             "image": "reg/agent@sha256:1",
+                            "imagePullPolicy": "Always",
                             "command": ["/usr/local/bin/aurcache-build-agent", "hold"],
                             "securityContext": unprivileged,
                             "resources": {

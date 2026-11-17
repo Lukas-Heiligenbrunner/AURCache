@@ -367,6 +367,7 @@ fn render(cfg: &Config, agent_image: &str, name: &str) -> Pod {
             containers: vec![Container {
                 name: PROBE.to_string(),
                 image: Some(agent_image.to_string()),
+                image_pull_policy: Some(cfg.pull_policy.clone()),
                 command: Some(vec![pod::agent_path(), "hold".to_string()]),
                 security_context: Some(restricted()),
                 ..Container::default()
