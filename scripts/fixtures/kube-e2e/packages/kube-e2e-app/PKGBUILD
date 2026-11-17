@@ -1,0 +1,20 @@
+# Depends on kube-e2e-dep, which only AURCache's repository has: the build
+# fails unless the build pod installed it from there before makepkg ran.
+pkgname=kube-e2e-app
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: builds against a dependency from AURCache's repository"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+depends=('kube-e2e-dep')
+
+build() {
+  test -f /usr/share/kube-e2e-dep/marker
+  echo "kube-e2e-app: found kube-e2e-dep's marker"
+}
+
+package() {
+  install -d "${pkgdir}/usr/share/kube-e2e-app"
+  echo "kube-e2e-app marker" > "${pkgdir}/usr/share/kube-e2e-app/marker"
+}
