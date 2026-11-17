@@ -1,47 +1,43 @@
-//! The legacy container executor.
+//! The Docker worker's executor: each job in a container of its own, made
+//! from the builder image, with the build agent running the build.
 //!
-//! Reproduces the pre-worker build strategy: create a container from the
-//! builder image, bind a shared build directory into it, run `makepkg`, stream
-//! its output as build logs, then upload whatever landed in the directory.
-//!
-//! This is a compatibility path. It builds in a container rather than a clean
-//! chroot, so a build can see whatever the image accumulated from the previous
-//! `pacman -Syu`, and it offers none of the chroot worker's caches or
-//! credential handling. New deployments should use `aurcache-worker`.
+//! Per job: the build directory gets the agent and the job's inputs; the
+//! container is created as [`container::render`] says and its output streamed
+//! into the build log; once it ends, the agent's report (or the engine's word
+//! when there is none) becomes the terminal report, and the packages in
+//! `pkg/` are uploaded. The directory and the container are removed on every
+//! path.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
+use aurcache_build_agent::layout::Work;
 use aurcache_common::worker::{BuildOutcome, CompleteReport};
-use aurcache_worker_core::artifacts;
+use aurcache_worker_container::arch::{self, Platform};
+use aurcache_worker_container::outcome::{self, MemoryLimit};
+use aurcache_worker_container::spec::{self, SpecOptions};
+use aurcache_worker_container::{agent, unsupported};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
-use aurcache_worker_core::protocol::{log, upload_artifacts};
-use aurcache_worker_core::report::{self, Exit};
-use aurcache_worker_core::settings::WorkerSettings;
+use aurcache_worker_core::protocol::{Stop, log, upload_artifacts};
+use aurcache_worker_core::settings::{DEFAULT_KEYSERVER, WorkerSettings};
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, EndpointSettings, HostConfig, NetworkingConfig};
+use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
-    StartContainerOptions,
+    AttachContainerOptions, CreateContainerOptions, CreateImageOptions, InspectContainerOptions,
+    KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::commands;
+use crate::cleanup::{self, Leftover};
 use crate::config::{BuildDirs, Config};
+use crate::container::{self, Build};
+use crate::ending::{Verdict, ending};
 use crate::network::{self, NetworkPlan};
-
-/// Where the shared build directory is mounted inside the container. The
-/// server renders `PKGDEST` to this path, so makepkg writes finished packages
-/// straight into the bind mount.
-const CONTAINER_PKGDEST: &str = "/output";
-/// Where sources are placed, inside the same bind mount.
-const CONTAINER_SRC: &str = "/output/src";
-/// Where the job's makepkg config is written, inside the bind mount.
-const MAKEPKG_CONF_PATH: &str = "/output/makepkg.conf";
-const BUILD_USER: &str = "ab";
+use crate::workdir;
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
@@ -53,18 +49,43 @@ pub struct DockerExecutor {
     /// How spawned build containers are attached to the network, so the repo
     /// URL in the job's pacman.conf resolves from inside them.
     network: NetworkPlan,
+    /// The agent binary each build directory gets a copy of.
+    agent: PathBuf,
+}
+
+/// How a build container's run ended, as this worker saw it.
+struct Run {
+    /// Why the worker stopped it, when it did.
+    stop: Option<Stop>,
+    elapsed: Duration,
+    status: Option<i64>,
+}
+
+/// The container a job runs in, and where.
+struct Target<'a> {
+    name: String,
+    platform: Platform,
+    dirs: &'a BuildDirs,
 }
 
 impl DockerExecutor {
-    /// Connect to the Docker daemon over the mounted socket.
+    /// Connect to the Docker daemon over the mounted socket, and find the
+    /// agent builds are run with.
     pub async fn connect(cfg: Config) -> Result<Self> {
+        let agent = agent::locate().with_context(|| {
+            format!(
+                "the Docker worker runs each build with aurcache-build-agent; install it at {} \
+                 or name it with {}",
+                agent::INSTALLED,
+                agent::VARIABLE
+            )
+        })?;
         let docker = Docker::connect_with_unix_defaults()?;
         docker.ping().await.map_err(|e| {
             anyhow!(
                 "connection to the Docker socket failed: {e}\n\
-                 The compatibility builder needs /var/run/docker.sock mounted into this \
-                 container. If using podman, install 'podman-docker' to provide the docker \
-                 socket, or run the chroot worker instead (see the Build Workers docs)."
+                 The Docker worker needs /var/run/docker.sock mounted into this container. \
+                 With Podman, install 'podman-docker' to provide the Docker socket."
             )
         })?;
         let network = network::resolve(
@@ -72,15 +93,17 @@ impl DockerExecutor {
             std::env::var("HOSTNAME").ok(),
         );
         tracing::info!("build containers will use network: {network:?}");
+        tracing::info!("builds run with the agent at {}", agent.display());
         Ok(Self {
             cfg: Live::new(cfg),
             docker,
             network,
+            agent,
         })
     }
 
-    /// Local and container-visible paths for one build's shared directory.
-    fn job_dirs(&self, cfg: &Config, build_id: i32) -> BuildDirs {
+    /// Local and container-visible paths for one build's directory.
+    fn job_dirs(cfg: &Config, build_id: i32) -> BuildDirs {
         let name = build_id.to_string();
         BuildDirs {
             host: cfg.dirs.host.join(&name),
@@ -93,7 +116,7 @@ impl DockerExecutor {
         cfg: &Config,
         client: &WorkerClient,
         build_id: i32,
-        arch: &str,
+        platform: Platform,
     ) -> Result<()> {
         log(
             client,
@@ -101,12 +124,10 @@ impl DockerExecutor {
             &format!("[worker] pulling {}\n", cfg.builder_image),
         )
         .await;
-        let platform = docker_arch(arch)
-            .with_context(|| format!("unknown architecture {arch:?}: refusing the pull"))?;
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions {
                 from_image: Some(cfg.builder_image.clone()),
-                platform: format!("linux/{platform}"),
+                platform: container::platform_name(platform),
                 ..Default::default()
             }),
             None,
@@ -140,158 +161,102 @@ impl DockerExecutor {
         client: &Arc<WorkerClient>,
         claimed: &ClaimedJob,
     ) -> Result<CompleteReport> {
-        let dirs = self.job_dirs(cfg, claimed.job.build_id);
+        let job = &claimed.job;
+        unsupported::warn(client, job).await;
+        // Building for the wrong architecture is worse than refusing the job.
+        let Some(platform) = arch::platform(&job.arch) else {
+            bail!("unknown architecture {:?}: refusing the job", job.arch);
+        };
+        let dirs = Self::job_dirs(cfg, job.build_id);
+        let target = Target {
+            name: format!("aurcache_build_{}", job.build_id),
+            platform,
+            dirs: &dirs,
+        };
 
-        // A crash mid-job could have left a tree behind under this id.
-        let _ = std::fs::remove_dir_all(&dirs.local);
-        let src_dir = dirs.local.join("src");
-        std::fs::create_dir_all(&src_dir)
-            .with_context(|| format!("creating {}", src_dir.display()))?;
-        // The build container runs as its image's own unprivileged user, whose
-        // uid this process cannot know and does not share. It must be able to
-        // write sources, `makepkg.conf` and finished packages here, so the
-        // directory is world-writable — as the pre-worker builder also made it.
-        // It lives inside a per-build directory that is removed afterwards.
-        world_writable(&dirs.local);
-        world_writable(&src_dir);
+        // A worker that died mid-build could have left its container and its
+        // directory behind under this id.
+        self.remove_container(&target.name).await;
+        self.clear(cfg, &target).await;
 
-        // Removed on every path, not just the happy one: any early return in
-        // `build_in` -- a failed download, pull, container or upload -- would
-        // otherwise leave the whole directory behind.
-        let outcome = self.build_in(cfg, client, claimed, &dirs).await;
-        let _ = std::fs::remove_dir_all(&dirs.local);
+        // Cleared on every path: any early return in `build_in` -- a failed
+        // download, pull, container or upload -- would otherwise leave the
+        // whole directory behind.
+        let outcome = self.build_in(cfg, client, claimed, &target).await;
+        self.clear(cfg, &target).await;
         outcome
     }
 
-    /// Build `job` in its prepared directories and upload what it produced.
+    /// Build the job in its directory and upload what it produced.
     async fn build_in(
         &self,
         cfg: &Config,
         client: &Arc<WorkerClient>,
         claimed: &ClaimedJob,
-        dirs: &BuildDirs,
+        target: &Target<'_>,
     ) -> Result<CompleteReport> {
-        let job = &claimed.job;
-        let build_id = job.build_id;
-        let BuildDirs {
-            host: host_dir,
-            local: local_dir,
-        } = dirs;
-        let src_dir = local_dir.join("src");
-
+        let build_id = claimed.job.build_id;
         let source = client
             .source(build_id)
             .await
             .context("downloading source")?;
-        artifacts::extract_source(&source, &src_dir).context("extracting source")?;
+        let spec = spec::for_job(claimed, client.repo(), spec_options(cfg));
+        workdir::prepare(&target.dirs.local, &self.agent, &spec, &source)
+            .context("preparing the build directory")?;
 
-        self.pull_image(cfg, client, build_id, &job.arch).await?;
+        self.pull_image(cfg, client, build_id, target.platform)
+            .await?;
 
-        // Bind-mounted rather than written in: see wrap_with_config.
-        let mut binds = vec![format!("{}:{CONTAINER_PKGDEST}", host_dir.display())];
-        if let Some(list) = &claimed.mirrorlist {
-            let path = local_dir.join("mirrorlist");
-            std::fs::write(&path, list).with_context(|| format!("writing {}", path.display()))?;
-            binds.push(etc_bind(host_dir, "mirrorlist", "/etc/pacman.d/mirrorlist"));
-        }
-
-        // The server sends no `[repo]` section; append the one rendered for the
-        // host this worker reaches the server on.
-        let pacman_conf =
-            aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
-        let path = local_dir.join("pacman.conf");
-        std::fs::write(&path, &pacman_conf)
-            .with_context(|| format!("writing {}", path.display()))?;
-        binds.push(etc_bind(host_dir, "pacman.conf", "/etc/pacman.conf"));
-
-        let cmd = commands::wrap_with_config(
-            &commands::with_layout(&job.makepkg_conf, CONTAINER_PKGDEST),
-            MAKEPKG_CONF_PATH,
-            &commands::build_build_command(
-                &job.pkgbase,
-                &job.build_flags,
-                Path::new(CONTAINER_SRC),
-                MAKEPKG_CONF_PATH,
-            ),
-        );
-
-        let container_name = format!("aurcache_build_{build_id}");
-        let body = ContainerCreateBody {
-            image: Some(cfg.builder_image.clone()),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            open_stdin: Some(false),
-            user: Some(BUILD_USER.to_string()),
-            cmd: Some(vec![
-                "bash".to_string(),
-                "-leco".to_string(),
-                "pipefail".to_string(),
-                cmd,
-            ]),
-            host_config: Some(HostConfig {
-                auto_remove: Some(false),
-                nano_cpus: cfg.tunables.nano_cpus(),
-                // Both, and equal: `MEMORY_LIMIT` is RAM and swap together,
-                // which Docker spells as a `MemorySwap` total equal to the
-                // `Memory` limit -- no swap beyond it. `MemorySwap` alone is
-                // refused ("you should always set the Memory limit when using
-                // Memoryswap limit"), which is how this limit went unapplied.
-                memory: cfg.tunables.memory_bytes(),
-                memory_swap: cfg.tunables.memory_bytes(),
-                binds: Some(binds),
-                network_mode: self.network.network_mode(),
-                ..Default::default()
-            }),
-            networking_config: self
-                .network
-                .endpoint_network()
-                .map(|name| NetworkingConfig {
-                    endpoints_config: Some(std::collections::HashMap::from([(
-                        name.to_string(),
-                        EndpointSettings::default(),
-                    )])),
-                }),
-            ..Default::default()
+        let body = container::render(&Build {
+            image: &cfg.builder_image,
+            host_dir: &target.dirs.host,
+            tunables: cfg.tunables,
+            network: &self.network,
+        });
+        let id = self.create(target, body).await?;
+        let run = self.run_container(client, claimed, &id).await;
+        let oom_killed = match &run {
+            Ok(_) => self.oom_killed(&id).await,
+            Err(_) => false,
         };
+        self.remove_container(&id).await;
+        let run = run?;
 
+        let report = outcome::complete(
+            run.stop,
+            run.elapsed,
+            ending(
+                workdir::report(&target.dirs.local),
+                Verdict {
+                    status: run.status,
+                    oom_killed,
+                },
+            ),
+            memory_limit(cfg),
+        );
+        if report.outcome == BuildOutcome::Succeeded {
+            upload_artifacts(client, build_id, &Work::new(&target.dirs.local).pkg()).await?;
+        }
+        Ok(report)
+    }
+
+    async fn create(&self, target: &Target<'_>, body: ContainerCreateBody) -> Result<String> {
         let created = self
             .docker
             .create_container(
                 Some(CreateContainerOptions {
-                    name: Some(container_name.clone()),
+                    name: Some(target.name.clone()),
                     // The builder image is multi-arch. Without this the daemon
                     // creates the host's variant (containerd image store) or
                     // whichever was pulled last (classic store): an x86_64
-                    // build for an aarch64 job either way. 0.5.0 passed it.
-                    // `pull_image` has refused an architecture this lacks.
-                    platform: docker_arch(&job.arch)
-                        .map(|platform| format!("linux/{platform}"))
-                        .unwrap_or_default(),
+                    // build for an aarch64 job either way.
+                    platform: container::platform_name(target.platform),
                 }),
                 body,
             )
             .await
             .context("creating build container")?;
-
-        let result = self.run_container(client, claimed, &created.id).await;
-
-        // Always remove the container, whatever happened to the build.
-        let _ = self
-            .docker
-            .remove_container(
-                &created.id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
-
-        let report = result?;
-        if report.outcome == BuildOutcome::Succeeded {
-            upload_artifacts(client, build_id, local_dir).await?;
-        }
-        Ok(report)
+        Ok(created.id)
     }
 
     /// Start the container, stream its output, and wait for it while honouring
@@ -301,7 +266,7 @@ impl DockerExecutor {
         client: &Arc<WorkerClient>,
         claimed: &ClaimedJob,
         container_id: &str,
-    ) -> Result<CompleteReport> {
+    ) -> Result<Run> {
         let build_id = claimed.job.build_id;
         let attached = self
             .docker
@@ -335,19 +300,17 @@ impl DockerExecutor {
         });
 
         let watch = claimed.watch();
-        let mut wait = self.docker.wait_container(
-            container_id,
-            None::<bollard::query_parameters::WaitContainerOptions>,
-        );
-        // What the container said as it ended; nothing, when it was stopped.
-        let mut exit = Exit::Unknown;
+        let mut wait = self
+            .docker
+            .wait_container(container_id, None::<WaitContainerOptions>);
+        let mut status = None;
         let stop = tokio::select! {
             next = wait.next() => {
-                exit = match next {
-                    Some(Ok(res)) => Exit::Code(res.status_code),
+                status = match next {
+                    Some(Ok(res)) => Some(res.status_code),
                     // A non-zero exit surfaces here as an error carrying the code.
                     Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => {
-                        Exit::Code(code)
+                        Some(code)
                     }
                     Some(Err(e)) => {
                         // The pump would otherwise stay detached against a
@@ -355,24 +318,79 @@ impl DockerExecutor {
                         pump.abort();
                         return Err(e).context("waiting for build container");
                     }
-                    None => Exit::Unknown,
+                    None => None,
                 };
                 None
             }
             stop = watch.stopped() => {
+                // The agent is PID 1: killing it ends everything the build
+                // started with it.
                 let _ = self.docker.kill_container(
                     container_id,
-                    None::<bollard::query_parameters::KillContainerOptions>,
+                    None::<KillContainerOptions>,
                 ).await;
                 Some(stop)
             }
         };
 
         build_log.close(vec![pump], stop).await;
-        // The legacy container builder samples neither the build tree nor the
-        // sources it was made from, so nothing is measured on either path.
-        Ok(report::ended(stop, watch.elapsed(), exit))
+        Ok(Run {
+            stop,
+            elapsed: watch.elapsed(),
+            status,
+        })
     }
+
+    /// Whether the engine says the kernel's OOM killer ended a process in
+    /// the container; no, when it cannot say.
+    async fn oom_killed(&self, container_id: &str) -> bool {
+        self.docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .ok()
+            .and_then(|inspected| inspected.state)
+            .and_then(|state| state.oom_killed)
+            .unwrap_or(false)
+    }
+
+    async fn remove_container(&self, name_or_id: &str) {
+        cleanup::remove_container(&self.docker, name_or_id).await;
+    }
+
+    /// Remove a build's directory, logging what could not be removed.
+    async fn clear(&self, cfg: &Config, target: &Target<'_>) {
+        let leftover = Leftover {
+            dirs: target.dirs,
+            image: &cfg.builder_image,
+            platform: target.platform,
+            name: format!("{}_clean", target.name),
+        };
+        if let Err(e) = cleanup::clear(&self.docker, &leftover).await {
+            tracing::warn!(
+                "could not remove the build directory {}: {e:#}",
+                target.dirs.local.display()
+            );
+        }
+    }
+}
+
+/// What this worker decides about a build beside what the job says.
+fn spec_options(cfg: &Config) -> SpecOptions {
+    SpecOptions {
+        cpus: cfg.tunables.cpus(),
+        keyserver: DEFAULT_KEYSERVER.to_string(),
+        scratch: PathBuf::from(container::SCRATCH),
+        credential: None,
+    }
+}
+
+/// The memory limit this worker set, for naming in an out-of-memory failure.
+fn memory_limit(cfg: &Config) -> Option<MemoryLimit> {
+    let bytes = cfg.tunables.memory_bytes()?;
+    Some(MemoryLimit {
+        bytes: u64::try_from(bytes).ok()?,
+        variable: "MEMORY_LIMIT",
+    })
 }
 
 impl Executor for DockerExecutor {
@@ -389,10 +407,7 @@ impl Executor for DockerExecutor {
     }
 
     fn describe_self(&self) -> String {
-        format!(
-            "legacy container ({}) [deprecated]",
-            self.cfg.current().builder_image
-        )
+        format!("docker ({})", self.cfg.current().builder_image)
     }
 
     /// Nothing here needs the machine's say beyond what the declaration
@@ -406,81 +421,5 @@ impl Executor for DockerExecutor {
         self.cfg
             .replace(self.cfg.current().with_settings(&settings));
         settings
-    }
-}
-
-/// Bind the build directory's `name` over `target`, a file a package owns.
-///
-/// Writable, not `:ro`: with `CheckSpace` on (as in Arch's stock
-/// `pacman.conf`), a `pacman -Syu` that upgrades the owning package
-/// (`pacman`, `pacman-mirrorlist`) checks every mount point the transaction
-/// writes to, and a single-file bind is its own mount point. A read-only one
-/// fails every build with "not enough free disk space" until the builder
-/// image catches up with the repositories. Writable, pacman keeps the file,
-/// since it differs from the packaged one, and writes any new default beside
-/// it as `.pacnew`.
-///
-/// This exposes nothing: the container already reaches the same file through
-/// the build directory at [`CONTAINER_PKGDEST`], which is removed after the
-/// build.
-fn etc_bind(host_dir: &Path, name: &str, target: &str) -> String {
-    format!("{}/{name}:{target}", host_dir.display())
-}
-
-/// Best-effort `chmod 0777`. A failure is logged here; the build then fails on
-/// the write it could not make, with its own error.
-fn world_writable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)) {
-            tracing::warn!("could not make {} writable: {e}", path.display());
-        }
-    }
-}
-
-/// Map an Arch architecture name onto Docker's platform vocabulary.
-///
-/// `None` for anything unrecognised: pulling the amd64 image for a job that
-/// is not amd64 builds the wrong thing (or fails confusingly), which is
-/// worse than refusing the job with a clear error.
-fn docker_arch(arch: &str) -> Option<&'static str> {
-    Some(match arch {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        "armv7h" => "arm/v7",
-        "riscv64" => "riscv64",
-        _ => return None,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_arch_names_to_docker_platforms() {
-        assert_eq!(docker_arch("x86_64"), Some("amd64"));
-        assert_eq!(docker_arch("aarch64"), Some("arm64"));
-        assert_eq!(docker_arch("armv7h"), Some("arm/v7"));
-        assert_eq!(docker_arch("riscv64"), Some("riscv64"));
-    }
-
-    /// A read-only bind over a packaged file fails every `pacman -Syu` that
-    /// upgrades its package.
-    #[test]
-    fn etc_binds_are_writable() {
-        assert_eq!(
-            etc_bind(Path::new("/srv/build/7"), "pacman.conf", "/etc/pacman.conf"),
-            "/srv/build/7/pacman.conf:/etc/pacman.conf"
-        );
-    }
-
-    /// An arch nobody taught the mapper must refuse the job, not silently
-    /// pull amd64 and build the wrong thing.
-    #[test]
-    fn unknown_arches_map_to_nothing() {
-        assert_eq!(docker_arch("sparc"), None);
-        assert_eq!(docker_arch(""), None);
     }
 }

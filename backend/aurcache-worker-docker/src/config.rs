@@ -1,10 +1,9 @@
-//! Configuration for the legacy container executor.
+//! Configuration for the Docker worker.
 //!
-//! These are the pre-worker environment variables, read under their original
-//! names and with their original meanings, because the whole point of this
-//! executor is that an existing deployment keeps behaving as it did. The two
-//! limits are declared settings as well (see [`crate::settings`]), so they can
-//! also be set from the server -- `CPU_LIMIT` still pins, as it always did.
+//! The environment variables keep the names and meanings deployments already
+//! set: `BUILDER_IMAGE`, `BUILD_ARTIFACT_DIR`, `BUILD_ARTIFACT_DIR_LOCAL`. The
+//! two limits are declared settings as well (see [`crate::settings`]), so they
+//! can also be set from the server; set in the environment, they pin.
 
 use crate::settings::keys;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
@@ -25,12 +24,12 @@ pub struct BuildDirs {
     pub local: PathBuf,
 }
 
-/// Fully-resolved configuration for the container executor.
+/// Fully-resolved configuration for the Docker worker.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Image each build container is created from (`BUILDER_IMAGE`).
     pub builder_image: String,
-    /// Shared build directory, host and local views.
+    /// Where build directories go, host and local views.
     pub dirs: BuildDirs,
     /// The declared settings, as read from the worker's resolution of them.
     pub tunables: Tunables,
@@ -46,13 +45,12 @@ pub struct Tunables {
     pub memory_limit: i64,
 }
 
-/// The platforms the pre-worker builder built for: `pacman_mirrors::Platform::ALL`,
+/// The platforms the server builds for: `pacman_mirrors::Platform::ALL`,
 /// spelled out because that crate would bring a database driver with it.
 const PLATFORMS: [&str; 3] = ["x86_64", "aarch64", "armv7h"];
 
-/// The default builder image. Not the pre-worker `aurcache-builder`: 0.5.0
-/// keeps pulling that before every build and runs paru in it, which this
-/// image does not ship.
+/// The default builder image: `aurcache-builder-v2`, not `aurcache-builder`,
+/// which is made for building with paru.
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
 
 /// The protocol configuration for this executor, its settings declared
@@ -63,7 +61,7 @@ pub fn core_from_env() -> CoreConfig {
         aurcache_common::version::full_version(env!("CARGO_PKG_VERSION")),
         crate::settings::docker_settings(),
     );
-    // Every platform unless told otherwise, as the pre-worker builder did:
+    // Every platform unless told otherwise:
     // each build runs in an image pulled for its platform, and the host's
     // binfmt runs a foreign one. Checking for the handlers instead would
     // stop builds that used to work, since a container rarely sees them.
@@ -123,11 +121,23 @@ impl Tunables {
                     .unwrap_or(crate::settings::DEFAULT_CPU_LIMIT),
             )
             .unwrap_or_default(),
-            // Negative is unlimited for memory, as it always was.
+            // Negative is unlimited for memory.
             memory_limit: settings
                 .integer(keys::MEMORY_LIMIT)
                 .unwrap_or(crate::settings::DEFAULT_MEMORY_LIMIT),
         }
+    }
+
+    /// The CPUs a build may use, which size its parallelism; `None` for
+    /// unlimited.
+    #[must_use]
+    pub fn cpus(&self) -> Option<f64> {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a CPU count needs no more than f64's 53 bits"
+        )]
+        let cpus = self.cpu_limit as f64 / 1000.0;
+        (self.cpu_limit > 0).then_some(cpus)
     }
 
     /// Docker's `NanoCpus`, or `None` for unlimited.
@@ -162,7 +172,7 @@ mod tests {
         }
     }
 
-    /// The pre-worker defaults (`0` CPU, `-1` memory) meant "unlimited"; they
+    /// The defaults (`0` CPU, `-1` memory) mean "unlimited"; they
     /// must not be passed to Docker as a literal zero, which means something
     /// else entirely.
     #[test]
@@ -174,11 +184,13 @@ mod tests {
     #[test]
     fn limits_convert_to_docker_units() {
         assert_eq!(cfg(2000, 512).nano_cpus(), Some(2_000_000_000));
+        assert_eq!(cfg(1500, 512).cpus(), Some(1.5));
+        assert_eq!(cfg(0, 512).cpus(), None);
         assert_eq!(cfg(2000, 512).memory_bytes(), Some(512 * 1024 * 1024));
     }
 
     /// A limit set on the server reaches the next container in Docker's units,
-    /// and removing it goes back to the old default of unlimited.
+    /// and removing it goes back to the default of unlimited.
     ///
     /// Reads the process environment, as the worker does, so it asserts nothing
     /// on a machine that pins either limit -- a pin outranks the server, which
