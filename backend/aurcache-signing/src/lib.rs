@@ -15,12 +15,12 @@ use aurcache_common::server_env;
 use aurcache_common::settings::parse_boolean;
 use pgp::composed::{
     ArmorOptions, Deserializable, DetachedSignature, KeyType, SecretKeyParamsBuilder,
-    SignedPublicKey, SignedSecretKey, SubkeyParamsBuilder,
+    SignedPublicKey, SignedSecretKey, SignedSecretSubKey, SubkeyParamsBuilder,
 };
 use pgp::crypto::hash::HashAlgorithm;
 use pgp::packet::SignatureType;
 use pgp::ser::Serialize;
-use pgp::types::{Fingerprint, KeyDetails, KeyId, KeyVersion, Password};
+use pgp::types::{Fingerprint, KeyDetails, KeyId, KeyVersion, Password, Timestamp};
 use std::io::{BufReader, Read};
 use std::path::Path;
 
@@ -311,23 +311,40 @@ struct Issuer {
     id: KeyId,
 }
 
-/// The first subkey bound for signing and not revoked, else the primary key:
-/// a key this server generated signs with its subkey, and one an operator
-/// supplies may sign with either.
+/// The newest subkey that signs now, else the primary key, as GnuPG picks: a
+/// key this server generated signs with its one subkey, and one an operator
+/// supplies -- whose old subkeys may have expired -- with its newest valid one.
 fn signer(key: &SignedSecretKey) -> Signer {
+    let now = u64::from(Timestamp::now().as_secs());
     key.secret_subkeys
         .iter()
-        .position(|subkey| {
-            let revoked = subkey
-                .signatures
-                .iter()
-                .any(|sig| sig.typ() == Some(SignatureType::SubkeyRevocation));
-            let signs = subkey.signatures.iter().any(|sig| {
-                sig.typ() == Some(SignatureType::SubkeyBinding) && sig.key_flags().sign()
-            });
-            signs && !revoked
-        })
-        .map_or(Signer::Primary, Signer::Subkey)
+        .enumerate()
+        .filter(|(_, subkey)| signs_at(subkey, now))
+        .max_by_key(|(_, subkey)| subkey.key.created_at().as_secs())
+        .map_or(Signer::Primary, |(index, _)| Signer::Subkey(index))
+}
+
+/// Whether `subkey` signs at `now` (seconds): its latest binding says it
+/// signs and has not expired, and nothing revokes it.
+fn signs_at(subkey: &SignedSecretSubKey, now: u64) -> bool {
+    let revoked = subkey
+        .signatures
+        .iter()
+        .any(|sig| sig.typ() == Some(SignatureType::SubkeyRevocation));
+    let binding = subkey
+        .signatures
+        .iter()
+        .filter(|sig| sig.typ() == Some(SignatureType::SubkeyBinding))
+        .max_by_key(|sig| sig.created().map_or(0, Timestamp::as_secs));
+    let Some(binding) = binding else {
+        return false;
+    };
+    let created = u64::from(subkey.key.created_at().as_secs());
+    let expired = binding
+        .key_expiration_time()
+        .map(|lifetime| u64::from(lifetime.as_secs()))
+        .is_some_and(|lifetime| lifetime > 0 && created + lifetime <= now);
+    binding.key_flags().sign() && !revoked && !expired
 }
 
 #[cfg(test)]
@@ -575,6 +592,80 @@ mod tests {
                 verified.status
             );
         }
+    }
+
+    /// A supplied key whose first signing subkey has expired -- as GnuPG
+    /// keys do, by default -- signs with its newest valid one, whose
+    /// signatures GnuPG accepts.
+    #[test]
+    fn an_expired_subkey_is_passed_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped: gpg is not installed");
+            return;
+        };
+        let user = "Rotated <ops@localhost>";
+        let made = gpg.unattended(&[
+            "--faked-system-time",
+            "20200101T000000",
+            "--quick-gen-key",
+            user,
+            "ed25519",
+            "cert",
+            "never",
+        ]);
+        if !made.success {
+            eprintln!("skipped: gpg could not make a key ({})", made.stderr);
+            return;
+        }
+        let primary = made
+            .status
+            .lines()
+            .find_map(|line| line.strip_prefix("[GNUPG:] KEY_CREATED P "))
+            .expect("gpg names the key it made")
+            .trim()
+            .to_string();
+        // Made in 2020, for a day: long expired.
+        let expired = gpg.run(&[
+            "--faked-system-time",
+            "20200102T000000",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-add-key",
+            &primary,
+            "ed25519",
+            "sign",
+            "1d",
+        ]);
+        assert!(expired.success, "gpg --quick-add-key: {}", expired.stderr);
+        let current = gpg.unattended(&["--quick-add-key", &primary, "ed25519", "sign", "never"]);
+        assert!(current.success, "gpg --quick-add-key: {}", current.stderr);
+        let exported = Command::new("gpg")
+            .arg("--homedir")
+            .arg(&gpg.home)
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(["--armor", "--export-secret-keys", &primary])
+            .output()
+            .unwrap();
+        assert!(exported.status.success());
+        let path = tmp.path().join("rotated.asc");
+        std::fs::write(&path, &exported.stdout).unwrap();
+
+        let key = InstanceKey::load(&path, None).unwrap();
+        assert_eq!(key.signer, Signer::Subkey(1));
+        let content = tmp.path().join("content");
+        std::fs::write(&content, CONTENT).unwrap();
+        let signature = tmp.path().join("content.sig");
+        std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
+        let verified = gpg.verify([signature.to_str().unwrap(), content.to_str().unwrap()]);
+        assert!(verified.success, "gpg --verify: {}", verified.stderr);
+        assert!(
+            verified.status.contains("[GNUPG:] GOODSIG") && !verified.status.contains("EXPKEYSIG"),
+            "{}",
+            verified.status
+        );
     }
 
     /// A throwaway GnuPG home, whose agent is stopped when it is dropped.
