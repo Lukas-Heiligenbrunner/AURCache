@@ -117,12 +117,27 @@ unlike on the chroot worker.
 The key never enters a build container. The worker holds it and answers for
 it: while makepkg downloads a build's sources, before anything is installed
 for the build, ssh in the container reaches the worker through `docker exec`
-and asks it for signatures. Then the link is closed for good, and only then
+and asks it to sign the login. Then the link is closed for good, and only then
 are the build's dependencies installed and its functions run, so a
 dependency's install script, which runs as root in the container, finds
 neither the key nor a way to use it. A package that clones over SSH in
 `prepare()` or `build()` instead of through `source=` therefore cannot
-authenticate here.
+authenticate here, where the [chroot worker](./split-chroot.md) allows it: the
+container workers close the window before that code runs.
+
+While the window is open, code in it can sign a login to any host with the
+key, though it can never read the key and the worker signs nothing but an SSH
+login (no commit signature, no SSHSIG). Give the worker a deploy key that
+reaches only what its packages need, read-only where the host allows it, and
+use [routing](./routing.md) to send those packages here.
+
+:::note Upgrading
+The Docker worker ignored `WORKER_GIT_SSH_KEY` before; it now acts on it, and
+a worker with the key set refuses to start without `WORKER_SSH_KNOWN_HOSTS`,
+or with a key in the old PEM format (convert it with
+`ssh-keygen -p -N '' -f <key>`). The same is true of the embedded worker in
+the [hybrid image](./hybrid.md).
+:::
 
 ### Build trees are not kept
 

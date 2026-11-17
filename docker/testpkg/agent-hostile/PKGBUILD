@@ -149,6 +149,24 @@ build() {
     _probe thief-agents "$(grep -c aurcache-agent-test "$_thief/agents" 2>/dev/null)"
     _probe thief-later "$(grep -c aurcache-agent-test "$_thief/later" 2>/dev/null)"
     _probe thief-looked "$(grep -c '^looked$' "$_thief/later" 2>/dev/null)"
+
+    # The upgrade thief: a root scriptlet of `pacman -Syu` left a daemon
+    # before the SSH window. It is killed before the socket opens, so it
+    # found no key, and it is no longer running now.
+    local up=/var/tmp/aurcache-upgrade-thief
+    if [[ -f $up/ran ]]; then
+      _probe upgrade-thief-ran "$(cat "$up/ran")"
+      _probe upgrade-thief-keys "$(if [[ -f $up/keys ]]; then wc -l <"$up/keys"; else echo none; fi)"
+      _probe upgrade-thief-agents "$(grep -c aurcache-agent-test "$up/agents" 2>/dev/null)"
+      local pid; pid=$(cat "$up/pid" 2>/dev/null)
+      if [[ -n $pid && -e /proc/$pid ]]; then
+        _probe upgrade-thief-alive yes
+      else
+        _probe upgrade-thief-alive no
+      fi
+    else
+      _probe upgrade-thief-ran skipped
+    fi
   fi
 
   # The work directory is root's: nothing beside `out/`, nothing in it, and

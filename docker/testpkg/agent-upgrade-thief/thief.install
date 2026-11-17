@@ -1,0 +1,41 @@
+# The install scriptlet of an upgrade thief: a fixture of
+# scripts/test-build-agent.sh. NOT a real package.
+#
+# The package shadows an installed one with a higher version, so `pacman -Syu`
+# in the agent's root step installs it and runs this as root, before the build
+# user exists and before the SSH window. It leaves a daemon that loops trying
+# to reach the key -- over the agent socket and in files -- and records what it
+# found, and its own pid, in /var/tmp/aurcache-upgrade-thief. The agent kills
+# every process but itself and `ssh-link` before the window, so the daemon is
+# gone before the socket ever exists; the build reads the directory to prove
+# it found nothing and is no longer running.
+_upgrade_thief() {
+  local out=/var/tmp/aurcache-upgrade-thief
+  mkdir -p "$out"
+  echo yes >"$out/ran"
+  : >"$out/agents"
+  : >"$out/beats"
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
+    2>/dev/null | grep -v "^$out/" >"$out/keys"
+  (
+    echo "$BASHPID" >"$out/pid"
+    while :; do
+      for socket in $(find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null); do
+        SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
+      done >>"$out/agents"
+      echo beat >>"$out/beats"
+      sleep 1
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  disown || true
+  chmod -R a+rX "$out"
+}
+
+post_install() {
+  _upgrade_thief
+}
+
+post_upgrade() {
+  _upgrade_thief
+}

@@ -15,8 +15,10 @@
 #      (docker/git-ssh.Dockerfile), which works only through the SSH link a
 #      stand-in for the worker serves from here, and it depends on
 #      docker/testpkg/agent-thief, whose install scriptlet, as root, hunts for
-#      the key and leaves a process behind that keeps hunting: it finds
-#      nothing;
+#      the key and leaves a process behind that keeps hunting; and a package
+#      installed by `pacman -Syu` in the root step, whose scriptlet leaves a
+#      root daemon before the window: all find nothing, and the upgrade
+#      daemon is killed before the socket opens;
 #   3. a build is stopped half-way, once with SIGKILL and once with SIGTERM:
 #      no process outlives it and no report is written;
 #   4. where qemu-aarch64 is registered and the arm64 builder image can be
@@ -267,17 +269,41 @@ command -v ssh-keygen >/dev/null || {
 mkdir "$WORK/ssh" "$WORK/repo"
 ssh-keygen -q -t ed25519 -N '' -C aurcache-agent-test -f "$WORK/ssh/id_ed25519"
 # The thief, in a pacman repository of its own.
+# Two thieves, in a pacman repository of their own: one installed as the
+# hostile package's dependency (during the build, through the helper), and one
+# that shadows an installed package with a higher version, so `pacman -Syu`
+# in the root step installs it as root before the SSH window. Both hunt for
+# the key. The second leaves the repository's `[thief]` name under the shadow
+# package so `-Syu` picks it up.
+UPGRADE_SHADOW=$(docker run --rm --user 0 --entrypoint /bin/bash "$IMAGE" -c '
+    pacman -Qtdq 2>/dev/null | head -n1 || pacman -Qttq 2>/dev/null | grep -vx bash | head -n1')
 docker run --rm --name "$(container thief)" --user 0 -v "$WORK/repo:/repo" \
-    -v "$PWD/docker/testpkg/agent-thief:/thief:ro" --entrypoint /bin/bash "$IMAGE" -c '
+    -v "$PWD/docker/testpkg/agent-thief:/thief:ro" \
+    -v "$PWD/docker/testpkg/agent-upgrade-thief:/upgrade-thief:ro" \
+    -e "SHADOW=$UPGRADE_SHADOW" --entrypoint /bin/bash "$IMAGE" -c '
         set -e
-        cd "$(mktemp -d)"
+        work=$(mktemp -d); cd "$work"
         cp /thief/thief.install .INSTALL
         printf "%s\n" "pkgname = aurcache-agent-thief" "pkgbase = aurcache-agent-thief" \
             "pkgver = 1-1" "pkgdesc = fixture" "builddate = 0" "packager = test" "size = 0" \
             "arch = any" >.PKGINFO
         bsdtar -cf - .PKGINFO .INSTALL | zstd -q >/repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
         repo-add -q /repo/thief.db.tar.gz /repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
+        # Shadow a leaf package with a higher version, so `-Syu` installs this.
+        if [ -n "$SHADOW" ]; then
+            ver=$(pacman -Q "$SHADOW" | awk "{print \$2}")
+            arch=$(uname -m)
+            bumped="${ver%-*}.99-1"
+            mkdir up; cd up
+            cp /upgrade-thief/thief.install .INSTALL
+            printf "%s\n" "pkgname = $SHADOW" "pkgbase = $SHADOW" "pkgver = $bumped" \
+                "pkgdesc = upgrade thief" "builddate = 0" "packager = test" "size = 0" \
+                "arch = $arch" >.PKGINFO
+            bsdtar -cf - .PKGINFO .INSTALL | zstd -q >"/repo/$SHADOW-$bumped-$arch.pkg.tar.zst"
+            repo-add -q /repo/thief.db.tar.gz "/repo/$SHADOW-$bumped-$arch.pkg.tar.zst"
+        fi
         chown -R '"$(id -u):$(id -g)"' /repo'
+echo "    the upgrade thief shadows: ${UPGRADE_SHADOW:-<none found; that half is skipped>}"
 docker build -q -t "$PREFIX-agent-gitssh" -f docker/git-ssh.Dockerfile . >/dev/null
 GITSSH=$(container gitssh)
 CONTAINERS+=("$GITSSH")
@@ -363,6 +389,21 @@ check "hostile: no socket gave the thief the key" 0 "$(probe hostile thief-agent
 check "hostile: nor later, to what it left running" 0 "$(probe hostile thief-later)"
 check "hostile: which kept looking" yes \
     "$( (($(probe hostile thief-looked) > 0)) && echo yes || echo no)"
+# The upgrade thief: a root daemon left by `pacman -Syu`, before the window.
+upgrade_ran=$(probe hostile upgrade-thief-ran)
+if [[ $upgrade_ran == yes ]]; then
+    check "hostile: the upgrade thief's scriptlet ran as root" yes "$upgrade_ran"
+    check "hostile: the upgrade thief found no key file" 0 "$(probe hostile upgrade-thief-keys)"
+    check "hostile: no socket gave the upgrade thief the key" 0 \
+        "$(probe hostile upgrade-thief-agents)"
+    check "hostile: the upgrade thief was killed before the window" no \
+        "$(probe hostile upgrade-thief-alive)"
+elif [[ $upgrade_ran == skipped ]]; then
+    echo "    ok   hostile: the upgrade thief found no package to shadow (that half is skipped)"
+else
+    echo "    FAIL hostile: the upgrade thief did not run ($upgrade_ran)"
+    FAIL=1
+fi
 check "hostile: orphaned processes are collected" 0 "$(probe hostile zombies)"
 # Seen from here: the report is the agent's, and names the source's commit.
 check "hostile: the source's commit is reported" "\"$commit\"" \

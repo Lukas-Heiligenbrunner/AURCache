@@ -754,9 +754,12 @@ agent protocol itself, in process. It answers two requests and refuses every
 other one with `SSH_AGENT_FAILURE`:
 
 - `SSH_AGENTC_REQUEST_IDENTITIES`: the one public key;
-- `SSH_AGENTC_SIGN_REQUEST` for that key: Ed25519; RSA as `rsa-sha2-256` or
-  `rsa-sha2-512`, by the request's flags (SHA-1 `ssh-rsa` signatures are
-  refused, as OpenSSH and GitHub refuse them); ECDSA on P-256 and P-384.
+- `SSH_AGENTC_SIGN_REQUEST` for that key, and only over data that parses as an
+  SSH `publickey` login (RFC 4252's request, or OpenSSH's
+  `publickey-hostbound-v00`): Ed25519; RSA as `rsa-sha2-256` or `rsa-sha2-512`,
+  by the request's flags (SHA-1 `ssh-rsa` signatures are refused, as OpenSSH
+  and GitHub refuse them); ECDSA on P-256 and P-384. A link is given 64
+  signatures at most, and 16 in any minute.
 
 Adding, removing or locking keys, extensions (`session-bind@openssh.com`
 among them, which OpenSSH's client treats as optional) and everything else are
@@ -832,17 +835,21 @@ have, without the key. Only `git` and `openssh` are installed for step 3, as
 git is the transport of nearly every source that needs a key.
 
 **What a build can still do with the key, and who.** Code that can connect to
-the socket while it is up can ask for signatures with it, for any host and
-any purpose, as with any agent; it can never obtain the key, which is in no
-file, no process and no memory of the pod. During the window that code is the
+the socket while it is up can log in with the key, to any host, up to a budget
+(64 signatures, 16 a minute); the agent signs an SSH login request and nothing
+else, so the key cannot sign a commit, an SSHSIG or a blob of the build's
+choosing. It can never obtain the key, which is in no file, no process and no
+memory of the pod. During the window that code is the
 package's own: the PKGBUILD's top level as makepkg sources it, makepkg, git
-and ssh, all as the build user. The one other way in is a root process left
-running by what was installed before the window: the image's upgrade
-(`pacman -Syu`) and `openssh` and `git`, from the job's repositories. Those
-are trusted as the image is; a repository that serves a hostile `git`, or a
-hostile upgrade of an installed package, could sign during the window, though
-it could still not take the key away. Dependencies, their install
-scriptlets, their hooks, and `prepare()`, `build()`, `check()` and
+and ssh, all as the build user, and only for a build that has a source
+fetched over SSH (`makepkg --printsrcinfo` says, and the window does not open
+otherwise). Nothing root ran before the window can sign in it: once the link
+is taken, every process but the agent and the one `ssh-link` carrying it is
+killed, and `/proc` is checked to hold no other, before the socket opens. A
+daemon the image's upgrade or the install of `openssh` and `git` left running
+is gone by then, and the socket is root's at a mode root would ignore, so
+there is nothing for a later one to connect to either. Dependencies, their
+install scriptlets, their hooks, and `prepare()`, `build()`, `check()` and
 `package()` all run after the link is gone, and can neither sign nor read
 anything. A dependency's root scriptlet that leaves a process behind finds no
 socket, and no exec to take over: `ssh-link` was killed before it ran, and the
@@ -1429,10 +1436,6 @@ for each advertised architecture (it needs `list` on nodes, a ClusterRole).
   closed before dependencies install ("Credentials and PGP keys"). Whether
   some packages need it enough for an opt-in that keeps the link up, with
   dependencies' scriptlets able to sign, is undecided.
-- **What installs before the SSH window is trusted**: the image's upgrade and
-  `openssh` and `git`, from the job's repositories, could leave a root
-  process that signs during the window. Killing every process but `ssh-link`
-  before the window opens would close that too.
 - The probe does not try name resolution, so NodeLocal DNSCache with the
   policy as shipped passes it and fails its builds.
 - A probe pod no node takes holds claims back until the probe gives up on it,
