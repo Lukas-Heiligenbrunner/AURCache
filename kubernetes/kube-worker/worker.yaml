@@ -58,8 +58,10 @@ spec:
       # See the server's Deployment: no AURCACHE_*_PORT variables from
       # Services in this namespace.
       enableServiceLinks: false
-      # Time to remove the build pods still running when this stops. Builds
-      # that were running are requeued by the server once their lease runs out.
+      # Time to stop the builds running when this stops: it deletes their
+      # pods and reports each build as interrupted, and the server queues a
+      # new build of each package. It is done in a few seconds; the rest is
+      # margin for a server that is slow to answer.
       terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true

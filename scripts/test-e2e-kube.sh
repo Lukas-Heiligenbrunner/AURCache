@@ -18,13 +18,16 @@
 #      against it, and both install with pacman from a pod;
 #   5. a build is cancelled, and its pod is gone within a minute;
 #   6. the worker is killed while a build runs; the new process deletes the
-#      build pod, and the server queues the package again;
-#   7. a package of 2 GiB (docker/testpkg/big) builds and is published; the
+#      build pod, and the server ends the build and queues a new one;
+#   7. the worker's pod is deleted while a build runs; it stops within its
+#      grace period, having deleted the build pod and handed the build back,
+#      and the server queues a new one;
+#   8. a package of 2 GiB (docker/testpkg/big) builds and is published; the
 #      relay's throughput and the worker container's peak memory are printed,
 #      and the run fails if that memory reached 256 MiB;
-#   8. build pods in user namespaces, where the cluster's nodes run one;
+#   9. build pods in user namespaces, where the cluster's nodes run one;
 #      skipped, saying why, where they do not;
-#   9. without the NetworkPolicy, the worker says it is not enforced, and the
+#  10. without the NetworkPolicy, the worker says it is not enforced, and the
 #      server hears it.
 #
 #   ./scripts/test-e2e-kube.sh [package] [timeout]
@@ -58,8 +61,8 @@
 #                         building or deploying anything; it is kept again
 #                         unless CLEANUP=1
 #   E2E_LEGS              which legs to run, space-separated, of: enrollment
-#                         policy quota repository cancel restart big userns
-#                         open-policy (default: all, in that order)
+#                         policy quota repository cancel restart stop big
+#                         userns open-policy (default: all, in that order)
 #   CLEANUP               as for the other e2e suites: 1 always tears down, 0
 #                         never; unset, a failed run is left up
 set -euo pipefail
@@ -701,21 +704,69 @@ check_restart() {
     wait_for 60 "pod $uid to go" pod_uid_gone "$uid" || fail "the old build pod survived the sweep"
     result "worker killed mid-build: the new process deleted $pod"
 
-    # The server gives the build up once the new process says it holds none,
-    # and queues the package again while it has attempts left: in the same
-    # build, or in a new one after it.
+    # The server ends the build once the new process says it holds none, and
+    # queues a new build of the package while it has attempts left.
     wait_for 180 "kube-e2e-slow to be built again in a new pod" another_pod "$uid" \
         || fail "the server did not queue kube-e2e-slow again, or the worker did not claim it"
     local again
     again=$(latest_build_ref kube-e2e-slow)
     log "    now building: $again in $(build_pods | awk '{print $1}' | head -n 1)"
-    if [ "$again" = "$ref" ]; then
-        result "the server queued $ref again and the worker started it in a new pod"
-    else
-        log "    $ref: $(build_output "$ref" | grep -v '^\s*$' | tail -n 1)"
-        build_over "$ref" || fail "$ref is still going beside $again"
-        result "the server ended $ref and queued $again, which the worker started in a new pod"
-    fi
+    [ "$again" != "$ref" ] || fail "no build of kube-e2e-slow newer than $ref"
+    log "    $ref: $(build_output "$ref" | grep -v '^\s*$' | tail -n 1)"
+    build_over "$ref" || fail "$ref is still going beside $again"
+    result "the server ended $ref and queued $again, which the worker started in a new pod"
+    CURRENT_BUILD_REF=$again
+    aurcache_cli builds cancel "$again" >/dev/null
+    wait_for 60 "the pod of $again to go" no_build_pods || fail "the pod of $again outlived its cancel"
+}
+
+# Whether no pod named `$1` is in the server's namespace any more.
+dispatcher_pod_gone() { ! k -n aurcache get pod "$1" >/dev/null 2>&1; }
+
+check_stop() {
+    log "=== 7. The worker is stopped under a build ==="
+    local before ref pod uid old said took
+    before=$(latest_build_ref kube-e2e-slow)
+    aurcache_cli builds retry "$before" | sed 's/^/    /'
+    wait_for 60 "a new build of kube-e2e-slow" ref_moved kube-e2e-slow "$before" \
+        || fail "the retry queued nothing"
+    ref=$(latest_build_ref kube-e2e-slow)
+    CURRENT_BUILD_REF=$ref
+    wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
+        || fail "$ref never started building"
+    read -r pod uid _ <<<"$(build_pods | head -n 1)"
+    log "    $ref runs in $pod ($uid)"
+
+    # The pod's log goes with the pod, so it is followed from before.
+    old=$(dispatcher_pod)
+    said="$SCRATCH/stopped-worker.log"
+    k -n aurcache logs -f "$old" -c worker >"$said" 2>&1 &
+    local follower=$! started=$SECONDS
+    k -n aurcache delete pod "$old" --wait=false >/dev/null
+    # Its grace period is 60s: a worker that did not act on the signal is
+    # killed at the end of it, and not before.
+    wait_for 45 "the worker's pod $old to stop" dispatcher_pod_gone "$old" \
+        || fail "the worker's pod was still there 45s after it was deleted: it did not stop when told to"
+    took=$((SECONDS - started))
+    wait "$follower" 2>/dev/null || true
+    sed 's/\x1b\[[0-9;]*m//g' "$said" | grep -E "Received SIGTERM" | sed 's/^/    | /' \
+        || fail "the stopped worker never logged that it received SIGTERM"
+    wait_for 30 "pod $uid to go" pod_uid_gone "$uid" || fail "the build pod outlived the worker that ran it"
+    result "worker pod deleted mid-build: it stopped in ${took}s, and $pod went with it"
+
+    # The build is over on the server, by the stopped worker's own report or
+    # by its successor's first heartbeat, whichever came first; a new build
+    # of the package is queued, and the new worker pod starts it.
+    k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
+        || fail "the worker did not start again"
+    wait_for 60 "$ref to end" build_over "$ref" || fail "$ref was not ended when its worker stopped"
+    log "    $ref: $(build_output "$ref" | grep -v '^\s*$' | tail -n 1)"
+    wait_for 180 "a new build of kube-e2e-slow in a new pod" another_pod "$uid" \
+        || fail "the server did not queue kube-e2e-slow again, or the worker did not claim it"
+    local again
+    again=$(latest_build_ref kube-e2e-slow)
+    [ "$again" != "$ref" ] || fail "no build of kube-e2e-slow newer than $ref"
+    result "the server ended $ref and queued $again, which the new worker pod started"
     CURRENT_BUILD_REF=$again
     aurcache_cli builds cancel "$again" >/dev/null
     wait_for 60 "the pod of $again to go" no_build_pods || fail "the pod of $again outlived its cancel"
@@ -725,7 +776,7 @@ check_restart() {
 ref_moved() { [ "$(latest_build_ref "$1")" != "$2" ]; }
 
 check_big() {
-    log "=== 7. A package of 2 GiB ==="
+    log "=== 8. A package of 2 GiB ==="
     if [ "${E2E_BIG:-1}" = 0 ]; then
         result "skipped: the 2 GiB package (E2E_BIG=0)"
         return
@@ -788,7 +839,7 @@ check_big() {
 }
 
 check_user_namespaces() {
-    log "=== 8. Build pods in user namespaces ==="
+    log "=== 9. Build pods in user namespaces ==="
     if [ "${E2E_USER_NAMESPACES:-auto}" = 0 ]; then
         result "skipped: user namespaces (E2E_USER_NAMESPACES=0)"
         return
@@ -855,7 +906,7 @@ server_logged() {
 }
 
 check_open_policy() {
-    log "=== 9. Without the NetworkPolicy ==="
+    log "=== 10. Without the NetworkPolicy ==="
     local since
     k -n aurcache-builds delete networkpolicy aurcache-builds >/dev/null
     since=$(now)
@@ -950,9 +1001,9 @@ cleanup() {
 # Main
 # =============================================================================
 
-# Every leg, in order. Some build on what an earlier one left: `restart` on
-# `cancel`'s package, `userns` on `repository`'s.
-LEGS=(enrollment policy quota repository cancel restart big userns open-policy)
+# Every leg, in order. Some build on what an earlier one left: `restart` and
+# `stop` on `cancel`'s package, `userns` on `repository`'s.
+LEGS=(enrollment policy quota repository cancel restart stop big userns open-policy)
 if [ -n "${E2E_LEGS:-}" ]; then read -r -a LEGS <<<"$E2E_LEGS"; fi
 
 RUN_STARTED=$SECONDS
@@ -978,6 +1029,7 @@ for leg in "${LEGS[@]}"; do
         repository) check_repository ;;
         cancel) check_cancel ;;
         restart) check_restart ;;
+        stop) check_stop ;;
         big) check_big ;;
         userns) check_user_namespaces ;;
         open-policy) check_open_policy ;;

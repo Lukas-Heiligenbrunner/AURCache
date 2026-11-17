@@ -5,24 +5,66 @@
 //! take the agent from, the pods a previous run left, enrollment, and the
 //! runner. The check that the builds' NetworkPolicy is enforced runs beside
 //! the runner, from once enrolled, and holds nothing up.
+//!
+//! Told to stop (SIGTERM, SIGINT), it claims nothing more, stops the builds
+//! it holds, reports each to the server as interrupted, and deletes whatever
+//! pod of its own is left.
 
 use anyhow::{Context, Result};
 use aurcache_common::api::activity::Severity;
-use aurcache_worker_core::client::{ClientIdentity, WorkerClient};
+use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::config::CoreConfig;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::repo::{Endpoint, RepoSection};
 use aurcache_worker_core::runner::Runner;
+use aurcache_worker_kube::cluster::Cluster;
 use aurcache_worker_kube::config::{self, AgentImage, Config};
 use aurcache_worker_kube::executor::KubeExecutor;
 use aurcache_worker_kube::kube_cluster::KubeCluster;
 use aurcache_worker_kube::probe::{self, ProbeOutcome, Targets};
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use std::time::Duration;
+use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::task::{AbortHandle, JoinHandle};
 
 const KIND: &str = KubeExecutor::<KubeCluster>::KIND;
+/// How long the builds held when this worker is told to stop get to be
+/// stopped and reported. Under the Deployment's termination grace period, so
+/// that the pods are deleted before the kubelet kills this process.
+const WIND_DOWN: Duration = Duration::from_secs(40);
+
+/// The worker, enrolled and ready to claim.
+struct Started {
+    runner: Arc<Runner<KubeExecutor<KubeCluster>>>,
+    cluster: Arc<KubeCluster>,
+    /// The NetworkPolicy check, when one was started.
+    probe: Option<AbortHandle>,
+}
+
+/// The signals that ask this process to stop.
+struct StopSignals {
+    terminate: Signal,
+    interrupt: Signal,
+}
+
+impl StopSignals {
+    fn listen() -> Result<Self> {
+        Ok(Self {
+            terminate: signal(SignalKind::terminate()).context("listening for SIGTERM")?,
+            interrupt: signal(SignalKind::interrupt()).context("listening for SIGINT")?,
+        })
+    }
+
+    /// The name of the first of them to arrive.
+    async fn received(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.terminate.recv() => "SIGTERM",
+            _ = self.interrupt.recv() => "SIGINT",
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +73,46 @@ async fn main() -> Result<()> {
     // binary links two, so neither is the default until one is installed.
     // An error only says one already is.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    // Before anything else: this is the first process of its container, where
+    // a signal nobody listens for is dropped, and enrolling can wait for a
+    // long time.
+    let mut signals = StopSignals::listen()?;
 
+    let started = tokio::select! {
+        started = start() => started?,
+        signal = signals.received() => {
+            tracing::info!("Received {signal} while starting: stopping");
+            return Ok(());
+        }
+    };
+    let running = Arc::clone(&started.runner).run();
+    tokio::pin!(running);
+    let signal = tokio::select! {
+        ended = &mut running => return ended,
+        signal = signals.received() => signal,
+    };
+    tracing::info!(
+        "Received {signal}: claiming no more builds and stopping the ones running, which \
+         the server queues again"
+    );
+    started.runner.stop();
+    match tokio::time::timeout(WIND_DOWN, running).await {
+        Ok(ended) => ended?,
+        Err(_) => tracing::warn!(
+            "Not every build was stopped and reported within {}s; the server ends the rest \
+             when it stops hearing of them",
+            WIND_DOWN.as_secs()
+        ),
+    }
+    if let Some(probe) = started.probe {
+        probe.abort();
+    }
+    leave(&*started.cluster).await
+}
+
+/// Everything before the first claim: the configuration, the cluster, the
+/// pods a previous run left, enrollment, and the NetworkPolicy check started.
+async fn start() -> Result<Started> {
     let core = config::core_from_env();
     let identity = Identity::load_or_create(&core.data_dir)?;
     let cfg = Config::from_env(&core.settings, &identity.fingerprint)?;
@@ -57,17 +138,41 @@ async fn main() -> Result<()> {
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, KIND).await?;
+    let targets = targets(&core, client.repo());
+    let runner = Runner::new(core, client, executor);
     // Once enrolled, the server's worker port is known to answer, so a probe
     // that cannot reach it learns something about the policy, not about a
     // server still starting.
-    if cfg.network_probe {
-        let targets = targets(&core, client.repo());
-        let probe = tokio::spawn(network_probe(cluster, cfg, agent_image, targets));
-        let reporter = reporter(&core, &identity, &client)?;
-        tokio::spawn(tell_server(probe, reporter));
-    }
+    let probe = cfg.network_probe.then(|| {
+        let probe = tokio::spawn(network_probe(
+            Arc::clone(&cluster),
+            cfg,
+            agent_image,
+            targets,
+        ));
+        let handle = probe.abort_handle();
+        tokio::spawn(tell_server(probe, runner.client()));
+        handle
+    });
+    Ok(Started {
+        runner,
+        cluster,
+        probe,
+    })
+}
 
-    Runner::new(core, client, executor).run().await
+/// Delete every pod of this worker's that is still there as it stops: one
+/// whose build did not get as far as deleting it, and the NetworkPolicy
+/// check's.
+async fn leave<C: Cluster>(cluster: &C) -> Result<()> {
+    let left = cluster
+        .sweep()
+        .await
+        .context("deleting the pods left as this worker stops")?;
+    if left > 0 {
+        tracing::info!("Deleted {left} pod(s) still there as this worker stopped");
+    }
+    Ok(())
 }
 
 /// The image the `stage` and `hold` containers run: the one named, or the
@@ -162,32 +267,10 @@ fn unenforced(outcome: &ProbeOutcome) -> Option<String> {
     ))
 }
 
-/// A client of this worker's identity for the probe's report: the runner
-/// keeps the one enrollment returned to itself.
-fn reporter(core: &CoreConfig, identity: &Identity, client: &WorkerClient) -> Result<WorkerClient> {
-    let csr = client
-        .registered_csr()
-        .context("the enrolled client holds no registration")?;
-    let lease = client
-        .lease()
-        .context("the enrolled client holds no lease")?;
-    WorkerClient::authenticated(
-        &core.aurcache_url,
-        &ClientIdentity {
-            ca_pem: &identity.ca_pem()?,
-            cert_pem: &identity.cert_pem()?,
-            key_pem: &identity.key_pem(),
-        },
-        enroll::register_request(core, csr, KIND),
-        lease,
-        None,
-    )
-}
-
 /// Tell the server what the probe found, when that is a policy not enforced:
 /// at error severity, so it shows on the worker's page and not only in this
 /// process's log.
-async fn tell_server(probe: JoinHandle<Option<String>>, reporter: WorkerClient) {
+async fn tell_server(probe: JoinHandle<Option<String>>, reporter: Arc<WorkerClient>) {
     let Ok(Some(message)) = probe.await else {
         return;
     };
