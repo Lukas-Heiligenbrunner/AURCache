@@ -2,9 +2,9 @@
 # End-to-end test for the Kubernetes worker, in a throwaway kind cluster.
 #
 # Builds the server and aurcache-worker-kube images from this tree, loads them
-# into a new kind cluster, deploys a minimal server and the worker from
-# kubernetes/kube-worker/ (scripts/fixtures/kube-e2e/), and drives the server
-# with the CLI:
+# into a new kind cluster, deploys the server from kubernetes/server/ and the
+# worker from kubernetes/kube-worker/ as they ship (scripts/fixtures/kube-e2e/
+# adds what a test needs), and drives the server with the CLI:
 #
 #   1. the worker enrolls through the `aurcache-enrollment` Secret, shows as
 #      `kubernetes`, and takes the build agent from the image it runs itself;
@@ -1003,7 +1003,7 @@ dump_logs_on_failure() {
         echo "=== the worker, its previous container ==="
         k -n aurcache logs deploy/aurcache-kube-worker -c worker --previous --timestamps
         echo "=== the server ==="
-        k -n aurcache logs deploy/aurcache --timestamps
+        k -n aurcache logs deploy/aurcache -c aurcache --timestamps
         echo "=== the git daemon ==="
         k -n kube-e2e logs deploy/kube-e2e-git --all-containers --timestamps
     } >"$LOG_FILE" 2>&1 || true
@@ -1017,7 +1017,7 @@ dump_logs_on_failure() {
     echo "--- the worker: errors and warnings ---"
     dispatcher_log | grep -E " (ERROR|WARN) " | tail -n 15 || echo "    (none)"
     echo "--- the server: errors ---"
-    k -n aurcache logs deploy/aurcache 2>/dev/null | filter_noise | grep -E " ERROR " | tail -n 10 || echo "    (none)"
+    k -n aurcache logs deploy/aurcache -c aurcache 2>/dev/null | filter_noise | grep -E " ERROR " | tail -n 10 || echo "    (none)"
     echo
     echo "    Full logs: $LOG_FILE"
 }

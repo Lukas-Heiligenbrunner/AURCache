@@ -1,110 +1,16 @@
-# A minimal AURCache server for the Kubernetes worker to enroll with: the
-# server's Deployment and its `aurcache` Service in the namespace `aurcache`,
-# carrying the labels kubernetes/kube-worker/networkpolicy.yaml lets builds
-# reach.
-#
-# Modelled on the server manifests in kubernetes/server/, without the nginx
-# container in front of the repository: the Service's repository port goes to
-# the server's own handler on 8081, which the NetworkPolicy also allows. Keep
-# the names, labels, ports and the variables below in step with those
-# manifests.
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: aurcache-data
-  namespace: aurcache
-  labels:
-    app.kubernetes.io/name: aurcache
-    app.kubernetes.io/component: server
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
----
+# What the test changes on the shipped server: its own crates log at debug, and
+# its image is taken from the node, where the test loads the one it built.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aurcache
   namespace: aurcache
-  labels:
-    app.kubernetes.io/name: aurcache
-    app.kubernetes.io/component: server
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: aurcache
-      app.kubernetes.io/component: server
   template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: aurcache
-        app.kubernetes.io/component: server
     spec:
-      # The server reads AURCACHE_WORKER_PORT as a port number; Service links
-      # would set it to a URL.
-      enableServiceLinks: false
       containers:
         - name: aurcache
-          image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
           imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 8080
-            - name: repo-builtin
-              containerPort: 8081
-            - name: worker
-              containerPort: 8083
           env:
             - name: LOG_LEVEL
               value: info,aurcache=debug,aurcache_api=debug,aurcache_utils=debug
-            # The worker dials the Service by its namespaced name.
-            - name: AURCACHE_TLS_SANS
-              value: aurcache,aurcache.aurcache.svc,aurcache.aurcache.svc.cluster.local,localhost
-            - name: AURCACHE_PUBLIC_URL
-              value: http://aurcache.aurcache.svc:8081
-            - name: AURCACHE_ENROLLMENT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: aurcache-enrollment
-                  key: token
-          volumeMounts:
-            - name: data
-              mountPath: /app
-          readinessProbe:
-            httpGet:
-              path: /api/health
-              port: http
-            periodSeconds: 5
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: aurcache-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: aurcache
-  namespace: aurcache
-  labels:
-    app.kubernetes.io/name: aurcache
-    app.kubernetes.io/component: server
-spec:
-  selector:
-    app.kubernetes.io/name: aurcache
-    app.kubernetes.io/component: server
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
-    - name: repo
-      port: 8081
-      targetPort: repo-builtin
-    - name: worker
-      port: 8083
-      targetPort: worker

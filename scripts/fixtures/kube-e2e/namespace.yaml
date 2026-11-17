@@ -1,15 +1,3 @@
-# The server's namespace, which kubernetes/kube-worker/ expects to exist and
-# puts the worker in. `baseline` here, where the server's own manifests ask for
-# `privileged` for the chroot worker beside it: the server alone passes
-# `baseline`, and the Kubernetes worker passes `restricted`.
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: aurcache
-  labels:
-    pod-security.kubernetes.io/enforce: baseline
-    pod-security.kubernetes.io/enforce-version: latest
----
 # The test's own pieces: the git daemon, the pod that installs what was built,
 # and the pods that check the NetworkPolicy from outside it. No policy selects
 # anything here, which is what makes it the control.

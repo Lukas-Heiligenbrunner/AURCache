@@ -1,18 +1,16 @@
 # =============================================================================
 # The cluster scripts/test-e2e-kube.sh tests against
 # =============================================================================
-# The Kubernetes worker exactly as kubernetes/kube-worker/ ships it, plus what
-# a real deployment would already have beside it and a test needs:
+# The server and the Kubernetes worker exactly as kubernetes/server/ and
+# kubernetes/kube-worker/ ship them, plus what a test needs beside them:
 #
-#   namespace.yaml  the server's namespace, and `kube-e2e` for the test's own
-#                   pieces, where no NetworkPolicy applies
-#   server.yaml     a minimal AURCache server: the Deployment and the
-#                   `aurcache` Service the worker's manifests expect, with the
-#                   labels their NetworkPolicy lets builds reach
+#   namespace.yaml  `kube-e2e`, for the test's own pieces, where no
+#                   NetworkPolicy applies
 #   git.yaml        a git daemon serving the test's packages, which the server
 #                   fetches from
-#   worker.yaml     what the test changes on the worker: a verbose log, and
-#                   images loaded onto the node rather than pulled
+#   server.yaml     what the test changes on the server: a verbose log, and
+#                   an image loaded onto the node rather than pulled
+#   worker.yaml     the same for the worker
 #
 # The script applies this through a kustomization of its own, written at run
 # time, which adds what changes per run: the image names it built, the
@@ -24,9 +22,10 @@ kind: Kustomization
 
 resources:
   - namespace.yaml
-  - server.yaml
   - git.yaml
+  - ../../../kubernetes/server
   - ../../../kubernetes/kube-worker
 
 patches:
+  - path: server.yaml
   - path: worker.yaml
