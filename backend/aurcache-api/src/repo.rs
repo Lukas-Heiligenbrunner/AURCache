@@ -21,9 +21,14 @@ pub struct RepoApi;
     )
 )]
 #[get("/repo/info")]
-pub fn repo_info(listen: &State<ListenAddresses>, _a: Authenticated) -> Json<RepoInfo> {
+pub fn repo_info(
+    listen: &State<ListenAddresses>,
+    services: &State<aurcache_utils::services::Services>,
+    _a: Authenticated,
+) -> Json<RepoInfo> {
     let port = listen.repo.port();
     Json(RepoInfo {
+        name: services.repo.name().to_string(),
         public_url: crate::worker::public_repo_url(port),
         listen_port: Some(port),
     })

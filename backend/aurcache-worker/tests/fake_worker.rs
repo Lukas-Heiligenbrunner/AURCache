@@ -141,11 +141,17 @@ async fn fake_worker_protocol_roundtrip() {
     // Boot the real worker protocol listener (HTTPS + optional mTLS).
     let ca = aurcache_ca::Ca::load_or_create(&ca_dir).unwrap();
     let repo_root = tmp.path().join("repo");
+    let repo = std::sync::Arc::new(
+        aurcache_utils::repository::Repository::new(&repo_root)
+            .with_name("custom_name".into())
+            .unwrap(),
+    );
+    repo.init().unwrap();
     let _server = aurcache_api::init::init_worker_api(
         db.clone(),
         ca,
         std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
-        std::sync::Arc::new(aurcache_utils::repository::Repository::new(&repo_root)),
+        repo,
         aurcache_activitylog::activity_utils::ActivityLog::discarding(),
         // Read as the server reads them, so AURCACHE_WORKER_PORT above applies.
         aurcache_api::listen::ListenAddresses::from_env().unwrap(),
@@ -170,6 +176,14 @@ async fn fake_worker_protocol_roundtrip() {
     let client: WorkerClient = ensure_enrolled(&cfg, &identity, "chroot")
         .await
         .expect("worker should enroll and be auto-approved via token");
+    let section = client.repo().expect("registration supplies the repository");
+    assert!(section.text().starts_with("[custom_name]\n"));
+    assert!(
+        section
+            .db_url("x86_64")
+            .unwrap()
+            .ends_with("/x86_64/custom_name.db")
+    );
 
     // --- The worker's declaration reaches the server over the real wire, and
     // the heartbeat carries what those settings resolved to.
@@ -407,7 +421,7 @@ async fn fake_worker_protocol_roundtrip() {
 
     // Accepted, then published in the background.
     assert_eq!(settled_status(&db, 1).await, BuildState::Successful);
-    let repo_db = repo_root.join("x86_64").join("repo.db.tar.gz");
+    let repo_db = repo_root.join("x86_64").join("custom_name.db.tar.gz");
     assert!(repo_db.exists(), "repo db should be written at {repo_db:?}");
     let file_rows = files::Entity::find()
         .filter(files::Column::PackageId.eq(1))

@@ -5,7 +5,7 @@
 
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, FileAction};
-use aurcache_common::repo::REPO_NAME;
+use aurcache_common::repo::{DEFAULT_REPO_NAME, validate_name};
 use aurcache_db::files;
 use aurcache_db::prelude::Files;
 use pacman_mirrors::platforms::Platform;
@@ -30,11 +30,6 @@ pub use aurcache_common::fs::REPO_ROOT;
 /// upload is never downloadable before it is published.
 const STAGING_DIR: &str = ".staging";
 
-/// `<REPO_NAME>.db.tar.gz`; a test keeps the two in step.
-const DB_ARCHIVE: &str = "repo.db.tar.gz";
-/// `<REPO_NAME>.files.tar.gz`, likewise.
-const FILES_ARCHIVE: &str = "repo.files.tar.gz";
-
 /// How many times a failed `commit` is tried in all. Enough to ride out a
 /// database that is briefly busy; a failure that will not go away just fails a
 /// few times quickly.
@@ -48,6 +43,7 @@ const COMMIT_ATTEMPTS: u32 = 3;
 /// when renaming its own result in, however atomic the rename.
 pub struct Repository {
     root: PathBuf,
+    name: String,
     lock: Arc<tokio::sync::Mutex<()>>,
     /// Numbers each update, so a [`PublishedFile`] can say which one read it.
     updates: AtomicU64,
@@ -305,10 +301,11 @@ impl Update<'_> {
         let plan = {
             let root = root.clone();
             let changes = Arc::clone(&changes);
+            let name = self.repo.name.clone();
             let lock = Arc::clone(&self.lock);
             tokio::task::spawn_blocking(move || {
                 let _lock = lock;
-                Finalization::stage(&root, &changes)
+                Finalization::stage(&root, &name, &changes)
             })
             .await??
         };
@@ -425,6 +422,7 @@ impl Repository {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            name: DEFAULT_REPO_NAME.to_string(),
             lock: Arc::new(tokio::sync::Mutex::new(())),
             updates: AtomicU64::new(0),
             retired: std::sync::Mutex::new(HashMap::new()),
@@ -432,12 +430,46 @@ impl Repository {
         }
     }
 
+    /// Set the name before initializing or using the repository.
+    pub fn with_name(mut self, name: String) -> anyhow::Result<Self> {
+        validate_name(&name).map_err(anyhow::Error::msg)?;
+        self.name = name;
+        Ok(self)
+    }
+
+    /// The pacman section and database filename prefix.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Create the databases of every platform that has none yet.
     pub fn init(&self) -> anyhow::Result<()> {
+        // Renaming an existing repository requires renaming its archives too.
+        // Creating empty ones here would hide its packages and let the sweep
+        // retire them. Check every platform before creating anything.
+        for platform in Platform::ALL {
+            let dir = Self::platform_dir(&self.root, platform);
+            if dir.join(format!("{}.db.tar.gz", self.name)).exists() {
+                continue;
+            }
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_name().to_string_lossy().ends_with(".db.tar.gz") {
+                        anyhow::bail!(
+                            "{} contains a differently named repository; rename its database archives and symlinks to '{}' before changing AURCACHE_REPO_NAME",
+                            dir.display(),
+                            self.name
+                        );
+                    }
+                }
+            }
+        }
         for platform in Platform::ALL {
             pacman_repo_utils::repo_init::init_repo(
                 &Self::platform_dir(&self.root, platform),
-                REPO_NAME,
+                &self.name,
             )?;
         }
         Ok(())
@@ -577,6 +609,7 @@ impl Repository {
         let lock = self.lock().await;
         self.recover_locked(db, Arc::clone(&lock)).await?;
         let root = self.root.clone();
+        let name = self.name.clone();
         let known = std::mem::take(&mut *self.retired_times());
         let log = self.log.clone();
         let task_lock = Arc::clone(&lock);
@@ -585,7 +618,7 @@ impl Repository {
             deleted,
         } = tokio::task::spawn_blocking(move || {
             let _lock = task_lock;
-            sweep_retired(&root, known, now, grace, &log)
+            sweep_retired(&root, &name, known, now, grace, &log)
         })
         .await?;
         *self.retired_times() = still_retired;
@@ -638,19 +671,19 @@ impl Finalization {
     ///
     /// The packages are planned before the databases, so a replay moves them
     /// in first: a database never lists a file that is not there yet.
-    fn stage(root: &Path, changes: &Changes) -> anyhow::Result<Self> {
+    fn stage(root: &Path, name: &str, changes: &Changes) -> anyhow::Result<Self> {
         let mut plan = Self {
             moves: Vec::new(),
             retired: Vec::new(),
         };
-        if let Err(error) = plan.stage_all(root, changes) {
+        if let Err(error) = plan.stage_all(root, name, changes) {
             plan.discard();
             return Err(error);
         }
         Ok(plan)
     }
 
-    fn stage_all(&mut self, root: &Path, changes: &Changes) -> anyhow::Result<()> {
+    fn stage_all(&mut self, root: &Path, name: &str, changes: &Changes) -> anyhow::Result<()> {
         let mut added = HashSet::new();
         for addition in &changes.add {
             let filename = addition.entry.filename.as_str();
@@ -665,7 +698,7 @@ impl Finalization {
             }
         }
         for platform in changes.platforms() {
-            self.stage_databases(root, changes, platform)
+            self.stage_databases(root, name, changes, platform)
                 .map_err(|e| e.context(format!("preparing the {platform} databases")))?;
         }
         for Retirement { platform, filename } in &changes.retire {
@@ -701,15 +734,16 @@ impl Finalization {
     fn stage_databases(
         &mut self,
         root: &Path,
+        name: &str,
         changes: &Changes,
         platform: Platform,
     ) -> anyhow::Result<()> {
         let dir = Repository::platform_dir(root, platform);
         std::fs::create_dir_all(&dir)?;
-        let db = dir.join(DB_ARCHIVE);
-        let db_next = dir.join(format!(".{DB_ARCHIVE}.next"));
-        let files = dir.join(FILES_ARCHIVE);
-        let files_next = dir.join(format!(".{FILES_ARCHIVE}.next"));
+        let db = dir.join(format!("{name}.db.tar.gz"));
+        let db_next = dir.join(format!(".{name}.db.tar.gz.next"));
+        let files = dir.join(format!("{name}.files.tar.gz"));
+        let files_next = dir.join(format!(".{name}.files.tar.gz.next"));
         // Planned before they are written, so that a write failing halfway
         // is cleaned up with the rest.
         for (source, destination) in [(&db_next, &db), (&files_next, &files)] {
@@ -817,6 +851,7 @@ struct Swept {
 /// [`Repository::sweep`], given what is known of when files were retired.
 fn sweep_retired(
     root: &Path,
+    name: &str,
     mut known: HashMap<PathBuf, Instant>,
     now: Instant,
     grace: Duration,
@@ -835,16 +870,17 @@ fn sweep_retired(
         if hidden || !dir.is_dir() {
             continue;
         }
-        let listed = match pacman_repo_utils::listed_filenames(&dir.join(DB_ARCHIVE)) {
-            Ok(listed) => listed,
-            Err(e) => {
-                warn!(
-                    "not sweeping {}: its repo.db cannot be read ({e})",
-                    dir.display()
-                );
-                continue;
-            }
-        };
+        let listed =
+            match pacman_repo_utils::listed_filenames(&dir.join(format!("{name}.db.tar.gz"))) {
+                Ok(listed) => listed,
+                Err(e) => {
+                    warn!(
+                        "not sweeping {}: its {name}.db cannot be read ({e})",
+                        dir.display()
+                    );
+                    continue;
+                }
+            };
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -912,16 +948,8 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
 
-    /// The archive names are spelled out as constants, so they are checked
-    /// against the name they derive from.
-    #[test]
-    fn the_archives_carry_the_repository_name() {
-        assert_eq!(super::DB_ARCHIVE, format!("{}.db.tar.gz", super::REPO_NAME));
-        assert_eq!(
-            super::FILES_ARCHIVE,
-            format!("{}.files.tar.gz", super::REPO_NAME)
-        );
-    }
+    const DB_ARCHIVE: &str = "repo.db.tar.gz";
+    const FILES_ARCHIVE: &str = "repo.files.tar.gz";
 
     use super::*;
     use sea_orm::Statement;
@@ -967,7 +995,10 @@ mod tests {
 
     /// The entry directories `repo.db` lists for x86_64.
     fn listed(repo: &Repository) -> Vec<String> {
-        let path = repo.root().join("x86_64").join(DB_ARCHIVE);
+        let path = repo
+            .root()
+            .join("x86_64")
+            .join(format!("{}.db.tar.gz", repo.name()));
         let mut data = Vec::new();
         std::fs::File::open(path)
             .unwrap()
@@ -1039,6 +1070,80 @@ mod tests {
             update.retire(&file).unwrap();
         }
         update.commit(&db, |_| Box::pin(async { Ok(()) })).await
+    }
+
+    #[tokio::test]
+    async fn a_custom_name_survives_initialization_publication_restart_and_sweep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path())
+            .with_name("custom_name".into())
+            .unwrap();
+        repo.init().unwrap();
+        for platform in Platform::ALL {
+            let dir = Repository::platform_dir(tmp.path(), platform);
+            for suffix in ["db", "files"] {
+                assert_eq!(
+                    std::fs::read_link(dir.join(format!("custom_name.{suffix}"))).unwrap(),
+                    PathBuf::from(format!("custom_name.{suffix}.tar.gz"))
+                );
+            }
+            assert!(!dir.join("repo.db").exists());
+        }
+        retire_one(&repo).await;
+        let restarted = Repository::new(tmp.path())
+            .with_name("custom_name".into())
+            .unwrap();
+        restarted.init().unwrap();
+        assert_eq!(listed(&restarted), ["foo-1.1-1"]);
+        let db = aurcache_db::testing::memory_db().await;
+        restarted.sweep(&db, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(
+            restarted
+                .sweep_at(
+                    &db,
+                    Instant::now() + Duration::from_secs(120),
+                    Duration::from_secs(60)
+                )
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(platform_file(&restarted, "foo", "1.1-1").exists());
+        assert!(!platform_file(&restarted, "foo", "1.0-1").exists());
+        assert_eq!(listed(&restarted), ["foo-1.1-1"]);
+    }
+
+    #[tokio::test]
+    async fn changing_the_name_does_not_silently_empty_an_existing_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path());
+        repo.init().unwrap();
+        retire_one(&repo).await;
+        let renamed = Repository::new(tmp.path())
+            .with_name("custom_name".into())
+            .unwrap();
+        assert!(
+            renamed
+                .init()
+                .unwrap_err()
+                .to_string()
+                .contains("differently named repository")
+        );
+        assert_eq!(listed(&repo), ["foo-1.1-1"]);
+        for platform in Platform::ALL {
+            let dir = Repository::platform_dir(tmp.path(), platform);
+            assert!(!dir.join("custom_name.db.tar.gz").exists());
+            for suffix in ["db", "files"] {
+                std::fs::rename(
+                    dir.join(format!("repo.{suffix}.tar.gz")),
+                    dir.join(format!("custom_name.{suffix}.tar.gz")),
+                )
+                .unwrap();
+                std::fs::remove_file(dir.join(format!("repo.{suffix}"))).unwrap();
+            }
+        }
+        renamed.init().unwrap();
+        assert_eq!(listed(&renamed), ["foo-1.1-1"]);
     }
 
     #[tokio::test]
@@ -1164,6 +1269,7 @@ mod tests {
         std::fs::create_dir(&old).unwrap();
         let first = sweep_retired(
             repo.root(),
+            repo.name(),
             repo.retired_times().clone(),
             later,
             grace,
@@ -1175,6 +1281,7 @@ mod tests {
         std::fs::write(&old, b"retired package").unwrap();
         let retried = sweep_retired(
             repo.root(),
+            repo.name(),
             first.still_retired,
             later + Duration::from_secs(1),
             grace,
@@ -1466,12 +1573,14 @@ mod tests {
     async fn each_failed_move_is_durable_and_replayable_after_restart() {
         for blocked_name in [
             filename("foo", "1.0-1"),
-            DB_ARCHIVE.to_string(),
-            FILES_ARCHIVE.to_string(),
+            "custom_name.db.tar.gz".to_string(),
+            "custom_name.files.tar.gz".to_string(),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let db = aurcache_db::testing::memory_db().await;
-            let repo = Repository::new(tmp.path());
+            let repo = Repository::new(tmp.path())
+                .with_name("custom_name".into())
+                .unwrap();
             let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
             let blocked = tmp.path().join("x86_64").join(&blocked_name);
             let mut update = repo.begin(&db).await.unwrap();
@@ -1491,7 +1600,9 @@ mod tests {
                 .unwrap_err();
             assert!(error.downcast_ref::<FinalizationPending>().is_some());
             assert!(staged.exists());
-            let restarted = Repository::new(tmp.path());
+            let restarted = Repository::new(tmp.path())
+                .with_name("custom_name".into())
+                .unwrap();
             assert!(restarted.begin(&db).await.is_err());
             assert!(restarted.sweep(&db, Duration::ZERO).await.is_err());
             std::fs::remove_dir(&blocked).unwrap();
@@ -1499,7 +1610,12 @@ mod tests {
             restarted.recover(&db).await.unwrap();
             assert_eq!(listed(&restarted), ["foo-1.0-1"]);
             assert!(platform_file(&restarted, "foo", "1.0-1").is_file());
-            assert!(tmp.path().join("x86_64").join(FILES_ARCHIVE).is_file());
+            assert!(
+                tmp.path()
+                    .join("x86_64")
+                    .join("custom_name.files.tar.gz")
+                    .is_file()
+            );
             assert!(
                 db.query_one_raw(Statement::from_string(
                     db.get_database_backend(),

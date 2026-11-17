@@ -9,11 +9,26 @@
 //! So the split is always the same, and it is worth having in one place: take
 //! everything but the host from the server, and the host from whoever is asking.
 
-/// What the repository is called. It names the databases (`repo.db`,
-/// `repo.files`), and pacman fetches `<section>.db`, so every `[repo]` section
-/// written for it -- the workers', a user's `pacman.conf` -- has to say the
-/// same.
-pub const REPO_NAME: &str = "repo";
+/// The default repository name. The server can override it with
+/// `AURCACHE_REPO_NAME`; database filenames and pacman sections must agree.
+pub const DEFAULT_REPO_NAME: &str = "repo";
+
+/// A repository name must be both a filename component and a pacman section.
+/// Keep configuration directives, paths and pacman's special section out.
+pub fn validate_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty()
+        || name == "options"
+        || !name.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+    {
+        return Err(
+            "repository name must start with an ASCII letter, digit or underscore, contain only ASCII letters, digits, underscores, dots or hyphens, and must not be 'options'",
+        );
+    }
+    Ok(())
+}
 
 /// The `Server =` line for a repository published at `public_url`, as reached by
 /// a client that gets to the instance at `host`. `listen_port` is the port the
@@ -85,7 +100,32 @@ pub fn host_from_url(url: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{host_from_url, server_url_for_host};
+    use super::{host_from_url, server_url_for_host, validate_name};
+
+    #[test]
+    fn repository_names_are_safe_filenames_and_pacman_sections() {
+        for name in ["repo", "my-packages", "custom_name.2", "_private"] {
+            assert!(validate_name(name).is_ok(), "{name:?}");
+        }
+        for name in [
+            "",
+            "options",
+            ".hidden",
+            "..",
+            "../repo",
+            "/repo",
+            "a/b",
+            "a\\b",
+            "repo]",
+            "a\nServer = bad",
+            "a b",
+            "a#b",
+            "répo",
+            "a\0b",
+        ] {
+            assert!(validate_name(name).is_err(), "{name:?}");
+        }
+    }
 
     /// Only the host changes: the rest describes how the repository is
     /// published and stays the server's decision.

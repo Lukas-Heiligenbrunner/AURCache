@@ -34,6 +34,20 @@ async fn main() {
         tracing::error!("{e}");
         std::process::exit(1);
     });
+    let repo_name = match aurcache_common::server_env::AURCACHE_REPO_NAME.get() {
+        Ok(name) => name,
+        Err(std::env::VarError::NotPresent) => aurcache_common::repo::DEFAULT_REPO_NAME.to_string(),
+        Err(error) => {
+            tracing::error!("invalid AURCACHE_REPO_NAME: {error}");
+            std::process::exit(1);
+        }
+    };
+    let repo = Repository::new(REPO_ROOT)
+        .with_name(repo_name)
+        .unwrap_or_else(|error| {
+            tracing::error!("invalid AURCACHE_REPO_NAME: {error}");
+            std::process::exit(1);
+        });
     let version = aurcache_common::version::full_version(env!("CARGO_PKG_VERSION"));
     pre_startup_tasks(&version).expect("could not take over the hybrid image's CA and build logs");
 
@@ -103,14 +117,15 @@ async fn main() {
     // The pacman repository. One instance, because its lock is what keeps two
     // changes to it from interleaving: the worker protocol publishing builds,
     // package removals and restores all go through this one.
-    let repo = Arc::new(Repository::new(REPO_ROOT).with_log(activity.clone()));
+    let repo = Arc::new(repo.with_log(activity.clone()));
     // Not fatal: a server that will not start cannot say what is wrong, and the
     // next repository update and every publication retry recover again.
     if let Err(e) = repo.recover(&db).await {
         tracing::error!("Could not finish the last repository update: {e:#}");
     }
-    if let Err(e) = repo.init() {
-        tracing::error!("Failed to initialize the pacman repository: {e:#}");
+    if let Err(error) = repo.init() {
+        tracing::error!("failed to initialize the pacman repository: {error:#}");
+        std::process::exit(1);
     }
 
     // The things a package operation acts through, from here on passed as one.

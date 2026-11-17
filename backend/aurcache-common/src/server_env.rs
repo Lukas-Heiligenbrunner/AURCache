@@ -60,6 +60,8 @@ pub const TZ: Var = Var("TZ");
 pub const SECRET_KEY: Var = Var("SECRET_KEY");
 /// Where workers reach the pacman repository.
 pub const AURCACHE_PUBLIC_URL: Var = Var("AURCACHE_PUBLIC_URL");
+/// The pacman section and database filename prefix.
+pub const AURCACHE_REPO_NAME: Var = Var("AURCACHE_REPO_NAME");
 /// Set by this project's images: the server runs in a container.
 pub const AURCACHE_CONTAINER_IMAGE: Var = Var("AURCACHE_CONTAINER_IMAGE");
 pub const RETIRED_PACKAGE_GRACE: Var = Var("RETIRED_PACKAGE_GRACE");
@@ -147,6 +149,7 @@ pub const ALL: &[Var] = &[
     TZ,
     SECRET_KEY,
     AURCACHE_PUBLIC_URL,
+    AURCACHE_REPO_NAME,
     AURCACHE_CONTAINER_IMAGE,
     RETIRED_PACKAGE_GRACE,
     ACTIVITY_RETENTION,
