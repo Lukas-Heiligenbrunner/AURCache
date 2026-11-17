@@ -73,9 +73,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          # Also the image of the agent that every build pod runs, which the
-          # worker reads from its own pod (WORKER_KUBE_POD_NAME below).
-          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:latest
+          # `git` is the build of the development branch, and the only tag
+          # there is until a release contains this worker. Pin a release once
+          # one does (see kustomization.yaml).
+          #
+          # Also the image of the agent that every build pod runs: see
+          # WORKER_KUBE_AGENT_IMAGE below.
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:git
+          imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -118,15 +123,13 @@ spec:
             # it here.
             - name: WORKER_CONCURRENCY_DEFAULT
               value: "2"
-            # Which pod this is, so the worker can read the image it runs.
-            - name: WORKER_KUBE_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: WORKER_KUBE_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+            # The image build pods take the build agent from: this worker's
+            # own, so that the agent in a build is the one this worker was
+            # built with. kustomization.yaml copies `image` above into it, so
+            # setting the image there moves both. If you change one by hand,
+            # or set images from an overlay of your own, change both.
+            - name: WORKER_KUBE_AGENT_IMAGE
+              value: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:git
             # Where build pods are created. The Role and NetworkPolicy in this
             # directory are for this namespace; change them together.
             - name: WORKER_KUBE_NAMESPACE

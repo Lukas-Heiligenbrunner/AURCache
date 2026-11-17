@@ -30,7 +30,7 @@ everything into one.
 |---|---|
 | `kustomization.yaml` | The default set. Options are commented in it. |
 | `namespace.yaml` | The `aurcache-builds` namespace, where build pods run, labelled for the Pod Security `baseline` level. |
-| `rbac.yaml` | The worker's ServiceAccount, its Roles and RoleBindings (see below), and `aurcache-build`, the account build pods run as, which is bound to nothing. |
+| `rbac.yaml` | The worker's ServiceAccount, its Role and RoleBinding (see below), and `aurcache-build`, the account build pods run as, which is bound to nothing. |
 | `networkpolicy.yaml` | The firewall around build pods: DNS, the server's repository, and the internet outside private address ranges. |
 | `worker.yaml` | The worker: a Deployment (one replica, `Recreate`, passing the `restricted` level) and the 1 Gi volume that holds its identity. |
 | `resourcequota.yaml` | An optional ceiling on all builds together. Not applied unless enabled in `kustomization.yaml`. |
@@ -43,9 +43,10 @@ server already reads.
 
 The worker holds no cluster-wide role. In `aurcache-builds` it may create, get,
 list, watch and delete pods (and delete them by label, to clean up after
-itself), open exec sessions into them and read their logs. In `aurcache` it may
-read pods, to learn which image it runs. Build pods get no token for the
-Kubernetes API at all.
+itself), open exec sessions into them and read their logs. In `aurcache`, its
+own namespace, it may do nothing: the image build pods take the build agent
+from is named in `worker.yaml`, and `kustomization.yaml` keeps it equal to the
+worker's own. Build pods get no token for the Kubernetes API at all.
 
 ## Running more than one
 

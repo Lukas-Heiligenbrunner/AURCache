@@ -1,5 +1,6 @@
-# What the dispatcher may do, and only where. It holds no cluster-wide role and
-# touches nothing outside the two namespaces below.
+# What the dispatcher may do, and only where. It holds no cluster-wide role,
+# and no role at all in its own namespace: everything it is allowed is in the
+# builds' namespace.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -54,38 +55,6 @@ kind: RoleBinding
 metadata:
   name: aurcache-kube-worker
   namespace: aurcache-builds
-  labels:
-    app.kubernetes.io/name: aurcache-kube-worker
-    app.kubernetes.io/component: kube-worker
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: aurcache-kube-worker
-subjects:
-  - kind: ServiceAccount
-    name: aurcache-kube-worker
-    namespace: aurcache
----
-# The dispatcher reads its own pod to learn which image it runs: every build
-# pod starts its `stage` and `hold` containers from that image.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: aurcache-kube-worker
-  namespace: aurcache
-  labels:
-    app.kubernetes.io/name: aurcache-kube-worker
-    app.kubernetes.io/component: kube-worker
-rules:
-  - apiGroups: [""]
-    resources: [pods]
-    verbs: [get]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: aurcache-kube-worker
-  namespace: aurcache
   labels:
     app.kubernetes.io/name: aurcache-kube-worker
     app.kubernetes.io/component: kube-worker

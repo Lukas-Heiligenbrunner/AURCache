@@ -6,8 +6,8 @@
 #
 #     kubectl apply -k kubernetes/kube-worker/
 #
-# Apply the server's manifests first (`kubectl apply -k kubernetes/`): this
-# expects the server's Service `aurcache` in the namespace `aurcache`, and
+# Apply the server's manifests first: this expects the server's Service
+# `aurcache` and the namespace `aurcache` they create, and
 # puts its own pieces in two namespaces:
 #
 #   aurcache         the worker itself (the "dispatcher"), one small pod
@@ -45,17 +45,32 @@ resources:
   # before enabling it.
   # - resourcequota.yaml
 
-# Pin a release instead of following `latest`:
+# Pin a release instead of following `git`, once a release contains this
+# worker:
 #
 #     kustomize edit set image \
 #       ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:<version>
 #
-# The dispatcher's image is also the image of the agent that runs in every
-# build pod, so one tag moves both.
-#
 # images:
 #   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
 #     newTag: "<version>"
+
+# The dispatcher's image is also the image of the agent that runs in every
+# build pod. This copies it, as set above, into WORKER_KUBE_AGENT_IMAGE, so
+# one tag moves both and the dispatcher needs no permission to read its own
+# pod. It runs after `images:` in this file, and before an overlay's: an
+# overlay that sets the image has to set that variable too.
+replacements:
+  - source:
+      kind: Deployment
+      name: aurcache-kube-worker
+      fieldPath: spec.template.spec.containers.[name=worker].image
+    targets:
+      - select:
+          kind: Deployment
+          name: aurcache-kube-worker
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].env.[name=WORKER_KUBE_AGENT_IMAGE].value
 
 # Automatic approval of workers (optional). The server approves a new worker
 # that presents the same token as its own `aurcache-enrollment` Secret, which
