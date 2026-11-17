@@ -1046,6 +1046,7 @@ dependencies = [
  "aurcache-utils",
  "aurcache-worker-container",
  "aurcache-worker-core",
+ "flate2",
  "futures",
  "hex",
  "k8s-openapi",
