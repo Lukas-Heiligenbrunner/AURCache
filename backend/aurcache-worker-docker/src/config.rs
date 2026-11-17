@@ -1,4 +1,4 @@
-//! Configuration for the legacy container executor.
+//! Configuration for the Docker worker's executor.
 //!
 //! These are the pre-worker environment variables, read under their original
 //! names and with their original meanings, because the whole point of this

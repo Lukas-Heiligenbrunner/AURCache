@@ -1,14 +1,10 @@
-//! AURCache legacy container build worker.
+//! The AURCache Docker worker.
 //!
-//! **Deprecated.** This exists so that deployments predating the remote-worker
-//! architecture keep building after an upgrade, by reproducing the old
-//! strategy of spawning a build container per package against the host's
-//! Docker socket. It is selected only by the hybrid compatibility image, and
-//! only when `BUILD_ARTIFACT_DIR` shows the deployment was previously using
-//! host build mode.
+//! It builds each package in a container of its own, made from a builder
+//! image, against a Docker or Podman socket. The hybrid image embeds it.
 //!
-//! New deployments should run `aurcache-worker`, which builds in a clean
-//! `devtools` chroot and supports source/package caches and build credentials.
+//! `aurcache-worker` builds in a clean `devtools` chroot instead, and supports
+//! source and package caches and build credentials.
 
 pub mod commands;
 pub mod config;

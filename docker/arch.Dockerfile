@@ -12,14 +12,14 @@
 #           mkarchroot need mount + unshare.
 #
 #   hybrid  the compatibility image (`aurcache`): server + an embedded build
-#           worker. **Deprecated.** It exists so that deployments predating the
+#           worker. It exists so that deployments predating the
 #           remote-worker architecture keep working after an upgrade without
 #           editing their compose file. New deployments should run the split
 #           images: `aurcache-server` plus one or more `aurcache-worker`
 #           containers, which can be scaled and placed independently. See the
 #           Build Workers documentation.
 #
-#           The embedded worker is the legacy container builder: the one
+#           The embedded worker is the Docker worker: the one
 #           closest to what these deployments ran before, so their
 #           requirements stay what they were. In the old DinD mode
 #           (privileged, no socket mounted) it drives a Podman running in this
@@ -244,7 +244,7 @@ CMD ["run"]
 FROM runtime AS hybrid
 ARG TARGETPLATFORM
 
-# The server, the sandbox it parses PKGBUILDs through, and the legacy builder.
+# The server, the sandbox it parses PKGBUILDs through, and the Docker worker.
 # pacman pulls alpm-pkgbuild-bridge as an ordinary dependency. Podman (with
 # crun and fuse-overlayfs, as upstream's image had) is what DinD mode builds
 # in.

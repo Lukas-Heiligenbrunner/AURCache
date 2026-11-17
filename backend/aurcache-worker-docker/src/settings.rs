@@ -1,4 +1,4 @@
-//! The settings the legacy container executor declares, beside the protocol
+//! The settings the Docker worker's executor declares, beside the protocol
 //! ones every worker has.
 //!
 //! Its own, in its own units: `CPU_LIMIT` in milli-CPUs and `MEMORY_LIMIT` in

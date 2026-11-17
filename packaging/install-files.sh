@@ -81,7 +81,7 @@ worker)
         "$PKGDIR/etc/sudoers.d/aurcache-worker"
     ;;
 worker-docker)
-    # The legacy executor delegates builds to containers, so it needs none of
+    # The Docker worker delegates builds to containers, so it needs none of
     # the chroot machinery the chroot worker installs -- no sandbox, no
     # aurcache-build, no sudoers entry. Just the binary and the users and
     # directories it shares with the chroot worker.

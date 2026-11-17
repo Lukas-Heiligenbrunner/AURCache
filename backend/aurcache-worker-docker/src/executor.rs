@@ -1,10 +1,10 @@
-//! The legacy container executor.
+//! The Docker worker's executor.
 //!
 //! Reproduces the pre-worker build strategy: create a container from the
 //! builder image, bind a shared build directory into it, run `makepkg`, stream
 //! its output as build logs, then upload whatever landed in the directory.
 //!
-//! This is a compatibility path. It builds in a container rather than a clean
+//! It builds in a container rather than a clean
 //! chroot, so a build can see whatever the image accumulated from the previous
 //! `pacman -Syu`, and it offers none of the chroot worker's caches or
 //! credential handling. New deployments should use `aurcache-worker`.
@@ -62,7 +62,7 @@ impl DockerExecutor {
         docker.ping().await.map_err(|e| {
             anyhow!(
                 "connection to the Docker socket failed: {e}\n\
-                 The compatibility builder needs /var/run/docker.sock mounted into this \
+                 The Docker worker needs /var/run/docker.sock mounted into this \
                  container. If using podman, install 'podman-docker' to provide the docker \
                  socket, or run the chroot worker instead (see the Build Workers docs)."
             )
@@ -369,7 +369,7 @@ impl DockerExecutor {
         };
 
         build_log.close(vec![pump], stop).await;
-        // The legacy container builder samples neither the build tree nor the
+        // This executor samples neither the build tree nor the
         // sources it was made from, so nothing is measured on either path.
         Ok(report::ended(stop, watch.elapsed(), exit))
     }
@@ -389,10 +389,7 @@ impl Executor for DockerExecutor {
     }
 
     fn describe_self(&self) -> String {
-        format!(
-            "legacy container ({}) [deprecated]",
-            self.cfg.current().builder_image
-        )
+        format!("docker ({})", self.cfg.current().builder_image)
     }
 
     /// Nothing here needs the machine's say beyond what the declaration

@@ -82,7 +82,7 @@ pub struct BuildSummary {
     /// this is that cgroup's `memory.peak`, covering every process in the tree.
     ///
     /// `None` where no figure was reported -- a build from before figures were
-    /// recorded, the deprecated container builder (Docker exposes no peak on cgroup v2), or a worker
+    /// recorded, the Docker worker (Docker exposes no peak on cgroup v2), or a worker
     /// whose cgroup subtree could not be prepared.
     pub peak_memory: Option<i64>,
     /// Disk the build used on its worker, part by part. `None` where no
