@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aurcache-chroot-worker-egress
+  namespace: aurcache
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: chroot-worker
+  policyTypes:
+    - Egress
+    # Workers serve nothing, so nothing needs to reach them.
+    - Ingress
+  egress:
+    # Name lookups.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # The server: its repository (nginx, port 80 in the pod) and its worker
+    # protocol. A policy sees the pod's ports, not the Service's.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aurcache
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8083
+    # Public addresses: the AUR, the Arch mirrors, package sources.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10     # carrier-grade NAT, used by some clusters
+              - 169.254.0.0/16    # link-local: the cloud metadata endpoint
+              - 127.0.0.0/8
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7          # unique local
+              - fe80::/10         # link-local
+              - ::1/128

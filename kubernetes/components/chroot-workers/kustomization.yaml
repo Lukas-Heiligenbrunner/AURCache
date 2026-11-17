@@ -1,0 +1,26 @@
+# Chroot build workers on amd64 nodes (../../chroot-worker), building x86_64
+# packages, each in a clean devtools chroot.
+#
+# They run privileged, so this also raises the `aurcache` namespace's Pod
+# Security level from `baseline` to `privileged`. Leave this component out and
+# the namespace stays at `baseline`, with the server alone in it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - ../../chroot-worker
+
+patches:
+  - target:
+      kind: Namespace
+      name: aurcache
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: aurcache
+        labels:
+          # devtools builds each package in a systemd-nspawn chroot, and the
+          # worker formats and mounts its own btrfs storage pool: both take a
+          # privileged pod, which `baseline` refuses.
+          pod-security.kubernetes.io/enforce: privileged

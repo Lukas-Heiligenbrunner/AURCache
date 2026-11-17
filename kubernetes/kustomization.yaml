@@ -1,8 +1,8 @@
 # =============================================================================
 # AURCache on Kubernetes
 # =============================================================================
-# The server (web UI, API, pacman repository) and one x86_64 chroot build
-# worker, in their own namespace:
+# The server (web UI, API, pacman repository) and the workers that build for
+# it, in the `aurcache` namespace:
 #
 #     kubectl apply -k kubernetes/
 #
@@ -13,47 +13,64 @@
 # Web UI / API : http://localhost:8080   (plain HTTP; put an Ingress in front for TLS)
 # Pacman repo  : http://localhost:8081   (add as a [repo] Server in pacman.conf)
 #
-# The worker shows up on the Workers page as pending: approve it there, or
+# The server is the base (server/, which also applies on its own). The workers
+# are a choice, below. By default that is one x86_64 chroot worker: a
+# privileged pod that needs Linux 6.7 or newer with btrfs on its node, and a
+# disk for its storage pool. See the Kubernetes page of the documentation
+# before running it on a cluster you share with anything else.
+#
+# A new worker shows up on the Workers page as pending: approve it there, or
 # create the `aurcache-enrollment` Secret below before applying and it is
 # approved on its own.
 #
-# The worker needs what it needs under Docker: a privileged pod, Linux 6.7 or
-# newer with btrfs on its node, and a disk for its storage pool. See the
-# Kubernetes page of the documentation before running this on a cluster you
-# share with anything else.
+# `kubectl delete -k kubernetes/` deletes the namespace, and with it the
+# server's volume -- the database, the repository and the worker CA -- unless
+# its PersistentVolume is set to be retained. See "Removing it" in the docs.
 # =============================================================================
 
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Everything goes in here. Changing it means changing the namespace in the
-# server's AURCACHE_TLS_SANS too (server/server.yaml).
-namespace: aurcache
+# No `namespace:` here: everything below names its own, and a worker kind may
+# span more than one.
 
 labels:
   - pairs:
       app.kubernetes.io/part-of: aurcache
+    includeTemplates: true
 
 resources:
-  - namespace.yaml
   - server
-  - worker
-  # A second set of workers on arm64 nodes, building aarch64 packages. A chroot
-  # worker builds for the architecture it runs on, so each architecture is its
-  # own StatefulSet pinned to nodes of that architecture.
-  # - worker-arm64
 
+# The workers. Each component adds one kind, and they can be combined.
 components:
-  # Uncomment to keep the workers' storage pools in an image file on their data
-  # volume rather than on a raw block volume of their own: for a storage class
-  # that cannot provision `volumeMode: Block` (local-path, for one).
+  # Chroot workers on amd64 nodes, building x86_64 packages, each in a clean
+  # devtools chroot. Privileged: this also raises the namespace's Pod Security
+  # level to `privileged`. Comment it out for the server alone.
+  - components/chroot-workers
+  #
+  # The same on arm64 nodes, building aarch64 packages.
+  # - components/chroot-workers-arm64
+  #
+  # Options for the chroot workers, listed after them:
+  #
+  # Their storage pools in an image file on their data volume, for a storage
+  # class that cannot provision `volumeMode: Block` (local-path, for one).
+  # Read the component first: such a class may not enforce sizes.
   # - components/pool-image
   #
-  # Uncomment to keep the database in PostgreSQL instead of SQLite. It expects
-  # an `aurcache-postgres` Secret; see the component.
+  # An egress NetworkPolicy keeping their builds off the cluster's private
+  # network. Read the component first: it has to match your cluster's DNS.
+  # - components/chroot-worker-egress
+  #
+  # The server's database in PostgreSQL instead of SQLite. It expects an
+  # `aurcache-postgres` Secret; see the component.
   # - components/postgres
 
-# Pin a release instead of following `latest`:
+# Image versions. The manifests name `git`, built from master, until a
+# release after 0.6.0 is out: 0.6.0's worker image hands the node's root
+# cgroup to its own user when it runs privileged under containerd. Once that
+# release exists, pin it here (and keep server and workers on one version):
 #
 #     kustomize edit set image \
 #       ghcr.io/lukas-heiligenbrunner/aurcache-server:<version> \
@@ -70,6 +87,6 @@ components:
 # someone clicks Approve on the Workers page. Kept out of this directory so no
 # token is ever committed with it:
 #
-#     kubectl apply -f kubernetes/namespace.yaml
+#     kubectl apply -f kubernetes/server/namespace.yaml
 #     kubectl -n aurcache create secret generic aurcache-enrollment \
 #       --from-literal=token="$(openssl rand -hex 32)"

@@ -10,8 +10,8 @@
 #       --from-literal=password=<password> \
 #       --from-literal=database=<database>
 #
-# The server writes the password into a postgres:// URL as it is, so keep it to
-# letters, digits and `-_.~`. The data volume is still needed: the repository,
+# Any password works: the server escapes the user and password itself when it
+# builds its postgres:// URL. The data volume is still needed: the repository,
 # the worker CA and the build logs stay on it.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
