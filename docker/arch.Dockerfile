@@ -209,9 +209,18 @@ ARG TARGETPLATFORM
 # sudoers entry, the sandbox policy, and the patched makechrootpkg
 # (`aurcache-build`). pacman pulls devtools (mkarchroot / makechrootpkg /
 # arch-nspawn) and python as ordinary dependencies.
+#
+# The base image has no /etc/localtime, and systemd-nspawn gives each build
+# chroot the timezone of the system it runs on, so builds would run with none:
+# test suites that format or parse local times then fail. A regular file set
+# to UTC rather than a link, so nspawn copies it into the chroot, and so a
+# host's file bind-mounted over it replaces it rather than landing on the
+# link's target. UTC also keeps a build's output the same whichever worker
+# produced it.
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     --mount=type=bind,from=packager,source=/pkg,target=/tmp/pkg \
-    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker
+    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker \
+    && cp /usr/share/zoneinfo/UTC /etc/localtime
 
 # The same locations the package's tmpfiles declaration creates. A container
 # has no systemd unit to carry them, so they are set here instead.
