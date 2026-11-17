@@ -100,6 +100,36 @@ Packages for `aarch64` and `armv7h` build as they did, through the host's
 qemu/binfmt handlers; see [the Docker
 worker](../workers/docker.md#other-architectures).
 
+## How the Docker worker builds
+
+This applies to the hybrid image's embedded worker and to any Docker worker,
+whether it comes from 0.5 or from 0.6. The Docker worker now runs each build
+with a build agent it puts in the build directory. The agent prepares the
+container as root, then runs makepkg as an unprivileged user. Packages that
+built before still build, but some things change:
+
+- **Build code has no `sudo`.** The container has no capabilities beyond the
+  few the agent needs, and it sets `no-new-privileges`. A PKGBUILD that runs
+  `sudo` itself now fails. Dependencies are still installed: makepkg asks the
+  agent for them.
+- **`-i` and `-r` in a package's build flags stop working.** The agent installs
+  the dependencies makepkg asks for and nothing else, so `makepkg -i` and
+  `makepkg -r` fail. Remove those flags from any package that sets them.
+- **A failure before makepkg is the worker's, not the package's.** If the image
+  upgrade (`pacman -Syu`) or the import of a PGP key fails, for example because a
+  mirror or the keyserver is down, the build is queued again while it has
+  attempts left. It no longer fails the package.
+- **Builds report what they used.** Each build reports its disk use, its VCS
+  commits and, where the engine's cgroup allows it, its peak memory. An
+  out-of-memory failure says so and names `MEMORY_LIMIT`.
+- **`/dev/shm` follows the memory limit.** It is as large as `MEMORY_LIMIT`, or
+  2 GiB when no limit is set, where Docker's default is 64 MiB.
+- **A custom `BUILDER_IMAGE`** needs pacman, makepkg and gpg. It no longer needs
+  `sudo` or an `ab` user. An image that worked before still works.
+
+The builder image itself has not changed, so a worker that has not been
+upgraded yet keeps building with the same image.
+
 ## Afterwards
 
 The hybrid image is for keeping an existing setup running. When convenient,
