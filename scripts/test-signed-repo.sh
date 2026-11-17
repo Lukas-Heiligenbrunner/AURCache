@@ -8,8 +8,8 @@
 #
 #   1. a client that does not trust the key refuses the repository even with
 #      `SigLevel = Optional TrustAll`, as the documentation warns;
-#   2. with the key trusted the way the documentation says, `SigLevel =
-#      Required` installs both packages;
+#   2. with the key trusted the way the documentation says -- piped into
+#      `pacman-key --add -` -- `SigLevel = Required` installs both packages;
 #   3. a database that is not the one signed is refused;
 #   4. a package whose signature is not over it is refused, by the package
 #      signature alone (database signatures not checked).
@@ -70,7 +70,9 @@ grep -q "is unknown" /tmp/out || { cat /tmp/out; fail "1: refused for another re
 echo "ok 1: refused while the key is not trusted"
 reset
 
-pacman-key --add /w/key.asc >/dev/null 2>&1 || fail "pacman-key --add"
+# From a pipe, as the documented command and `aurcli repo config --install`
+# feed it: `--add -`, since pacman-key refuses `--add` with no argument.
+cat /w/key.asc | pacman-key --add - >/dev/null 2>&1 || fail "pacman-key --add -"
 pacman-key --lsign-key "$FINGERPRINT" >/dev/null 2>&1 || fail "pacman-key --lsign-key"
 conf "Required"
 pacman -Sy --noconfirm signed-later signed-now >/tmp/out 2>&1 || { cat /tmp/out; fail "2: refused"; }

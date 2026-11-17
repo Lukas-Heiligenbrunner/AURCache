@@ -16,9 +16,9 @@ Server = http://<server_ip>:8081/$arch
 8081 is the default; a server that sets `AURCACHE_REPO_PORT` serves the
 repository on that port instead.
 
-That is for an instance that does not sign its repository, the default. One
-that does is used with `SigLevel = Required`, once its key is trusted; see
-[Signing the repository](#signing-the-repository).
+That stanza is for an instance that does not sign its repository, the
+default. One that does is used with `SigLevel = Required`, once its key is
+trusted; see [Signing the repository](#signing-the-repository).
 
 ## Browse the repository
 
@@ -76,14 +76,17 @@ port says nothing about the repository's, so against a server that moved it pass
 `--port`. `--offline` forces
 that fallback; `--port`, `--name` and `--siglevel` override the result outright.
 
-The server's answer also says whether the repository is signed. If it is, the
-stanza says `SigLevel = Required`, the commands to trust the key are printed
-with it, and `--install` first offers to run them: it shows the key's
-fingerprint and asks before adding the key to pacman's keyring and locally
-signing it (through `sudo` unless run as root). Answering no, or running
-without a terminal to ask on, leaves the keyring alone and prints the commands
-instead. A section already in `pacman.conf` is left as it is, its `SigLevel`
-included: change that one yourself.
+It also asks whether the repository is signed, which the server answers
+without a token too (`GET /api/repo/signing`). If it is, the stanza says
+`SigLevel = Required`, the commands to trust the key are printed with it, and
+`--install` first offers to run them: it shows the key's fingerprint and asks
+before adding the key to pacman's keyring and locally signing it (through
+`sudo` unless run as root). Answering no, or running without a terminal to ask
+on, leaves the keyring alone, prints the commands, and does not write the
+section either — pacman would refuse it, even with signatures optional, until
+the key is trusted. Run it again once the key is trusted, or pass `--siglevel`
+to write the section regardless. A section already in `pacman.conf` is left as
+it is, its `SigLevel` included: change that one yourself.
 
 `$arch` is pacman's own variable and is deliberately left unexpanded: one stanza
 serves every architecture the instance builds for.
@@ -124,7 +127,7 @@ directory without running the server, and a stale or swapped `repo.db`.
    shows:
 
    ```bash
-   curl -fsSL http://<server_ip>:8080/api/repo/key | sudo pacman-key --add
+   curl -fsSL http://<server_ip>:8080/api/repo/key | sudo pacman-key --add -
    sudo pacman-key --lsign-key <fingerprint>
    ```
 
