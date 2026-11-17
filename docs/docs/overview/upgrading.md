@@ -116,9 +116,12 @@ built before still build, but some things change:
   the dependencies makepkg asks for and nothing else, so `makepkg -i` and
   `makepkg -r` fail. Remove those flags from any package that sets them.
 - **A failure before makepkg is the worker's, not the package's.** If the image
-  upgrade (`pacman -Syu`) or the import of a PGP key fails, for example because a
-  mirror or the keyserver is down, the build is queued again while it has
-  attempts left. It no longer fails the package.
+  upgrade (`pacman -Syu`) fails, for example because a mirror is down, the
+  server ends the build and queues a new one while the package has attempts
+  left. It no longer fails the package. A PGP key that cannot be fetched is
+  noted in the build log and the build goes on, as on the chroot worker.
+- **Every build starts from a fresh tree.** The persistent build directory
+  setting has no effect on this worker.
 - **Builds report what they used.** Each build reports its disk use, its VCS
   commits and, where the engine's cgroup allows it, its peak memory. An
   out-of-memory failure says so and names `MEMORY_LIMIT`.

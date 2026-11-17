@@ -15,18 +15,82 @@ the source and package caches nor [build credentials](./credentials.md). The
 
 ## How it builds
 
-For each job the worker prepares a build directory, creates a container from
-the builder image with the engine's resource limits, streams the container's
-output into the build log, and uploads the packages the build leaves in the
-directory. The builder image needs pacman, makepkg and gpg.
+For each job the worker prepares a build directory holding the job, its
+sources and a copy of the **build agent**, creates a container from the builder
+image with the engine's resource limits, streams the container's output into
+the build log, and uploads the packages the build leaves in the directory. The
+container and the directory are removed afterwards, however the build ended.
 
 With `BUILD_ARTIFACT_DIR` set the worker builds against the mounted Docker
 socket: the directory must be a path the Docker daemon can bind, with the same
 directory visible to the worker. Without it, the [hybrid image](./hybrid.md)
 builds against a Podman it runs inside its own container.
 
-`WORKER_BUILD_AGENT` names the build agent the worker places in each build
-directory to run the build.
+### The build agent
+
+The agent is a small static program, `aurcache-build-agent`, that the worker
+brings: it is the build container's entrypoint, and the builder image does not
+contain it. The package and the hybrid image install it at
+`/usr/lib/aurcache/bin/aurcache-build-agent`; `WORKER_BUILD_AGENT` names another
+path. The worker refuses to start without it. The
+[Kubernetes worker](./kubernetes.md) runs the same agent, so a build behaves
+alike on both.
+
+Inside the container the agent works in two steps:
+
+1. **As root**, it writes the job's `pacman.conf` and mirrorlist, prepares
+   pacman's keyring, upgrades the image (`pacman -Syu`) and adds a build user.
+2. **As that user, with no privileges**, it unpacks the sources, fetches the
+   PGP keys the PKGBUILD names in `validpgpkeys`, and runs makepkg. When makepkg
+   needs dependencies installed it asks the agent, which installs the packages
+   named and nothing else. There is no `sudo`, so `-i` and `-r` in a package's
+   build flags do not work.
+
+A step that fails before makepkg (a mirror that is down) is the worker's
+problem, not the package's: the build is handed back and the server tries it
+again while it has attempts left. A PGP key that cannot be fetched is only
+noted in the build log, since a PKGBUILD often lists keys no source of the
+version is signed with; a build that needed the key then fails at makepkg's
+signature check.
+
+When the build ends, the agent writes a report beside the packages: how makepkg
+ended, the build's disk use, the commits of its VCS sources, and its peak
+memory and out-of-memory kills, read from the container's own cgroup (cgroup
+v2; on a host without it those two are left unknown). That is where the
+figures on a build's page come from, against the host's Docker and against the
+Podman the hybrid image runs inside itself alike.
+
+### What a build may do
+
+A build container is not privileged. It starts as root with every capability
+dropped except the seven the agent's first step needs (`CHOWN`, `DAC_OVERRIDE`,
+`FOWNER`, `FSETID`, `SETUID`, `SETGID` and `KILL`), and with
+`no-new-privileges`, so nothing in it can gain more. Package code runs as the
+unprivileged build user, with none of them. The build directory is the
+container's only bind mount, and the Docker socket is never given to a build.
+
+By default a build container shares the worker's own network namespace, so
+that the repository address the worker uses means the same thing inside the
+build. A build can therefore reach whatever the worker can, the server's worker
+port included; that port asks for a client certificate, which a build does not
+have. `AURCACHE_BUILDER_NETWORK` puts builds on a Docker network you name
+instead. Unlike the Kubernetes worker, nothing here firewalls a build.
+
+`/dev/shm` is as large as the memory limit, or 2 GiB when none is set.
+
+### The builder image
+
+`BUILDER_IMAGE` (default
+`ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest`) is pulled before
+each build. An image of your own needs pacman, makepkg and gpg; it needs
+neither `sudo` nor a build user, which the agent adds.
+
+### Build trees are not kept
+
+Every build starts from a fresh tree in a new container, so the
+persistent build directory setting
+(`persistent_builddir`) has no effect on this worker, and nothing is logged
+about it. Kept failed builds are not offered either.
 
 ## Settings
 
