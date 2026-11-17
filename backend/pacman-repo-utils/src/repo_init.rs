@@ -25,14 +25,20 @@ pub fn init_repo(path: &Path, name: &str) -> anyhow::Result<()> {
 /// archives' detached signatures, as `repo-add --sign` names them.
 ///
 /// A link to a signature not written yet is left dangling, and answers "not
-/// found" until there is one -- which is what a missing signature is.
+/// found" until there is one -- which is what a missing signature is. A file
+/// under the link's name -- a signature some other tool wrote, of databases
+/// since rewritten -- is replaced by the link: pacman refuses a signature
+/// that does not match, even where signatures are optional.
 pub fn link_signatures(path: &Path, name: &str) -> anyhow::Result<()> {
     for suffix in ["db", "files"] {
         let [signature, link] = get_archive_names(name, suffix).map(|n| format!("{n}.sig"));
         let link = path.join(link);
-        if link.symlink_metadata().is_err() {
-            symlink(signature, link).context("failed to link a database signature")?;
+        match link.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(_) => fs::remove_file(&link).context("failed to replace a database signature")?,
+            Err(_) => {}
         }
+        symlink(signature, link).context("failed to link a database signature")?;
     }
     Ok(())
 }
@@ -111,6 +117,22 @@ mod tests {
             b"populated"
         );
         assert!(tmp.path().join("repo.files").exists());
+    }
+
+    /// A signature file where the link goes -- left by another tool, of
+    /// databases since rewritten -- would be refused by every client.
+    #[test]
+    fn a_stray_signature_file_is_replaced_by_the_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo").unwrap();
+        fs::write(tmp.path().join("repo.db.sig"), b"stale").unwrap();
+        fs::write(tmp.path().join("repo.db.tar.gz.sig"), b"current").unwrap();
+
+        link_signatures(tmp.path(), "repo").unwrap();
+
+        let link = tmp.path().join("repo.db.sig");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(link).unwrap(), b"current");
     }
 
     /// pacman asks for `repo.db.sig`; it is a link to the archive's
