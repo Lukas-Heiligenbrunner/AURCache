@@ -144,7 +144,8 @@ impl<C: Cluster> KubeExecutor<C> {
         if swept > 0 {
             tracing::warn!(
                 "Deleted {swept} build pod(s) left by a previous run of this worker; the \
-                 server queues their builds again"
+                 server ends their builds, and queues a new build of each package while it \
+                 has attempts left"
             );
         }
         Ok(swept)
