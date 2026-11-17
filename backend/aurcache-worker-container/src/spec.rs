@@ -37,7 +37,7 @@ fn describe(
     BuildSpec {
         interface: INTERFACE,
         pkgbase: job.pkgbase.clone(),
-        build_flags: job.build_flags.clone(),
+        build_flags: build_flags(&job.build_flags),
         makepkg_conf: job.makepkg_conf.clone(),
         pacman_conf: append_to_pacman_conf(&job.pacman_conf, repo),
         mirrorlist: mirrorlist.map(str::to_string),
@@ -50,10 +50,59 @@ fn describe(
     }
 }
 
+/// The job's makepkg flags, without the two that act on the build's own
+/// system once the package is made: `--install` and `--rmdeps`, as words or
+/// as letters of a bundle such as `-sri`.
+///
+/// The container is discarded when the build ends, so neither would change
+/// anything that lasts. Both need root, which the build does not have: left
+/// in, makepkg would build the whole package and then fail at them.
+fn build_flags(flags: &[String]) -> Vec<String> {
+    flags
+        .iter()
+        .filter_map(|flag| {
+            if flag.starts_with("--") {
+                return (!matches!(flag.as_str(), "--install" | "--rmdeps")).then(|| flag.clone());
+            }
+            let Some(letters) = flag.strip_prefix('-') else {
+                return Some(flag.clone());
+            };
+            let kept: String = letters
+                .chars()
+                .filter(|c| !matches!(c, 'i' | 'r'))
+                .collect();
+            match kept.len() {
+                0 if !letters.is_empty() => None,
+                len if len == letters.len() => Some(flag.clone()),
+                _ => Some(format!("-{kept}")),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use aurcache_common::worker::{JobVcsSource, MirrorlistOffer};
+
+    /// What makepkg would do to the build's own system after the build is
+    /// left out; everything else is passed as it came.
+    #[test]
+    fn flags_that_only_touch_the_discarded_system_are_left_out() {
+        let flags = |given: &[&str]| {
+            let given: Vec<String> = given.iter().map(ToString::to_string).collect();
+            build_flags(&given)
+        };
+        assert_eq!(
+            flags(&["--noconfirm", "--rmdeps", "--nocheck", "--install"]),
+            ["--noconfirm", "--nocheck"]
+        );
+        assert_eq!(flags(&["-sri", "-r", "-i", "-ri", "-c"]), ["-s", "-c"]);
+        assert_eq!(
+            flags(&["--skippgpcheck", "-", "odd", "-f"]),
+            ["--skippgpcheck", "-", "odd", "-f"]
+        );
+    }
 
     fn job() -> JobDescriptor {
         JobDescriptor {
