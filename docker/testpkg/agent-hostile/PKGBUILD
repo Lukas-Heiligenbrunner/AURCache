@@ -2,19 +2,24 @@
 #
 # `scripts/test-build-agent.sh` builds this with `aurcache-build-agent build`
 # in a container under the flags a build pod gets. `build()` runs as the build
-# user and tries what a hostile package would: becoming root, reading the SSH
-# credential, writing the report, and getting root's pacman helper to do
+# user and tries what a hostile package would: becoming root, finding the
+# worker's SSH key, writing the report, and getting root's pacman helper to do
 # anything but install named dependencies. It prints one `probe name=value`
 # line per attempt, and the script asserts each of them.
 #
 # Both polarities: the same build shows what must work. `tree` is not in the
 # builder image, so it is only there if the helper installed it; the git
-# source is only cloned if makepkg ran with a working environment; and the
-# credential's key is only listed if the agent loaded it.
+# source is only cloned if makepkg ran with a working environment.
 #
-# It expects what the script sets up: the work directory at /work, the
-# credential at /aurcache/credentials, and a repository at
-# /srv/aurcache-agent-test/upstream.git.
+# With AURCACHE_TEST_GITSSH set (by the job's makepkg.conf) to the address of
+# the test's git server, it also fetches a source over git+ssh, which works
+# only through the worker's SSH link, and depends on `aurcache-agent-thief`,
+# from the test's own repository, whose install scriptlet runs as root and
+# hunts for the key: files, agent sockets, then a process it leaves behind
+# that keeps looking. build() reports what it found.
+#
+# It expects what the script sets up: the work directory at /work, and a
+# repository at /srv/aurcache-agent-test/upstream.git.
 pkgname=aurcache-agent-hostile
 pkgver=1.0.0
 pkgrel=1
@@ -25,9 +30,20 @@ license=('GPL-3.0-or-later')
 makedepends=('tree' 'git')
 source=("fixture::git+file:///srv/aurcache-agent-test/upstream.git")
 sha256sums=('SKIP')
+if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+  source+=("payload::git+ssh://git@${AURCACHE_TEST_GITSSH}/srv/git/payload.git")
+  sha256sums+=('SKIP')
+  makedepends+=('aurcache-agent-thief')
+  # Run as makepkg reads this file: in the download, the one run that has
+  # the socket, the key is listed through it.
+  if [[ -n ${SSH_AUTH_SOCK:-} ]] && ssh-add -L 2>/dev/null | grep -q aurcache-agent-test; then
+    printf 'probe download-agent-key=listed\n'
+  fi
+fi
 
 _work=/work
-_credential=/aurcache/credentials/ssh-privatekey
+_scratch=/var/lib/aurcache-build
+_thief=/var/tmp/aurcache-thief
 
 _probe() {
   printf 'probe %s=%s\n' "$1" "$2"
@@ -106,16 +122,33 @@ build() {
   _attempt write-passwd _append /etc/passwd
   _attempt write-pacman-conf _append /etc/pacman.conf
 
-  # The credential: usable through the agent, never readable.
-  if [[ -e $_credential ]]; then
-    _attempt read-credential cat "$_credential"
-  else
-    _probe read-credential absent
-  fi
-  if ssh-add -l 2>/dev/null | grep -q aurcache-agent-test; then
-    _probe agent-key loaded
+  # The worker's key: in no file here, and its socket gone once the
+  # sources were downloaded.
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  _probe key-files "$(grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home \
+    /srv /run /opt /mnt 2>/dev/null | grep -vc "^$_thief/")"
+  _probe ssh-socket "$([[ -e $_scratch/ssh/agent.sock ]] && echo present || echo absent)"
+  _probe link-socket "$([[ -e $_scratch/ssh-link/link.sock ]] && echo present || echo absent)"
+  if SSH_AUTH_SOCK=$_scratch/ssh/agent.sock ssh-add -L 2>/dev/null | grep -q aurcache-agent-test ||
+    ssh-add -L 2>/dev/null | grep -q aurcache-agent-test; then
+    _probe agent-key listed
   else
     _probe agent-key missing
+  fi
+  if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+    if [[ -f $srcdir/payload/marker.txt ]]; then
+      _probe payload fetched
+    else
+      _probe payload missing
+    fi
+    # What the thief's root scriptlet, and what it left running, found.
+    sleep 5
+    _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
+    _probe thief-keys "$(if [[ -f $_thief/keys ]]; then wc -l <"$_thief/keys"; else echo none; fi)"
+    _probe thief-agents "$(grep -c aurcache-agent-test "$_thief/agents" 2>/dev/null)"
+    _probe thief-later "$(grep -c aurcache-agent-test "$_thief/later" 2>/dev/null)"
+    _probe thief-looked "$(grep -c '^looked$' "$_thief/later" 2>/dev/null)"
   fi
 
   # The work directory is root's: nothing beside `out/`, nothing in it, and

@@ -36,6 +36,9 @@ git clone -q --bare "$work/pkg" /srv/git/pkg.git
 chown -R git:git /srv/git
 
 /usr/sbin/sshd -e
+if [ -d /srv/repo ]; then
+    httpd -p 8080 -h /srv/repo
+fi
 # Drop to the repo owner: git refuses to serve a repository owned by another
 # user ("dubious ownership"), and the daemon would otherwise run as root.
 exec git daemon --base-path=/srv/git --export-all --reuseaddr --listen=0.0.0.0 \

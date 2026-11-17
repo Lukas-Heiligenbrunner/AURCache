@@ -11,12 +11,15 @@
 #   (`unreal-engine`), where the AUR holds the PKGBUILD publicly and the sources
 #   sit behind an authenticated remote.
 #
+# With a pacman repository mounted at /srv/repo, it serves that over HTTP on
+# port 8080 too, for scripts/test-build-agent.sh.
+#
 # The authorised key is supplied at run time from a mounted directory, so the
 # test can generate a fresh throwaway keypair per run and nothing is baked into
 # the image or committed to the repository.
 FROM alpine:3.24
 
-RUN apk add --no-cache openssh-server git git-daemon \
+RUN apk add --no-cache openssh-server git git-daemon busybox-extras \
     && adduser -D -s /bin/sh git \
     # sshd refuses an account whose password field is `!` (locked), even for
     # public-key auth; `*` means "no password login" without locking it.
@@ -25,5 +28,5 @@ RUN apk add --no-cache openssh-server git git-daemon \
 COPY docker/testpkg/ssh-fixture/PKGBUILD /fixture/PKGBUILD
 COPY --chmod=0755 docker/git-ssh-entrypoint.sh /usr/local/bin/entrypoint
 
-EXPOSE 22 9418
+EXPOSE 22 8080 9418
 ENTRYPOINT ["/usr/local/bin/entrypoint"]

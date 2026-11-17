@@ -16,13 +16,18 @@
 #      peak memory figure and disk use;
 #   4. a package whose dependency only AURCache's repository has builds
 #      against it, and both install with pacman from a pod;
+#   4b. a package fetches a source over git+ssh with the dispatcher's SSH
+#      key (never mounted into a build pod), and a dependency of it from
+#      AURCache's repository, whose install script hunts for the key as root
+#      in the pod and leaves a process behind that keeps hunting, finds
+#      nothing;
 #   5. a build is cancelled, and its pod is gone within a minute;
 #   6. the worker is killed while a build runs; the new process deletes the
 #      build pod, and the server ends the build and queues a new one;
 #   7. the worker's pod is deleted while a build runs; it stops within its
 #      grace period, having deleted the build pod and handed the build back,
 #      and the server queues a new one;
-#   8. with a credential Secret that does not exist, a build pod never
+#   8. with a RuntimeClass whose handler the node lacks, a build pod never
 #      starts: the build is handed back as the worker's once the schedule
 #      timeout has passed, and builds again once the worker is put right;
 #   9. a package of 2 GiB (docker/testpkg/big) builds and is published; the
@@ -90,6 +95,7 @@ REGISTRY="localhost/$PREFIX"
 TAG=kube-e2e
 SERVER_IMAGE="$REGISTRY/aurcache-server:$TAG"
 WORKER_IMAGE="$REGISTRY/aurcache-worker-kube:$TAG"
+GITSSH_IMAGE="$REGISTRY/aurcache-gitssh:$TAG"
 BUILDER_IMAGE="${E2E_BUILDER_IMAGE:-ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest}"
 MAX_WORKER_MEMORY="${E2E_MAX_WORKER_MEMORY:-$((256 * 1024 * 1024))}"
 GIT_URL="git://kube-e2e-git.kube-e2e.svc"
@@ -293,6 +299,8 @@ build_images() {
     log "=== Building the server and Kubernetes worker images ==="
     "$SCRIPT_DIR/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
         --tag "$TAG" "$REGISTRY"
+    docker build -q -t "$GITSSH_IMAGE" -f "$PROJECT_DIR/docker/git-ssh.Dockerfile" \
+        "$PROJECT_DIR" >/dev/null
 }
 
 create_cluster() {
@@ -322,7 +330,7 @@ EOF
 
 load_images() {
     log "=== Loading images into the node ==="
-    "$KIND" load docker-image --name "$CLUSTER" "$SERVER_IMAGE" "$WORKER_IMAGE"
+    "$KIND" load docker-image --name "$CLUSTER" "$SERVER_IMAGE" "$WORKER_IMAGE" "$GITSSH_IMAGE"
     if docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1; then
         log "    loading $BUILDER_IMAGE from the local Docker"
         # One platform only: from Docker's containerd image store, a pulled
@@ -346,6 +354,17 @@ write_overlay() {
     cp "$FIXTURE/packages/kube-e2e-app/PKGBUILD" "$dir/packages/kube-e2e-app.PKGBUILD"
     cp "$FIXTURE/packages/kube-e2e-slow/PKGBUILD" "$dir/packages/kube-e2e-slow.PKGBUILD"
     cp "$PROJECT_DIR/docker/testpkg/big/PKGBUILD" "$dir/packages/aurcache-big-test.PKGBUILD"
+    cp "$FIXTURE/packages/kube-e2e-thief/PKGBUILD" "$dir/packages/kube-e2e-thief.PKGBUILD"
+    cp "$FIXTURE/packages/kube-e2e-thief/kube-e2e-thief.install" "$dir/packages/kube-e2e-thief.install"
+    cp "$FIXTURE/packages/kube-e2e-ssh/PKGBUILD" "$dir/packages/kube-e2e-ssh.PKGBUILD"
+    # The dispatcher's SSH key, and the git server's host key, so that its
+    # known_hosts can name it before the server runs.
+    mkdir -p "$dir/ssh"
+    rm -f "$dir/ssh/"*
+    ssh-keygen -q -t ed25519 -N '' -C kube-e2e-dispatcher -f "$dir/ssh/id_ed25519"
+    ssh-keygen -q -t ed25519 -N '' -C kube-e2e-gitssh -f "$dir/ssh/ssh_host_ed25519_key"
+    echo "kube-e2e-gitssh.kube-e2e.svc $(cut -d' ' -f1-2 "$dir/ssh/ssh_host_ed25519_key.pub")" \
+        >"$dir/ssh/known_hosts"
     cat >"$dir/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -358,7 +377,25 @@ images:
   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
     newName: $REGISTRY/aurcache-worker-kube
     newTag: $TAG
+  - name: aurcache-gitssh
+    newName: $REGISTRY/aurcache-gitssh
+    newTag: $TAG
 secretGenerator:
+  - name: kube-e2e-gitssh
+    namespace: kube-e2e
+    files:
+      - ssh/id_ed25519.pub
+      - ssh/ssh_host_ed25519_key
+      - ssh/ssh_host_ed25519_key.pub
+    options:
+      disableNameSuffixHash: true
+  - name: aurcache-build-ssh
+    namespace: aurcache
+    files:
+      - ssh-privatekey=ssh/id_ed25519
+      - ssh/known_hosts
+    options:
+      disableNameSuffixHash: true
   - name: aurcache-enrollment
     namespace: aurcache
     literals:
@@ -386,6 +423,9 @@ configMapGenerator:
       - packages/kube-e2e-app.PKGBUILD
       - packages/kube-e2e-slow.PKGBUILD
       - packages/aurcache-big-test.PKGBUILD
+      - packages/kube-e2e-thief.PKGBUILD
+      - packages/kube-e2e-thief.install
+      - packages/kube-e2e-ssh.PKGBUILD
     options:
       disableNameSuffixHash: true
 patches:
@@ -398,6 +438,29 @@ patches:
         value:
           name: WORKER_KUBE_BUILDER_IMAGE
           value: $BUILDER_IMAGE
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: WORKER_GIT_SSH_KEY
+          value: /etc/aurcache-ssh/ssh-privatekey
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: WORKER_SSH_KNOWN_HOSTS
+          value: /etc/aurcache-ssh/known_hosts
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value:
+          name: build-ssh
+          mountPath: /etc/aurcache-ssh
+          readOnly: true
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value:
+          name: build-ssh
+          secret:
+            secretName: aurcache-build-ssh
+            defaultMode: 0440
   - target:
       kind: Deployment
       name: kube-e2e-git
@@ -417,6 +480,8 @@ deploy() {
     k apply -k "$SCRATCH/overlay" >/dev/null
     k -n aurcache rollout status deploy/aurcache --timeout=300s \
         || fail "the server did not become ready"
+    k -n kube-e2e rollout status deploy/kube-e2e-gitssh --timeout=300s \
+        || fail "the SSH git server did not become ready"
     k -n kube-e2e rollout status deploy/kube-e2e-git --timeout=600s \
         || fail "the git daemon did not become ready"
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
@@ -561,6 +626,31 @@ spec:
 EOF
     ) || { echo "$out"; return 1; }
     grep -E '^\[' <<<"$out" | tail -n 1
+}
+
+check_ssh_key() {
+    log "=== 4b. A source over git+ssh with the dispatcher's key, and a dependency that hunts for it ==="
+    CURRENT_BUILD_REF=
+    pkg_add "$GIT_URL/kube-e2e-thief.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT" \
+        | sed 's/^/    /' || fail "kube-e2e-thief did not build"
+    pkg_add "$GIT_URL/kube-e2e-ssh.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT" \
+        | sed 's/^/    /' || { CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-ssh); fail "kube-e2e-ssh did not build"; }
+    local ref output found
+    ref=$(latest_build_ref kube-e2e-ssh)
+    CURRENT_BUILD_REF=$ref
+    output=$(build_output "$ref")
+    grep -E "SSH link|kube-e2e-ssh:|downloading the sources" <<<"$output" | sed 's/^/    | /'
+    grep -qF "kube-e2e-ssh: payload aurcache-ssh-credential-reached-the-chroot" <<<"$output" \
+        || fail "$ref did not fetch its git+ssh source"
+    grep -qE "\[worker\] the SSH link closed: [1-9][0-9]* signature" <<<"$output" \
+        || fail "the log of $ref says no SSH link closed having signed"
+    found=$(grep -oE "kube-e2e-ssh: thief .*" <<<"$output" | tail -n 1)
+    [[ $found =~ ran=yes\ keys=0\ agents=0\ later=0\ looked=[1-9] ]] \
+        || fail "the thief's report in $ref is not 'ran, found nothing, kept looking': $found"
+    k -n aurcache-builds get pods -o json \
+        | jq -e '[.items[].spec.volumes[]? | select(.secret)] | length == 0' >/dev/null \
+        || fail "a build pod mounts a Secret"
+    result "$ref fetched over git+ssh through the dispatcher; its dependency's root script found no key: $found"
 }
 
 check_quota_then_build() {
@@ -796,10 +886,31 @@ check_stuck() {
     log "=== 8. A build pod that cannot start ==="
     local since before ref
     since=$(now)
-    # A Secret that does not exist: the pod is scheduled, and its volumes
-    # never mount.
+    # A RuntimeClass whose handler the node does not have, through the pod
+    # template: the pod is scheduled, and its sandbox is never made.
+    k apply -f - >/dev/null <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kube-e2e-no-such-handler
+handler: kube-e2e-no-such-handler
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-e2e-stuck-template
+  namespace: aurcache
+data:
+  pod-template.json: '{"runtimeClassName": "kube-e2e-no-such-handler"}'
+EOF
+    k -n aurcache patch deploy/aurcache-kube-worker --type json -p '[
+      {"op": "add", "path": "/spec/template/spec/volumes/-",
+       "value": {"name": "stuck-template", "configMap": {"name": "kube-e2e-stuck-template"}}},
+      {"op": "add", "path": "/spec/template/spec/containers/0/volumeMounts/-",
+       "value": {"name": "stuck-template", "mountPath": "/etc/kube-e2e-stuck", "readOnly": true}}
+    ]' >/dev/null
     k -n aurcache set env deploy/aurcache-kube-worker \
-        WORKER_KUBE_CREDENTIAL_SECRET=kube-e2e-no-such-secret \
+        WORKER_KUBE_POD_TEMPLATE=/etc/kube-e2e-stuck/pod-template.json \
         WORKER_KUBE_SCHEDULE_TIMEOUT=30s >/dev/null
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
         || fail "the worker did not start again"
@@ -818,13 +929,13 @@ check_stuck() {
     log "    $ref: $(last_word "$ref")"
     build_said "$ref" "did not start within 30s" \
         || fail "the log of $ref does not say its pod did not start"
-    k -n aurcache-builds get events --field-selector reason=FailedMount \
+    k -n aurcache-builds get events --field-selector reason=FailedCreatePodSandBox \
         -o custom-columns=MESSAGE:.message --no-headers 2>/dev/null | tail -n 1 | sed 's/^/    | /'
     result "$ref: its pod never started, and the build was handed back as the worker's"
 
     since=$(now)
     k -n aurcache set env deploy/aurcache-kube-worker \
-        WORKER_KUBE_CREDENTIAL_SECRET- WORKER_KUBE_SCHEDULE_TIMEOUT- >/dev/null
+        WORKER_KUBE_POD_TEMPLATE- WORKER_KUBE_SCHEDULE_TIMEOUT- >/dev/null
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
         || fail "the worker did not start again"
     expect_said "take the build agent from" "$since" 120
@@ -835,7 +946,7 @@ check_stuck() {
         || fail "kube-e2e-dep did not build once the worker was put right"
     CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-dep)
     wait_for 60 "the build pods to go" no_build_pods || fail "a build pod was left"
-    result "$CURRENT_BUILD_REF built once the Secret was no longer asked for"
+    result "$CURRENT_BUILD_REF built once the RuntimeClass was no longer asked for"
 }
 
 # Whether package `$1` has a build newer than `$2`.
@@ -975,6 +1086,10 @@ check_open_policy() {
     log "=== 11. Without the NetworkPolicy ==="
     local since
     k -n aurcache-builds delete networkpolicy aurcache-builds >/dev/null
+    # The SSH leg's policy selects build pods too, and would keep them fenced.
+    k -n aurcache-builds get networkpolicy kube-e2e-builds-to-gitssh -o yaml \
+        >"$SCRATCH/gitssh-policy.yaml"
+    k -n aurcache-builds delete networkpolicy kube-e2e-builds-to-gitssh >/dev/null
     since=$(now)
     crash_dispatcher
     expect_said "The builds' NetworkPolicy is not enforced" "$since" 180
@@ -985,6 +1100,7 @@ check_open_policy() {
         || fail "the server's log has no error saying the NetworkPolicy is not enforced"
     result "the server's log has it at error severity"
     k apply -f "$PROJECT_DIR/kubernetes/kube-worker/networkpolicy.yaml" >/dev/null
+    k apply -f "$SCRATCH/gitssh-policy.yaml" >/dev/null
 }
 
 # =============================================================================
@@ -1059,7 +1175,7 @@ cleanup() {
         rm -rf "$SCRATCH"
     fi
     if [ "${E2E_SKIP_BUILD:-0}" != 1 ]; then
-        docker rmi "$SERVER_IMAGE" "$WORKER_IMAGE" >/dev/null 2>&1 || true
+        docker rmi "$SERVER_IMAGE" "$WORKER_IMAGE" "$GITSSH_IMAGE" >/dev/null 2>&1 || true
     fi
 }
 
@@ -1069,7 +1185,7 @@ cleanup() {
 
 # Every leg, in order. Some build on what an earlier one left: `restart` and
 # `stop` on `cancel`'s package, `stuck` and `userns` on `repository`'s.
-LEGS=(enrollment policy quota repository cancel restart stop stuck big userns open-policy)
+LEGS=(enrollment policy quota repository ssh cancel restart stop stuck big userns open-policy)
 if [ -n "${E2E_LEGS:-}" ]; then read -r -a LEGS <<<"$E2E_LEGS"; fi
 
 RUN_STARTED=$SECONDS
@@ -1093,6 +1209,7 @@ for leg in "${LEGS[@]}"; do
         policy) check_network_policy ;;
         quota) check_quota_then_build ;;
         repository) check_repository ;;
+        ssh) check_ssh_key ;;
         cancel) check_cancel ;;
         restart) check_restart ;;
         stop) check_stop ;;

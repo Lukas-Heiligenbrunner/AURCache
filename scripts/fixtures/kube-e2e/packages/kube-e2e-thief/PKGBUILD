@@ -1,0 +1,19 @@
+# The hostile half of the Kubernetes suite's SSH key check. NOT a real
+# package. Its install script runs as root in the pod of every build that
+# installs it, and hunts for the dispatcher's SSH key there: in every file,
+# through every socket that answers as an agent, and through a process it
+# leaves behind that keeps asking. It writes what it found to
+# /var/tmp/kube-e2e-thief, where kube-e2e-ssh's build reads it.
+pkgname=kube-e2e-thief
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a dependency whose install script hunts for the SSH key"
+arch=('any')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+depends=('openssh')
+install=kube-e2e-thief.install
+
+package() {
+  install -d "${pkgdir}/usr/share/kube-e2e-thief"
+}

@@ -8,10 +8,15 @@
 #   1. docker/testpkg/hello builds: a report, measurements, and one package
 #      handed back to the work directory's owner;
 #   2. docker/testpkg/agent-hostile builds, and from inside build() tries to
-#      become root, read the SSH credential, write the report and get root's
+#      become root, find the worker's SSH key, write the report and get root's
 #      pacman helper to do anything but install named dependencies. Both
-#      polarities: its dependency is only there if the helper installed it,
-#      and its credential only usable if the agent loaded it;
+#      polarities: its dependency is only there if the helper installed it.
+#      It fetches a source over git+ssh from a throwaway server
+#      (docker/git-ssh.Dockerfile), which works only through the SSH link a
+#      stand-in for the worker serves from here, and it depends on
+#      docker/testpkg/agent-thief, whose install scriptlet, as root, hunts for
+#      the key and leaves a process behind that keeps hunting: it finds
+#      nothing;
 #   3. a build is stopped half-way, once with SIGKILL and once with SIGTERM:
 #      no process outlives it and no report is written;
 #   4. where qemu-aarch64 is registered and the arm64 builder image can be
@@ -93,7 +98,8 @@ prepare() {
     mkdir -p "$WORK/$leg/in" "$WORK/stage/$leg/$pkgbase"
     cp -r "$fixture/." "$WORK/stage/$leg/$pkgbase/"
     tar -czf "$WORK/$leg/in/source.tar.gz" -C "$WORK/stage/$leg" "$pkgbase"
-    python3 - "$WORK/$leg/in/spec.json" "$pkgbase" "$arch" "$FIXTURE_SOURCE" "$@" <<'EOF'
+    python3 - "$WORK/$leg/in/spec.json" "$pkgbase" "$arch" "$FIXTURE_SOURCE" \
+        "interface=$INTERFACE" "$@" <<'EOF'
 import json, sys
 
 path, pkgbase, arch, fixture_source = sys.argv[1:5]
@@ -115,12 +121,15 @@ if "vcs" in options:
     makepkg_conf += (
         "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'\n"
     )
+if "gitssh" in options:
+    makepkg_conf += f"AURCACHE_TEST_GITSSH={options['gitssh']}\n"
+    pacman_conf += f"\n[thief]\nServer = http://{options['gitssh']}:8080\n"
 if "linger" in options:
     makepkg_conf += f"AURCACHE_TEST_LINGER={options['linger']}\n"
 makepkg_conf += "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n"
 
 spec = {
-    "interface": 1,
+    "interface": int(options["interface"]),
     "pkgbase": pkgbase,
     "build_flags": ["--noconfirm", "--noprogressbar", "--nocolor"],
     "makepkg_conf": makepkg_conf,
@@ -135,9 +144,9 @@ spec = {
     ),
     "cpus": float(options["cpus"]) if "cpus" in options else None,
     "scratch": "/var/lib/aurcache-build",
-    "credential": (
-        {"key": "/aurcache/credentials/ssh-privatekey", "known_hosts": None}
-        if "credential" in options
+    "ssh": (
+        {"known_hosts": open(options["known_hosts"]).read()}
+        if "known_hosts" in options
         else None
     ),
 }
@@ -236,6 +245,10 @@ install -m 0755 "$agent" "$WORK/tools/aurcache-build-agent"
 if command -v file >/dev/null; then
     file "$WORK/tools/aurcache-build-agent" | sed 's/^[^:]*: /    /'
 fi
+INTERFACE=$("$WORK/tools/aurcache-build-agent" --interface)
+echo "==> building the worker's end of the SSH link"
+LINK_SERVE=$(cargo_executable ssh-link-serve build --manifest-path backend/Cargo.toml \
+    -p aurcache-worker-container --example ssh-link-serve)
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null
 
 echo "==> leg 1/4: a package builds"
@@ -250,12 +263,36 @@ command -v ssh-keygen >/dev/null || {
     echo "error: ssh-keygen is needed to make the test credential" >&2
     exit 2
 }
-# The credential, as a Secret mounted for root alone.
-mkdir "$WORK/credentials"
-ssh-keygen -q -t ed25519 -N '' -C aurcache-agent-test -f "$WORK/credentials/ssh-privatekey"
-rm "$WORK/credentials/ssh-privatekey.pub"
-docker run --rm --name "$(container credential)" --user 0 -v "$WORK/credentials:/c" \
-    --entrypoint /bin/sh "$IMAGE" -c 'chown 0:0 /c/ssh-privatekey && chmod 0400 /c/ssh-privatekey'
+# The worker's SSH key, which stays out here, and the server it opens.
+mkdir "$WORK/ssh" "$WORK/repo"
+ssh-keygen -q -t ed25519 -N '' -C aurcache-agent-test -f "$WORK/ssh/id_ed25519"
+# The thief, in a pacman repository of its own.
+docker run --rm --name "$(container thief)" --user 0 -v "$WORK/repo:/repo" \
+    -v "$PWD/docker/testpkg/agent-thief:/thief:ro" --entrypoint /bin/bash "$IMAGE" -c '
+        set -e
+        cd "$(mktemp -d)"
+        cp /thief/thief.install .INSTALL
+        printf "%s\n" "pkgname = aurcache-agent-thief" "pkgbase = aurcache-agent-thief" \
+            "pkgver = 1-1" "pkgdesc = fixture" "builddate = 0" "packager = test" "size = 0" \
+            "arch = any" >.PKGINFO
+        bsdtar -cf - .PKGINFO .INSTALL | zstd -q >/repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
+        repo-add -q /repo/thief.db.tar.gz /repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
+        chown -R '"$(id -u):$(id -g)"' /repo'
+docker build -q -t "$PREFIX-agent-gitssh" -f docker/git-ssh.Dockerfile . >/dev/null
+GITSSH=$(container gitssh)
+CONTAINERS+=("$GITSSH")
+docker rm -f "$GITSSH" >/dev/null 2>&1 || true
+docker run -d --name "$GITSSH" -v "$WORK/ssh/id_ed25519.pub:/keys/id_ed25519.pub:ro" \
+    -v "$WORK/repo:/srv/repo:ro" "$PREFIX-agent-gitssh" >/dev/null
+GITSSH_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GITSSH")
+for _ in $(seq 60); do
+    ssh-keyscan -t ed25519 "$GITSSH_IP" >"$WORK/ssh/known_hosts" 2>/dev/null && [[ -s $WORK/ssh/known_hosts ]] && break
+    sleep 1
+done
+[[ -s $WORK/ssh/known_hosts ]] || {
+    echo "error: the git server at $GITSSH_IP never answered" >&2
+    exit 1
+}
 # The repository the fixture's source is.
 mkdir -p "$WORK/stage/upstream"
 git init -q -b master "$WORK/stage/upstream"
@@ -267,10 +304,15 @@ git -C "$WORK/stage/upstream" push -q "$WORK/upstream.git" master
 commit=$(git -C "$WORK/stage/upstream" rev-parse HEAD)
 HOSTILE_FLAGS=(-v "$WORK/upstream.git:/srv/aurcache-agent-test/upstream.git:ro")
 
-prepare hostile docker/testpkg/agent-hostile aurcache-agent-hostile "$(uname -m)" vcs=1 credential=1
-status=0
-build run hostile "$IMAGE" "${HOSTILE_FLAGS[@]}" -v "$WORK/credentials:/aurcache/credentials:ro" ||
-    status=$?
+prepare hostile docker/testpkg/agent-hostile aurcache-agent-hostile "$(uname -m)" vcs=1 \
+    "known_hosts=$WORK/ssh/known_hosts" "gitssh=$GITSSH_IP"
+build -d hostile "$IMAGE" "${HOSTILE_FLAGS[@]}"
+# The worker's side: one exec of ssh-link, as the container starts.
+timeout "$BUILD_TIMEOUT" "$LINK_SERVE" "$WORK/ssh/id_ed25519" -- docker exec -i "$(container hostile)" \
+    "$AGENT" ssh-link --socket /var/lib/aurcache-build/ssh-link/link.sock \
+    >"$WORK/hostile.link" 2>&1 || true
+status=$(timeout "$BUILD_TIMEOUT" docker wait "$(container hostile)" || echo timeout)
+docker logs "$(container hostile)" >"$WORK/hostile.stdout" 2>"$WORK/hostile.stderr" || true
 before=$FAIL
 check "hostile: the agent exited 0" 0 "$status"
 check "hostile: makepkg exited 0" '{"code": 0, "how": "exited"}' "$(report hostile ended)"
@@ -284,7 +326,7 @@ done
 check "hostile: no_new_privs is set" 1 "$(probe hostile nonewprivs)"
 # Nothing it tried worked.
 for attempt in sudo su kill-init term-init read-init-environment write-passwd write-pacman-conf \
-    read-credential write-report rename-out write-work write-log remove-log \
+    write-report rename-out write-work write-log remove-log \
     write-makepkg-conf remove-helper-socket; do
     check "hostile: $attempt" blocked "$(probe hostile $attempt)"
 done
@@ -293,14 +335,34 @@ for request in upgrade upgrade-noconfirm config path relative-path repo remove e
     check "hostile: helper, $request" refused "$(probe hostile "helper-$request")"
 done
 check "hostile: no install script ran as root" not-run "$(probe hostile install-script)"
+# The thief's hunt sends the helper what it sends every socket, which is
+# refused as no request at all; those are not counted.
 check "hostile: each refusal is in the build log" 16 \
-    "$(grep -a -c '^\[agent\] refused a request to run pacman as root' "$WORK/hostile/log/build.log")"
+    "$(grep -a '^\[agent\] refused a request to run pacman as root' "$WORK/hostile/log/build.log" |
+        grep -a -c -v 'is not a list of words')"
 # And what must work did.
 check "hostile: pkg/ is the build's to write" worked "$(probe hostile write-pkg)"
 check "hostile: the helper runs what makepkg sends" ran:0 "$(probe hostile helper-asdeps)"
 check "hostile: the dependency was installed" installed "$(probe hostile dependency)"
 check "hostile: the source was cloned" cloned "$(probe hostile source)"
-check "hostile: the credential is usable" loaded "$(probe hostile agent-key)"
+# The worker's key: used while the sources were downloaded, and nowhere in
+# reach afterwards, of the build or of a dependency's root scriptlet.
+check "hostile: the download listed the key through the link" listed \
+    "$(probe hostile download-agent-key)"
+check "hostile: the git+ssh source was fetched" fetched "$(probe hostile payload)"
+check "hostile: the link closed, having signed" yes \
+    "$(grep -Eq 'the SSH link closed: [1-9][0-9]* signature' "$WORK/hostile.link" && echo yes ||
+        cat "$WORK/hostile.link")"
+check "hostile: no key file in the container" 0 "$(probe hostile key-files)"
+check "hostile: the agent socket is gone in build()" absent "$(probe hostile ssh-socket)"
+check "hostile: the link socket is gone in build()" absent "$(probe hostile link-socket)"
+check "hostile: no agent lists the key in build()" missing "$(probe hostile agent-key)"
+check "hostile: the thief's scriptlet ran as root" yes "$(probe hostile thief-ran)"
+check "hostile: the thief found no key file" 0 "$(probe hostile thief-keys)"
+check "hostile: no socket gave the thief the key" 0 "$(probe hostile thief-agents)"
+check "hostile: nor later, to what it left running" 0 "$(probe hostile thief-later)"
+check "hostile: which kept looking" yes \
+    "$( (($(probe hostile thief-looked) > 0)) && echo yes || echo no)"
 check "hostile: orphaned processes are collected" 0 "$(probe hostile zombies)"
 # Seen from here: the report is the agent's, and names the source's commit.
 check "hostile: the source's commit is reported" "\"$commit\"" \

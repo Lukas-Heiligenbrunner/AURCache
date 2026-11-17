@@ -1,0 +1,35 @@
+# The install scriptlet of `aurcache-agent-thief`, a fixture of
+# scripts/test-build-agent.sh. NOT a real package.
+#
+# It runs as root in the build container when a build installs the package
+# as a dependency, and does what a hostile dependency would to take the SSH
+# key the build was given: look for it in every file, ask every socket that
+# answers as an agent, and leave a process behind that keeps asking. What it
+# finds is left in /var/tmp/aurcache-thief, for the build to report.
+post_install() {
+  local out=/var/tmp/aurcache-thief
+  mkdir -p "$out"
+  echo yes >"$out/ran"
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
+    2>/dev/null | grep -v "^$out/" >"$out/keys"
+  _sockets() {
+    find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null
+  }
+  local socket
+  for socket in $(_sockets); do
+    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
+  done >"$out/agents"
+  (
+    for _ in $(seq 120); do
+      for socket in $(_sockets); do
+        SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
+      done
+      echo looked
+      sleep 1
+    done >>"$out/later"
+  ) </dev/null >/dev/null 2>&1 &
+  chmod -R a+rX "$out"
+  chmod a+w "$out"
+}

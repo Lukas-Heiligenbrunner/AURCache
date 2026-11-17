@@ -4,8 +4,8 @@
 # to allow for it.
 #
 # The PKGBUILDs come from the ConfigMap `kube-e2e-packages`, one key per
-# package (`<package>.PKGBUILD`), which the test's run-time kustomization
-# generates. The image is the builder's, which every node that builds has
+# package (`<package>.PKGBUILD`, and `<package>.install` for one with an
+# install script), which the test's run-time kustomization generates. The image is the builder's, which every node that builds has
 # already and which has git.
 ---
 apiVersion: apps/v1
@@ -41,8 +41,11 @@ spec:
                 work=/tmp/work/$name
                 mkdir -p "$work"
                 cp "$file" "$work/PKGBUILD"
+                if [ -f "/packages/$name.install" ]; then
+                    cp "/packages/$name.install" "$work/$name.install"
+                fi
                 git -C "$work" init -q -b master
-                git -C "$work" add PKGBUILD
+                git -C "$work" add -A
                 git -C "$work" -c user.name=kube-e2e -c user.email=kube-e2e@localhost \
                     commit -q -m "$name"
                 git clone -q --bare "$work" "/srv/git/$name.git"
