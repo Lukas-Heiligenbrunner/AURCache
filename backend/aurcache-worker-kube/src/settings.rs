@@ -66,8 +66,8 @@ pub fn kube_settings() -> Vec<SettingSpec> {
             key: keys::SCHEDULE_TIMEOUT,
             env_var: "WORKER_KUBE_SCHEDULE_TIMEOUT",
             kind: ValueKind::Duration,
-            description: "How long a build pod may stay unschedulable before the build is \
-                          given up on.",
+            description: "How long a build pod may wait for a node, and then how long it \
+                          may take to start on it, before the build is handed back.",
             category: "Build limits",
             applies: Applies::NextJob,
             default: Builtin::Duration(DEFAULT_SCHEDULE_TIMEOUT),

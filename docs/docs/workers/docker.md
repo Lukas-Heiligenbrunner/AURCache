@@ -19,11 +19,23 @@ For each job the worker prepares a build directory holding the job, its
 sources and a copy of the **build agent**, creates a container from the builder
 image with the engine's resource limits, streams the container's output into
 the build log, and uploads the packages the build leaves in the directory. The
-container and the directory are removed afterwards, however the build ended.
+container and the directory are removed afterwards, however the build ended,
+and when the worker is told to stop (`SIGTERM`, as `docker stop` and
+`systemctl stop` send): it stops its builds, cleans up after them and reports
+each to the server as interrupted, so that a new build of the package is
+queued.
+
+A build's container is named `aurcache_build_<worker>_<build>`, where
+`<worker>` is the start of the worker's fingerprint, so two AURCache instances
+can share one Docker daemon without taking each other's containers for their
+own.
 
 With `BUILD_ARTIFACT_DIR` set the worker builds against the mounted Docker
 socket: the directory must be a path the Docker daemon can bind, with the same
-directory visible to the worker. Without it, the [hybrid image](./hybrid.md)
+directory visible to the worker. It must be on a filesystem that allows
+executing: the build agent is run from it, so a mount with `noexec` fails
+every build as its container starts. The worker warns at startup when it sees
+one. Without it, the [hybrid image](./hybrid.md)
 builds against a Podman it runs inside its own container.
 
 ### The build agent
@@ -32,7 +44,9 @@ The agent is a small static program, `aurcache-build-agent`, that the worker
 brings: it is the build container's entrypoint, and the builder image does not
 contain it. The package and the hybrid image install it at
 `/usr/lib/aurcache/bin/aurcache-build-agent`; `WORKER_BUILD_AGENT` names another
-path. The worker refuses to start without it. The
+path. The worker refuses to start without it, and with one that is not
+statically linked: it runs in the builder image, for any architecture, where
+the worker's own libraries are not. The
 [Kubernetes worker](./kubernetes.md) runs the same agent, so a build behaves
 alike on both.
 
@@ -43,11 +57,12 @@ Inside the container the agent works in two steps:
 2. **As that user, with no privileges**, it unpacks the sources, fetches the
    PGP keys the PKGBUILD names in `validpgpkeys`, and runs makepkg. When makepkg
    needs dependencies installed it asks the agent, which installs the packages
-   named and nothing else. There is no `sudo`, so `-i` and `-r` in a package's
-   build flags do not work.
+   named and nothing else. There is no `sudo`. `--install` and `--rmdeps` in
+   a package's build flags are left out: the container is discarded when the
+   build ends, so there is nothing to install into or to clean up.
 
-A step that fails before makepkg (a mirror that is down) is the worker's
-problem, not the package's: the build is handed back and the server tries it
+A step that fails before makepkg (a mirror that is down, a source archive
+that does not unpack) is the worker's problem, not the package's: the build is handed back and the server tries it
 again while it has attempts left. A PGP key that cannot be fetched is only
 noted in the build log, since a PKGBUILD often lists keys no source of the
 version is signed with; a build that needed the key then fails at makepkg's
@@ -69,6 +84,10 @@ dropped except the seven the agent's first step needs (`CHOWN`, `DAC_OVERRIDE`,
 unprivileged build user, with none of them. The build directory is the
 container's only bind mount, and the Docker socket is never given to a build.
 
+The build user is uid 1001 inside the container. Unless the engine remaps
+user ids, that is uid 1001 on the host as well, and a host user with that uid
+can signal and inspect a build's processes.
+
 By default a build container shares the worker's own network namespace, so
 that the repository address the worker uses means the same thing inside the
 build. A build can therefore reach whatever the worker can, the server's worker
@@ -82,7 +101,7 @@ instead. Unlike the Kubernetes worker, nothing here firewalls a build.
 
 `BUILDER_IMAGE` (default
 `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest`) is pulled before
-each build. An image of your own needs pacman, makepkg and gpg; it needs
+each build. An image of your own needs pacman, makepkg, gpg and `find`; it needs
 neither `sudo` nor a build user, which the agent adds.
 
 ### Build trees are not kept

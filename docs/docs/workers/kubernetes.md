@@ -47,8 +47,8 @@ downloads both again.
   [What a build can reach](#what-a-build-can-reach).
 - **RBAC**, namespace-scoped. In the builds' namespace the dispatcher may
   create, get, list, watch and delete pods (and delete them by label), open
-  `exec` sessions into them and read their logs. In its own namespace it may
-  read pods, to learn which image it runs. It holds no cluster-wide role.
+  `exec` sessions into them and read their logs. It holds no role in its own
+  namespace, and no cluster-wide one.
 - **A small volume** for the dispatcher's identity: a 1 Gi `ReadWriteOnce`
   claim from the default StorageClass, or one you name. Packages stream through
   the dispatcher and are never stored.
@@ -76,7 +76,7 @@ live in two namespaces and name them. It expects the server's Service
 | Resource | Where | Purpose |
 |---|---|---|
 | Namespace `aurcache-builds`, labelled for Pod Security `baseline` | cluster | where build pods run |
-| ServiceAccount, Roles and RoleBindings for the dispatcher | `aurcache` and `aurcache-builds` | the permissions above |
+| ServiceAccount for the dispatcher, with a Role and RoleBinding | `aurcache`; the Role in `aurcache-builds` | the permissions above |
 | ServiceAccount `aurcache-build` | `aurcache-builds` | what build pods run as; bound to nothing, with no API token mounted |
 | NetworkPolicy | `aurcache-builds` | the firewall around build pods |
 | Deployment `aurcache-kube-worker` and its volume | `aurcache` | the dispatcher: one replica, strategy `Recreate`, unprivileged, a read-only root filesystem |
@@ -88,11 +88,18 @@ Render the result without a cluster with
 The dispatcher's image is
 `ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube`, published for `amd64`,
 `arm64` and `arm/v7`: `latest` and a tag per version from releases, `git` from
-the development branch. It is also the image of the agent that runs in every
-build pod, so one tag moves both. The dispatcher reads which image its own pod
-runs, by digest where the cluster reports one, and build pods use exactly that.
-Pin a release instead of following `latest` with `kustomize edit set image`;
-the comments in `kustomization.yaml` show how.
+the development branch. The manifests use `git`, because no release contains
+this worker yet. Once one does, pin it with `kustomize edit set image`; the
+comments in `kustomization.yaml` show how.
+
+It is also the image of the agent that runs in every build pod. The manifests
+name it a second time for that, in `WORKER_KUBE_AGENT_IMAGE`, and the
+kustomization copies the Deployment's image into that variable, so setting the
+image there moves both. An overlay of your own that changes the image has to
+change the variable too. With a tag that moves (`git`, `latest`) a node may
+pull a newer or older agent than the dispatcher that hands it a job; the two
+check that they speak the same interface, and a build whose agent does not is
+handed back. A version tag or a digest makes them the same build.
 
 ### Approving
 
@@ -146,9 +153,9 @@ because they decide what a build may reach.
 |---|---|---|
 | `WORKER_KUBE_NAMESPACE` | `aurcache-builds` | Namespace build pods are created in. The Role and NetworkPolicy in the manifests are for this namespace: change them together. |
 | `WORKER_KUBE_BUILDER_IMAGE` | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` | The image each build runs in. |
-| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the builder image: `Always`, `IfNotPresent` or `Never`; anything else is an error at startup. `Always` picks up a new image; use `IfNotPresent` for an image you loaded onto the nodes by hand. |
-| `WORKER_KUBE_AGENT_IMAGE` | the image the dispatcher's own pod runs | Image build pods take the build agent from. |
-| `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none; the manifest sets them from the downward API | Which pod to read the agent image from. Needed unless `WORKER_KUBE_AGENT_IMAGE` is set; with neither, the dispatcher refuses to start. |
+| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the images of a build pod, the builder's and the agent's: `Always`, `IfNotPresent` or `Never`; anything else is an error at startup. `Always` picks up a new image; use `IfNotPresent` for images you loaded onto the nodes by hand. |
+| `WORKER_KUBE_AGENT_IMAGE` | none; the manifest sets it to the dispatcher's own image | Image build pods take the build agent from. |
+| `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none | The other way to name the agent image: the dispatcher's own pod, which it then reads to use the image of its own container, by digest where the cluster reports one. It needs `get` on pods in its namespace, which the manifests do not grant, because that also lets it read the server's pod. With neither these nor `WORKER_KUBE_AGENT_IMAGE`, the dispatcher refuses to start. |
 | `WORKER_KUBE_CREDENTIAL_SECRET` | none | A Secret in the builds' namespace holding an SSH build credential. See [Build credentials](#build-credentials). |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | `true` or `false`. Run build pods in user namespaces. See [User namespaces](#user-namespaces). |
 | `WORKER_KUBE_POD_TEMPLATE` | none | Path of a JSON file adding scheduling fields to every build pod. See [Architectures and scheduling](#architectures-and-scheduling). |
@@ -169,7 +176,7 @@ pins the value on the machine, and its `_DEFAULT` form (for example
 | `WORKER_BUILD_MEMORY_MAX` | `build_memory_max` | unset | Memory one build container may use, as its request and its limit. |
 | `WORKER_BUILD_CPUS` | `build_cpus` | unset | CPUs one build container may use, as its request and its limit; fractions are allowed. Also sizes the build's parallel jobs. `0` is no limit. |
 | `WORKER_BUILD_DISK_MAX` | `build_disk_max` | unset | Disk one build may write. Enforced by eviction; see below. |
-| `WORKER_KUBE_SCHEDULE_TIMEOUT` | `schedule_timeout` | `10m` | How long a build pod may wait for a node before the build is handed back to the server. |
+| `WORKER_KUBE_SCHEDULE_TIMEOUT` | `schedule_timeout` | `10m` | How long a build pod may wait for a node, and then how long it may take to start on it, before the build is handed back to the server. |
 | `WORKER_KEYSERVER` | `keyserver` | the chroot worker's default | Keyserver used to fetch the keys a PKGBUILD names in `validpgpkeys`. Which keys are accepted is decided by the PKGBUILD, not by this. |
 
 Concurrency, priority, package affinity and the build timeout are the same
@@ -278,10 +285,18 @@ kubectl -n aurcache-builds create secret generic aurcache-build-ssh \
 
 Set `WORKER_KUBE_CREDENTIAL_SECRET=aurcache-build-ssh`. The key goes under
 `ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret. The Secret is mounted
-readable by root alone, in the build container only. A build can use the key
-through an `ssh-agent` for its duration but cannot read it. One key is given to
-every build the dispatcher runs; use [routing](./routing.md) to send the
-packages that need it to this worker.
+readable by root alone, in the build container only. Package code, which runs
+as an unprivileged user, can use the key through an `ssh-agent` for the length
+of the build and cannot read it. One key is given to every build the
+dispatcher runs; use [routing](./routing.md) to send the packages that need it
+to this worker.
+
+**The key is not hidden from code that runs as root in the pod**, and one kind
+of package code does: the install scriptlet of a dependency, which pacman runs
+as root when the build installs it. A package in a repository your builds use,
+AURCache's own included, could read the key that way. Give this worker a
+deploy key that opens only what its packages need, read-only where the host
+allows it.
 
 **`known_hosts` is required.** It holds the host keys of the servers the key is
 used with, and a build's ssh accepts no host that is not in it:
@@ -317,26 +332,49 @@ policy. If the server is outside the cluster and shares one address and port
 between the repository and the worker protocol, no NetworkPolicy can separate
 them, and approving a worker remains the trust decision.
 
+The policy does not know your cluster's addresses. Three kinds of cluster need
+it edited, and `networkpolicy.yaml` has a comment at each place:
+
+- **NodeLocal DNSCache** (Kubespray's default, an option on GKE and EKS). It
+  serves on a link-local address such as `169.254.25.10` or `169.254.20.10`.
+  That address is in the ranges the policy excepts, and it is not a `kube-dns`
+  pod, so lookups fail: builds resolve nothing, and every one stops at its
+  first `pacman -Syu`. The fix is an extra egress rule, an `ipBlock` of that
+  address as a `/32` on port 53, UDP and TCP, which the manifest has commented
+  out.
+- **Pods, nodes or services on public addresses.** "Outside private ranges"
+  only keeps builds off a cluster that uses private ones. On an IPv6 cluster
+  whose pods have globally routable addresses (EKS in IPv6 mode), the rule for
+  the IPv6 internet reaches every pod, the server's worker port included. Add
+  the cluster's ranges to the `except` list.
+- **An API server on a public endpoint**, as managed control planes often
+  have. Builds can reach it. They hold no credential for it, so this is
+  exposure and not access; add its address to `except` to close it.
+
 A NetworkPolicy has an effect only where the CNI enforces it, and the API does
 not say whether it does. Once enrolled, the dispatcher therefore starts a short
 pod labelled like a build and has it try four addresses: the server's worker
-port, the cluster's API and the cloud metadata address (`169.254.169.254`),
-which must not answer, and the repository builds are given, which must. Builds
+port and the cloud metadata address (`169.254.169.254`), which must not
+answer, the cluster's API, which should not, and the repository builds are
+given, which must. Builds
 are claimed meanwhile; the check takes up to half a minute. The dispatcher's
 log then has one of:
 
 | Log line | Meaning |
 |---|---|
-| `The builds' NetworkPolicy is enforced: ...` (info) | The three forbidden addresses did not answer and the repository did. |
+| `The builds' NetworkPolicy is enforced: ...` (info) | The worker port, the metadata address and the API did not answer, and the repository did. |
 | `The builds' NetworkPolicy is not enforced: <addresses> answered from a pod labelled like a build. ...` (error) | A forbidden address answered. Also sent to the server, so it shows in AURCache's log and on the worker's page. |
+| `The builds' NetworkPolicy is enforced, and lets builds reach the cluster's API at <address>: ...` (warning) | Only the API answered: the worker port did not, so the policy is at work, and the API server's address is one it does not shut out. See the public endpoint above. |
 | `Could not check whether the builds' NetworkPolicy is enforced: <reason>` (warning) | The check pod could not run, or nothing answered at all, the repository included. Nothing answering is what an enforced policy and a pod with no network have in common, so it proves nothing; it also means builds will not find AURCache's own packages. |
 | `The builds' NetworkPolicy looks enforced: ...` (info) | The forbidden addresses did not answer, and builds are given no repository to compare with. |
 
 Set `WORKER_KUBE_NETWORK_PROBE=false` to skip the check, for example where you
 have confirmed enforcement or accepted the exposure.
 
-Two limits of the check. It does not try your mirror, so a mirror on a private
-address that the policy blocks shows up as failing builds, not here. And a CNI
+Three limits of the check. It does not try name resolution, so a cluster with
+NodeLocal DNSCache and the policy as shipped passes it and fails its builds.
+It does not try your mirror, so a mirror on a private address that the policy
+blocks shows up as failing builds too. And a CNI
 may put the policy around a pod only some seconds after the pod starts: kindnet
 lets a new pod reach everything for about ten seconds. The check waits that
 window out before it believes an open answer, but a build pod's first seconds
@@ -362,8 +400,14 @@ prepares pacman and upgrades the image before makepkg starts.
   ends the builds those pods ran (their log ends with
   `Abandoned: its worker stopped reporting it.`) and queues a new build of each
   package, under a new number, while the package has attempts left. Pods also
-  bound themselves: each carries a deadline of its build's timeout plus ten
-  minutes, so one outlives a dispatcher that never comes back by at most that.
+  bound themselves: each carries a deadline of its build's timeout plus an
+  hour, so one outlives a dispatcher that never comes back by at most that.
+  The hour is for the hand-back: the timeout stops a build, not the upload of
+  what it made.
+- **`--install` and `--rmdeps` in a package's build flags.** The build's
+  system is the pod, which is discarded, so there is nothing to install into
+  or to clean up. The flags are left out rather than passed to makepkg, which
+  could do neither without root.
 
 ## What to expect
 
@@ -401,7 +445,13 @@ a policy webhook. Check `kubectl -n aurcache-builds get events` and
 `kubectl -n aurcache-builds describe resourcequota`. If the question itself
 fails, the dispatcher logs
 `Could not ask the cluster whether it admits a build pod; claiming builds anyway`
-and goes on.
+and goes on. Anything the API server itself answers is taken as its answer for
+a real pod too: a builds namespace that does not exist, a webhook that is
+down, a server turning requests away.
+
+Before each claim the dispatcher also deletes any pod of its own that no build
+of its holds: one whose delete failed earlier, or the NetworkPolicy check's
+after it ended. It logs `Deleted pod <name>, which no build of this worker held`.
 
 **A pod stays `Pending`, then the build is ended and tried again.** No node
 could take it within `WORKER_KUBE_SCHEDULE_TIMEOUT`. Meanwhile the build's log
@@ -420,11 +470,25 @@ labelled `pod-security.kubernetes.io/enforce: baseline`. A `restricted` label
 there forbids the build container's capabilities and root user, and another
 admission policy may forbid the same: allow it for this namespace.
 
+**A pod stays `ContainerCreating` or `Init:0/1`, then the build is ended and
+tried again.** A node took the pod and could not start it within
+`WORKER_KUBE_SCHEDULE_TIMEOUT`. The build ends with
+`the build pod did not start within 10m of getting a node ...`. The pod's
+status seldom says why; `kubectl -n aurcache-builds get events` does. The
+usual causes are a volume that cannot be mounted
+(`WORKER_KUBE_CREDENTIAL_SECRET` names a Secret that is not in the builds'
+namespace) and a pod network the node cannot set up.
+
+**Every build fails at `pacman -Syu` with `Could not resolve host`.** Builds
+cannot reach the cluster's DNS. On a cluster with NodeLocal DNSCache, see
+[What a build can reach](#what-a-build-can-reach).
+
 **`ErrImagePull` or `ImagePullBackOff`.** The nodes cannot pull the builder
-image or the dispatcher's image. The dispatcher does not wait for the kubelet's
-retries: the build ends the first time its pod reports either, and the server
-tries it again while it has attempts left, so a registry that fails briefly
-costs an attempt. Check the registry and the names, add `imagePullSecrets`
+image or the dispatcher's image. The node tries again by itself, and the
+dispatcher waits two minutes for that, saying so in the build's log; then the
+build ends and the server tries it again while it has attempts left. A name
+that cannot be pulled at all (`InvalidImageName`) ends it at once. Check the
+registry and the names, add `imagePullSecrets`
 through the pod template for a private registry, or load the images onto the
 nodes and set `WORKER_KUBE_IMAGE_PULL_POLICY=IfNotPresent`. Every node that
 builds pulls the dispatcher's image, not only the one it runs on.

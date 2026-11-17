@@ -1450,6 +1450,26 @@ design documents where the code ended up different, and move nothing to
 - **The e2e harness finds the CLI where cargo put it**, and the hybrid suites
   expect disk use like every other.
 
+**What review changed** (the pull request's review, findings R1 to R9, S2 to
+S4 and the smaller ones; S1, the SSH credential, is its own design):
+
+- A pod that a node took and that does not start is handed back after the
+  schedule timeout, as the worker's; a failed image pull is waited on for two
+  minutes; a pod's deadline leaves an hour for the hand-back.
+- A stopped build asks for no pod, a request to create one is seen to its
+  answer, and pods no build holds are deleted before each claim. The shipped
+  quota counts `pods`, not `count/pods`.
+- Whatever the API server answers a dry run with holds claims back.
+- Stopping on a signal is `aurcache-worker-core`'s (`shutdown`), and the
+  Docker worker does it too. A second signal ends the wait.
+- The Docker worker names its containers after itself, warns about a
+  `noexec` build directory, and neither worker takes a dynamically linked
+  agent. `--install` and `--rmdeps` are left out of the flags makepkg gets.
+- The manifests name the agent image and grant no role in the dispatcher's
+  namespace; the NetworkPolicy has an opt-in rule for NodeLocal DNSCache and
+  says what to add on a cluster with public addresses; the probe tells an API
+  the policy lets through from a policy that is not enforced.
+
 ---
 
 ## 7. Waves

@@ -365,9 +365,13 @@ What an operator sees change:
   worker's, and the server ends the build and queues a new one, where it used
   to fail the package. A PGP key that cannot be fetched is not such a
   failure: the build goes on without it.
-- **`makepkg -i` and `-r` in a package's build flags stop working**: the
-  helper installs dependencies and nothing else.
-- **A custom builder image** needs pacman, makepkg and gpg, and no longer
+- **`--install` and `--rmdeps` in a package's build flags have no effect**:
+  the helper installs dependencies and nothing else, and the container is
+  discarded when the build ends, so the worker leaves both out of what
+  makepkg is given rather than let it build and then fail at them.
+- **The worker stops its builds when it is told to stop**, and names their
+  containers after itself, so that two instances can share a daemon.
+- **A custom builder image** needs pacman, makepkg, gpg and `find`, and no longer
   needs sudo or an `ab` user. Every image that worked still works.
 
 Still not supported: a persistent build directory (every build starts from a

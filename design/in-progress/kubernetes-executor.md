@@ -398,7 +398,17 @@ per check) and answers no while:
 A pod that stays unschedulable past `WORKER_KUBE_SCHEDULE_TIMEOUT` (declared,
 default 10 minutes) is deleted and reported `Interrupted` ("no node could
 take the build"), so the server ends the build and queues a new one, which
-another worker may take. The
+another worker may take. A pod a node took gets the same allowance again to
+reach its `stage` container, and is reported `Interrupted` the same way
+("the build pod did not start"): a volume that cannot be mounted or a pod
+network that cannot be set up shows in events, not in the pod's status, and
+would otherwise hold the build until its own timeout and be blamed on the
+package.
+
+What the API server answers the dry run with is taken as its answer for a
+real pod, whatever the code: a 404 for a namespace that is not there, a 500
+from a webhook that is down and a 429 hold claims back like a 403 does. Only
+a question that reached no server leaves the dispatcher claiming. The
 build timeout counts from the claim, as it does on every worker, so time
 spent pending is time the build does not get; that is the honest accounting,
 since the server's job timeout is about how long a build holds its lease.
@@ -440,8 +450,16 @@ and queues a new one for its package, under a new number, while the package
 has attempts left.
 
 The pods also bound themselves without the dispatcher:
-`activeDeadlineSeconds` is the build's timeout plus ten minutes, so a pod
-outlives a dead dispatcher by at most that.
+`activeDeadlineSeconds` is the build's timeout plus an hour, so a pod
+outlives a dead dispatcher by at most that. The hour is the hand-back's: the
+timeout stops the build and not the upload of what it made, and a deadline
+ten minutes past it cut large uploads off.
+
+While it runs, the dispatcher also deletes, before each claim, any pod of its
+own that no build of its holds: one whose delete failed when its build ended,
+and a pod of no build that has ended (the probe's). It keeps the set of
+builds it is seeing through for that. Such pods would otherwise stand until
+their deadline, and count against a quota.
 
 **Told to stop** (`SIGTERM` from the kubelet, `SIGINT`), the dispatcher does
 the same work itself instead of leaving it to its next start. It is the first
@@ -478,7 +496,7 @@ metadata:
     aurcache.io/arch: <arch>
 spec:
   restartPolicy: Never
-  activeDeadlineSeconds: <timeout + 10 min>  # absent for a build with no timeout
+  activeDeadlineSeconds: <timeout + 1 h>     # absent for a build with no timeout
   serviceAccountName: aurcache-build         # bound to nothing
   automountServiceAccountToken: false
   enableServiceLinks: false
@@ -536,11 +554,12 @@ Notes on the choices:
 - **The agent comes from the dispatcher's image**, copied into `tools` by the
   `stage` init container. The builder image is then the stock
   `aurcache-builder-v2`, untouched, and the agent is always the dispatcher's
-  own, so the two cannot drift: by default the agent image is the image the
-  dispatcher's own pod runs, by digest, read from its own pod's status
-  (`WORKER_KUBE_POD_NAME` and `WORKER_KUBE_POD_NAMESPACE`, from the downward
-  API; `get` on that one pod). `WORKER_KUBE_AGENT_IMAGE` names one instead,
-  for a dispatcher running outside a pod, or an image loaded by hand. The
+  own: the manifests name it in `WORKER_KUBE_AGENT_IMAGE`, kept equal to the
+  dispatcher's image by the kustomization. The dispatcher can read it from
+  its own pod's status instead, by digest (`WORKER_KUBE_POD_NAME` and
+  `WORKER_KUBE_POD_NAMESPACE`, from the downward API), but that takes `get`
+  on the pods of its namespace, the server's among them, so the manifests do
+  not grant it. The
   agent refuses a job written for another interface number, so a mismatch is
   an error message and not a misread field.
 - **The builder image's `sudo` grants are inert** under
@@ -698,7 +717,7 @@ From the report, the build container's `state.terminated` and the pod's
 | pod `reason: Evicted`, for passing its own limit (the message says a limit was exceeded) | failed, "out of disk: the build passed its ephemeral-storage limit of N and was evicted" |
 | pod `reason: Evicted`, for anything else (the node was short) | `Interrupted` |
 | pod `reason: DeadlineExceeded` | timed out (the backstop; the dispatcher's own timeout normally fires first) |
-| unschedulable past the timeout, `ErrImagePull`/`ImagePullBackOff`, `CreateContainerConfigError`, creation refused | `Interrupted`, with the status message |
+| unschedulable past the timeout, not started within it once scheduled, `ErrImagePull`/`ImagePullBackOff` for two minutes, `CreateContainerConfigError`, creation refused | `Interrupted`, with the status message |
 | the pod disappears (node lost, deleted by hand), or its build container ends with neither a report nor `OOMKilled` | `Interrupted` |
 
 Only a build that left a report carries measurements. None carries the
@@ -1104,7 +1123,8 @@ each is run. The layers:
     verbs: [get]
   ```
 
-  and in its own namespace, `get` on `pods`, to read which image it runs.
+  and nothing in its own namespace: reading its own pod's image there would
+  take `get` on every pod in it.
   Builds get a ServiceAccount bound to nothing (`aurcache-build`).
 - **A CNI that enforces NetworkPolicy**, or accepting that builds can reach the
   cluster.
@@ -1284,12 +1304,19 @@ supports.
   user namespace is unverified.
 - **One node, one architecture.** Nothing has run on a cluster with several
   nodes, where the agent image is pulled per node, or on arm.
-- **The agent image by digest.** kind reports a loaded image by a bare
-  `sha256:` id, so `image_of` fell back to the pod's image name in every run;
-  the digest path is covered by unit tests only.
-- An image that cannot be pulled ends the build on first sight
-  (`ErrImagePull`), so a registry that fails briefly costs an attempt. Waiting
-  out a few of the kubelet's retries would be kinder.
+- **The agent image is named, not read.** The manifests set
+  `WORKER_KUBE_AGENT_IMAGE` to the dispatcher's own image and grant no role
+  in the dispatcher's namespace: reading its own pod took `get` on every pod
+  there, the server's included. Reading it is still possible
+  (`WORKER_KUBE_POD_NAME`), by digest, and that path has unit tests only.
+  With a tag that moves, the agent a node pulls may be another build than the
+  dispatcher; the interface number is what keeps the two honest.
+- **The SSH credential is readable by root in the pod**, which a
+  dependency's install scriptlet is. "Can use and not read" holds against the
+  build user only. Moving the key and its `ssh-agent` out of the pod is
+  designed separately.
+- The probe does not try name resolution, so NodeLocal DNSCache with the
+  policy as shipped passes it and fails its builds.
 - A probe pod no node takes holds claims back until the probe gives up on it,
   two minutes at most.
 - CI has run none of this: the `buildAgentTest` job, the kube-worker image's
