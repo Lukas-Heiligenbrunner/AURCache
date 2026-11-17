@@ -105,7 +105,8 @@ impl Handler for CustomFileServer {
             // Relative entry and parent links need a directory URL, even
             // when the repository is mounted under a reverse proxy prefix.
             if !req.uri().path().ends_with('/') {
-                return Outcome::from(req, Redirect::permanent(format!("{}/", req.uri().path())));
+                let uri = req.uri().clone().into_normalized();
+                return Outcome::from(req, Redirect::permanent(format!("{}/", uri.path())));
             }
             return match self
                 .directory_index(&file_path, relative_path.as_os_str().is_empty())
@@ -451,6 +452,20 @@ mod serve_tests {
             .await;
         assert_eq!(response.status(), Status::Ok);
         assert_eq!(response.into_bytes().await.unwrap(), b"package");
+    }
+
+    #[rocket::async_test]
+    async fn directory_redirects_never_become_network_path_references() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("x86_64")).unwrap();
+        let client = served_client(root.path()).await;
+        for path in ["//x86_64", "///x86_64", "/x86_64//nested/.."] {
+            let response = client.get(path).dispatch().await;
+            assert_eq!(response.status(), Status::PermanentRedirect, "{path}");
+            let location = response.headers().get_one("Location").unwrap();
+            assert!(location.starts_with('/'));
+            assert!(!location.starts_with("//"), "{path}: {location}");
+        }
     }
 
     #[rocket::async_test]
