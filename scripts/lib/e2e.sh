@@ -18,8 +18,12 @@
 #   CLEANUP unset  tear down on success, preserve on failure so a failed run
 #                  can be debugged.
 
+# shellcheck source=scripts/lib/common.sh
+. "$PROJECT_DIR/scripts/lib/common.sh"
+
 LOG_FILE="$(mktemp -t aurcache-e2e-XXXXXX.log)"
-CLI_BIN="$PROJECT_DIR/backend/target/debug/aurcli"
+# The CLI the run drives the server with; `build_cli` says where it is.
+CLI_BIN=
 E2E_KEEP_HINTS=()
 E2E_CLEANUP_PATHS=()
 CURRENT_BUILD_REF=
@@ -56,20 +60,21 @@ announce_log() { log "Full container logs will be written to: $LOG_FILE"; }
 
 # Fail early with an actionable message instead of an obscure error 3 minutes in.
 # A caller needing more appends to E2E_TOOLS.
-E2E_TOOLS=(docker jq curl cargo)
+E2E_TOOLS=(docker jq curl cargo python3)
 preflight() {
-    local missing=0 tool
+    local lacking=0 tool
     for tool in "${E2E_TOOLS[@]}"; do
-        command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' is required but not installed"; missing=1; }
+        command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' is required but not installed"; lacking=1; }
     done
-    docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' (v2) is required"; missing=1; }
-    docker info >/dev/null 2>&1 || { echo "ERROR: cannot talk to the Docker daemon"; missing=1; }
-    [ "$missing" -eq 0 ] || exit 1
+    docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' (v2) is required"; lacking=1; }
+    docker info >/dev/null 2>&1 || { echo "ERROR: cannot talk to the Docker daemon"; lacking=1; }
+    [ "$lacking" -eq 0 ] || exit 1
 }
 
+# Cargo says where it put the binary, so a CARGO_TARGET_DIR is honoured.
 build_cli() {
     log "=== Building AURCache CLI ==="
-    (cd "$PROJECT_DIR/backend" && cargo build -q -p aurcache-cli)
+    CLI_BIN=$(cd "$PROJECT_DIR/backend" && cargo_executable aurcli build -q -p aurcache-cli)
 }
 
 # True if a service container has exited. A dead container will never satisfy

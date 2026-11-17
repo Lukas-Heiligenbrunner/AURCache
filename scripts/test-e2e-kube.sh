@@ -99,8 +99,6 @@ COMPOSE_ARGS=()
 E2E_SERVICES=""
 # shellcheck source=scripts/lib/e2e.sh
 . "$SCRIPT_DIR/lib/e2e.sh"
-# shellcheck source=scripts/lib/common.sh
-. "$SCRIPT_DIR/lib/common.sh"
 
 FORWARD_PID=
 CLUSTER_CREATED=0
@@ -289,11 +287,6 @@ build_images() {
     log "=== Building the server and Kubernetes worker images ==="
     "$SCRIPT_DIR/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
         --tag "$TAG" "$REGISTRY"
-}
-
-build_cli() {
-    log "=== Building the AURCache CLI ==="
-    CLI_BIN=$(cd "$PROJECT_DIR/backend" && cargo_executable aurcli build -q -p aurcache-cli)
 }
 
 create_cluster() {
