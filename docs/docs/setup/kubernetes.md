@@ -8,14 +8,15 @@ AURCache runs on Kubernetes as the same two pieces it runs as under Docker:
 
 - the **server** (`aurcache-server`), as a Deployment with one replica and a
   volume for its data;
-- **build workers** (`aurcache-worker`), as a StatefulSet. Each replica is one
-  worker with volumes of its own, and builds every package in a clean
-  `devtools` chroot.
+- **build workers**, which enroll with it, claim builds and upload what they
+  build.
 
 The manifests are in
 [`kubernetes/`](https://github.com/Lukas-Heiligenbrunner/AURCache/tree/master/kubernetes)
 in the repository. They are plain manifests put together with Kustomize, which
-is built into `kubectl`. There is no Helm chart.
+is built into `kubectl`. There is no Helm chart. The server is the base
+(`kubernetes/server/`, which also applies on its own), and the workers are
+chosen in `kubernetes/kustomization.yaml`, one Kustomize component per kind.
 
 :::note
 These manifests are newer than the compose files and have had far less use.
@@ -23,23 +24,47 @@ If one of them does not work on your cluster, please open an issue and say
 which distribution and storage you run.
 :::
 
+## Choosing a worker
+
+| Worker | How it builds | Needs |
+|---|---|---|
+| Chroot workers (`components/chroot-workers`, the default) | Each package in a clean `devtools` chroot, in a StatefulSet of privileged pods | Privileged pods, Linux 6.7+ with btrfs on their nodes, a volume per worker for its storage pool |
+
+The rest of this page is about the chroot workers, apart from the server
+itself. Workers can also run outside the cluster and connect to its worker
+port (see [Workers outside the cluster](#workers-outside-the-cluster)); the
+kinds of worker there are, and what each needs, are listed under [Build
+Workers](../workers/index.md).
+
+## Image versions
+
+The manifests name the `git` images, built from the master branch, and pull
+them again at every start. That is deliberate and temporary. In a privileged
+pod under containerd, `/sys/fs/cgroup` is the node's own cgroup tree rather than
+the pod's, and the 0.6.0 worker image's entrypoint hands that directory to the
+worker's user: the node's root cgroup ends up owned by it, and stays so after
+the pod is gone. The fix is in master, not yet in a release.
+
+Once a release after 0.6.0 is out, pin it in `kubernetes/kustomization.yaml`
+(`images:` is there, commented), for the server and the workers alike, and
+drop `imagePullPolicy: Always` if you like. Do not move these manifests to
+`latest` or `0.6.0` before then.
+
 ## What the cluster needs
 
-The server needs nothing unusual: an ordinary pod and a `ReadWriteOnce` volume.
-The worker needs the same things it needs under Docker, and some clusters
-cannot give them.
+The server needs nothing unusual: an ordinary pod, which the `baseline` [Pod
+Security](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+level admits, and a `ReadWriteOnce` volume. The chroot workers need what they
+need under Docker, and some clusters cannot give it.
 
 - **Privileged pods.** Each package is built in a `systemd-nspawn` chroot, and
   the worker formats and mounts its own btrfs storage pool. Both take a
-  privileged container. The manifests' namespace is labelled for the
-  `privileged` [Pod Security
-  Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
-  level, which a cluster policy (Kyverno, Gatekeeper, a managed policy) may
-  still refuse. Managed modes that never run privileged pods, such as GKE
-  Autopilot and EKS on Fargate, cannot run the worker. The server can still
-  run there, with workers on other machines (see [Workers outside the
-  cluster](#workers-outside-the-cluster)).
-- **Linux 6.7 or newer on the worker's nodes, with btrfs.** The worker's
+  privileged container, so `components/chroot-workers` raises the `aurcache`
+  namespace from `baseline` to `privileged`. A cluster policy (Kyverno,
+  Gatekeeper, a managed policy) may still refuse them. Managed modes that never
+  run privileged pods, such as GKE Autopilot and EKS on Fargate, cannot run
+  them at all. The server can still run there, with workers elsewhere.
+- **Linux 6.7 or newer on the workers' nodes, with btrfs.** The worker's
   [storage pool](../workers/storage-pool.md) is a btrfs filesystem with simple
   quotas, which arrived in 6.7. The container brings `btrfs-progs`, but the
   filesystem itself is the node's kernel's, so the node must have the btrfs
@@ -52,13 +77,15 @@ cannot give them.
   ```
 
   A worker that cannot open its pool takes no builds and says why in its log.
-- **cgroup v2 on the worker's nodes**, which current distributions use by
-  default. The worker gives each build a cgroup of its own for its memory
-  figure and its limits.
-- **A storage class for raw block volumes**, for the storage pool. Most CSI
+- **A storage class for raw block volumes**, for the storage pools. Most CSI
   drivers for disks can do this (cloud disks, Ceph RBD, Longhorn, TopoLVM,
   OpenEBS LVM). Where yours cannot, keep the pool in an image file instead
   (see [The storage pool](#the-storage-pool)).
+- **cgroup v2 on the workers' nodes** is recommended, and is what current
+  distributions use. The worker gives each build a cgroup of its own, which is
+  where its memory figure and its [limits](../workers/split-chroot.md#resource-limits)
+  come from. Without it builds still run, with no memory figure, and a worker
+  configured with limits refuses builds rather than run them unlimited.
 
 ## Deploying
 
@@ -66,15 +93,20 @@ From a checkout of the repository:
 
 ```bash
 # Optional: approve workers automatically (see below)
-kubectl apply -f kubernetes/namespace.yaml
+kubectl apply -f kubernetes/server/namespace.yaml
 kubectl -n aurcache create secret generic aurcache-enrollment \
   --from-literal=token="$(openssl rand -hex 32)"
 
 kubectl apply -k kubernetes/
 ```
 
-This starts the server, nginx for the repository, and one x86_64 worker in the
-`aurcache` namespace. To look at it before exposing anything:
+This starts the server, nginx for the repository, and one x86_64 chroot worker
+in the `aurcache` namespace. `kubectl apply -k kubernetes/server/` starts the
+server alone. Keep applying whichever you started with: applying
+`kubernetes/server/` over a deployment with chroot workers lowers the namespace
+to `baseline` again, and their pods are refused the next time they are created.
+
+To look at it before exposing anything:
 
 ```bash
 kubectl -n aurcache port-forward svc/aurcache 8080:8080 8081:8081
@@ -93,9 +125,9 @@ Before relying on it, read through `kubernetes/kustomization.yaml` and set:
   clients fetch packages from (see [Exposing the
   server](#exposing-the-server));
 - the volume sizes and, if the cluster's default is not the one you want,
-  `storageClassName`;
-- an image version instead of `latest`, if you would rather upgrade on purpose
-  (see [Upgrading](#upgrading)).
+  `storageClassName`. Decide them now: a StatefulSet's volume templates cannot
+  be changed later without the steps under [Changing the volumes
+  later](#changing-the-volumes-later).
 
 ## What the manifests set up
 
@@ -103,6 +135,7 @@ Before relying on it, read through `kubernetes/kustomization.yaml` and set:
 
 | Resource | Purpose |
 |---|---|
+| Namespace `aurcache` | Pod Security level `baseline`, or `privileged` with the chroot workers. |
 | Deployment `aurcache` | The server and an nginx container that serves the repository. One replica, replaced with `Recreate`. |
 | PersistentVolumeClaim `aurcache-data` | `/app`: the database, the repository, the internal worker CA, build logs and the source cache. |
 | Service `aurcache` | `8080` web UI and API, `8081` the repository (nginx), `8083` the worker protocol. |
@@ -120,14 +153,22 @@ and with it every enrolled worker, so it is the one to back up.
 
 nginx runs in the server's pod rather than in a Deployment of its own because
 the data volume is `ReadWriteOnce`: only one node can mount it. It reads the
-volume read-only and the server stays its only writer.
+volume read-only and the server stays its only writer. It runs with a
+read-only root filesystem and no capabilities beyond the four it needs to bind
+port 80 and drop to its own user.
 
 The server runs as root, as it does under Docker: each PKGBUILD parse runs as a
 separate unprivileged user, and switching to it takes the default `SETUID` and
 `SETGID` capabilities. See [Package
 parsing](../Configuration/package-parsing.md).
 
-### The workers
+The pod is ready once the server answers HTTP (`/api/version`). It
+deliberately does not use `/api/health`, which also pings the database: with
+PostgreSQL, a moment without the database would take the whole pod out of the
+Service, and the repository and the worker port with it. Point your monitoring
+at `/api/health` instead.
+
+### The chroot workers
 
 | Resource | Purpose |
 |---|---|
@@ -137,9 +178,13 @@ parsing](../Configuration/package-parsing.md).
 | Service `aurcache-workers` | Headless, only because a StatefulSet names one. Workers serve nothing. |
 
 A worker is known to the server by its key, which it keeps on its `data`
-volume. A StatefulSet keeps each replica's volumes through restarts and moves
-to other nodes, so a replica stays the same approved worker. Scaling up adds
-workers, each of which enrolls as a new one:
+volume. A StatefulSet keeps each replica's volumes through restarts, so a
+replica stays the same approved worker. It can move to another node with them
+when the storage is network-attached (cloud disks, Ceph, Longhorn). On
+node-local storage (TopoLVM, OpenEBS LVM, `local-path`), a replica is tied to
+its node: while that node is gone, the pod stays `Pending`.
+
+Scaling up adds workers, each of which enrolls as a new one:
 
 ```bash
 kubectl -n aurcache scale statefulset aurcache-worker --replicas=3
@@ -159,10 +204,14 @@ Each pod also has:
   each build as `builder`, so its data directory needs the owners and modes
   that declaration gives. Docker fills a new volume from the image with them; a
   new PersistentVolume is empty and owned by root;
-- `enableServiceLinks: false`, as the server has. Otherwise Kubernetes sets an
-  `AURCACHE_<NAME>_PORT` variable for every Service in the namespace whose name
-  starts with `aurcache`, and a Service called `aurcache-worker` would set
-  `AURCACHE_WORKER_PORT`, which the server reads as its port number.
+- `automountServiceAccountToken: false`, as the server has: neither talks to
+  the Kubernetes API, so neither carries a token for it;
+- `enableServiceLinks: false`, as the server has. Otherwise Kubernetes sets a
+  `<SERVICE>_PORT` variable for every Service in the namespace. The server
+  reads `AURCACHE_HTTP_PORT`, `AURCACHE_REPO_PORT` and `AURCACHE_WORKER_PORT`
+  as port numbers and stops on anything else, so a Service named
+  `aurcache-http`, `aurcache-repo` or `aurcache-worker` in the namespace would
+  stop it.
 
 A pod's `resources` limits bound the worker and every build it runs. Within
 them, the worker's [own limits](../workers/split-chroot.md#resource-limits)
@@ -173,10 +222,14 @@ the whole pod being killed.
 A stopped worker's builds are requeued once their lease runs out, a minute by
 default, and start again on another worker. To drain a node without losing
 work, [stop the worker's intake](../workers/managing.md#stopping-a-workers-intake)
-first:
+first, and resume it once the node is back. A stopped intake survives the
+worker restarting, so without the resume it never builds again:
 
 ```bash
 aurcli worker pause <id> --wait && kubectl drain <node> --ignore-daemonsets
+# ... maintenance, then:
+kubectl uncordon <node>
+aurcli worker resume <id>
 ```
 
 ## Approving workers
@@ -218,27 +271,103 @@ never formatted, so a new volume is what it wants.
 
 `WORKER_DISK_MAX_DEFAULT` is set to `190G` for a 200 GiB volume: the worker
 makes its filesystem 5% larger than `WORKER_DISK_MAX` (at least 2 GiB larger),
-so that has to fit on the volume. To grow the pool, expand the volume first (if
-the storage class allows volume expansion), then raise `WORKER_DISK_MAX` on the
-worker's page; see [Resizing](../workers/storage-pool.md#resizing).
+so that has to fit on the volume.
 
 **Without raw block volumes**, uncomment `components/pool-image` in
-`kubernetes/kustomization.yaml`. The pool is then a sparse image file on the
-worker's `data` volume, which grows to 200 GiB to hold it, and is loop-mounted.
-It works on any storage class, `local-path` included, at the cost of the loop
-device and the nested filesystem. A pool moved from one backing to the other
-starts empty; it only ever holds the base chroot and caches, which the worker
-rebuilds.
+`kubernetes/kustomization.yaml`, after the chroot worker components. The pool
+is then a sparse image file on the worker's `data` volume, which the component
+makes 200 GiB, and is loop-mounted. It works on any storage class, at the cost
+of the loop device and the nested filesystem.
+
+:::warning A storage class that does not enforce sizes
+`local-path` and other host-path provisioners ignore the size a claim asks for:
+the image lives on the node's own disk and can grow to fill it. The worker's
+`WORKER_DISK_MAX` is then the only bound, so set it within what that disk has
+free, leaving room for the node itself. A node whose disk fills up starts
+evicting pods, the server's included.
+:::
+
+### Changing the volumes later
+
+A StatefulSet's `volumeClaimTemplates` cannot be changed once it exists:
+`kubectl apply` refuses a new pool size, or `components/pool-image` added to a
+running deployment, with `spec: Forbidden: updates to statefulset spec ... are
+forbidden`. The claims it already made are ordinary PersistentVolumeClaims,
+though, and are changed one by one.
+
+**To grow a pool**, if the storage class allows volume expansion, expand each
+replica's claim, then raise `WORKER_DISK_MAX` on the worker's page (see
+[Resizing](../workers/storage-pool.md#resizing)):
+
+```bash
+kubectl -n aurcache patch pvc pool-aurcache-worker-0 \
+  -p '{"spec":{"resources":{"requests":{"storage":"300Gi"}}}}'
+```
+
+With `components/pool-image`, the claim to grow is `data-aurcache-worker-0`.
+For replicas added later to get the new size too, change it in the manifest and
+replace the StatefulSet without touching its pods or claims:
+
+```bash
+kubectl -n aurcache delete statefulset aurcache-worker --cascade=orphan
+kubectl apply -k kubernetes/
+```
+
+**To switch between a block volume and an image file**, each worker's pool
+starts again, empty: it only ever holds the base chroot and caches, which the
+worker rebuilds. Its identity, on `data`, can stay.
+
+1. Stop each worker's intake and wait for its builds:
+   `aurcli worker pause <id> --wait`.
+2. Replace the StatefulSet, leaving its pods running:
+   `kubectl -n aurcache delete statefulset aurcache-worker --cascade=orphan`.
+3. Change the claims. Moving to an image file, the `data` claims must grow to
+   hold it: expand each `data-aurcache-worker-N` as above (if the class cannot
+   expand, delete it, and that replica enrolls again as a new worker), and
+   delete each `pool-aurcache-worker-N`. Moving to a block volume, delete
+   nothing: the new template makes the `pool` claims.
+4. Change `kubernetes/kustomization.yaml`, `kubectl apply -k kubernetes/`, and
+   delete the old pods so they are made again from the new template:
+   `kubectl -n aurcache delete pod -l app.kubernetes.io/instance=aurcache-worker`.
+5. Resume each worker's intake: `aurcli worker resume <id>`.
+
+## What builds can reach on the network
+
+A chroot build runs in its worker pod's network namespace, so package code can
+connect wherever the worker can. The worker installs one firewall rule for its
+builds, which keeps them off the server's worker port, and nothing else. Without
+a NetworkPolicy, a PKGBUILD can reach other Services in the cluster, the
+Kubernetes API, the nodes, and the cloud metadata endpoint (`169.254.169.254`),
+which on some clouds hands out the node's credentials.
+
+`components/chroot-worker-egress` is a NetworkPolicy for the worker pods that
+allows DNS, the server's repository and worker ports, and public addresses, and
+refuses private, link-local and carrier-grade NAT ranges. It applies to the
+worker process as much as to its builds, since they share an address. Before
+enabling it:
+
+- your CNI must enforce NetworkPolicy (Calico, Cilium, kube-router, k3s's
+  built-in one; not flannel alone), or the policy does nothing;
+- its DNS rule allows the `k8s-app: kube-dns` pods in `kube-system`, where
+  CoreDNS runs under that label on most distributions. If yours differs, every
+  name lookup fails until you adjust it;
+- anything builds must reach on a private address (a source mirror, a git
+  server, an HTTP proxy) needs a rule of its own.
+
+Where node credentials matter, also block the metadata endpoint for pods at the
+cloud's own level (IMDSv2 with a hop limit of 1 on AWS, Workload Identity on
+GKE), whatever this policy does.
 
 ## Other architectures
 
 A chroot worker builds for the architecture of the node it runs on, so each
 architecture is a StatefulSet of its own, pinned to nodes of that architecture.
-`kubernetes/worker-arm64/` is the x86_64 one renamed, with its own labels and
-volumes, on `kubernetes.io/arch: arm64` nodes; uncomment it in
-`kubernetes/kustomization.yaml` to build aarch64 packages. The worker image is
-multi-arch, so those nodes pull their own variant of the same tag. For armv7h,
-copy that directory with `arm` and `armv7h` in place of `arm64` and `aarch64`.
+`components/chroot-workers-arm64` adds `aurcache-worker-arm64`, the x86_64 one
+renamed, with its own labels and volumes, on `kubernetes.io/arch: arm64` nodes,
+building aarch64 packages. It works with or without the x86_64 workers. The
+worker image is multi-arch, so those nodes pull their own variant of the same
+tag. For armv7h, copy `kubernetes/chroot-worker-arm64/` and its component with
+`arm` and `armv7h` in place of `arm64` and `aarch64`.
 
 Emulated workers, which the compose file runs on x86_64 through qemu, are not
 set up here: they need binfmt handlers registered on the node, which is the
@@ -334,14 +463,14 @@ kubectl -n aurcache create secret generic aurcache-postgres \
   --from-literal=database=<database>
 ```
 
-The server writes the password into a `postgres://` URL as it is, so keep it to
-letters, digits and `-_.~`. The data volume is still needed: the repository,
+Any password works: the server escapes the user and password itself when it
+builds its connection URL. The data volume is still needed: the repository,
 the worker CA and the build logs stay on it.
 
 ## Upgrading
 
-The manifests use the `latest` tags, so Kubernetes pulls the image again when a
-pod starts. Restart the server first, then the workers:
+The `git` images are pulled again whenever a pod starts. Restart the server
+first, then the workers:
 
 ```bash
 kubectl -n aurcache rollout restart deployment/aurcache
@@ -349,32 +478,52 @@ kubectl -n aurcache rollout status deployment/aurcache
 kubectl -n aurcache rollout restart statefulset/aurcache-worker
 ```
 
-To upgrade on purpose instead, pin a version in `kubernetes/kustomization.yaml`
-(`images:` is there, commented) and change it when you mean to.
+With a version pinned (see [Image versions](#image-versions)), change it in
+`kubernetes/kustomization.yaml` and apply instead.
 
-## The legacy container builder
+## Removing it
 
-The deprecated [legacy container builder](../workers/legacy-docker.md) runs each
-build in a container it creates through a Docker API, on a Unix socket. A
-Kubernetes node's runtime is containerd or CRI-O, which offer none, so it is not
-part of these manifests.
+`kubectl delete -k kubernetes/` deletes everything it applied, the `aurcache`
+namespace included, and deleting a namespace deletes every
+PersistentVolumeClaim in it. With the reclaim policy most default storage
+classes use (`Delete`), that deletes the server's volume -- the database, the
+repository and the worker CA -- along with the workers' volumes and the
+Secrets you created by hand.
 
-The [hybrid image](../workers/hybrid.md) in its DinD mode (`privileged: true`,
-`BUILD_ARTIFACT_DIR` unset) needs no outside daemon: builds run in a Podman
-inside its own container, which a privileged pod can hold too. It is
-deprecated, and needs the same privileges as the chroot worker while building
-in a reused image rather than a clean chroot.
+To keep the data, set the server's volume to be retained before deleting:
+
+```bash
+kubectl patch pv "$(kubectl -n aurcache get pvc aurcache-data -o jsonpath='{.spec.volumeName}')" \
+  -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+```
+
+or remove only the workloads, and leave the namespace and its claims:
+
+```bash
+kubectl -n aurcache delete deployment/aurcache statefulset/aurcache-worker
+```
+
+## Docker-based builders on Kubernetes
+
+The container builder runs each build in a container it creates through a
+Docker API, on a Unix socket. A Kubernetes node's runtime is containerd or
+CRI-O, which offer none, so it is not part of these manifests.
+
+The [hybrid image](../workers/hybrid.md) in its DinD mode (`BUILD_ARTIFACT_DIR`
+unset) needs no outside daemon: its builds run in a Podman inside its own
+container. That container needs either `privileged: true` or `SYS_ADMIN` with
+the seccomp and AppArmor settings described under [Without
+`privileged`](../workers/hybrid.md#without-privileged). On Kubernetes both put
+the namespace at the `privileged` Pod Security level, the second because
+`baseline` refuses `SYS_ADMIN`, and the seccomp profile has to be installed on
+each node as a `Localhost` profile.
 
 Against a separate Docker daemon, the only shape that works is a privileged
 `docker:dind` container in the same pod, sharing the socket through an
 `emptyDir`, with the build directory mounted **at the same path** in both
 containers. The builder tells the daemon to bind `BUILD_ARTIFACT_DIR` into each
 build container, and reads the results from the same directory itself, so the
-path has to mean the same directory to both. This is not recommended: use the
-chroot worker.
-
-A builder that starts each build as an unprivileged pod of its own is not
-available.
+path has to mean the same directory to both.
 
 ## Troubleshooting
 
@@ -384,6 +533,10 @@ provisioners do not support. `kubectl -n aurcache describe pvc
 pool-aurcache-worker-0` says so in its events (`rancher.io/local-path does not
 support block volume provisioning`, for one). Use `components/pool-image`, or
 name a class that can in the `pool` claim template.
+
+**`kubectl apply` says updates to the StatefulSet spec are forbidden.** A
+volume template changed: a size, a storage class, or `components/pool-image`.
+See [Changing the volumes later](#changing-the-volumes-later).
 
 **The worker logs that it cannot open its storage pool.** The node's kernel is
 older than 6.7, or has no btrfs. Run the worker on nodes that have both (a
@@ -398,5 +551,5 @@ namespace; deploying to another namespace means changing those too.
 socket mounted into the pod.** The daemon binds `BUILD_ARTIFACT_DIR` from the
 node's filesystem, and a volume mounted in the pod is not on the node at that
 path, so each build container gets an empty or missing directory. Use the chroot
-worker, or the same-path `docker:dind` shape above
+workers, or the same-path `docker:dind` shape above
 ([#200](https://github.com/Lukas-Heiligenbrunner/AURCache/issues/200)).
