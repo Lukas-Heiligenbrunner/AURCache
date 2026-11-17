@@ -84,13 +84,15 @@ request_package() {
         exit 1
     fi
 
-    # A chroot worker measures what each build used on its disk. Off for the
-    # Docker worker, which has no storage pool to measure.
-    local usage
-    usage=$(aurcache_cli --format json builds list --limit 20 2>/dev/null \
-        | jq -c --arg pkg "$PACKAGE" '[.[] | select(.pkg_name == $pkg)] | max_by(.number) | .disk_usage' 2>/dev/null)
+    # Every worker measures what a build used on its disk: the chroot worker
+    # from its storage pool, the Docker worker through the build agent.
+    local build usage
+    build=$(aurcache_cli --format json builds list --limit 20 2>/dev/null \
+        | jq -c --arg pkg "$PACKAGE" '[.[] | select(.pkg_name == $pkg)] | max_by(.number)' 2>/dev/null)
+    usage=$(jq -c '.disk_usage' <<<"$build" 2>/dev/null)
     log "    disk usage: ${usage:-none}"
-    if [ "${E2E_EXPECT_DISK_USAGE:-1}" = 1 ] && { [ -z "$usage" ] || [ "$usage" = null ]; }; then
+    log "    peak memory: $(jq -r '.peak_memory // "none"' <<<"$build" 2>/dev/null)"
+    if [ -z "$usage" ] || [ "$usage" = null ]; then
         log "ERROR: the build reported no disk usage"
         exit 1
     fi
