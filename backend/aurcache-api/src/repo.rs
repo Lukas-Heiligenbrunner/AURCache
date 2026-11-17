@@ -9,7 +9,10 @@ use utoipa::OpenApi;
 use crate::auth::Authenticated;
 
 #[derive(OpenApi)]
-#[openapi(paths(repo_info, repo_key), components(schemas(RepoInfo, SigningInfo)))]
+#[openapi(
+    paths(repo_info, repo_key, repo_signing),
+    components(schemas(RepoInfo, SigningInfo))
+)]
 pub struct RepoApi;
 
 /// How this instance publishes its repository.
@@ -42,7 +45,7 @@ pub fn repo_info(
 ///
 /// Unauthenticated, like the repository it lets a client verify: a public key
 /// is no secret, and a client sets it up before it has any token. Trust it by
-/// the fingerprint `GET /repo/info` reports, not by where it came from.
+/// the fingerprint `GET /repo/signing` reports, not by where it came from.
 #[utoipa::path(
     responses(
             (status = 200, description = "The armored public key", content_type = "application/pgp-keys", body = String),
@@ -56,4 +59,21 @@ pub fn repo_key(services: &State<Services>) -> Result<(ContentType, String), Sta
         ContentType::new("application", "pgp-keys"),
         key.public_key().to_string(),
     ))
+}
+
+/// Whether the repository is signed, and with which key: `null` when it is
+/// not.
+///
+/// Unauthenticated, like `GET /repo/key`: pacman refuses a signed repository
+/// whose key it does not trust, so a client writing its `pacman.conf` needs to
+/// know before it has any token. `GET /repo/info` says the same, with the
+/// rest of how the repository is published.
+#[utoipa::path(
+    responses(
+            (status = 200, description = "The key the repository is signed with, or null", body = Option<SigningInfo>),
+    )
+)]
+#[get("/repo/signing")]
+pub fn repo_signing(services: &State<Services>) -> Json<Option<SigningInfo>> {
+    Json(services.repo.signing_info())
 }

@@ -391,15 +391,20 @@ A signature is only as useful as the client's way of knowing the key.
   authentication, as `application/pgp-keys`, and 404 when the instance does
   not sign. **`GET /api/repo/info`** (built) carries
   `signing: Option<SigningInfo { fingerprint, backfilling }>`; `None`, or a
-  server that predates it, means unsigned.
+  server that predates it, means unsigned. **`GET /api/repo/signing`** (built)
+  answers the same without authentication, for a client with no token yet.
 - **`aurcli repo config`** (built) prints `SigLevel = Required` and the two
-  commands (`curl … | sudo pacman-key --add`, `sudo pacman-key --lsign-key
+  commands (`curl … | sudo pacman-key --add -`, `sudo pacman-key --lsign-key
   <fpr>`) when the instance signs and has finished backfilling, and keeps
   `Optional TrustAll` — still printing the commands — while it has not.
   `--install` trusts the key *before* writing the stanza, after showing the
   fingerprint and asking (`sudo` unless root); without a terminal it does not
-  ask, and prints the commands. It asks `/repo/info` even with `--port` now,
-  since the answer is about more than the address. The fingerprint comes over
+  ask, prints the commands, and writes no section unless `--siglevel` is
+  given, since pacman would refuse it even under `Optional`. `pacman-key
+  --add` is given `-` for the pipe: with no argument at all, pacman-key 7.1
+  refuses. Without a token, it asks `/repo/signing`; with one, `/repo/info`,
+  even with `--port`, since the answer is about more than the address. The
+  fingerprint comes over
   the same connection the token authenticates; the prompt is what makes
   `--lsign` a decision, and lsigning by the reported fingerprint means a
   served key that is not that one is never trusted.
