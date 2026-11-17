@@ -14,7 +14,6 @@ use crate::cluster::{Cluster, CreateError, ExecEnd, Stdin};
 use crate::config::Config;
 use crate::pod;
 use anyhow::{Context, Result, bail};
-use aurcache_build_agent::layout;
 use aurcache_build_agent::report::Reach;
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, Pod, PodSecurityContext, PodSpec, SeccompProfile, SecurityContext,
@@ -61,8 +60,6 @@ const ANSWER_MAX: u64 = 64 * 1024;
 const RECHECKS: usize = 3;
 /// How long to wait before checking again.
 const SETTLE: Duration = Duration::from_secs(4);
-/// Where the agent lives in its image.
-const AGENT: &str = "/usr/local/bin";
 const NOBODY: i64 = 65534;
 
 /// Run the probe pod, read what it found, and delete it.
@@ -219,7 +216,7 @@ async fn ask<C: Cluster>(
     connect: &[String],
     named: &[String],
 ) -> Result<Vec<Reach>> {
-    let agent = format!("{AGENT}/{}", layout::BIN_NAME);
+    let agent = pod::agent_path();
     let timeout = CONNECT_SECONDS.to_string();
     let mut argv = vec![agent.as_str(), "probe", "--timeout", timeout.as_str()];
     for target in connect {
@@ -326,10 +323,7 @@ fn render(cfg: &Config, agent_image: &str, name: &str) -> Pod {
             containers: vec![Container {
                 name: PROBE.to_string(),
                 image: Some(agent_image.to_string()),
-                command: Some(vec![
-                    format!("{AGENT}/{}", layout::BIN_NAME),
-                    "hold".to_string(),
-                ]),
+                command: Some(vec![pod::agent_path(), "hold".to_string()]),
                 security_context: Some(restricted()),
                 ..Container::default()
             }],

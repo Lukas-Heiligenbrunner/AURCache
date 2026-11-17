@@ -16,6 +16,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 /// `app.kubernetes.io/managed-by` on every pod this worker creates.
@@ -152,8 +153,20 @@ fn mount(name: &str, path: &str, read_only: bool) -> VolumeMount {
     }
 }
 
-fn agent_path() -> String {
+/// The agent, where a container of the dispatcher's image has it: what
+/// `stage` and `hold` run, and what an exec into either names.
+#[must_use]
+pub fn agent_path() -> String {
     format!("{AGENT_IN_IMAGE}/{}", layout::BIN_NAME)
+}
+
+/// Where the build container has the files of the credential Secret; `None`
+/// when the configuration names no Secret, and the pod mounts none.
+#[must_use]
+pub fn credentials(cfg: &Config) -> Option<&'static Path> {
+    cfg.credential_secret
+        .as_ref()
+        .map(|_| Path::new(CREDENTIALS))
 }
 
 fn stage(inputs: &PodInputs<'_>) -> Container {
@@ -177,8 +190,8 @@ fn stage(inputs: &PodInputs<'_>) -> Container {
 fn build(inputs: &PodInputs<'_>) -> Container {
     let log = Work::new(WORK).log();
     let mut mounts = vec![mount("work", WORK, false), mount("tools", TOOLS, true)];
-    if inputs.cfg.credential_secret.is_some() {
-        mounts.push(mount("credentials", CREDENTIALS, true));
+    if let Some(path) = credentials(inputs.cfg) {
+        mounts.push(mount("credentials", &path.to_string_lossy(), true));
     }
     Container {
         name: BUILD.to_string(),
@@ -671,6 +684,35 @@ mod tests {
                 .any(|m| m.name == "credentials");
             assert_eq!(mounted, which == BUILD, "{which}");
         }
+    }
+
+    /// What the executor is told about the credential is where the pod has it.
+    #[test]
+    fn the_credential_is_named_where_build_mounts_it() {
+        assert_eq!(credentials(&config()), None);
+        let mut cfg = config();
+        cfg.credential_secret = Some("ssh".into());
+        let named = credentials(&cfg).unwrap();
+        let with = pod(&cfg);
+        let mounted = container(&with, BUILD)
+            .volume_mounts
+            .iter()
+            .flatten()
+            .find(|m| m.name == "credentials")
+            .unwrap();
+        assert_eq!(Path::new(&mounted.mount_path), named);
+        assert_eq!(mounted.read_only, Some(true));
+    }
+
+    /// What an exec names is what `stage` and `hold` themselves run.
+    #[test]
+    fn the_agent_is_named_where_stage_and_hold_run_it() {
+        let pod = pod(&config());
+        for which in [STAGE, HOLD] {
+            let command = container(&pod, which).command.as_ref().unwrap();
+            assert_eq!(command[0], agent_path(), "{which}");
+        }
+        assert!(agent_path().ends_with(layout::BIN_NAME));
     }
 
     #[test]

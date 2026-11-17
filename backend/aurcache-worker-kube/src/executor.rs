@@ -11,7 +11,7 @@
 use crate::cluster::{Admission, Cluster, CreateError};
 use crate::config::Config;
 use crate::outcome::{self, BuildEnd, Observed};
-use crate::pod::{self, BUILD, HOLD, PodInputs};
+use crate::pod::{self, BUILD, PodInputs};
 use crate::transfer::{Agent, Lines, Uploads};
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_build_agent::report::Artifact;
@@ -31,7 +31,7 @@ use aurcache_worker_core::settings::WorkerSettings;
 use futures::FutureExt;
 use k8s_openapi::api::core::v1::Pod;
 use std::panic::{AssertUnwindSafe, resume_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -201,7 +201,7 @@ impl<C: Cluster> KubeExecutor<C> {
         build: &Build<'_, U>,
         watch: &StopWatch,
     ) -> Result<CompleteReport> {
-        let bin = command(pod, HOLD).context("the rendered pod has no hold command")?;
+        let bin = pod::agent_path();
         let agent = Agent {
             cluster: &*self.cluster,
             pod: name,
@@ -535,7 +535,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             .source(build_id)
             .await
             .context("downloading source")?;
-        let spec = spec::for_job(&claimed, client.repo(), options(&cfg, &pod));
+        let spec = spec::for_job(&claimed, client.repo(), options(&cfg));
         let input = input::pack(&spec, &source)?;
         let log = BuildLog::open(Arc::clone(&client), build_id);
         let build = Build {
@@ -728,56 +728,26 @@ fn undelivered(done: CompleteReport, error: &anyhow::Error) -> CompleteReport {
 
 /// What the worker decides about a build's spec: the limits it runs under,
 /// and where in the pod its trees and its credential are.
-fn options(cfg: &Config, pod: &Pod) -> SpecOptions {
+fn options(cfg: &Config) -> SpecOptions {
     SpecOptions {
         cpus: cfg.tunables.cpus,
         keyserver: cfg.tunables.keyserver.clone(),
         scratch: Path::new(pod::WORK).join(SCRATCH),
-        credential: credential_mount(pod).map(|mount| Credential {
+        credential: pod::credentials(cfg).map(|mount| Credential {
             key: mount.join(CREDENTIAL_KEY),
-            // Named whether or not the Secret holds one: the dispatcher
-            // cannot read the Secret to know.
+            // Always named: the dispatcher cannot read the Secret to know
+            // whether it holds one, and a build without it is refused. A pod
+            // is new each time, so an ssh left to trust the keys it is shown
+            // would trust any host, on every build.
             known_hosts: Some(mount.join(CREDENTIAL_KNOWN_HOSTS)),
         }),
     }
-}
-
-/// The first word of a container's command: the program it runs.
-fn command(pod: &Pod, container: &str) -> Option<String> {
-    let spec = pod.spec.as_ref()?;
-    spec.containers
-        .iter()
-        .chain(spec.init_containers.iter().flatten())
-        .find(|found| found.name == container)?
-        .command
-        .as_ref()?
-        .first()
-        .cloned()
-}
-
-/// Where the build container has the credential Secret, when the pod mounts
-/// one.
-fn credential_mount(pod: &Pod) -> Option<PathBuf> {
-    let spec = pod.spec.as_ref()?;
-    let volume = spec
-        .volumes
-        .iter()
-        .flatten()
-        .find(|volume| volume.secret.is_some())?;
-    let build = spec.containers.iter().find(|found| found.name == BUILD)?;
-    let mount = build
-        .volume_mounts
-        .iter()
-        .flatten()
-        .find(|mount| mount.name == volume.name)?;
-    Some(PathBuf::from(&mount.mount_path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{AgentImage, PodExtras, Tunables};
-    use aurcache_build_agent::layout::BIN_NAME;
 
     fn cfg(credential_secret: Option<&str>) -> Config {
         Config {
@@ -842,36 +812,25 @@ mod tests {
             .unwrap()
     }
 
-    /// The agent is run from where the pod's own containers run it.
-    #[test]
-    fn the_agent_is_found_where_the_pod_runs_it() {
-        let pod = rendered(&cfg(None));
-        let hold = command(&pod, HOLD).unwrap();
-        assert!(hold.ends_with(BIN_NAME), "{hold}");
-        assert_eq!(command(&pod, pod::STAGE).as_deref(), Some(hold.as_str()));
-        assert_eq!(command(&pod, "sidecar"), None);
-    }
-
     #[test]
     fn the_spec_takes_the_limits_and_the_scratch_in_the_work_volume() {
         let cfg = cfg(None);
-        let options = options(&cfg, &rendered(&cfg));
+        let options = options(&cfg);
         assert_eq!(options.cpus, Some(2.5));
         assert_eq!(options.keyserver, "hkps://keys.example");
         assert_eq!(options.scratch, Path::new("/work/scratch"));
         assert_eq!(options.credential, None);
     }
 
-    /// The credential is named where the build container has the Secret.
+    /// The credential is named where the build container has the Secret,
+    /// host keys included whatever the Secret holds.
     #[test]
     fn the_spec_names_the_credential_where_the_pod_mounts_it() {
         let cfg = cfg(Some("build-ssh"));
-        let pod = rendered(&cfg);
-        let mount = credential_mount(&pod).unwrap();
-        let credential = options(&cfg, &pod).credential.unwrap();
+        let mount = pod::credentials(&cfg).unwrap();
+        let credential = options(&cfg).credential.unwrap();
         assert_eq!(credential.key, mount.join("ssh-privatekey"));
         assert_eq!(credential.known_hosts, Some(mount.join("known_hosts")));
-        assert!(mount.is_absolute());
     }
 
     #[test]
