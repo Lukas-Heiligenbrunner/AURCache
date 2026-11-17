@@ -6,10 +6,13 @@ use super::user::BuildUser;
 
 /// Fetch each of the job's keys from the keyserver, as the build user.
 ///
-/// A key that cannot be fetched stops the build before it starts: whether
-/// the keyserver is down or the key is not on it cannot be told apart here,
-/// and a build that needs the key would only fail later for a reason that
-/// looks like the package's.
+/// A key that cannot be fetched is said in the build log and the build goes
+/// on, as it does on the chroot worker. A PKGBUILD's `validpgpkeys` often
+/// lists keys no source of this version is signed with, some of them on no
+/// keyserver any more, and stopping for one of those would keep a package
+/// from ever building here that builds elsewhere. A build that does need the
+/// key fails at makepkg's signature check, with the line written here just
+/// above it. Only a gpg that cannot be run at all stops the build.
 pub fn import(
     keys: &[String],
     keyserver: &str,
@@ -28,8 +31,9 @@ pub fn import(
         let status =
             run::logged(output, &mut gpg).map_err(|e| format!("gpg could not be started: {e}"))?;
         if !status.success() {
-            return Err(format!(
-                "fetching PGP key {key} from {keyserver}: gpg {}",
+            output.say(&format!(
+                "could not fetch PGP key {key} from {keyserver} (gpg {}); going on without \
+                 it, and a source signed with it will not verify",
                 run::describe(status)
             ));
         }
