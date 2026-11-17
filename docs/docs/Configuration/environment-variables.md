@@ -52,6 +52,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | ACTIVITY_RETENTION     | Duration      | How long an entry stays in the **Logs** page (`90d`, `4w`, or seconds). `0` keeps everything | `90d` |
 | PARSE_NETWORK          | Boolean       | Let a PKGBUILD reach the network while the server parses it; also a setting, global | false |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
+| AURCACHE_REPO_NAME     | String        | Pacman section and database filename prefix; see [Repository name](#repository-name) | `repo` |
 | AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081`. One that names no port means `AURCACHE_REPO_PORT` | `http://localhost:<AURCACHE_REPO_PORT>` |
 | AURCACHE_PROTECTED_DIR | Paths         | Further directories a PKGBUILD parse may not read, colon-separated, added to the built-in list; see [Package parsing](./package-parsing.md) | none |
 | AURCACHE_SANDBOX       | Path          | The `aurcache-sandbox` a parse runs under, for an install outside the default place; absolute | `/usr/bin/aurcache-sandbox` |
@@ -65,6 +66,31 @@ Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
 `OAUTH_AUTH_URI`, `OAUTH_TOKEN_URI`, `OAUTH_USERINFO_URI`,
 `OAUTH_REDIRECT_URI` and `OAUTH_ALLOWED_USERS`; see
 [Authentication](./authentication.md).
+
+### Repository name
+
+Set `AURCACHE_REPO_NAME=custom_name` on the **server** to publish
+`custom_name.db` and `custom_name.files` (and their `.tar.gz` archives). Names
+must start with an ASCII letter, digit or underscore and contain only ASCII
+letters, digits, underscores, dots or hyphens. `options` is reserved by pacman.
+Invalid names prevent startup.
+
+Workers receive the name when they register; no worker variable is needed.
+`aurcli repo config` discovers it from the server when authenticated. For
+`--offline` or an unauthenticated command, pass `--name custom_name`.
+Clients must use the matching `[custom_name]` section in `pacman.conf`; the
+`Server =` URL stays the same. Distinct names let a client use several AURCache
+instances at once.
+
+To rename an existing repository, finish pending publications and stop the
+server first. In every architecture directory under `/var/lib/aurcache/repo`,
+rename `<old>.db.tar.gz` to `<new>.db.tar.gz` and `<old>.files.tar.gz` to
+`<new>.files.tar.gz`. Remove the old `<old>.db` and `<old>.files` symlinks;
+startup recreates them under the new name, pointing at the renamed archives.
+Then set `AURCACHE_REPO_NAME`, restart the server and workers, and update each
+client's `pacman.conf` section. The server refuses startup when it finds only
+differently named databases, so changing the variable alone cannot replace a
+populated repository with an empty one.
 
 ### Where the server listens
 

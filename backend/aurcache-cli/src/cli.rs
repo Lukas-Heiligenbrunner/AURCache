@@ -479,6 +479,7 @@ pub(crate) struct RepoConfigArgs {
     pub(crate) port: Option<u16>,
 
     /// Section name, which must match the repository's database files.
+    /// Defaults to the server's name, or 'repo' offline.
     #[arg(long)]
     pub(crate) name: Option<String>,
 

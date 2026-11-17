@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RepoInfo {
+    /// The pacman section and database filename prefix. Older servers omit it.
+    #[serde(default = "default_name")]
+    pub name: String,
     /// Base URL the repository is served on, from `AURCACHE_PUBLIC_URL`, else
     /// `http://localhost:<listen_port>`.
     pub public_url: String,
@@ -19,4 +22,20 @@ pub struct RepoInfo {
     /// that does not report it, which listens on the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
+}
+
+fn default_name() -> String {
+    crate::repo::DEFAULT_REPO_NAME.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RepoInfo;
+
+    #[test]
+    fn older_servers_default_to_repo() {
+        let info: RepoInfo =
+            serde_json::from_str(r#"{"public_url":"http://localhost:8081"}"#).unwrap();
+        assert_eq!(info.name, "repo");
+    }
 }

@@ -17,10 +17,8 @@ use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// What the server names the repository, and therefore what pacman must call
-/// it: the database files are `repo.db` / `repo.files`, so the section header
-/// is not a free choice.
-pub use aurcache_common::repo::REPO_NAME as DEFAULT_REPO_NAME;
+/// The name assumed offline or when a server predates configurable names.
+pub use aurcache_common::repo::DEFAULT_REPO_NAME;
 
 /// Matches the documented stanza. AURCache does not sign its packages, so a
 /// stricter level would refuse everything it serves.
@@ -98,7 +96,12 @@ pub fn repo_config(
         (None, Some(published)) => server_url_from_public(published, api_url)?,
         (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_REPO_PORT))?,
     };
-    let name = name.unwrap_or_else(|| DEFAULT_REPO_NAME.to_string());
+    let name = name.unwrap_or_else(|| {
+        published
+            .map_or(DEFAULT_REPO_NAME, |info| info.name.as_str())
+            .to_string()
+    });
+    aurcache_common::repo::validate_name(&name).map_err(anyhow::Error::msg)?;
     let siglevel = siglevel.unwrap_or_else(|| DEFAULT_SIGLEVEL.to_string());
     let block = format!("[{name}]\nSigLevel = {siglevel}\nServer = {server}\n");
     Ok(RepoConfig {
@@ -258,9 +261,42 @@ mod tests {
     /// report it.
     fn published(public_url: &str, listen_port: Option<u16>) -> RepoInfo {
         RepoInfo {
+            name: DEFAULT_REPO_NAME.to_string(),
             public_url: public_url.to_string(),
             listen_port,
         }
+    }
+
+    #[test]
+    fn the_server_name_is_used_unless_explicitly_overridden() {
+        let mut info = published("http://localhost:8081", Some(8081));
+        info.name = "custom_name".to_string();
+        let config = repo_config("http://host:8080/api", None, None, None, Some(&info)).unwrap();
+        assert_eq!(config.name, "custom_name");
+        assert!(config.block.starts_with("[custom_name]\n"));
+        let config = repo_config(
+            "http://host:8080/api",
+            None,
+            Some("override".into()),
+            None,
+            Some(&info),
+        )
+        .unwrap();
+        assert_eq!(config.name, "override");
+    }
+
+    #[test]
+    fn an_invalid_section_name_is_rejected() {
+        assert!(
+            repo_config(
+                "http://host:8080/api",
+                None,
+                Some("bad]\nServer = bad".into()),
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -62,8 +62,12 @@ pub struct RepoTemplate(String);
 impl RepoTemplate {
     /// The template for this server, whose repository listens on `repo_port`.
     #[must_use]
-    pub fn new(repo_port: u16) -> Self {
-        Self(render_repo_template(&public_repo_url(repo_port), repo_port))
+    pub fn new(repo_port: u16, name: &str) -> Self {
+        Self(render_repo_template(
+            &public_repo_url(repo_port),
+            repo_port,
+            name,
+        ))
     }
 }
 
@@ -87,13 +91,12 @@ fn published_at(configured: Option<String>, repo_port: u16) -> String {
 ///
 /// The host substitution is shared with the CLI, which answers the same
 /// question for a `pacman.conf` — see [`aurcache_common::repo`].
-fn render_repo_template(public_url: &str, repo_port: u16) -> String {
+fn render_repo_template(public_url: &str, repo_port: u16, name: &str) -> String {
     let server = aurcache_common::repo::server_url_for_host(
         public_url,
         aurcache_common::worker::REPO_HOST_PLACEHOLDER,
         repo_port,
     );
-    let name = aurcache_common::repo::REPO_NAME;
     format!("[{name}]\nSigLevel = Never\nServer = {server}\n")
 }
 
@@ -949,11 +952,18 @@ mod repo_template_tests {
     use super::{published_at, render_repo_template};
     use aurcache_common::worker::REPO_HOST_PLACEHOLDER;
 
+    #[test]
+    fn the_worker_section_uses_the_configured_repository_name() {
+        let template = render_repo_template("http://localhost:8081", 8081, "custom_name");
+        assert!(template.starts_with("[custom_name]\nSigLevel = Never\n"));
+        assert!(!template.contains("[repo]"));
+    }
+
     /// Only the host is replaced: the scheme, port and path describe how the
     /// repository is published and remain the server's decision.
     #[test]
     fn replaces_only_the_host() {
-        let t = render_repo_template("http://aurcache.example.com:9000/repo", 8081);
+        let t = render_repo_template("http://aurcache.example.com:9000/repo", 8081, "repo");
         assert!(t.contains(&format!(
             "Server = http://{REPO_HOST_PLACEHOLDER}:9000/repo/$arch"
         )));
@@ -965,7 +975,7 @@ mod repo_template_tests {
     /// the port the repository listens on.
     #[test]
     fn supplies_the_repository_port_when_the_url_omits_it() {
-        let t = render_repo_template("http://aurcache.example.com", 9081);
+        let t = render_repo_template("http://aurcache.example.com", 9081, "repo");
         assert!(t.contains(&format!(
             "Server = http://{REPO_HOST_PLACEHOLDER}:9081/$arch"
         )));
@@ -980,7 +990,7 @@ mod repo_template_tests {
             published_at(Some("https://aur.example.com/repo".into()), 9081),
             "https://aur.example.com/repo"
         );
-        let t = render_repo_template(&published_at(None, 9081), 9081);
+        let t = render_repo_template(&published_at(None, 9081), 9081, "repo");
         assert!(t.contains(&format!(
             "Server = http://{REPO_HOST_PLACEHOLDER}:9081/$arch"
         )));
@@ -988,7 +998,7 @@ mod repo_template_tests {
 
     #[test]
     fn keeps_https_and_ignores_a_trailing_slash() {
-        let t = render_repo_template("https://aurcache.example.com:8081/", 9081);
+        let t = render_repo_template("https://aurcache.example.com:8081/", 9081, "repo");
         assert!(t.contains(&format!(
             "Server = https://{REPO_HOST_PLACEHOLDER}:8081/$arch"
         )));
