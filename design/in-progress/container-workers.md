@@ -387,8 +387,11 @@ What an operator sees change:
   needs sudo or an `ab` user. Every image that worked still works.
 
 Still not supported: a persistent build directory (every build starts from a
-fresh tree, silently), kept failed builds, caches. SSH build credentials are something the agent can do
-and the Docker worker does not yet offer.
+fresh tree, silently), kept failed builds, caches. SSH build credentials
+are supported the Kubernetes worker's way: `WORKER_GIT_SSH_KEY` and
+`WORKER_SSH_KNOWN_HOSTS` on the worker, which answers for the key over a
+`docker exec` of `ssh-link` (`kubernetes-executor.md`, "Credentials and PGP
+keys"); no path is shared with the engine for it.
 
 ### With Podman, rootless engines, and the hybrid image
 
@@ -441,8 +444,6 @@ A symlink in `pkg/` named like a package is still refused twice, by
 
 ## Later
 
-- SSH build credentials on the Docker worker (a key file bound read-only for
-  root; the agent does the rest).
 - The chroot worker's in-container script as this agent (`build-runner.md`).
 - A standalone image and compose file for the Docker worker, if it is wanted
   outside the hybrid image and the native package.
