@@ -101,7 +101,7 @@ impl Handler for CustomFileServer {
         };
 
         let metadata = named_file.metadata().await.ok();
-        if metadata.as_ref().is_some_and(|m| m.is_dir()) {
+        if metadata.as_ref().is_some_and(std::fs::Metadata::is_dir) {
             // Relative entry and parent links need a directory URL, even
             // when the repository is mounted under a reverse proxy prefix.
             if !req.uri().path().ends_with('/') {
