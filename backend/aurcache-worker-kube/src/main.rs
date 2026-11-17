@@ -209,6 +209,13 @@ async fn network_probe(
         ProbeOutcome::Open { .. } => {
             tracing::error!("{}", unenforced.as_deref().unwrap_or_default());
         }
+        ProbeOutcome::ApiOpen { api } => tracing::warn!(
+            "The builds' NetworkPolicy is enforced, and lets builds reach the cluster's API \
+             at {api}: the API server's own address is outside the private ranges the \
+             policy shuts builds out of, as a control plane on a public address is. Builds \
+             hold no credential for it. To close it, add that address to the policy's \
+             `except` list"
+        ),
         ProbeOutcome::Inconclusive { reason } => tracing::warn!(
             "Could not check whether the builds' NetworkPolicy is enforced: {reason}"
         ),

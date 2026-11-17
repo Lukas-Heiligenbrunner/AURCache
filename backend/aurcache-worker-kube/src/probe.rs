@@ -44,6 +44,11 @@ pub enum ProbeOutcome {
     Enforced,
     /// These answered and should not have.
     Open { reachable: Vec<String> },
+    /// The policy is at work, and lets the cluster's API through: nothing
+    /// else that must be closed answered. The shipped policy shuts builds out
+    /// of private address ranges, and an API server behind a public address
+    /// is in none of them.
+    ApiOpen { api: String },
     /// The probe could not be run or read, or what it found says nothing
     /// either way.
     Inconclusive { reason: String },
@@ -55,9 +60,11 @@ const METADATA: &str = "169.254.169.254:80";
 const PROBE: &str = "probe";
 /// How long each connection may take, in seconds.
 const CONNECT_SECONDS: u64 = 5;
-/// The pod's own deadline, in seconds.
-const DEADLINE_SECONDS: i64 = 60;
-/// How long to wait for the pod to finish, pulling its image included.
+/// The pod's own deadline, in seconds, counted from when a node took it:
+/// past the wait for it to run and every time it is asked, so that it is
+/// this worker that ends it.
+const DEADLINE_SECONDS: i64 = 300;
+/// How long to wait for the pod to run, pulling its image included.
 const WAIT: Duration = Duration::from_secs(120);
 /// How long the pod gets to go away.
 const GRACE: Duration = Duration::ZERO;
@@ -98,6 +105,8 @@ fn api_target() -> Option<String> {
 struct Asked {
     /// Targets that must not answer.
     closed: Vec<String>,
+    /// The cluster's API among them, when it is asked about.
+    api: Option<String>,
     /// The target that should.
     repo: Option<String>,
 }
@@ -113,9 +122,10 @@ async fn run<C: Cluster>(
 ) -> ProbeOutcome {
     let name = format!("aurcache-probe-{}", cfg.dispatcher);
     let mut closed = vec![targets.worker.clone(), METADATA.to_string()];
-    closed.extend(api);
+    closed.extend(api.clone());
     let asked = Asked {
         closed,
+        api,
         repo: targets.repo.clone(),
     };
     let outcome = match attempt(cluster, cfg, agent_image, &name, &asked, wait).await {
@@ -291,10 +301,19 @@ fn judge(asked: &Asked, reach: &[Reach]) -> ProbeOutcome {
         .filter(|answer| answer.reachable && asked.closed.contains(&answer.target))
         .map(|answer| answer.target.clone())
         .collect();
+    let repo_silent = silent_repo(asked, reach);
+    if let Some(api) = &asked.api
+        && open == [api.clone()]
+        && repo_silent.is_none()
+    {
+        // The worker port is known to answer, since this worker enrolled
+        // through it, and did not answer a pod the policy selects.
+        return ProbeOutcome::ApiOpen { api: api.clone() };
+    }
     if !open.is_empty() {
         return ProbeOutcome::Open { reachable: open };
     }
-    match silent_repo(asked, reach) {
+    match repo_silent {
         None => ProbeOutcome::Enforced,
         Some(repo) => ProbeOutcome::Inconclusive {
             reason: format!(
@@ -593,6 +612,29 @@ mod tests {
         assert_eq!(probe(&fake, false, None).await, ProbeOutcome::Enforced);
     }
 
+    /// The API answering beside the worker port is everything answering.
+    #[tokio::test(start_paused = true)]
+    async fn the_api_beside_the_worker_port_is_open() {
+        let fake = Fake::new(Behaviour::Answers(vec![said([true, false, true, true])]));
+        assert_eq!(
+            probe(&fake, true, Some("10.96.0.1:443")).await,
+            ProbeOutcome::Open {
+                reachable: vec!["10.1.2.3:8083".into(), "10.96.0.1:443".into()]
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_api_alone_beside_a_repository_that_answers_is_let_through() {
+        let fake = Fake::new(Behaviour::Answers(vec![said([false, false, true, true])]));
+        assert_eq!(
+            probe(&fake, true, Some("10.96.0.1:443")).await,
+            ProbeOutcome::ApiOpen {
+                api: "10.96.0.1:443".into()
+            }
+        );
+    }
+
     /// Something open is open whatever the repository does.
     #[tokio::test(start_paused = true)]
     async fn an_open_port_beside_a_silent_repository_is_open() {
@@ -639,16 +681,20 @@ mod tests {
         assert_eq!(fake.asked.lock().unwrap().len(), 2);
     }
 
+    /// The API alone answering is a policy that lets it through, not one
+    /// that is not enforced: the worker port did not answer.
     #[tokio::test(start_paused = true)]
     async fn the_clusters_api_is_asked_about_too() {
         let fake = Fake::new(Behaviour::Answers(vec![said([false, false, true])]));
         let outcome = probe(&fake, false, Some("10.96.0.1:443")).await;
         assert_eq!(
             outcome,
-            ProbeOutcome::Open {
-                reachable: vec!["10.96.0.1:443".into()]
+            ProbeOutcome::ApiOpen {
+                api: "10.96.0.1:443".into()
             }
         );
+        // It is asked again first: a CNI may still be closing in.
+        assert_eq!(fake.asked.lock().unwrap().len(), 1 + RECHECKS);
         let asked = fake.asked.lock().unwrap();
         assert_eq!(
             asked[0][1..],
@@ -685,7 +731,7 @@ mod tests {
             Some("abcdef0123456789")
         );
         let spec = pod.spec.as_ref().unwrap();
-        assert_eq!(spec.active_deadline_seconds, Some(60));
+        assert_eq!(spec.active_deadline_seconds, Some(300));
         let container = &spec.containers[0];
         assert_eq!(container.name, PROBE);
         assert_eq!(container.image.as_deref(), Some("reg/agent@sha256:1"));
