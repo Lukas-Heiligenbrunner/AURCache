@@ -120,6 +120,11 @@ enum Readiness {
     Refused {
         message: String,
     },
+    /// The SSH key builds are given cannot be read: every build would end
+    /// without it, so none is claimed until it can be.
+    NoKey {
+        message: String,
+    },
 }
 
 /// How far a build got before something other than its end decided it.
@@ -563,6 +568,11 @@ impl<C: Cluster> KubeExecutor<C> {
 
     /// What the cluster says about starting one more build now.
     async fn readiness(&self, cfg: &Config) -> Readiness {
+        if let Some(Err(error)) = cfg.credential.as_ref().map(CredentialFiles::load) {
+            return Readiness::NoKey {
+                message: format!("{error:#}"),
+            };
+        }
         let waiting = self.cluster.pods().into_iter().find_map(|pod| {
             let message = outcome::unschedulable(&pod)?;
             Some(Readiness::Unschedulable {
@@ -627,6 +637,11 @@ impl<C: Cluster> KubeExecutor<C> {
             ),
             Readiness::Refused { message } => {
                 tracing::warn!("Not claiming builds: the cluster refuses a build pod: {message}");
+            }
+            Readiness::NoKey { message } => {
+                tracing::error!(
+                    "Not claiming builds until the SSH key can be read again: {message}"
+                );
             }
         }
         *last = found.clone();

@@ -317,12 +317,14 @@ impl DockerExecutor {
             .await
             .context("starting build container")?;
         // Once, as the container starts, and never again for this build.
-        let link = ssh.map(|key| {
-            tokio::spawn(link::serve(
+        // Aborted when this returns, whichever way: an error waiting for the
+        // container, or a link that outlives it.
+        let mut link = ssh.map(|key| {
+            Aborting(tokio::spawn(link::serve(
                 self.docker.clone(),
                 container_id.to_string(),
                 key,
-            ))
+            )))
         });
 
         // Pump container output into the build log.
@@ -371,13 +373,14 @@ impl DockerExecutor {
             }
         };
 
-        if let Some(link) = link {
+        if let Some(Aborting(handle)) = link.as_mut() {
             // The container ended, and the exec with it: what is left is the
             // end of the stream.
-            if let Ok(Ok(served)) = tokio::time::timeout(LINK_END, link).await {
+            if let Ok(Ok(served)) = tokio::time::timeout(LINK_END, handle).await {
                 let _ = build_log.sender().send(served.line()).await;
             }
         }
+        drop(link);
         build_log.close(vec![pump], stop).await;
         Ok(Run {
             stop,
@@ -434,6 +437,15 @@ fn spec_options(cfg: &Config, ssh: Option<SshAccess>) -> SpecOptions {
         keyserver: DEFAULT_KEYSERVER.to_string(),
         scratch: PathBuf::from(container::SCRATCH),
         ssh,
+    }
+}
+
+/// A task that is aborted when this is dropped.
+struct Aborting<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for Aborting<T> {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

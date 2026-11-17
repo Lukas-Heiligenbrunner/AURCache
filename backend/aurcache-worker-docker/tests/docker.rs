@@ -283,8 +283,12 @@ const LINK_PKGBUILD: &str = r#"pkgname=aurcache-link-test
 pkgver=1.0.0
 pkgrel=1
 pkgdesc="The Docker worker's SSH link, from inside"
-arch=('any')
+arch=('x86_64' 'aarch64' 'armv7h')
 license=('GPL-3.0-or-later')
+# A source over SSH, for an architecture this test does not build for: the
+# agent opens the window for it, and makepkg fetches nothing.
+source_armv7h=('x::git+ssh://git@example.invalid/x.git')
+sha256sums_armv7h=('SKIP')
 if [[ -n ${SSH_AUTH_SOCK:-} ]]; then
   ssh-add -L | sed 's/^/listed: /'
 fi
