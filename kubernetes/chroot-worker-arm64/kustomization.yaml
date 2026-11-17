@@ -1,14 +1,14 @@
 # The same workers on arm64 nodes, building aarch64 packages. The worker image
 # is multi-arch, so the node pulls its own variant of the same tag.
 #
-# A copy of ../worker under other names (aurcache-worker-arm64), with its own
+# A copy of ../chroot-worker under other names (aurcache-worker-arm64), with its own
 # selector and its own volumes. For armv7h, copy this directory with `arm` and
 # `armv7h` in place of `arm64` and `aarch64`.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
-  - ../worker
+  - ../chroot-worker
 
 nameSuffix: -arm64
 
@@ -16,7 +16,7 @@ nameSuffix: -arm64
 # own architecture's.
 labels:
   - pairs:
-      aurcache.io/arch: aarch64
+      app.kubernetes.io/instance: aurcache-worker-arm64
     includeSelectors: true
     includeTemplates: true
 

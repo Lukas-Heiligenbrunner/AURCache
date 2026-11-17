@@ -47,13 +47,24 @@ spec:
         app.kubernetes.io/name: aurcache
         app.kubernetes.io/component: server
     spec:
-      # Kubernetes would otherwise set AURCACHE_*_PORT variables for every
-      # Service in the namespace whose name starts with `aurcache`, and the
-      # server reads AURCACHE_WORKER_PORT as a port number.
+      # Kubernetes would otherwise set `<SERVICE>_PORT` variables for every
+      # Service in the namespace. The server reads AURCACHE_HTTP_PORT,
+      # AURCACHE_REPO_PORT and AURCACHE_WORKER_PORT as port numbers and stops
+      # on anything else, so a Service named `aurcache-http`, `aurcache-repo`
+      # or `aurcache-worker` would stop it.
       enableServiceLinks: false
+      # Nothing here talks to the Kubernetes API.
+      automountServiceAccountToken: false
       containers:
         - name: aurcache
-          image: ghcr.io/lukas-heiligenbrunner/aurcache-server:latest
+          # `git`, built from master, until a release after 0.6.0 is out: the
+          # workers need one (see chroot-worker/worker.yaml), and server and
+          # workers are best kept on one version. Move both to that release's
+          # tag, or to `latest` after it, in kustomization.yaml.
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-server:git
+          # `git` moves, and only `latest` is pulled again by default. Once a
+          # version is pinned, this can go.
+          imagePullPolicy: Always
           # The image runs the server as root on purpose: each PKGBUILD parse
           # runs as a separate, unprivileged user, and switching to it takes
           # the default SETUID and SETGID capabilities. Do not set
@@ -102,9 +113,14 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /app
+          # Ready once it answers HTTP. Not /api/health, which also pings the
+          # database: with PostgreSQL, a database hiccup would take the whole
+          # pod out of the Service, and the repository and the worker port
+          # with it, though neither needs the database to answer. Point a
+          # monitor at /api/health instead.
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /api/version
               port: http
             periodSeconds: 10
           # No liveness probe: the first start after an upgrade migrates the
@@ -119,6 +135,15 @@ spec:
           # rather than a Deployment of its own, because the volume is
           # ReadWriteOnce.
           image: nginx:alpine
+          # nginx starts as root, binds port 80 and drops to its own user for
+          # the workers: that is all it keeps. It writes only its cache, its
+          # pid file and temporary files, in the volumes below.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE]
           ports:
             - name: repo
               containerPort: 80
@@ -129,6 +154,12 @@ spec:
             - name: repo-nginx
               mountPath: /etc/nginx/conf.d
               readOnly: true
+            - name: repo-cache
+              mountPath: /var/cache/nginx
+            - name: repo-run
+              mountPath: /run
+            - name: repo-tmp
+              mountPath: /tmp
           readinessProbe:
             tcpSocket:
               port: repo
@@ -140,6 +171,12 @@ spec:
         - name: repo-nginx
           configMap:
             name: aurcache-repo-nginx
+        - name: repo-cache
+          emptyDir: {}
+        - name: repo-run
+          emptyDir: {}
+        - name: repo-tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
