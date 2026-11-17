@@ -107,7 +107,7 @@ async fn the_pod_is_rendered_from_the_job_and_the_configuration() {
         .await;
     let rendered = rig.cluster.rendered();
     let spec = rendered[0].spec.as_ref().unwrap();
-    assert_eq!(spec.active_deadline_seconds, Some(3600 + 600));
+    assert_eq!(spec.active_deadline_seconds, Some(3600 + 3600));
     assert_eq!(spec.init_containers.as_ref().unwrap()[0].name, STAGE);
     let build = &spec.containers[0];
     assert_eq!(build.name, BUILD);
@@ -313,6 +313,75 @@ async fn an_agent_image_that_cannot_be_pulled_is_an_interruption() {
     assert_cleaned_up(&rig, 7);
 }
 
+/// A pod a node took and that never starts, as one whose Secret does not
+/// exist or whose network cannot be set up: the build is handed back as the
+/// worker's, and not left to run into the package's own timeout.
+#[tokio::test(start_paused = true)]
+async fn a_pod_that_does_not_start_gives_the_build_back() {
+    let rig = Rig::new(Script {
+        start: Start::Status(Box::new(status::starting("ContainerCreating"))),
+        ..Script::default()
+    });
+    let started = tokio::time::Instant::now();
+    let built = rig
+        .build(&claimed(7, Some(Duration::from_secs(3 * 3600))))
+        .await;
+    assert_eq!(started.elapsed(), Duration::from_secs(600));
+    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
+    assert_eq!(
+        reason(&built),
+        "the build pod did not start within 10m of getting a node \
+         (WORKER_KUBE_SCHEDULE_TIMEOUT); when last seen, the build pod is starting \
+         (ContainerCreating). `kubectl -n aurcache-builds get events` says what holds it: a \
+         volume that cannot be mounted (a Secret that does not exist), or a network the node \
+         cannot give the pod"
+    );
+    assert!(rig.cluster.execs().is_empty());
+    assert_cleaned_up(&rig, 7);
+}
+
+/// The wait for a node does not count against the time to start on it.
+#[tokio::test(start_paused = true)]
+async fn a_pod_gets_as_long_to_start_as_it_had_to_find_a_node() {
+    let rig = Rig::new(Script {
+        start: Start::Status(Box::new(status::unschedulable("0/3 nodes are available"))),
+        ..Script::default()
+    });
+    let job = claimed(7, None);
+    let (built, ()) = tokio::join!(rig.build(&job), async {
+        tokio::time::sleep(Duration::from_secs(590)).await;
+        rig.cluster
+            .set_status(&pod_name(7), status::starting("PodInitializing"));
+        tokio::time::sleep(Duration::from_secs(590)).await;
+        rig.cluster.set_status(&pod_name(7), status::staged());
+    });
+    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
+}
+
+/// The node tries a failed pull again by itself, and a registry that
+/// answers on a later try has cost the build nothing.
+#[tokio::test(start_paused = true)]
+async fn an_image_pulled_on_a_later_try_costs_nothing() {
+    let rig = Rig::new(Script {
+        start: Start::Status(Box::new(status::stage_image_missing())),
+        ..Script::default()
+    });
+    let job = claimed(7, None);
+    let (built, ()) = tokio::join!(rig.build(&job), async {
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        rig.cluster.set_status(&pod_name(7), status::staged());
+    });
+    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
+    assert!(
+        built.log.contains(
+            "[worker] the stage container cannot start: ErrImagePull: manifest unknown; the \
+             node tries again\n"
+        ),
+        "{}",
+        built.log
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_builder_image_that_cannot_be_pulled_is_an_interruption() {
     let rig = Rig::new(Script {
@@ -321,7 +390,9 @@ async fn a_builder_image_that_cannot_be_pulled_is_an_interruption() {
         log: Vec::new(),
         ..Script::default()
     });
+    let started = tokio::time::Instant::now();
     let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(started.elapsed(), Duration::from_secs(120));
     assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
     assert_eq!(
         reason(&built),

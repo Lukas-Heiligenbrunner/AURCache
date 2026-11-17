@@ -780,6 +780,11 @@ pub mod status {
         }
     }
 
+    /// On a node, with `stage` not started, and the kubelet's word for why.
+    pub fn starting(reason: &str) -> PodStatus {
+        scheduled(waiting(reason, ""), Vec::new())
+    }
+
     /// On a node, `stage` running: waiting for the job.
     pub fn staged() -> PodStatus {
         scheduled(running(), Vec::new())

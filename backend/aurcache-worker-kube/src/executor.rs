@@ -30,6 +30,7 @@ use aurcache_worker_core::report;
 use aurcache_worker_core::settings::WorkerSettings;
 use futures::FutureExt;
 use k8s_openapi::api::core::v1::Pod;
+use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -47,6 +48,10 @@ const LOG_END: Duration = Duration::from_secs(60);
 const LOG_DRAIN: Duration = Duration::from_secs(3);
 /// How long a leftover pod with the name a build needs may take to go away.
 const REPLACE: Duration = Duration::from_secs(60);
+/// How long an image that cannot be pulled is waited for. The kubelet tries
+/// again by itself, at growing intervals, and a registry that answers within
+/// this is not worth one of the build's attempts.
+const PULL_PATIENCE: Duration = Duration::from_secs(2 * 60);
 /// How many of the build container's last lines are copied into the build
 /// log when it ended without a report.
 const LAST_LINES: i64 = 20;
@@ -118,7 +123,20 @@ enum Reached {
 /// Whether a pod of the name a build needs could be created.
 enum Created {
     Yes,
-    Refused { message: String },
+    Refused {
+        message: String,
+    },
+    /// The build was stopped while a leftover pod of that name went away.
+    Stopped(Stop),
+}
+
+/// What a pod is waited for before it can be handed its job.
+enum Awaited {
+    /// A node, with the scheduler's message when it has said why there is
+    /// none.
+    Node(Option<String>),
+    /// Its `stage` container, with the pod's own word for where it is.
+    Stage(String),
 }
 
 impl<C: Cluster> KubeExecutor<C> {
@@ -340,16 +358,21 @@ impl<C: Cluster> KubeExecutor<C> {
         status: &mut Status,
         watch: &StopWatch,
     ) -> Result<Option<CompleteReport>> {
+        // The same allowance twice: for a node to take the pod, and then
+        // for the pod to start on it. Neither is the build's own time, and a
+        // pod that cannot start (a volume that will not mount, a network the
+        // node cannot give it) says so in events, not in its status.
         let timeout = cfg.tunables.schedule_timeout;
-        let deadline = Instant::now() + timeout;
+        let scheduled_by = Instant::now() + timeout;
+        let mut started_by = None;
         loop {
-            // `Some` while no node has taken the pod, with the scheduler's
-            // message when it has said why.
-            let unscheduled = match status.read(&*self.cluster, &build.log).await {
+            let awaited = match status.read(&*self.cluster, &build.log).await {
                 Seen::Gone => return Ok(Some(outcome::gone())),
-                Seen::NotYet => Some(None),
-                Seen::Pod(Observed::Unscheduled { unschedulable }) => Some(unschedulable),
-                Seen::Pod(Observed::Starting { .. }) => None,
+                Seen::NotYet => Awaited::Node(None),
+                Seen::Pod(Observed::Unscheduled { unschedulable }) => Awaited::Node(unschedulable),
+                Seen::Pod(starting @ (Observed::Starting { .. } | Observed::Unpulled { .. })) => {
+                    Awaited::Stage(starting.line().unwrap_or_default())
+                }
                 Seen::Pod(Observed::Staged) => return Ok(None),
                 Seen::Pod(Observed::Lost(loss)) => {
                     return Ok(Some(lost(cfg, build, &loss, watch)));
@@ -360,14 +383,19 @@ impl<C: Cluster> KubeExecutor<C> {
                     )));
                 }
             };
-            match unscheduled {
-                None => status.changed().await?,
-                Some(message) => tokio::select! {
-                    changed = status.changed() => changed?,
-                    () = tokio::time::sleep_until(deadline) => {
-                        return Ok(Some(outcome::unscheduled_past(timeout, message.as_deref())));
-                    }
-                },
+            let (deadline, late) = match awaited {
+                Awaited::Node(message) => (
+                    scheduled_by,
+                    outcome::unscheduled_past(timeout, message.as_deref()),
+                ),
+                Awaited::Stage(where_) => (
+                    *started_by.get_or_insert_with(|| Instant::now() + timeout),
+                    outcome::unstarted_past(timeout, &where_, &cfg.namespace),
+                ),
+            };
+            tokio::select! {
+                changed = status.changed() => changed?,
+                () = tokio::time::sleep_until(deadline) => return Ok(Some(late)),
             }
         }
     }
@@ -602,6 +630,9 @@ struct Status {
     seen: bool,
     /// The last line written to the build log about it.
     said: Option<String>,
+    /// Until when an image that cannot be pulled is waited for, while one
+    /// cannot.
+    patient_until: Option<Instant>,
 }
 
 impl Status {
@@ -611,6 +642,7 @@ impl Status {
             generation,
             seen: false,
             said: None,
+            patient_until: None,
         }
     }
 
@@ -620,7 +652,7 @@ impl Status {
             return if self.seen { Seen::Gone } else { Seen::NotYet };
         };
         self.seen = true;
-        let observed = outcome::observe(&pod);
+        let observed = self.patient(outcome::observe(&pod));
         let line = observed.line();
         if line.is_some() && line != self.said {
             if let Some(line) = &line {
@@ -631,12 +663,57 @@ impl Status {
         Seen::Pod(observed)
     }
 
-    /// Resolves when the watch has moved since the last read.
+    /// `observed`, with an image that cannot be pulled turned into a loss
+    /// once it has been waited for long enough.
+    fn patient(&mut self, observed: Observed) -> Observed {
+        let Observed::Unpulled { message } = observed else {
+            self.patient_until = None;
+            return observed;
+        };
+        let until = *self
+            .patient_until
+            .get_or_insert_with(|| Instant::now() + PULL_PATIENCE);
+        if Instant::now() < until {
+            Observed::Unpulled { message }
+        } else {
+            Observed::Lost(outcome::Loss::Stuck { message })
+        }
+    }
+
+    /// Resolves when there is something new to read: the watch has moved
+    /// since the last read, or the wait for an image is over.
     async fn changed(&mut self) -> Result<()> {
-        self.generation
-            .changed()
-            .await
-            .map_err(|_| anyhow!("the watch on build pods ended"))
+        let patience = async {
+            match self.patient_until {
+                Some(until) => tokio::time::sleep_until(until).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            changed = self.generation.changed() => {
+                changed.map_err(|_| anyhow!("the watch on build pods ended"))
+            }
+            () = patience => Ok(()),
+        }
+    }
+}
+
+/// Whether `pod`, one of this dispatcher's, is nobody's: a build's that no
+/// build in `held` is, or one of no build that has ended. A pod already
+/// being deleted is left to that.
+fn orphaned(pod: &Pod, held: &HashSet<i32>) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    match pod::build_id(pod) {
+        Some(build_id) => !held.contains(&build_id),
+        None => {
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref());
+            matches!(phase, Some("Succeeded" | "Failed"))
+        }
     }
 }
 

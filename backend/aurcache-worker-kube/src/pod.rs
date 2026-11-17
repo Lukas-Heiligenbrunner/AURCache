@@ -39,8 +39,10 @@ const AGENT_IN_IMAGE: &str = "/usr/local/bin";
 /// The user `stage` and `hold` run as.
 const NOBODY: i64 = 65534;
 /// A build pod outlives its build's timeout by this long, then the kubelet
-/// ends it, whether or not a dispatcher is there to.
-const DEADLINE_GRACE: Duration = Duration::from_secs(10 * 60);
+/// ends it, whether or not a dispatcher is there to. The timeout bounds the
+/// build and not the hand-back, so this is also how long the packages of a
+/// build that ended at its timeout have to reach the server.
+const DEADLINE_GRACE: Duration = Duration::from_secs(60 * 60);
 /// A Secret's files are readable by their owner alone.
 const SECRET_MODE: i32 = 0o400;
 
@@ -78,6 +80,13 @@ pub fn labels(dispatcher: &str) -> BTreeMap<String, String> {
         (LABEL_MANAGED_BY.to_string(), MANAGED_BY.to_string()),
         (LABEL_DISPATCHER.to_string(), dispatcher.to_string()),
     ])
+}
+
+/// The build a pod of this worker's was made for; `None` for a pod that is
+/// no build's.
+#[must_use]
+pub fn build_id(pod: &Pod) -> Option<i32> {
+    pod.metadata.labels.as_ref()?.get(LABEL_BUILD)?.parse().ok()
 }
 
 fn quantity(text: impl Into<String>) -> Quantity {
@@ -459,7 +468,7 @@ mod tests {
                 },
                 "spec": {
                     "restartPolicy": "Never",
-                    "activeDeadlineSeconds": 4200,
+                    "activeDeadlineSeconds": 7200,
                     "serviceAccountName": "aurcache-build",
                     "automountServiceAccountToken": false,
                     "enableServiceLinks": false,
@@ -604,7 +613,7 @@ mod tests {
         let none = render_with(&config(), 1, "x86_64", None).unwrap();
         assert_eq!(spec(&none).active_deadline_seconds, None);
         let pod = render_with(&config(), 1, "x86_64", Some(60)).unwrap();
-        assert_eq!(spec(&pod).active_deadline_seconds, Some(660));
+        assert_eq!(spec(&pod).active_deadline_seconds, Some(3660));
     }
 
     #[test]
