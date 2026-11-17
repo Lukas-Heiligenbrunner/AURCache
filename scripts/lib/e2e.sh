@@ -194,14 +194,26 @@ cleanup() {
 # Emptying runs as root on whatever the variable names, so it only ever
 # empties a directory this function made: an absolute path that is empty or
 # carries its marker. A typo naming a directory with anything else in it is
-# refused, not emptied.
+# refused, not emptied. The marker itself is kept through the emptying, so a
+# delete that fails half-way does not lock the directory out next time.
+#
+# Only stacks with a `builder` service, the default compose file's worker,
+# use the directory; for the others (the hybrid suites) the variable is
+# ignored. A remote Docker daemon is refused: the marker is checked here, but
+# the emptying would run on the daemon's host, on whatever is there.
 fresh_worker_data() {
     [ -n "${E2E_WORKER_DATA:-}" ] || return 0
-    local marker=.aurcache-e2e-worker-data
+    dc config --services 2>/dev/null | grep -qx builder || return 0
+    local marker=.aurcache-e2e-worker-data daemon
     case "$E2E_WORKER_DATA" in
         /) log "ERROR: E2E_WORKER_DATA must not be /" >&2; return 1 ;;
         /*) ;;
         *) log "ERROR: E2E_WORKER_DATA must be an absolute path" >&2; return 1 ;;
+    esac
+    daemon=${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)}
+    case "$daemon" in
+        "" | unix://*) ;;
+        *) log "ERROR: E2E_WORKER_DATA needs a local Docker daemon, not $daemon" >&2; return 1 ;;
     esac
     mkdir -p "$E2E_WORKER_DATA"
     if [ ! -e "$E2E_WORKER_DATA/$marker" ] && [ -n "$(ls -A "$E2E_WORKER_DATA")" ]; then
@@ -209,8 +221,8 @@ fresh_worker_data() {
         return 1
     fi
     dc run --rm --no-deps --user root --entrypoint sh builder -c \
-        "find /var/lib/aurcache-worker -mindepth 1 -delete &&
-         touch /var/lib/aurcache-worker/$marker &&
+        "touch /var/lib/aurcache-worker/$marker &&
+         find /var/lib/aurcache-worker -mindepth 1 ! -path /var/lib/aurcache-worker/$marker -delete &&
          chown aurcache:aurcache /var/lib/aurcache-worker"
 }
 
