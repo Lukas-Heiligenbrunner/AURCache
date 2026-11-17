@@ -94,6 +94,37 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
     Ok(Some(key))
 }
 
+/// A secret key, armored or binary.
+fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
+    let armored = match SignedSecretKey::from_armor_single(bytes) {
+        Ok((key, _headers)) => return Ok(key),
+        Err(error) => error,
+    };
+    let binary = match SignedSecretKey::from_bytes(bytes) {
+        Ok(key) => return Ok(key),
+        Err(error) => error,
+    };
+    if [armored, binary]
+        .iter()
+        .any(|error| error.to_string().contains("Invalid checksum"))
+    {
+        bail!(UNREADABLE_UNPROTECTED);
+    }
+    bail!("not an OpenPGP secret key")
+}
+
+/// Why a key GnuPG reads can be refused here, and the way around it.
+///
+/// rPGP (0.21) checks an unprotected secret key's checksum over its own
+/// encoding of the secret, not over the bytes in the file, and GnuPG writes
+/// an Ed25519 secret whose first byte is zero with a bit count rPGP does not
+/// keep -- about one secret in 256. A passphrase moves the check to the
+/// decrypted bytes, which rPGP gets right.
+const UNREADABLE_UNPROTECTED: &str = "its checksum does not match as rPGP, which reads \
+     signing keys here, computes it: GnuPG writes about one unprotected Ed25519 secret in \
+     256 that way. Lock it with a passphrase (gpg --passwd), export it again, and give the \
+     passphrase with AURCACHE_SIGNING_KEY_PASSPHRASE_FILE";
+
 /// The passphrase in `path`, without the newline an editor or `echo` leaves
 /// at its end.
 fn read_passphrase(path: &Path) -> anyhow::Result<String> {
@@ -141,10 +172,8 @@ impl InstanceKey {
     pub fn load(path: &Path, passphrase: Option<&str>) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading the signing key {}", path.display()))?;
-        let key = SignedSecretKey::from_armor_single(bytes.as_slice())
-            .map(|(key, _headers)| key)
-            .or_else(|_| SignedSecretKey::from_bytes(bytes.as_slice()))
-            .with_context(|| format!("{} is not an OpenPGP secret key", path.display()))?;
+        let key = parse_secret(&bytes)
+            .with_context(|| format!("reading the signing key {}", path.display()))?;
         if passphrase.is_some() && !key.primary_key.secret_params().is_encrypted() {
             tracing::warn!(
                 "the signing key {} is not protected by a passphrase; the one configured is not used to unlock it",
@@ -951,6 +980,34 @@ mod tests {
         let after = choose(&key.key, choice.expires.unwrap()).unwrap();
         assert_eq!(after.signer, Signer::Subkey(0));
         assert_eq!(expiry_notice(&key.key, after, now), None);
+    }
+
+    /// About one unprotected Ed25519 key GnuPG exports in 256 -- a secret
+    /// beginning with a zero byte -- is one rPGP refuses ("Invalid
+    /// checksum"), though GnuPG reads it: refused here with the way around it,
+    /// which this same key, locked with `gpg --passwd`, shows works. When this
+    /// test fails because the key loads, rPGP reads such keys, and the advice
+    /// can go.
+    #[test]
+    fn a_gnupg_key_rpgp_cannot_read_is_refused_with_the_way_around_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unprotected.gpg");
+        std::fs::write(
+            &path,
+            include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg"),
+        )
+        .unwrap();
+        let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
+        assert!(error.contains(UNREADABLE_UNPROTECTED), "{error}");
+
+        let path = tmp.path().join("protected.gpg");
+        std::fs::write(
+            &path,
+            include_bytes!("../testdata/gnupg-protected-leading-zero.gpg"),
+        )
+        .unwrap();
+        let key = InstanceKey::load(&path, Some("testpw")).unwrap();
+        assert!(key.verifies(&key.sign(CONTENT).unwrap(), CONTENT));
     }
 
     /// A throwaway GnuPG home, whose agent is stopped when it is dropped.
