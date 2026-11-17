@@ -42,9 +42,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Config { command } => run_config_command(format, command),
-        // Offline, like `config`: the repo address is arithmetic on the
-        // configured URL, and a new user reaching for this may not have a token
-        // yet. Prompting for one to print three lines of text would be absurd.
+        // Onboarding can print a stanza without prompting for a token,
+        // using server metadata when available and explicit overrides or
+        // defaults otherwise.
         Command::Repo {
             command: RepoCommand::Config(args),
         } => run_repo_config(format, cli.url, cli.token, args).await,
@@ -113,27 +113,27 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
 /// The server is the only party that knows whether the repository sits on a
 /// non-default port, under a path, or behind a reverse proxy — deriving it from
 /// the API URL is a guess that happens to be right for a default deployment.
-/// So ask when a token makes that possible, and fall back to the guess when it
-/// does not: a first-time user with no token still gets a usable answer, which
-/// is the whole reason this command works offline.
+/// Ask unless explicitly offline, using a stored token when available. An
+/// instance without authentication can answer without one. Explicit name and
+/// port overrides still win over whichever metadata the server reports.
 async fn published_repo(
     api_url: &str,
     cli_token: Option<String>,
     args: &RepoConfigArgs,
 ) -> Option<aurcache_client::RepoInfo> {
-    // An explicit --port is the user overriding us; asking would be pointless.
-    if args.offline || args.port.is_some() {
+    // Overriding the port still leaves the repository name to discover.
+    if args.offline {
         return None;
     }
 
-    let token = config::stored_token(cli_token).ok().flatten()?;
-    let client = AurCacheClient::new(api_url.to_string(), Some(token)).ok()?;
+    let token = config::stored_token(cli_token).ok().flatten();
+    let client = AurCacheClient::new(api_url.to_string(), token).ok()?;
     match client.repo_info().await {
         Ok(info) => Some(info),
         Err(e) => {
             eprintln!(
                 "Warning: could not ask {api_url} how it publishes the repository \
-                 ({e:#}); falling back to the default port. Pass --offline to skip \
+                 ({e:#}); using explicit overrides or defaults. Pass --offline to skip \
                  this check."
             );
             None
@@ -141,7 +141,7 @@ async fn published_repo(
     }
 }
 
-/// Print the `pacman.conf` stanza, resolving the URL without touching the token.
+/// Print the `pacman.conf` stanza, using optional server metadata.
 async fn run_repo_config(
     format: OutputFormat,
     cli_url: Option<String>,

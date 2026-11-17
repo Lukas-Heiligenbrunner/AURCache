@@ -72,12 +72,16 @@ Signing in is configured with `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`,
 Set `AURCACHE_REPO_NAME=custom_name` on the **server** to publish
 `custom_name.db` and `custom_name.files` (and their `.tar.gz` archives). Names
 must start with an ASCII letter, digit or underscore and contain only ASCII
-letters, digits, underscores, dots or hyphens. `options` is reserved by pacman.
+letters, digits, underscores, dots or hyphens. `options` and `local` are reserved
+by pacman.
 Invalid names prevent startup.
 
 Workers receive the name when they register; no worker variable is needed.
-`aurcli repo config` discovers it from the server when authenticated. For
-`--offline` or an unauthenticated command, pass `--name custom_name`.
+`aurcli repo config` discovers it from the running server, using a configured
+token when authentication is enabled. `--name custom_name` overrides the
+detected name; `--port 9000` overrides only the port and still discovers the
+name. With `--offline` or an unreachable server, pass `--name custom_name`
+(and `--port` if needed) to configure it manually.
 Clients must use the matching `[custom_name]` section in `pacman.conf`; the
 `Server =` URL stays the same. Distinct names let a client use several AURCache
 instances at once.

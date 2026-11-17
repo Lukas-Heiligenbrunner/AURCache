@@ -857,6 +857,8 @@ fn sweep_retired(
     grace: Duration,
     log: &ActivityLog,
 ) -> Swept {
+    let database_names =
+        ["db", "files", "db.tar.gz", "files.tar.gz"].map(|suffix| format!("{name}.{suffix}"));
     let mut swept = Swept {
         still_retired: HashMap::new(),
         deleted: Vec::new(),
@@ -890,7 +892,10 @@ fn sweep_retired(
                 continue;
             }
             let package = name.strip_suffix(".sig").unwrap_or(&name);
-            if listed.contains(package) {
+            // A valid repository name can itself contain `.pkg.tar.`.
+            // Its databases (and signatures) are never retired packages.
+            if database_names.iter().any(|database| database == package) || listed.contains(package)
+            {
                 continue;
             }
             let path = entry.path();
@@ -1111,6 +1116,34 @@ mod tests {
         assert!(platform_file(&restarted, "foo", "1.1-1").exists());
         assert!(!platform_file(&restarted, "foo", "1.0-1").exists());
         assert_eq!(listed(&restarted), ["foo-1.1-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_package_like_repository_name_does_not_let_the_sweep_delete_its_databases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path())
+            .with_name("custom.pkg.tar.repo".into())
+            .unwrap();
+        repo.init().unwrap();
+        retire_one(&repo).await;
+        let dir = repo.root().join("x86_64");
+        let databases = ["db", "files", "db.tar.gz", "files.tar.gz"]
+            .map(|suffix| dir.join(format!("{}.{suffix}", repo.name())));
+        for database in &databases {
+            std::fs::write(with_suffix(database, ".sig"), b"database signature").unwrap();
+        }
+        let db = aurcache_db::testing::memory_db().await;
+        let grace = Duration::from_secs(60);
+        let now = Instant::now();
+        assert_eq!(repo.sweep_at(&db, now, grace).await.unwrap(), 0);
+        assert_eq!(repo.sweep_at(&db, now + grace, grace).await.unwrap(), 2);
+        for database in databases {
+            assert!(database.is_file(), "{}", database.display());
+            assert!(with_suffix(&database, ".sig").is_file());
+        }
+        assert_eq!(listed(&repo), ["foo-1.1-1"]);
+        assert!(platform_file(&repo, "foo", "1.1-1").exists());
+        assert!(!platform_file(&repo, "foo", "1.0-1").exists());
     }
 
     #[tokio::test]
