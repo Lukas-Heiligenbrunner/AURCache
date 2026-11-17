@@ -373,15 +373,7 @@ fn ensure(source: &KeySource, passphrase_file: Option<&Path>) -> anyhow::Result<
 /// Generate an ed25519 key at `path`, private to this user, with its public
 /// half beside it as OpenSSH names it.
 fn generate(path: &Path) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("closing {} to other users", dir.display()))?;
-        }
-    }
+    create_private_dir(path)?;
     let mut key = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
         .context("generating an SSH key")?;
     key.set_comment(KEY_COMMENT);
@@ -396,6 +388,21 @@ fn generate(path: &Path) -> anyhow::Result<()> {
         .context("encoding the public key")?;
     fs::write(public_key_path(path), format!("{public}\n"))
         .with_context(|| format!("writing {}", public_key_path(path).display()))?;
+    Ok(())
+}
+
+/// Create the directory `file` goes in, closed to other users.
+fn create_private_dir(file: &Path) -> anyhow::Result<()> {
+    let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("closing {} to other users", dir.display()))?;
+    }
     Ok(())
 }
 
@@ -681,9 +688,7 @@ fn glob(pattern: &str, name: &str) -> bool {
 /// Append `name`'s key to the server's own `known_hosts`, creating it (and
 /// its directory) private to this user.
 fn record(file: &Path, name: &str, key: &PublicKey) -> anyhow::Result<()> {
-    if let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
+    create_private_dir(file)?;
     let mut key = key.clone();
     key.set_comment("");
     let line = format!("{name} {}\n", key.to_openssh()?);
