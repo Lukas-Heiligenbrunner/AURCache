@@ -31,13 +31,24 @@ async fn main() -> Result<()> {
     aurcache_worker_core::init_tracing();
 
     let core = config::core_from_env();
-    let cfg = Config::from_env(&core.settings).ok_or_else(|| {
+    let cfg = Config::from_env(&core.settings)?.ok_or_else(|| {
         anyhow!(
             "BUILD_ARTIFACT_DIR is not set. The Docker worker binds a host directory into each \
              build container and cannot infer that path: set it to a directory the Docker \
              daemon can bind, as it sees it."
         )
     })?;
+
+    if let Some(files) = &cfg.credential {
+        let credential = files.load()?;
+        tracing::info!(
+            "Builds fetch their sources with the SSH key {} ({} {}), which stays in this \
+             process: they reach it over a link while makepkg downloads, and never hold it",
+            files.key.display(),
+            credential.key.kind(),
+            credential.key.fingerprint()
+        );
+    }
 
     let identity = Identity::load_or_create(&core.data_dir)?;
     let executor = DockerExecutor::connect(cfg, tag::of(&identity.fingerprint)?).await?;

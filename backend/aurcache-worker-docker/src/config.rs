@@ -6,6 +6,8 @@
 //! can also be set from the server; set in the environment, they pin.
 
 use crate::settings::keys;
+use anyhow::Result;
+use aurcache_worker_container::ssh::CredentialFiles;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::WorkerSettings;
 use std::path::PathBuf;
@@ -33,6 +35,9 @@ pub struct Config {
     pub dirs: BuildDirs,
     /// The declared settings, as read from the worker's resolution of them.
     pub tunables: Tunables,
+    /// The SSH key builds fetch their sources with, which the worker holds
+    /// and answers for (`WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS`).
+    pub credential: Option<CredentialFiles>,
 }
 
 /// The limits each build container gets: the two settings this executor
@@ -78,9 +83,15 @@ impl Config {
     /// Returns `None` when `BUILD_ARTIFACT_DIR` is unset: without a host path
     /// for the bind mount there is nothing this executor can do, and guessing
     /// one would produce containers that silently build into nowhere.
-    #[must_use]
-    pub fn from_env(settings: &WorkerSettings) -> Option<Self> {
-        let host = env_opt("BUILD_ARTIFACT_DIR").map(PathBuf::from)?;
+    ///
+    /// # Errors
+    ///
+    /// When an SSH key is named without the hosts it is used with, or the
+    /// other way round.
+    pub fn from_env(settings: &WorkerSettings) -> Result<Option<Self>> {
+        let Some(host) = env_opt("BUILD_ARTIFACT_DIR").map(PathBuf::from) else {
+            return Ok(None);
+        };
         let local = env_opt("BUILD_ARTIFACT_DIR_LOCAL")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -88,12 +99,13 @@ impl Config {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join("builds")
             });
-        Some(Self {
+        Ok(Some(Self {
             builder_image: env_opt("BUILDER_IMAGE")
                 .unwrap_or_else(|| DEFAULT_BUILDER_IMAGE.to_string()),
             dirs: BuildDirs { host, local },
             tunables: Tunables::from_settings(settings),
-        })
+            credential: CredentialFiles::from_vars(env_opt)?,
+        }))
     }
 
     /// The same configuration with `settings` in force: the limits read

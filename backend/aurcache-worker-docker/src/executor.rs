@@ -37,7 +37,10 @@ use crate::config::{BuildDirs, Config};
 use crate::container::{self, Build};
 use crate::ending::{Verdict, ending};
 use crate::network::{self, NetworkPlan};
-use crate::workdir;
+use crate::{link, workdir};
+use aurcache_build_agent::spec::SshAccess;
+use aurcache_worker_container::ssh::key::SshKey;
+use aurcache_worker_container::ssh::{Credential, CredentialFiles};
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
@@ -214,7 +217,19 @@ impl DockerExecutor {
             .source(build_id)
             .await
             .context("downloading source")?;
-        let spec = spec::for_job(claimed, client.repo(), spec_options(cfg));
+        // Read for each build, so that a changed key or host keys are used
+        // from the next build on.
+        let credential = cfg
+            .credential
+            .as_ref()
+            .map(CredentialFiles::load)
+            .transpose()
+            .context("reading the worker's SSH key")?;
+        let ssh = credential.as_ref().map(|credential| SshAccess {
+            known_hosts: credential.known_hosts.clone(),
+        });
+        let key = credential.map(|credential: Credential| credential.key);
+        let spec = spec::for_job(claimed, client.repo(), spec_options(cfg, ssh));
         workdir::prepare(&target.dirs.local, &self.agent, &spec, &source)
             .context("preparing the build directory")?;
 
@@ -228,7 +243,7 @@ impl DockerExecutor {
             network: &self.network,
         });
         let id = self.create(target, body).await?;
-        let run = self.run_container(client, claimed, &id).await;
+        let run = self.run_container(client, claimed, &id, key).await;
         let oom_killed = match &run {
             Ok(_) => self.oom_killed(&id).await,
             Err(_) => false,
@@ -280,6 +295,7 @@ impl DockerExecutor {
         client: &Arc<WorkerClient>,
         claimed: &ClaimedJob,
         container_id: &str,
+        ssh: Option<Arc<SshKey>>,
     ) -> Result<Run> {
         let build_id = claimed.job.build_id;
         let attached = self
@@ -300,6 +316,14 @@ impl DockerExecutor {
             .start_container(container_id, None::<StartContainerOptions>)
             .await
             .context("starting build container")?;
+        // Once, as the container starts, and never again for this build.
+        let link = ssh.map(|key| {
+            tokio::spawn(link::serve(
+                self.docker.clone(),
+                container_id.to_string(),
+                key,
+            ))
+        });
 
         // Pump container output into the build log.
         let build_log = BuildLog::open(Arc::clone(client), build_id);
@@ -347,6 +371,13 @@ impl DockerExecutor {
             }
         };
 
+        if let Some(link) = link {
+            // The container ended, and the exec with it: what is left is the
+            // end of the stream.
+            if let Ok(Ok(served)) = tokio::time::timeout(LINK_END, link).await {
+                let _ = build_log.sender().send(served.line()).await;
+            }
+        }
         build_log.close(vec![pump], stop).await;
         Ok(Run {
             stop,
@@ -397,14 +428,17 @@ fn container_name(tag: &str, build_id: i32) -> String {
 }
 
 /// What this worker decides about a build beside what the job says.
-fn spec_options(cfg: &Config) -> SpecOptions {
+fn spec_options(cfg: &Config, ssh: Option<SshAccess>) -> SpecOptions {
     SpecOptions {
         cpus: cfg.tunables.cpus(),
         keyserver: DEFAULT_KEYSERVER.to_string(),
         scratch: PathBuf::from(container::SCRATCH),
-        credential: None,
+        ssh,
     }
 }
+
+/// How long the SSH link may take to end once the container has.
+const LINK_END: Duration = Duration::from_secs(5);
 
 /// The memory limit this worker set, for naming in an out-of-memory failure.
 fn memory_limit(cfg: &Config) -> Option<MemoryLimit> {

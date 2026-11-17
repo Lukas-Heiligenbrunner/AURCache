@@ -126,7 +126,7 @@ fn spec() -> BuildSpec {
         vcs_sources: vec![],
         cpus: Some(2.0),
         scratch: SCRATCH.into(),
-        credential: None,
+        ssh: None,
     }
 }
 
