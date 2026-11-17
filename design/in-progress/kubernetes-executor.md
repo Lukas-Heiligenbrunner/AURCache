@@ -739,12 +739,12 @@ would accept any host, every time. The dispatcher refuses to start with a key
 and no host keys, and with a key it cannot use (protected by a passphrase, or
 of a type it does not sign with).
 
-Why not in the pod. The key used to be mounted `0400` into the build
-container, root's alone, and the agent loaded it into an `ssh-agent` running
-as the build user. That kept it from the build *user*, and from nothing else
-that runs as root in the pod: a dependency's install scriptlet runs as root
-there (see "What the root step still installs" above), and one that copied
-`/aurcache/credentials/ssh-privatekey` out was shown to work. One deploy key
+Why not in the pod: a key mounted `0400` into the build container, root's
+alone, and loaded into an `ssh-agent` running as the build user, is kept from
+the build *user* and from nothing else that runs as root in the pod. A
+dependency's install scriptlet runs as root there (see "What the root step
+still installs" above), and one that copied the mounted key out was shown to
+work. One deploy key
 shared by every build of a dispatcher, taken by any package in any repository
 a build installs from, is not a boundary.
 
@@ -1425,10 +1425,14 @@ for each advertised architecture (it needs `list` on nodes, a ClusterRole).
   (`WORKER_KUBE_POD_NAME`), by digest, and that path has unit tests only.
   With a tag that moves, the agent a node pulls may be another build than the
   dispatcher; the interface number is what keeps the two honest.
-- **The SSH credential is readable by root in the pod**, which a
-  dependency's install scriptlet is. "Can use and not read" holds against the
-  build user only. Moving the key and its `ssh-agent` out of the pod is
-  designed separately.
+- **SSH from `prepare()` or `build()`** cannot authenticate: the link is
+  closed before dependencies install ("Credentials and PGP keys"). Whether
+  some packages need it enough for an opt-in that keeps the link up, with
+  dependencies' scriptlets able to sign, is undecided.
+- **What installs before the SSH window is trusted**: the image's upgrade and
+  `openssh` and `git`, from the job's repositories, could leave a root
+  process that signs during the window. Killing every process but `ssh-link`
+  before the window opens would close that too.
 - The probe does not try name resolution, so NodeLocal DNSCache with the
   policy as shipped passes it and fails its builds.
 - A probe pod no node takes holds claims back until the probe gives up on it,
