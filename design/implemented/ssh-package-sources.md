@@ -114,8 +114,8 @@ commands for them can sit beside `ssh key` and `ssh hosts`.
 
 `pkgbuild::private_state` names `AURCACHE_SSH_DIR`, the key
 `AURCACHE_GIT_SSH_KEY` points at and the passphrase file, so a PKGBUILD parse
-cannot read any of them. On a
-kernel without Landlock the parse sandbox checks file modes instead and refuses
+cannot read any of them. On a kernel without Landlock the parse sandbox checks
+file modes instead and refuses
 to parse while the key is readable by other users -- a world-readable Docker
 secret then stops every parse, with a message saying which file. That is the
 sandbox doing its job (the parse user *could* read it), and the docs say to keep
@@ -203,9 +203,9 @@ deployment until it is upgraded. An operator who wants pinning has
 The rule: a dump without secrets has nothing of SSH in it, so it restores
 anywhere and needs no key. A dump with secrets carries what keeps private
 sources cloning after a restore or a migration, so that no key has to be added
-to every repository again. `SshAccess::export` and `SshAccess::restore` are
-the whole of it, and the dump and restore code only call them; the state is
-`DumpSecrets::ssh` (`DumpSsh`).
+to every repository again. `SshAccess::export`, `plan_restore` and
+`apply_restore` are the whole of it, and the dump and restore code only call
+them; the state is `DumpSecrets::ssh` (`DumpSsh`).
 
 - **Carried, with secrets only:** the key the server uses, generated or
   supplied, read from its file and written to `ssh/key` byte for byte (an
@@ -214,14 +214,34 @@ the whole of it, and the dump and restore code only call them; the state is
   is read from the file, never from what is loaded. The passphrase is never
   carried, and a pinned `AURCACHE_SSH_KNOWN_HOSTS` is the operator's file, so it
   is not carried either.
-- **On a restore that takes secrets** (`--secrets copy`, or `--clear`, as for
-  the CA): the key goes to the server's own key file (`AURCACHE_SSH_DIR/id_ed25519`,
-  whatever its type), replacing a freshly generated one, and is used at once:
-  the loaded key sits behind a lock and is reloaded. If `AURCACHE_GIT_SSH_KEY`
-  is set, that file still wins and is never written to; the restore logs a
-  warning and an activity entry (`restore.ssh_key_superseded`) when it differs
-  from the dump's key. A replaced key is `restore.ssh_key_replaced`. The host
-  keys replace the server's own `known_hosts`, and a pinned file is left alone.
+- **Restore** follows the policy shared with the signing key (#434):
+  - *Validate first.* `SshAccess::plan_restore` writes nothing: it checks that
+    the dump's key opens here (a protected key needs this server's passphrase
+    file, and an OpenSSH-format key is decrypted to prove it), that the files
+    it would write can be written (`probe_writable`), and that the dump's
+    trusted hosts do not contradict this server's. Any failure refuses the
+    whole restore before pass 1 ("nothing was imported: …"); the dry run
+    reports the same. `apply_restore` then runs after the rows, and the loaded
+    key, behind a lock, is reloaded. "Installed" is reported only for a key
+    that was checked to open.
+  - *No secrets, no change.* Without `--secrets copy` and without `--clear`,
+    nothing is touched.
+  - *`--secrets copy`:* the key goes to the server's own key file
+    (`AURCACHE_SSH_DIR/id_ed25519`, whatever its type); `known_hosts` is merged,
+    never replaced, so a restore of an older dump cannot drop hosts recorded
+    since, and an entry naming a known host with another key refuses it.
+  - *`--clear` is a fresh install* plus what the dump carries: the dump's key
+    and `known_hosts`, or, without them, a freshly generated key and an empty
+    `known_hosts`.
+  - *Operator paths are never written.* A key named by `AURCACHE_GIT_SSH_KEY`
+    stays in use and untouched, compared by real path so that one mounted at
+    the server's own key file is not written either; the dump's key then goes
+    beside it, or nowhere, and an activity entry
+    (`restore.ssh_key_superseded`) says when the two differ. A replaced or
+    regenerated key is `restore.ssh_key_replaced`. A pinned
+    `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
+- **Archive modes:** the SSH key, the CA key and the token hashes are written
+  `0600` in the archive (`append_private`), as #434's signing key is.
 - **Validation:** SSH files in a dump without the CA are refused, as tokens
   are -- secrets travel together -- and so is a public key without its private
   key. The schema version is unchanged: the files are optional, and an older

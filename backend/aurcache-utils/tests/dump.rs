@@ -311,13 +311,18 @@ async fn a_git_source_is_carried_whole() {
 }
 
 /// Read a `.tar.gz` into path -> contents.
+/// No SSH configuration, for tests about everything else.
+fn no_ssh() -> &'static Arc<SshAccess> {
+    static NO_SSH: std::sync::LazyLock<Arc<SshAccess>> =
+        std::sync::LazyLock::new(|| Arc::new(SshAccess::unavailable("not under test")));
+    &NO_SSH
+}
+
 /// Secrets from the CA at `ca_dir`, and no SSH configuration.
 fn without_ssh(ca_dir: &std::path::Path) -> SecretSources<'_> {
-    static NO_SSH: std::sync::LazyLock<SshAccess> =
-        std::sync::LazyLock::new(|| SshAccess::unavailable("not under test"));
     SecretSources {
         ca_dir,
-        ssh: &NO_SSH,
+        ssh: no_ssh(),
     }
 }
 
@@ -378,7 +383,7 @@ async fn a_preview_reports_without_applying() {
     package(&target, "already-here", true, None).await;
 
     let loaded = load_dump(&bytes).unwrap();
-    let entries = preview(&target, &loaded, &RestoreOptions::default())
+    let entries = preview(&target, no_ssh(), &loaded, &RestoreOptions::default())
         .await
         .unwrap();
 
@@ -407,6 +412,7 @@ async fn overwrite_is_reported_as_overwrite() {
     let loaded = load_dump(&bytes).unwrap();
     let entries = preview(
         &target,
+        no_ssh(),
         &loaded,
         &RestoreOptions {
             dry_run: true,
@@ -1323,6 +1329,7 @@ async fn a_preview_names_the_conflicting_packages() {
     let loaded = load_dump(&bytes).unwrap();
     let entries = preview(
         &target,
+        no_ssh(),
         &loaded,
         &RestoreOptions {
             dry_run: true,
@@ -1463,8 +1470,11 @@ async fn a_dependency_only_package_survives_the_restore() {
 // The server's SSH state in dumps.
 // ---------------------------------------------------------------------------
 
+const GITHUB_ED25519: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+
 /// A server's SSH directory with a generated key and one host recorded.
-fn ssh_server(dir: &std::path::Path) -> SshAccess {
+fn ssh_server(dir: &std::path::Path) -> Arc<SshAccess> {
     let ssh = SshAccess::new(SshConfig {
         dir: dir.to_path_buf(),
         key: KeySource::Generated(dir.join("id_ed25519")),
@@ -1473,16 +1483,30 @@ fn ssh_server(dir: &std::path::Path) -> SshAccess {
     });
     std::fs::write(
         dir.join("known_hosts"),
-        "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+        format!("github.com {GITHUB_ED25519}\n"),
     )
     .unwrap();
-    ssh
+    Arc::new(ssh)
 }
 
 fn fingerprint(ssh: &SshAccess) -> String {
     match ssh.info().key {
         aurcache_common::api::ssh::SshKey::Ready { fingerprint, .. } => fingerprint,
         other => panic!("{other:?}"),
+    }
+}
+
+/// A key protected by `passphrase`, made by ssh-keygen; `None` without it.
+fn protected_key(path: &std::path::Path, passphrase: &str) -> Option<()> {
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", passphrase, "-f"])
+        .arg(path)
+        .status();
+    if made.is_ok_and(|s| s.success()) {
+        Some(())
+    } else {
+        eprintln!("skipped: ssh-keygen is not installed");
+        None
     }
 }
 
@@ -1509,18 +1533,10 @@ async fn a_dump_without_secrets_carries_nothing_of_ssh() {
 /// passphrase.
 #[tokio::test]
 async fn a_dump_with_secrets_carries_the_key_as_stored_and_the_trusted_hosts() {
-    let source = aurcache_db::testing::memory_db().await;
-    let ca = tempfile::tempdir().unwrap();
-    aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
     let ssh_dir = tempfile::tempdir().unwrap();
     // A supplied key, protected by a passphrase.
     let key = ssh_dir.path().join("deploy_key");
-    let made = std::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "correct horse", "-f"])
-        .arg(&key)
-        .status();
-    if !made.is_ok_and(|s| s.success()) {
-        eprintln!("skipped: ssh-keygen is not installed");
+    if protected_key(&key, "correct horse").is_none() {
         return;
     }
     let passphrase = ssh_dir.path().join("passphrase");
@@ -1530,24 +1546,14 @@ async fn a_dump_with_secrets_carries_the_key_as_stored_and_the_trusted_hosts() {
         "example.com ssh-ed25519 AAAA\n",
     )
     .unwrap();
-    let ssh = SshAccess::new(SshConfig {
+    let ssh = Arc::new(SshAccess::new(SshConfig {
         dir: ssh_dir.path().to_path_buf(),
         key: KeySource::Provided(key.clone()),
         passphrase_file: Some(passphrase),
         hosts: HostKeySource::TrustOnFirstUse(ssh_dir.path().join("known_hosts")),
-    });
+    }));
 
-    let dump = build_dump(
-        &source,
-        "test",
-        Some(SecretSources {
-            ca_dir: ca.path(),
-            ssh: &ssh,
-        }),
-    )
-    .await
-    .unwrap();
-    let bytes = write_archive(&dump).unwrap();
+    let bytes = dump_with_ssh(&ssh).await;
     let files = archive_files(&bytes);
     assert_eq!(
         files.get("ssh/key").map(String::as_str),
@@ -1563,38 +1569,40 @@ async fn a_dump_with_secrets_carries_the_key_as_stored_and_the_trusted_hosts() {
             "the passphrase is in {name}"
         );
     }
-
     let loaded = load_dump(&bytes).unwrap();
     let carried = loaded.secrets.unwrap().ssh;
     assert_eq!(carried.key.unwrap().private_key, files["ssh/key"]);
 }
 
+/// The secrets in an archive are written for their owner only.
+#[tokio::test]
+async fn secrets_are_owner_only_in_the_archive() {
+    let ssh_dir = tempfile::tempdir().unwrap();
+    let bytes = dump_with_ssh(&ssh_server(ssh_dir.path())).await;
+    let mut archive = tar::Archive::new(GzDecoder::new(&bytes[..]));
+    for entry in archive.entries().unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mode = entry.header().mode().unwrap();
+        if ["ca-key.pem", "tokens.json", "ssh/key"].contains(&path.as_str()) {
+            assert_eq!(mode & 0o077, 0, "{path} is mode {mode:o}");
+        }
+    }
+}
+
 /// A file the operator pins is theirs: it is not carried.
 #[tokio::test]
 async fn pinned_host_keys_are_not_carried() {
-    let source = aurcache_db::testing::memory_db().await;
-    let ca = tempfile::tempdir().unwrap();
-    aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
     let ssh_dir = tempfile::tempdir().unwrap();
     let pinned = ssh_dir.path().join("pinned");
     std::fs::write(&pinned, "example.com ssh-ed25519 AAAA\n").unwrap();
-    let ssh = SshAccess::new(SshConfig {
+    let ssh = Arc::new(SshAccess::new(SshConfig {
         dir: ssh_dir.path().to_path_buf(),
         key: KeySource::Generated(ssh_dir.path().join("id_ed25519")),
         passphrase_file: None,
         hosts: HostKeySource::Pinned(pinned),
-    });
-    let dump = build_dump(
-        &source,
-        "test",
-        Some(SecretSources {
-            ca_dir: ca.path(),
-            ssh: &ssh,
-        }),
-    )
-    .await
-    .unwrap();
-    let files = archive_files(&write_archive(&dump).unwrap());
+    }));
+    let files = archive_files(&dump_with_ssh(&ssh).await);
     assert!(files.contains_key("ssh/key"));
     assert!(!files.contains_key("ssh/known_hosts"));
 }
@@ -1635,48 +1643,10 @@ fn ssh_files_without_the_rest_of_the_secrets_are_refused() {
     assert!(error.contains("ssh/key"), "{error}");
 }
 
-/// Restore `bytes` into a fresh database with `ssh` as the server's SSH,
-/// under `secrets`.
-async fn restore_with_ssh(
-    bytes: &[u8],
-    ssh: SshAccess,
-    secrets: aurcache_common::api::dump::SecretsPolicy,
-) -> Arc<aurcache_utils::snapshot::SnapshotStore> {
-    let target = aurcache_db::testing::memory_db().await;
-    let target_ca = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
-            tempfile::tempdir().unwrap().keep(),
-        )
-        .with_ssh(Arc::new(ssh)),
-    );
-    let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(1024);
-    let TestClient { client, _repos } = client_with_empty_official_repos().await;
-    aurcache_utils::restore::apply(
-        &Services {
-            db: target,
-            store: store.clone(),
-            client: Arc::new(client),
-            repo: Arc::new(aurcache_utils::repository::Repository::new(
-                tempfile::tempdir().unwrap().keep(),
-            )),
-            activity: ActivityLog::discarding(),
-        },
-        target_ca.path(),
-        load_dump(bytes).unwrap(),
-        RestoreOptions {
-            secrets,
-            ..RestoreOptions::default()
-        },
-        progress_tx,
-    )
-    .await;
-    store
-}
-
-/// A dump of `ssh` with secrets.
-async fn dump_with_ssh(ssh: &SshAccess) -> Vec<u8> {
+/// A dump of `ssh` with secrets, carrying one package.
+async fn dump_with_ssh(ssh: &Arc<SshAccess>) -> Vec<u8> {
     let source = aurcache_db::testing::memory_db().await;
+    package(&source, "hello", true, None).await;
     let ca = tempfile::tempdir().unwrap();
     aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
     write_archive(
@@ -1694,6 +1664,68 @@ async fn dump_with_ssh(ssh: &SshAccess) -> Vec<u8> {
     .unwrap()
 }
 
+/// What restoring a dump left behind.
+struct Restored {
+    db: DatabaseConnection,
+    store: Arc<aurcache_utils::snapshot::SnapshotStore>,
+    failures: Vec<String>,
+}
+
+/// Restore `bytes` into a fresh database with `ssh` as the server's SSH.
+async fn restore_with_ssh(bytes: &[u8], ssh: Arc<SshAccess>, options: RestoreOptions) -> Restored {
+    let target = aurcache_db::testing::memory_db().await;
+    let target_ca = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
+            tempfile::tempdir().unwrap().keep(),
+        )
+        .with_ssh(ssh),
+    );
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
+    let TestClient { client, _repos } = client_with_empty_official_repos().await;
+    aurcache_utils::restore::apply(
+        &Services {
+            db: target.clone(),
+            store: store.clone(),
+            client: Arc::new(client),
+            repo: Arc::new(aurcache_utils::repository::Repository::new(
+                tempfile::tempdir().unwrap().keep(),
+            )),
+            activity: ActivityLog::discarding(),
+        },
+        target_ca.path(),
+        load_dump(bytes).unwrap(),
+        options,
+        progress_tx,
+    )
+    .await;
+    let mut failures = Vec::new();
+    while let Ok(entry) = progress_rx.try_recv() {
+        if let RestoreOutcome::Failed { error } = entry.outcome {
+            failures.push(error);
+        }
+    }
+    Restored {
+        db: target,
+        store,
+        failures,
+    }
+}
+
+fn copying() -> RestoreOptions {
+    RestoreOptions {
+        secrets: aurcache_common::api::dump::SecretsPolicy::Copy,
+        ..RestoreOptions::default()
+    }
+}
+
+fn clearing() -> RestoreOptions {
+    RestoreOptions {
+        clear: true,
+        ..RestoreOptions::default()
+    }
+}
+
 /// A migration onto a new instance keeps the key the remotes know: the one
 /// the new server generated is replaced, and used at once.
 #[tokio::test]
@@ -1703,17 +1735,21 @@ async fn restoring_secrets_replaces_a_freshly_generated_key() {
     let bytes = dump_with_ssh(&old).await;
 
     let new_dir = tempfile::tempdir().unwrap();
-    let new = SshAccess::new(SshConfig {
+    let new = Arc::new(SshAccess::new(SshConfig {
         dir: new_dir.path().to_path_buf(),
         key: KeySource::Generated(new_dir.path().join("id_ed25519")),
         passphrase_file: None,
         hosts: HostKeySource::TrustOnFirstUse(new_dir.path().join("known_hosts")),
-    });
+    }));
     assert_ne!(fingerprint(&old), fingerprint(&new));
 
-    let store =
-        restore_with_ssh(&bytes, new, aurcache_common::api::dump::SecretsPolicy::Copy).await;
-    assert_eq!(fingerprint(store.ssh()), fingerprint(&old), "not in use");
+    let restored = restore_with_ssh(&bytes, new, copying()).await;
+    assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    assert_eq!(
+        fingerprint(restored.store.ssh()),
+        fingerprint(&old),
+        "not in use"
+    );
     assert_eq!(
         std::fs::read(new_dir.path().join("id_ed25519")).unwrap(),
         std::fs::read(old_dir.path().join("id_ed25519")).unwrap()
@@ -1740,49 +1776,185 @@ async fn a_default_restore_leaves_the_ssh_key_alone() {
     let bytes = dump_with_ssh(&ssh_server(old_dir.path())).await;
     let new_dir = tempfile::tempdir().unwrap();
     let new = ssh_server(new_dir.path());
-    let before = fingerprint(&new);
-    let store = restore_with_ssh(
-        &bytes,
-        new,
-        aurcache_common::api::dump::SecretsPolicy::Ignore,
-    )
-    .await;
-    assert_eq!(fingerprint(store.ssh()), before);
+    let before = std::fs::read(new_dir.path().join("id_ed25519")).unwrap();
+    let restored = restore_with_ssh(&bytes, new, RestoreOptions::default()).await;
+    assert_eq!(
+        std::fs::read(new_dir.path().join("id_ed25519")).unwrap(),
+        before
+    );
+    assert!(restored.failures.is_empty(), "{:?}", restored.failures);
 }
 
-/// The operator's key and pinned host keys win: neither file is written, and
-/// the dump's key waits in the server's own key file.
+/// A key this server cannot open is refused before anything is touched:
+/// no package is imported, and the working key stays.
+#[tokio::test]
+async fn a_key_that_cannot_be_opened_refuses_the_whole_restore() {
+    let old_dir = tempfile::tempdir().unwrap();
+    let key = old_dir.path().join("deploy_key");
+    if protected_key(&key, "correct horse").is_none() {
+        return;
+    }
+    let passphrase = old_dir.path().join("passphrase");
+    std::fs::write(&passphrase, "correct horse\n").unwrap();
+    let old = Arc::new(SshAccess::new(SshConfig {
+        dir: old_dir.path().to_path_buf(),
+        key: KeySource::Provided(key),
+        passphrase_file: Some(passphrase),
+        hosts: HostKeySource::TrustOnFirstUse(old_dir.path().join("known_hosts")),
+    }));
+    let bytes = dump_with_ssh(&old).await;
+
+    // No passphrase file here.
+    let new_dir = tempfile::tempdir().unwrap();
+    let new = ssh_server(new_dir.path());
+    let before = std::fs::read(new_dir.path().join("id_ed25519")).unwrap();
+    let in_use = fingerprint(&new);
+
+    let loaded = load_dump(&bytes).unwrap();
+    let target = aurcache_db::testing::memory_db().await;
+    let previewed = preview(&target, &new, &loaded, &copying()).await.unwrap();
+    assert!(
+        previewed.iter().any(|e| matches!(&e.outcome,
+            RestoreOutcome::Failed { error } if error.contains("nothing would be imported")
+                && error.contains("passphrase"))),
+        "{previewed:?}"
+    );
+
+    let restored = restore_with_ssh(&bytes, new, copying()).await;
+    assert!(
+        restored
+            .failures
+            .iter()
+            .any(|e| e.contains("nothing was imported") && e.contains("passphrase")),
+        "{:?}",
+        restored.failures
+    );
+    assert!(
+        Packages::find().all(&restored.db).await.unwrap().is_empty(),
+        "a refused restore imported packages"
+    );
+    assert_eq!(
+        std::fs::read(new_dir.path().join("id_ed25519")).unwrap(),
+        before
+    );
+    assert_eq!(fingerprint(restored.store.ssh()), in_use);
+}
+
+/// The operator's key is never written, even where it is the server's own
+/// key file; pinned host keys neither.
 #[tokio::test]
 async fn an_operators_key_and_pinned_hosts_are_never_written() {
     let old_dir = tempfile::tempdir().unwrap();
     let old = ssh_server(old_dir.path());
     let bytes = dump_with_ssh(&old).await;
 
-    let new_dir = tempfile::tempdir().unwrap();
-    let operator_key = new_dir.path().join("operator_key");
-    // Any key that is not the dump's.
-    let other = ssh_server(&new_dir.path().join("other"));
-    drop(other);
-    std::fs::copy(new_dir.path().join("other/id_ed25519"), &operator_key).unwrap();
-    let pinned = new_dir.path().join("pinned");
-    std::fs::write(&pinned, "mine\n").unwrap();
-    let operator_bytes = std::fs::read(&operator_key).unwrap();
-    let new = SshAccess::new(SshConfig {
-        dir: new_dir.path().join("ssh"),
-        key: KeySource::Provided(operator_key.clone()),
-        passphrase_file: None,
-        hosts: HostKeySource::Pinned(pinned.clone()),
-    });
-    let in_use = fingerprint(&new);
+    for at_own_path in [false, true] {
+        let new_dir = tempfile::tempdir().unwrap();
+        let own_dir = new_dir.path().join("ssh");
+        // Any key that is not the dump's.
+        let other = ssh_server(&new_dir.path().join("other"));
+        drop(other);
+        let operator_key = if at_own_path {
+            std::fs::create_dir_all(&own_dir).unwrap();
+            own_dir.join("id_ed25519")
+        } else {
+            new_dir.path().join("operator_key")
+        };
+        std::fs::copy(new_dir.path().join("other/id_ed25519"), &operator_key).unwrap();
+        let operator_bytes = std::fs::read(&operator_key).unwrap();
+        let pinned = new_dir.path().join("pinned");
+        std::fs::write(&pinned, "mine\n").unwrap();
+        let new = Arc::new(SshAccess::new(SshConfig {
+            dir: own_dir.clone(),
+            key: KeySource::Provided(operator_key.clone()),
+            passphrase_file: None,
+            hosts: HostKeySource::Pinned(pinned.clone()),
+        }));
+        let in_use = fingerprint(&new);
 
-    let store =
-        restore_with_ssh(&bytes, new, aurcache_common::api::dump::SecretsPolicy::Copy).await;
-    assert_eq!(std::fs::read(&operator_key).unwrap(), operator_bytes);
-    assert_eq!(std::fs::read_to_string(&pinned).unwrap(), "mine\n");
-    assert_eq!(fingerprint(store.ssh()), in_use, "the operator's key lost");
+        let restored = restore_with_ssh(&bytes, new, copying()).await;
+        assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+        assert_eq!(
+            std::fs::read(&operator_key).unwrap(),
+            operator_bytes,
+            "the operator's key was written (at its own path: {at_own_path})"
+        );
+        assert_eq!(std::fs::read_to_string(&pinned).unwrap(), "mine\n");
+        assert_eq!(fingerprint(restored.store.ssh()), in_use);
+        if !at_own_path {
+            assert_eq!(
+                std::fs::read(own_dir.join("id_ed25519")).unwrap(),
+                std::fs::read(old_dir.path().join("id_ed25519")).unwrap(),
+                "the dump's key is not in the server's own key file"
+            );
+        }
+    }
+}
+
+/// `--clear` is a fresh install: without secrets in the dump, the server's
+/// own key is a new one and it trusts no host yet.
+#[tokio::test]
+async fn clearing_without_secrets_starts_ssh_afresh() {
+    let source = aurcache_db::testing::memory_db().await;
+    package(&source, "hello", true, None).await;
+    let bytes = write_archive(&build_dump(&source, "test", None).await.unwrap()).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = ssh_server(dir.path());
+    let before = fingerprint(&ssh);
+    let restored = restore_with_ssh(&bytes, ssh, clearing()).await;
+    assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    assert_ne!(fingerprint(restored.store.ssh()), before);
     assert_eq!(
-        std::fs::read(new_dir.path().join("ssh/id_ed25519")).unwrap(),
-        std::fs::read(old_dir.path().join("id_ed25519")).unwrap(),
-        "the dump's key is not in the server's own key file"
+        std::fs::read_to_string(dir.path().join("known_hosts")).unwrap(),
+        ""
+    );
+}
+
+/// Without `--clear`, trusted hosts are merged: none this server recorded is
+/// lost, and a dump that trusts another key for one of them is refused.
+#[tokio::test]
+async fn trusted_hosts_are_merged_and_a_conflict_is_refused() {
+    let old_dir = tempfile::tempdir().unwrap();
+    let old = ssh_server(old_dir.path());
+    std::fs::write(
+        old_dir.path().join("known_hosts"),
+        format!("github.com {GITHUB_ED25519}\nold.example.com {GITHUB_ED25519}\n"),
+    )
+    .unwrap();
+    let bytes = dump_with_ssh(&old).await;
+
+    let new_dir = tempfile::tempdir().unwrap();
+    let new = ssh_server(new_dir.path());
+    std::fs::write(
+        new_dir.path().join("known_hosts"),
+        format!("new.example.com {GITHUB_ED25519}\n"),
+    )
+    .unwrap();
+    let restored = restore_with_ssh(&bytes, new, copying()).await;
+    assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    let merged = std::fs::read_to_string(new_dir.path().join("known_hosts")).unwrap();
+    for host in ["new.example.com", "old.example.com", "github.com"] {
+        assert!(merged.contains(host), "{host} missing from {merged}");
+    }
+
+    // This server trusts another key for github.com.
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = ssh_server(other_dir.path());
+    let other_key = std::fs::read_to_string(other_dir.path().join("id_ed25519.pub")).unwrap();
+    let mine = format!("github.com {}\n", other_key.trim());
+    std::fs::write(other_dir.path().join("known_hosts"), &mine).unwrap();
+    let restored = restore_with_ssh(&bytes, other, copying()).await;
+    assert!(
+        restored
+            .failures
+            .iter()
+            .any(|e| e.contains("nothing was imported") && e.contains("github.com")),
+        "{:?}",
+        restored.failures
+    );
+    assert_eq!(
+        std::fs::read_to_string(other_dir.path().join("known_hosts")).unwrap(),
+        mine
     );
 }

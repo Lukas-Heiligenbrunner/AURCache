@@ -517,14 +517,15 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
-    /// A restore put the dump's SSH key in place, and the server now clones
-    /// with it: remotes that knew the key it had before do not know this one.
+    /// A restore replaced the SSH key package sources are cloned with: with
+    /// the dump's, or with a fresh one as a cleared server starts. Remotes that
+    /// knew the previous key do not know this one.
     RestoreSshKeyReplaced => ("restore.ssh_key_replaced", "Backups", "SSH key replaced") {
         fingerprint: String,
     },
 
-    /// A restore put the dump's SSH key in the server's own key file, but the
-    /// server clones with the different key `AURCACHE_GIT_SSH_KEY` names.
+    /// A restore carried an SSH key, but the server clones with the different
+    /// key `AURCACHE_GIT_SSH_KEY` names, which the restore leaves alone.
     RestoreSshKeySuperseded => ("restore.ssh_key_superseded", "Backups", "Restored SSH key not in use") {
         fingerprint: String,
         configured: String,
@@ -1256,9 +1257,9 @@ impl Event {
                 fingerprint,
                 configured,
             } => vec![text(format!(
-                "a restore kept the dump's SSH key ({fingerprint}), but this server clones \
-                 with {configured} (AURCACHE_GIT_SSH_KEY), a different key; the remotes that \
-                 knew the dump's key need this one"
+                "the dump's SSH key ({fingerprint}) is not the one this server clones with: \
+                 {configured} (AURCACHE_GIT_SSH_KEY) is a different key, which the restore \
+                 leaves alone; the remotes that knew the dump's key need this one"
             ))],
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]

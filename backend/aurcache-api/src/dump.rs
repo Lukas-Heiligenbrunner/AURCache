@@ -200,7 +200,9 @@ pub async fn restore(
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
 
     if options.dry_run {
-        let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
+        let preview =
+            aurcache_utils::restore::preview(&services.db, services.store.ssh(), &loaded, &options)
+                .await?;
         return Ok(status::Accepted(Json(RestoreAccepted {
             job_id: None,
             total,

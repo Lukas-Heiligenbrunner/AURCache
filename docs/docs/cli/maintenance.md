@@ -30,12 +30,27 @@ to every repository:
 - **The host keys trusted on first use** (`AURCACHE_SSH_DIR/known_hosts`). A
   file you pin with `AURCACHE_SSH_KNOWN_HOSTS` is yours, and is not carried.
 
-Taking the secrets on restore puts the key in the server's own place,
-`AURCACHE_SSH_DIR/id_ed25519`, replacing the one a new server generated, and the
-server clones with it at once. If the target sets `AURCACHE_GIT_SSH_KEY`, that
-key stays the one in use and is never written to; the activity log says so when
-it differs from the dump's. The trusted host keys replace the server's own, and
-a pinned `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
+What a restore does with them:
+
+- **Everything is checked first.** The dump's key has to open on this server:
+  a protected key needs this server's `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`
+  to hold its passphrase. If it does not open, or a file the restore would
+  write cannot be written, the restore is refused whole, before any package
+  is imported, and `--dry-run` says so too.
+- **Without `--secrets copy` or `--clear`, the SSH key is left alone.**
+- **`--secrets copy`** puts the key in the server's own place,
+  `AURCACHE_SSH_DIR/id_ed25519`, replacing the one a new server generated, and
+  the server clones with it at once. The trusted host keys are merged into the
+  server's own: none it recorded is lost, and a dump that trusts a different
+  key for a host this server already knows is refused.
+- **`--clear` is a fresh install plus what the dump carries.** The key and the
+  trusted host keys are the dump's. A dump without them leaves the server as a
+  new one starts: a freshly generated key, which every repository has to be
+  given again, and no trusted hosts.
+- **What you configured is never written.** A key named by
+  `AURCACHE_GIT_SSH_KEY` stays the key in use, even where it is the server's own
+  key file, and the activity log says so when it differs from the dump's. A
+  pinned `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.

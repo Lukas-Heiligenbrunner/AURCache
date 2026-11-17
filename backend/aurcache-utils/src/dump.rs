@@ -23,6 +23,7 @@ use aurcache_db::{packages, settings, workers};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use std::sync::Arc;
 
 /// Everything a dump carries, before it is packed into an archive.
 ///
@@ -45,7 +46,7 @@ pub struct SecretSources<'a> {
     /// The worker CA's directory.
     pub ca_dir: &'a std::path::Path,
     /// The server's SSH key and host keys.
-    pub ssh: &'a SshAccess,
+    pub ssh: &'a Arc<SshAccess>,
 }
 
 /// Read the authored state out of the database.
@@ -125,7 +126,8 @@ async fn build_secrets(
     db: &DatabaseConnection,
     sources: SecretSources<'_>,
 ) -> anyhow::Result<DumpSecrets> {
-    let ssh = sources.ssh.export()?;
+    let ssh = Arc::clone(sources.ssh);
+    let ssh = tokio::task::spawn_blocking(move || ssh.export()).await??;
     let ca_dir = sources.ca_dir.to_path_buf();
     let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
     let ca_cert_pem = ca.ca_cert_pem().to_owned();
@@ -243,8 +245,8 @@ pub fn write_archive(dump: &Dump) -> anyhow::Result<Vec<u8>> {
         }
         if let Some(secrets) = &dump.secrets {
             append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem)?;
-            append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
-            append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            append_private(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
+            append_private(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
             if let Some(key) = &secrets.ssh.key {
                 append_private(&mut tar, SSH_KEY_FILE, &key.private_key)?;
                 if let Some(public) = &key.public_key {
@@ -272,7 +274,7 @@ fn append<W: Write>(tar: &mut tar::Builder<W>, path: &str, content: &str) -> any
     append_mode(tar, path, content, 0o644)
 }
 
-/// A private key, which `tar -x` should not leave readable by everyone.
+/// A secret, which `tar -x` should not leave readable by everyone.
 fn append_private<W: Write>(
     tar: &mut tar::Builder<W>,
     path: &str,

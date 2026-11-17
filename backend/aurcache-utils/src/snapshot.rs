@@ -231,7 +231,7 @@ impl SnapshotStore {
 
     /// The SSH key and host keys this store clones with.
     #[must_use]
-    pub fn ssh(&self) -> &SshAccess {
+    pub fn ssh(&self) -> &Arc<SshAccess> {
         &self.ssh
     }
 
