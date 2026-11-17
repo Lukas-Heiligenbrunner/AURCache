@@ -110,6 +110,10 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
         remote.known_hosts_name(),
         identity.fingerprint()
     );
+    let no_keys = format!(
+        "{} does not accept SSH keys, so the server's key cannot be offered to it",
+        remote.known_hosts_name()
+    );
     // libgit2 asks again after a refusal, for as long as the callback answers;
     // there is one key, so a second request is the answer.
     let mut offered = false;
@@ -119,7 +123,10 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
         if allowed.contains(CredentialType::USERNAME) {
             return Cred::username(user);
         }
-        if allowed.contains(CredentialType::SSH_KEY) && !offered {
+        if !allowed.contains(CredentialType::SSH_KEY) {
+            return Err(credentials_refusal.refuse(no_keys.clone()));
+        }
+        if !offered {
             offered = true;
             return Cred::ssh_key(user, None, identity.private_key(), identity.passphrase());
         }
@@ -128,12 +135,21 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
 
     let remote = remote.clone();
     let refusal = refusal.clone();
-    callbacks.certificate_check(move |cert, _host| {
+    callbacks.certificate_check(move |cert, host| {
         let Some(hostkey) = cert.as_hostkey() else {
             // A TLS certificate: libgit2 checks those itself.
             return Ok(CertificateCheckStatus::CertificatePassthrough);
         };
         let name = remote.known_hosts_name();
+        // The host key is judged under the name this module parsed out of the
+        // URL. Should libgit2 have connected somewhere else, recording or
+        // matching under that name would vouch for the wrong host.
+        if !same_host(host, &remote.host) {
+            return Err(refusal.refuse(format!(
+                "connected to {host} while checking {name}; the URL is read two ways, so \
+                 the host key is not checked against either"
+            )));
+        }
         let blob = hostkey
             .hostkey()
             .ok_or_else(|| refusal.refuse(format!("{name} sent no host key to check")))?;
@@ -147,6 +163,16 @@ fn callbacks<'a>(route: &Route<'a>, refusal: &Refusal) -> RemoteCallbacks<'a> {
             .map_err(|e| refusal.refuse(format!("{e:#}")))
     });
     callbacks
+}
+
+/// Whether `connected`, as libgit2 names the host it reached, is `parsed`.
+fn same_host(connected: &str, parsed: &str) -> bool {
+    let bare = |h: &str| {
+        h.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase()
+    };
+    bare(connected) == bare(parsed)
 }
 
 /// Fetch options for `route`.
@@ -464,6 +490,13 @@ mod tests {
         assert_eq!(user("ssh://deploy@git.example.com:2222/r.git"), "deploy");
         assert_eq!(user("ssh://git.example.com/r.git"), "git");
         assert_eq!(user("github.com:user/repo.git"), "git");
+    }
+
+    #[test]
+    fn host_names_compare_without_case_or_brackets() {
+        assert!(same_host("GitHub.com", "github.com"));
+        assert!(same_host("[::1]", "::1"));
+        assert!(!same_host("evil.example.com", "github.com"));
     }
 
     /// A remote a PKGBUILD names is never offered the server's key.

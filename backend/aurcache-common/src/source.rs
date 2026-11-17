@@ -72,13 +72,15 @@ pub struct SshRemote {
 }
 
 impl SshRemote {
-    /// How a `known_hosts` file names this host: bare on the default port,
-    /// `[host]:port` on any other, as OpenSSH writes it.
+    /// How a `known_hosts` file names this host: lower case, bare on the
+    /// default port, `[host]:port` on any other, as OpenSSH writes it -- and
+    /// hashes it, so a hashed entry for `github.com` matches `GitHub.com`.
     #[must_use]
     pub fn known_hosts_name(&self) -> String {
+        let host = self.host.to_ascii_lowercase();
         match self.port {
-            None | Some(22) => self.host.clone(),
-            Some(port) => format!("[{}]:{port}", self.host),
+            None | Some(22) => host,
+            Some(port) => format!("[{host}]:{port}"),
         }
     }
 }
@@ -383,6 +385,7 @@ mod tests {
         assert_eq!(name("ssh://git@github.com:22/u/r"), "github.com");
         assert_eq!(name("ssh://git@host:2222/r"), "[host]:2222");
         assert_eq!(name("ssh://[::1]:2222/r"), "[::1]:2222");
+        assert_eq!(name("git@GitHub.com:u/r"), "github.com");
     }
 
     #[test]
