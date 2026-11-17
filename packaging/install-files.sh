@@ -8,7 +8,7 @@
 # is what stops an image being a second, hand-maintained copy of the host
 # contract.
 #
-# Usage: install-files.sh sandbox|server|worker|worker-docker|cli <pkgdir> <repo-root> <binary-dir>
+# Usage: install-files.sh sandbox|server|worker|worker-docker|worker-kube|cli <pkgdir> <repo-root> <binary-dir>
 set -euo pipefail
 
 readonly ROLE=$1
@@ -19,7 +19,7 @@ readonly BINDIR=$4
 readonly PKG="$ROOT/packaging"
 
 case "$ROLE" in
-sandbox | server | worker | worker-docker | cli) ;;
+sandbox | server | worker | worker-docker | worker-kube | cli) ;;
 *) echo "install-files.sh: unknown role '$ROLE'" >&2; exit 1 ;;
 esac
 # The package being built, which is also the name its declaration files take.
@@ -81,13 +81,26 @@ worker)
         "$PKGDIR/etc/sudoers.d/aurcache-worker"
     ;;
 worker-docker)
-    # The legacy executor delegates builds to containers, so it needs none of
-    # the chroot machinery the chroot worker installs -- no sandbox, no
-    # aurcache-build, no sudoers entry. Just the binary and the users and
-    # directories it shares with the chroot worker.
+    # The Docker worker builds each package in a container of its own, so it
+    # needs none of the chroot machinery the chroot worker installs -- no
+    # sandbox, no aurcache-build, no sudoers entry. The binary, the users and
+    # directories it shares with the chroot worker, and the build agent: the
+    # statically linked program the worker copies into every build's
+    # container to run the build there. The worker looks for it at this path
+    # (aurcache_worker_container::agent::INSTALLED).
     declare_from aurcache-worker
     install -Dm755 "$BINDIR/aurcache-worker-docker" \
         "$PKGDIR/usr/bin/aurcache-worker-docker"
+    install -Dm755 "$BINDIR/aurcache-build-agent" \
+        "$PKGDIR/usr/lib/aurcache/bin/aurcache-build-agent"
+    ;;
+worker-kube)
+    # The Kubernetes worker builds each package in a pod, and the pod takes
+    # the build agent from the agent image (WORKER_KUBE_AGENT_IMAGE), not from
+    # this machine. So the binary and the worker's users and directories.
+    declare_from aurcache-worker
+    install -Dm755 "$BINDIR/aurcache-worker-kube" \
+        "$PKGDIR/usr/bin/aurcache-worker-kube"
     ;;
 cli)
     # The client is one binary with no service, users or state of its own.

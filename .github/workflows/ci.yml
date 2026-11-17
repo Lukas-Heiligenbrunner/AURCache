@@ -101,6 +101,11 @@ jobs:
           cargo check --features aurcache-api/static -p aurcache
           cargo check -p aurcache-worker-docker
           cargo check -p aurcache-cli
+          # The build agent, which packaging/common.sh builds alone beside the
+          # Docker worker's package, and docker/build-kube-worker.sh beside
+          # the Kubernetes worker (docker/kube-worker.Dockerfile).
+          cargo check -p aurcache-build-agent
+          cargo check -p aurcache-worker-kube
           # docker/build-rust.sh (docker/server.Dockerfile)
           cargo check --features static
 
@@ -196,6 +201,22 @@ jobs:
 
       - name: Sandbox test
         run: ./scripts/test-sandbox.sh
+
+  # The build agent, statically linked as it ships, running builds in the
+  # builder image under a build pod's security context: a package builds, a
+  # hostile PKGBUILD stays confined, and a stopped build leaves nothing
+  # running. Docker only. Its arm64 leg needs qemu, which this runner does
+  # not register, so it is skipped here.
+  buildAgentTest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update local toolchain
+        run: rustup update
+
+      - name: Build agent test
+        run: ./scripts/test-build-agent.sh
 
   # No e2e job here: the full suite builds images and hits the real AUR and
   # Arch mirrors, so it runs nightly (see e2e-nightly.yml) instead of on every
