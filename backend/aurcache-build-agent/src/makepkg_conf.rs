@@ -3,7 +3,8 @@
 //! The image's own, then the job's assignments without the lines that say
 //! where things go or how many jobs run, then the agent's: `PKGDEST`,
 //! `BUILDDIR`, `SRCDEST`, the parallelism for the build's CPUs, `PACMAN_AUTH`
-//! on the helper and, with a credential, the ssh-agent's socket.
+//! on the helper and, while the sources are fetched with the worker's SSH
+//! key, the socket that reaches it.
 
 use crate::layout::{Scratch, Work};
 use aurcache_common::shell::quote_argument;
@@ -36,10 +37,11 @@ pub struct Rendering<'a> {
     pub ssh: Option<Ssh<'a>>,
 }
 
-/// The build user's ssh-agent, for a build with a credential.
+/// The socket that reaches the worker's SSH key, and the hosts it is used
+/// with.
 pub struct Ssh<'a> {
     pub socket: &'a Path,
-    pub known_hosts: Option<&'a Path>,
+    pub known_hosts: &'a Path,
 }
 
 /// `source /etc/makepkg.conf`, the job's lines minus the layout ones, then the agent's.
@@ -87,14 +89,10 @@ fn parallelism(cpus: Option<f64>) -> String {
     )
 }
 
-/// What lets the build use the credential: the agent's socket, and an ssh
-/// that trusts the given hosts, or, with none given, each host as first seen
-/// (ssh would otherwise stop to ask, and nobody answers).
+/// What lets the build use the key: the agent socket, and an ssh that
+/// trusts the given hosts and no other.
 fn credential(ssh: &Ssh<'_>) -> String {
-    let command = match ssh.known_hosts {
-        Some(hosts) => format!("ssh -o UserKnownHostsFile={}", quote(hosts)),
-        None => "ssh -o StrictHostKeyChecking=accept-new".to_string(),
-    };
+    let command = format!("ssh -o UserKnownHostsFile={}", quote(ssh.known_hosts));
     format!(
         "export SSH_AUTH_SOCK={}\nexport GIT_SSH_COMMAND={}\n",
         quote(ssh.socket),
@@ -319,28 +317,15 @@ mod tests {
         assert!(!without.contains("GIT_SSH_COMMAND"));
 
         let socket = scratch.ssh_socket();
-        rendering.ssh = Some(Ssh {
-            socket: &socket,
-            known_hosts: None,
-        });
         let print = "printf '%s\\n' \"$SSH_AUTH_SOCK\" \"$GIT_SSH_COMMAND\"; export -p | grep -c 'SSH_AUTH_SOCK\\|GIT_SSH_COMMAND'";
-        assert_eq!(
-            evaluate(&render(&rendering), print),
-            [
-                "/work/scratch/run/ssh-agent.sock",
-                "ssh -o StrictHostKeyChecking=accept-new",
-                "2"
-            ]
-        );
-
         rendering.ssh = Some(Ssh {
             socket: &socket,
-            known_hosts: Some(Path::new("/work/scratch/known_hosts")),
+            known_hosts: Path::new("/work/scratch/known_hosts"),
         });
         assert_eq!(
             evaluate(&render(&rendering), print),
             [
-                "/work/scratch/run/ssh-agent.sock",
+                "/work/scratch/ssh/agent.sock",
                 "ssh -o UserKnownHostsFile=/work/scratch/known_hosts",
                 "2"
             ]
@@ -371,7 +356,7 @@ mod tests {
             rendering.agent = Path::new(&agent);
             rendering.ssh = Some(Ssh {
                 socket: &socket,
-                known_hosts: Some(Path::new(&hosts)),
+                known_hosts: Path::new(&hosts),
             });
             let got = evaluate(
                 &render(&rendering),
@@ -387,7 +372,7 @@ mod tests {
                     format!("{hostile}/scratch/srcdest"),
                     "2".to_string(),
                     agent.clone(),
-                    format!("{hostile}/scratch/run/ssh-agent.sock"),
+                    format!("{hostile}/scratch/ssh/agent.sock"),
                     // git hands GIT_SSH_COMMAND to a shell: there too the
                     // path is one word.
                     "3".to_string(),

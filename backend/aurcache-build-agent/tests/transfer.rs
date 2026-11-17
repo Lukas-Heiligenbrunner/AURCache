@@ -3,6 +3,7 @@
 
 use aurcache_build_agent::layout::Work;
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, Reach};
+use aurcache_build_agent::spec::INTERFACE;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -82,7 +83,7 @@ fn sha256(data: &[u8]) -> String {
 
 fn write_report(work: &Work) {
     let report = BuildReport {
-        interface: 1,
+        interface: INTERFACE,
         ended: Ended::Exited { code: 0 },
         peak_memory_bytes: Some(1),
         oom_kills: Some(0),
@@ -273,7 +274,7 @@ fn stage_installs_the_binary_and_ends_only_once_ready_exists() {
         std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&installed).unwrap().permissions());
     assert_eq!(mode & 0o777, 0o755);
     let ran = run(Command::new(&installed).arg("--interface"));
-    assert_eq!(ran.stdout, b"1\n");
+    assert_eq!(ran.stdout, format!("{INTERFACE}\n").as_bytes());
 }
 
 #[test]
@@ -399,7 +400,7 @@ fn manifest_lists_only_regular_files_with_package_names() {
     write_report(&work);
 
     let handback = manifest_of(dir.path());
-    assert_eq!(handback.interface, 1);
+    assert_eq!(handback.interface, INTERFACE);
     assert_eq!(
         handback.artifacts,
         [

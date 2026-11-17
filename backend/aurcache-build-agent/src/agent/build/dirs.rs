@@ -22,8 +22,8 @@ pub struct Owner {
     pub gid: u32,
 }
 
-const ROOT: Owner = Owner { uid: 0, gid: 0 };
-const BUILD: Owner = Owner {
+pub const ROOT: Owner = Owner { uid: 0, gid: 0 };
+pub const BUILD: Owner = Owner {
     uid: BUILD_UID,
     gid: BUILD_GID,
 };

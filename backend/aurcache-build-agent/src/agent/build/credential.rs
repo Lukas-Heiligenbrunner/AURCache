@@ -1,38 +1,26 @@
-//! An SSH credential the build can use and cannot read.
+//! The worker's SSH key, for the download of the sources.
 //!
-//! The key is a file only root can open. Root reads it, starts an
-//! `ssh-agent` as the build user (it serves only its own uid), and hands it
-//! the key through `ssh-add -` on a pipe, so the key is never a file the
-//! build user could open. The build then authenticates through the agent's
-//! socket, and an agent does not give back what it holds.
+//! The key is never in the container. The worker holds it and answers for
+//! it over the link ([`super::relay`]); what the build gets is a socket that
+//! reaches it, for as long as makepkg downloads the sources and no longer.
+//! What runs as root afterwards, dependencies' install scriptlets among it,
+//! finds neither a key nor a way to ask for a signature.
 
-use super::children;
 use super::output::Output;
-use super::run::{self, Keep};
-use super::user::BuildUser;
-use aurcache_build_agent::layout::Scratch;
-use aurcache_build_agent::spec::Credential;
+use super::run;
 use std::fs::Permissions;
-use std::io::{ErrorKind, Write};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 /// The hosts the build's ssh trusts, where the build user can read them.
-const KNOWN_HOSTS: &str = "known_hosts";
+pub const KNOWN_HOSTS: &str = "known_hosts";
 
-/// How long `ssh-agent` has to open its socket, and `ssh-add` to load a key.
-const PATIENCE: Duration = Duration::from_secs(30);
-
-/// What the build's `makepkg.conf` needs to know about a loaded credential.
-pub struct Loaded {
-    pub socket: PathBuf,
-    pub known_hosts: Option<PathBuf>,
-}
-
-/// Install OpenSSH where the image has none. As root, before the build user
-/// exists.
+/// Install what the download uses where the image has none: ssh, and git,
+/// the transport of nearly every source that needs a key. As root, before
+/// the build user exists. Any other VCS client comes with the build's own
+/// dependencies, afterwards.
 pub fn provide(output: &Output) -> Result<(), String> {
     let mut pacman = Command::new("pacman");
     pacman.args([
@@ -43,6 +31,7 @@ pub fn provide(output: &Output) -> Result<(), String> {
         "--color",
         "never",
         "openssh",
+        "git",
     ]);
     let status = run::logged(output, &mut pacman)
         .map_err(|e| format!("pacman could not be started: {e}"))?;
@@ -50,146 +39,57 @@ pub fn provide(output: &Output) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "installing openssh: pacman {}",
+            "installing openssh and git: pacman {}",
             run::describe(status)
         ))
     }
 }
 
-/// Start the build user's `ssh-agent` and load the credential into it.
-pub fn load(
-    credential: &Credential,
-    root: &Path,
-    scratch: &Scratch,
-    user: &BuildUser,
-    output: &Output,
-) -> Result<Loaded, String> {
-    let known_hosts = credential
-        .known_hosts
-        .as_deref()
-        .map(|hosts| publish(hosts, &root.join(KNOWN_HOSTS)))
-        .transpose()?;
-    let mut key = std::fs::read(&credential.key)
-        .map_err(|e| format!("reading {}: {e}", credential.key.display()))?;
-    let socket = scratch.ssh_socket();
-    let loaded = serve(&socket, user, output).and_then(|()| add(&key, &socket, user));
-    key.fill(0);
-    loaded.map(|()| Loaded {
-        socket,
-        known_hosts,
-    })
-}
-
-/// Copy the known hosts to a file of root's that anyone may read.
-fn publish(hosts: &Path, to: &Path) -> Result<PathBuf, String> {
-    std::fs::copy(hosts, to)
-        .and_then(|_| std::fs::set_permissions(to, Permissions::from_mode(0o644)))
-        .map_err(|e| match e.kind() {
-            ErrorKind::NotFound => no_known_hosts(hosts),
-            _ => format!("reading {}: {e}", hosts.display()),
-        })?;
+/// Write the hosts' keys to a file of root's that anyone may read.
+pub fn known_hosts(hosts: &str, to: &Path) -> Result<PathBuf, String> {
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
+        .open(to)
+        .and_then(|mut file| {
+            file.write_all(hosts.as_bytes())?;
+            file.set_permissions(Permissions::from_mode(0o644))
+        });
+    written.map_err(|e| format!("writing {}: {e}", to.display()))?;
     Ok(to.to_path_buf())
-}
-
-/// What to do about a credential that came without its host keys.
-///
-/// The build's ssh accepts only the hosts it is given: a container is new for
-/// every build, so one left to trust the first key it is shown would trust
-/// any host, every time.
-fn no_known_hosts(hosts: &Path) -> String {
-    let key = hosts
-        .file_name()
-        .map_or_else(|| KNOWN_HOSTS.into(), |name| name.to_string_lossy());
-    format!(
-        "the credential has no host keys: {} does not exist. Add a `{key}` entry beside \
-         the private key (in the credential's Secret, on Kubernetes) with the host keys \
-         of the servers the key is used with, for example the output of \
-         `ssh-keyscan github.com`",
-        hosts.display()
-    )
-}
-
-/// Start `ssh-agent` in the foreground, as a child that lives until the
-/// build is ended, and wait for its socket.
-fn serve(socket: &Path, user: &BuildUser, output: &Output) -> Result<(), String> {
-    let mut agent = user.command("ssh-agent");
-    agent.arg("-D").arg("-a").arg(socket);
-    // On stdout it prints the shell commands that name its socket, which
-    // nothing here reads.
-    agent
-        .stdout(Stdio::null())
-        .stderr(output.stdio().map_err(|e| e.to_string())?);
-    let running =
-        children::spawn(&mut agent).map_err(|e| format!("ssh-agent could not be started: {e}"))?;
-    let deadline = Instant::now() + PATIENCE;
-    loop {
-        if std::fs::symlink_metadata(socket).is_ok_and(|meta| meta.file_type().is_socket()) {
-            return Ok(());
-        }
-        if let Some(status) = children::wait_within(running.pid, Duration::from_millis(50)) {
-            return Err(format!("ssh-agent {}", run::describe(status)));
-        }
-        if Instant::now() >= deadline {
-            return Err("ssh-agent did not open its socket".to_string());
-        }
-    }
-}
-
-/// Hand the key to the agent through `ssh-add -`, which reads it from stdin.
-fn add(key: &[u8], socket: &Path, user: &BuildUser) -> Result<(), String> {
-    let mut ssh_add = user.command("ssh-add");
-    ssh_add
-        .arg("-")
-        .env("SSH_AUTH_SOCK", socket)
-        .stdin(Stdio::piped());
-    let captured = run::capture(&mut ssh_add, Keep::Both)
-        .and_then(|mut adding| {
-            // A key is far smaller than a pipe holds, so this cannot block
-            // on a reader that never comes. Dropping the handle ends
-            // ssh-add's input.
-            if let Some(mut stdin) = adding.stdin.take() {
-                stdin.write_all(key)?;
-            }
-            adding.finish(Some(PATIENCE))
-        })
-        .map_err(|e| format!("ssh-add could not be run: {e}"))?;
-    if captured.succeeded() {
-        Ok(())
-    } else {
-        Err(format!(
-            "ssh-add did not load the credential: {}",
-            captured.text.trim()
-        ))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A Secret without host keys is the mistake to expect, so the message
-    /// says what to add and under which name.
     #[test]
-    fn missing_host_keys_say_what_to_add() {
+    fn host_keys_are_written_for_anyone_to_read() {
         let dir = tempfile::tempdir().unwrap();
-        let hosts = dir.path().join("credentials").join("known_hosts");
-        let said = publish(&hosts, &dir.path().join("out")).unwrap_err();
-        assert!(said.contains("`known_hosts`"), "{said}");
-        assert!(said.contains("ssh-keyscan github.com"), "{said}");
-        assert!(said.contains(&hosts.display().to_string()), "{said}");
-    }
-
-    #[test]
-    fn host_keys_are_copied_for_anyone_to_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let hosts = dir.path().join("known_hosts");
-        std::fs::write(&hosts, "github.com ssh-ed25519 AAAA\n").unwrap();
-        let out = publish(&hosts, &dir.path().join("out")).unwrap();
+        let out = known_hosts(
+            "github.com ssh-ed25519 AAAA\n",
+            &dir.path().join(KNOWN_HOSTS),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&out).unwrap(),
             "github.com ssh-ed25519 AAAA\n"
         );
         let mode = std::fs::metadata(&out).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn host_keys_are_not_written_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "kept").unwrap();
+        let link = dir.path().join(KNOWN_HOSTS);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(known_hosts("github.com ssh-ed25519 AAAA\n", &link).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
     }
 }

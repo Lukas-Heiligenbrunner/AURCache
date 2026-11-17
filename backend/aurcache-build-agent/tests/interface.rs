@@ -16,7 +16,7 @@
 //! this pass: that is the break it exists to catch.
 
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, Reach, SetupStep};
-use aurcache_build_agent::spec::{BuildSpec, Credential, INTERFACE};
+use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -89,9 +89,8 @@ fn specs() -> Vec<BuildSpec> {
         }],
         cpus: Some(2.5),
         scratch: PathBuf::from("/work/scratch"),
-        credential: Some(Credential {
-            key: PathBuf::from("/aurcache/credentials/ssh-privatekey"),
-            known_hosts: Some(PathBuf::from("/aurcache/credentials/known_hosts")),
+        ssh: Some(SshAccess {
+            known_hosts: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n".to_string(),
         }),
     };
     let bare = BuildSpec {
@@ -102,17 +101,10 @@ fn specs() -> Vec<BuildSpec> {
         vcs_sources: Vec::new(),
         cpus: None,
         scratch: PathBuf::from("/var/lib/aurcache-build"),
-        credential: None,
+        ssh: None,
         ..full.clone()
     };
-    let key_only = BuildSpec {
-        credential: Some(Credential {
-            key: PathBuf::from("/aurcache/credentials/ssh-privatekey"),
-            known_hosts: None,
-        }),
-        ..bare.clone()
-    };
-    vec![full, bare, key_only]
+    vec![full, bare]
 }
 
 fn reports() -> Vec<BuildReport> {

@@ -88,6 +88,13 @@ enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Carry the SSH link: connect to the agent's link socket and copy
+    /// between it and stdin and stdout.
+    #[command(hide = true)]
+    SshLink {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     /// Try a TCP connection to each target, and print which answered.
     Probe {
         /// Seconds to give each connection.
@@ -119,6 +126,7 @@ fn main() -> ExitCode {
         Command::Tail { work, from } => agent::transfer::tail(&work, from),
         Command::Manifest { work } => agent::transfer::manifest(&work),
         Command::Send { work, name } => agent::transfer::send(&work, &name),
+        Command::SshLink { socket } => agent::transfer::ssh_link(&socket),
         Command::Probe { timeout, targets } => {
             agent::transfer::probe(&targets, Duration::from_secs(timeout))
         }

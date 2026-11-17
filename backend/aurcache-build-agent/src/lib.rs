@@ -12,7 +12,8 @@
 //! The pure parts of a build live here too, where they are tested without a
 //! container: what the pacman helper accepts ([`pacman_request`]), what a job's
 //! `pacman.conf` may say ([`pacman_conf`]), and the `makepkg.conf` the build
-//! runs with ([`makepkg_conf`]).
+//! runs with ([`makepkg_conf`]), and the frames of the link a build reaches the
+//! worker's SSH key through ([`ssh_link`]).
 //!
 //! See `design/in-progress/container-workers.md`.
 
@@ -22,3 +23,4 @@ pub mod pacman_conf;
 pub mod pacman_request;
 pub mod report;
 pub mod spec;
+pub mod ssh_link;

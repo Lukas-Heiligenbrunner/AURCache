@@ -1,0 +1,42 @@
+[
+  {
+    "interface": 2,
+    "pkgbase": "hello",
+    "build_flags": [
+      "--skippgpcheck"
+    ],
+    "makepkg_conf": "OPTIONS=(!debug)\n",
+    "pacman_conf": "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[aurcache]\nSigLevel = Optional TrustAll\nServer = http://aurcache.test/x86_64\n",
+    "mirrorlist": "Server = https://mirror.test/$repo/os/$arch\n",
+    "pgp_keys": [
+      "ABAF11C65A2970B130ABE3C479BE3E4300411886"
+    ],
+    "keyserver": "hkps://keyserver.ubuntu.com",
+    "vcs_sources": [
+      {
+        "source_url": "git+https://example.test/repo.git#branch=main",
+        "dir": "repo",
+        "git_ref": "main"
+      }
+    ],
+    "cpus": 2.5,
+    "scratch": "/work/scratch",
+    "ssh": {
+      "known_hosts": "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n"
+    }
+  },
+  {
+    "interface": 2,
+    "pkgbase": "hello",
+    "build_flags": [],
+    "makepkg_conf": "",
+    "pacman_conf": "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[aurcache]\nSigLevel = Optional TrustAll\nServer = http://aurcache.test/x86_64\n",
+    "mirrorlist": null,
+    "pgp_keys": [],
+    "keyserver": "hkps://keyserver.ubuntu.com",
+    "vcs_sources": [],
+    "cpus": null,
+    "scratch": "/var/lib/aurcache-build",
+    "ssh": null
+  }
+]

@@ -50,10 +50,14 @@ enum Answer {
     Failed { message: String },
 }
 
-/// Whether the helper still starts pacman.
+/// Whether the helper starts pacman.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Gate {
+pub enum Gate {
+    /// Not yet: the sources are being fetched with the worker's SSH key, and
+    /// nothing is installed while code could reach it.
+    Held,
     Open,
+    /// No more: the build is over.
     Closed,
 }
 
@@ -63,10 +67,10 @@ pub struct Helper {
 }
 
 impl Helper {
-    /// A helper that listens nowhere yet.
-    pub fn new() -> Self {
+    /// A helper that listens nowhere yet, its gate as given.
+    pub fn new(gate: Gate) -> Self {
         Self {
-            gate: Arc::new(Mutex::new(Gate::Open)),
+            gate: Arc::new(Mutex::new(gate)),
         }
     }
 
@@ -81,6 +85,14 @@ impl Helper {
         let gate = Arc::clone(&self.gate);
         std::thread::spawn(move || serve(&listener, &output, &gate));
         Ok(())
+    }
+
+    /// Start pacman from now on, for a helper that was held.
+    pub fn open(&self) {
+        let mut gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
+        if *gate == Gate::Held {
+            *gate = Gate::Open;
+        }
     }
 
     /// Start no more pacman. Whatever was started before this returns is
@@ -177,12 +189,19 @@ fn decide(argv: &[String], run: impl FnOnce(&Install) -> Answer) -> Answer {
 fn install_as_root(install: &Install, output: &Output, gate: &Mutex<Gate>) -> Answer {
     let started = {
         let gate = gate.lock().unwrap_or_else(PoisonError::into_inner);
-        if *gate == Gate::Closed {
-            return Answer::Failed {
-                message: "the build is over".to_string(),
-            };
+        match *gate {
+            Gate::Open => start(install, output),
+            Gate::Held => {
+                return Answer::Refused {
+                    reason: "nothing is installed while the sources are fetched".to_string(),
+                };
+            }
+            Gate::Closed => {
+                return Answer::Failed {
+                    message: "the build is over".to_string(),
+                };
+            }
         }
-        start(install, output)
     };
     match started {
         Ok(pid) => {

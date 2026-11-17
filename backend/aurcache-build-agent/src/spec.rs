@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// What the agent and a worker must agree on to work together.
-pub const INTERFACE: u32 = 1;
+pub const INTERFACE: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BuildSpec {
@@ -31,13 +31,16 @@ pub struct BuildSpec {
     pub cpus: Option<f64>,
     /// Where the build's own trees go, inside the container.
     pub scratch: PathBuf,
-    pub credential: Option<Credential>,
+    /// The worker's SSH key, for the build to fetch its sources with.
+    pub ssh: Option<SshAccess>,
 }
 
-/// An SSH credential for the build to use and never read: paths inside the
-/// container that only root can open.
+/// The use of an SSH key the worker holds: the build asks the worker for
+/// signatures over the link ([`crate::ssh_link`]) while makepkg downloads
+/// the sources, and never sees the key itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Credential {
-    pub key: PathBuf,
-    pub known_hosts: Option<PathBuf>,
+pub struct SshAccess {
+    /// The hosts' keys, as a `known_hosts` file holds them. The build's ssh
+    /// accepts no other host.
+    pub known_hosts: String,
 }

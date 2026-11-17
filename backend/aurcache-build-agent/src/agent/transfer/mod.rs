@@ -1,6 +1,6 @@
 //! The other end of each `exec` a worker makes into a build pod: handing the
-//! job in, following the log, handing the packages back, and probing what a
-//! build can reach.
+//! job in, following the log, handing the packages back, probing what a
+//! build can reach, and carrying the SSH link.
 //!
 //! The wire format of each is in `kubernetes-executor-plan.md`, section 4.3.
 //! Every subcommand exits 0 when it did what it was asked and 1 otherwise,
@@ -15,6 +15,7 @@ mod manifest;
 mod probe;
 mod receive;
 mod send;
+mod ssh_link;
 mod stage;
 mod tail;
 
@@ -60,6 +61,12 @@ pub fn send(work: &Path, name: &str) -> ExitCode {
 /// `[Reach]`. Exits 0 whatever it found.
 pub fn probe(targets: &[String], timeout: Duration) -> ExitCode {
     finish(probe::run(targets, timeout))
+}
+
+/// Connect to the agent's link socket and copy bytes between it and
+/// stdin and stdout, until either side ends.
+pub fn ssh_link(socket: &Path) -> ExitCode {
+    finish(ssh_link::run(socket))
 }
 
 /// Turn what a subcommand did into its exit status, naming the error on stderr.

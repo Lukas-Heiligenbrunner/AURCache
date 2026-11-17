@@ -5,11 +5,14 @@
 //! order is what makes it safe:
 //!
 //! 1. as root, before the build user has any process: take the work
-//!    directory, write pacman's configuration, upgrade the image, make the
-//!    build user and its directories, open the helper's socket;
+//!    directory, listen for the worker's SSH link when the job has its key,
+//!    write pacman's configuration, upgrade the image, make the build user
+//!    and its directories, open the helper's socket;
 //! 2. as the build user, through [`user::BuildUser::command`] and nothing
-//!    else: unpack the source, fetch the keys, hold the credential, run
-//!    makepkg, which reaches root only through [`helper`];
+//!    else: unpack the source, fetch the keys; with the worker's SSH key,
+//!    download the sources while a socket reaches it ([`relay`]), with the
+//!    helper refusing everything, then kill every other process and close
+//!    the link; run makepkg, which reaches root only through [`helper`];
 //! 3. as root again, once every other process is dead: measure, write the
 //!    report, hand the directory back.
 
@@ -23,6 +26,7 @@ mod keys;
 mod makepkg;
 mod measure;
 mod output;
+mod relay;
 mod run;
 mod source;
 mod user;
@@ -32,10 +36,12 @@ use aurcache_build_agent::layout::{Scratch, Work};
 use aurcache_build_agent::makepkg_conf::{self, Rendering, Ssh};
 use aurcache_build_agent::pacman_conf;
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
-use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
+use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use children::Quiet;
-use helper::Helper;
+use helper::{Gate, Helper};
+use makepkg::Sources;
 use output::Output;
+use relay::{LinkEnd, Listening, Relay};
 use run::Keep;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -47,6 +53,11 @@ use user::BuildUser;
 
 /// How long the build's processes have to die once they are killed.
 const ENDING: Duration = Duration::from_secs(60);
+
+/// How long the worker's SSH link may still take to come once the sources
+/// are to be downloaded. The worker opens it as the container starts, so it
+/// is normally there long before.
+const LINK_WAIT: Duration = Duration::from_secs(120);
 
 /// What root finds programs through when it was started with nothing set.
 const ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
@@ -120,10 +131,9 @@ fn build(work: &Work, log_file: Option<&Path>) -> Result<(), String> {
         Arc::new(Output::open(log).map_err(|e| format!("opening the build's output: {e}"))?);
     children::start();
 
-    let helper = Helper::new();
     let (spec, made) = match read_spec(work) {
         Ok(spec) => {
-            let made = make(&spec, work, &output, &helper);
+            let made = make(&spec, work, &output);
             (Some(spec), made)
         }
         Err(message) => (
@@ -135,7 +145,6 @@ fn build(work: &Work, log_file: Option<&Path>) -> Result<(), String> {
         ),
     };
 
-    helper.close();
     end()?;
     let vcs_commits = match (&spec, &made) {
         (Some(spec), Ok(made)) => {
@@ -219,8 +228,19 @@ fn is_one_name(pkgbase: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
-/// Everything from the spec to makepkg's end.
-fn make(
+/// Everything from the spec to makepkg's end. The helper starts nothing
+/// once this returns.
+fn make(spec: &BuildSpec, work: &Work, output: &Arc<Output>) -> Result<Made, Failed> {
+    let helper = Helper::new(match spec.ssh {
+        Some(_) => Gate::Held,
+        None => Gate::Open,
+    });
+    let made = make_with(spec, work, output, &helper);
+    helper.close();
+    made
+}
+
+fn make_with(
     spec: &BuildSpec,
     work: &Work,
     output: &Arc<Output>,
@@ -229,13 +249,20 @@ fn make(
     let root = spec.scratch.as_path();
     let scratch = Scratch::new(root);
 
-    // As root, with no process of the build user's anywhere.
+    // As root, with no process of the build user's anywhere. The link is
+    // listened for first, as the worker opens it once the container runs.
+    let listening = spec
+        .ssh
+        .as_ref()
+        .map(|_| Listening::open(&scratch))
+        .transpose()
+        .map_err(at(SetupStep::Credential))?;
     configure_pacman(spec).map_err(at(SetupStep::Config))?;
     output.say("preparing pacman's keyring");
     init_keyring(output).map_err(at(SetupStep::Keyring))?;
     output.say("upgrading the image");
     upgrade(output).map_err(at(SetupStep::Sync))?;
-    if spec.credential.is_some() {
+    if spec.ssh.is_some() {
         credential::provide(output).map_err(at(SetupStep::Credential))?;
     }
     let agent = std::env::current_exe().map_err(at(SetupStep::User))?;
@@ -259,12 +286,22 @@ fn make(
         keys::import(&spec.pgp_keys, &spec.keyserver, &user, output)
             .map_err(at(SetupStep::Keys))?;
     }
-    let loaded = spec
-        .credential
-        .as_ref()
-        .map(|credential| credential::load(credential, root, &scratch, &user, output))
-        .transpose()
-        .map_err(at(SetupStep::Credential))?;
+    let sources = match (&spec.ssh, listening) {
+        (Some(ssh), Some(listening)) => {
+            let fetching = Fetching {
+                spec,
+                work,
+                scratch: &scratch,
+                agent: &agent,
+                user: &user,
+                output,
+            };
+            download(&fetching, ssh, listening)?;
+            Sources::Fetched
+        }
+        _ => Sources::ToFetch,
+    };
+    helper.open();
 
     let conf = scratch.makepkg_conf();
     let rendered = makepkg_conf::render(&Rendering {
@@ -273,10 +310,7 @@ fn make(
         scratch: &scratch,
         cpus: spec.cpus,
         agent: &agent,
-        ssh: loaded.as_ref().map(|loaded| Ssh {
-            socket: &loaded.socket,
-            known_hosts: loaded.known_hosts.as_deref(),
-        }),
+        ssh: None,
     });
     std::fs::write(&conf, rendered).map_err(at(SetupStep::Config))?;
 
@@ -286,7 +320,7 @@ fn make(
             startdir: &scratch.startdir(&spec.pkgbase),
             conf: &conf,
             socket: &scratch.pacman_socket(),
-            flags: &spec.build_flags,
+            args: &makepkg::build(&spec.build_flags, sources),
         },
         &user,
         output,
@@ -296,6 +330,94 @@ fn make(
         message: format!("makepkg could not be started: {e}"),
     })?;
     Ok(Made { status, user })
+}
+
+/// What a download with the worker's SSH key runs with.
+struct Fetching<'a> {
+    spec: &'a BuildSpec,
+    work: &'a Work,
+    scratch: &'a Scratch,
+    agent: &'a Path,
+    user: &'a BuildUser,
+    output: &'a Output,
+}
+
+/// Download the sources while a socket reaches the worker's SSH key, then
+/// make sure nothing can reach it any more: the link is closed and every
+/// other process is dead, `ssh-link` among them, before this returns.
+///
+/// The download itself is best-effort: makepkg can fail here where the
+/// build would not (a VCS client that only the build's dependencies
+/// install), and the build then fetches what is missing on its own.
+fn download(fetching: &Fetching<'_>, ssh: &SshAccess, listening: Listening) -> Result<(), Failed> {
+    let Fetching {
+        spec,
+        work,
+        scratch,
+        agent,
+        user,
+        output,
+    } = *fetching;
+    let link = listening
+        .accept(LINK_WAIT)
+        .map_err(at(SetupStep::Credential))?;
+    let known_hosts = credential::known_hosts(
+        &ssh.known_hosts,
+        &spec.scratch.join(credential::KNOWN_HOSTS),
+    )
+    .map_err(at(SetupStep::Credential))?;
+    let relay = Relay::start(link, scratch).map_err(at(SetupStep::Credential))?;
+    let socket = scratch.ssh_socket();
+    let conf = scratch.makepkg_conf();
+    let rendered = makepkg_conf::render(&Rendering {
+        job: &spec.makepkg_conf,
+        work,
+        scratch,
+        cpus: spec.cpus,
+        agent,
+        ssh: Some(Ssh {
+            socket: &socket,
+            known_hosts: &known_hosts,
+        }),
+    });
+    let downloaded = std::fs::write(&conf, rendered).and_then(|()| {
+        output.say("downloading the sources, with the worker's SSH key");
+        makepkg::run(
+            &makepkg::Run {
+                startdir: &scratch.startdir(&spec.pkgbase),
+                conf: &conf,
+                socket: &scratch.pacman_socket(),
+                args: &makepkg::download(&spec.build_flags),
+            },
+            user,
+            output,
+        )
+    });
+    let link = relay.close();
+    end().map_err(at(SetupStep::Credential))?;
+    if let LinkEnd::Broken { message } = link {
+        return Err(Failed {
+            step: SetupStep::Credential,
+            message: format!(
+                "the SSH link to the worker broke while the sources were downloaded: {message}"
+            ),
+        });
+    }
+    match downloaded {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => {
+            output.say(&format!(
+                "downloading the sources with the SSH key failed (makepkg {}); the build \
+                 fetches what is missing without it",
+                run::describe(status)
+            ));
+            Ok(())
+        }
+        Err(e) => Err(Failed {
+            step: SetupStep::Config,
+            message: format!("makepkg could not be started: {e}"),
+        }),
+    }
 }
 
 /// Check the job's pacman configuration and write it into `/etc`.
@@ -356,7 +478,7 @@ mod tests {
     use super::{is_one_name, read_spec};
     use aurcache_build_agent::layout::Work;
 
-    const SPEC: &str = include_str!("../../../tests/fixtures/interface-1/spec.json");
+    const SPEC: &str = include_str!("../../../tests/fixtures/interface-2/spec.json");
 
     /// A job's work directory, for as long as this is held.
     struct Job {
@@ -390,9 +512,9 @@ mod tests {
     /// it is read: its other fields may mean something else.
     #[test]
     fn another_interface_is_refused_by_its_number() {
-        let other = job(&serde_json::json!({"interface": 2, "packages": []}));
+        let other = job(&serde_json::json!({"interface": 3, "packages": []}));
         let refused = read_spec(&other.work).unwrap_err();
-        assert!(refused.contains("interface 2"), "{refused}");
+        assert!(refused.contains("interface 3"), "{refused}");
 
         let mut spec = fixture();
         spec["interface"] = 0.into();
