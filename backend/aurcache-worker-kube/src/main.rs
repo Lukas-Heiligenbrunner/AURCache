@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
         signal = signals.received() => signal,
     };
     tracing::info!(
-        "Received {signal}: claiming no more builds and stopping the ones running, which \
-         the server queues again"
+        "Received {signal}: claiming no more builds and stopping the ones running; the \
+         server queues a new build of each"
     );
     started.runner.stop();
     match tokio::time::timeout(WIND_DOWN, running).await {
