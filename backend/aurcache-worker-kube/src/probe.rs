@@ -5,6 +5,11 @@
 //! the repository when there is one. The cluster's API cannot say whether its
 //! CNI enforces policies; this asks the network instead.
 //!
+//! The repository is the one target a build is allowed, and so the control:
+//! where it does not answer either, nothing was learned, because a pod that
+//! reaches nothing at all gives the same answers as one behind an enforced
+//! policy.
+//!
 //! The pod only holds still; the agent's `probe` runs in it by exec. A CNI
 //! may take a moment after a pod starts to put a policy around it, so an
 //! answer that says something is open is asked for again, a few times, before
@@ -34,11 +39,13 @@ pub struct Targets {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProbeOutcome {
-    /// What must be closed is closed.
+    /// What must be closed is closed, and the repository, where one was
+    /// tried, answered.
     Enforced,
     /// These answered and should not have.
     Open { reachable: Vec<String> },
-    /// The probe could not be run or read.
+    /// The probe could not be run or read, or what it found says nothing
+    /// either way.
     Inconclusive { reason: String },
 }
 
@@ -112,7 +119,18 @@ async fn run<C: Cluster>(
         repo: targets.repo.clone(),
     };
     let outcome = match attempt(cluster, cfg, agent_image, &name, &asked, wait).await {
-        Ok(reach) => judge(&asked, &reach),
+        Ok(reach) => {
+            let outcome = judge(&asked, &reach);
+            // An inconclusive outcome says it in its reason.
+            if let (ProbeOutcome::Open { .. }, Some(repo)) = (&outcome, silent_repo(&asked, &reach))
+            {
+                tracing::warn!(
+                    "the network probe could not reach the repository at {repo}; \
+                     builds will not find AURCache's own packages"
+                );
+            }
+            outcome
+        }
         Err(err) => ProbeOutcome::Inconclusive {
             reason: format!("{err:#}"),
         },
@@ -273,22 +291,29 @@ fn judge(asked: &Asked, reach: &[Reach]) -> ProbeOutcome {
         .filter(|answer| answer.reachable && asked.closed.contains(&answer.target))
         .map(|answer| answer.target.clone())
         .collect();
-    if let Some(repo) = &asked.repo {
-        let reached = reach
-            .iter()
-            .any(|answer| answer.target == *repo && answer.reachable);
-        if !reached {
-            tracing::warn!(
-                "the network probe could not reach the repository at {repo}; \
-                 builds will not find AURCache's own packages"
-            );
-        }
+    if !open.is_empty() {
+        return ProbeOutcome::Open { reachable: open };
     }
-    if open.is_empty() {
-        ProbeOutcome::Enforced
-    } else {
-        ProbeOutcome::Open { reachable: open }
+    match silent_repo(asked, reach) {
+        None => ProbeOutcome::Enforced,
+        Some(repo) => ProbeOutcome::Inconclusive {
+            reason: format!(
+                "nothing answered a pod labelled like a build, the repository at {repo} \
+                 included, which builds are allowed to reach. A pod that reaches nothing at \
+                 all looks the same as an enforced policy; and builds that cannot reach the \
+                 repository will not find AURCache's own packages"
+            ),
+        },
     }
+}
+
+/// The repository, when it was asked about and did not answer.
+fn silent_repo<'a>(asked: &'a Asked, reach: &[Reach]) -> Option<&'a str> {
+    let repo = asked.repo.as_deref()?;
+    let reached = reach
+        .iter()
+        .any(|answer| answer.target == repo && answer.reachable);
+    (!reached).then_some(repo)
 }
 
 /// The probe pod, which only holds still: it carries the build pods' labels, and nothing else of theirs.
@@ -499,15 +524,15 @@ mod tests {
         }
     }
 
-    /// The probe's answer for the worker, the metadata address and the
-    /// repository, as `reached` says.
-    fn said(reached: [bool; 3]) -> String {
-        let names = ["x:1", "x:2", "x:3"];
-        let list: Vec<Reach> = names
-            .iter()
-            .zip(reached)
-            .map(|(target, reachable)| Reach {
-                target: (*target).to_string(),
+    /// The probe's answer for the targets it was asked about, in order (the
+    /// worker, the metadata address, then the cluster's API or the
+    /// repository), as `reached` says.
+    fn said<const N: usize>(reached: [bool; N]) -> String {
+        let list: Vec<Reach> = reached
+            .into_iter()
+            .enumerate()
+            .map(|(at, reachable)| Reach {
+                target: format!("x:{at}"),
                 reachable,
             })
             .collect();
@@ -540,10 +565,44 @@ mod tests {
         assert_eq!(fake.asked.lock().unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn an_unreachable_repository_is_still_enforced() {
+    /// Nothing answering is what an enforced policy and a network that lets
+    /// nothing through have in common.
+    #[tokio::test(start_paused = true)]
+    async fn a_repository_that_does_not_answer_either_is_inconclusive() {
         let fake = Fake::new(Behaviour::Answers(vec![said([false, false, false])]));
+        let reason = inconclusive(probe(&fake, true, None).await);
+        assert!(reason.contains("the repository at 10.1.2.3:80"), "{reason}");
+        // It may only be slow to answer a new pod, so it is asked again.
+        assert_eq!(fake.asked.lock().unwrap().len(), 1 + RECHECKS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repository_that_answers_late_is_enforced() {
+        let fake = Fake::new(Behaviour::Answers(vec![
+            said([false, false, false]),
+            said([false, false, true]),
+        ]));
         assert_eq!(probe(&fake, true, None).await, ProbeOutcome::Enforced);
+    }
+
+    /// With no repository to try there is no control, and closed is all
+    /// that can be said.
+    #[tokio::test]
+    async fn closed_targets_without_a_repository_mean_enforced() {
+        let fake = Fake::new(Behaviour::Answers(vec![said([false, false])]));
+        assert_eq!(probe(&fake, false, None).await, ProbeOutcome::Enforced);
+    }
+
+    /// Something open is open whatever the repository does.
+    #[tokio::test(start_paused = true)]
+    async fn an_open_port_beside_a_silent_repository_is_open() {
+        let fake = Fake::new(Behaviour::Answers(vec![said([true, false, false])]));
+        assert_eq!(
+            probe(&fake, true, None).await,
+            ProbeOutcome::Open {
+                reachable: vec!["10.1.2.3:8083".into()]
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]

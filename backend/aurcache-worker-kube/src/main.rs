@@ -13,7 +13,7 @@ use aurcache_worker_core::config::CoreConfig;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
-use aurcache_worker_core::repo::Endpoint;
+use aurcache_worker_core::repo::{Endpoint, RepoSection};
 use aurcache_worker_core::runner::Runner;
 use aurcache_worker_kube::config::{self, AgentImage, Config};
 use aurcache_worker_kube::executor::KubeExecutor;
@@ -61,7 +61,8 @@ async fn main() -> Result<()> {
     // that cannot reach it learns something about the policy, not about a
     // server still starting.
     if cfg.network_probe {
-        let probe = tokio::spawn(network_probe(cluster, cfg, agent_image, targets(&core)));
+        let targets = targets(&core, client.repo());
+        let probe = tokio::spawn(network_probe(cluster, cfg, agent_image, targets));
         let reporter = reporter(&core, &identity, &client)?;
         tokio::spawn(tell_server(probe, reporter));
     }
@@ -82,24 +83,30 @@ async fn agent_image(cluster: &KubeCluster, cfg: &Config) -> Result<String> {
     }
 }
 
-/// What the probe tries: the server's worker port, and the repository where
-/// this worker is told its address. The address the server would give is
-/// only known once enrolled, which the probe does not wait for.
-fn targets(core: &CoreConfig) -> Option<Targets> {
+/// What the probe tries: the server's worker port, and the repository as
+/// this worker's builds are told to reach it, when they are given one.
+fn targets(core: &CoreConfig, repo: Option<&RepoSection>) -> Option<Targets> {
     Some(Targets {
         worker: dialled(&core.aurcache_url)?,
-        repo: core.repo_url.as_deref().and_then(dialled),
+        repo: repo
+            .and_then(RepoSection::endpoint)
+            .map(|endpoint| address(&endpoint)),
     })
 }
 
 /// The `host:port` a URL is dialled on.
 fn dialled(raw: &str) -> Option<String> {
-    let Endpoint { host, port } = Endpoint::of(&url::Url::parse(raw).ok()?)?;
-    Some(if host.contains(':') {
+    Endpoint::of(&url::Url::parse(raw).ok()?).map(|endpoint| address(&endpoint))
+}
+
+/// An endpoint as `host:port`, an IPv6 address in its brackets.
+fn address(endpoint: &Endpoint) -> String {
+    let Endpoint { host, port } = endpoint;
+    if host.contains(':') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
-    })
+    }
 }
 
 /// Find out whether the builds' NetworkPolicy is enforced, and say so in
@@ -120,9 +127,16 @@ async fn network_probe(
     let outcome = probe::check(&*cluster, &cfg, &agent_image, &targets).await;
     let unenforced = unenforced(&outcome);
     match &outcome {
+        ProbeOutcome::Enforced if targets.repo.is_some() => tracing::info!(
+            "The builds' NetworkPolicy is enforced: a pod labelled like a build reached the \
+             repository, and not the server's worker port, the cluster's API or the \
+             metadata address"
+        ),
         ProbeOutcome::Enforced => tracing::info!(
-            "The builds' NetworkPolicy is enforced: a pod labelled like a build could not \
-             reach the server's worker port, the cluster's API or the metadata address"
+            "The builds' NetworkPolicy looks enforced: a pod labelled like a build could not \
+             reach the server's worker port, the cluster's API or the metadata address. \
+             Builds are given no repository to try, so nothing told this from a pod that \
+             reaches nothing"
         ),
         ProbeOutcome::Open { .. } => {
             tracing::error!("{}", unenforced.as_deref().unwrap_or_default());
