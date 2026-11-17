@@ -48,7 +48,7 @@ async fn main() -> ExitCode {
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return ExitCode::FAILURE;
     };
-    let served = link::serve(&key, stdout, stdin).await;
+    let served = link::serve(std::sync::Arc::new(key), stdout, stdin).await;
     let _ = child.wait().await;
     print!("{}", served.line());
     match served.end {

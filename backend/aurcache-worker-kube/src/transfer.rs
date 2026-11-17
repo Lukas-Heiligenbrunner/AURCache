@@ -155,7 +155,7 @@ impl<C: Cluster> Agent<'_, C> {
                 },
             };
         };
-        let served = link::serve(&key, stdout, stdin).await;
+        let served = link::serve(key, stdout, stdin).await;
         if let ExecEnd::Failed { message } | ExecEnd::Lost { message } = ended.await {
             tracing::debug!("ssh-link in {} ended: {message}", self.pod);
         }

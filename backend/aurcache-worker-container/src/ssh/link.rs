@@ -6,10 +6,65 @@
 //! however this one ended, so nothing in the container can open one after
 //! the agent closed it.
 
-use super::agent::{Asked, answer};
+use super::agent::{Answer, Asked, answer, is_sign_request, refusal};
 use super::key::SshKey;
 use aurcache_build_agent::ssh_link::{Frame, HEADER_LEN, HELLO, Header, Kind};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::Instant;
+
+/// The most signatures one link is given. A git fetch logs in once per
+/// remote, so a package's download needs a handful; this leaves room for
+/// many sources and retries, and bounds what a build can take.
+pub const SIGNATURES_MAX: u32 = 64;
+/// The most signatures in any [`RATE_WINDOW`].
+pub const RATE_MAX: usize = 16;
+pub const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// How many signatures a link has been given, and when.
+struct Budget {
+    total: u32,
+    recent: VecDeque<Instant>,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            total: 0,
+            recent: VecDeque::new(),
+        }
+    }
+
+    /// Whether one more signature is allowed now; counted if it is.
+    fn take(&mut self, now: Instant) -> Spend {
+        while self
+            .recent
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= RATE_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        if self.total >= SIGNATURES_MAX {
+            return Spend::Exhausted;
+        }
+        if self.recent.len() >= RATE_MAX {
+            return Spend::TooFast;
+        }
+        self.total += 1;
+        self.recent.push_back(now);
+        Spend::Granted
+    }
+}
+
+/// What the budget says to one more signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spend {
+    Granted,
+    Exhausted,
+    TooFast,
+}
 
 /// How a link ended, and what it was used for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +114,7 @@ impl LinkEnd {
 
 /// Serve one link to its end: `from_pod` is what `ssh-link` writes, `to_pod`
 /// what it reads.
-pub async fn serve<R, W>(key: &SshKey, mut from_pod: R, mut to_pod: W) -> Served
+pub async fn serve<R, W>(key: Arc<SshKey>, mut from_pod: R, mut to_pod: W) -> Served
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -69,13 +124,13 @@ where
         refused: 0,
         end: LinkEnd::Closed,
     };
-    served.end = exchange(key, &mut from_pod, &mut to_pod, &mut served).await;
+    served.end = exchange(&key, &mut from_pod, &mut to_pod, &mut served).await;
     let _ = to_pod.shutdown().await;
     served
 }
 
 async fn exchange<R, W>(
-    key: &SshKey,
+    key: &Arc<SshKey>,
     from_pod: &mut R,
     to_pod: &mut W,
     served: &mut Served,
@@ -100,6 +155,7 @@ where
     if let Err(e) = write(to_pod, HELLO).await {
         return LinkEnd::lost(&e);
     }
+    let mut budget = Budget::new();
     loop {
         let mut header = [0; HEADER_LEN];
         if let Err(e) = from_pod.read_exact(&mut header).await {
@@ -126,7 +182,15 @@ where
         if let Err(e) = from_pod.read_exact(&mut message).await {
             return LinkEnd::lost(&e);
         }
-        let answered = answer(key, &message);
+        let answered = if is_sign_request(&message) {
+            match budget.take(Instant::now()) {
+                Spend::Granted => sign_apart(key, message).await,
+                Spend::Exhausted => refusal("past the signatures one link is given"),
+                Spend::TooFast => refusal("signatures asked for faster than allowed"),
+            }
+        } else {
+            answer(key, &message)
+        };
         match answered.asked {
             Asked::Signed => served.signed += 1,
             Asked::Refused(why) => {
@@ -143,6 +207,15 @@ where
             return LinkEnd::lost(&e);
         }
     }
+}
+
+/// Answer a sign request on a blocking thread: an RSA signature takes
+/// milliseconds, which the runtime's own threads are not for.
+async fn sign_apart(key: &Arc<SshKey>, message: Vec<u8>) -> Answer {
+    let key = Arc::clone(key);
+    tokio::task::spawn_blocking(move || answer(&key, &message))
+        .await
+        .unwrap_or_else(|_| refusal("a signature that failed"))
 }
 
 async fn write<W: AsyncWrite + Unpin>(to: &mut W, bytes: &[u8]) -> std::io::Result<()> {
@@ -170,7 +243,7 @@ mod tests {
         let key = SshKey::parse(ed25519_key().private.as_bytes()).unwrap();
         let (mut pod, worker) = tokio::io::duplex(64 * 1024);
         let (from_pod, to_pod) = tokio::io::split(worker);
-        let serving = async { serve(&key, from_pod, to_pod).await };
+        let serving = async { serve(Arc::new(key), from_pod, to_pod).await };
         let pod_side = async {
             pod.write_all(HELLO).await.unwrap();
             let mut theirs = [0; HELLO.len()];
@@ -222,18 +295,41 @@ mod tests {
 
     #[tokio::test]
     async fn another_hello_is_refused_and_a_cut_stream_is_lost() {
-        let key = SshKey::parse(ed25519_key().private.as_bytes()).unwrap();
+        let key = Arc::new(SshKey::parse(ed25519_key().private.as_bytes()).unwrap());
         let (mut pod, worker) = tokio::io::duplex(1024);
         pod.write_all(b"aurcache-ssh-link 9\n").await.unwrap();
         let (from_pod, to_pod) = tokio::io::split(worker);
-        let served = serve(&key, from_pod, to_pod).await;
+        let served = serve(Arc::clone(&key), from_pod, to_pod).await;
         assert!(matches!(served.end, LinkEnd::Refused { .. }), "{served:?}");
 
         let (mut pod, worker) = tokio::io::duplex(1024);
         pod.write_all(HELLO).await.unwrap();
         drop(pod);
         let (from_pod, to_pod) = tokio::io::split(worker);
-        let served = serve(&key, from_pod, to_pod).await;
+        let served = serve(Arc::clone(&key), from_pod, to_pod).await;
         assert!(matches!(served.end, LinkEnd::Lost { .. }), "{served:?}");
+    }
+
+    #[test]
+    fn the_budget_holds_a_rate_and_a_total() {
+        let start = Instant::now();
+        let mut budget = Budget::new();
+        for _ in 0..RATE_MAX {
+            assert_eq!(budget.take(start), Spend::Granted);
+        }
+        assert_eq!(budget.take(start), Spend::TooFast);
+        // A window later, the rate allows more, up to the total.
+        let mut at = start;
+        let mut granted = u32::try_from(RATE_MAX).unwrap();
+        while granted < SIGNATURES_MAX {
+            at += RATE_WINDOW;
+            for _ in 0..RATE_MAX {
+                if budget.take(at) == Spend::Granted {
+                    granted += 1;
+                }
+            }
+        }
+        at += RATE_WINDOW;
+        assert_eq!(budget.take(at), Spend::Exhausted);
     }
 }

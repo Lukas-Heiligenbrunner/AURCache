@@ -971,9 +971,9 @@ dependencies = [
  "aurcache-build-agent",
  "aurcache-common",
  "aurcache-worker-core",
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
- "num-bigint 0.4.8",
+ "num-bigint 0.5.1",
  "ring",
  "serde_json",
  "tar",
@@ -7531,9 +7531,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.9.1"
+version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
 
 [[package]]
 name = "zerotrie"

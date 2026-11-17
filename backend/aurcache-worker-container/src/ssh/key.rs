@@ -76,10 +76,11 @@ impl SshKey {
             }
             bail!("the file holds no private key");
         };
-        let armour: String = body.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let armour: Zeroizing<String> =
+            Zeroizing::new(body.chars().filter(|c| !c.is_ascii_whitespace()).collect());
         let decoded = Zeroizing::new(
             STANDARD
-                .decode(armour)
+                .decode(armour.as_bytes())
                 .map_err(|_| anyhow!("the key's base64 is broken"))?,
         );
         Self::decode(&decoded).map_err(|e| e.context("reading the key"))
@@ -224,6 +225,11 @@ fn ed25519(private: &mut Reader<'_>) -> Result<(Signer, Vec<u8>)> {
 /// OpenSSH stores `n`, `e`, `d`, `iqmp`, `p` and `q`; *ring* takes the CRT
 /// form with `p > q`, so the exponents and the coefficient are worked out
 /// here, once, when the key is read.
+///
+/// The arithmetic is num-bigint's, whose values cannot be zeroized: copies of
+/// the private factors are left in freed memory of the worker's process. That
+/// process is the worker, which holds the key anyway; nothing of a build can
+/// read its memory. The byte forms handed to *ring* are zeroized.
 fn rsa(private: &mut Reader<'_>) -> Result<(Signer, Vec<u8>)> {
     let truncated = |Truncated| anyhow!("the key is truncated");
     let n = private.mpint().map_err(truncated)?;
@@ -264,7 +270,12 @@ fn rsa(private: &mut Reader<'_>) -> Result<(Signer, Vec<u8>)> {
         dQ: dq.as_slice(),
         qInv: qinv.as_slice(),
     })
-    .map_err(|e| anyhow!("the RSA key cannot be used: {e} (at least 2048 bits are needed)"))?;
+    .map_err(|e| {
+        anyhow!(
+            "the RSA key cannot be used: {e} (a key of 2048 to 4096 bits, with a public \
+             exponent of at least 65537, is needed)"
+        )
+    })?;
     let derived = Writer::new()
         .string(RSA.as_bytes())
         .mpint(e)
@@ -478,7 +489,11 @@ pub(crate) mod tests {
         assert!(said(&pem).contains("OpenSSH format"), "{}", said(&pem));
         assert!(said("hello").contains("no private key"));
         let short = keygen("rsa", "1024", "", &[]).private;
-        assert!(said(&short).contains("2048 bits"), "{}", said(&short));
+        assert!(
+            said(&short).contains("2048 to 4096 bits"),
+            "{}",
+            said(&short)
+        );
         let key = ed25519_key().private;
         let mut lines: Vec<&str> = key.lines().collect();
         let corrupt = format!("!!{}", &lines[1][2..]);

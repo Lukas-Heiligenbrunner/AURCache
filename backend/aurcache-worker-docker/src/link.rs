@@ -28,7 +28,7 @@ use tokio_util::io::StreamReader;
 /// would open one it no longer watches.
 pub async fn serve(docker: Docker, container_id: String, key: Arc<SshKey>) -> Served {
     match open(&docker, &container_id).await {
-        Ok(Opened { output, input }) => link::serve(&key, output, input).await,
+        Ok(Opened { output, input }) => link::serve(key, output, input).await,
         Err(message) => Served {
             signed: 0,
             refused: 0,
