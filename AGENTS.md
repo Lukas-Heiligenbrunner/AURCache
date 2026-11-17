@@ -78,11 +78,11 @@ cd docs && yarn install --frozen-lockfile && yarn build
 ./scripts/test-e2e.sh hello
 
 # the build agent, static, running builds in the builder image under a build
-# pod's flags (docker, ~5 min; needs python3, git and ssh-keygen)
+# pod's flags (docker, ~2 min; needs python3, git and ssh-keygen)
 ./scripts/test-build-agent.sh
 
 # the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker;
-# ~25 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk with room)
+# ~15 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk with room)
 ./scripts/test-e2e-kube.sh hello
 E2E_BIG=0 ./scripts/test-e2e-kube.sh              # without the 2 GiB package
 KEEP=1 ./scripts/test-e2e-kube.sh                 # leave the cluster up, then:

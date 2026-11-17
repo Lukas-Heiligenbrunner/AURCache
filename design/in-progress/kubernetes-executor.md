@@ -1297,5 +1297,5 @@ supports.
 
 Measured in kind, on one machine: a 2 GiB package went from the end of its
 build to published at about 50 MiB/s through `exec`; the dispatcher's peak
-memory over that relay was 12 to 13 MiB; a cancelled build's pod was gone 2
+memory over that relay was 12 to 14 MiB; a cancelled build's pod was gone 2
 to 17 seconds after the cancel.

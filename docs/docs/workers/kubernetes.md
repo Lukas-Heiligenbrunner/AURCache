@@ -376,7 +376,7 @@ machine. A real cluster differs, mostly in how fast its API server relays.
   about 50 MiB/s. Very large packages on a slow or rate-limited API server will
   take correspondingly longer.
 - **The dispatcher stays small.** It holds no package in memory or on disk: its
-  peak memory during that 2 GiB relay was 12 to 13 MiB, against the manifest's
+  peak memory during that 2 GiB relay was 12 to 14 MiB, against the manifest's
   256 MiB limit.
 - **A cancelled build's pod is gone in 2 to 17 seconds.** The pod is deleted
   with a five-second grace period; the rest is the kubelet.
