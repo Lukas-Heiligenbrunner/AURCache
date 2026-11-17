@@ -2,13 +2,18 @@
 # The Kubernetes worker
 # =============================================================================
 # A worker that builds each package in a pod of its own, without privileges. It
-# runs next to the server and does the building elsewhere in the cluster:
+# runs next to the server and does the building elsewhere in the cluster.
+# Apply the server alone first, then this:
 #
+#     kubectl apply -k kubernetes/server/
 #     kubectl apply -k kubernetes/kube-worker/
 #
-# Apply the server's manifests first: this expects the server's Service
-# `aurcache` and the namespace `aurcache` they create, and
-# puts its own pieces in two namespaces:
+# (`kubectl apply -k kubernetes/` is the server with a privileged chroot
+# worker beside it; to have this worker from there instead, see the commented
+# `kube-worker` line in kubernetes/kustomization.yaml.)
+#
+# This expects the server's Service `aurcache` and the namespace `aurcache`
+# that server/ creates, and puts its own pieces in two namespaces:
 #
 #   aurcache         the worker itself (the "dispatcher"), one small pod
 #   aurcache-builds  the build pods, in a namespace of their own
@@ -45,15 +50,21 @@ resources:
   # before enabling it.
   # - resourcequota.yaml
 
-# Pin a release instead of following `git`, once a release contains this
-# worker:
+# Image versions. The manifest names `git`, built from master: no release
+# contains this worker yet.
 #
-#     kustomize edit set image \
-#       ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube:<version>
+# `git` is pulled at every start, so until you pin it, any restart of the
+# worker is an upgrade to master as it is that day, and a node may pull
+# another build of the agent than the worker that hands it a job. To stop
+# that, pin what is running by digest
+# (`kubectl -n aurcache get pod -o jsonpath='{..imageID}'` shows it):
 #
 # images:
 #   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
-#     newTag: "<version>"
+#     digest: sha256:<digest>
+#
+# Later, pin a release the same way with `newTag: "<version>"`, the same
+# version as the server's.
 
 # The dispatcher's image is also the image of the agent that runs in every
 # build pod. This copies it, as set above, into WORKER_KUBE_AGENT_IMAGE, so

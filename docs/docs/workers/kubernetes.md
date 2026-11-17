@@ -61,17 +61,24 @@ downloads both again.
 
 ## Installing
 
-Apply the server's manifests first, then the worker's, from the repository
-root:
+Apply the server alone first, then the worker, from the repository root:
 
 ```bash
-kubectl apply -k kubernetes/
+kubectl apply -k kubernetes/server/
 kubectl apply -k kubernetes/kube-worker/
 ```
 
-The worker's kustomization is separate from the server's because its resources
-live in two namespaces and name them. It expects the server's Service
-`aurcache` in the namespace `aurcache`, and creates:
+`kubectl apply -k kubernetes/` is not the first step here: it deploys the
+server together with a privileged [chroot worker](../setup/kubernetes.md) and
+raises the `aurcache` namespace to the `privileged` Pod Security level, which
+this worker exists to avoid. To install from that file instead, comment out
+`components/chroot-workers` in `kubernetes/kustomization.yaml` and uncomment
+the `kube-worker` line there. The two kinds of worker can also run side by
+side.
+
+The worker is a kustomization of its own because its resources live in two
+namespaces and name them. It expects the namespace `aurcache` and the server's
+Service `aurcache` in it, as `kubernetes/server/` creates them, and creates:
 
 | Resource | Where | Purpose |
 |---|---|---|
@@ -88,9 +95,13 @@ Render the result without a cluster with
 The dispatcher's image is
 `ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube`, published for `amd64`,
 `arm64` and `arm/v7`: `latest` and a tag per version from releases, `git` from
-the development branch. The manifests use `git`, because no release contains
-this worker yet. Once one does, pin it with `kustomize edit set image`; the
-comments in `kustomization.yaml` show how.
+the development branch. The manifests name `git` and pull it at every start,
+as the server's manifests do, because no release contains this worker yet. So
+until you pin it, any restart of the worker is an upgrade to that day's
+`git`. Pin what you run by digest in `kubernetes/kube-worker/kustomization.yaml`
+(`images:` is there, commented), and a release the same way once one exists,
+the same version as the server's; [Image versions](../setup/kubernetes.md#image-versions)
+has the reasons and the commands.
 
 It is also the image of the agent that runs in every build pod. The manifests
 name it a second time for that, in `WORKER_KUBE_AGENT_IMAGE`, and the
@@ -318,7 +329,9 @@ apply here: a key generated in a pod would be lost with it.
 Every build pod is covered by the NetworkPolicy in `networkpolicy.yaml`:
 
 - nothing can connect to a build;
-- a build may resolve names through the cluster's DNS;
+- a build may resolve names through the cluster's DNS: pods labelled
+  `k8s-app: kube-dns`, in any namespace, which is how CoreDNS runs on most
+  distributions;
 - it may reach the server's repository ports only (80 and 8081 of the server's
   pods), never its worker port;
 - it may reach the internet outside private address ranges (`10.0.0.0/8`,
@@ -335,13 +348,14 @@ them, and approving a worker remains the trust decision.
 The policy does not know your cluster's addresses. Three kinds of cluster need
 it edited, and `networkpolicy.yaml` has a comment at each place:
 
-- **NodeLocal DNSCache** (Kubespray's default, an option on GKE and EKS). It
-  serves on a link-local address such as `169.254.25.10` or `169.254.20.10`.
-  That address is in the ranges the policy excepts, and it is not a `kube-dns`
-  pod, so lookups fail: builds resolve nothing, and every one stops at its
-  first `pacman -Syu`. The fix is an extra egress rule, an `ipBlock` of that
-  address as a `/32` on port 53, UDP and TCP, which the manifest has commented
-  out.
+- With **NodeLocal DNSCache** (Kubespray's default, an option on GKE and EKS),
+  pods resolve through a link-local address on their node, such as
+  `169.254.25.10` or `169.254.20.10`. The policy refuses link-local addresses,
+  and the cache is not a `kube-dns` pod, so lookups fail: builds resolve
+  nothing, and every one stops at its first `pacman -Syu`. Uncomment the rule
+  for it in `networkpolicy.yaml`: an `ipBlock` for that address's `/32` on
+  port 53, UDP and TCP. The `nameserver` line of `/etc/resolv.conf` in any pod
+  names the address.
 - **Pods, nodes or services on public addresses.** "Outside private ranges"
   only keeps builds off a cluster that uses private ones. On an IPv6 cluster
   whose pods have globally routable addresses (EKS in IPv6 mode), the rule for

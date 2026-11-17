@@ -1,20 +1,25 @@
 # The Kubernetes worker
 
 Manifests for a worker that builds each package in a pod of its own, with no
-privileged pod and no access to a node. Apply them after the server's, from the
-repository root:
+privileged pod and no access to a node. Apply them after the server alone,
+from the repository root:
 
 ```bash
+kubectl apply -k kubernetes/server/
 kubectl apply -k kubernetes/kube-worker/
 ```
 
-This is a kustomization of its own, not part of the one above it: its resources
-live in two namespaces, and name them, where the server's kustomization moves
-everything into one.
+`kubectl apply -k kubernetes/` is something else: the server with a privileged
+chroot worker beside it, in a namespace raised to `privileged`. To have this
+worker from that file instead, comment out `components/chroot-workers` in
+`kubernetes/kustomization.yaml` and uncomment its `kube-worker` line.
+
+This is a kustomization of its own: its resources live in two namespaces, and
+name them.
 
 ## What it needs
 
-- The server, running as the manifests in `kubernetes/` set it up: a Service
+- The server, running as the manifests in `kubernetes/server/` set it up: a Service
   `aurcache` in the namespace `aurcache`, whose pods carry the labels
   `app.kubernetes.io/name: aurcache` and `app.kubernetes.io/component: server`.
 - A CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, kindnet; not

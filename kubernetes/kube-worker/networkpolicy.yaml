@@ -25,7 +25,8 @@ spec:
   # server.
   ingress: []
   egress:
-    # Name resolution.
+    # Name resolution: the cluster DNS pods (CoreDNS, labelled `kube-dns` on
+    # most distributions), in whichever namespace they run.
     - to:
         - namespaceSelector: {}
           podSelector:
@@ -37,12 +38,13 @@ spec:
         - protocol: TCP
           port: 53
     # Name resolution on a cluster with NodeLocal DNSCache (Kubespray's
-    # default, an option on GKE and EKS). It serves on a link-local address
-    # such as 169.254.25.10 or 169.254.20.10. That address is in the ranges
-    # the internet rule below excepts, and it is not a kube-dns pod, so
-    # lookups fail: a build resolves nothing and stops at its first
-    # `pacman -Syu`. The fix is this extra rule, with your cluster's address
-    # (a pod's /etc/resolv.conf has it).
+    # default, an option on GKE and EKS). There, pods resolve through a
+    # link-local address on their own node, served by a host-network process
+    # that the rule above cannot select, and that the link-local exception
+    # below refuses: a build resolves nothing and stops at its first
+    # `pacman -Syu`. Uncomment this with your cluster's address: the
+    # `nameserver` line of /etc/resolv.conf in any pod (169.254.20.10 and
+    # 169.254.25.10 are the usual ones).
     # - to:
     #     - ipBlock:
     #         cidr: 169.254.20.10/32
@@ -94,13 +96,16 @@ spec:
               - 10.0.0.0/8
               - 172.16.0.0/12
               - 192.168.0.0/16
-              - 100.64.0.0/10
-              - 169.254.0.0/16
+              - 100.64.0.0/10     # carrier-grade NAT, used by some clusters
+              - 169.254.0.0/16    # link-local: the cloud metadata endpoint
+              - 127.0.0.0/8
+              # - 203.0.113.0/24  # e.g. your nodes' or API endpoint's public range
         - ipBlock:
             cidr: ::/0
             except:
-              - fc00::/7
-              - fe80::/10
+              - fc00::/7          # unique local
+              - fe80::/10         # link-local
+              - ::1/128
               # The same IPv4 ranges as a NAT64 gateway maps them
               # (64:ff9b::/96), so that it is no way round the list above.
               - 64:ff9b::a00:0/104
