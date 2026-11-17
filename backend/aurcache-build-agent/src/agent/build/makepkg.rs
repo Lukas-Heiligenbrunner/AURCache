@@ -9,6 +9,7 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
+use std::time::Duration;
 
 /// What a login shell runs: makepkg in its place, with the words after the
 /// script as its arguments. Nothing of the job is in the script itself.
@@ -76,6 +77,58 @@ fn ignores_arch(flag: &str) -> bool {
 /// chroot build. With `-s` makepkg installs what is missing, which it does
 /// through `PACMAN_AUTH`, and so through the helper.
 pub fn run(run: &Run<'_>, user: &BuildUser, output: &Output) -> io::Result<ExitStatus> {
+    match run_within(run, user, output, None)? {
+        Within::Ended(status) => Ok(status),
+        // `None` never times out.
+        Within::TimedOut => unreachable!("an unbounded run does not time out"),
+    }
+}
+
+/// Whether the PKGBUILD in `startdir` has a source fetched over SSH, from
+/// what `makepkg --printsrcinfo` prints, run as the build user with no
+/// socket to reach. Its output is data to this, nothing more. A run that
+/// fails reads as one that needs the key, so that a PKGBUILD the reader
+/// trips on is not built without it.
+pub fn fetches_over_ssh(startdir: &Path, conf: &Path, user: &BuildUser) -> bool {
+    let mut printing = user.command("bash");
+    printing
+        .args(["-l", "-c", SCRIPT, "makepkg", "--config"])
+        .arg(conf)
+        .arg("--printsrcinfo")
+        .current_dir(startdir);
+    match super::run::capture(&mut printing, super::run::Keep::Stdout)
+        .and_then(|capturing| capturing.finish(Some(PRINT_TIME)))
+    {
+        Ok(printed) if printed.succeeded() => {
+            aurcache_build_agent::srcinfo::needs_ssh(&printed.text)
+        }
+        _ => true,
+    }
+}
+
+/// How long `makepkg --printsrcinfo` may take.
+const PRINT_TIME: Duration = Duration::from_secs(120);
+
+/// How a bounded run ended.
+pub enum Within {
+    /// makepkg ended on its own, within the time it was given.
+    Ended(ExitStatus),
+    /// It ran past `limit` and was killed. What it left is cleaned up by the
+    /// caller's end-of-build kill.
+    TimedOut,
+}
+
+/// Run makepkg, killing it if it has not ended within `limit`.
+///
+/// The download that holds the SSH window open is bounded this way, so a
+/// PKGBUILD's top-level `sleep` cannot keep the window open until the build
+/// timeout. `None` lets it run to its own end, as the build itself does.
+pub fn run_within(
+    run: &Run<'_>,
+    user: &BuildUser,
+    output: &Output,
+    limit: Option<Duration>,
+) -> io::Result<Within> {
     let mut makepkg = user.command("bash");
     makepkg
         .args(["-l", "-c", SCRIPT, "makepkg", "--config"])
@@ -87,7 +140,16 @@ pub fn run(run: &Run<'_>, user: &BuildUser, output: &Output) -> io::Result<ExitS
         .stderr(output.stdio()?);
     let running = children::spawn(&mut makepkg)?;
     drop(makepkg);
-    Ok(children::wait(running.pid))
+    match limit {
+        None => Ok(Within::Ended(children::wait(running.pid))),
+        Some(limit) => match children::wait_within(running.pid, limit) {
+            Some(status) => Ok(Within::Ended(status)),
+            None => {
+                children::kill(running.pid);
+                Ok(Within::TimedOut)
+            }
+        },
+    }
 }
 
 /// How makepkg ended, for the report.

@@ -141,6 +141,52 @@ pub fn kill_all(limit: Duration) -> Quiet {
     }
 }
 
+/// Kill every process but PID 1 (this one) and `spare`, and wait until none
+/// but those two is left.
+///
+/// What runs before the SSH window -- the image's upgrade and the install of
+/// `openssh` and `git` -- runs install scriptlets as root, which can leave a
+/// daemon behind. One kept until the window could reach the key over the
+/// socket (root ignores its mode) or through `ssh-link`'s open descriptors.
+/// Killing everything but the agent and the one `ssh-link` that carries the
+/// link removes that before the socket opens. Only PID 1 may call this.
+pub fn seal_except(spare: u32, limit: Duration) -> Quiet {
+    let deadline = Instant::now() + limit;
+    loop {
+        let others = others_than(spare);
+        for pid in &others {
+            if let Ok(pid) = libc::pid_t::try_from(*pid) {
+                // SAFETY: a signal to a process in this PID namespace; if it
+                // is already gone the call fails harmlessly.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+        // The reaper collects our children; a process that is not our child
+        // leaves `/proc` when the kernel reaps it.
+        if others.is_empty() {
+            return Quiet::Alone;
+        }
+        if Instant::now() >= deadline {
+            return Quiet::Lingering;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+/// The pids `/proc` lists that are neither this process nor `spare`. An
+/// unreadable `/proc` reads as none, as [`alone`] treats it.
+fn others_than(spare: u32) -> Vec<u32> {
+    let own = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|&pid| pid != own && pid != spare)
+        .collect()
+}
+
 /// The status of a child that ended, removing it from the table.
 fn taken(table: &mut Table, pid: u32) -> Option<ExitStatus> {
     let own = table.own.as_mut()?;
@@ -247,8 +293,23 @@ fn alone() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Peek, collect, peek};
+    use super::{Peek, collect, others_than, peek};
     use std::process::Command;
+
+    /// A spare process is left out of the list to kill; this one and a made-up
+    /// pid aside, the list is every other process `/proc` shows.
+    #[test]
+    fn others_than_spares_self_and_the_one_given() {
+        let own = std::process::id();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let others = others_than(child.id());
+        assert!(!others.contains(&own), "self is spared");
+        assert!(!others.contains(&child.id()), "the spare is spared");
+        // A different spare leaves the child in the list.
+        assert!(others_than(own).contains(&child.id()));
+        child.kill().ok();
+        child.wait().ok();
+    }
 
     /// A child that ended is seen without being collected, and collected
     /// once. Other tests have children of their own, which are looked at and

@@ -46,6 +46,20 @@ pub fn placed() -> Result<(), Misplaced> {
     Ok(())
 }
 
+/// Make the agent non-dumpable, so a build process cannot `ptrace` it or
+/// read its memory through `/proc`. On a host with `ptrace_scope=0` a process
+/// of the same uid could otherwise read the agent while the SSH window holds
+/// a connection open; the key is never in the agent's memory, but this closes
+/// the path regardless.
+pub fn seal_memory() -> io::Result<()> {
+    // SAFETY: `prctl(PR_SET_DUMPABLE, 0)` takes no pointer and has no
+    // precondition.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Kill every other process and exit when told to stop.
 pub fn stop_on_signal() -> io::Result<()> {
     for signal in [libc::SIGTERM, libc::SIGINT] {

@@ -42,6 +42,17 @@ pub struct Listening {
 /// The link, once the worker's `ssh-link` connected and said hello.
 pub struct Link {
     stream: UnixStream,
+    /// The pid of the `ssh-link` process at the other end: the one process,
+    /// besides the agent, that must outlive the pre-window kill.
+    peer: u32,
+}
+
+impl Link {
+    /// The `ssh-link` process carrying the link.
+    #[must_use]
+    pub fn peer(&self) -> u32 {
+        self.peer
+    }
 }
 
 /// How the link was when the relay closed it.
@@ -75,23 +86,37 @@ impl Listening {
     pub fn accept(self, limit: Duration) -> Result<Link, String> {
         let taken = self.take(limit);
         let _ = remove(&self.path);
-        let stream = taken?;
+        let (stream, peer) = taken?;
         greet(&stream).map_err(|e| format!("the link's hello failed: {e}"))?;
-        Ok(Link { stream })
+        Ok(Link { stream, peer })
     }
 
-    fn take(&self, limit: Duration) -> Result<UnixStream, String> {
+    /// Take the worker's link only to close it at once, for a build that
+    /// does not need the key; within `limit`, or not at all.
+    pub fn decline(self, limit: Duration) {
+        let taken = self.take(limit);
+        let _ = remove(&self.path);
+        if let Ok((stream, _)) = taken {
+            if greet(&stream).is_ok() {
+                let mut writer = &stream;
+                let _ = writer.write_all(&Frame::Close.encode());
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn take(&self, limit: Duration) -> Result<(UnixStream, u32), String> {
         let deadline = Instant::now() + limit;
         loop {
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    let uid = peer_uid(&stream)
+                    let peer = peer_cred(&stream)
                         .map_err(|e| format!("asking who opened the link: {e}"))?;
-                    if uid != ROOT.uid {
-                        return Err(format!("the link was opened by uid {uid}, not root"));
+                    if peer.uid != ROOT.uid {
+                        return Err(format!("the link was opened by uid {}, not root", peer.uid));
                     }
                     stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-                    return Ok(stream);
+                    return Ok((stream, peer.pid));
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
@@ -355,8 +380,16 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The uid of the process at the other end of a connection.
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+/// Who is at the other end of a connection.
+struct Peer {
+    uid: u32,
+    pid: u32,
+}
+
+/// The uid and pid of the process at the other end of a connection, from one
+/// `SO_PEERCRED` call, so the pid cannot have been reused between asking the
+/// uid and sparing the process.
+fn peer_cred(stream: &UnixStream) -> io::Result<Peer> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -376,7 +409,11 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         )
     };
     if got == 0 {
-        Ok(credentials.uid)
+        Ok(Peer {
+            uid: credentials.uid,
+            #[allow(clippy::cast_sign_loss)]
+            pid: credentials.pid as u32,
+        })
     } else {
         Err(io::Error::last_os_error())
     }

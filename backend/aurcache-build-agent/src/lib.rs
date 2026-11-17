@@ -23,4 +23,5 @@ pub mod pacman_conf;
 pub mod pacman_request;
 pub mod report;
 pub mod spec;
+pub mod srcinfo;
 pub mod ssh_link;
