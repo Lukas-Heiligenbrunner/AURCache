@@ -581,7 +581,15 @@ pub async fn plan_ssh(
 /// activity log too.
 async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
     let ssh = Arc::clone(services.store.ssh());
-    let restored = tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await??;
+    let restored = match tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await? {
+        Ok(restored) => restored,
+        Err(partial) => {
+            // What did change is said as it would be on success, so the
+            // failure is not taken to mean nothing did.
+            report_hosts(&partial.known_hosts);
+            return Err(partial.error);
+        }
+    };
     match restored.key {
         KeyRestored::Untouched | KeyRestored::Unchanged => {}
         KeyRestored::Installed { fingerprint } => {
@@ -638,7 +646,13 @@ async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
             });
         }
     }
-    match restored.known_hosts {
+    report_hosts(&restored.known_hosts);
+    Ok(())
+}
+
+/// Log what a restore did with the trusted host keys.
+fn report_hosts(known_hosts: &HostsRestored) {
+    match known_hosts {
         HostsRestored::Untouched => {}
         HostsRestored::Merged { file, added } => tracing::info!(
             "Added {added} of the dump's trusted SSH host keys to {}",
@@ -653,7 +667,6 @@ async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
             file.display()
         ),
     }
-    Ok(())
 }
 
 /// What pass 1 did.

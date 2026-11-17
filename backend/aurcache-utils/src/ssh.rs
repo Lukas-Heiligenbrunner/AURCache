@@ -464,6 +464,14 @@ pub struct SshRestored {
     pub known_hosts: HostsRestored,
 }
 
+/// A restore that failed part of the way: what it had changed already, and
+/// why it stopped.
+#[derive(Debug)]
+pub struct PartialRestore {
+    pub known_hosts: HostsRestored,
+    pub error: anyhow::Error,
+}
+
 impl SshAccess {
     /// What a dump with secrets carries of SSH: the key in use, generated or
     /// supplied, byte for byte as it is stored, and the host keys trusted on
@@ -537,8 +545,40 @@ impl SshAccess {
 
     /// Carry out a plan [`Self::plan_restore`] made, and use the key it put in
     /// place at once.
-    pub fn apply_restore(&self, plan: SshPlan) -> anyhow::Result<SshRestored> {
-        let key = match plan.key {
+    ///
+    /// The host keys go first: their merge is checked again under the lock
+    /// and may still refuse, and refusing then must leave the key as it was.
+    /// A failure after that says what had changed already.
+    pub fn apply_restore(&self, plan: SshPlan) -> Result<SshRestored, PartialRestore> {
+        let known_hosts = self
+            .apply_hosts(plan.known_hosts)
+            .map_err(|error| PartialRestore {
+                known_hosts: HostsRestored::Untouched,
+                error,
+            })?;
+        match self.apply_key(plan.key) {
+            Ok(key) => Ok(SshRestored { key, known_hosts }),
+            Err(error) => Err(PartialRestore { known_hosts, error }),
+        }
+    }
+
+    fn apply_hosts(&self, plan: HostsPlan) -> anyhow::Result<HostsRestored> {
+        Ok(match plan {
+            HostsPlan::Keep => HostsRestored::Untouched,
+            HostsPlan::Pinned { file } => HostsRestored::Pinned { file },
+            HostsPlan::Merge { file, text } => HostsRestored::Merged {
+                added: self.hosts.merge(&file, &text)?,
+                file,
+            },
+            HostsPlan::Replace { file, text } => {
+                self.hosts.replace(&file, &text)?;
+                HostsRestored::Replaced { file }
+            }
+        })
+    }
+
+    fn apply_key(&self, plan: KeyPlan) -> anyhow::Result<KeyRestored> {
+        Ok(match plan {
             KeyPlan::Keep => KeyRestored::Untouched,
             KeyPlan::Install {
                 own,
@@ -549,8 +589,24 @@ impl SshAccess {
                     KeyRestored::Unchanged
                 } else {
                     self.reload();
-                    KeyRestored::Installed {
-                        fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+                    // Checked to open before it was written; said so only once
+                    // the server has loaded it as the key it clones with.
+                    match self.identity() {
+                        Ok(identity) if identity.public_key.key_data() == public_key.key_data() => {
+                            KeyRestored::Installed {
+                                fingerprint: identity.fingerprint(),
+                            }
+                        }
+                        Ok(_) => bail!(
+                            "the dump's SSH key was written to {}, but the server loaded \
+                             another key from it",
+                            own.display()
+                        ),
+                        Err(reason) => bail!(
+                            "the dump's SSH key was written to {}, replacing the key there, \
+                             but the server cannot use it: {reason}",
+                            own.display()
+                        ),
                     }
                 }
             }
@@ -584,26 +640,16 @@ impl SshAccess {
                         Ok(identity) => KeyRestored::Regenerated {
                             fingerprint: identity.fingerprint(),
                         },
-                        Err(reason) => bail!("generating a fresh SSH key: {reason}"),
+                        Err(reason) => bail!(
+                            "the server's own SSH key was removed, but a fresh one could not \
+                             be generated: {reason}"
+                        ),
                     }
                 } else {
                     KeyRestored::Removed
                 }
             }
-        };
-        let known_hosts = match plan.known_hosts {
-            HostsPlan::Keep => HostsRestored::Untouched,
-            HostsPlan::Pinned { file } => HostsRestored::Pinned { file },
-            HostsPlan::Merge { file, text } => HostsRestored::Merged {
-                added: self.hosts.merge(&file, &text)?,
-                file,
-            },
-            HostsPlan::Replace { file, text } => {
-                self.hosts.replace(&file, &text)?;
-                HostsRestored::Replaced { file }
-            }
-        };
-        Ok(SshRestored { key, known_hosts })
+        })
     }
 
     /// Load the configured key again, as a restore that replaced it needs.
@@ -673,6 +719,16 @@ fn plan_key(
             ),
         }
     })?;
+    // Only a key in OpenSSH's format can be shown to open before it is
+    // installed. An older encrypted one would be taken on the passphrase's
+    // word, and replace a working key with one libssh2 may refuse.
+    if matches!(file.protection, Protection::LegacyEncrypted) {
+        bail!(
+            "the dump's SSH key is encrypted in an older format, which cannot be checked to \
+             open before it is installed; convert it with `ssh-keygen -p -f <key>` on the \
+             server it came from, and take the dump again"
+        );
+    }
     let passphrase = config
         .passphrase_file
         .as_deref()
@@ -737,7 +793,8 @@ fn plan_hosts(
         }
         (_, None) => Ok(HostsPlan::Keep),
         (_, Some(text)) => {
-            conflicts(&read_entries(&file)?, text)?;
+            let ours = read_optional(&file)?.unwrap_or_default();
+            mergeable(&read_entries(&file)?, &ours, text)?;
             probe_writable(&file)?;
             Ok(HostsPlan::Merge {
                 file,
@@ -747,33 +804,100 @@ fn plan_hosts(
     }
 }
 
-/// Refuse `carried` entries that name a host `ours` holds to another key:
-/// merging them would let a restore move trust backwards.
-fn conflicts(ours: &[Entry], carried: &str) -> anyhow::Result<()> {
-    for entry in KnownHosts::new(carried).filter_map(Result::ok) {
-        if entry.marker().is_some() {
+/// The lines of `carried` to add to the `known_hosts` `ours` was read from,
+/// or why the two cannot be merged.
+///
+/// An entry naming a host `ours` holds to another key of the same type is
+/// refused: merging it would let a restore move trust backwards. Another
+/// type is no conflict -- OpenSSH keeps one key per type, and GitHub has
+/// several. A hashed entry is compared under each name `ours` writes plainly,
+/// hashed with that entry's salt; one that matches none of them names a host
+/// `ours` does not know plainly, which is safe to add only when `ours` holds
+/// no hashed entries either. Otherwise it is left out, as is a line that does
+/// not parse.
+fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<Vec<String>> {
+    let have: std::collections::HashSet<&str> = ours_text.lines().map(str::trim).collect();
+    let plain_names: Vec<String> = ours
+        .iter()
+        .filter_map(|e| match e.host_patterns() {
+            HostPatterns::Patterns(patterns) => Some(patterns),
+            HostPatterns::HashedName { .. } => None,
+        })
+        .flatten()
+        .filter(|p| !p.starts_with('!') && !p.contains(['*', '?']))
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    let ours_hashed = ours
+        .iter()
+        .any(|e| matches!(e.host_patterns(), HostPatterns::HashedName { .. }));
+
+    let mut lines = Vec::new();
+    for line in carried.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || have.contains(line) {
             continue;
         }
-        let HostPatterns::Patterns(patterns) = entry.host_patterns() else {
-            // A hashed name cannot be compared without the name itself.
+        let Ok(entry) = line.parse::<Entry>() else {
+            tracing::warn!("Leaving out an entry of the dump's known_hosts that does not parse");
             continue;
         };
-        for name in patterns
-            .iter()
-            .filter(|p| !p.starts_with('!') && !p.contains(['*', '?']))
-        {
-            if let HostKeyCheck::Changed { recorded } = check(ours, name, entry.public_key()) {
-                bail!(
-                    "the dump trusts {} {} for {name}, but this server trusts another key \
-                     for it ({}); remove one of them before restoring",
-                    entry.public_key().algorithm(),
-                    entry.public_key().fingerprint(HashAlg::Sha256),
-                    recorded.join(", ")
-                );
+        if entry.marker().is_none() {
+            let names: Vec<String> = match entry.host_patterns() {
+                HostPatterns::Patterns(patterns) => patterns
+                    .iter()
+                    .filter(|p| !p.starts_with('!') && !p.contains(['*', '?']))
+                    .map(|p| p.to_ascii_lowercase())
+                    .collect(),
+                hashed @ HostPatterns::HashedName { .. } => {
+                    let resolved: Vec<String> = plain_names
+                        .iter()
+                        .filter(|name| names(hashed, name))
+                        .cloned()
+                        .collect();
+                    if resolved.is_empty() && ours_hashed {
+                        tracing::warn!(
+                            "Leaving out a hashed entry of the dump's known_hosts: this \
+                             server's own hashed entries cannot be compared with it"
+                        );
+                        continue;
+                    }
+                    resolved
+                }
+            };
+            for name in &names {
+                same_type_conflict(ours, name, entry.public_key())?;
             }
         }
+        lines.push(line.to_string());
     }
-    Ok(())
+    Ok(lines)
+}
+
+/// Refuse `presented` for `name` when `ours` holds another key of the same
+/// type for it, and not this one.
+fn same_type_conflict(ours: &[Entry], name: &str, presented: &PublicKey) -> anyhow::Result<()> {
+    let same_type: Vec<&Entry> = ours
+        .iter()
+        .filter(|e| e.marker().is_none() && names(e.host_patterns(), name))
+        .filter(|e| e.public_key().algorithm() == presented.algorithm())
+        .collect();
+    if same_type.is_empty()
+        || same_type
+            .iter()
+            .any(|e| e.public_key().key_data() == presented.key_data())
+    {
+        return Ok(());
+    }
+    bail!(
+        "the dump trusts {} {} for {name}, but this server trusts another key of that type \
+         for it ({}); remove one of them before restoring",
+        presented.algorithm(),
+        presented.fingerprint(HashAlg::Sha256),
+        same_type
+            .iter()
+            .map(|e| e.public_key().fingerprint(HashAlg::Sha256).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Write `private_key` to `own` and its public half beside it; `false` when
@@ -1120,21 +1244,15 @@ impl HostKeys {
             .record
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        conflicts(&read_entries(file)?, text)?;
         let mut merged = read_optional(file)?.unwrap_or_default();
-        let have: std::collections::HashSet<String> =
-            merged.lines().map(|l| l.trim().to_string()).collect();
-        let mut added = 0;
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') || have.contains(line) {
-                continue;
-            }
+        let lines = mergeable(&read_entries(file)?, &merged, text)?;
+        let added = lines.len();
+        for line in lines {
             if !merged.is_empty() && !merged.ends_with('\n') {
                 merged.push('\n');
             }
-            merged.push_str(line);
+            merged.push_str(&line);
             merged.push('\n');
-            added += 1;
         }
         if added > 0 {
             create_private_dir(file)?;
@@ -2013,5 +2131,187 @@ mod tests {
         assert!(identity.passphrase().is_none());
         let key = PrivateKey::from_openssh(fs::read(&path).unwrap()).unwrap();
         assert!(!key.is_encrypted());
+    }
+
+    /// A server whose own key and `known_hosts` are in `dir`.
+    fn server(dir: &Path) -> SshAccess {
+        SshAccess::new(SshConfig {
+            dir: dir.to_path_buf(),
+            key: KeySource::Generated(dir.join(KEY_FILE)),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(dir.join(KNOWN_HOSTS_FILE)),
+        })
+    }
+
+    /// What a dump of `access` carries.
+    fn dumped(access: &SshAccess) -> DumpSsh {
+        access.export().unwrap()
+    }
+
+    fn line(name: &str, key: &PublicKey) -> String {
+        let mut key = key.clone();
+        key.set_comment("");
+        format!("{name} {}", key.to_openssh().unwrap())
+    }
+
+    /// `github.com` hashed with a fixed salt, as `ssh-keygen -H` writes it.
+    fn hashed(name: &str, key: &PublicKey) -> String {
+        let salt = [7u8; 20];
+        let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(&salt).unwrap();
+        mac.update(name.as_bytes());
+        let hash = mac.finalize().into_bytes();
+        let key = line("x", key);
+        let (_, key) = key.split_once(' ').unwrap();
+        format!("|1|{}|{} {key}", base64(&salt), base64(&hash))
+    }
+
+    /// Standard base64, enough for a test fixture.
+    fn base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b))
+                << (8 * (3 - chunk.len()));
+            for i in 0..=chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            }
+            for _ in chunk.len()..3 {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    /// Any ECDSA key: generating one needs a curve feature nothing else does.
+    fn ecdsa_key() -> PublicKey {
+        PublicKey::from_openssh(
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFJZp50VMW6Y\
+             sDFDeExBTrPGujgyJ37OJSKFOTA8q5wJPYZI8m1WUR4NvKTKCl/qOPYx3QgAkqXqg0OyrbtEaQU=",
+        )
+        .unwrap()
+    }
+
+    /// A merge that refuses at apply time leaves the key as it was, and the
+    /// failure says nothing had changed.
+    #[test]
+    fn a_host_refused_at_apply_leaves_the_key_alone() {
+        let old = tempfile::tempdir().unwrap();
+        let from = server(old.path());
+        let github = random_key();
+        fs::write(
+            old.path().join(KNOWN_HOSTS_FILE),
+            line("github.com", &github) + "\n",
+        )
+        .unwrap();
+        let dump = dumped(&from);
+
+        let new = tempfile::tempdir().unwrap();
+        let to = server(new.path());
+        let before = fs::read(new.path().join(KEY_FILE)).unwrap();
+        let plan = to.plan_restore(Some(&dump), SshRestoreMode::Take).unwrap();
+        // Recorded between the plan and its application: another key.
+        fs::write(
+            new.path().join(KNOWN_HOSTS_FILE),
+            line("github.com", &random_key()) + "\n",
+        )
+        .unwrap();
+
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a conflicting merge was applied");
+        };
+        assert_eq!(partial.known_hosts, HostsRestored::Untouched);
+        assert!(format!("{:#}", partial.error).contains("github.com"));
+        assert_eq!(fs::read(new.path().join(KEY_FILE)).unwrap(), before);
+    }
+
+    /// A key encrypted in an older format cannot be shown to open, so a
+    /// restore refuses it rather than install it on the passphrase's word.
+    #[test]
+    fn a_legacy_encrypted_key_is_refused_by_a_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("legacy");
+        let made = std::process::Command::new("ssh-keygen")
+            .args([
+                "-q", "-m", "PEM", "-t", "rsa", "-b", "2048", "-N", "secret", "-f",
+            ])
+            .arg(&key)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ssh-keygen is not installed");
+            return;
+        }
+        let dump = DumpSsh {
+            key: Some(DumpSshKey {
+                private_key: fs::read_to_string(&key).unwrap(),
+                public_key: Some(fs::read_to_string(public_key_path(&key)).unwrap()),
+            }),
+            known_hosts: None,
+        };
+        let passphrase = dir.path().join("passphrase");
+        fs::write(&passphrase, "secret\n").unwrap();
+        let target = dir.path().join("target");
+        let to = SshAccess::new(SshConfig {
+            dir: target.clone(),
+            key: KeySource::Generated(target.join(KEY_FILE)),
+            passphrase_file: Some(passphrase),
+            hosts: HostKeySource::TrustOnFirstUse(target.join(KNOWN_HOSTS_FILE)),
+        });
+        let Err(error) = to.plan_restore(Some(&dump), SshRestoreMode::Take) else {
+            panic!("a legacy encrypted key was planned for");
+        };
+        assert!(format!("{error:#}").contains("older format"), "{error:#}");
+    }
+
+    /// The dump's names are compared as OpenSSH writes them: lower case, and
+    /// a hashed entry under each name this server writes plainly.
+    #[test]
+    fn hashed_and_mixed_case_entries_are_checked_for_conflicts() {
+        let ours_key = random_key();
+        let ours = format!("{}\n", line("github.com", &ours_key));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+
+        let other = random_key();
+        for carried in [line("GitHub.com", &other), hashed("github.com", &other)] {
+            let error = mergeable(&entries, &ours, &carried).unwrap_err();
+            assert!(format!("{error:#}").contains("github.com"), "{error:#}");
+        }
+        // The same key, hashed, is no conflict.
+        assert_eq!(
+            mergeable(&entries, &ours, &hashed("github.com", &ours_key))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Another key type for a known host is merged: OpenSSH keeps one per
+    /// type.
+    #[test]
+    fn another_key_type_for_a_known_host_is_merged() {
+        let ours = format!("{}\n", line("github.com", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+        let carried = line("github.com", &ecdsa_key());
+        assert_eq!(mergeable(&entries, &ours, &carried).unwrap(), vec![carried]);
+    }
+
+    /// A hashed entry that names none of this server's plain names is added
+    /// when this server has no hashed entries -- the host is new to it -- and
+    /// left out when it has, since those cannot be compared.
+    #[test]
+    fn an_unresolved_hashed_entry_is_added_only_when_it_cannot_hide_a_conflict() {
+        let carried = hashed("gitlab.com", &random_key());
+        let plain = format!("{}\n", line("github.com", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&plain).filter_map(Result::ok).collect();
+        assert_eq!(mergeable(&entries, &plain, &carried).unwrap().len(), 1);
+
+        let with_hashed = format!("{}\n", hashed("codeberg.org", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&with_hashed)
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            mergeable(&entries, &with_hashed, &carried)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -42,7 +42,9 @@ What a restore does with them:
   `AURCACHE_SSH_DIR/id_ed25519`, replacing the one a new server generated, and
   the server clones with it at once. The trusted host keys are merged into the
   server's own: none it recorded is lost, and a dump that trusts a different
-  key for a host this server already knows is refused.
+  key of the same type for a host this server already knows is refused. A key
+  encrypted in an older format is refused too, since it cannot be shown to
+  open: convert it with `ssh-keygen -p` and take the dump again.
 - **`--clear` is a fresh install plus what the dump carries.** The key and the
   trusted host keys are the dump's. A dump without them leaves the server as a
   new one starts: a freshly generated key, which every repository has to be

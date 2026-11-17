@@ -229,7 +229,19 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
   - *`--secrets copy`:* the key goes to the server's own key file
     (`AURCACHE_SSH_DIR/id_ed25519`, whatever its type); `known_hosts` is merged,
     never replaced, so a restore of an older dump cannot drop hosts recorded
-    since, and an entry naming a known host with another key refuses it.
+    since. An entry naming a known host with another key of the same type
+    refuses it; another type is merged, as OpenSSH keeps one key per type.
+    Names are compared in lower case, and a hashed entry under each name this
+    server writes plainly, hashed with that entry's salt. A hashed entry that
+    resolves to none of them is added only when this server has no hashed
+    entries of its own, which it could not compare it with.
+  - *Order:* the host keys are applied before the key, since their merge is
+    checked again under the lock and may still refuse; a failure after that
+    reports what had changed (`PartialRestore`).
+  - *Only checkable keys:* a key encrypted in an older (PEM) format cannot be
+    shown to open before it is written, so a restore refuses it. After a key
+    is installed, the server reloads it and reports "installed" only if what
+    it loaded is that key.
   - *`--clear` is a fresh install* plus what the dump carries: the dump's key
     and `known_hosts`, or, without them, a freshly generated key and an empty
     `known_hosts`.
