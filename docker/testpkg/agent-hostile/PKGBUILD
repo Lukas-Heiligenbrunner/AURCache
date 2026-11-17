@@ -36,7 +36,7 @@ if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
   makedepends+=('aurcache-agent-thief')
   # Run as makepkg reads this file: in the download, the one run that has
   # the socket, the key is listed through it.
-  if [[ -n ${SSH_AUTH_SOCK:-} ]] && ssh-add -L 2>/dev/null | grep -q aurcache-agent-test; then
+  if [[ -n ${SSH_AUTH_SOCK:-} ]] && ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
     printf 'probe download-agent-key=listed\n'
   fi
 fi
@@ -130,8 +130,8 @@ build() {
     /srv /run /opt /mnt 2>/dev/null | grep -vc "^$_thief/")"
   _probe ssh-socket "$([[ -e $_scratch/ssh/agent.sock ]] && echo present || echo absent)"
   _probe link-socket "$([[ -e $_scratch/ssh-link/link.sock ]] && echo present || echo absent)"
-  if SSH_AUTH_SOCK=$_scratch/ssh/agent.sock ssh-add -L 2>/dev/null | grep -q aurcache-agent-test ||
-    ssh-add -L 2>/dev/null | grep -q aurcache-agent-test; then
+  if SSH_AUTH_SOCK=$_scratch/ssh/agent.sock ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 ' ||
+    ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
     _probe agent-key listed
   else
     _probe agent-key missing
@@ -146,8 +146,8 @@ build() {
     sleep 5
     _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
     _probe thief-keys "$(if [[ -f $_thief/keys ]]; then wc -l <"$_thief/keys"; else echo none; fi)"
-    _probe thief-agents "$(grep -c aurcache-agent-test "$_thief/agents" 2>/dev/null)"
-    _probe thief-later "$(grep -c aurcache-agent-test "$_thief/later" 2>/dev/null)"
+    _probe thief-agents "$(grep -c '^ssh-ed25519 ' "$_thief/agents" 2>/dev/null)"
+    _probe thief-later "$(grep -c '^ssh-ed25519 ' "$_thief/later" 2>/dev/null)"
     _probe thief-looked "$(grep -c '^looked$' "$_thief/later" 2>/dev/null)"
 
     # The upgrade thief: a root scriptlet of `pacman -Syu` left a daemon
@@ -157,7 +157,7 @@ build() {
     if [[ -f $up/ran ]]; then
       _probe upgrade-thief-ran "$(cat "$up/ran")"
       _probe upgrade-thief-keys "$(if [[ -f $up/keys ]]; then wc -l <"$up/keys"; else echo none; fi)"
-      _probe upgrade-thief-agents "$(grep -c aurcache-agent-test "$up/agents" 2>/dev/null)"
+      _probe upgrade-thief-agents "$(grep -c '^ssh-ed25519 ' "$up/agents" 2>/dev/null)"
       local pid; pid=$(cat "$up/pid" 2>/dev/null)
       if [[ -n $pid && -e /proc/$pid ]]; then
         _probe upgrade-thief-alive yes

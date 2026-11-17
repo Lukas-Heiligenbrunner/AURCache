@@ -275,8 +275,12 @@ ssh-keygen -q -t ed25519 -N '' -C aurcache-agent-test -f "$WORK/ssh/id_ed25519"
 # in the root step installs it as root before the SSH window. Both hunt for
 # the key. The second leaves the repository's `[thief]` name under the shadow
 # package so `-Syu` picks it up.
+# A data-only package the build never reads: `pacman -Syu` upgrades it to the
+# shadow in [thief], and removing its files breaks nothing here.
 UPGRADE_SHADOW=$(docker run --rm --user 0 --entrypoint /bin/bash "$IMAGE" -c '
-    pacman -Qtdq 2>/dev/null | head -n1 || pacman -Qttq 2>/dev/null | grep -vx bash | head -n1')
+    for p in tzdata iana-etc pacman-mirrorlist; do
+        if pacman -Q "$p" >/dev/null 2>&1; then echo "$p"; break; fi
+    done')
 docker run --rm --name "$(container thief)" --user 0 -v "$WORK/repo:/repo" \
     -v "$PWD/docker/testpkg/agent-thief:/thief:ro" \
     -v "$PWD/docker/testpkg/agent-upgrade-thief:/upgrade-thief:ro" \
