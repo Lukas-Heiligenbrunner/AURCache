@@ -1,7 +1,15 @@
 # Building in Kubernetes, one pod per build
 
-Status: **In progress** · Last updated: 2026-11-16 · Kubernetes facts checked
-against the v1.36 documentation; container spikes run on Docker, kernel 7.2
+Status: **Built, not yet merged** (branch `feat/kubernetes-executor`) · Last
+updated: 2026-11-16 · Kubernetes facts checked against the v1.36
+documentation; container spikes run on Docker, kernel 7.2; the worker run in
+kind v0.33 (Kubernetes 1.37, one node, kindnet)
+
+Everything under "Design" is built and covered by `cargo test`, by
+`scripts/test-build-agent.sh` and, in a real cluster, by
+`scripts/test-e2e-kube.sh`. What is left before this moves to `implemented/`
+is under "Still open": user namespaces have not run in any cluster, nothing
+has run on more than one node or on arm, and CI has not run the new jobs.
 
 Design for a worker that builds each job in a short-lived pod of its own, with
 **no privileged pod and no kernel or filesystem requirement on the nodes**
@@ -83,7 +91,8 @@ From `aurcache-common/src/worker.rs` and the server:
   arch list, a concurrency, an affinity and a priority at registration.
 - Every heartbeat lists the builds the worker holds
   (`Heartbeat::active_build_ids`). A build the worker **stops listing is
-  abandoned** and requeued with a fresh attempt
+  abandoned**: the server ends it and, while the package has attempts left,
+  queues a new build of it under a new number
   (`aurcache-utils/src/worker_heartbeat.rs`). The runner sends its first
   heartbeat before its first claim (`aurcache-worker-core/src/runner.rs:212`),
   listing nothing, so whatever a previous process of the same worker held is
@@ -383,12 +392,13 @@ per check) and answers no while:
   a missing ServiceAccount or a policy webhook says no, with a message the
   dispatcher logs once per change. A job claimed into a cluster that refuses
   its pod would be reported `Interrupted` and spend one of the build's
-  attempts for nothing. (Quota is checked but not consumed in a dry run; to
-  confirm against a real quota in the end-to-end test.)
+  attempts for nothing. Quota is checked but not consumed in a dry run, which
+  the end-to-end suite confirms against a real quota that admits no pod.
 
 A pod that stays unschedulable past `WORKER_KUBE_SCHEDULE_TIMEOUT` (declared,
 default 10 minutes) is deleted and reported `Interrupted` ("no node could
-take the build"), so the server requeues it, possibly to another worker. The
+take the build"), so the server ends the build and queues a new one, which
+another worker may take. The
 build timeout counts from the claim, as it does on every worker, so time
 spent pending is time the build does not get; that is the honest accounting,
 since the server's job timeout is about how long a build holds its lease.
@@ -425,11 +435,25 @@ orphans, and the dispatcher deletes them before it enrolls: one
 That loses the progress of builds that were running, which is what every
 worker does on a restart today. Running pods are **not adopted**: resuming
 one would need a way to hand the runner a job it did not claim, which it
-does not have, and is left for later.
+does not have, and is left for later. The server ends each abandoned build
+and queues a new one for its package, under a new number, while the package
+has attempts left.
 
 The pods also bound themselves without the dispatcher:
-`activeDeadlineSeconds` is the build's timeout plus a grace, so a pod outlives
-a dead dispatcher by at most that.
+`activeDeadlineSeconds` is the build's timeout plus ten minutes, so a pod
+outlives a dead dispatcher by at most that.
+
+**Told to stop** (`SIGTERM` from the kubelet, `SIGINT`), the dispatcher does
+the same work itself instead of leaving it to its next start. It is the first
+process of its container, where a signal nobody listens for is dropped, so it
+listens from its first moment. The runner then claims nothing more and trips
+every build's token (each is a child of one the runner holds, so a build
+claimed at that moment stops too); each build deletes its pod as for a
+cancel, and the runner reports it `Interrupted` rather than cancelled, which
+makes the server queue a new build at once instead of when a lease runs out.
+The dispatcher allows forty seconds for that, inside the Deployment's sixty,
+then deletes by label whatever pod of its own is left (`Runner::stop` in
+`aurcache-worker-core`; `main.rs`).
 
 ### Cancellation and timeouts
 
@@ -686,8 +710,14 @@ from inside, so `DiskUsage::chroot` is `None`.
 **SSH build credentials** come from a Secret the operator provides, and from
 nowhere else: `WORKER_KUBE_CREDENTIAL_SECRET` names it, in the builds'
 namespace, with the key under `ssh-privatekey` (as in a
-`kubernetes.io/ssh-auth` Secret) and optionally a `known_hosts`. It is
-mounted `0400` into the build container only. The agent, as root, reads it,
+`kubernetes.io/ssh-auth` Secret) and the hosts' keys under `known_hosts`. It
+is mounted `0400` into the build container only.
+
+`known_hosts` is required. The dispatcher cannot read the Secret, so it always
+names the file, and the agent stops a build whose credential has none, with a
+message that says what to add. The alternative, an ssh that accepts the first
+key a host shows, protects nothing here: a pod is new for every build, so the
+first time is every time. The agent, as root, reads it,
 starts `ssh-agent` *as the build user* and loads the key into it through
 `ssh-add -` on a pipe, before any build code runs; then makepkg's
 `SSH_AUTH_SOCK` and `GIT_SSH_COMMAND` point at it. That is the property the
@@ -706,7 +736,10 @@ out.
 **PGP keys.** The agent imports the job's `validpgpkeys` from the keyserver
 per build, into the build user's own keyring (`WORKER_KEYSERVER`, declared,
 as on the chroot worker). No shared writable keyring in any pod, which is
-what the chroot worker's per-job replicas work hard to emulate. Later, the
+what the chroot worker's per-job replicas work hard to emulate. A key that
+cannot be fetched is a line in the build log and no more, as on the chroot
+worker: `validpgpkeys` often names keys no source of the version is signed
+with, and a build that needs the missing one fails at makepkg's check. Later, the
 dispatcher can fetch each key once over HKP, keep it, and ship the armored
 keys with the job, so builds stop depending on the keyserver being up.
 
@@ -754,9 +787,10 @@ free. All three are unset by default.
 
 **Persistent build directories** (`persistent_builddir`) are not supported:
 a pod's volume goes with the pod. A job that asks for one is built in a
-fresh tree, with a line in its build log and a worker warning saying so,
-rather than refused, since the package builds either way and only its
-rebuild time differs. **Kept failed builds** are not supported either: this
+fresh tree rather than refused, since the package builds either way and only
+its rebuild time differs. Nothing is said about it beyond a debug line on the
+worker: the setting is on for every package that does not turn it off, so a
+warning would be on every build. **Kept failed builds** are not supported either: this
 worker declares no `keep_failed` setting, so there is nothing to turn on,
 and the documentation says so.
 
@@ -812,9 +846,20 @@ is on a private address adds a rule for it.
   builds need nothing from the dispatcher.
 - A NetworkPolicy only does something when the CNI enforces it (Calico,
   Cilium, kube-router, kindnet; not flannel alone). The dispatcher cannot
-  tell from the API whether it is enforced. It can probe, though: at startup,
-  a pod with the builds' labels that tries the server's worker port and the
-  metadata address, and a warning, at error severity, when either answers.
+  tell from the API whether it is enforced. It can probe, though: once
+  enrolled, a pod with the builds' labels tries the server's worker port, the
+  cluster's API and the metadata address, and the repository builds are
+  given. One of the first three answering is an error, logged and sent to the
+  server. The repository is the control: when it does not answer either, the
+  result is inconclusive, because a pod that reaches nothing looks exactly
+  like one behind an enforced policy. The probe has no mirror among its
+  targets, so a mirror on a private address that the policy blocks is found
+  by a build, not by the probe.
+- A CNI may apply a policy to a pod only some seconds after the pod starts.
+  kindnet lets a new pod reach everything for about ten seconds. The probe
+  asks again before it believes an open answer; a build pod's own first
+  seconds are spent waiting for the job and then in the agent's root step,
+  before any package code runs.
 
 ### The build environment
 
@@ -1178,10 +1223,11 @@ that grows with package size.
 
 ---
 
-## How it is being built
+## How it was built
 
 `kubernetes-executor-plan.md` is the plan: the work packages, their
-interfaces, their tests and their order. In one line each:
+interfaces, their tests and their order. All of them are merged into
+`feat/kubernetes-executor`. In one line each:
 
 1. The build agent, with the plain-container test in CI.
 2. The shared worker side, and the Docker worker moved onto the agent.
@@ -1214,9 +1260,9 @@ supports.
 | user namespaces | off by default; `WORKER_KUBE_USER_NAMESPACES=true` turns them on |
 | artifact transport | `pods/exec`, streamed from the pod into the upload, nothing staged on the dispatcher. No protocol change. A direct upload from the pod is a later optimisation |
 | where builds run | a namespace of their own; cleanup is the startup sweep and `activeDeadlineSeconds` |
-| the SSH build credential | a Secret the operator provides; nothing is generated |
+| the SSH build credential | a Secret the operator provides, `known_hosts` included; nothing is generated |
 | caches | none in the first release |
-| `persistent_builddir`, kept failed builds | not supported: the first builds in a fresh tree with a warning, the second is not offered |
+| `persistent_builddir`, kept failed builds | not supported: the first builds in a fresh tree and says nothing, the second is not offered |
 | the Docker worker | no longer deprecated, and moved to the same agent, capabilities and privilege drop (`container-workers.md`) |
 | adopting pods across a restart | no; leftover pods are swept by label at startup |
 | concurrency | one total per worker |
@@ -1229,7 +1275,27 @@ supports.
   package whose install scriptlet wants one will say so by failing; all three
   are on `baseline`'s list.
 - Whether quota admission is evaluated in a server-side dry run on every
-  supported version, which the readiness check assumes.
-- Artifact throughput through the API server, to be measured in kind.
-- User namespaces under the root step, to be run in kind where its node
-  image allows.
+  supported version, which the readiness check assumes. It is on 1.37, where
+  the end-to-end suite holds claims back with a quota that admits no pod.
+- **User namespaces under the root step have not run anywhere.** The kind
+  node on the development machine cannot start a pod with `hostUsers: false`
+  (runc fails mounting sysfs), so the suite skips that leg and says why. The
+  pod is rendered with the field and nothing else changes, but a build in a
+  user namespace is unverified.
+- **One node, one architecture.** Nothing has run on a cluster with several
+  nodes, where the agent image is pulled per node, or on arm.
+- **The agent image by digest.** kind reports a loaded image by a bare
+  `sha256:` id, so `image_of` fell back to the pod's image name in every run;
+  the digest path is covered by unit tests only.
+- An image that cannot be pulled ends the build on first sight
+  (`ErrImagePull`), so a registry that fails briefly costs an attempt. Waiting
+  out a few of the kubelet's retries would be kinder.
+- A probe pod no node takes holds claims back until the probe gives up on it,
+  two minutes at most.
+- CI has run none of this: the `buildAgentTest` job, the kube-worker image's
+  publishing step and the `e2e-kube.yml` workflow are new.
+
+Measured in kind, on one machine: a 2 GiB package went from the end of its
+build to published at about 50 MiB/s through `exec`; the dispatcher's peak
+memory over that relay was 12 to 13 MiB; a cancelled build's pod was gone 2
+to 17 seconds after the cancel.

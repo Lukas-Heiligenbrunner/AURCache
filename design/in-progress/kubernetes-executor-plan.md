@@ -1,7 +1,13 @@
 # Kubernetes worker and shared build agent: implementation plan
 
-Status: **In progress** · Last updated: 2026-11-16 · Branch
+Status: **Done** · Last updated: 2026-11-16 · Branch
 `feat/kubernetes-executor`, one pull request
+
+All fifteen work packages (WP0 to WP14) are merged into the branch. This
+document stays as the record of how the work was cut, and because the code
+cites its section 4 for the interfaces. Where integration changed what a work
+package had built, section 6 says so under WP14; what is left unverified is in
+`kubernetes-executor.md`, "Still open".
 
 The plan for building what `kubernetes-executor.md` and
 `container-workers.md` design. Read those two first: this document says who
@@ -1419,6 +1425,30 @@ backend/aurcache-common/src/worker.rs
 backend/aurcache-common/tests/fixtures/worker-protocol` is empty; update the
 design documents where the code ended up different, and move nothing to
 `implemented/` (that is for after the merge).
+
+**What integration changed**, against what the earlier work packages built:
+
+- **No per-build line about `persistent_builddir`** (WP3's `unsupported`).
+  The setting is on by default, so the build-log line and the worker warning
+  appeared on every build of both container workers. What is left is a debug
+  line.
+- **`known_hosts` is required in the credential Secret** (WP9's seam), and the
+  agent's failure says what to add.
+- **A PGP key that cannot be fetched no longer stops the build** (WP1): it is
+  noted in the log, as on the chroot worker. `Setup { Keys }` is now only a
+  gpg that cannot be started.
+- **The dispatcher stops on `SIGTERM` and `SIGINT`** (WP13's finding): the
+  runner gained `stop`, which ends claiming and stops every build; a build
+  stopped that way is reported `Interrupted`. The dispatcher then sweeps its
+  pods, which is the `deletecollection` at shutdown `rbac.yaml` describes.
+- **The NetworkPolicy probe** (WP12) is inconclusive when the repository does
+  not answer either, takes its repository target from what builds are given
+  rather than from `AURCACHE_REPO_URL` alone, and reports through the runner's
+  own client.
+- **`pod.rs` exports the agent path and the credential mount** (WP9's seam 4);
+  the executor no longer reads them back from the rendered pod.
+- **The e2e harness finds the CLI where cargo put it**, and the hybrid suites
+  expect disk use like every other.
 
 ---
 

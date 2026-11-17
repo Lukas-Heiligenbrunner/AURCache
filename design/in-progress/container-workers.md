@@ -1,7 +1,12 @@
 # Container workers: one build agent for Docker and Kubernetes
 
-Status: **In progress** · Last updated: 2026-11-16 · Spikes run on Docker,
-kernel 7.2, with the published `aurcache-builder-v2`
+Status: **Built, not yet merged** (branch `feat/kubernetes-executor`) · Last
+updated: 2026-11-16 · Spikes run on Docker, kernel 7.2, with the published
+`aurcache-builder-v2`
+
+The agent, the workers' shared side and the Docker worker on the agent are
+built, and both hybrid suites build through the agent. What "Later" lists was
+left out on purpose. It moves to `implemented/` with `kubernetes-executor.md`.
 
 Two workers build each job in a container made from the builder image: the
 Docker worker, which asks a Docker (or Podman) daemon for it, and the
@@ -185,9 +190,12 @@ the runtime:
 5. **As the build user**, each through `setgroups`, `setresgid`,
    `setresuid` and `PR_SET_NO_NEW_PRIVS`, which leaves a process with no
    capabilities and no way to regain one: unpack the source archive; import
-   the job's `validpgpkeys` from the keyserver into its own keyring; start
-   `ssh-agent` and load the credential into it, when the spec names one
-   (root reads the key file and pipes it to `ssh-add -`).
+   the job's `validpgpkeys` from the keyserver into its own keyring (a key
+   that cannot be fetched is noted in the log and the build goes on, as on
+   the chroot worker); start `ssh-agent` and load the credential into it,
+   when the spec names one (root reads the key file and pipes it to
+   `ssh-add -`). A credential that names a `known_hosts` file which is not
+   there stops the build, with a message saying what to add.
 6. **The helper.** Root listens on a unix socket in `run/`. See below.
 7. **makepkg**, as the build user: `makepkg -s <the job's flags>` in
    `src/<pkgbase>`, with a `makepkg.conf` made of the image's own, the job's
@@ -287,8 +295,10 @@ job, and nothing either needs alone:
   no report.
 - **the out-of-memory wording**, naming the worker's own limit and its
   variable.
-- **what is not supported**: the line in the build log and the worker
-  warning for a job that asks for a persistent build directory.
+- **what is not supported**: a job that asks for a persistent build
+  directory is built in a fresh tree, and only a debug line on the worker
+  says so. The setting is on by default, so anything louder would be on
+  every build.
 - **where the agent is** on the worker's machine, and the constants both
   renderers need: the capability list, the paths inside the container.
 
@@ -351,16 +361,17 @@ What an operator sees change:
   more, and the agent itself is not emulated.
 - **Builds report their peak memory, their disk use and their VCS commits**,
   and an out-of-memory failure says so, naming `MEMORY_LIMIT`.
-- **A failure before makepkg** (the mirror is down, the keyserver is) is
-  reported as the worker's, and the build is queued again, where it used to
-  fail the package.
+- **A failure before makepkg** (the mirror is down) is reported as the
+  worker's, and the server ends the build and queues a new one, where it used
+  to fail the package. A PGP key that cannot be fetched is not such a
+  failure: the build goes on without it.
 - **`makepkg -i` and `-r` in a package's build flags stop working**: the
   helper installs dependencies and nothing else.
 - **A custom builder image** needs pacman, makepkg and gpg, and no longer
   needs sudo or an `ab` user. Every image that worked still works.
 
-Still not supported: a persistent build directory (now with a warning), kept
-failed builds, caches. SSH build credentials are something the agent can do
+Still not supported: a persistent build directory (every build starts from a
+fresh tree, silently), kept failed builds, caches. SSH build credentials are something the agent can do
 and the Docker worker does not yet offer.
 
 ### With Podman, rootless engines, and the hybrid image
