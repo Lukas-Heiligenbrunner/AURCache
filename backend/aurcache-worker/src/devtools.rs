@@ -115,6 +115,30 @@ pub(crate) async fn create_base(root: &Path, pacman_conf: &Path) -> Result<()> {
         bail!("mkarchroot failed:\n{log}");
     }
     ensure_multilib(root).await;
+    ensure_utc_localtime(root).await?;
+    Ok(())
+}
+
+/// Point the chroot's `/etc/localtime` at UTC, whatever it was.
+///
+/// devtools' `arch-nspawn` runs the container with `--timezone=off`, so
+/// nothing is copied in from the machine the worker runs on: a build sees the
+/// zone the chroot itself holds, and a freshly made one holds none. Tests that
+/// format or parse local times, and libraries that check for a zone, then
+/// fail. UTC also makes a build's output the same whichever worker produced
+/// it. A chroot made under an older devtools may hold its host's zone instead;
+/// that is replaced too.
+///
+/// A link rather than a copy, so it follows the chroot's own `tzdata`. Safe to
+/// repeat. The chroot is root's, so this goes through `sudo` like the rest.
+pub(crate) async fn ensure_utc_localtime(root: &Path) -> Result<()> {
+    let mut cmd = Command::new("sudo");
+    cmd.args(["-n", "ln", "-sfn", "../usr/share/zoneinfo/UTC"])
+        .arg(root.join("etc/localtime"));
+    let Captured { log, status } = run_capture(cmd).await?;
+    if !status.success() {
+        bail!("setting the chroot's timezone failed:\n{log}");
+    }
     Ok(())
 }
 
@@ -128,6 +152,7 @@ pub(crate) async fn upgrade_candidate(next: &Path) -> Result<()> {
     if !status.success() {
         bail!("chroot upgrade returned non-zero:\n{log}");
     }
+    ensure_utc_localtime(next).await?;
     Ok(())
 }
 
@@ -522,6 +547,32 @@ mod tests {
         let conf = std::fs::read_to_string(replica.join("gpg.conf")).unwrap();
         assert!(conf.contains("lock-never"), "{conf}");
         assert!(conf.contains("no-auto-check-trustdb"), "{conf}");
+    }
+
+    /// The link is made, replaces whatever was there (a file from an older
+    /// devtools, or another zone), and making it again changes nothing.
+    #[tokio::test]
+    async fn the_chroot_gets_a_utc_localtime() {
+        if !std::process::Command::new("sudo")
+            .args(["-n", "true"])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let etc = tmp.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let link = etc.join("localtime");
+        std::fs::write(&link, "an inherited zone").unwrap();
+
+        for _ in 0..2 {
+            ensure_utc_localtime(tmp.path()).await.unwrap();
+            assert_eq!(
+                std::fs::read_link(&link).unwrap(),
+                Path::new("../usr/share/zoneinfo/UTC")
+            );
+        }
     }
 
     /// One build's overrides go to a file of that build's own, which
