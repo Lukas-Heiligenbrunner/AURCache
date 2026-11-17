@@ -209,18 +209,9 @@ ARG TARGETPLATFORM
 # sudoers entry, the sandbox policy, and the patched makechrootpkg
 # (`aurcache-build`). pacman pulls devtools (mkarchroot / makechrootpkg /
 # arch-nspawn) and python as ordinary dependencies.
-#
-# The base image has no /etc/localtime, and systemd-nspawn gives each build
-# chroot the timezone of the system it runs on, so builds would run with none:
-# test suites that format or parse local times then fail. A regular file set
-# to UTC rather than a link, so nspawn copies it into the chroot, and so a
-# host's file bind-mounted over it replaces it rather than landing on the
-# link's target. UTC also keeps a build's output the same whichever worker
-# produced it.
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     --mount=type=bind,from=packager,source=/pkg,target=/tmp/pkg \
-    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker \
-    && cp /usr/share/zoneinfo/UTC /etc/localtime
+    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker
 
 # The same locations the package's tmpfiles declaration creates. A container
 # has no systemd unit to carry them, so they are set here instead.
@@ -258,8 +249,10 @@ ARG TARGETPLATFORM
 # crun and fuse-overlayfs, as upstream's image had) is what DinD mode builds
 # in.
 #
-# The image's own /etc/localtime link goes: a host's bind-mounted over it would
-# land on the link's UTC target and be reported as "UTC"; see server.Dockerfile.
+# No /etc/localtime of its own is left: the base has none, and the `rm` below
+# keeps it so. A host's file bind-mounted there then replaces nothing, rather
+# than landing on a link's UTC target and being reported as "UTC"; see
+# server.Dockerfile.
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     --mount=type=bind,from=packager,source=/pkg,target=/tmp/pkg \
     aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-server aurcache-worker-docker \

@@ -24,6 +24,12 @@ ADD docker/pacman.conf.amd64 /etc/pacman.conf.amd64
 ADD --chmod=0755 docker/pacman-keyring.sh /usr/local/bin/aurcache-pacman-keyring
 ADD --chmod=0755 docker/builder-entrypoint.sh /usr/local/bin/aurcache-builder-entrypoint
 RUN /bin/bash /root/add-aur.sh ab
+# The base image has no /etc/localtime, and builds run directly in this
+# container, so they would run with no timezone: tests that format or parse
+# local times, and libraries that check for a zone, then fail. UTC, as a link
+# to the image's own tzdata, also keeps a build's output the same whichever
+# machine produced it.
+RUN ln -sfn ../usr/share/zoneinfo/UTC /etc/localtime
 USER ab
 # Each container makes its own pacman keyring master key before the build
 # runs; see the script. The worker supplies the command; CMD keeps a bare
