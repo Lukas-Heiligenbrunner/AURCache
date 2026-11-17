@@ -1,0 +1,18 @@
+# What the test changes on the shipped worker: the dispatcher's own crates log
+# at debug, and the builder image is taken from the node when it is there,
+# which is where the test loads it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          env:
+            - name: RUST_LOG
+              value: info,aurcache_worker_kube=debug,aurcache_worker_core=debug
+            - name: WORKER_KUBE_IMAGE_PULL_POLICY
+              value: IfNotPresent

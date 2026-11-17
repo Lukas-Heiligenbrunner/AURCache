@@ -1,0 +1,994 @@
+#!/usr/bin/env bash
+# End-to-end test for the Kubernetes worker, in a throwaway kind cluster.
+#
+# Builds the server and aurcache-worker-kube images from this tree, loads them
+# into a new kind cluster, deploys a minimal server and the worker from
+# kubernetes/kube-worker/ (scripts/fixtures/kube-e2e/), and drives the server
+# with the CLI:
+#
+#   1. the worker enrolls through the `aurcache-enrollment` Secret, shows as
+#      `kubernetes`, and finds the agent image from its own pod;
+#   2. the worker finds the builds' NetworkPolicy enforced; and asked by hand,
+#      a pod labelled like a build cannot open the server's worker port but
+#      reaches its repository, where a pod outside the policy reaches both;
+#   3. with a ResourceQuota that admits no pod, the worker claims nothing;
+#      once it is gone, <package> builds, with its output in the build log, a
+#      peak memory figure and disk use;
+#   4. a package whose dependency only AURCache's repository has builds
+#      against it, and both install with pacman from a pod;
+#   5. a build is cancelled, and its pod is gone within a minute;
+#   6. the worker is killed while a build runs; the new process deletes the
+#      build pod, and the server queues the package again;
+#   7. a package of 2 GiB (docker/testpkg/big) builds and is published; the
+#      relay's throughput and the worker container's peak memory are printed,
+#      and the run fails if that memory reached 256 MiB;
+#   8. build pods in user namespaces, where the cluster's nodes run one;
+#      skipped, saying why, where they do not;
+#   9. without the NetworkPolicy, the worker says it is not enforced, and the
+#      server hears it.
+#
+#   ./scripts/test-e2e-kube.sh [package] [timeout]
+#
+# package defaults to `hello` (from the AUR), timeout to 900 seconds a build.
+#
+# Needs kind, kubectl, docker, jq, curl, cargo and python3, and the packaging
+# submodules (`git submodule update --init`) for the image builds.
+#
+# Environment:
+#   AURCACHE_TEST_PREFIX  prefix of the cluster, the images and the scratch
+#                         directory (default aurcache-test)
+#   KIND, KUBECTL         the binaries (default: from PATH)
+#   E2E_SCRATCH           where the cluster keeps its node's data: containerd's
+#                         images, the pods' volumes and the server's, and the
+#                         builder image on its way in. ~10 GB with the 2 GiB
+#                         package; default $TMPDIR/<prefix>-kube-e2e. `kind
+#                         load` stages the other images in $TMPDIR
+#   E2E_BUILDER_IMAGE     the builder image builds run in (default
+#                         ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest);
+#                         loaded from the local Docker when it is there, pulled
+#                         by the node otherwise
+#   E2E_SKIP_BUILD=1      use the images already built under the prefix
+#   E2E_BIG=0             skip the 2 GiB package
+#   E2E_USER_NAMESPACES   auto (default): run step 8 where the node can;
+#                         1: fail where it cannot; 0: skip it
+#   E2E_MAX_WORKER_MEMORY the worker's peak memory the run fails at, in bytes
+#                         (default 256 MiB)
+#   KEEP=1                leave everything up, pass or fail, to look into it
+#   REUSE=1               run against the cluster a kept run left, without
+#                         building or deploying anything; it is kept again
+#                         unless CLEANUP=1
+#   E2E_LEGS              which legs to run, space-separated, of: enrollment
+#                         policy quota repository cancel restart big userns
+#                         open-policy (default: all, in that order)
+#   CLEANUP               as for the other e2e suites: 1 always tears down, 0
+#                         never; unset, a failed run is left up
+set -euo pipefail
+
+PACKAGE="${1:-hello}"
+BUILD_TIMEOUT="${2:-900}"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$PROJECT_DIR"
+FIXTURE="$SCRIPT_DIR/fixtures/kube-e2e"
+
+PREFIX="${AURCACHE_TEST_PREFIX:-aurcache-test}"
+CLUSTER="$PREFIX-kube-e2e"
+NODE="$CLUSTER-control-plane"
+KIND="${KIND:-kind}"
+KUBECTL="${KUBECTL:-kubectl}"
+# The node image kind v0.33.0 was released with, by digest.
+NODE_IMAGE="kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+SCRATCH="${E2E_SCRATCH:-${TMPDIR:-/tmp}/$CLUSTER}"
+REGISTRY="localhost/$PREFIX"
+TAG=kube-e2e
+SERVER_IMAGE="$REGISTRY/aurcache-server:$TAG"
+WORKER_IMAGE="$REGISTRY/aurcache-worker-kube:$TAG"
+BUILDER_IMAGE="${E2E_BUILDER_IMAGE:-ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest}"
+MAX_WORKER_MEMORY="${E2E_MAX_WORKER_MEMORY:-$((256 * 1024 * 1024))}"
+GIT_URL="git://kube-e2e-git.kube-e2e.svc"
+[ "${KEEP:-0}" = 1 ] && CLEANUP=0
+[ "${REUSE:-0}" = 1 ] && CLEANUP=${CLEANUP:-0}
+
+export KUBECONFIG="$SCRATCH/kubeconfig"
+export AURCACHE_TOKEN="${AURCACHE_TOKEN:-}"
+
+# The compose-based harness's helpers: logging, `pkg_add` and its retry, the
+# build lookups. What it does with compose is replaced below.
+COMPOSE_ARGS=()
+E2E_SERVICES=""
+# shellcheck source=scripts/lib/e2e.sh
+. "$SCRIPT_DIR/lib/e2e.sh"
+# shellcheck source=scripts/lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh"
+
+FORWARD_PID=
+CLUSTER_CREATED=0
+RESULTS=()
+
+k() { "$KUBECTL" "$@"; }
+
+aurcache_cli() {
+    ensure_forward
+    "$CLI_BIN" "$@"
+}
+
+# What a leg found, for the summary at the end.
+result() {
+    RESULTS+=("$*")
+    log "    => $*"
+}
+
+fail() {
+    log "ERROR: $*"
+    dump_logs_on_failure
+    exit 1
+}
+
+# Run `$@` every two seconds until it succeeds, for at most `$1` seconds.
+wait_for() {
+    local timeout=$1 what=$2
+    shift 2
+    local deadline=$((SECONDS + timeout))
+    until "$@"; do
+        if ((SECONDS >= deadline)); then
+            log "ERROR: gave up after ${timeout}s waiting for $what"
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# =============================================================================
+# The worker's log
+# =============================================================================
+
+dispatcher_pod() {
+    k -n aurcache get pods -l app.kubernetes.io/name=aurcache-kube-worker \
+        -o jsonpath='{.items[0].metadata.name}'
+}
+
+# The running worker container's log, from `$1` (RFC 3339) when given.
+dispatcher_log() {
+    local from=()
+    [ -n "${1:-}" ] && from=(--since-time="$1")
+    k -n aurcache logs deploy/aurcache-kube-worker -c worker "${from[@]}" 2>/dev/null \
+        | sed 's/\x1b\[[0-9;]*m//g'
+}
+
+# Whether the worker logged a line matching `$1` since `$2`.
+dispatcher_said() { dispatcher_log "${2:-}" | grep -qE -- "$1"; }
+
+# Wait for the worker to log `$1`, since `$2`, for `$3` seconds.
+expect_said() {
+    local pattern=$1 since=${2:-} timeout=${3:-120}
+    if ! wait_for "$timeout" "the worker to log /$pattern/" dispatcher_said "$pattern" "$since"; then
+        fail "the worker never logged /$pattern/"
+    fi
+    dispatcher_log "$since" | grep -E -- "$pattern" | tail -n 1 | sed 's/^/    | /'
+}
+
+dispatcher_restarts() {
+    k -n aurcache get pod "$(dispatcher_pod)" \
+        -o jsonpath='{.status.containerStatuses[0].restartCount}'
+}
+
+dispatcher_running_after() {
+    local before=$1 state
+    [ "$(dispatcher_restarts)" -gt "$before" ] || return 1
+    state=$(k -n aurcache get pod "$(dispatcher_pod)" \
+        -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}')
+    [ -n "$state" ]
+}
+
+# Kill the worker's process outright, as a crash or an OOM kill would, and
+# wait for the kubelet to start it again in the same pod.
+crash_dispatcher() {
+    local pod cid before
+    pod=$(dispatcher_pod)
+    before=$(dispatcher_restarts)
+    cid=$(k -n aurcache get pod "$pod" -o jsonpath='{.status.containerStatuses[0].containerID}')
+    docker exec "$NODE" crictl stop --timeout 0 "${cid#containerd://}" >/dev/null
+    wait_for 120 "the worker to start again" dispatcher_running_after "$before" \
+        || fail "the worker did not come back after being killed"
+}
+
+# =============================================================================
+# Builds and pods
+# =============================================================================
+
+build_json() { aurcache_cli --format json builds get "$1" 2>/dev/null; }
+build_status() { build_json "$1" | jq -r '.status'; }
+build_output() { aurcache_cli builds output "$1" 2>/dev/null; }
+build_said() { build_output "$1" | grep -qF -- "$2"; }
+
+# The build pods, as `name uid build-id` lines.
+build_pods() {
+    k -n aurcache-builds get pods -l aurcache.io/build-id -o json \
+        | jq -r '.items[] | "\(.metadata.name) \(.metadata.uid) \(.metadata.labels["aurcache.io/build-id"])"'
+}
+no_build_pods() { [ -z "$(build_pods)" ]; }
+pod_uid_gone() { ! build_pods | grep -q " $1 "; }
+
+# Whether a build pod other than the one with uid `$1` exists.
+another_pod() { build_pods | awk -v uid="$1" '$2 != uid' | grep -q .; }
+
+build_ref_exists() { [ -n "$(latest_build_ref "$1")" ]; }
+
+# The `--wait` of an add, in the background, as ADD_PID; its exit status is
+# the build's.
+add_in_background() {
+    local out=$1
+    shift
+    pkg_add "$@" >"$out" 2>&1 &
+    ADD_PID=$!
+}
+
+# Apply a pod from stdin, wait for it to end, print its log, delete it. True
+# when it succeeded.
+run_pod() {
+    local ns=$1 name=$2 timeout=${3:-300} phase=
+    k apply -f - >/dev/null
+    local deadline=$((SECONDS + timeout))
+    while ((SECONDS < deadline)); do
+        phase=$(k -n "$ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        [ "$phase" = Succeeded ] || [ "$phase" = Failed ] && break
+        sleep 2
+    done
+    k -n "$ns" logs "$name" --all-containers 2>&1 || true
+    if [ "$phase" != Succeeded ] && [ "$phase" != Failed ]; then
+        k -n "$ns" get events --field-selector "involvedObject.name=$name" \
+            -o custom-columns=REASON:.reason,MESSAGE:.message --no-headers 2>/dev/null | tail -n 3
+    fi
+    k -n "$ns" delete pod "$name" --wait=false >/dev/null 2>&1 || true
+    [ "$phase" = Succeeded ]
+}
+
+# =============================================================================
+# The cluster
+# =============================================================================
+
+preflight() {
+    local lacking=0 tool
+    for tool in "$KIND" "$KUBECTL" docker jq curl cargo python3; do
+        command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' is required but not found"; lacking=1; }
+    done
+    docker info >/dev/null 2>&1 || { echo "ERROR: cannot talk to the Docker daemon"; lacking=1; }
+    [ "$lacking" -eq 0 ] || exit 1
+    if [ "${E2E_SKIP_BUILD:-0}" != 1 ]; then
+        require_packaging_submodules aurcache-sandbox aurcache-worker aurcache-server \
+            aurcache-worker-docker
+    fi
+    if [ "${REUSE:-0}" = 1 ]; then
+        "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER" \
+            || { echo "ERROR: REUSE=1, but there is no kind cluster named $CLUSTER"; exit 1; }
+        return
+    fi
+    if "$KIND" get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+        echo "ERROR: a kind cluster named $CLUSTER exists already (a run left up?)."
+        echo "       Delete it with: $KIND delete cluster --name $CLUSTER"
+        exit 1
+    fi
+    if [ -d "$SCRATCH" ] && [ -n "$(ls -A "$SCRATCH")" ]; then
+        echo "ERROR: $SCRATCH holds what an earlier run left. Remove it with:"
+        echo "       docker run --rm --name $CLUSTER-cleanup -v $SCRATCH:/d --entrypoint rm $NODE_IMAGE -rf /d/containerd /d/kubelet /d/local-path"
+        echo "       rm -rf $SCRATCH"
+        exit 1
+    fi
+}
+
+build_images() {
+    if [ "${E2E_SKIP_BUILD:-0}" = 1 ]; then
+        log "=== Using the images already built (E2E_SKIP_BUILD=1) ==="
+        docker image inspect "$SERVER_IMAGE" "$WORKER_IMAGE" >/dev/null \
+            || fail "E2E_SKIP_BUILD=1, but $SERVER_IMAGE or $WORKER_IMAGE is missing"
+        return
+    fi
+    log "=== Building the server and Kubernetes worker images ==="
+    "$SCRIPT_DIR/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
+        --tag "$TAG" "$REGISTRY"
+}
+
+build_cli() {
+    log "=== Building the AURCache CLI ==="
+    CLI_BIN=$(cd "$PROJECT_DIR/backend" && cargo_executable aurcli build -q -p aurcache-cli)
+}
+
+create_cluster() {
+    log "=== Creating kind cluster $CLUSTER (node data in $SCRATCH) ==="
+    mkdir -p "$SCRATCH"/{containerd,kubelet,local-path}
+    # The node keeps everything heavy under /var, on an anonymous volume of
+    # the Docker daemon's unless mounted elsewhere: images, the pods' volumes
+    # (a build's work directory) and the server's persistent volume.
+    cat >"$SCRATCH/cluster.yaml" <<EOF
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    image: $NODE_IMAGE
+    extraMounts:
+      - hostPath: $SCRATCH/containerd
+        containerPath: /var/lib/containerd
+      - hostPath: $SCRATCH/kubelet
+        containerPath: /var/lib/kubelet
+      - hostPath: $SCRATCH/local-path
+        containerPath: /var/local-path-provisioner
+EOF
+    CLUSTER_CREATED=1
+    "$KIND" create cluster --name "$CLUSTER" --config "$SCRATCH/cluster.yaml" \
+        --kubeconfig "$KUBECONFIG" --wait 180s
+}
+
+load_images() {
+    log "=== Loading images into the node ==="
+    "$KIND" load docker-image --name "$CLUSTER" "$SERVER_IMAGE" "$WORKER_IMAGE"
+    if docker image inspect "$BUILDER_IMAGE" >/dev/null 2>&1; then
+        log "    loading $BUILDER_IMAGE from the local Docker"
+        # One platform only: from Docker's containerd image store, a pulled
+        # image saves with an index naming every platform's manifest but the
+        # blobs of one, which the node's import refuses.
+        docker save --platform linux/amd64 -o "$SCRATCH/builder.tar" "$BUILDER_IMAGE"
+        "$KIND" load image-archive --name "$CLUSTER" "$SCRATCH/builder.tar"
+        rm -f "$SCRATCH/builder.tar"
+    else
+        log "    $BUILDER_IMAGE is not in the local Docker; the node pulls it"
+    fi
+}
+
+# The run's own kustomization over the fixture: what differs per run.
+write_overlay() {
+    local dir="$SCRATCH/overlay" base token
+    mkdir -p "$dir/packages"
+    base=$(realpath --relative-to="$dir" "$FIXTURE")
+    token=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+    cp "$FIXTURE/packages/kube-e2e-dep/PKGBUILD" "$dir/packages/kube-e2e-dep.PKGBUILD"
+    cp "$FIXTURE/packages/kube-e2e-app/PKGBUILD" "$dir/packages/kube-e2e-app.PKGBUILD"
+    cp "$FIXTURE/packages/kube-e2e-slow/PKGBUILD" "$dir/packages/kube-e2e-slow.PKGBUILD"
+    cp "$PROJECT_DIR/docker/testpkg/big/PKGBUILD" "$dir/packages/aurcache-big-test.PKGBUILD"
+    cat >"$dir/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - $base
+images:
+  - name: ghcr.io/lukas-heiligenbrunner/aurcache-server
+    newName: $REGISTRY/aurcache-server
+    newTag: $TAG
+  - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker-kube
+    newName: $REGISTRY/aurcache-worker-kube
+    newTag: $TAG
+secretGenerator:
+  - name: aurcache-enrollment
+    namespace: aurcache
+    literals:
+      - token=$token
+    options:
+      disableNameSuffixHash: true
+configMapGenerator:
+  - name: kube-e2e-packages
+    namespace: kube-e2e
+    files:
+      - packages/kube-e2e-dep.PKGBUILD
+      - packages/kube-e2e-app.PKGBUILD
+      - packages/kube-e2e-slow.PKGBUILD
+      - packages/aurcache-big-test.PKGBUILD
+    options:
+      disableNameSuffixHash: true
+patches:
+  - target:
+      kind: Deployment
+      name: aurcache-kube-worker
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: WORKER_KUBE_BUILDER_IMAGE
+          value: $BUILDER_IMAGE
+  - target:
+      kind: Deployment
+      name: kube-e2e-git
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/initContainers/0/image
+        value: $BUILDER_IMAGE
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: $BUILDER_IMAGE
+EOF
+}
+
+deploy() {
+    log "=== Deploying the server, the git daemon and the Kubernetes worker ==="
+    write_overlay
+    k apply -k "$SCRATCH/overlay" >/dev/null
+    k -n aurcache rollout status deploy/aurcache --timeout=300s \
+        || fail "the server did not become ready"
+    k -n kube-e2e rollout status deploy/kube-e2e-git --timeout=600s \
+        || fail "the git daemon did not become ready"
+    k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
+        || fail "the Kubernetes worker did not start"
+}
+
+# The API through a port-forward to the server's Service, on a free port.
+# Started again whenever it has died.
+ensure_forward() {
+    if [ -n "$FORWARD_PID" ] && kill -0 "$FORWARD_PID" 2>/dev/null; then
+        return
+    fi
+    local out="$SCRATCH/port-forward.log" port='' i
+    k -n aurcache port-forward svc/aurcache :8080 >"$out" 2>&1 &
+    FORWARD_PID=$!
+    for i in $(seq 50); do
+        port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$out" | head -n 1)
+        [ -n "$port" ] && break
+        sleep 0.2
+    done
+    [ -n "$port" ] || { cat "$out"; echo "ERROR: the port-forward to the server did not start"; return 1; }
+    export AURCACHE_PORT=$port
+    export AURCACHE_URL="http://127.0.0.1:$port/api"
+}
+
+wait_for_service() {
+    log "=== Waiting for the API ==="
+    wait_for 120 "the API" aurcache_cli health >/dev/null || fail "the API did not answer"
+}
+
+worker_json() {
+    aurcache_cli --format json worker list 2>/dev/null \
+        | jq -c '[.[] | select(.kind == "kubernetes")] | first // empty'
+}
+worker_approved() { [ "$(worker_json | jq -r '.status // empty')" = approved ]; }
+
+# =============================================================================
+# The legs
+# =============================================================================
+
+check_enrollment() {
+    log "=== 1. The worker enrolls and starts ==="
+    wait_for 180 "the Kubernetes worker to be approved" worker_approved \
+        || fail "no approved worker of kind kubernetes (the enrollment Secret should approve it)"
+    local worker
+    worker=$(worker_json)
+    log "    worker: $(jq -r '"\(.name), \(.kind), \(.status), arches \(.arches | join(","))"' <<<"$worker")"
+    result "enrolled through the Secret, approved, kind kubernetes"
+
+    # The agent image, read from the worker's own pod: what its container
+    # status says it runs, by digest when that is pullable.
+    local line agent own spec
+    expect_said "Build pods go to namespace aurcache-builds and take the build agent from" "" 60
+    line=$(dispatcher_log | grep -E "take the build agent from" | tail -n 1)
+    agent=${line##* from }
+    own=$(k -n aurcache get pod "$(dispatcher_pod)" -o jsonpath='{.status.containerStatuses[0].imageID}')
+    spec=$(k -n aurcache get pod "$(dispatcher_pod)" -o jsonpath='{.spec.containers[0].image}')
+    log "    agent image: $agent"
+    log "    the pod's image: $spec, id $own"
+    if [ "$agent" != "$own" ] && [ "$agent" != "$spec" ]; then
+        fail "the agent image is neither the worker pod's image id nor its image"
+    fi
+    if [[ $agent == *@sha256:* ]]; then
+        result "agent image from the worker's own pod, by digest ($agent)"
+    else
+        result "agent image from the worker's own pod, by name: its id ($own) is not pullable"
+    fi
+    expect_said "Build pods share their node's user namespace" "" 10
+    result "warned that build pods share the node's user namespace"
+    if dispatcher_log | grep -qE "Deleted [0-9]+ build pod"; then
+        fail "a first start found build pods to delete"
+    fi
+}
+
+check_network_policy() {
+    log "=== 2. The builds' NetworkPolicy ==="
+    # The worker's own check, which runs beside enrollment and takes ~20s.
+    if ! wait_for 180 "the worker's NetworkPolicy check" dispatcher_said \
+        "The builds' NetworkPolicy (is enforced|is not enforced|was not checked)|Could not check whether the builds' NetworkPolicy"; then
+        fail "the worker never reported its NetworkPolicy check"
+    fi
+    dispatcher_log | grep -E "NetworkPolicy" | sed 's/^/    | /'
+    dispatcher_said "The builds' NetworkPolicy is enforced" \
+        || fail "the worker did not find the NetworkPolicy enforced (kindnet enforces it)"
+    result "the worker's probe: NetworkPolicy enforced"
+
+    # The same question asked by hand, with a control outside the policy, so
+    # that "enforced" cannot mean that nothing answers at all.
+    local server_ip built control
+    server_ip=$(k -n aurcache get pods -l app.kubernetes.io/component=server \
+        -o jsonpath='{.items[0].status.podIP}')
+    built=$(probe_pod aurcache-builds kube-e2e-probe-build "aurcache.aurcache.svc:8083" \
+        "$server_ip:8083" "aurcache.aurcache.svc:8081") || fail "the labelled probe pod failed: $built"
+    control=$(probe_pod kube-e2e kube-e2e-probe-control "aurcache.aurcache.svc:8083" \
+        "$server_ip:8083" "aurcache.aurcache.svc:8081") || fail "the control probe pod failed: $control"
+    log "    labelled like a build: $built"
+    log "    outside the policy:    $control"
+    reach() { jq -r --arg t "$2" '.[] | select(.target == $t) | .reachable' <<<"$1"; }
+    [ "$(reach "$built" "aurcache.aurcache.svc:8083")" = false ] \
+        || fail "a pod labelled like a build reached the server's worker port"
+    [ "$(reach "$built" "$server_ip:8083")" = false ] \
+        || fail "a pod labelled like a build reached the server pod's worker port"
+    [ "$(reach "$built" "aurcache.aurcache.svc:8081")" = true ] \
+        || fail "a pod labelled like a build could not reach the repository"
+    [ "$(reach "$control" "aurcache.aurcache.svc:8083")" = true ] \
+        || fail "the control pod could not reach the worker port, so the check proves nothing"
+    result "by hand: a build pod reaches the repository and not the worker port; the control reaches both"
+}
+
+# The agent's `probe` from a pod in namespace `$1`, labelled like a build
+# there; prints its one line of JSON.
+#
+# After a pause: kindnet puts the policy around a pod only once it has seen
+# the pod, a moment after its containers start, and lets everything through
+# until then. The worker's own probe asks again for the same reason.
+probe_pod() {
+    local ns=$1 name=$2 out
+    shift 2
+    local args=""
+    for target in "$@"; do args+=" --connect $target"; done
+    out=$(run_pod "$ns" "$name" 120 <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+  namespace: $ns
+  labels:
+    app.kubernetes.io/managed-by: aurcache-worker-kube
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: $WORKER_IMAGE
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep 10; exec /usr/local/bin/aurcache-build-agent probe --timeout 5$args"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+EOF
+    ) || { echo "$out"; return 1; }
+    grep -E '^\[' <<<"$out" | tail -n 1
+}
+
+check_quota_then_build() {
+    log "=== 3. A full quota holds claims back; then $PACKAGE builds ==="
+    local since pid ref
+    since=$(now)
+    k -n aurcache-builds create quota kube-e2e-full --hard=count/pods=0 >/dev/null
+    add_in_background "$SCRATCH/add-$PACKAGE.log" "$PACKAGE" --platform x86_64 \
+        --wait --wait-timeout "$BUILD_TIMEOUT" --wait-stall-after 600
+    pid=$ADD_PID
+    expect_said "Not claiming builds: the cluster refuses a build pod" "$since" 120
+    wait_for 60 "the build of $PACKAGE to be queued" build_ref_exists "$PACKAGE" \
+        || fail "the add of $PACKAGE queued no build"
+    ref=$(latest_build_ref "$PACKAGE")
+    CURRENT_BUILD_REF=$ref
+    # A claim would show as a pod, refused here, and as a build no longer
+    # queued.
+    sleep 15
+    [ "$(build_status "$ref")" = 3 ] || fail "$ref left the queue while the quota was full"
+    no_build_pods || fail "a build pod exists while the quota admits none"
+    result "quota full: the worker said so and $ref stayed queued"
+
+    since=$(now)
+    k -n aurcache-builds delete quota kube-e2e-full >/dev/null
+    expect_said "Claiming builds again" "$since" 120
+    if ! wait "$pid"; then
+        sed 's/^/    /' "$SCRATCH/add-$PACKAGE.log"
+        fail "$ref did not build"
+    fi
+    result "quota gone: claiming again, and $ref built"
+
+    local output json
+    output=$(build_output "$ref")
+    for line in "[worker] created pod" "[worker] handing the job to the pod" "==> Finished making"; do
+        grep -qF -- "$line" <<<"$output" || fail "the log of $ref has no '$line'"
+    done
+    json=$(build_json "$ref")
+    log "    $(jq -c '{size, peak_memory, disk_usage, worker_name}' <<<"$json")"
+    [ "$(jq -r '.peak_memory // empty' <<<"$json")" != "" ] || fail "$ref reports no peak memory"
+    [ "$(jq -r '.disk_usage // empty' <<<"$json")" != "" ] || fail "$ref reports no disk use"
+    result "$ref: build output in its log, peak memory $(jq -r .peak_memory <<<"$json") B, disk use reported"
+    wait_for 60 "the build pod of $ref to go" no_build_pods || fail "the pod of $ref was left behind"
+}
+
+check_repository() {
+    log "=== 4. A dependency from AURCache's own repository ==="
+    CURRENT_BUILD_REF=
+    pkg_add "$GIT_URL/kube-e2e-dep.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT" \
+        | sed 's/^/    /' || fail "kube-e2e-dep did not build"
+    CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-dep)
+    pkg_add "$GIT_URL/kube-e2e-app.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT" \
+        | sed 's/^/    /' || { CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-app); fail "kube-e2e-app did not build"; }
+    local ref
+    ref=$(latest_build_ref kube-e2e-app)
+    CURRENT_BUILD_REF=$ref
+    build_said "$ref" "kube-e2e-app: found kube-e2e-dep's marker" \
+        || fail "the build of $ref did not find its dependency installed"
+    build_output "$ref" | grep -E "kube-e2e-dep" | head -n 3 | sed 's/^/    | /'
+    result "$ref built against kube-e2e-dep installed from AURCache's repository"
+
+    log "    installing $PACKAGE and kube-e2e-app from the repository in a pod"
+    local out
+    out=$(run_pod kube-e2e kube-e2e-install 600 <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-e2e-install
+  namespace: kube-e2e
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 0
+  containers:
+    - name: install
+      image: $BUILDER_IMAGE
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -euc
+        - |
+          printf '[repo]\nSigLevel = Optional TrustAll\nServer = http://aurcache.aurcache.svc:8081/\$arch\n' >> /etc/pacman.conf
+          pacman -Sy --noconfirm "\$@" >/dev/null
+          pacman -Q "\$@"
+          cat /usr/share/kube-e2e-dep/marker /usr/share/kube-e2e-app/marker
+        - install
+        - $PACKAGE
+        - kube-e2e-app
+EOF
+    ) || { echo "$out" | tail -n 20; fail "installing from the repository failed"; }
+    echo "$out" | sed 's/^/    | /'
+    grep -q "kube-e2e-app marker" <<<"$out" || fail "kube-e2e-app installed without its files"
+    result "$PACKAGE, kube-e2e-app and kube-e2e-dep installed with pacman from the repository"
+}
+
+# The build of `$1` running its build(): its log says so.
+running_build() { build_said "$1" "kube-e2e-slow: sleeping"; }
+
+check_cancel() {
+    log "=== 5. Cancelling a build ==="
+    CURRENT_BUILD_REF=
+    pkg_add "$GIT_URL/kube-e2e-slow.git" --ref master | sed 's/^/    /' \
+        || fail "adding kube-e2e-slow failed"
+    wait_for 60 "kube-e2e-slow to be queued" build_ref_exists kube-e2e-slow \
+        || fail "no build of kube-e2e-slow"
+    local ref started
+    ref=$(latest_build_ref kube-e2e-slow)
+    CURRENT_BUILD_REF=$ref
+    wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
+        || fail "$ref never started building"
+    started=$SECONDS
+    aurcache_cli builds cancel "$ref" | sed 's/^/    /'
+    wait_for 60 "the pod of $ref to go" no_build_pods || fail "the pod of $ref outlived its cancel by a minute"
+    log "    the pod was gone $((SECONDS - started))s after the cancel"
+    wait_for 60 "$ref to end" build_over "$ref" || fail "$ref did not end after its cancel"
+    result "$ref cancelled; its pod gone after $((SECONDS - started))s"
+}
+
+build_over() {
+    local status
+    status=$(build_status "$1")
+    [ "$status" = 1 ] || [ "$status" = 2 ]
+}
+
+check_restart() {
+    log "=== 6. The worker dies under a build ==="
+    # A setting this worker does not honour, for the warning that says so;
+    # set here so the check does not rest on the server's default.
+    aurcache_cli raw PATCH /package/kube-e2e-slow/settings/persistent_builddir \
+        --body '{"value":"true"}' >/dev/null || fail "could not set persistent_builddir"
+    local before ref pod uid since
+    before=$(latest_build_ref kube-e2e-slow)
+    aurcache_cli builds retry "$before" | sed 's/^/    /'
+    wait_for 60 "a new build of kube-e2e-slow" ref_moved kube-e2e-slow "$before" \
+        || fail "the retry queued nothing"
+    ref=$(latest_build_ref kube-e2e-slow)
+    CURRENT_BUILD_REF=$ref
+    wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
+        || fail "$ref never started building"
+    build_said "$ref" "asks for a persistent build directory, which this worker does not keep" \
+        || fail "the log of $ref does not say persistent_builddir is not kept"
+    wait_for 30 "the server to hear of it" server_logged warning \
+        "asks for a persistent build directory, which this worker does not keep" \
+        || fail "the server's log has no warning that persistent_builddir is not kept"
+    result "$ref: the build log and the server's log say the persistent build directory is not kept"
+    read -r pod uid _ <<<"$(build_pods | head -n 1)"
+    log "    $ref runs in $pod ($uid)"
+
+    since=$(now)
+    crash_dispatcher
+    expect_said "Deleted 1 build pod\(s\) left by a previous run of this worker" "$since" 120
+    wait_for 60 "pod $uid to go" pod_uid_gone "$uid" || fail "the old build pod survived the sweep"
+    result "worker killed mid-build: the new process deleted $pod"
+
+    # The server gives the build up once the new process says it holds none,
+    # and queues the package again while it has attempts left: in the same
+    # build, or in a new one after it.
+    wait_for 180 "kube-e2e-slow to be built again in a new pod" another_pod "$uid" \
+        || fail "the server did not queue kube-e2e-slow again, or the worker did not claim it"
+    local again
+    again=$(latest_build_ref kube-e2e-slow)
+    log "    now building: $again in $(build_pods | awk '{print $1}' | head -n 1)"
+    if [ "$again" = "$ref" ]; then
+        result "the server queued $ref again and the worker started it in a new pod"
+    else
+        log "    $ref: $(build_output "$ref" | grep -v '^\s*$' | tail -n 1)"
+        build_over "$ref" || fail "$ref is still going beside $again"
+        result "the server ended $ref and queued $again, which the worker started in a new pod"
+    fi
+    CURRENT_BUILD_REF=$again
+    aurcache_cli builds cancel "$again" >/dev/null
+    wait_for 60 "the pod of $again to go" no_build_pods || fail "the pod of $again outlived its cancel"
+}
+
+# Whether package `$1` has a build newer than `$2`.
+ref_moved() { [ "$(latest_build_ref "$1")" != "$2" ]; }
+
+check_big() {
+    log "=== 7. A package of 2 GiB ==="
+    if [ "${E2E_BIG:-1}" = 0 ]; then
+        result "skipped: the 2 GiB package (E2E_BIG=0)"
+        return
+    fi
+    local pid finished='' restarts json ref size end seconds peak
+    restarts=$(dispatcher_restarts)
+    CURRENT_BUILD_REF=
+    local before
+    before=$(latest_build_ref aurcache-big-test)
+    if [ -n "$before" ]; then
+        # A cluster this ran in before (REUSE=1), where adding it again
+        # would queue nothing.
+        ensure_forward
+        "$CLI_BIN" builds retry "$before" --wait --wait-timeout 3600 --wait-stall-after 600 \
+            >"$SCRATCH/add-big.log" 2>&1 &
+        pid=$!
+    else
+        add_in_background "$SCRATCH/add-big.log" "$GIT_URL/aurcache-big-test.git" --ref master \
+            --wait --wait-timeout 3600 --wait-stall-after 600
+        pid=$ADD_PID
+    fi
+    # When the build container ended: from there on it is the relay.
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -z "$finished" ]; then
+            finished=$(k -n aurcache-builds get pods -l aurcache.io/build-id -o json 2>/dev/null \
+                | jq -r '[.items[].status.containerStatuses[]? | select(.name == "build")
+                          | .state.terminated.finishedAt // empty] | first // empty')
+        fi
+        sleep 2
+    done
+    ref=$(latest_build_ref aurcache-big-test)
+    CURRENT_BUILD_REF=$ref
+    if ! wait "$pid"; then
+        tail -n 20 "$SCRATCH/add-big.log" | sed 's/^/    /'
+        fail "$ref did not build"
+    fi
+    json=$(build_json "$ref")
+    size=$(jq -r '.size' <<<"$json")
+    end=$(jq -r '.end_time' <<<"$json")
+    if [ -n "$finished" ]; then
+        seconds=$((end - $(date -d "$finished" +%s)))
+        ((seconds > 0)) || seconds=1
+        log "    $ref: $((size / 1024 / 1024)) MiB relayed and published in ${seconds}s after the build ended"
+        result "$ref: $((size / 1024 / 1024)) MiB, ~$((size / seconds / 1024 / 1024)) MiB/s from the build's end to published"
+    else
+        result "$ref: $((size / 1024 / 1024)) MiB published (the build's end was not seen, so no throughput)"
+    fi
+    ((size > 2 * 1024 * 1024 * 1024)) || fail "$ref published only $size bytes"
+
+    # The container's own cgroup, which its memory limit says it is.
+    local limit
+    limit=$(k -n aurcache exec deploy/aurcache-kube-worker -c worker -- cat /sys/fs/cgroup/memory.max)
+    peak=$(k -n aurcache exec deploy/aurcache-kube-worker -c worker -- cat /sys/fs/cgroup/memory.peak)
+    log "    the worker container's peak memory: $((peak / 1024 / 1024)) MiB, of its limit of $limit"
+    [ "$limit" = "$((256 * 1024 * 1024))" ] \
+        || fail "the worker's cgroup has limit $limit, not the manifest's 256Mi: the wrong cgroup?"
+    [ "$(dispatcher_restarts)" = "$restarts" ] || fail "the worker restarted during the relay"
+    ((peak < MAX_WORKER_MEMORY)) || fail "the worker's peak memory, $peak bytes, reached $MAX_WORKER_MEMORY"
+    result "the worker container's peak memory: $((peak / 1024 / 1024)) MiB (limit for the run $((MAX_WORKER_MEMORY / 1024 / 1024)) MiB)"
+}
+
+check_user_namespaces() {
+    log "=== 8. Build pods in user namespaces ==="
+    if [ "${E2E_USER_NAMESPACES:-auto}" = 0 ]; then
+        result "skipped: user namespaces (E2E_USER_NAMESPACES=0)"
+        return
+    fi
+    local out
+    if ! out=$(run_pod kube-e2e kube-e2e-userns 90 <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-e2e-userns
+  namespace: kube-e2e
+spec:
+  restartPolicy: Never
+  hostUsers: false
+  containers:
+    - name: userns
+      image: $WORKER_IMAGE
+      imagePullPolicy: IfNotPresent
+      command: ["cat", "/proc/self/uid_map"]
+EOF
+    ); then
+        local reason
+        # The event, without the runtime's wrapping of it.
+        reason=$(grep -vE '^\s*$' <<<"$out" | tail -n 1 | sed 's/.*error during container init: //')
+        if [ "${E2E_USER_NAMESPACES:-auto}" = 1 ]; then
+            fail "the node cannot run a pod with hostUsers: false: $reason"
+        fi
+        result "skipped: user namespaces; the node cannot run a pod with hostUsers: false: $reason"
+        return
+    fi
+    log "    a pod with hostUsers: false maps: $(tr -s ' ' <<<"$out" | head -n 1)"
+
+    local since ref uid hostusers=
+    since=$(now)
+    k -n aurcache set env deploy/aurcache-kube-worker WORKER_KUBE_USER_NAMESPACES=true >/dev/null
+    k -n aurcache rollout status deploy/aurcache-kube-worker --timeout=300s \
+        || fail "the worker did not start again with user namespaces"
+    expect_said "take the build agent from" "$since" 120
+    if dispatcher_said "Build pods share their node's user namespace" "$since"; then
+        fail "the worker still warns about user namespaces with them on"
+    fi
+    wait_for 120 "the worker to be approved again" worker_approved || fail "the worker did not come back"
+    local before
+    before=$(latest_build_ref kube-e2e-dep)
+    aurcache_cli builds retry "$before" | sed 's/^/    /'
+    wait_for 60 "a new build of kube-e2e-dep" ref_moved kube-e2e-dep "$before" \
+        || fail "the retry queued nothing"
+    ref=$(latest_build_ref kube-e2e-dep)
+    CURRENT_BUILD_REF=$ref
+    while ! build_over "$ref"; do
+        [ -n "$hostusers" ] || hostusers=$(k -n aurcache-builds get pods -l aurcache.io/build-id \
+            -o jsonpath='{.items[0].spec.hostUsers}' 2>/dev/null || true)
+        sleep 2
+    done
+    [ "$(build_status "$ref")" = 1 ] || fail "$ref failed with user namespaces on"
+    [ "$hostusers" = false ] || fail "the build pod of $ref did not ask for a user namespace (hostUsers: '$hostusers')"
+    result "$ref built in a pod with hostUsers: false"
+}
+
+# Whether the server's log has `$2` at severity `$1`, among its latest.
+server_logged() {
+    curl -fsS "$AURCACHE_URL/log?severity=$1&limit=100" 2>/dev/null \
+        | jq -r '.. | strings' | grep -qF -- "$2"
+}
+
+check_open_policy() {
+    log "=== 9. Without the NetworkPolicy ==="
+    local since
+    k -n aurcache-builds delete networkpolicy aurcache-builds >/dev/null
+    since=$(now)
+    crash_dispatcher
+    expect_said "The builds' NetworkPolicy is not enforced" "$since" 180
+    result "the worker says the NetworkPolicy is not enforced"
+    ensure_forward
+    wait_for 90 "the server to hear of it" server_logged error \
+        "The builds' NetworkPolicy is not enforced" \
+        || fail "the server's log has no error saying the NetworkPolicy is not enforced"
+    result "the server's log has it at error severity"
+    k apply -f "$PROJECT_DIR/kubernetes/kube-worker/networkpolicy.yaml" >/dev/null
+}
+
+# =============================================================================
+# Failure and cleanup
+# =============================================================================
+
+dump_logs_on_failure() {
+    [ "$CLUSTER_CREATED" = 1 ] || return 0
+    {
+        echo "=== pods ==="
+        k get pods -A -o wide
+        echo "=== events in aurcache-builds ==="
+        k -n aurcache-builds get events --sort-by=.lastTimestamp
+        echo "=== the worker ==="
+        k -n aurcache logs deploy/aurcache-kube-worker -c worker --timestamps
+        echo "=== the worker, its previous container ==="
+        k -n aurcache logs deploy/aurcache-kube-worker -c worker --previous --timestamps
+        echo "=== the server ==="
+        k -n aurcache logs deploy/aurcache --timestamps
+        echo "=== the git daemon ==="
+        k -n kube-e2e logs deploy/kube-e2e-git --all-containers --timestamps
+    } >"$LOG_FILE" 2>&1 || true
+
+    echo "--- builds ---"
+    aurcache_cli builds list --limit 20 2>/dev/null || echo "    (unavailable)"
+    if [ -n "$CURRENT_BUILD_REF" ]; then
+        echo "--- build $CURRENT_BUILD_REF: last 25 lines ---"
+        build_output "$CURRENT_BUILD_REF" | tail -n 25 || echo "    (unavailable)"
+    fi
+    echo "--- the worker: errors and warnings ---"
+    dispatcher_log | grep -E " (ERROR|WARN) " | tail -n 15 || echo "    (none)"
+    echo "--- the server: errors ---"
+    k -n aurcache logs deploy/aurcache 2>/dev/null | filter_noise | grep -E " ERROR " | tail -n 10 || echo "    (none)"
+    echo
+    echo "    Full logs: $LOG_FILE"
+}
+
+cleanup() {
+    local exit_code=$? do_cleanup
+    if [ "${CLEANUP:-}" = 1 ]; then
+        do_cleanup=1
+    elif [ "${CLEANUP:-}" = 0 ]; then
+        do_cleanup=0
+    elif [ "$exit_code" -eq 0 ]; then
+        do_cleanup=1
+    else
+        do_cleanup=0
+    fi
+    if [ -n "$FORWARD_PID" ]; then kill "$FORWARD_PID" 2>/dev/null || true; fi
+
+    if [ "$do_cleanup" = 0 ]; then
+        echo "=== Leaving the cluster up (exit $exit_code) ==="
+        echo "    Logs:       $LOG_FILE"
+        echo "    Cluster:    export KUBECONFIG=$KUBECONFIG"
+        echo "                kubectl -n aurcache logs deploy/aurcache-kube-worker"
+        echo "                kubectl -n aurcache port-forward svc/aurcache 8080"
+        echo "    Tear down:  $KIND delete cluster --name $CLUSTER"
+        echo "                docker run --rm --name $CLUSTER-cleanup -v $SCRATCH:/d --entrypoint rm $NODE_IMAGE -rf /d/containerd /d/kubelet /d/local-path"
+        echo "                rm -rf $SCRATCH"
+        [ "${E2E_SKIP_BUILD:-0}" = 1 ] || echo "                docker rmi $SERVER_IMAGE $WORKER_IMAGE"
+        return
+    fi
+
+    log "=== Cleaning up ==="
+    if [ "$CLUSTER_CREATED" = 1 ]; then
+        "$KIND" delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+    fi
+    # The node wrote as root under the scratch directory.
+    if [ -d "$SCRATCH" ]; then
+        docker run --rm --name "$CLUSTER-cleanup" -v "$SCRATCH:/d" --entrypoint rm "$NODE_IMAGE" \
+            -rf /d/containerd /d/kubelet /d/local-path >/dev/null 2>&1 || true
+        rm -rf "$SCRATCH"
+    fi
+    if [ "${E2E_SKIP_BUILD:-0}" != 1 ]; then
+        docker rmi "$SERVER_IMAGE" "$WORKER_IMAGE" >/dev/null 2>&1 || true
+    fi
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+# Every leg, in order. Some build on what an earlier one left: `restart` on
+# `cancel`'s package, `userns` on `repository`'s.
+LEGS=(enrollment policy quota repository cancel restart big userns open-policy)
+if [ -n "${E2E_LEGS:-}" ]; then read -r -a LEGS <<<"$E2E_LEGS"; fi
+
+RUN_STARTED=$SECONDS
+preflight
+trap cleanup EXIT
+announce_log
+build_cli
+if [ "${REUSE:-0}" = 1 ]; then
+    log "=== Reusing the cluster $CLUSTER (REUSE=1; nothing rebuilt or deployed) ==="
+    CLUSTER_CREATED=1
+else
+    build_images
+    create_cluster
+    load_images
+    deploy
+fi
+wait_for_service
+for leg in "${LEGS[@]}"; do
+    case $leg in
+        enrollment) check_enrollment ;;
+        policy) check_network_policy ;;
+        quota) check_quota_then_build ;;
+        repository) check_repository ;;
+        cancel) check_cancel ;;
+        restart) check_restart ;;
+        big) check_big ;;
+        userns) check_user_namespaces ;;
+        open-policy) check_open_policy ;;
+        *) fail "no leg named '$leg'" ;;
+    esac
+done
+
+log "=== Kubernetes end-to-end test complete in $((SECONDS - RUN_STARTED))s ==="
+for line in "${RESULTS[@]}"; do echo "    - $line"; done

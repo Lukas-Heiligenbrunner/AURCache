@@ -4,7 +4,7 @@
 //! its own. In order: the configuration, the cluster, the image build pods
 //! take the agent from, the pods a previous run left, enrollment, and the
 //! runner. The check that the builds' NetworkPolicy is enforced runs beside
-//! all of that, from before enrollment, and holds nothing up.
+//! the runner, from once enrolled, and holds nothing up.
 
 use anyhow::{Context, Result};
 use aurcache_common::api::activity::Severity;
@@ -55,13 +55,13 @@ async fn main() -> Result<()> {
     // too, whose pod carries the same label.
     executor.sweep().await?;
 
-    let probe = cfg
-        .network_probe
-        .then(|| tokio::spawn(network_probe(cluster, cfg, agent_image, targets(&core))));
-
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, KIND).await?;
-    if let Some(probe) = probe {
+    // Once enrolled, the server's worker port is known to answer, so a probe
+    // that cannot reach it learns something about the policy, not about a
+    // server still starting.
+    if cfg.network_probe {
+        let probe = tokio::spawn(network_probe(cluster, cfg, agent_image, targets(&core)));
         let reporter = reporter(&core, &identity, &client)?;
         tokio::spawn(tell_server(probe, reporter));
     }
