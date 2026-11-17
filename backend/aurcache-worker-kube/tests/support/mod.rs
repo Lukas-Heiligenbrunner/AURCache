@@ -11,6 +11,8 @@
 // Each test binary uses its own part of this.
 #![allow(dead_code)]
 
+pub mod server;
+
 use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_common::worker::{JobDescriptor, MirrorlistOffer};

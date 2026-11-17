@@ -414,7 +414,12 @@ pub fn refused(message: &str) -> CompleteReport {
 /// message when it gave one.
 #[must_use]
 pub fn unscheduled_past(waited: Duration, message: Option<&str>) -> CompleteReport {
-    let waited = aurcache_common::units::format_duration(waited.as_secs());
+    // A whole number of minutes or more reads with its unit; anything else
+    // is a bare count of seconds, which needs one.
+    let mut waited = aurcache_common::units::format_duration(waited.as_secs());
+    if waited.bytes().all(|byte| byte.is_ascii_digit()) {
+        waited.push('s');
+    }
     let why = message.map_or_else(String::new, |message| format!(": {message}"));
     interrupted(format!(
         "no node could take the build within {waited} ({SCHEDULE_VARIABLE}){why}"
@@ -858,6 +863,11 @@ mod tests {
                 "no node could take the build within 10m (WORKER_KUBE_SCHEDULE_TIMEOUT): \
                  0/3 nodes are available"
             )
+        );
+        let soon = unscheduled_past(secs(90), None);
+        assert_eq!(
+            soon.reason.as_deref(),
+            Some("no node could take the build within 90s (WORKER_KUBE_SCHEDULE_TIMEOUT)")
         );
         let no = refused("exceeded quota: builds");
         assert_eq!(no.outcome, BuildOutcome::Interrupted);

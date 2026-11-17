@@ -1,35 +1,30 @@
 //! Packages relayed from a pod to the real worker listener.
 //!
-//! The server's worker protocol listener runs in-process, over an in-memory
-//! database and a throwaway CA, and a worker enrolls with it through the
-//! production client. The cluster is the fake one, whose `send` yields a
-//! package a few bytes at a time. Nothing here is mocked between the
-//! dispatcher and the server: the upload is the request the server's route
-//! reads, and a build is published by the server's own publishing.
+//! The server's worker protocol listener runs in-process and a worker enrolls
+//! with it through the production client. The cluster is the fake one, whose
+//! `send` yields a package a few bytes at a time. Nothing here is mocked
+//! between the dispatcher and the server: the upload is the request the
+//! server's route reads, and a build is published by the server's own
+//! publishing.
 
 mod support;
 
 use aurcache_build_agent::report::Ended;
 use aurcache_common::build_state::BuildState;
-use aurcache_common::worker::{BuildOutcome, ClaimRequest, MirrorlistPreference};
-use aurcache_db::{builds, files};
+use aurcache_common::worker::BuildOutcome;
+use aurcache_db::files;
 use aurcache_worker_container::spec::SpecOptions;
 use aurcache_worker_container::{input, spec};
 use aurcache_worker_core::build_log::BuildLog;
-use aurcache_worker_core::client::{WorkerClient, fetch_and_pin_ca};
-use aurcache_worker_core::config::CoreConfig;
-use aurcache_worker_core::enroll::ensure_enrolled;
-use aurcache_worker_core::executor::ClaimedJob;
-use aurcache_worker_core::identity::Identity;
 use aurcache_worker_kube::executor::{Build, KubeExecutor};
 use aurcache_worker_kube::transfer::Agent;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use support::{AGENT_IMAGE, FakeCluster, Package, Script, config, pod_name, report, status};
-use tokio_util::sync::CancellationToken;
+use support::server::Server;
+use support::{
+    AGENT_IMAGE, Content, FakeCluster, Package, Script, config, pod_name, report, status,
+};
 
 /// The size of the package that must pass without being held.
 const LARGE: u64 = 256 << 20;
@@ -57,140 +52,6 @@ fn package(name: &str, version: &str) -> Package {
         &format!("{name}-{version}-x86_64.pkg.tar.zst"),
         &encoder.finish().unwrap(),
     )
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// An enqueued build of package `p<id>`, whose source is a path that does
-/// not exist, so that nothing the server does for it reaches the network.
-async fn seed_build(db: &DatabaseConnection, id: i32) {
-    let source =
-        r#"{"type":"git","url":"/nonexistent-aurcache-kube-test","ref":"HEAD","subfolder":""}"#;
-    db.execute_unprepared(&format!(
-        "INSERT INTO packages (id, name, build_flags, source_data, platforms) \
-         VALUES ({id}, 'p{id}', '', '{source}', 'x86_64')"
-    ))
-    .await
-    .unwrap();
-    db.execute_unprepared(&format!(
-        "INSERT INTO builds (id, pkg_id, status, start_time, platform, version) \
-         VALUES ({id}, {id}, 3, {id}000, 'x86_64', '1.0')"
-    ))
-    .await
-    .unwrap();
-}
-
-/// The build's row once it is no longer being published.
-async fn settled(db: &DatabaseConnection, id: i32) -> builds::Model {
-    for _ in 0..100 {
-        let build = builds::Entity::find_by_id(id)
-            .one(db)
-            .await
-            .unwrap()
-            .unwrap();
-        if build.status != BuildState::Publishing {
-            return build;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("build {id} is still publishing");
-}
-
-/// The server's worker listener, and a worker enrolled with it.
-struct Server {
-    db: DatabaseConnection,
-    repo_root: PathBuf,
-    client: Arc<WorkerClient>,
-    // Dropped last: the listener and the database write under it.
-    _dir: tempfile::TempDir,
-}
-
-impl Server {
-    /// Start the listener over a database holding builds 1 and 2, enqueued,
-    /// and enroll a worker with it.
-    async fn start() -> Self {
-        // Under the build's own directory: the server stages what it is sent
-        // on disk, which here includes a large file.
-        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let port = free_port();
-        // SAFETY: before anything else in this process reads the
-        // environment; this file holds one test, and each test file is a
-        // process of its own.
-        unsafe {
-            std::env::set_var("AURCACHE_WORKER_PORT", port.to_string());
-            std::env::set_var("AURCACHE_TLS_SANS", "localhost");
-            std::env::set_var("AURCACHE_ENROLLMENT_TOKEN", "enroll-me");
-            std::env::remove_var("AURCACHE_ENROLLMENT_DIR");
-            std::env::remove_var("AURCACHE_PREAPPROVED_WORKERS");
-            std::env::set_var("AURCACHE_URL", format!("https://localhost:{port}"));
-            std::env::set_var("WORKER_DATA_DIR", dir.path().join("worker"));
-            std::env::set_var("WORKER_ARCHES", "x86_64");
-            std::env::set_var("WORKER_NAME", "kube-test");
-        }
-        let db = aurcache_db::testing::memory_db().await;
-        seed_build(&db, 1).await;
-        seed_build(&db, 2).await;
-
-        let ca = aurcache_ca::Ca::load_or_create(&dir.path().join("ca")).unwrap();
-        let repo_root = dir.path().join("repo");
-        // Runs for as long as the test's runtime does.
-        drop(aurcache_api::init::init_worker_api(
-            db.clone(),
-            ca,
-            Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
-            Arc::new(aurcache_utils::repository::Repository::new(&repo_root)),
-            aurcache_activitylog::activity_utils::ActivityLog::discarding(),
-        ));
-        let base = format!("https://localhost:{port}");
-        let mut up = false;
-        for _ in 0..80 {
-            if fetch_and_pin_ca(&base, None).await.is_ok() {
-                up = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        assert!(up, "the worker listener did not come up on :{port}");
-
-        let core = CoreConfig::from_env(
-            "test".to_string(),
-            aurcache_worker_kube::settings::kube_settings(),
-        );
-        let identity = Identity::load_or_create(&core.data_dir).unwrap();
-        let client = ensure_enrolled(&core, &identity, "kubernetes")
-            .await
-            .expect("the worker should enroll and be approved by its token");
-        Self {
-            db,
-            repo_root,
-            client: Arc::new(client),
-            _dir: dir,
-        }
-    }
-
-    /// Claim the next build, as the runner would hand it to the executor.
-    async fn claim(&self) -> ClaimedJob {
-        let job = self
-            .client
-            .claim(&ClaimRequest {
-                mirrorlist: MirrorlistPreference::Server {
-                    checksums: Default::default(),
-                },
-            })
-            .await
-            .unwrap()
-            .expect("a build should be claimable");
-        ClaimedJob {
-            job,
-            mirrorlist: None,
-            timeout: None,
-            cancel: CancellationToken::new(),
-        }
-    }
 }
 
 /// The process's peak resident memory so far, in bytes.
@@ -254,17 +115,13 @@ async fn a_build_is_published(server: &Server) {
     assert!(!cluster.has_pod(&pod_name(1)));
 
     server.client.complete(1, &report).await.unwrap();
-    let build = settled(&server.db, 1).await;
+    let build = server.settled(1).await;
     assert_eq!(build.status, BuildState::Successful);
     assert_eq!(build.peak_memory, Some(3 << 30));
     assert_eq!(build.disk_workdir, Some(2 << 30));
     let published = server.repo_root.join("x86_64").join(&built.name);
-    let Package {
-        content: support::Content::Bytes(bytes),
-        ..
-    } = &built
-    else {
-        unreachable!()
+    let Content::Bytes(bytes) = &built.content else {
+        unreachable!("the package was made of bytes");
     };
     assert_eq!(&std::fs::read(&published).unwrap(), bytes);
     let rows = files::Entity::find()
@@ -311,6 +168,7 @@ async fn a_large_package_is_not_held(server: &Server) {
         .await
         .expect("the package should reach the server");
     let grown = peak_memory().saturating_sub(before);
+    println!("relaying {LARGE} bytes grew the process's peak memory by {grown} bytes");
 
     let staged = server
         .repo_root

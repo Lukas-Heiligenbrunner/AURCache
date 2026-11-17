@@ -210,7 +210,7 @@ impl<C: Cluster> KubeExecutor<C> {
         let lines = Mutex::new(Lines::default());
         let reached = tokio::select! {
             biased;
-            reached = self.until_built(cfg, pod, &agent, build, &lines) => Ok(reached),
+            reached = self.until_built(cfg, pod, &agent, build, &lines, watch) => Ok(reached),
             stop = watch.stopped() => Err(stop),
         };
         let rest = lock(&lines).flush();
@@ -244,6 +244,7 @@ impl<C: Cluster> KubeExecutor<C> {
         agent: &Agent<'_, C>,
         build: &Build<'_, U>,
         lines: &Mutex<Lines>,
+        watch: &StopWatch,
     ) -> Result<Reached> {
         let log = &build.log;
         if let Created::Refused { message } = self.create(pod, agent.pod).await? {
@@ -251,7 +252,7 @@ impl<C: Cluster> KubeExecutor<C> {
         }
         say(log, &format!("[worker] created pod {}\n", agent.pod)).await;
         let mut status = Status::new(agent.pod, self.cluster.generation());
-        if let Some(over) = self.until_staged(cfg, build, &mut status).await? {
+        if let Some(over) = self.until_staged(cfg, build, &mut status, watch).await? {
             return Ok(Reached::Over(over));
         }
         say(log, "[worker] handing the job to the pod\n").await;
@@ -271,7 +272,7 @@ impl<C: Cluster> KubeExecutor<C> {
                 Seen::Gone => return Ok(Reached::Over(outcome::gone())),
                 Seen::Pod(Observed::Built(end)) => break end,
                 Seen::Pod(Observed::Lost(loss)) => {
-                    return Ok(Reached::Over(self.lost(cfg, build, &loss, &status)));
+                    return Ok(Reached::Over(lost(cfg, build, &loss, watch)));
                 }
                 Seen::NotYet | Seen::Pod(_) => {}
             }
@@ -336,6 +337,7 @@ impl<C: Cluster> KubeExecutor<C> {
         cfg: &Config,
         build: &Build<'_, U>,
         status: &mut Status,
+        watch: &StopWatch,
     ) -> Result<Option<CompleteReport>> {
         let timeout = cfg.tunables.schedule_timeout;
         let deadline = Instant::now() + timeout;
@@ -349,7 +351,7 @@ impl<C: Cluster> KubeExecutor<C> {
                 Seen::Pod(Observed::Starting { .. }) => None,
                 Seen::Pod(Observed::Staged) => return Ok(None),
                 Seen::Pod(Observed::Lost(loss)) => {
-                    return Ok(Some(self.lost(cfg, build, &loss, status)));
+                    return Ok(Some(lost(cfg, build, &loss, watch)));
                 }
                 Seen::Pod(Observed::Building { .. } | Observed::Built(_)) => {
                     return Ok(Some(report::interrupted(
@@ -367,21 +369,6 @@ impl<C: Cluster> KubeExecutor<C> {
                 },
             }
         }
-    }
-
-    fn lost<U: Uploads>(
-        &self,
-        cfg: &Config,
-        build: &Build<'_, U>,
-        loss: &outcome::Loss,
-        status: &Status,
-    ) -> CompleteReport {
-        outcome::lost(
-            loss,
-            status.started.elapsed(),
-            build.claimed.timeout,
-            cfg.tunables.disk,
-        )
     }
 
     /// Read what the build left and relay its packages: the report of a
@@ -614,7 +601,6 @@ struct Status {
     seen: bool,
     /// The last line written to the build log about it.
     said: Option<String>,
-    started: Instant,
 }
 
 impl Status {
@@ -624,7 +610,6 @@ impl Status {
             generation,
             seen: false,
             said: None,
-            started: Instant::now(),
         }
     }
 
@@ -661,6 +646,21 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Write to the build log. Losing a line is not worth failing a build over.
 async fn say(log: &mpsc::Sender<String>, text: &str) {
     let _ = log.send(text.to_string()).await;
+}
+
+/// The report of a build whose pod can no longer produce or hand back one.
+fn lost<U>(
+    cfg: &Config,
+    build: &Build<'_, U>,
+    loss: &outcome::Loss,
+    watch: &StopWatch,
+) -> CompleteReport {
+    outcome::lost(
+        loss,
+        watch.elapsed(),
+        build.claimed.timeout,
+        cfg.tunables.disk,
+    )
 }
 
 /// The report of a build this worker stopped.
@@ -735,8 +735,8 @@ fn options(cfg: &Config, pod: &Pod) -> SpecOptions {
         scratch: Path::new(pod::WORK).join(SCRATCH),
         credential: credential_mount(pod).map(|mount| Credential {
             key: mount.join(CREDENTIAL_KEY),
-            // The Secret may or may not hold one, and the dispatcher cannot
-            // read it to know: the agent uses the file when it is there.
+            // Named whether or not the Secret holds one: the dispatcher
+            // cannot read the Secret to know.
             known_hosts: Some(mount.join(CREDENTIAL_KNOWN_HOSTS)),
         }),
     }
