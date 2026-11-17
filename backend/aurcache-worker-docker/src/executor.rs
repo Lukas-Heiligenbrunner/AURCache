@@ -162,7 +162,7 @@ impl DockerExecutor {
         claimed: &ClaimedJob,
     ) -> Result<CompleteReport> {
         let job = &claimed.job;
-        unsupported::warn(client, job).await;
+        unsupported::note(job);
         // Building for the wrong architecture is worse than refusing the job.
         let Some(platform) = arch::platform(&job.arch) else {
             bail!("unknown architecture {:?}: refusing the job", job.arch);

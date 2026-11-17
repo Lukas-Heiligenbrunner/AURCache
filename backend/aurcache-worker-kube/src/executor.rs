@@ -529,7 +529,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         // Once, here: everything this build does reads this copy.
         let cfg = self.cfg.current();
         let build_id = claimed.job.build_id;
-        unsupported::warn(&client, &claimed.job).await;
+        unsupported::note(&claimed.job);
         let pod = self.render(&cfg, &claimed)?;
         let source = client
             .source(build_id)

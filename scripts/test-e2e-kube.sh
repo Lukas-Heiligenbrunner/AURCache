@@ -678,8 +678,9 @@ build_over() {
 
 check_restart() {
     log "=== 6. The worker dies under a build ==="
-    # A setting this worker does not honour, for the warning that says so;
-    # set here so the check does not rest on the server's default.
+    # A setting this worker does not act on: a build starts from a fresh tree
+    # whatever it says, and says nothing about it. Set here so the check does
+    # not rest on the server's default.
     aurcache_cli raw PATCH /package/kube-e2e-slow/settings/persistent_builddir \
         --body '{"value":"true"}' >/dev/null || fail "could not set persistent_builddir"
     local before ref pod uid since
@@ -691,12 +692,13 @@ check_restart() {
     CURRENT_BUILD_REF=$ref
     wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
         || fail "$ref never started building"
-    build_said "$ref" "asks for a persistent build directory, which this worker does not keep" \
-        || fail "the log of $ref does not say persistent_builddir is not kept"
-    wait_for 30 "the server to hear of it" server_logged warning \
-        "asks for a persistent build directory, which this worker does not keep" \
-        || fail "the server's log has no warning that persistent_builddir is not kept"
-    result "$ref: the build log and the server's log say the persistent build directory is not kept"
+    if build_said "$ref" "persistent build directory"; then
+        fail "the log of $ref talks about the persistent build directory"
+    fi
+    if server_logged warning "persistent build directory"; then
+        fail "the server's log has a warning about the persistent build directory"
+    fi
+    result "$ref builds with persistent_builddir set, and neither its log nor the server's mentions it"
     read -r pod uid _ <<<"$(build_pods | head -n 1)"
     log "    $ref runs in $pod ($uid)"
 
