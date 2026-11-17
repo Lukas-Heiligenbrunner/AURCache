@@ -4,11 +4,11 @@ sidebar_position: 9
 
 # Hybrid image
 
-:::warning Deprecated
+:::note Compatibility image
 The `aurcache` image runs the server *and* a build worker in one container. It
 exists so that deployments predating build workers keep working after an
-upgrade without editing their compose file. It will be removed in a future
-release — migrate to `aurcache-server` + `aurcache-worker` when convenient.
+upgrade without editing their compose file. New setups use `aurcache-server` +
+`aurcache-worker`.
 :::
 
 If you already run AURCache as a single container, pulling the new `aurcache`
@@ -18,7 +18,7 @@ start does. On startup it launches the server, then
 an embedded worker that enrolls over loopback with a secret generated inside the
 container.
 
-The embedded worker is the [legacy container builder](./legacy-docker.md): a
+The embedded worker is the [Docker worker](./docker.md): a
 container per package, as before, so the requirements are the ones you already
 meet. Which Docker API it builds against is decided from your existing
 configuration:
@@ -36,7 +36,7 @@ it had before.
 
 Packages for other architectures build as before, through the host's
 qemu/binfmt handlers (see the
-[legacy container builder](./legacy-docker.md#other-architectures)).
+[Docker worker](./docker.md#other-architectures)).
 `MAX_CONCURRENT_BUILDS` still sets how many packages build at once, and
 `CPU_LIMIT` and `MEMORY_LIMIT` each build's share. Set instead on 0.5's settings
 page, the three become the embedded worker's settings, on its page under

@@ -13,16 +13,16 @@ The **Type** column says how each worker builds:
 
 | Type | Meaning |
 |---|---|
-| `chroot` | The `devtools` chroot worker — the supported strategy. |
-| `docker` | The legacy container builder, **deprecated**. Shown highlighted. |
+| `chroot` | The `devtools` chroot worker. |
+| `docker` | The [Docker worker](./docker.md). |
 | `—` | The worker enrolled before workers reported this; restarting it fills it in. |
 
 A worker reports whatever it calls itself, so a future build strategy appears
 here without the server needing to know about it in advance.
 
-This is the quickest way to answer "is anything still on the legacy builder?"
-before retiring it — it builds in a reused container image rather than a clean
-chroot, and supports neither build caches nor build credentials.
+The chroot worker builds in a clean chroot and supports build caches and build
+credentials; the Docker worker builds in a reused container image and supports
+neither.
 
 ## Approving
 

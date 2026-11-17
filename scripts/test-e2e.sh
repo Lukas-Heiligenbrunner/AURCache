@@ -85,7 +85,7 @@ request_package() {
     fi
 
     # A chroot worker measures what each build used on its disk. Off for the
-    # legacy container builder, which has no storage pool to measure.
+    # Docker worker, which has no storage pool to measure.
     local usage
     usage=$(aurcache_cli --format json builds list --limit 20 2>/dev/null \
         | jq -c --arg pkg "$PACKAGE" '[.[] | select(.pkg_name == $pkg)] | max_by(.number) | .disk_usage' 2>/dev/null)

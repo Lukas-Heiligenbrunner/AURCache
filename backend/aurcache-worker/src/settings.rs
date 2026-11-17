@@ -39,8 +39,8 @@ pub mod keys {
     pub const BUILDDIR_MIN_FREE: &str = "builddir_min_free";
 }
 
-/// Re-exported from the shared executor settings: the legacy container
-/// executor's build script uses the same default, and two literals would drift.
+/// Re-exported from the shared executor settings: the Docker
+/// worker's build script uses the same default, and two literals would drift.
 pub use aurcache_worker_core::settings::DEFAULT_KEYSERVER;
 /// Total disk the worker's caches may use when nothing is configured.
 pub const DEFAULT_TOTAL_CACHE_SIZE: u64 = 20 * 1024 * 1024 * 1024;

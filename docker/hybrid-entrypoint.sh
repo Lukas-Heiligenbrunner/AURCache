@@ -2,7 +2,7 @@
 # AURCache hybrid (compatibility) entrypoint: run the server and one embedded
 # build worker in a single container.
 #
-# **Deprecated.** This exists so a pre-remote-worker compose file keeps building
+# This exists so a pre-remote-worker compose file keeps building
 # packages after an upgrade with no edits. The split `aurcache-server` +
 # `aurcache-worker` images are the supported setup.
 #
@@ -11,7 +11,7 @@
 # does not know it is embedded, so retiring this image retires the whole
 # mechanism with it.
 #
-# The embedded worker is the legacy container builder, the one closest to what
+# The embedded worker is the Docker worker, the one closest to what
 # these deployments ran before: a container per package, spawned over a Docker
 # socket. That keeps the old requirements the old requirements -- no new
 # kernel, no loop devices, foreign architectures through binfmt as before.
@@ -131,9 +131,9 @@ log "starting AURCache server"
 PIDS+=($!)
 
 if [ -n "$WORKER" ]; then
-    log "starting embedded worker: legacy container builder"
-    log "NOTE: the hybrid image is deprecated. Migrate to the separate"
-    log "      aurcache-server and aurcache-worker images when convenient."
+    log "starting embedded worker: Docker worker"
+    log "NOTE: the hybrid image is a compatibility image. New setups use the separate"
+    log "      aurcache-server and aurcache-worker images."
     # The worker reaches this container's own server over loopback, so it
     # learns the CA afresh on every start instead of trusting the copy it
     # cached on first use. That copy is stale whenever the CA was replaced, and

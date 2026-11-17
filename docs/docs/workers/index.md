@@ -11,10 +11,10 @@ on another machine, or on another architecture.
 
 | Worker | How it builds | Status |
 |---|---|---|
-| [Split chroot worker](./split-chroot.md) | Each package in its own `devtools` chroot | Supported — this is what every setup wants |
-| [Legacy container builder](./legacy-docker.md) | Each package in a reused container | Deprecated, continuity only |
+| [Split chroot worker](./split-chroot.md) | Each package in its own `devtools` chroot | Supported |
+| [Docker worker](./docker.md) | Each package in a container from a builder image | Supported |
 | [Demo worker](./demo.md) | Completes every job with synthetic packages | Demo instance only |
-| [Hybrid image](./hybrid.md) | Server *and* a worker in one container | Deprecated, continuity only |
+| [Hybrid image](./hybrid.md) | Server *and* a Docker worker in one container | Compatibility image for single-container compose files |
 
 A worker starts from its environment variables. Its policy and tuning settings —
 concurrency, build limits, cache budgets, timeouts — can then be set for it from

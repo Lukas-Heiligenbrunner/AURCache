@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end test for the hybrid image's legacy container builder.
+# End-to-end test for the hybrid image's Docker worker.
 #
 # Covers the upgrade path of a pre-worker deployment that used "host build
 # mode": Docker socket mounted, BUILD_ARTIFACT_DIR set, container not
-# privileged. That combination selects the legacy builder, which spawns a
+# privileged. That combination selects the Docker worker, which spawns a
 # container per package instead of building in a chroot.
 #
 # Usage: scripts/test-e2e-hybrid-legacy.sh [package] [port] [timeout]
@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# The builder image the legacy executor spawns. Built locally so the test does
+# The builder image the Docker worker spawns. Built locally so the test does
 # not depend on a published tag.
 docker build -q -f "$PROJECT_DIR/docker/builder.Dockerfile" \
     -t aurcache-legacy-builder:test "$PROJECT_DIR" >/dev/null

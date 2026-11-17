@@ -43,8 +43,8 @@ hardware or a foreign architecture (e.g. aarch64), see
 [`docker-compose.remote-worker.yaml`](compose/docker-compose.remote-worker.yaml).
 
 Already running AURCache as a single container? It keeps working — the
-`aurcache` image now bundles a build worker for exactly that case. It is
-deprecated, so migrate to the split setup when convenient; see
+`aurcache` image now bundles a build worker for exactly that case. It is a
+compatibility image; new setups use the split images, see
 [Backward compatibility](https://lukas-heiligenbrunner.github.io/AURCache/docs/setup/docker#backward-compatibility-the-hybrid-image).
 
 ## CLI client
