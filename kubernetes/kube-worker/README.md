@@ -20,6 +20,10 @@ everything into one.
 - A CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, kindnet; not
   flannel alone). Without one, builds can reach whatever a pod in the cluster
   can. The worker tests this when it starts and logs an error if it can.
+- A look at `networkpolicy.yaml` if the cluster runs NodeLocal DNSCache, has
+  pods or nodes on public addresses (IPv6 above all), or an API server on a
+  public endpoint: the policy cannot know those addresses, and says at each
+  place what to change.
 - A default StorageClass, or one named in `worker.yaml`, for a 1 Gi volume.
 - Nodes labelled `kubernetes.io/arch` (every node is), for each architecture
   you build for.

@@ -36,6 +36,21 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Name resolution on a cluster with NodeLocal DNSCache (Kubespray's
+    # default, an option on GKE and EKS). It serves on a link-local address
+    # such as 169.254.25.10 or 169.254.20.10. That address is in the ranges
+    # the internet rule below excepts, and it is not a kube-dns pod, so
+    # lookups fail: a build resolves nothing and stops at its first
+    # `pacman -Syu`. The fix is this extra rule, with your cluster's address
+    # (a pod's /etc/resolv.conf has it).
+    # - to:
+    #     - ipBlock:
+    #         cidr: 169.254.20.10/32
+    #   ports:
+    #     - protocol: UDP
+    #       port: 53
+    #     - protocol: TCP
+    #       port: 53
     # The server's repository, for dependencies AURCache built. These are the
     # server pod's own ports, which is what a NetworkPolicy matches, not its
     # Service's: 80 for the nginx container in front of the repository, 8081
@@ -55,9 +70,23 @@ spec:
         - protocol: TCP
           port: 8081
     # The internet, minus every private range. This keeps builds off the pod,
-    # service and node networks of any cluster without naming yours, and off
-    # 169.254.0.0/16, where cloud providers serve the node's credentials. A
-    # mirror or keyserver on a private address needs a rule of its own here.
+    # service and node networks of a cluster that uses private addresses,
+    # without naming yours, and off 169.254.0.0/16, where cloud providers
+    # serve the node's credentials. A mirror or keyserver on a private address
+    # needs a rule of its own here.
+    #
+    # It does not know your cluster's addresses, so add to `except` whatever
+    # of yours is not private:
+    #
+    #   - pods, nodes or services with public addresses. On an IPv6 cluster
+    #     whose pods have globally routable addresses (EKS in IPv6 mode), the
+    #     `::/0` rule reaches every pod, the server's worker port included:
+    #     add the cluster's IPv6 ranges.
+    #   - an API server on a public endpoint (a managed control plane). A
+    #     build holds no credential for it, but can reach it.
+    #
+    # The worker's check at startup tells both apart: it reports the worker
+    # port answering as an error, and the API alone answering as a warning.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -72,3 +101,10 @@ spec:
             except:
               - fc00::/7
               - fe80::/10
+              # The same IPv4 ranges as a NAT64 gateway maps them
+              # (64:ff9b::/96), so that it is no way round the list above.
+              - 64:ff9b::a00:0/104
+              - 64:ff9b::ac10:0/108
+              - 64:ff9b::c0a8:0/112
+              - 64:ff9b::6440:0/106
+              - 64:ff9b::a9fe:0/112
