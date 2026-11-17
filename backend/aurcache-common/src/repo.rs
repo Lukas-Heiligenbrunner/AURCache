@@ -17,14 +17,14 @@ pub const DEFAULT_REPO_NAME: &str = "repo";
 /// Keep configuration directives, paths and pacman's special section out.
 pub fn validate_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty()
-        || name == "options"
+        || matches!(name, "options" | "local")
         || !name.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
         || !name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
     {
         return Err(
-            "repository name must start with an ASCII letter, digit or underscore, contain only ASCII letters, digits, underscores, dots or hyphens, and must not be 'options'",
+            "repository name must start with an ASCII letter, digit or underscore, contain only ASCII letters, digits, underscores, dots or hyphens, and must not be 'options' or 'local'",
         );
     }
     Ok(())
@@ -110,6 +110,7 @@ mod tests {
         for name in [
             "",
             "options",
+            "local",
             ".hidden",
             "..",
             "../repo",

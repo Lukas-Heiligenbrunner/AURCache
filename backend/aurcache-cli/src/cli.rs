@@ -473,7 +473,7 @@ pub(crate) struct RepoConfigArgs {
     pub(crate) offline: bool,
 
     /// Port the pacman repository is published on. By default, what the
-    /// server reports; without a token, or with --offline, 8081, which is only
+    /// server reports; if unavailable or with --offline, 8081, which is only
     /// right for a server that kept the default `AURCACHE_REPO_PORT`.
     #[arg(long)]
     pub(crate) port: Option<u16>,
