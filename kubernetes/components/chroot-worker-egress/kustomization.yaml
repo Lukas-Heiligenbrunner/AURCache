@@ -1,0 +1,26 @@
+# Keep the chroot workers' builds off the cluster's private network.
+#
+# A build runs in its worker pod's network namespace, so package code reaches
+# whatever the worker reaches. The worker's own firewall rule keeps builds off
+# the server's worker port and nothing else. Without a policy, a PKGBUILD can
+# connect to other Services, the Kubernetes API, the nodes, and the cloud
+# metadata endpoint (169.254.169.254), which on some clouds hands out the
+# node's credentials.
+#
+# This policy lets worker pods reach DNS, the server's repository and worker
+# ports, and public addresses, and nothing else. It applies to the worker
+# process as much as to its builds, since they share an address, and only on
+# a CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, k3s's
+# built-in one; not flannel alone).
+#
+# Check two things before enabling it:
+#   - DNS: it allows the `kube-dns` pods in `kube-system`, which is where
+#     CoreDNS runs under that label on most distributions. Adjust it if yours
+#     differ, or every name lookup fails.
+#   - Anything the builds must reach on a private address -- a source mirror,
+#     a git server, an HTTP proxy in your network -- needs a rule of its own.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - networkpolicy.yaml

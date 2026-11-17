@@ -1,7 +1,19 @@
+# The server alone: the `aurcache` namespace, the server, its data volume and
+# its Service. It builds nothing by itself:
+#
+#     kubectl apply -k kubernetes/server/
+#
+# runs a server that waits for workers, which can join from anywhere that
+# reaches its worker port. kubernetes/kustomization.yaml adds workers beside it.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Changing it means changing the namespace in AURCACHE_TLS_SANS too
+# (server.yaml), and in the workers' kustomizations.
+namespace: aurcache
+
 resources:
+  - namespace.yaml
   - server.yaml
 
 configMapGenerator:

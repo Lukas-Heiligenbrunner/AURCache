@@ -1,0 +1,21 @@
+# Chroot build workers on arm64 nodes (../../chroot-worker-arm64), building
+# aarch64 packages. A chroot worker builds for the architecture it runs on, so
+# each architecture is a StatefulSet of its own. Usable with or without the
+# x86_64 ones; like them, it lets the namespace run privileged pods.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - ../../chroot-worker-arm64
+
+patches:
+  - target:
+      kind: Namespace
+      name: aurcache
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: aurcache
+        labels:
+          pod-security.kubernetes.io/enforce: privileged

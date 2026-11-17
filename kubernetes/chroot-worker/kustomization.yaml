@@ -1,0 +1,10 @@
+# Chroot build workers for x86_64, in the server's namespace. Added by
+# components/chroot-workers, which also lets the namespace run their
+# privileged pods; applied on their own they would be refused.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aurcache
+
+resources:
+  - worker.yaml

@@ -7,6 +7,10 @@
 # moves, and so stays the same, approved worker. Scale with
 # `kubectl -n aurcache scale statefulset aurcache-worker --replicas=N`; each
 # new replica enrolls as a new worker.
+#
+# A StatefulSet's volumeClaimTemplates cannot be changed once it exists: to
+# resize or replace the volumes below on a running deployment, see "The
+# storage pool" in the Kubernetes setup documentation.
 ---
 apiVersion: v1
 kind: Service
@@ -15,13 +19,13 @@ metadata:
   name: aurcache-workers
   labels:
     app.kubernetes.io/name: aurcache-worker
-    app.kubernetes.io/component: worker
+    app.kubernetes.io/component: chroot-worker
 spec:
   clusterIP: None
   selector:
     app.kubernetes.io/name: aurcache-worker
-    app.kubernetes.io/component: worker
-    aurcache.io/arch: x86_64
+    app.kubernetes.io/component: chroot-worker
+    app.kubernetes.io/instance: aurcache-worker
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -29,8 +33,8 @@ metadata:
   name: aurcache-worker
   labels:
     app.kubernetes.io/name: aurcache-worker
-    app.kubernetes.io/component: worker
-    aurcache.io/arch: x86_64
+    app.kubernetes.io/component: chroot-worker
+    app.kubernetes.io/instance: aurcache-worker
 spec:
   serviceName: aurcache-workers
   replicas: 1
@@ -39,14 +43,14 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: aurcache-worker
-      app.kubernetes.io/component: worker
-      aurcache.io/arch: x86_64
+      app.kubernetes.io/component: chroot-worker
+      app.kubernetes.io/instance: aurcache-worker
   template:
     metadata:
       labels:
         app.kubernetes.io/name: aurcache-worker
-        app.kubernetes.io/component: worker
-        aurcache.io/arch: x86_64
+        app.kubernetes.io/component: chroot-worker
+        app.kubernetes.io/instance: aurcache-worker
     spec:
       # A worker builds in a chroot of its own architecture, so it builds for
       # that architecture only. It reports what it is on its own; this only
@@ -62,14 +66,18 @@ spec:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: aurcache-worker
-              aurcache.io/arch: x86_64
+              app.kubernetes.io/instance: aurcache-worker
       # See the server's Deployment: no AURCACHE_*_PORT variables from
       # Services in this namespace.
       enableServiceLinks: false
+      # The worker never talks to the Kubernetes API, so it is given no token
+      # for it.
+      automountServiceAccountToken: false
       # A stopped worker's builds are requeued once their lease runs out (a
       # minute by default) and start again elsewhere. To drain a node without
-      # losing work, stop the worker's intake first:
+      # losing work, stop the worker's intake first, and resume it after:
       #     aurcli worker pause <id> --wait
+      #     aurcli worker resume <id>
       terminationGracePeriodSeconds: 30
       initContainers:
         # The worker runs as the image's `aurcache` user, and gives each build
@@ -80,7 +88,9 @@ spec:
         # start. It only creates and fixes those few directories, never what
         # is in them.
         - name: data-dir
-          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+          # Same image as the worker below; see there for the tag.
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:git
+          imagePullPolicy: Always   # `git` moves: pull it at every start
           command:
             - systemd-tmpfiles
             - --create
@@ -93,7 +103,13 @@ spec:
               mountPath: /var/lib/aurcache-worker
       containers:
         - name: worker
-          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:latest
+          # `git`, built from master, until a release after 0.6.0 is out. The
+          # 0.6.0 image's entrypoint hands /sys/fs/cgroup to the worker's
+          # user, and in a privileged pod under containerd that directory is
+          # the node's root cgroup, not the pod's. Move to that release's tag,
+          # and to `latest` after it, once one exists (kustomization.yaml).
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:git
+          imagePullPolicy: Always   # `git` moves: pull it at every start
           # devtools builds each package in a systemd-nspawn chroot, which needs
           # the namespaces and mounts an ordinary pod forbids, and the storage
           # pool needs to format and mount a btrfs filesystem. `privileged`
@@ -187,6 +203,10 @@ spec:
     # cloud disks, Ceph RBD, Longhorn, TopoLVM, OpenEBS LVM). For one that
     # does not, use components/pool-image. Keep this second in the list;
     # that component removes it by position.
+    #
+    # The device's size is what bounds the pool, so a storage class that does
+    # not enforce capacity has to be told the truth here and in
+    # WORKER_DISK_MAX_DEFAULT.
     - metadata:
         name: pool
       spec:

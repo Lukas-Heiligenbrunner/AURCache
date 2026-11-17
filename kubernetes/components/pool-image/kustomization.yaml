@@ -1,5 +1,5 @@
-# The workers' storage pools in an image file on their data volume, instead of
-# on a raw block volume of their own.
+# The chroot workers' storage pools in an image file on their data volume,
+# instead of on a raw block volume of their own.
 #
 # For a storage class that only provisions filesystems. The worker creates a
 # sparse `pool.img` under its data directory and loop-mounts it, so the pool
@@ -7,14 +7,24 @@
 # deleted. That costs a loop device and a filesystem nested in another, which
 # the block volume avoids. The data volume grows to hold it.
 #
-# Applies to every worker StatefulSet, the arm64 ones included.
+# A storage class that does not enforce the size it is asked for -- local-path
+# and other host-path provisioners -- gives the image the node's own disk, and
+# 200Gi on the claim means nothing. WORKER_DISK_MAX is then the only bound:
+# keep it within what that disk has free, or builds fill the node until the
+# kubelet starts evicting pods, the server's included.
+#
+# List it after the chroot-workers components: it changes every chroot worker
+# StatefulSet they add, the arm64 one included. It changes the volume claim
+# templates, which an existing StatefulSet cannot take; switching a running
+# deployment is described under "The storage pool" in the Kubernetes setup
+# documentation.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
 patches:
   - target:
       kind: StatefulSet
-      labelSelector: app.kubernetes.io/component=worker
+      labelSelector: app.kubernetes.io/component=chroot-worker
     patch: |-
       apiVersion: apps/v1
       kind: StatefulSet
@@ -28,15 +38,17 @@ patches:
                 env:
                   - name: WORKER_POOL
                     $patch: delete
-                volumeDevices:
-                  - devicePath: /dev/aurcache-pool
-                    $patch: delete
-  # volumeClaimTemplates has no merge key, so its entries go by position; the
-  # `test`s make this fail rather than remove the wrong one if they move.
+  # Lists without a merge key go by position; the `test`s make this fail
+  # rather than remove the wrong entry if they move.
   - target:
       kind: StatefulSet
-      labelSelector: app.kubernetes.io/component=worker
+      labelSelector: app.kubernetes.io/component=chroot-worker
     patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/volumeDevices/0/devicePath
+        value: /dev/aurcache-pool
+      - op: remove
+        path: /spec/template/spec/containers/0/volumeDevices
       - op: test
         path: /spec/volumeClaimTemplates/1/metadata/name
         value: pool
