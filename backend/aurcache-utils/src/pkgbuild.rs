@@ -211,6 +211,23 @@ fn private_state() -> Vec<PathBuf> {
     paths
 }
 
+/// Every path in `paths`, and where each really is.
+///
+/// The sandbox keeps a path unreadable as it is written, and grants what is
+/// beside it -- following symlinks when it does. A secret behind a link (a
+/// Kubernetes secret is `key -> ..data/key`) or under a linked directory
+/// would then stay readable at its real path, so that is named too.
+fn with_real_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut all: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .chain(paths.iter().cloned())
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
 impl Bridge {
     /// Resolve the installed layout.
     ///
@@ -232,13 +249,14 @@ impl Bridge {
             .get_os()
             .filter(|v| !v.is_empty());
         // Absolute, because the sandbox is not started where the server runs.
-        let mut private: Vec<PathBuf> = private_state()
-            .into_iter()
-            .chain(PRIVATE_PATHS.map(PathBuf::from))
-            .chain(extra.iter().flat_map(std::env::split_paths))
-            .map(|dir| cwd.join(dir))
-            .collect();
-        private.dedup();
+        let private = with_real_paths(
+            private_state()
+                .into_iter()
+                .chain(PRIVATE_PATHS.map(PathBuf::from))
+                .chain(extra.iter().flat_map(std::env::split_paths))
+                .map(|dir| cwd.join(dir))
+                .collect(),
+        );
 
         Ok(Self {
             network,
@@ -487,6 +505,25 @@ pub(crate) mod tests {
             "{:?}",
             bridge.private
         );
+    }
+
+    /// A symlinked secret is kept from the parse at both of its paths.
+    #[test]
+    fn a_symlinked_private_path_is_private_where_it_really_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("..data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("key"), "secret").unwrap();
+        let link = dir.path().join("key");
+        std::os::unix::fs::symlink(data.join("key"), &link).unwrap();
+        let missing = dir.path().join("not-yet");
+
+        let private = with_real_paths(vec![link.clone(), missing.clone()]);
+        let real = std::fs::canonicalize(data.join("key")).unwrap();
+        assert!(private.contains(&link), "{private:?}");
+        assert!(private.contains(&real), "{private:?}");
+        // A path that does not exist yet is kept as written.
+        assert!(private.contains(&missing), "{private:?}");
     }
 
     fn sh(script: &str) -> Command {

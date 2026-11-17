@@ -98,7 +98,8 @@ PKGBUILDs are parsed in a sandbox that cannot read `AURCACHE_SSH_DIR`, the key
 `AURCACHE_GIT_SSH_KEY` names, or the passphrase file. On a kernel without
 Landlock the sandbox relies on file permissions instead, and refuses to parse
 anything while one of them is readable by other users: keep them `0600`, or
-`0400`.
+`0400`. A path that is a symlink, as a Kubernetes secret's is, is kept from
+the parse at its real path too.
 
 ## Host keys
 
