@@ -836,8 +836,12 @@ the socket while it is up can ask for signatures with it, for any host and
 any purpose, as with any agent; it can never obtain the key, which is in no
 file, no process and no memory of the pod. During the window that code is the
 package's own: the PKGBUILD's top level as makepkg sources it, makepkg, git
-and ssh, all as the build user. Root in the pod is the agent alone, and
-whatever the image's own upgrade ran before. Dependencies, their install
+and ssh, all as the build user. The one other way in is a root process left
+running by what was installed before the window: the image's upgrade
+(`pacman -Syu`) and `openssh` and `git`, from the job's repositories. Those
+are trusted as the image is; a repository that serves a hostile `git`, or a
+hostile upgrade of an installed package, could sign during the window, though
+it could still not take the key away. Dependencies, their install
 scriptlets, their hooks, and `prepare()`, `build()`, `check()` and
 `package()` all run after the link is gone, and can neither sign nor read
 anything. A dependency's root scriptlet that leaves a process behind finds no
