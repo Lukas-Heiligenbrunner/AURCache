@@ -20,8 +20,8 @@ const DEFAULT_NAMESPACE: &str = "aurcache-builds";
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
 /// The pull policies Kubernetes knows.
 const PULL_POLICIES: [&str; 3] = ["Always", "IfNotPresent", "Never"];
-/// How many hex digits of the fingerprint name the dispatcher.
-const DISPATCHER_DIGITS: usize = 16;
+/// The variable naming the dispatcher's own pod, for reading its image.
+pub const POD_NAME: &str = "WORKER_KUBE_POD_NAME";
 
 /// What every worker reads, advertising the dispatcher's own architecture
 /// unless `WORKER_ARCHES` says otherwise.
@@ -121,20 +121,6 @@ impl PodExtras {
     }
 }
 
-/// The first digits of a fingerprint, lower case, without separators.
-fn dispatcher_label(fingerprint: &str) -> Result<String> {
-    let digits: String = fingerprint
-        .chars()
-        .filter(char::is_ascii_hexdigit)
-        .map(|c| c.to_ascii_lowercase())
-        .take(DISPATCHER_DIGITS)
-        .collect();
-    if digits.len() < DISPATCHER_DIGITS {
-        bail!("fingerprint {fingerprint:?} has fewer than {DISPATCHER_DIGITS} hex digits");
-    }
-    Ok(digits)
-}
-
 /// A yes/no variable: `true` or `false`, in any case.
 fn flag(name: &str, raw: Option<String>, default: bool) -> Result<bool> {
     match raw.map(|v| v.to_ascii_lowercase()).as_deref() {
@@ -174,7 +160,7 @@ impl Config {
         }
         let agent_image = match (
             var("WORKER_KUBE_AGENT_IMAGE"),
-            var("WORKER_KUBE_POD_NAME"),
+            var(POD_NAME),
             var("WORKER_KUBE_POD_NAMESPACE"),
         ) {
             (Some(image), _, _) => AgentImage::Given(image),
@@ -186,7 +172,7 @@ impl Config {
         };
         Ok(Self {
             namespace: var("WORKER_KUBE_NAMESPACE").unwrap_or_else(|| DEFAULT_NAMESPACE.into()),
-            dispatcher: dispatcher_label(fingerprint)?,
+            dispatcher: aurcache_worker_container::tag::of(fingerprint)?,
             builder_image: var("WORKER_KUBE_BUILDER_IMAGE")
                 .unwrap_or_else(|| DEFAULT_BUILDER_IMAGE.into()),
             pull_policy,
@@ -330,7 +316,6 @@ mod tests {
             vars.push(bad);
             assert!(read(&vars).is_err(), "{bad:?}");
         }
-        assert!(dispatcher_label("abc").is_err());
     }
 
     #[test]

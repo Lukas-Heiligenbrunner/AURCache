@@ -51,6 +51,9 @@ pub struct DockerExecutor {
     network: NetworkPlan,
     /// The agent binary each build directory gets a copy of.
     agent: PathBuf,
+    /// This worker's own part of its containers' names (see
+    /// [`aurcache_worker_container::tag`]).
+    tag: String,
 }
 
 /// How a build container's run ended, as this worker saw it.
@@ -70,8 +73,9 @@ struct Target<'a> {
 
 impl DockerExecutor {
     /// Connect to the Docker daemon over the mounted socket, and find the
-    /// agent builds are run with.
-    pub async fn connect(cfg: Config) -> Result<Self> {
+    /// agent builds are run with. `tag` names this worker in the names of
+    /// its containers.
+    pub async fn connect(cfg: Config, tag: String) -> Result<Self> {
         let agent = agent::locate().with_context(|| {
             format!(
                 "the Docker worker runs each build with aurcache-build-agent; install it at {} \
@@ -99,6 +103,7 @@ impl DockerExecutor {
             docker,
             network,
             agent,
+            tag,
         })
     }
 
@@ -169,13 +174,13 @@ impl DockerExecutor {
         };
         let dirs = Self::job_dirs(cfg, job.build_id);
         let target = Target {
-            name: format!("aurcache_build_{}", job.build_id),
+            name: container_name(&self.tag, job.build_id),
             platform,
             dirs: &dirs,
         };
 
-        // A worker that died mid-build could have left its container and its
-        // directory behind under this id.
+        // This worker, had it died mid-build, could have left its container
+        // and its directory behind under this id.
         self.remove_container(&target.name).await;
         self.clear(cfg, &target).await;
 
@@ -374,6 +379,14 @@ impl DockerExecutor {
     }
 }
 
+/// The name of a build's container: this worker's tag, then the build. The
+/// engine may be shared with a worker of another server, whose build ids are
+/// the same numbers, and a container found under a build's name is removed
+/// as a leftover.
+fn container_name(tag: &str, build_id: i32) -> String {
+    format!("aurcache_build_{tag}_{build_id}")
+}
+
 /// What this worker decides about a build beside what the job says.
 fn spec_options(cfg: &Config) -> SpecOptions {
     SpecOptions {
@@ -421,5 +434,20 @@ impl Executor for DockerExecutor {
         self.cfg
             .replace(self.cfg.current().with_settings(&settings));
         settings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::container_name;
+
+    /// Two workers on one engine, building the same build number of two
+    /// servers, do not share a container name.
+    #[test]
+    fn a_containers_name_is_its_workers_and_its_builds() {
+        let one = container_name("0123456789abcdef", 7);
+        let other = container_name("fedcba9876543210", 7);
+        assert_eq!(one, "aurcache_build_0123456789abcdef_7");
+        assert_ne!(one, other);
     }
 }
