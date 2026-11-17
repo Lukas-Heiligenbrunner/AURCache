@@ -180,7 +180,11 @@ repository until it does.
 
 Turning signing off removes the databases' signatures at the next start, since
 the databases are written unsigned from then on. Packages keep the signatures
-they have. Set clients back to `SigLevel = Optional TrustAll` first.
+they have, beside them and in `repo.db`, until they are rebuilt — and pacman
+checks every signature it finds, even with signatures optional. So a client
+that trusts the key can go back to `SigLevel = Optional TrustAll`, while one
+that never trusted it keeps refusing those packages until they are rebuilt:
+trust the key there, or set it to `SigLevel = Never` meanwhile.
 
 ### Limits
 
