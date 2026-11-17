@@ -16,6 +16,13 @@ Server = http://<server_ip>:8081/$arch
 8081 is the default; a server that sets `AURCACHE_REPO_PORT` serves the
 repository on that port instead.
 
+## Browse the repository
+
+Open `http://<server_ip>:8081/` in a browser to list architecture directories,
+then open one to browse and download its packages and repository databases.
+The built-in server hides dot-prefixed files and directories, including staged
+uploads and temporary databases, and refuses direct requests for those paths.
+
 ## Let the CLI fill it in
 
 `aurcli` is already configured to talk to the instance, and the repository

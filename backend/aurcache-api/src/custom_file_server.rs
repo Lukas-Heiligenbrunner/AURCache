@@ -1,7 +1,7 @@
 use rocket::fs::NamedFile;
 use rocket::http::uri::Segments;
-use rocket::http::{Header, Method, Status};
-use rocket::response::Responder;
+use rocket::http::{Header, Method, RawStr, Status};
+use rocket::response::{Redirect, Responder, content::RawHtml};
 use rocket::route::{Handler, Outcome};
 use rocket::{Data, Request, Response, Route, async_trait, figment};
 use std::io::SeekFrom;
@@ -22,6 +22,49 @@ impl CustomFileServer {
         Self {
             root: path.as_ref().into(),
         }
+    }
+
+    /// A plain index, using the same no-dot-names policy as downloads.
+    async fn directory_index(&self, path: &Path, is_root: bool) -> std::io::Result<String> {
+        let mut entries = Vec::new();
+        let mut directory = tokio::fs::read_dir(path).await?;
+        while let Some(entry) = directory.next_entry().await? {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            // Follow symlinks, as downloads do: repo.db and repo.files can
+            // be links. A file may disappear during a repository update.
+            let Ok(metadata) = tokio::fs::metadata(entry.path()).await else {
+                continue;
+            };
+            if metadata.is_file() || metadata.is_dir() {
+                entries.push((name.to_owned(), metadata.is_dir()));
+            }
+        }
+        entries.sort_by(|(a, a_dir), (b, b_dir)| b_dir.cmp(a_dir).then_with(|| a.cmp(b)));
+
+        let mut html = String::from(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+             <title>Repository index</title></head><body><h1>Repository index</h1><ul>\n",
+        );
+        if !is_root {
+            html.push_str("<li><a href=\"../\">Parent directory</a></li>\n");
+        }
+        for (name, is_dir) in entries {
+            let name = RawStr::new(&name);
+            let href = name.percent_encode();
+            let label = name.html_escape();
+            let suffix = if is_dir { "/" } else { "" };
+            html.push_str(&format!(
+                "<li><a href=\"./{href}{suffix}\">{label}{suffix}</a></li>\n"
+            ));
+        }
+        html.push_str("</ul></body></html>\n");
+        Ok(html)
     }
 }
 
@@ -50,7 +93,7 @@ impl Handler for CustomFileServer {
         let Some(relative_path) = relative_path else {
             return Outcome::forward(data, Status::NotFound);
         };
-        let file_path = self.root.join(relative_path);
+        let file_path = self.root.join(&relative_path);
 
         // open file
         let Ok(named_file) = NamedFile::open(&file_path).await else {
@@ -58,12 +101,19 @@ impl Handler for CustomFileServer {
         };
 
         let metadata = named_file.metadata().await.ok();
-        // A directory opens fine but cannot be written as a response body --
-        // Rocket fails the write with "Is a directory" (os error 21) and the
-        // request answers 500. There is no listing to serve, so a directory
-        // is exactly like a missing file.
-        if metadata.as_ref().is_some_and(|m| m.file_type().is_dir()) {
-            return Outcome::forward(data, Status::NotFound);
+        if metadata.as_ref().is_some_and(|m| m.is_dir()) {
+            // Relative entry and parent links need a directory URL, even
+            // when the repository is mounted under a reverse proxy prefix.
+            if !req.uri().path().ends_with('/') {
+                return Outcome::from(req, Redirect::permanent(format!("{}/", req.uri().path())));
+            }
+            return match self
+                .directory_index(&file_path, relative_path.as_os_str().is_empty())
+                .await
+            {
+                Ok(html) => Outcome::from(req, RawHtml(html)),
+                Err(_) => Outcome::error(Status::InternalServerError),
+            };
         }
         let file_size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
         // HTTP's own date form (`Mon, 06 Oct 2026 10:00:00 GMT`, RFC 9110),
@@ -287,28 +337,163 @@ mod serve_tests {
             .expect("tracked client builds")
     }
 
-    /// A directory is not a file to download: opening one succeeds, and the
-    /// response write would then fail with "Is a directory" (os error 21) as a
-    /// 500. There is no listing to serve, so a directory answers exactly like a
-    /// missing file.
     #[rocket::async_test]
-    async fn directories_answer_like_missing_files() {
+    async fn directories_are_browsable_and_files_still_download() {
         let root = tempfile::tempdir().unwrap();
         let arch = root.path().join("x86_64");
         std::fs::create_dir(&arch).unwrap();
         std::fs::write(arch.join("repo.db"), b"db").unwrap();
-
+        std::fs::write(arch.join("a.pkg.tar.zst"), b"package").unwrap();
+        std::fs::create_dir(arch.join("nested")).unwrap();
         let client = served_client(root.path()).await;
 
+        let root_page = client
+            .get("/")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap();
+        assert!(root_page.contains("href=\"./x86_64/\""));
+        assert!(!root_page.contains("Parent directory"));
+        let redirect = client.get("/x86_64").dispatch().await;
+        assert_eq!(redirect.status(), Status::PermanentRedirect);
+        assert_eq!(redirect.headers().get_one("Location"), Some("/x86_64/"));
+        let page = client.get("/x86_64/").dispatch().await;
+        assert_eq!(page.status(), Status::Ok);
+        assert_eq!(page.content_type(), Some(rocket::http::ContentType::HTML));
+        let html = page.into_string().await.unwrap();
+        assert!(html.contains("href=\"../\""));
+        assert!(html.contains("href=\"./repo.db\""));
+        assert!(html.find("./nested/").unwrap() < html.find("./a.pkg.tar.zst").unwrap());
+        assert!(html.find("./a.pkg.tar.zst").unwrap() < html.find("./repo.db").unwrap());
         let file = client.get("/x86_64/repo.db").dispatch().await;
         assert_eq!(file.status(), Status::Ok);
+        assert_eq!(file.into_bytes().await.unwrap(), b"db");
+        assert_eq!(
+            client.get("/missing").dispatch().await.status(),
+            Status::NotFound
+        );
+        // Empty directories also have a valid index.
+        assert_eq!(
+            client.get("/x86_64/nested/").dispatch().await.status(),
+            Status::Ok
+        );
+    }
 
-        for path in ["/x86_64", "/x86_64/", "/"] {
-            let response = client.get(path).dispatch().await;
-            assert_eq!(response.status(), Status::NotFound, "GET {path}");
+    #[rocket::async_test]
+    async fn dot_files_and_directories_are_neither_listed_nor_downloadable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".staging")).unwrap();
+        std::fs::create_dir(root.path().join("x86_64")).unwrap();
+        for path in [
+            ".staging/private.pkg.tar.zst",
+            ".repo.db.tmp",
+            "x86_64/.repo.files.tmp",
+        ] {
+            std::fs::write(root.path().join(path), b"private").unwrap();
         }
+        let client = served_client(root.path()).await;
+        for path in ["/", "/x86_64/"] {
+            let html = client
+                .get(path)
+                .dispatch()
+                .await
+                .into_string()
+                .await
+                .unwrap();
+            assert!(!html.contains(".staging"));
+            assert!(!html.contains(".tmp"));
+        }
+        for path in [
+            "/.staging/",
+            "/.staging/private.pkg.tar.zst",
+            "/.repo.db.tmp",
+            "/x86_64/.repo.files.tmp",
+            "/%2Estaging/",
+            "/x86_64/%2Erepo.files.tmp",
+        ] {
+            assert_eq!(
+                client.get(path).dispatch().await.status(),
+                Status::NotFound,
+                "{path}"
+            );
+        }
+    }
 
-        let missing = client.get("/x86_64/no-such-file").dispatch().await;
-        assert_eq!(missing.status(), Status::NotFound);
+    #[rocket::async_test]
+    async fn listing_escapes_html_and_links_round_trip_special_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let name = "<tag> & \"quote\" #?% café.pkg.tar.zst";
+        std::fs::write(root.path().join(name), b"package").unwrap();
+        let client = served_client(root.path()).await;
+        let html = client
+            .get("/")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap();
+        assert!(!html.contains("<tag>"));
+        assert!(html.contains("&lt;tag&gt;"));
+        assert!(html.contains("&amp;"));
+        // Follow the actual generated URL, including its percent encoding.
+        let href = html
+            .split("href=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let response = client
+            .get(format!("/{}", href.strip_prefix("./").unwrap()))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(response.into_bytes().await.unwrap(), b"package");
+    }
+
+    #[rocket::async_test]
+    async fn listing_and_redirects_work_at_a_mount_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("x86_64")).unwrap();
+        std::fs::write(root.path().join("x86_64/repo.db"), b"db").unwrap();
+        let client =
+            Client::tracked(rocket::build().mount("/repo", CustomFileServer::new(root.path())))
+                .await
+                .unwrap();
+        let redirect = client.get("/repo/x86_64").dispatch().await;
+        assert_eq!(
+            redirect.headers().get_one("Location"),
+            Some("/repo/x86_64/")
+        );
+        let html = client
+            .get("/repo/x86_64/")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap();
+        assert!(html.contains("href=\"./repo.db\""));
+        assert!(html.contains("href=\"../\""));
+    }
+
+    #[cfg(unix)]
+    #[rocket::async_test]
+    async fn repository_database_symlinks_are_listed_and_downloadable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("repo.db.tar.gz"), b"db").unwrap();
+        std::os::unix::fs::symlink("repo.db.tar.gz", root.path().join("repo.db")).unwrap();
+        let client = served_client(root.path()).await;
+        let html = client
+            .get("/")
+            .dispatch()
+            .await
+            .into_string()
+            .await
+            .unwrap();
+        assert!(html.contains("href=\"./repo.db\""));
+        let response = client.get("/repo.db").dispatch().await;
+        assert_eq!(response.into_bytes().await.unwrap(), b"db");
     }
 }
