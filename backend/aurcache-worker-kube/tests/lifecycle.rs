@@ -13,10 +13,11 @@ use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::settings::WorkerSettings;
 use aurcache_worker_kube::cluster::{Admission, CreateError};
 use aurcache_worker_kube::pod::{BUILD, HOLD, STAGE};
+use std::sync::Arc;
 use std::time::Duration;
 use support::{
-    AfterLog, Answer, Call, INPUT, Package, Receive, Rig, Script, Sending, Sink, Start, claimed,
-    pod_name, report, status,
+    AfterLog, Answer, Call, INPUT, Package, Receive, Rig, Script, Sending, Sink, SshLinkScript,
+    Start, claimed, pod_name, report, status,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -664,7 +665,7 @@ async fn a_package_the_server_refuses_is_not_retried() {
 /// A name that is not a package's never reaches a URL, or the pod.
 #[tokio::test(start_paused = true)]
 async fn a_manifest_naming_something_that_is_not_a_package_is_refused() {
-    let manifest = r#"{"interface":1,"report":{"interface":1,"ended":{"how":"exited","code":0},
+    let manifest = r#"{"interface":2,"report":{"interface":2,"ended":{"how":"exited","code":0},
         "peak_memory_bytes":null,"oom_kills":null,"disk_bytes":null,"vcs_commits":{}},
         "artifacts":[{"name":"../x","size":1,"sha256":"00"}]}"#;
     let rig = Rig::new(Script {
@@ -682,12 +683,12 @@ async fn a_manifest_naming_something_that_is_not_a_package_is_refused() {
 #[tokio::test(start_paused = true)]
 async fn a_manifest_from_another_interface_is_refused() {
     let rig = Rig::new(Script {
-        manifest: Some(r#"{"interface":2,"report":null,"artifacts":[]}"#.to_string()),
+        manifest: Some(r#"{"interface":3,"report":null,"artifacts":[]}"#.to_string()),
         ..Script::default()
     });
     let built = rig.build(&claimed(7, None)).await;
     assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
-    assert!(reason(&built).contains("interface 2"), "{}", reason(&built));
+    assert!(reason(&built).contains("interface 3"), "{}", reason(&built));
 }
 
 #[tokio::test(start_paused = true)]
@@ -778,6 +779,7 @@ async fn a_panic_while_building_still_deletes_the_pod() {
         input: INPUT.to_vec(),
         log,
         uploads: &Panics,
+        ssh: None,
     };
     let drain = async { while lines.recv().await.is_some() {} };
     let building = std::panic::AssertUnwindSafe(rig.executor.build(build)).catch_unwind();
@@ -911,5 +913,99 @@ fn the_executor_names_itself() {
     assert_eq!(
         rig.executor.describe_self(),
         "kubernetes (namespace aurcache-builds, builder registry.example/builder:latest)"
+    );
+}
+
+/// An SSH key made with `ssh-keygen` for one test.
+fn ssh_key() -> Arc<aurcache_worker_container::ssh::key::SshKey> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key");
+    let made = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "aurcache-test", "-f"])
+        .arg(&path)
+        .status()
+        .expect("ssh-keygen is needed to make the test key");
+    assert!(made.success());
+    let text = std::fs::read(&path).unwrap();
+    Arc::new(aurcache_worker_container::ssh::key::SshKey::parse(&text).unwrap())
+}
+
+/// With a key, the dispatcher execs `ssh-link` into the build container
+/// once, answers the agent's requests for it there, and the build goes on.
+#[tokio::test(start_paused = true)]
+async fn the_ssh_link_is_opened_once_and_answered() {
+    let mut rig = Rig::new(Script {
+        after_log: AfterLog::Nothing,
+        ssh_link: SshLinkScript::Asks(vec![vec![11], vec![22]]),
+        ..Script::default()
+    });
+    let key = ssh_key();
+    rig.ssh = Some(Arc::clone(&key));
+    let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(
+        built.report.outcome,
+        BuildOutcome::Succeeded,
+        "{}",
+        built.log
+    );
+    let links: Vec<_> = rig
+        .cluster
+        .execs()
+        .into_iter()
+        .filter(|exec| exec.contains("ssh-link"))
+        .collect();
+    assert_eq!(
+        links,
+        ["build: ssh-link --socket /work/scratch/ssh-link/link.sock"]
+    );
+    let answers = rig.cluster.ssh_answers();
+    assert_eq!(answers.len(), 1);
+    // The identities, then a refusal of the lock request.
+    assert_eq!(answers[0][0][0], 12);
+    assert_eq!(answers[0][1], [5]);
+    assert!(
+        built
+            .log
+            .contains("[worker] the SSH link closed: 0 signature(s) made, 1 request(s) refused"),
+        "{}",
+        built.log
+    );
+    assert_cleaned_up(&rig, 7);
+}
+
+/// An exec that fails is not tried again: the agent, waiting for its link,
+/// ends the build itself.
+#[tokio::test(start_paused = true)]
+async fn a_failed_ssh_link_is_not_opened_again() {
+    let mut rig = Rig::new(Script {
+        ssh_link: SshLinkScript::Fails,
+        ..Script::default()
+    });
+    rig.ssh = Some(ssh_key());
+    let built = rig.build(&claimed(7, None)).await;
+    let links = rig
+        .cluster
+        .execs()
+        .into_iter()
+        .filter(|exec| exec.contains("ssh-link"))
+        .count();
+    assert_eq!(links, 1);
+    assert!(
+        built.log.contains("the exec of ssh-link failed"),
+        "{}",
+        built.log
+    );
+}
+
+/// Without a key, no link.
+#[tokio::test(start_paused = true)]
+async fn no_ssh_link_without_a_key() {
+    let rig = Rig::new(Script::default());
+    rig.build(&claimed(7, None)).await;
+    assert!(
+        !rig.cluster
+            .execs()
+            .iter()
+            .any(|exec| exec.contains("ssh-link"))
     );
 }

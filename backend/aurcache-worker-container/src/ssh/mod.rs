@@ -15,6 +15,11 @@ use key::SshKey;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The variable naming the SSH key's file, as on the chroot worker.
+pub const KEY_VARIABLE: &str = "WORKER_GIT_SSH_KEY";
+/// The variable naming the file of the hosts' keys, as on the chroot worker.
+pub const HOSTS_VARIABLE: &str = "WORKER_SSH_KNOWN_HOSTS";
+
 /// The files a worker reads its SSH key and the hosts' keys from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CredentialFiles {
@@ -29,6 +34,17 @@ pub struct Credential {
 }
 
 impl CredentialFiles {
+    /// The files [`KEY_VARIABLE`] and [`HOSTS_VARIABLE`] name, read through
+    /// `var`.
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
+        Self::from_settings(
+            var(KEY_VARIABLE).map(PathBuf::from),
+            var(HOSTS_VARIABLE).map(PathBuf::from),
+            KEY_VARIABLE,
+            HOSTS_VARIABLE,
+        )
+    }
+
     /// The files `key_variable` and `hosts_variable` name: none, or both.
     ///
     /// A key without host keys is refused: a container is new for every

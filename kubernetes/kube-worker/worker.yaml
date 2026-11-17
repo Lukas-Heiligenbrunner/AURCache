@@ -163,20 +163,25 @@ spec:
             # - name: WORKER_BUILD_DISK_MAX_DEFAULT
             #   value: 30G
             #
-            # SSH credentials for packages whose sources are in private git
-            # repositories: a Secret in `aurcache-builds`, with the private key
-            # under `ssh-privatekey` and the host keys of the servers it is
-            # used with under `known_hosts`. Both are required: a build's ssh
-            # trusts no host it was not told about.
+            # An SSH key for packages whose sources are in private git
+            # repositories: a Secret in this namespace (not the builds'), with
+            # the private key under `ssh-privatekey` and the host keys of the
+            # servers it is used with under `known_hosts`, mounted below. Both
+            # are required: a build's ssh trusts no host it was not told about.
             #
+            #     ssh-keygen -t ed25519 -N '' -f id_ed25519
             #     ssh-keyscan github.com > known_hosts
-            #     kubectl -n aurcache-builds create secret generic \
+            #     kubectl -n aurcache create secret generic \
             #       aurcache-build-ssh --from-file=ssh-privatekey=./id_ed25519 \
             #       --from-file=known_hosts=./known_hosts
             #
-            # Every build gets this one key, and can use it but not read it.
-            # - name: WORKER_KUBE_CREDENTIAL_SECRET
-            #   value: aurcache-build-ssh
+            # The key stays in this pod. Builds ask this worker for signatures
+            # while makepkg downloads their sources, and never hold the key;
+            # nothing a build installs can reach it.
+            # - name: WORKER_GIT_SSH_KEY
+            #   value: /etc/aurcache-ssh/ssh-privatekey
+            # - name: WORKER_SSH_KNOWN_HOSTS
+            #   value: /etc/aurcache-ssh/known_hosts
             #
             # Run build pods in user namespaces (`hostUsers: false`), so root
             # in a build is an unprivileged user on the node. Needs Kubernetes
@@ -212,6 +217,10 @@ spec:
             # - name: pod-template
             #   mountPath: /etc/aurcache
             #   readOnly: true
+            # The SSH key above, from its Secret:
+            # - name: build-ssh
+            #   mountPath: /etc/aurcache-ssh
+            #   readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -222,3 +231,8 @@ spec:
         # - name: pod-template
         #   configMap:
         #     name: aurcache-pod-template
+        # - name: build-ssh
+        #   secret:
+        #     secretName: aurcache-build-ssh
+        #     # The worker's user alone reads it (fsGroup above).
+        #     defaultMode: 0440

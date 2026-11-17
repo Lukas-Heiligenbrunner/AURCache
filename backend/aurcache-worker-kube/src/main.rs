@@ -79,6 +79,16 @@ async fn start() -> Result<Started> {
     let core = config::core_from_env();
     let identity = Identity::load_or_create(&core.data_dir)?;
     let cfg = Config::from_env(&core.settings, &identity.fingerprint)?;
+    if let Some(files) = &cfg.credential {
+        let credential = files.load()?;
+        tracing::info!(
+            "Builds fetch their sources with the SSH key {} ({} {}), which stays in this \
+             process: they reach it over a link while makepkg downloads, and never hold it",
+            files.key.display(),
+            credential.key.kind(),
+            credential.key.fingerprint()
+        );
+    }
 
     let cluster = Arc::new(KubeCluster::connect(&cfg.namespace, &cfg.dispatcher).await?);
     let agent_image = agent_image(&cluster, &cfg).await?;

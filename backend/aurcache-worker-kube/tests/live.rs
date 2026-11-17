@@ -67,7 +67,7 @@ fn config(dispatcher: &str, builder_image: String, schedule_timeout: Duration) -
         builder_image,
         pull_policy: "IfNotPresent".to_string(),
         agent_image: AgentImage::Given(variable("AURCACHE_KUBE_TEST_AGENT_IMAGE", None)),
-        credential_secret: None,
+        credential: None,
         user_namespaces: false,
         extras: PodExtras::default(),
         network_probe: false,
@@ -158,7 +158,7 @@ fn job(claimed: &ClaimedJob, cfg: &Config, pkgbuild: &str) -> Vec<u8> {
         cpus: cfg.tunables.cpus,
         keyserver: cfg.tunables.keyserver.clone(),
         scratch: "/work/scratch".into(),
-        credential: None,
+        ssh: None,
     };
     let spec = spec::for_job(claimed, None, options);
     input::pack(&spec, &source(&claimed.job.pkgbase, pkgbuild)).unwrap()
@@ -191,6 +191,7 @@ impl Dispatcher {
             input,
             log,
             uploads: sink,
+            ssh: None,
         };
         let collect = async {
             let mut text = String::new();
@@ -237,7 +238,7 @@ async fn a_package_builds_in_a_pod_and_is_published() {
         cpus: dispatcher.cfg.tunables.cpus,
         keyserver: dispatcher.cfg.tunables.keyserver.clone(),
         scratch: "/work/scratch".into(),
-        credential: None,
+        ssh: None,
     };
     // Without the repository section: the server is this process, which no
     // pod can reach.
@@ -250,6 +251,7 @@ async fn a_package_builds_in_a_pod_and_is_published() {
         input,
         log: log.sender(),
         uploads: &*server.client,
+        ssh: None,
     };
     let report = dispatcher.executor.build(build).await.unwrap();
     log.close(Vec::new(), None).await;

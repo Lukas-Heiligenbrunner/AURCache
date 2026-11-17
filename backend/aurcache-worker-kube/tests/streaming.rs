@@ -96,7 +96,7 @@ async fn a_build_is_published(server: &Server) {
         cpus: None,
         keyserver: "hkps://keys.example".to_string(),
         scratch: "/work/scratch".into(),
-        credential: None,
+        ssh: None,
     };
     let spec = spec::for_job(&claimed, server.client.repo(), options);
     let job = input::pack(&spec, b"").unwrap();
@@ -106,6 +106,7 @@ async fn a_build_is_published(server: &Server) {
         input: job.clone(),
         log: log.sender(),
         uploads: &*server.client,
+        ssh: None,
     };
     let report = executor.build(build).await.unwrap();
     log.close(Vec::new(), None).await;

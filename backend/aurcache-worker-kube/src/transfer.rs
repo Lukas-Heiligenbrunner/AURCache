@@ -9,15 +9,18 @@
 
 use crate::cluster::{Cluster, Exec, ExecEnd, Stdin};
 use crate::outcome::{Observed, observe};
-use crate::pod::{HOLD, STAGE, WORK};
+use crate::pod::{self, BUILD, HOLD, STAGE, WORK};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use aurcache_build_agent::report::{Artifact, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::artifact::is_artifact;
+use aurcache_worker_container::ssh::key::SshKey;
+use aurcache_worker_container::ssh::link::{self, LinkEnd, Served};
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::PackagesRefused;
 use sha2::{Digest, Sha256};
 use std::io;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context as TaskContext, Poll, ready};
@@ -110,6 +113,53 @@ impl<C: Cluster> Agent<'_, C> {
                 Err(error) => bail!("{message} (writing the job: {error})"),
             },
         }
+    }
+
+    /// Open the SSH link and answer for `key` over it until it ends: exec
+    /// `ssh-link` into the build container, which connects to `socket`.
+    ///
+    /// Called once per build, and never again whatever this returns: the
+    /// agent closes the link before anything it does not trust runs, and a
+    /// second exec would open one that it no longer watches.
+    pub async fn ssh_link(&self, key: Arc<SshKey>, socket: &Path) -> Served {
+        let bin = pod::build_agent_path();
+        let socket = socket.to_string_lossy();
+        let argv = [bin.as_str(), "ssh-link", "--socket", &socket];
+        let exec = match self
+            .cluster
+            .exec(self.pod, BUILD, &argv, Stdin::Piped)
+            .await
+        {
+            Ok(exec) => exec,
+            Err(error) => {
+                return Served {
+                    signed: 0,
+                    refused: 0,
+                    end: LinkEnd::Lost {
+                        message: format!("the exec of ssh-link failed: {error:#}"),
+                    },
+                };
+            }
+        };
+        let Exec {
+            stdin,
+            stdout,
+            ended,
+        } = exec;
+        let Some(stdin) = stdin else {
+            return Served {
+                signed: 0,
+                refused: 0,
+                end: LinkEnd::Lost {
+                    message: "the exec gave no stdin".to_string(),
+                },
+            };
+        };
+        let served = link::serve(&key, stdout, stdin).await;
+        if let ExecEnd::Failed { message } | ExecEnd::Lost { message } = ended.await {
+            tracing::debug!("ssh-link in {} ended: {message}", self.pod);
+        }
+        served
     }
 
     /// Follow the build log into `log` from where `lines` is, until the

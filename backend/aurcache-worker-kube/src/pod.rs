@@ -11,12 +11,11 @@ use aurcache_common::worker::JobDescriptor;
 use aurcache_worker_container::arch;
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, EmptyDirVolumeSource, Pod, PodSecurityContext, PodSpec,
-    ResourceRequirements, SeccompProfile, SecretVolumeSource, SecurityContext, Volume, VolumeMount,
+    ResourceRequirements, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::Duration;
 
 /// `app.kubernetes.io/managed-by` on every pod this worker creates.
@@ -33,7 +32,6 @@ pub const WORK: &str = "/work";
 pub const SERVICE_ACCOUNT: &str = "aurcache-build";
 
 const TOOLS: &str = "/aurcache/bin";
-const CREDENTIALS: &str = "/aurcache/credentials";
 /// Where the agent lives in the dispatcher's image.
 const AGENT_IN_IMAGE: &str = "/usr/local/bin";
 /// The user `stage` and `hold` run as.
@@ -43,8 +41,6 @@ const NOBODY: i64 = 65534;
 /// build and not the hand-back, so this is also how long the packages of a
 /// build that ended at its timeout have to reach the server.
 const DEADLINE_GRACE: Duration = Duration::from_secs(60 * 60);
-/// A Secret's files are readable by their owner alone.
-const SECRET_MODE: i32 = 0o400;
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const LABEL_DISPATCHER: &str = "aurcache.io/dispatcher";
@@ -169,13 +165,11 @@ pub fn agent_path() -> String {
     format!("{AGENT_IN_IMAGE}/{}", layout::BIN_NAME)
 }
 
-/// Where the build container has the files of the credential Secret; `None`
-/// when the configuration names no Secret, and the pod mounts none.
+/// The agent, where the build container has it: what an exec into `build`
+/// names.
 #[must_use]
-pub fn credentials(cfg: &Config) -> Option<&'static Path> {
-    cfg.credential_secret
-        .as_ref()
-        .map(|_| Path::new(CREDENTIALS))
+pub fn build_agent_path() -> String {
+    format!("{TOOLS}/{}", layout::BIN_NAME)
 }
 
 fn stage(inputs: &PodInputs<'_>) -> Container {
@@ -199,16 +193,13 @@ fn stage(inputs: &PodInputs<'_>) -> Container {
 
 fn build(inputs: &PodInputs<'_>) -> Container {
     let log = Work::new(WORK).log();
-    let mut mounts = vec![mount("work", WORK, false), mount("tools", TOOLS, true)];
-    if let Some(path) = credentials(inputs.cfg) {
-        mounts.push(mount("credentials", &path.to_string_lossy(), true));
-    }
+    let mounts = vec![mount("work", WORK, false), mount("tools", TOOLS, true)];
     Container {
         name: BUILD.to_string(),
         image: Some(inputs.cfg.builder_image.clone()),
         image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(vec![
-            format!("{TOOLS}/{}", layout::BIN_NAME),
+            build_agent_path(),
             "build".to_string(),
             "--work".to_string(),
             WORK.to_string(),
@@ -244,7 +235,7 @@ fn hold(inputs: &PodInputs<'_>) -> Container {
 }
 
 fn volumes(cfg: &Config) -> Vec<Volume> {
-    let mut all = vec![
+    vec![
         Volume {
             name: "work".to_string(),
             empty_dir: Some(EmptyDirVolumeSource {
@@ -261,19 +252,7 @@ fn volumes(cfg: &Config) -> Vec<Volume> {
             }),
             ..Volume::default()
         },
-    ];
-    if let Some(secret) = &cfg.credential_secret {
-        all.push(Volume {
-            name: "credentials".to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(secret.clone()),
-                default_mode: Some(SECRET_MODE),
-                ..SecretVolumeSource::default()
-            }),
-            ..Volume::default()
-        });
-    }
-    all
+    ]
 }
 
 /// The pod's labels: the operator's under this worker's.
@@ -358,7 +337,7 @@ mod tests {
             builder_image: "reg/builder:1".into(),
             pull_policy: "Always".into(),
             agent_image: AgentImage::Given("reg/agent@sha256:1".into()),
-            credential_secret: None,
+            credential: None,
             user_namespaces: false,
             extras: PodExtras::default(),
             network_probe: true,
@@ -442,7 +421,7 @@ mod tests {
     #[test]
     fn the_whole_pod() {
         let mut cfg = limited();
-        cfg.credential_secret = Some("ssh".into());
+        cfg.credential = Some(credential());
         cfg.user_namespaces = true;
         let value =
             serde_json::to_value(render_with(&cfg, 7, "aarch64", Some(3600)).unwrap()).unwrap();
@@ -509,8 +488,6 @@ mod tests {
                             "volumeMounts": [
                                 {"name": "work", "mountPath": "/work"},
                                 {"name": "tools", "mountPath": "/aurcache/bin", "readOnly": true},
-                                {"name": "credentials", "mountPath": "/aurcache/credentials",
-                                 "readOnly": true},
                             ],
                         },
                         {
@@ -530,8 +507,6 @@ mod tests {
                     "volumes": [
                         {"name": "work", "emptyDir": {"sizeLimit": "32212254720"}},
                         {"name": "tools", "emptyDir": {"sizeLimit": "64Mi"}},
-                        {"name": "credentials",
-                         "secret": {"secretName": "ssh", "defaultMode": 256}},
                     ],
                 },
             })
@@ -668,53 +643,31 @@ mod tests {
         assert_eq!(size.unwrap().0, (30u64 << 30).to_string());
     }
 
+    fn credential() -> aurcache_worker_container::ssh::CredentialFiles {
+        aurcache_worker_container::ssh::CredentialFiles {
+            key: "/etc/aurcache/ssh/ssh-privatekey".into(),
+            known_hosts: "/etc/aurcache/ssh/known_hosts".into(),
+        }
+    }
+
+    /// The SSH key stays with the dispatcher: a pod of a dispatcher that
+    /// holds one is the pod of one that does not, with no Secret in it.
     #[test]
-    fn the_credential_is_mounted_into_build_alone() {
-        let without = pod(&config());
+    fn the_credential_never_reaches_a_pod() {
+        let mut cfg = config();
+        cfg.credential = Some(credential());
+        let with = pod(&cfg);
+        assert_eq!(
+            serde_json::to_value(&with).unwrap(),
+            serde_json::to_value(pod(&config())).unwrap()
+        );
         assert!(
-            spec(&without)
+            spec(&with)
                 .volumes
                 .iter()
                 .flatten()
                 .all(|v| v.secret.is_none())
         );
-
-        let mut cfg = config();
-        cfg.credential_secret = Some("ssh".into());
-        let with = pod(&cfg);
-        let secrets = spec(&with)
-            .volumes
-            .iter()
-            .flatten()
-            .filter(|v| v.secret.is_some())
-            .count();
-        assert_eq!(secrets, 1);
-        for which in [STAGE, BUILD, HOLD] {
-            let mounted = container(&with, which)
-                .volume_mounts
-                .iter()
-                .flatten()
-                .any(|m| m.name == "credentials");
-            assert_eq!(mounted, which == BUILD, "{which}");
-        }
-    }
-
-    /// What the executor is told about the credential is where the pod has it.
-    #[test]
-    fn the_credential_is_named_where_build_mounts_it() {
-        assert_eq!(credentials(&config()), None);
-        let mut cfg = config();
-        cfg.credential_secret = Some("ssh".into());
-        let named = credentials(&cfg).unwrap();
-        let with = pod(&cfg);
-        let mounted = container(&with, BUILD)
-            .volume_mounts
-            .iter()
-            .flatten()
-            .find(|m| m.name == "credentials")
-            .unwrap();
-        assert_eq!(Path::new(&mounted.mount_path), named);
-        assert_eq!(mounted.read_only, Some(true));
     }
 
     /// What an exec names is what `stage` and `hold` themselves run.
@@ -800,7 +753,7 @@ mod tests {
         for bits in 0..32u32 {
             let mut cfg = config();
             cfg.user_namespaces = bits & 1 != 0;
-            cfg.credential_secret = (bits & 2 != 0).then(|| "ssh".to_string());
+            cfg.credential = (bits & 2 != 0).then(credential);
             cfg.tunables.memory = (bits & 4 != 0).then_some(1 << 30);
             cfg.tunables.disk = (bits & 8 != 0).then_some(1 << 30);
             if bits & 16 != 0 {

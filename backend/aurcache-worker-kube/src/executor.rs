@@ -14,12 +14,16 @@ use crate::outcome::{self, BuildEnd, Observed};
 use crate::pod::{self, BUILD, PodInputs};
 use crate::transfer::{Agent, Lines, Uploads};
 use anyhow::{Context, Result, anyhow, bail};
+use aurcache_build_agent::layout::Scratch;
 use aurcache_build_agent::report::Artifact;
-use aurcache_build_agent::spec::Credential;
+use aurcache_build_agent::spec::SshAccess;
 use aurcache_common::artifact::is_artifact;
 use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor, MirrorlistOffer};
 use aurcache_worker_container::outcome::{Ending, MemoryLimit, complete};
 use aurcache_worker_container::spec::SpecOptions;
+use aurcache_worker_container::ssh::key::SshKey;
+use aurcache_worker_container::ssh::link::{LinkEnd, Served};
+use aurcache_worker_container::ssh::{Credential, CredentialFiles};
 use aurcache_worker_container::{input, spec, unsupported};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
@@ -29,6 +33,7 @@ use aurcache_worker_core::protocol::{PackagesRefused, Stop, StopWatch};
 use aurcache_worker_core::report;
 use aurcache_worker_core::settings::WorkerSettings;
 use futures::FutureExt;
+use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, resume_unwind};
@@ -46,6 +51,8 @@ const LOG_END: Duration = Duration::from_secs(60);
 /// How long the log is read on once the build container has ended without a
 /// report, when nothing says where its end is.
 const LOG_DRAIN: Duration = Duration::from_secs(3);
+/// How long the SSH link may take to end once the build container has.
+const LINK_END: Duration = Duration::from_secs(5);
 /// How long a leftover pod with the name a build needs may take to go away.
 const REPLACE: Duration = Duration::from_secs(60);
 /// How long an image that cannot be pulled is waited for. The kubelet tries
@@ -60,10 +67,6 @@ const MEMORY_VARIABLE: &str = "WORKER_BUILD_MEMORY_MAX";
 /// Where the build's own trees go, under the work volume, so that everything
 /// a build writes is in the volume its disk limit is on.
 const SCRATCH: &str = "scratch";
-/// The key file of a `kubernetes.io/ssh-auth` Secret, and the host keys
-/// that go beside it.
-const CREDENTIAL_KEY: &str = "ssh-privatekey";
-const CREDENTIAL_KNOWN_HOSTS: &str = "known_hosts";
 /// The build the admission check asks about: an id no build has.
 const PROBE_BUILD: i32 = 0;
 /// The timeout the admission check's pod carries, so that it has a deadline
@@ -95,6 +98,9 @@ pub struct Build<'a, U> {
     /// Where the build log goes, a chunk of text at a time.
     pub log: mpsc::Sender<String>,
     pub uploads: &'a U,
+    /// The SSH key the build fetches its sources with, which this answers
+    /// for over the link; `None` when the dispatcher holds none.
+    pub ssh: Option<Arc<SshKey>>,
 }
 
 /// Whether the cluster can start one more build now.
@@ -333,6 +339,10 @@ impl<C: Cluster> KubeExecutor<C> {
         let follow = agent.follow(lines, log);
         tokio::pin!(follow);
         let mut followed = false;
+        // The SSH link, opened once the build container runs and never
+        // again for this build, whatever becomes of it.
+        let mut link: Fuse<BoxFuture<'_, Served>> = Fuse::terminated();
+        let mut linked = build.ssh.is_none();
         let end = loop {
             match status.read(&*self.cluster, log).await {
                 Seen::Gone => return Ok(Reached::Over(outcome::gone())),
@@ -340,13 +350,38 @@ impl<C: Cluster> KubeExecutor<C> {
                 Seen::Pod(Observed::Lost(loss)) => {
                     return Ok(Reached::Over(lost(cfg, build, &loss, watch)));
                 }
+                Seen::Pod(Observed::Building { .. })
+                    if !linked
+                        && self
+                            .cluster
+                            .pod(agent.pod)
+                            .is_some_and(|pod| build_runs(&pod)) =>
+                {
+                    if let Some(key) = build.ssh.clone() {
+                        linked = true;
+                        let socket = Scratch::new(scratch()).ssh_link();
+                        link = async move { agent.ssh_link(key, &socket).await }
+                            .boxed()
+                            .fuse();
+                    }
+                }
                 Seen::NotYet | Seen::Pod(_) => {}
             }
             tokio::select! {
                 changed = status.changed() => changed?,
                 () = &mut follow, if !followed => followed = true,
+                served = &mut link, if !link.is_terminated() => {
+                    say(log, &linked_line(&served)).await;
+                }
             }
         };
+        if !link.is_terminated() {
+            // The build container ended, and the exec with it: what is left
+            // is the end of the stream.
+            if let Ok(served) = tokio::time::timeout(LINK_END, &mut link).await {
+                say(log, &linked_line(&served)).await;
+            }
+        }
         if !followed {
             // A report exists exactly when the agent exited cleanly, and
             // `tail` then ends by itself at the end of the log.
@@ -615,7 +650,26 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             .source(build_id)
             .await
             .context("downloading source")?;
-        let spec = spec::for_job(&claimed, client.repo(), options(&cfg));
+        // Read for each build, so that a key or host keys changed in the
+        // Secret are used from the next build on.
+        let credential = match cfg
+            .credential
+            .as_ref()
+            .map(CredentialFiles::load)
+            .transpose()
+        {
+            Ok(credential) => credential,
+            Err(error) => {
+                return Ok(report::interrupted(format!(
+                    "the worker's SSH key could not be read: {error:#}"
+                )));
+            }
+        };
+        let ssh = credential.as_ref().map(|credential| SshAccess {
+            known_hosts: credential.known_hosts.clone(),
+        });
+        let key = credential.map(|credential: Credential| credential.key);
+        let spec = spec::for_job(&claimed, client.repo(), options(&cfg, ssh));
         let input = input::pack(&spec, &source)?;
         // Packed: one copy of the source is enough to hold until the pod
         // takes it.
@@ -626,6 +680,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             input,
             log: log.sender(),
             uploads: &*client,
+            ssh: key,
         };
         // Every other sender goes with `build`, so closing the log sends
         // what is left and returns.
@@ -859,20 +914,49 @@ fn undelivered(done: CompleteReport, error: &anyhow::Error) -> CompleteReport {
 }
 
 /// What the worker decides about a build's spec: the limits it runs under,
-/// and where in the pod its trees and its credential are.
-fn options(cfg: &Config) -> SpecOptions {
+/// where in the pod its trees are, and the hosts its SSH key is used with.
+fn options(cfg: &Config, ssh: Option<SshAccess>) -> SpecOptions {
     SpecOptions {
         cpus: cfg.tunables.cpus,
         keyserver: cfg.tunables.keyserver.clone(),
-        scratch: Path::new(pod::WORK).join(SCRATCH),
-        credential: pod::credentials(cfg).map(|mount| Credential {
-            key: mount.join(CREDENTIAL_KEY),
-            // Always named: the dispatcher cannot read the Secret to know
-            // whether it holds one, and a build without it is refused. A pod
-            // is new each time, so an ssh left to trust the keys it is shown
-            // would trust any host, on every build.
-            known_hosts: Some(mount.join(CREDENTIAL_KNOWN_HOSTS)),
-        }),
+        scratch: scratch(),
+        ssh,
+    }
+}
+
+/// Where the build's own trees are, in the pod.
+fn scratch() -> std::path::PathBuf {
+    Path::new(pod::WORK).join(SCRATCH)
+}
+
+/// Whether the build container runs, which is when it can be exec'd into.
+fn build_runs(pod: &Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|container| {
+            container.name == BUILD
+                && container
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.running.is_some())
+        })
+}
+
+/// What the build log says of a link once it is over.
+fn linked_line(served: &Served) -> String {
+    let used = format!(
+        "{} signature(s) made, {} request(s) refused",
+        served.signed, served.refused
+    );
+    match &served.end {
+        LinkEnd::Closed => format!("[worker] the SSH link closed: {used}\n"),
+        LinkEnd::Lost { message } => {
+            format!("[worker] the SSH link ended without being closed ({message}): {used}\n")
+        }
+        LinkEnd::Refused { message } => format!("[worker] the SSH link was refused: {message}\n"),
     }
 }
 
@@ -881,14 +965,14 @@ mod tests {
     use super::*;
     use crate::config::{AgentImage, PodExtras, Tunables};
 
-    fn cfg(credential_secret: Option<&str>) -> Config {
+    fn cfg(credential: Option<CredentialFiles>) -> Config {
         Config {
             namespace: "aurcache-builds".to_string(),
             dispatcher: "0123456789abcdef".to_string(),
             builder_image: "builder:1".to_string(),
             pull_policy: "Always".to_string(),
             agent_image: AgentImage::Given("agent:1".to_string()),
-            credential_secret: credential_secret.map(str::to_string),
+            credential,
             user_namespaces: false,
             extras: PodExtras::default(),
             network_probe: false,
@@ -947,22 +1031,25 @@ mod tests {
     #[test]
     fn the_spec_takes_the_limits_and_the_scratch_in_the_work_volume() {
         let cfg = cfg(None);
-        let options = options(&cfg);
+        let options = options(&cfg, None);
         assert_eq!(options.cpus, Some(2.5));
         assert_eq!(options.keyserver, "hkps://keys.example");
         assert_eq!(options.scratch, Path::new("/work/scratch"));
-        assert_eq!(options.credential, None);
+        assert_eq!(options.ssh, None);
     }
 
-    /// The credential is named where the build container has the Secret,
-    /// host keys included whatever the Secret holds.
+    /// The link the agent listens on is under the scratch the spec names.
     #[test]
-    fn the_spec_names_the_credential_where_the_pod_mounts_it() {
-        let cfg = cfg(Some("build-ssh"));
-        let mount = pod::credentials(&cfg).unwrap();
-        let credential = options(&cfg).credential.unwrap();
-        assert_eq!(credential.key, mount.join("ssh-privatekey"));
-        assert_eq!(credential.known_hosts, Some(mount.join("known_hosts")));
+    fn the_link_is_where_the_agent_listens() {
+        let spec_scratch = options(&cfg(None), None).scratch;
+        assert_eq!(
+            Scratch::new(spec_scratch).ssh_link(),
+            Scratch::new(scratch()).ssh_link()
+        );
+        assert_eq!(
+            Scratch::new(scratch()).ssh_link(),
+            Path::new("/work/scratch/ssh-link/link.sock")
+        );
     }
 
     #[test]

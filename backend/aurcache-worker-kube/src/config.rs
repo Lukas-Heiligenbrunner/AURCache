@@ -5,6 +5,7 @@
 
 use crate::settings::{DEFAULT_SCHEDULE_TIMEOUT, keys};
 use anyhow::{Context, Result, bail};
+use aurcache_worker_container::ssh::CredentialFiles;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::{DEFAULT_KEYSERVER, WorkerSettings};
 use k8s_openapi::api::core::v1::{
@@ -44,7 +45,9 @@ pub struct Config {
     /// builder's, and the agent's.
     pub pull_policy: String,
     pub agent_image: AgentImage,
-    pub credential_secret: Option<String>,
+    /// The SSH key builds fetch their sources with, which the dispatcher
+    /// holds and answers for (`WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS`).
+    pub credential: Option<CredentialFiles>,
     pub user_namespaces: bool,
     pub extras: PodExtras,
     pub network_probe: bool,
@@ -179,7 +182,7 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_BUILDER_IMAGE.into()),
             pull_policy,
             agent_image,
-            credential_secret: var("WORKER_KUBE_CREDENTIAL_SECRET"),
+            credential: CredentialFiles::from_vars(&var)?,
             user_namespaces: flag(
                 "WORKER_KUBE_USER_NAMESPACES",
                 var("WORKER_KUBE_USER_NAMESPACES"),
@@ -256,7 +259,7 @@ mod tests {
                 name: "w-0".into()
             }
         );
-        assert_eq!(cfg.credential_secret, None);
+        assert_eq!(cfg.credential, None);
         assert!(!cfg.user_namespaces);
         assert!(cfg.network_probe);
         assert_eq!(cfg.extras, PodExtras::default());
@@ -295,14 +298,21 @@ mod tests {
         vars.extend([
             ("WORKER_KUBE_NAMESPACE", "b"),
             ("WORKER_KUBE_IMAGE_PULL_POLICY", "IfNotPresent"),
-            ("WORKER_KUBE_CREDENTIAL_SECRET", "ssh"),
+            ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
+            ("WORKER_SSH_KNOWN_HOSTS", "/etc/aurcache/ssh/known_hosts"),
             ("WORKER_KUBE_USER_NAMESPACES", "TRUE"),
             ("WORKER_KUBE_NETWORK_PROBE", "false"),
         ]);
         let cfg = read(&vars).unwrap();
         assert_eq!(cfg.namespace, "b");
         assert_eq!(cfg.pull_policy, "IfNotPresent");
-        assert_eq!(cfg.credential_secret.as_deref(), Some("ssh"));
+        assert_eq!(
+            cfg.credential,
+            Some(CredentialFiles {
+                key: "/etc/aurcache/ssh/ssh-privatekey".into(),
+                known_hosts: "/etc/aurcache/ssh/known_hosts".into(),
+            })
+        );
         assert!(cfg.user_namespaces);
         assert!(!cfg.network_probe);
     }
@@ -313,6 +323,8 @@ mod tests {
             ("WORKER_KUBE_IMAGE_PULL_POLICY", "Sometimes"),
             ("WORKER_KUBE_USER_NAMESPACES", "yes"),
             ("WORKER_KUBE_NETWORK_PROBE", "1"),
+            // A key without the hosts it may be used with.
+            ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
         ] {
             let mut vars = OWN_POD.to_vec();
             vars.push(bad);

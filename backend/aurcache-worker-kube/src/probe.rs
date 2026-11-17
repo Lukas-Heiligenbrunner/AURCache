@@ -523,7 +523,7 @@ mod tests {
             builder_image: "reg/builder:1".into(),
             pull_policy: "Always".into(),
             agent_image: AgentImage::Given("reg/agent@sha256:1".into()),
-            credential_secret: None,
+            credential: None,
             user_namespaces: false,
             extras: PodExtras::default(),
             network_probe: true,

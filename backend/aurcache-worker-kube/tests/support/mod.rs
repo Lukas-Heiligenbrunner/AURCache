@@ -15,6 +15,7 @@ pub mod server;
 
 use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
+use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::worker::{JobDescriptor, MirrorlistOffer};
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
@@ -301,6 +302,19 @@ pub struct Script {
     pub chunk: usize,
     /// What the kubelet has of the build container's last lines.
     pub last_words: String,
+    /// What `ssh-link`'s far end, the agent, does once exec'd.
+    pub ssh_link: SshLinkScript,
+}
+
+/// The agent's side of the SSH link, as a test plays it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SshLinkScript {
+    /// Hello, these requests, the closing frame, and then the build
+    /// container ends with 0, as once the sources are downloaded the build
+    /// goes on without the link.
+    Asks(Vec<Vec<u8>>),
+    /// The exec fails.
+    Fails,
 }
 
 impl Default for Script {
@@ -325,6 +339,7 @@ impl Default for Script {
             sends: VecDeque::new(),
             chunk: 7,
             last_words: String::new(),
+            ssh_link: SshLinkScript::Asks(vec![vec![11]]),
         }
     }
 }
@@ -345,7 +360,7 @@ impl Script {
 /// A report with every measurement filled in.
 pub fn report(ended: Ended) -> BuildReport {
     BuildReport {
-        interface: 1,
+        interface: INTERFACE,
         ended,
         peak_memory_bytes: Some(3 << 30),
         oom_kills: Some(0),
@@ -367,6 +382,8 @@ struct State {
     rendered: Vec<Pod>,
     /// What each `receive` read from its stdin.
     received: Vec<Vec<u8>>,
+    /// What came back to the agent's side of each SSH link.
+    ssh_answers: Vec<Vec<Vec<u8>>>,
     script: Script,
 }
 
@@ -421,6 +438,7 @@ impl FakeCluster {
                     calls: Vec::new(),
                     rendered: Vec::new(),
                     received: Vec::new(),
+                    ssh_answers: Vec::new(),
                     script,
                 }),
                 moved: watch::channel(0).0,
@@ -459,6 +477,11 @@ impl FakeCluster {
 
     pub fn received(&self) -> Vec<Vec<u8>> {
         self.shared.state().received.clone()
+    }
+
+    /// The answers each SSH link carried, a list per link.
+    pub fn ssh_answers(&self) -> Vec<Vec<Vec<u8>>> {
+        self.shared.state().ssh_answers.clone()
     }
 
     pub fn has_pod(&self, name: &str) -> bool {
@@ -576,12 +599,63 @@ impl FakeCluster {
         played(steps, script.chunk, ExecEnd::Succeeded)
     }
 
+    /// The agent's side of an SSH link: say hello, ask, record the answers,
+    /// close, and end the build.
+    fn ssh_link(&self, pod: &str) -> Result<Exec> {
+        use aurcache_build_agent::ssh_link::{Frame, HEADER_LEN, HELLO, Header};
+        use tokio::io::AsyncWriteExt;
+        let requests = match self.shared.state().script.ssh_link.clone() {
+            SshLinkScript::Fails => bail!("container \"build\" is not running"),
+            SshLinkScript::Asks(requests) => requests,
+        };
+        // What the agent writes, the worker reads as stdout; what the worker
+        // writes to stdin, the agent reads.
+        let (worker_out, mut agent_out) = tokio::io::duplex(64 * 1024);
+        let (worker_in, mut agent_in) = tokio::io::duplex(64 * 1024);
+        let shared = Arc::clone(&self.shared);
+        let name = pod.to_string();
+        let agent = tokio::spawn(async move {
+            agent_out.write_all(HELLO).await.unwrap();
+            let mut theirs = [0; HELLO.len()];
+            agent_in.read_exact(&mut theirs).await.unwrap();
+            assert_eq!(&theirs, HELLO);
+            let mut answers = Vec::new();
+            for (id, message) in (1..).zip(requests) {
+                agent_out
+                    .write_all(&Frame::Request { id, message }.encode())
+                    .await
+                    .unwrap();
+                let mut header = [0; HEADER_LEN];
+                agent_in.read_exact(&mut header).await.unwrap();
+                let header = Header::parse(&header).unwrap();
+                assert_eq!(header.id, id);
+                let mut answer = vec![0; header.len as usize];
+                agent_in.read_exact(&mut answer).await.unwrap();
+                answers.push(answer);
+            }
+            agent_out.write_all(&Frame::Close.encode()).await.unwrap();
+            shared.state().ssh_answers.push(answers);
+            shared.set_status(&name, status::built(0, "Completed"));
+        });
+        let ended = async move {
+            match agent.await {
+                Ok(()) => ExecEnd::Succeeded,
+                Err(e) => std::panic::resume_unwind(e.into_panic()),
+            }
+        };
+        Ok(Exec {
+            stdin: Some(Box::pin(worker_in)),
+            stdout: Box::pin(worker_out),
+            ended: ended.boxed(),
+        })
+    }
+
     fn manifest(&self) -> Exec {
         let state = self.shared.state();
         let script = &state.script;
         let text = script.manifest.clone().unwrap_or_else(|| {
             let handback = Handback {
-                interface: 1,
+                interface: INTERFACE,
                 report: script.report.clone(),
                 artifacts: script.packages.iter().map(Package::artifact).collect(),
             };
@@ -709,6 +783,11 @@ impl Cluster for FakeCluster {
             "tail" => self.tail(pod, value("--from").parse().unwrap()),
             "manifest" => self.manifest(),
             "send" => self.send(value("--name")),
+            "ssh-link" => {
+                assert_eq!(container, aurcache_worker_kube::pod::BUILD);
+                assert_eq!(stdin, Stdin::Piped, "ssh-link carries the link on stdin");
+                self.ssh_link(pod)?
+            }
             other => panic!("the agent has no subcommand {other:?} for a build"),
         })
     }
@@ -927,7 +1006,7 @@ pub fn config() -> Config {
         builder_image: "registry.example/builder:latest".to_string(),
         pull_policy: "Always".to_string(),
         agent_image: AgentImage::Given(AGENT_IMAGE.to_string()),
-        credential_secret: None,
+        credential: None,
         user_namespaces: false,
         extras: PodExtras::default(),
         network_probe: false,
@@ -985,6 +1064,8 @@ pub struct Rig {
     pub cluster: Arc<FakeCluster>,
     pub executor: KubeExecutor<FakeCluster>,
     pub sink: Sink,
+    /// The SSH key builds are given, when a test sets one.
+    pub ssh: Option<Arc<aurcache_worker_container::ssh::key::SshKey>>,
 }
 
 /// The job as a test hands it in: any bytes, since no agent reads them.
@@ -1001,6 +1082,7 @@ impl Rig {
             executor: KubeExecutor::new(config(), Arc::clone(&cluster), AGENT_IMAGE.to_string()),
             cluster,
             sink,
+            ssh: None,
         }
     }
 
@@ -1012,6 +1094,7 @@ impl Rig {
             input: INPUT.to_vec(),
             log,
             uploads: &self.sink,
+            ssh: self.ssh.clone(),
         };
         let collect = async {
             let mut text = String::new();
