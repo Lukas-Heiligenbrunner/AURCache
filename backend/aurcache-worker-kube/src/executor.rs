@@ -22,7 +22,7 @@ use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor, Mirro
 use aurcache_worker_container::outcome::{Ending, MemoryLimit, complete};
 use aurcache_worker_container::spec::SpecOptions;
 use aurcache_worker_container::ssh::key::SshKey;
-use aurcache_worker_container::ssh::link::{LinkEnd, Served};
+use aurcache_worker_container::ssh::link::Served;
 use aurcache_worker_container::ssh::{Credential, CredentialFiles};
 use aurcache_worker_container::{input, spec, unsupported};
 use aurcache_worker_core::build_log::BuildLog;
@@ -371,7 +371,7 @@ impl<C: Cluster> KubeExecutor<C> {
                 changed = status.changed() => changed?,
                 () = &mut follow, if !followed => followed = true,
                 served = &mut link, if !link.is_terminated() => {
-                    say(log, &linked_line(&served)).await;
+                    say(log, &served.line()).await;
                 }
             }
         };
@@ -379,7 +379,7 @@ impl<C: Cluster> KubeExecutor<C> {
             // The build container ended, and the exec with it: what is left
             // is the end of the stream.
             if let Ok(served) = tokio::time::timeout(LINK_END, &mut link).await {
-                say(log, &linked_line(&served)).await;
+                say(log, &served.line()).await;
             }
         }
         if !followed {
@@ -943,21 +943,6 @@ fn build_runs(pod: &Pod) -> bool {
                     .as_ref()
                     .is_some_and(|state| state.running.is_some())
         })
-}
-
-/// What the build log says of a link once it is over.
-fn linked_line(served: &Served) -> String {
-    let used = format!(
-        "{} signature(s) made, {} request(s) refused",
-        served.signed, served.refused
-    );
-    match &served.end {
-        LinkEnd::Closed => format!("[worker] the SSH link closed: {used}\n"),
-        LinkEnd::Lost { message } => {
-            format!("[worker] the SSH link ended without being closed ({message}): {used}\n")
-        }
-        LinkEnd::Refused { message } => format!("[worker] the SSH link was refused: {message}\n"),
-    }
 }
 
 #[cfg(test)]

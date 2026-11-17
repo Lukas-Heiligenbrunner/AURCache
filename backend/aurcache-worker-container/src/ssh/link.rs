@@ -29,6 +29,26 @@ pub enum LinkEnd {
     Refused { message: String },
 }
 
+impl Served {
+    /// What the build log says of the link once it is over.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let used = format!(
+            "{} signature(s) made, {} request(s) refused",
+            self.signed, self.refused
+        );
+        match &self.end {
+            LinkEnd::Closed => format!("[worker] the SSH link closed: {used}\n"),
+            LinkEnd::Lost { message } => {
+                format!("[worker] the SSH link ended without being closed ({message}): {used}\n")
+            }
+            LinkEnd::Refused { message } => {
+                format!("[worker] the SSH link was refused: {message}\n")
+            }
+        }
+    }
+}
+
 impl LinkEnd {
     fn lost(error: &std::io::Error) -> Self {
         Self::Lost {
