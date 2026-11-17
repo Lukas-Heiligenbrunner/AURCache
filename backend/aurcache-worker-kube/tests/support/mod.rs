@@ -477,6 +477,21 @@ impl FakeCluster {
         self.shared.bump();
     }
 
+    /// Put a build's pod in the cluster, labelled as the dispatcher labels
+    /// one, as if its build had ended without it being deleted.
+    pub fn leave_build(&self, build_id: i32, status: PodStatus) {
+        let name = pod_name(build_id);
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.clone());
+        pod.metadata.labels = Some(BTreeMap::from([(
+            "aurcache.io/build-id".to_string(),
+            build_id.to_string(),
+        )]));
+        pod.status = Some(status);
+        self.shared.state().pods.insert(name, Arc::new(pod));
+        self.shared.bump();
+    }
+
     pub fn set_status(&self, name: &str, status: PodStatus) {
         self.shared.set_status(name, status);
     }

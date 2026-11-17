@@ -187,6 +187,23 @@ async fn a_cancel_while_the_pod_waits_for_a_node_deletes_it() {
     assert_cleaned_up(&rig, 7);
 }
 
+/// A build that is stopped before it has a pod gets none: a request to
+/// create one would only have to be undone.
+#[tokio::test(start_paused = true)]
+async fn a_build_cancelled_before_its_pod_is_made_makes_none() {
+    let rig = Rig::new(Script::default());
+    let job = claimed(7, None);
+    job.cancel.cancel();
+    let built = rig.build(&job).await;
+    assert_eq!(built.report.outcome, BuildOutcome::Canceled);
+    assert!(
+        !rig.cluster.calls().contains(&Call::Create(pod_name(7))),
+        "{:?}",
+        rig.cluster.calls()
+    );
+    assert!(!rig.cluster.has_pod(&pod_name(7)));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_cancel_while_building_deletes_the_pod() {
     let rig = Rig::new(Script {
@@ -298,21 +315,6 @@ async fn a_pod_scheduled_late_but_in_time_builds() {
     assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
 }
 
-#[tokio::test(start_paused = true)]
-async fn an_agent_image_that_cannot_be_pulled_is_an_interruption() {
-    let rig = Rig::new(Script {
-        start: Start::Status(Box::new(status::stage_image_missing())),
-        ..Script::default()
-    });
-    let built = rig.build(&claimed(7, None)).await;
-    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
-    assert_eq!(
-        reason(&built),
-        "the stage container cannot start: ErrImagePull: manifest unknown"
-    );
-    assert_cleaned_up(&rig, 7);
-}
-
 /// A pod a node took and that never starts, as one whose Secret does not
 /// exist or whose network cannot be set up: the build is handed back as the
 /// worker's, and not left to run into the package's own timeout.
@@ -383,6 +385,23 @@ async fn an_image_pulled_on_a_later_try_costs_nothing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_agent_image_that_cannot_be_pulled_is_an_interruption() {
+    let rig = Rig::new(Script {
+        start: Start::Status(Box::new(status::stage_image_missing())),
+        ..Script::default()
+    });
+    let started = tokio::time::Instant::now();
+    let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(started.elapsed(), Duration::from_secs(120));
+    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
+    assert_eq!(
+        reason(&built),
+        "the stage container cannot start: ErrImagePull: manifest unknown"
+    );
+    assert_cleaned_up(&rig, 7);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_builder_image_that_cannot_be_pulled_is_an_interruption() {
     let rig = Rig::new(Script {
         report: None,
@@ -390,9 +409,7 @@ async fn a_builder_image_that_cannot_be_pulled_is_an_interruption() {
         log: Vec::new(),
         ..Script::default()
     });
-    let started = tokio::time::Instant::now();
     let built = rig.build(&claimed(7, None)).await;
-    assert_eq!(started.elapsed(), Duration::from_secs(120));
     assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
     assert_eq!(
         reason(&built),
@@ -780,6 +797,51 @@ async fn leftover_pods_are_swept_at_startup() {
     assert!(!rig.cluster.has_pod(&pod_name(3)));
     assert!(!rig.cluster.has_pod(&pod_name(4)));
     assert_eq!(rig.executor.sweep().await.unwrap(), 0);
+}
+
+/// A pod no build holds is deleted before the next claim: one whose delete
+/// failed, and one of no build that has ended. A pod of no build that still
+/// runs is somebody's.
+#[tokio::test(start_paused = true)]
+async fn pods_nobody_holds_are_deleted_before_a_claim() {
+    let rig = Rig::new(Script::default());
+    rig.cluster.leave_build(3, status::built(0, "Completed"));
+    rig.cluster
+        .leave("aurcache-probe-ended", status::evicted("deadline"));
+    rig.cluster.leave("aurcache-probe-asked", status::staged());
+    assert!(rig.executor.ready_for_work(0).await);
+    let mut deletions = rig.cluster.deletions();
+    deletions.sort_by_key(|call| format!("{call:?}"));
+    let gone = |name: &str| Call::Delete {
+        name: name.to_string(),
+        grace: Duration::ZERO,
+    };
+    assert_eq!(
+        deletions,
+        [gone(&pod_name(3)), gone("aurcache-probe-ended")]
+    );
+    assert!(rig.cluster.has_pod("aurcache-probe-asked"));
+}
+
+/// The pod of a build that is running is that build's, whatever else is
+/// asked of the cluster meanwhile.
+#[tokio::test(start_paused = true)]
+async fn the_pod_of_a_running_build_is_not_taken_for_an_orphan() {
+    let rig = Rig::new(Script {
+        report: None,
+        after_log: AfterLog::Nothing,
+        ..Script::default()
+    });
+    let job = claimed(7, None);
+    let cancel = job.cancel.clone();
+    let (built, ()) = tokio::join!(rig.build(&job), async {
+        rig.cluster.until_exec("tail").await;
+        assert!(rig.executor.ready_for_work(1).await);
+        assert!(rig.cluster.deletions().is_empty());
+        cancel.cancel();
+    });
+    assert_eq!(built.report.outcome, BuildOutcome::Canceled);
+    assert_cleaned_up(&rig, 7);
 }
 
 #[tokio::test(start_paused = true)]

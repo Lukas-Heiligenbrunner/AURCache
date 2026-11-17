@@ -81,12 +81,16 @@ pub struct KubeExecutor<C: Cluster> {
     agent_image: String,
     /// What the last readiness check found, so that a change is logged once.
     readiness: Mutex<Readiness>,
+    /// The builds this executor is seeing through now. A pod of any other
+    /// build is nobody's.
+    held: Mutex<HashSet<i32>>,
 }
 
 /// What one build is made from, beside the configuration.
 pub struct Build<'a, U> {
     pub claimed: &'a ClaimedJob,
-    /// The job as `receive` reads it: [`input::pack`]'s tar.
+    /// The job as `receive` reads it: [`input::pack`]'s tar. Taken out when
+    /// the build starts, and dropped once the pod has it.
     pub input: Vec<u8>,
     /// Where the build log goes, a chunk of text at a time.
     pub log: mpsc::Sender<String>,
@@ -146,6 +150,7 @@ impl<C: Cluster> KubeExecutor<C> {
             cluster,
             agent_image,
             readiness: Mutex::new(Readiness::Ready),
+            held: Mutex::new(HashSet::new()),
         }
     }
 
@@ -174,7 +179,7 @@ impl<C: Cluster> KubeExecutor<C> {
     pub async fn build<U: Uploads>(&self, build: Build<'_, U>) -> Result<CompleteReport> {
         let cfg = self.cfg.current();
         let pod = self.render(&cfg, build.claimed)?;
-        self.run(&cfg, &pod, &build).await
+        self.run(&cfg, &pod, build).await
     }
 
     fn render(&self, cfg: &Config, claimed: &ClaimedJob) -> Result<Pod> {
@@ -192,19 +197,47 @@ impl<C: Cluster> KubeExecutor<C> {
         &self,
         cfg: &Config,
         pod: &Pod,
-        build: &Build<'_, U>,
+        mut build: Build<'_, U>,
     ) -> Result<CompleteReport> {
         let watch = build.claimed.watch();
-        let name = pod::name(&cfg.dispatcher, build.claimed.job.build_id);
-        let attended = AssertUnwindSafe(self.attend(cfg, pod, &name, build, &watch))
+        let build_id = build.claimed.job.build_id;
+        let name = pod::name(&cfg.dispatcher, build_id);
+        let input = std::mem::take(&mut build.input);
+        lock(&self.held).insert(build_id);
+        let attended = AssertUnwindSafe(self.attend(cfg, pod, &name, &build, input, &watch))
             .catch_unwind()
             .await;
         if let Err(error) = self.cluster.delete(&name, GRACE).await {
-            // Its deadline ends it, and the next start of this worker sweeps
-            // it; neither is a reason to change what the build is reported as.
+            // Not a reason to change what the build is reported as: once the
+            // build is no longer held, `reap` deletes its pod.
             tracing::warn!("{error:#}");
         }
+        lock(&self.held).remove(&build_id);
         attended.unwrap_or_else(|panic| resume_unwind(panic))
+    }
+
+    /// Delete the pods of this dispatcher that no build holds: one whose
+    /// delete failed when its build ended, one created by a request that was
+    /// answered after its build had given up on it, and a pod with no build
+    /// that has ended (the NetworkPolicy check's). A pod left standing holds
+    /// its requests and its place in a quota until its deadline, and a pod
+    /// that ended keeps its place in a quota on objects for good.
+    async fn reap(&self) {
+        let orphans: Vec<String> = {
+            let held = lock(&self.held);
+            self.cluster
+                .pods()
+                .iter()
+                .filter(|pod| orphaned(pod, &held))
+                .filter_map(|pod| pod.metadata.name.clone())
+                .collect()
+        };
+        for name in orphans {
+            match self.cluster.delete(&name, Duration::ZERO).await {
+                Ok(()) => tracing::warn!("Deleted pod {name}, which no build of this worker held"),
+                Err(error) => tracing::warn!("{error:#}"),
+            }
+        }
     }
 
     /// The build from pod creation to its report, stopped where the job's
@@ -218,8 +251,23 @@ impl<C: Cluster> KubeExecutor<C> {
         pod: &Pod,
         name: &str,
         build: &Build<'_, U>,
+        input: Vec<u8>,
         watch: &StopWatch,
     ) -> Result<CompleteReport> {
+        // A build stopped before it has a pod gets none.
+        if build.claimed.cancel.is_cancelled() {
+            return Ok(stopped(Stop::Canceled, watch));
+        }
+        // Not raced against a stop: a request to create a pod that is dropped
+        // half-way can still be answered, after the delete meant to undo it,
+        // and the pod would then stand until its deadline.
+        match self.create(pod, name, watch).await? {
+            Created::Yes => {}
+            Created::Refused { message } => return Ok(outcome::refused(&message)),
+            Created::Stopped(stop) => return Ok(stopped(stop, watch)),
+        }
+        say(&build.log, &format!("[worker] created pod {name}\n")).await;
+
         let bin = pod::agent_path();
         let agent = Agent {
             cluster: &*self.cluster,
@@ -229,7 +277,7 @@ impl<C: Cluster> KubeExecutor<C> {
         let lines = Mutex::new(Lines::default());
         let reached = tokio::select! {
             biased;
-            reached = self.until_built(cfg, pod, &agent, build, &lines, watch) => Ok(reached),
+            reached = self.until_built(cfg, &agent, build, input, &lines, watch) => Ok(reached),
             stop = watch.stopped() => Err(stop),
         };
         let rest = lock(&lines).flush();
@@ -254,22 +302,18 @@ impl<C: Cluster> KubeExecutor<C> {
         }
     }
 
-    /// Create the pod, hand the job in, and follow the build until its
-    /// container has ended or the pod is lost.
+    /// Hand the job to the pod, once it can take it, and follow the build
+    /// until its container has ended or the pod is lost.
     async fn until_built<U: Uploads>(
         &self,
         cfg: &Config,
-        pod: &Pod,
         agent: &Agent<'_, C>,
         build: &Build<'_, U>,
+        input: Vec<u8>,
         lines: &Mutex<Lines>,
         watch: &StopWatch,
     ) -> Result<Reached> {
         let log = &build.log;
-        if let Created::Refused { message } = self.create(pod, agent.pod).await? {
-            return Ok(Reached::Over(outcome::refused(&message)));
-        }
-        say(log, &format!("[worker] created pod {}\n", agent.pod)).await;
         let mut status = Status::new(agent.pod, self.cluster.generation());
         if let Some(over) = self.until_staged(cfg, build, &mut status, watch).await? {
             return Ok(Reached::Over(over));
@@ -277,7 +321,10 @@ impl<C: Cluster> KubeExecutor<C> {
         say(log, "[worker] handing the job to the pod\n").await;
         // Once, and never again: a second hand-in is refused by the agent,
         // and after a failed one nobody knows whether a build started.
-        if let Err(error) = agent.receive(&build.input).await {
+        let handed = agent.receive(&input).await;
+        // The pod has it now, or never will: the build may run for hours.
+        drop(input);
+        if let Err(error) = handed {
             return Ok(Reached::Over(report::interrupted(format!(
                 "handing the job to the build pod failed: {error:#}"
             ))));
@@ -320,8 +367,9 @@ impl<C: Cluster> KubeExecutor<C> {
     }
 
     /// Create the pod. One of that name left by an earlier attempt at the
-    /// same build is deleted first.
-    async fn create(&self, pod: &Pod, name: &str) -> Result<Created> {
+    /// same build is deleted first, and only that wait gives way to a stop:
+    /// each request to create is seen to its answer.
+    async fn create(&self, pod: &Pod, name: &str, watch: &StopWatch) -> Result<Created> {
         match self.cluster.create(pod).await {
             Ok(()) => return Ok(Created::Yes),
             Err(CreateError::Refused { message }) => return Ok(Created::Refused { message }),
@@ -338,8 +386,11 @@ impl<C: Cluster> KubeExecutor<C> {
                 }
             }
         };
-        if tokio::time::timeout(REPLACE, gone).await.is_err() {
-            bail!("a pod named {name} exists already and did not go away when deleted");
+        tokio::select! {
+            waited = tokio::time::timeout(REPLACE, gone) => if waited.is_err() {
+                bail!("a pod named {name} exists already and did not go away when deleted");
+            },
+            stop = watch.stopped() => return Ok(Created::Stopped(stop)),
         }
         match self.cluster.create(pod).await {
             Ok(()) => Ok(Created::Yes),
@@ -566,6 +617,9 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             .context("downloading source")?;
         let spec = spec::for_job(&claimed, client.repo(), options(&cfg));
         let input = input::pack(&spec, &source)?;
+        // Packed: one copy of the source is enough to hold until the pod
+        // takes it.
+        drop(source);
         let log = BuildLog::open(Arc::clone(&client), build_id);
         let build = Build {
             claimed: &claimed,
@@ -573,10 +627,9 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             log: log.sender(),
             uploads: &*client,
         };
-        let result = self.run(&cfg, &pod, &build).await;
-        // Every other sender is gone with `build`, so this sends what is
-        // left and returns.
-        drop(build);
+        // Every other sender goes with `build`, so closing the log sends
+        // what is left and returns.
+        let result = self.run(&cfg, &pod, build).await;
         log.close(Vec::new(), None).await;
         result
     }
@@ -585,6 +638,7 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
     /// holds a lease, and one whose pod is refused or left pending spends an
     /// attempt for nothing.
     async fn ready_for_work(&self, _claimed: usize) -> bool {
+        self.reap().await;
         let cfg = self.cfg.current();
         let found = self.readiness(&cfg).await;
         self.note(&found);
