@@ -113,8 +113,13 @@ repos = {"x86_64": ["core", "extra", "multilib"]}.get(arch, ["core", "extra", "a
 pacman_conf = (
     "[options]\nDisableSandbox\nSigLevel = Never\nHoldPkg = pacman glibc\n"
     f"Architecture = {arch}\n"
-    + "".join(f"\n[{repo}]\nInclude = /etc/pacman.d/mirrorlist\n" for repo in repos)
 )
+# The test's repository, where the upgrade thief outranks core, as an
+# operator's own repository or an image-only package would. The agent
+# appends the AURCache repository after this, as the server does.
+if "gitssh" in options:
+    pacman_conf += f"\n[thief]\nServer = http://{options['gitssh']}:8080\n"
+pacman_conf += "".join(f"\n[{repo}]\nInclude = /etc/pacman.d/mirrorlist\n" for repo in repos)
 # The first two are the agent's to decide, and must not win.
 makepkg_conf = "PKGDEST=/tmp/not-here\nMAKEFLAGS=-j1\n"
 if "vcs" in options:
@@ -125,7 +130,6 @@ if "vcs" in options:
     )
 if "gitssh" in options:
     makepkg_conf += f"AURCACHE_TEST_GITSSH={options['gitssh']}\n"
-    pacman_conf += f"\n[thief]\nServer = http://{options['gitssh']}:8080\n"
 if "linger" in options:
     makepkg_conf += f"AURCACHE_TEST_LINGER={options['linger']}\n"
 makepkg_conf += "PACKAGER='AURCache <aurcache@localhost>'\nOPTIONS+=(!debug)\n"
@@ -293,18 +297,18 @@ docker run --rm --name "$(container thief)" --user 0 -v "$WORK/repo:/repo" \
             "arch = any" >.PKGINFO
         bsdtar -cf - .PKGINFO .INSTALL | zstd -q >/repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
         repo-add -q /repo/thief.db.tar.gz /repo/aurcache-agent-thief-1-1-any.pkg.tar.zst
-        # Shadow a leaf package with a higher version, so `-Syu` installs this.
+        # Shadow the package with a far higher version of the arch its local
+        # database records (pacman does not upgrade across arch); with [thief]
+        # ahead of core, `-Syu` installs this and runs its scriptlet as root.
         if [ -n "$SHADOW" ]; then
-            ver=$(pacman -Q "$SHADOW" | awk "{print \$2}")
-            arch=$(uname -m)
-            bumped="${ver%-*}.99-1"
+            arch=$(cat /var/lib/pacman/local/"$SHADOW"-*/desc | grep -A1 "%ARCH%" | tail -1)
             mkdir up; cd up
             cp /upgrade-thief/thief.install .INSTALL
-            printf "%s\n" "pkgname = $SHADOW" "pkgbase = $SHADOW" "pkgver = $bumped" \
+            printf "%s\n" "pkgname = $SHADOW" "pkgbase = $SHADOW" "pkgver = 9999-1" \
                 "pkgdesc = upgrade thief" "builddate = 0" "packager = test" "size = 0" \
                 "arch = $arch" >.PKGINFO
-            bsdtar -cf - .PKGINFO .INSTALL | zstd -q >"/repo/$SHADOW-$bumped-$arch.pkg.tar.zst"
-            repo-add -q /repo/thief.db.tar.gz "/repo/$SHADOW-$bumped-$arch.pkg.tar.zst"
+            bsdtar -cf - .PKGINFO .INSTALL | zstd -q >"/repo/$SHADOW-9999-1-$arch.pkg.tar.zst"
+            repo-add -q /repo/thief.db.tar.gz "/repo/$SHADOW-9999-1-$arch.pkg.tar.zst"
         fi
         chown -R '"$(id -u):$(id -g)"' /repo'
 echo "    the upgrade thief shadows: ${UPGRADE_SHADOW:-<none found; that half is skipped>}"
