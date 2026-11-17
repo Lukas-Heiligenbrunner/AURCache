@@ -276,3 +276,123 @@ async fn a_killed_build_leaves_nothing_behind() {
     clear(&setup, &dirs, &name).await;
     std::fs::remove_dir_all(&stage).unwrap();
 }
+
+/// A package whose PKGBUILD, as makepkg reads it while downloading, lists
+/// the keys of the agent it is given, and in `build()` looks for one.
+const LINK_PKGBUILD: &str = r#"pkgname=aurcache-link-test
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="The Docker worker's SSH link, from inside"
+arch=('any')
+license=('GPL-3.0-or-later')
+if [[ -n ${SSH_AUTH_SOCK:-} ]]; then
+  ssh-add -L | sed 's/^/listed: /'
+fi
+build() {
+  echo "in build: ${SSH_AUTH_SOCK:-no socket named}"
+  ls /var/lib/aurcache-build/ssh 2>&1 | sed 's/^/in build: /'
+}
+package() {
+  :
+}
+"#;
+
+/// The link the worker opens with `docker exec` reaches the key from the
+/// download, and nothing of it is left in `build()`.
+#[tokio::test]
+#[ignore = "needs Docker and a static agent: AURCACHE_DOCKER_TESTS=1"]
+async fn the_ssh_link_serves_the_download_and_nothing_after() {
+    use aurcache_build_agent::spec::SshAccess;
+    use aurcache_worker_container::ssh::key::SshKey;
+    use aurcache_worker_container::ssh::link::LinkEnd;
+    use std::sync::Arc;
+
+    let Some(setup) = setup() else { return };
+    let dirs = dirs("link");
+    let stage = dirs.local.with_extension("stage");
+    let _ = std::fs::remove_dir_all(&stage);
+    let tree = stage.join("aurcache-link-test");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("PKGBUILD"), LINK_PKGBUILD).unwrap();
+    let archive = stage.join("source.tar.gz");
+    assert!(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage)
+            .arg("aurcache-link-test")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let key_file = stage.join("key");
+    assert!(
+        Command::new("ssh-keygen")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "aurcache-link-test",
+                "-f"
+            ])
+            .arg(&key_file)
+            .status()
+            .expect("ssh-keygen")
+            .success()
+    );
+    let key = Arc::new(SshKey::parse(&std::fs::read(&key_file).unwrap()).unwrap());
+    let mut spec = spec();
+    spec.pkgbase = "aurcache-link-test".into();
+    spec.ssh = Some(SshAccess {
+        known_hosts: "example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n".into(),
+    });
+    workdir::prepare(
+        &dirs.local,
+        &setup.agent,
+        &spec,
+        &std::fs::read(&archive).unwrap(),
+    )
+    .unwrap();
+
+    let name = format!("{}-docker-link", setup.prefix);
+    let id = start(&setup, &name, &dirs).await;
+    let link = tokio::spawn(aurcache_worker_docker::link::serve(
+        setup.docker.clone(),
+        id.clone(),
+        Arc::clone(&key),
+    ));
+    let status = wait(&setup.docker, &id).await;
+    let served = tokio::time::timeout(Duration::from_secs(10), link)
+        .await
+        .expect("the link ends with the container")
+        .unwrap();
+    let logs = Command::new("docker").args(["logs", &id]).output().unwrap();
+    let said = String::from_utf8_lossy(&logs.stdout).into_owned();
+    cleanup::remove_container(&setup.docker, &id).await;
+
+    assert_eq!(status, Some(0), "{said}");
+    assert_eq!(served.end, LinkEnd::Closed, "{said}");
+    let public = std::fs::read_to_string(key_file.with_extension("pub")).unwrap();
+    assert!(
+        said.contains(&format!("listed: {}", public.trim())),
+        "the download did not list the key:\n{said}"
+    );
+    assert!(said.contains("in build: no socket named"), "{said}");
+    assert!(
+        !said.contains("in build: agent.sock"),
+        "the socket outlived the download:\n{said}"
+    );
+    assert!(
+        !said
+            .lines()
+            .any(|line| line.starts_with("listed: ") && !line.contains("aurcache-link-test")),
+        "{said}"
+    );
+
+    clear(&setup, &dirs, &name).await;
+    std::fs::remove_dir_all(&stage).unwrap();
+}
