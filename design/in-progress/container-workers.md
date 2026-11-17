@@ -138,7 +138,7 @@ in an arm64 container, starting an emulated build.
 
 **An interface number.** The agent and the worker are the same build when
 things are set up right, and the Kubernetes worker can be set up wrong (an
-agent image named by hand). The spec and the report carry `interface: 1`,
+agent image named by hand). The spec and the report carry `interface: 2`,
 and the agent refuses a spec with any other number, as `aurcache-build`
 refuses a worker that expects another interface (`build-runner.md`, step 0).
 
@@ -156,7 +156,10 @@ refuses a worker that expects another interface (`build-runner.md`, step 0).
   build/                      BUILDDIR
   srcdest/                    SRCDEST
   home/                       the build user's home and keyring
-  run/                        the pacman helper's socket, the ssh-agent's
+  run/                        the pacman helper's socket
+  ssh/agent.sock              while the sources download with the worker's
+                              SSH key: the build user's way to it
+  ssh-link/link.sock          root's: where the worker's `ssh-link` connects
 ```
 
 The worker reads back `pkg/`, `out/report.json` and, if it asked for one,
@@ -192,29 +195,38 @@ the runtime:
    capabilities and no way to regain one: unpack the source archive; import
    the job's `validpgpkeys` from the keyserver into its own keyring (a key
    that cannot be fetched is noted in the log and the build goes on, as on
-   the chroot worker); start `ssh-agent` and load the credential into it,
-   when the spec names one (root reads the key file and pipes it to
-   `ssh-add -`). A credential that names a `known_hosts` file which is not
-   there stops the build, with a message saying what to add.
+   the chroot worker).
 6. **The helper.** Root listens on a unix socket in `run/`. See below.
-7. **makepkg**, as the build user: `makepkg -s <the job's flags>` in
+   With `ssh` in the spec it refuses everything until step 7 is over.
+7. **With the worker's SSH key** (`ssh` in the spec, which carries the
+   hosts' keys and never the key): the worker's one `ssh-link` exec, which
+   connected to `ssh-link/link.sock` as the container started (root listens
+   there before step 2, and installs `openssh` and `git` after step 3), is
+   accepted; root opens `ssh/agent.sock` for the build user, and makepkg
+   runs once as `makepkg --verifysource --skipinteg`, which downloads the
+   sources and does nothing else. Then every other process is killed,
+   `ssh-link` among them, and the link and the socket are closed, before
+   anything is installed. `kubernetes-executor.md`, "Credentials and PGP
+   keys", is the whole of it. A link that never comes, or breaks during the
+   download, stops the build at its `credential` step.
+8. **makepkg**, as the build user: `makepkg -s <the job's flags>` in
    `src/<pkgbase>`, with a `makepkg.conf` made of the image's own, the job's
    assignments (minus where things go, which is the agent's), then
    `PKGDEST`, `BUILDDIR`, `SRCDEST`, the parallelism for the spec's CPU
    count (the chroot worker's rule: `MAKEFLAGS`, `OMP_NUM_THREADS`,
-   `CARGO_BUILD_JOBS`), `PACMAN_AUTH` on the helper, and the ssh-agent's
-   socket. Its output, and pacman's, goes to the agent's stdout and to the
-   log file.
-8. **Afterwards.** Kill whatever the build left running: as PID 1,
+   `CARGO_BUILD_JOBS`) and `PACMAN_AUTH` on the helper; after step 7, with
+   `--holdver` so the VCS clones are built as they were fetched. Its output,
+   and pacman's, goes to the agent's stdout and to the log file.
+9. **Afterwards.** Kill whatever the build left running: as PID 1,
    `kill(-1, SIGKILL)` reaches every other process in the container. Then,
    as the build user, ask git what each VCS source was at (as the build
    user because git on a repository the build wrote runs hooks and
    configuration the build chose).
-9. **Measure**: `memory.peak` and `memory.events`' `oom_kill` from the
+10. **Measure**: `memory.peak` and `memory.events`' `oom_kill` from the
    container's own cgroup, found through `/proc/self/cgroup` so that a
    container sharing the host's cgroup namespace does not read the host's;
    the bytes under the work and scratch directories.
-10. **Hand back.** Write `out/report.json`, then give the work directory,
+11. **Hand back.** Write `out/report.json`, then give the work directory,
     and `pkg/`, `log/` and `out/` with the regular files in them, back to
     whoever owned it, readable by anyone. Last, after step 8, so nothing the
     build started can write the report or change a package.

@@ -114,6 +114,23 @@ Two consequences:
   path — they are what gets checksummed, and what gets fetched before any
   package code runs.
 
+## On the Docker and Kubernetes workers
+
+The container workers take `WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS`
+too, with three differences:
+
+- nothing is generated: a key must be given;
+- `known_hosts` is required, since a container is new for every build and an
+  ssh that trusts the first key it is shown would trust any host;
+- the key never enters the build container. The worker answers for it over a
+  link into the container while makepkg downloads the sources, and closes the
+  link before any dependency is installed or any function of the PKGBUILD runs.
+  A PKGBUILD that clones over SSH inside `prepare()` or `build()` cannot
+  authenticate there.
+
+See [Docker worker](./docker.md#build-credentials) and
+[Kubernetes worker](./kubernetes.md#build-credentials).
+
 ## Other credentials
 
 For credentials that are not SSH — a `.netrc`, an API token, a licence file —

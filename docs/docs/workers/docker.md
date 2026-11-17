@@ -9,9 +9,10 @@ image, against a Docker or Podman socket it is given. It is for hosts that
 already run a container engine and have no use for a `devtools` chroot, and it
 is the builder the [hybrid image](./hybrid.md) embeds.
 
-It builds in a reused image rather than a clean chroot, so it supports neither
-the source and package caches nor [build credentials](./credentials.md). The
-[chroot worker](./split-chroot.md) offers both.
+It builds in a reused image rather than a clean chroot, so it does not support
+the source and package caches; the [chroot worker](./split-chroot.md) does. It
+does support an SSH key for private sources: see
+[Build credentials](#build-credentials).
 
 ## How it builds
 
@@ -103,6 +104,25 @@ instead. Unlike the Kubernetes worker, nothing here firewalls a build.
 `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest`) is pulled before
 each build. An image of your own needs pacman, makepkg, gpg and `find`; it needs
 neither `sudo` nor a build user, which the agent adds.
+
+### Build credentials
+
+`WORKER_GIT_SSH_KEY` names an SSH key for packages whose sources are in private
+repositories, and `WORKER_SSH_KNOWN_HOSTS` the host keys of the servers it is
+used with; set both or neither, as the worker refuses to start with a key and
+no host keys. The key is in the OpenSSH format `ssh-keygen` writes, without a
+passphrase: Ed25519, RSA (signing with SHA-2) or ECDSA. Nothing is generated,
+unlike on the chroot worker.
+
+The key never enters a build container. The worker holds it and answers for
+it: while makepkg downloads a build's sources, before anything is installed
+for the build, ssh in the container reaches the worker through `docker exec`
+and asks it for signatures. Then the link is closed for good, and only then
+are the build's dependencies installed and its functions run, so a
+dependency's install script, which runs as root in the container, finds
+neither the key nor a way to use it. A package that clones over SSH in
+`prepare()` or `build()` instead of through `source=` therefore cannot
+authenticate here.
 
 ### Build trees are not kept
 

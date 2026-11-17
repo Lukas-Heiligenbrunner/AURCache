@@ -167,7 +167,7 @@ because they decide what a build may reach.
 | `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the images of a build pod, the builder's and the agent's: `Always`, `IfNotPresent` or `Never`; anything else is an error at startup. `Always` picks up a new image; use `IfNotPresent` for images you loaded onto the nodes by hand. |
 | `WORKER_KUBE_AGENT_IMAGE` | none; the manifest sets it to the dispatcher's own image | Image build pods take the build agent from. |
 | `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none | The other way to name the agent image: the dispatcher's own pod, which it then reads to use the image of its own container, by digest where the cluster reports one. It needs `get` on pods in its namespace, which the manifests do not grant, because that also lets it read the server's pod. With neither these nor `WORKER_KUBE_AGENT_IMAGE`, the dispatcher refuses to start. |
-| `WORKER_KUBE_CREDENTIAL_SECRET` | none | A Secret in the builds' namespace holding an SSH build credential. See [Build credentials](#build-credentials). |
+| `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | The SSH key builds fetch private sources with, and the host keys of the servers it is used with: files in the dispatcher's own pod. Both or neither. See [Build credentials](#build-credentials). |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | `true` or `false`. Run build pods in user namespaces. See [User namespaces](#user-namespaces). |
 | `WORKER_KUBE_POD_TEMPLATE` | none | Path of a JSON file adding scheduling fields to every build pod. See [Architectures and scheduling](#architectures-and-scheduling). |
 | `WORKER_KUBE_NETWORK_PROBE` | `true` | `true` or `false`. Check at startup that the NetworkPolicy is enforced. |
@@ -286,40 +286,51 @@ one there. Try it with a package or two before relying on it.
 ## Build credentials
 
 Packages whose sources are in private git repositories need an SSH key. It comes
-from a Secret you create in the builds' namespace, and from nowhere else:
+from a Secret you create in the **dispatcher's** namespace, mounted into the
+dispatcher's pod, and from nowhere else:
 
 ```bash
-kubectl -n aurcache-builds create secret generic aurcache-build-ssh \
+ssh-keyscan github.com > known_hosts
+kubectl -n aurcache create secret generic aurcache-build-ssh \
   --from-file=ssh-privatekey=./id_ed25519 \
   --from-file=known_hosts=./known_hosts
 ```
 
-Set `WORKER_KUBE_CREDENTIAL_SECRET=aurcache-build-ssh`. The key goes under
-`ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret. The Secret is mounted
-readable by root alone, in the build container only. Package code, which runs
-as an unprivileged user, can use the key through an `ssh-agent` for the length
-of the build and cannot read it. One key is given to every build the
-dispatcher runs; use [routing](./routing.md) to send the packages that need it
-to this worker.
+Mount it into the dispatcher (the commented `build-ssh` volume in
+`worker.yaml`), and set `WORKER_GIT_SSH_KEY=/etc/aurcache-ssh/ssh-privatekey`
+and `WORKER_SSH_KNOWN_HOSTS=/etc/aurcache-ssh/known_hosts`. The key goes under
+`ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret, in the OpenSSH
+format `ssh-keygen` writes and without a passphrase: Ed25519, RSA (signing with
+SHA-2) or ECDSA. The dispatcher reads it again at the start of each build, so a
+changed Secret is used from the next build on.
 
-**The key is not hidden from code that runs as root in the pod**, and one kind
-of package code does: the install scriptlet of a dependency, which pacman runs
-as root when the build installs it. A package in a repository your builds use,
-AURCache's own included, could read the key that way. Give this worker a
-deploy key that opens only what its packages need, read-only where the host
-allows it.
+**The key never enters a build pod.** The dispatcher holds it and answers for
+it: while makepkg downloads a build's sources, and before anything is
+installed for the build, ssh in the pod reaches the dispatcher over an exec
+stream and asks it for signatures. Once the sources are in, that link is closed
+for good, and only then are the build's dependencies installed and its
+`prepare()`, `build()` and `package()` run. Code that runs as root in the pod,
+a dependency's install script for one, finds neither the key nor a way to ask
+for a signature. What can use the key, for the length of the download, is the
+package's own PKGBUILD as makepkg reads it, and git and ssh fetching its
+sources.
+
+One consequence: a package that clones over SSH itself, in `prepare()` or
+`build()` rather than through `source=`, cannot authenticate on this worker.
+The [chroot worker](./split-chroot.md) supports it, as there the key stays on
+the host while the socket is in the chroot for the whole build.
+
+Signatures are still signatures: code that runs during the download can ask
+for as many as it likes, for any host. Give this worker a deploy key that opens
+only what its packages need, read-only where the host allows it. One key is
+given to every build the dispatcher runs; use [routing](./routing.md) to send
+the packages that need it to this worker.
 
 **`known_hosts` is required.** It holds the host keys of the servers the key is
-used with, and a build's ssh accepts no host that is not in it:
-
-```bash
-ssh-keyscan github.com > known_hosts
-```
-
-A pod is new for every build, so an ssh left to trust the first key a host
-shows would trust any host, on every build. With a Secret that has no
-`known_hosts`, every build on this worker is stopped before it starts, and its
-log says to add one.
+used with, and a build's ssh accepts no host that is not in it. A pod is new
+for every build, so an ssh left to trust the first key a host shows would trust
+any host, on every build. The dispatcher refuses to start with a key and no
+`known_hosts`, or with a key it cannot use, and says why.
 
 The [generated-key onboarding](./credentials.md) of the chroot worker does not
 apply here: a key generated in a pod would be lost with it.
@@ -489,9 +500,7 @@ tried again.** A node took the pod and could not start it within
 `WORKER_KUBE_SCHEDULE_TIMEOUT`. The build ends with
 `the build pod did not start within 10m of getting a node ...`. The pod's
 status seldom says why; `kubectl -n aurcache-builds get events` does. The
-usual causes are a volume that cannot be mounted
-(`WORKER_KUBE_CREDENTIAL_SECRET` names a Secret that is not in the builds'
-namespace) and a pod network the node cannot set up.
+usual cause is a pod network the node cannot set up.
 
 **Every build fails at `pacman -Syu` with `Could not resolve host`.** Builds
 cannot reach the cluster's DNS. On a cluster with NodeLocal DNSCache, see
@@ -507,13 +516,16 @@ through the pod template for a private registry, or load the images onto the
 nodes and set `WORKER_KUBE_IMAGE_PULL_POLICY=IfNotPresent`. Every node that
 builds pulls the dispatcher's image, not only the one it runs on.
 
-**Every build ends with `credential failed: the credential has no host keys`.**
-The Secret named by `WORKER_KUBE_CREDENTIAL_SECRET` has no `known_hosts`. See
-[Build credentials](#build-credentials).
+**Builds with an SSH key end at their `credential` step.** The log says
+why: `the worker did not open the link` when the dispatcher could not exec into
+the build container (check that its Role still allows `pods/exec`), or `the SSH
+link to the worker broke` when the exec stream ended during the download. The
+server builds the package again. See [Build credentials](#build-credentials).
 
 **The dispatcher will not start.** It names the problem: a yes/no variable that
 is not `true` or `false`, a pull policy outside the three, a pod template that
-cannot be read or has a field outside the allowed list, or no agent image (set
+cannot be read or has a field outside the allowed list, an SSH key without its
+`known_hosts` or one it cannot use, or no agent image (set
 `WORKER_KUBE_AGENT_IMAGE`, or both `WORKER_KUBE_POD_NAME` and
 `WORKER_KUBE_POD_NAMESPACE`).
 
