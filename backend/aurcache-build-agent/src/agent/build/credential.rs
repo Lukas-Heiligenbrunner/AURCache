@@ -13,7 +13,7 @@ use super::user::BuildUser;
 use aurcache_build_agent::layout::Scratch;
 use aurcache_build_agent::spec::Credential;
 use std::fs::Permissions;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -84,8 +84,29 @@ pub fn load(
 fn publish(hosts: &Path, to: &Path) -> Result<PathBuf, String> {
     std::fs::copy(hosts, to)
         .and_then(|_| std::fs::set_permissions(to, Permissions::from_mode(0o644)))
-        .map_err(|e| format!("reading {}: {e}", hosts.display()))?;
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => no_known_hosts(hosts),
+            _ => format!("reading {}: {e}", hosts.display()),
+        })?;
     Ok(to.to_path_buf())
+}
+
+/// What to do about a credential that came without its host keys.
+///
+/// The build's ssh accepts only the hosts it is given: a container is new for
+/// every build, so one left to trust the first key it is shown would trust
+/// any host, every time.
+fn no_known_hosts(hosts: &Path) -> String {
+    let key = hosts
+        .file_name()
+        .map_or_else(|| KNOWN_HOSTS.into(), |name| name.to_string_lossy());
+    format!(
+        "the credential has no host keys: {} does not exist. Add a `{key}` entry beside \
+         the private key (in the credential's Secret, on Kubernetes) with the host keys \
+         of the servers the key is used with, for example the output of \
+         `ssh-keyscan github.com`",
+        hosts.display()
+    )
 }
 
 /// Start `ssh-agent` in the foreground, as a child that lives until the
@@ -139,5 +160,36 @@ fn add(key: &[u8], socket: &Path, user: &BuildUser) -> Result<(), String> {
             "ssh-add did not load the credential: {}",
             captured.text.trim()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Secret without host keys is the mistake to expect, so the message
+    /// says what to add and under which name.
+    #[test]
+    fn missing_host_keys_say_what_to_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("credentials").join("known_hosts");
+        let said = publish(&hosts, &dir.path().join("out")).unwrap_err();
+        assert!(said.contains("`known_hosts`"), "{said}");
+        assert!(said.contains("ssh-keyscan github.com"), "{said}");
+        assert!(said.contains(&hosts.display().to_string()), "{said}");
+    }
+
+    #[test]
+    fn host_keys_are_copied_for_anyone_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("known_hosts");
+        std::fs::write(&hosts, "github.com ssh-ed25519 AAAA\n").unwrap();
+        let out = publish(&hosts, &dir.path().join("out")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "github.com ssh-ed25519 AAAA\n"
+        );
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 }

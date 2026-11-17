@@ -160,10 +160,14 @@ spec:
             #
             # SSH credentials for packages whose sources are in private git
             # repositories: a Secret in `aurcache-builds`, with the private key
-            # under `ssh-privatekey` and optionally a `known_hosts`:
+            # under `ssh-privatekey` and the host keys of the servers it is
+            # used with under `known_hosts`. Both are required: a build's ssh
+            # trusts no host it was not told about.
             #
+            #     ssh-keyscan github.com > known_hosts
             #     kubectl -n aurcache-builds create secret generic \
-            #       aurcache-build-ssh --from-file=ssh-privatekey=./id_ed25519
+            #       aurcache-build-ssh --from-file=ssh-privatekey=./id_ed25519 \
+            #       --from-file=known_hosts=./known_hosts
             #
             # Every build gets this one key, and can use it but not read it.
             # - name: WORKER_KUBE_CREDENTIAL_SECRET

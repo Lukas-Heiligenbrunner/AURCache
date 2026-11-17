@@ -55,8 +55,8 @@ const MEMORY_VARIABLE: &str = "WORKER_BUILD_MEMORY_MAX";
 /// Where the build's own trees go, under the work volume, so that everything
 /// a build writes is in the volume its disk limit is on.
 const SCRATCH: &str = "scratch";
-/// The key file of a `kubernetes.io/ssh-auth` Secret, and the optional file
-/// beside it.
+/// The key file of a `kubernetes.io/ssh-auth` Secret, and the host keys
+/// that go beside it.
 const CREDENTIAL_KEY: &str = "ssh-privatekey";
 const CREDENTIAL_KNOWN_HOSTS: &str = "known_hosts";
 /// The build the admission check asks about: an id no build has.
