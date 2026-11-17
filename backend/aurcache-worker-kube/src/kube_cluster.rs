@@ -1191,7 +1191,7 @@ mod live {
             assert!(chunk[..got].iter().all(|b| *b == 0));
             read += got as u64;
             reads += 1;
-            if reads % 64 == 0 {
+            if reads.is_multiple_of(64) {
                 peak = peak.max(resident());
             }
             tokio::time::sleep(PACE).await;
