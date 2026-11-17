@@ -69,18 +69,23 @@ components:
 
 # Image versions. The manifests name `git`, built from master, until a
 # release after 0.6.0 is out: 0.6.0's worker image hands the node's root
-# cgroup to its own user when it runs privileged under containerd. Once that
-# release exists, pin it here (and keep server and workers on one version):
+# cgroup to its own user when it runs privileged under containerd.
 #
-#     kustomize edit set image \
-#       ghcr.io/lukas-heiligenbrunner/aurcache-server:<version> \
-#       ghcr.io/lukas-heiligenbrunner/aurcache-worker:<version>
+# `git` is pulled at every start, so until you pin it, any restart -- an
+# eviction, a drain, a node reboot -- is an upgrade to master as it is that
+# day, migrations included. To stop that, pin what is running by digest
+# (`kubectl -n aurcache get pod -o jsonpath='{..imageID}'` shows it):
 #
 # images:
 #   - name: ghcr.io/lukas-heiligenbrunner/aurcache-server
-#     newTag: "<version>"
+#     digest: sha256:<digest>
 #   - name: ghcr.io/lukas-heiligenbrunner/aurcache-worker
-#     newTag: "<version>"
+#     digest: sha256:<digest>
+#
+# Later, pin a release the same way with `newTag: "<version>"`, for server and
+# workers alike -- but only a release at least as new as the `git` image the
+# server last ran, which /api/version names. An older one finds migrations in
+# its database it does not have, and refuses to start.
 
 # Automatic approval of workers (optional). The server approves a new worker
 # that presents the same token; without the Secret nothing is approved until

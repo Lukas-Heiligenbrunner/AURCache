@@ -106,8 +106,9 @@ spec:
           # `git`, built from master, until a release after 0.6.0 is out. The
           # 0.6.0 image's entrypoint hands /sys/fs/cgroup to the worker's
           # user, and in a privileged pod under containerd that directory is
-          # the node's root cgroup, not the pod's. Move to that release's tag,
-          # and to `latest` after it, once one exists (kustomization.yaml).
+          # the node's root cgroup, not the pod's. Pulled at every start, so
+          # every restart is an upgrade until it is pinned (kustomization.yaml
+          # says how).
           image: ghcr.io/lukas-heiligenbrunner/aurcache-worker:git
           imagePullPolicy: Always   # `git` moves: pull it at every start
           # devtools builds each package in a systemd-nspawn chroot, which needs

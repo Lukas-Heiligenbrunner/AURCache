@@ -8,15 +8,23 @@
 # node's credentials.
 #
 # This policy lets worker pods reach DNS, the server's repository and worker
-# ports, and public addresses, and nothing else. It applies to the worker
-# process as much as to its builds, since they share an address, and only on
-# a CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, k3s's
-# built-in one; not flannel alone).
+# ports, and public addresses, and nothing else. "Public addresses" includes
+# whatever of the cluster's own has one -- a managed control plane's API
+# endpoint, nodes with public IPs and their kubelet and NodePorts -- so this
+# keeps builds off those only once their addresses are added to its `except`
+# list. It applies to the worker process as much as to its builds, since they
+# share an address, and only on a CNI that enforces NetworkPolicy (Calico,
+# Cilium, kube-router, k3s's built-in one; not flannel alone).
 #
-# Check two things before enabling it:
-#   - DNS: it allows the `kube-dns` pods in `kube-system`, which is where
-#     CoreDNS runs under that label on most distributions. Adjust it if yours
-#     differ, or every name lookup fails.
+# Check these before enabling it:
+#   - DNS: it allows pods labelled `k8s-app: kube-dns` in any namespace, which
+#     is how CoreDNS runs on most distributions. Adjust it if yours differs, or
+#     every name lookup fails.
+#   - NodeLocal DNSCache (Kubespray's default, an option on GKE and EKS)
+#     serves on a link-local address such as 169.254.25.10 or 169.254.20.10,
+#     which this policy refuses, and is not a `kube-dns` pod. Uncomment the
+#     rule for it in networkpolicy.yaml: an ipBlock for that /32 on port 53,
+#     UDP and TCP.
 #   - Anything the builds must reach on a private address -- a source mirror,
 #     a git server, an HTTP proxy in your network -- needs a rule of its own.
 apiVersion: kustomize.config.k8s.io/v1alpha1

@@ -59,11 +59,10 @@ spec:
         - name: aurcache
           # `git`, built from master, until a release after 0.6.0 is out: the
           # workers need one (see chroot-worker/worker.yaml), and server and
-          # workers are best kept on one version. Move both to that release's
-          # tag, or to `latest` after it, in kustomization.yaml.
+          # workers are best kept on one version. Pulled at every start, so
+          # every restart is an upgrade until it is pinned; kustomization.yaml
+          # says how, and which release is safe to pin later.
           image: ghcr.io/lukas-heiligenbrunner/aurcache-server:git
-          # `git` moves, and only `latest` is pulled again by default. Once a
-          # version is pinned, this can go.
           imagePullPolicy: Always
           # The image runs the server as root on purpose: each PKGBUILD parse
           # runs as a separate, unprivileged user, and switching to it takes
@@ -134,7 +133,7 @@ spec:
           # the server stays its only writer. A container in the server's pod
           # rather than a Deployment of its own, because the volume is
           # ReadWriteOnce.
-          image: nginx:alpine
+          image: nginx:1.29-alpine
           # nginx starts as root, binds port 80 and drops to its own user for
           # the workers: that is all it keeps. It writes only its cache, its
           # pid file and temporary files, in the volumes below.

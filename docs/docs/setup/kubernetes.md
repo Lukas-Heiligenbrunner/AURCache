@@ -45,10 +45,22 @@ the pod's, and the 0.6.0 worker image's entrypoint hands that directory to the
 worker's user: the node's root cgroup ends up owned by it, and stays so after
 the pod is gone. The fix is in master, not yet in a release.
 
-Once a release after 0.6.0 is out, pin it in `kubernetes/kustomization.yaml`
-(`images:` is there, commented), for the server and the workers alike, and
-drop `imagePullPolicy: Always` if you like. Do not move these manifests to
-`latest` or `0.6.0` before then.
+Because `git` is pulled at every start, **any restart is an upgrade** until
+you pin it: an eviction, a drain or a node reboot brings up master as it is
+that day, and the server runs that version's database migrations. Pin what you
+run by digest in `kubernetes/kustomization.yaml` (`images:` is there,
+commented, for the server and the workers alike). The digest running now is
+in the pods' status:
+
+```bash
+kubectl -n aurcache get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.image} {.imageID}{"\n"}{end}{end}' | sort -u
+```
+
+Once a release after 0.6.0 is out, pin it the same way, with `newTag`. Pick
+one at least as new as the `git` image the server last ran, which
+`/api/version` names (`0.6.0+g<commit>`): an older release finds migrations in
+its database that it does not have, and does not start. Do not move these
+manifests to `latest` or `0.6.0` in the meantime.
 
 ## What the cluster needs
 
@@ -245,6 +257,8 @@ past that:
 
   ```bash
   kubectl -n aurcache rollout restart deployment/aurcache statefulset/aurcache-worker
+  # and, with the arm64 workers:
+  kubectl -n aurcache rollout restart statefulset/aurcache-worker-arm64
   ```
 
 - **The Workers page.** Without the Secret, approve each worker there once.
@@ -276,7 +290,7 @@ so that has to fit on the volume.
 **Without raw block volumes**, uncomment `components/pool-image` in
 `kubernetes/kustomization.yaml`, after the chroot worker components. The pool
 is then a sparse image file on the worker's `data` volume, which the component
-makes 200 GiB, and is loop-mounted. It works on any storage class, at the cost
+makes 210 GiB, and is loop-mounted. It works on any storage class, at the cost
 of the loop device and the nested filesystem.
 
 :::warning A storage class that does not enforce sizes
@@ -329,7 +343,14 @@ worker rebuilds. Its identity, on `data`, can stay.
 4. Change `kubernetes/kustomization.yaml`, `kubectl apply -k kubernetes/`, and
    delete the old pods so they are made again from the new template:
    `kubectl -n aurcache delete pod -l app.kubernetes.io/instance=aurcache-worker`.
-5. Resume each worker's intake: `aurcli worker resume <id>`.
+5. Moving back to a block volume, delete the old image once the worker is up
+   again, or it keeps its space on the `data` volume:
+   `kubectl -n aurcache exec aurcache-worker-0 -- sudo rm /var/lib/aurcache-worker/chroot/pool.img`.
+6. Resume each worker's intake: `aurcli worker resume <id>`.
+
+With `components/chroot-workers-arm64`, do the same for `aurcache-worker-arm64`:
+its claims end in `-aurcache-worker-arm64-N`, and its pods carry
+`app.kubernetes.io/instance=aurcache-worker-arm64`.
 
 ## What builds can reach on the network
 
@@ -348,11 +369,25 @@ enabling it:
 
 - your CNI must enforce NetworkPolicy (Calico, Cilium, kube-router, k3s's
   built-in one; not flannel alone), or the policy does nothing;
-- its DNS rule allows the `k8s-app: kube-dns` pods in `kube-system`, where
-  CoreDNS runs under that label on most distributions. If yours differs, every
+- its DNS rule allows pods labelled `k8s-app: kube-dns`, in any namespace,
+  which is how CoreDNS runs on most distributions. If yours differs, every
   name lookup fails until you adjust it;
+- with **NodeLocal DNSCache** (Kubespray's default, an option on GKE and EKS),
+  pods resolve through a link-local address on their node, such as
+  `169.254.25.10` or `169.254.20.10`. The policy refuses link-local addresses,
+  and the cache is not a `kube-dns` pod, so lookups fail. Uncomment the rule
+  for it in the component's `networkpolicy.yaml`: an `ipBlock` for that
+  address's `/32` on port 53, UDP and TCP. The `nameserver` line of
+  `/etc/resolv.conf` in any pod names the address;
 - anything builds must reach on a private address (a source mirror, a git
   server, an HTTP proxy) needs a rule of its own.
+
+"Public addresses" means every address outside those private ranges,
+including whatever of the cluster's own has one: a managed control plane's
+API endpoint, nodes with public IPs, and the kubelet and NodePorts on them.
+The policy keeps builds off the API server and the nodes only where those are
+on private addresses. Where they are not, add their ranges to the `except`
+list of the public-address rule (an example is commented there).
 
 Where node credentials matter, also block the metadata endpoint for pods at the
 cloud's own level (IMDSv2 with a hop limit of 1 on AWS, Workload Identity on
@@ -476,6 +511,7 @@ first, then the workers:
 kubectl -n aurcache rollout restart deployment/aurcache
 kubectl -n aurcache rollout status deployment/aurcache
 kubectl -n aurcache rollout restart statefulset/aurcache-worker
+kubectl -n aurcache rollout restart statefulset/aurcache-worker-arm64   # if you run it
 ```
 
 With a version pinned (see [Image versions](#image-versions)), change it in
@@ -497,10 +533,20 @@ kubectl patch pv "$(kubectl -n aurcache get pvc aurcache-data -o jsonpath='{.spe
   -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
 ```
 
-or remove only the workloads, and leave the namespace and its claims:
+A retained volume outlives its claim, as `Released`, and keeps a reference to
+it. To use it again, for a new deployment, clear that reference so it becomes
+`Available`, then let a claim of the same name and size bind it (pinning
+`volumeName` in the claim makes sure it is that one):
+
+```bash
+kubectl patch pv <name> --type json -p '[{"op":"remove","path":"/spec/claimRef"}]'
+```
+
+Or remove only the workloads, and leave the namespace and its claims:
 
 ```bash
 kubectl -n aurcache delete deployment/aurcache statefulset/aurcache-worker
+kubectl -n aurcache delete statefulset/aurcache-worker-arm64   # if you run it
 ```
 
 ## Docker-based builders on Kubernetes
@@ -537,6 +583,12 @@ name a class that can in the `pool` claim template.
 **`kubectl apply` says updates to the StatefulSet spec are forbidden.** A
 volume template changed: a size, a storage class, or `components/pool-image`.
 See [Changing the volumes later](#changing-the-volumes-later).
+
+**`components/pool-image` changed nothing: the workers still have a `pool`
+claim.** A component only changes what the components before it have added,
+so it has to come after `components/chroot-workers` (and the arm64 one) in
+`kubernetes/kustomization.yaml`. Listed before them, it finds no StatefulSet
+and does nothing, without an error.
 
 **The worker logs that it cannot open its storage pool.** The node's kernel is
 older than 6.7, or has no btrfs. Run the worker on nodes that have both (a

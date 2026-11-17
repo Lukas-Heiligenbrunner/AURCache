@@ -12,11 +12,10 @@ spec:
     # Workers serve nothing, so nothing needs to reach them.
     - Ingress
   egress:
-    # Name lookups.
+    # Name resolution: the cluster DNS pods (CoreDNS, labelled `kube-dns` on
+    # most distributions), in whichever namespace they run.
     - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
+        - namespaceSelector: {}
           podSelector:
             matchLabels:
               k8s-app: kube-dns
@@ -25,6 +24,21 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    # Name resolution on a cluster with NodeLocal DNSCache (Kubespray's
+    # default, an option on GKE and EKS). There, pods resolve through a
+    # link-local address on their own node, served by a host-network process
+    # that the rule above cannot select, and that the link-local exception
+    # below refuses. Uncomment this with your cluster's address: the
+    # `nameserver` line of /etc/resolv.conf in any pod (169.254.20.10 and
+    # 169.254.25.10 are the usual ones).
+    # - to:
+    #     - ipBlock:
+    #         cidr: 169.254.20.10/32
+    #   ports:
+    #     - protocol: UDP
+    #       port: 53
+    #     - protocol: TCP
+    #       port: 53
     # The server: its repository (nginx, port 80 in the pod) and its worker
     # protocol. A policy sees the pod's ports, not the Service's.
     - to:
@@ -37,7 +51,10 @@ spec:
           port: 80
         - protocol: TCP
           port: 8083
-    # Public addresses: the AUR, the Arch mirrors, package sources.
+    # Public addresses: the AUR, the Arch mirrors, package sources -- and
+    # anything else of the cluster's own that has one: a managed control
+    # plane's API endpoint, nodes with public IPs (their kubelet, NodePorts).
+    # Add those addresses to `except` on a cluster that has them.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -48,6 +65,7 @@ spec:
               - 100.64.0.0/10     # carrier-grade NAT, used by some clusters
               - 169.254.0.0/16    # link-local: the cloud metadata endpoint
               - 127.0.0.0/8
+              # - 203.0.113.0/24  # e.g. your nodes' or API endpoint's public range
         - ipBlock:
             cidr: ::/0
             except:
