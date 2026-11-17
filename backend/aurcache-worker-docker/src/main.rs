@@ -4,14 +4,27 @@
 //! identity, same worker row — but builds each package in a container
 //! spawned from the builder image instead of a `devtools` chroot.
 
-use anyhow::{Result, anyhow};
+//!
+//! Told to stop (SIGTERM, SIGINT), it claims nothing more, stops the builds
+//! it holds, which removes their containers and directories, and reports
+//! each to the server as interrupted.
 
+use anyhow::{Result, anyhow};
+use std::time::Duration;
+
+use aurcache_worker_container::tag;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::Runner;
+use aurcache_worker_core::shutdown::{self, StopSignals};
 use aurcache_worker_docker::config::{self, Config};
 use aurcache_worker_docker::executor::DockerExecutor;
+
+/// How long the builds held when this worker is told to stop get to be
+/// stopped, cleaned up after and reported. `docker stop` waits ten seconds
+/// before it kills, and a service manager longer.
+const WIND_DOWN: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,5 +45,10 @@ async fn main() -> Result<()> {
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, DockerExecutor::KIND).await?;
 
-    Runner::new(core, client, executor).run().await
+    // From here on, and not before: until something listens, a stop signal
+    // ends the process by itself, which is right while it holds no build.
+    let mut signals = StopSignals::listen()?;
+    let runner = Runner::new(core, client, executor);
+    shutdown::run_until_told_to_stop(runner, &mut signals, WIND_DOWN).await?;
+    Ok(())
 }

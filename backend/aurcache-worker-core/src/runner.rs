@@ -296,6 +296,12 @@ impl<E: Executor> Runner<E> {
                 self.idle(cfg.tunables.poll_interval).await;
                 continue;
             }
+            // The readiness check can take a while, and a job claimed once
+            // the worker is stopping would only be handed straight back,
+            // having cost the build an attempt.
+            if self.stopping.is_cancelled() {
+                break;
+            }
 
             let claim = ClaimRequest {
                 mirrorlist: self.mirrorlist_preference(&cfg).await,

@@ -8,7 +8,7 @@
 //!
 //! Told to stop (SIGTERM, SIGINT), it claims nothing more, stops the builds
 //! it holds, reports each to the server as interrupted, and deletes whatever
-//! pod of its own is left.
+//! pod of its own is left. Told twice, it stops at once.
 
 use anyhow::{Context, Result};
 use aurcache_common::api::activity::Severity;
@@ -19,6 +19,7 @@ use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::repo::{Endpoint, RepoSection};
 use aurcache_worker_core::runner::Runner;
+use aurcache_worker_core::shutdown::{self, StopSignals, WoundDown};
 use aurcache_worker_kube::cluster::Cluster;
 use aurcache_worker_kube::config::{self, AgentImage, Config};
 use aurcache_worker_kube::executor::KubeExecutor;
@@ -26,7 +27,6 @@ use aurcache_worker_kube::kube_cluster::KubeCluster;
 use aurcache_worker_kube::probe::{self, ProbeOutcome, Targets};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::task::{AbortHandle, JoinHandle};
 
 const KIND: &str = KubeExecutor::<KubeCluster>::KIND;
@@ -41,29 +41,6 @@ struct Started {
     cluster: Arc<KubeCluster>,
     /// The NetworkPolicy check, when one was started.
     probe: Option<AbortHandle>,
-}
-
-/// The signals that ask this process to stop.
-struct StopSignals {
-    terminate: Signal,
-    interrupt: Signal,
-}
-
-impl StopSignals {
-    fn listen() -> Result<Self> {
-        Ok(Self {
-            terminate: signal(SignalKind::terminate()).context("listening for SIGTERM")?,
-            interrupt: signal(SignalKind::interrupt()).context("listening for SIGINT")?,
-        })
-    }
-
-    /// The name of the first of them to arrive.
-    async fn received(&mut self) -> &'static str {
-        tokio::select! {
-            _ = self.terminate.recv() => "SIGTERM",
-            _ = self.interrupt.recv() => "SIGINT",
-        }
-    }
 }
 
 #[tokio::main]
@@ -85,27 +62,13 @@ async fn main() -> Result<()> {
             return Ok(());
         }
     };
-    let running = Arc::clone(&started.runner).run();
-    tokio::pin!(running);
-    let signal = tokio::select! {
-        ended = &mut running => return ended,
-        signal = signals.received() => signal,
-    };
-    tracing::info!(
-        "Received {signal}: claiming no more builds and stopping the ones running; the \
-         server queues a new build of each"
-    );
-    started.runner.stop();
-    match tokio::time::timeout(WIND_DOWN, running).await {
-        Ok(ended) => ended?,
-        Err(_) => tracing::warn!(
-            "Not every build was stopped and reported within {}s; the server ends the rest \
-             when it stops hearing of them",
-            WIND_DOWN.as_secs()
-        ),
-    }
+    let wound_down =
+        shutdown::run_until_told_to_stop(started.runner, &mut signals, WIND_DOWN).await?;
     if let Some(probe) = started.probe {
         probe.abort();
+    }
+    if wound_down == WoundDown::Hurried {
+        return Ok(());
     }
     leave(&*started.cluster).await
 }

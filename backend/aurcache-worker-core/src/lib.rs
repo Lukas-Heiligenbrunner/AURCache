@@ -6,10 +6,9 @@
 //! [`Executor`](executor::Executor), implemented once per build strategy in its
 //! own crate.
 //!
-//! `aurcache-worker` is the supported executor: each package is built in a
-//! `devtools` chroot. `aurcache-worker-docker` reproduces the pre-worker
-//! behaviour of spawning a build container, and exists only so single-container
-//! deployments keep working across the upgrade.
+//! `aurcache-worker` builds each package in a `devtools` chroot,
+//! `aurcache-worker-docker` in a container it asks a Docker daemon for, and
+//! `aurcache-worker-kube` in a pod.
 //!
 //! See `design/implemented/remote-workers.md`.
 
@@ -31,6 +30,7 @@ pub mod report;
 pub mod runner;
 /// What a worker declares it can be configured with, and how it resolves one.
 pub mod settings;
+pub mod shutdown;
 
 /// Log to stderr at `info`, or what `RUST_LOG` asks for: every worker binary's
 /// first step.
