@@ -473,9 +473,16 @@ pub enum HostKeyCheck {
     Known,
     /// The file says nothing of this host.
     Unknown,
-    /// The file lists other keys for this host, and not this one.
+    /// The file lists another key of this type for this host, and not this
+    /// one.
     Changed {
         /// The fingerprints of what it lists, to compare against.
+        recorded: Vec<String>,
+    },
+    /// The file lists keys for this host, but none of this type: the host
+    /// offered a type nobody recorded.
+    OtherTypes {
+        /// The types it does list.
         recorded: Vec<String>,
     },
     /// The file marks this key `@revoked`.
@@ -531,16 +538,26 @@ impl HostKeys {
                 };
                 bail!(
                     "{name} presented the SSH host key {} {fingerprint}, but {} records \
-                     another for it: {}. Someone may be intercepting the connection. If \
-                     the host's key really changed, remove the old entry (`ssh-keygen -R \
-                     '{name}' -f {}`), {renew}. Record every key type the host has \
-                     (`ssh-keyscan` without `-t`): the server may be offered any of them.",
+                     another of that type for it: {}. Someone may be intercepting the \
+                     connection. If the host's key really changed, remove the old entry \
+                     (`ssh-keygen -R '{name}' -f {}`), {renew}.",
                     presented.algorithm(),
                     file.display(),
                     recorded.join(", "),
                     file.display(),
                 )
             }
+            // Not a sign of interception: the host has several keys, and only
+            // other types were recorded. Still refused, since nothing vouches
+            // for this one.
+            HostKeyCheck::OtherTypes { recorded } => bail!(
+                "only {} recorded for {name} in {}, and it offered its {} key \
+                 ({fingerprint}); record that key too: `{}`",
+                recorded.join(", "),
+                file.display(),
+                presented.algorithm(),
+                keyscan_type(remote, file, presented),
+            ),
             HostKeyCheck::Unknown => match &self.source {
                 HostKeySource::Pinned(_) => bail!(
                     "{name} is not in {AURCACHE_SSH_KNOWN_HOSTS} ({}), so its SSH host key \
@@ -570,6 +587,20 @@ fn keyscan(remote: &SshRemote, file: &Path) -> String {
         _ => String::new(),
     };
     format!("ssh-keyscan {port}{} >> {}", remote.host, file.display())
+}
+
+/// The command that appends a host's key of `key`'s type to `file`.
+fn keyscan_type(remote: &SshRemote, file: &Path, key: &PublicKey) -> String {
+    let kind = match key.algorithm() {
+        ssh_key::Algorithm::Ed25519 => "ed25519",
+        ssh_key::Algorithm::Ecdsa { .. } => "ecdsa",
+        ssh_key::Algorithm::Rsa { .. } => "rsa",
+        _ => "",
+    };
+    if kind.is_empty() {
+        return keyscan(remote, file);
+    }
+    keyscan(remote, file).replacen("ssh-keyscan ", &format!("ssh-keyscan -t {kind} "), 1)
 }
 
 /// Every entry of the `known_hosts` file at `path`; none when it does not
@@ -624,8 +655,21 @@ pub fn check(entries: &[Entry], name: &str, presented: &PublicKey) -> HostKeyChe
     if plain.is_empty() {
         return HostKeyCheck::Unknown;
     }
+    let same_type: Vec<&&Entry> = plain
+        .iter()
+        .filter(|e| e.public_key().algorithm() == presented.algorithm())
+        .collect();
+    if same_type.is_empty() {
+        let mut recorded: Vec<String> = plain
+            .iter()
+            .map(|e| e.public_key().algorithm().to_string())
+            .collect();
+        recorded.sort();
+        recorded.dedup();
+        return HostKeyCheck::OtherTypes { recorded };
+    }
     HostKeyCheck::Changed {
-        recorded: plain
+        recorded: same_type
             .iter()
             .map(|e| {
                 format!(
@@ -760,6 +804,44 @@ mod tests {
     }
 
     /// `[host]:port` is a different host from `host`, as OpenSSH reads it.
+    /// A host known by another key type is no interception: the refusal
+    /// says which type to record.
+    #[test]
+    fn another_key_type_is_told_apart_from_a_changed_key() {
+        let github = PublicKey::from_openssh(GITHUB_ED25519).unwrap();
+        let ecdsa = PublicKey::from_openssh(
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFJZp50VMW6Y\
+             sDFDeExBTrPGujgyJ37OJSKFOTA8q5wJPYZI8m1WUR4NvKTKCl/qOPYx3QgAkqXqg0OyrbtEaQU=",
+        )
+        .unwrap();
+        let list = entries(&format!("github.com {GITHUB_ED25519}\n"));
+        assert_eq!(
+            check(&list, "github.com", &ecdsa),
+            HostKeyCheck::OtherTypes {
+                recorded: vec!["ssh-ed25519".to_string()]
+            }
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        fs::write(&file, format!("github.com {GITHUB_ED25519}\n")).unwrap();
+        let hosts = HostKeys::new(HostKeySource::Pinned(file));
+        let error = hosts
+            .verify(&remote("github.com", None), &ecdsa)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only ssh-ed25519 recorded"), "{error}");
+        assert!(error.contains("ssh-keyscan -t ecdsa github.com"), "{error}");
+        assert!(!error.contains("intercepting"), "{error}");
+        // The same type with another key still reads as one.
+        let error = hosts
+            .verify(&remote("github.com", None), &random_key())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("intercepting"), "{error}");
+        let _ = github;
+    }
+
     #[test]
     fn a_port_names_a_host_of_its_own() {
         let github = PublicKey::from_openssh(GITHUB_ED25519).unwrap();

@@ -136,8 +136,10 @@ entries (`ssh-keyscan -H`), wildcards and `@revoked` lines are understood;
 
 Record every key type a host has, which is what `ssh-keyscan` does without
 `-t`. The server negotiates whichever of the host's key types its SSH library
-prefers, and a host known only by another type is refused, as a changed key
-would be.
+prefers. A host known only by another type is refused, with a message naming
+the types recorded and the `ssh-keyscan -t` line that records the one it
+offered; that is not a sign of interception, unlike a changed key of the same
+type.
 
 ### When a host's key changes
 

@@ -51,8 +51,10 @@ What it costs, and is documented:
   The URL carries the real host and port.
 - libssh2 picks the host-key algorithm (ECDSA before ed25519 before RSA), not
   what `known_hosts` already holds as OpenSSH would. A host recorded only by
-  another key type is refused as changed; the docs say to record every type
-  (`ssh-keyscan` without `-t`).
+  another key type is refused (`HostKeyCheck::OtherTypes`), saying which types
+  are recorded and how to record the offered one, not warning of
+  interception; the docs say to record every type (`ssh-keyscan` without
+  `-t`). Only the same type with another key reads as a changed key.
 - No ssh-agent and no hardware keys. A passphrase only from a file (see below).
 - libgit2 replaces a callback's error message with a generic one ("invalid or
   unknown remote ssh hostkey"). `git.rs` keeps the callback's reason beside it
