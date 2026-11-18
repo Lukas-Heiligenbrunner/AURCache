@@ -152,7 +152,6 @@ pub(crate) async fn upgrade_candidate(next: &Path) -> Result<()> {
     if !status.success() {
         bail!("chroot upgrade returned non-zero:\n{log}");
     }
-    ensure_utc_localtime(next).await?;
     Ok(())
 }
 
