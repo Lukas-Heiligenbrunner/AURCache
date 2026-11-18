@@ -7,7 +7,7 @@ use aurcache_build_agent::report::{Artifact, BuildReport, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::artifact::is_artifact;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -30,9 +30,14 @@ pub fn run(work: &Work) -> Result<()> {
 }
 
 /// The build's report, or `None` when the build wrote none.
+///
+/// The agent writes a regular file. Anything else at its place (a pipe that
+/// would never be read to its end, a link to somewhere else) was put there
+/// by something else, and is no report.
 fn report(path: &Path) -> Result<Option<BuildReport>> {
-    let file = match File::open(path) {
-        Ok(file) => file,
+    let file = match open_regular(path) {
+        Ok(Opened::Regular(file)) => file,
+        Ok(Opened::Other) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("cannot open {}", path.display())),
     };

@@ -1,6 +1,6 @@
 //! Follow the build log from a given byte, until the build is over.
 
-use super::file::{pump, stdout};
+use super::file::{Opened, open_regular, pump, stdout};
 use anyhow::{Context, Result, bail};
 use aurcache_build_agent::layout::Work;
 use std::fs::{self, File};
@@ -63,9 +63,13 @@ impl Follower {
     }
 
     /// The log at the offset, or `None` while it does not exist yet.
+    ///
+    /// The agent writes a regular file. A pipe or a link at its place would
+    /// hold this up or lead it elsewhere, and is refused.
     fn open(&self) -> Result<Option<File>> {
-        let mut file = match File::open(&self.log) {
-            Ok(file) => file,
+        let mut file = match open_regular(&self.log) {
+            Ok(Opened::Regular(file)) => file,
+            Ok(Opened::Other) => bail!("{} is not a file", self.log.display()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot open {}", self.log.display()));

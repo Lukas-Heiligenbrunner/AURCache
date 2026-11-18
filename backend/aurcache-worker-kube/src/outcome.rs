@@ -368,15 +368,19 @@ impl Observed {
 }
 
 /// How a build container that ended on its own is to be reported: by the
-/// agent's report when there is one, whatever the engine says beside it; as
-/// an out-of-memory kill when the engine says so and there is none; and
-/// otherwise as a container that ended without saying why.
+/// agent's report when it wrote one; as an out-of-memory kill when the
+/// engine says so and there is none; and otherwise as a container that ended
+/// without saying why.
+///
+/// The agent exits 0 if and only if it wrote its report. A report found
+/// beside any other exit status was left by something else, and is not
+/// believed.
 #[must_use]
 pub fn ending(end: &BuildEnd, report: Option<BuildReport>) -> Ending {
     match report {
-        Some(report) => Ending::Reported(report),
-        None if end.oom_killed => Ending::OomKilled,
-        None => Ending::Unreported {
+        Some(report) if end.exit_code == 0 => Ending::Reported(report),
+        _ if end.oom_killed => Ending::OomKilled,
+        _ => Ending::Unreported {
             detail: end.detail.clone(),
         },
     }
@@ -701,11 +705,26 @@ mod tests {
 
         // The agent's count of kills wins over the engine's word.
         let killed = report(Ended::Exited { code: 2 });
-        let judged = ending(&end(137, "OOMKilled"), Some(killed.clone()));
+        let judged = ending(&end(0, "OOMKilled"), Some(killed.clone()));
         assert_eq!(judged, Ending::Reported(killed));
         let done = complete(None, secs(5), judged, Some(LIMIT));
         assert_eq!(done.outcome, BuildOutcome::Failed);
         assert_eq!(done.exit_code, Some(2));
+    }
+
+    /// The agent exits 0 exactly when it wrote its report, so a report beside
+    /// any other status is someone else's and decides nothing.
+    #[test]
+    fn a_report_beside_a_failed_agent_is_not_believed() {
+        let forged = report(Ended::Exited { code: 0 });
+        assert_eq!(
+            ending(&end(137, "OOMKilled"), Some(forged.clone())),
+            Ending::OomKilled
+        );
+        let judged = ending(&end(1, "Error"), Some(forged));
+        assert!(matches!(judged, Ending::Unreported { .. }), "{judged:?}");
+        let done = complete(None, secs(5), judged, Some(LIMIT));
+        assert_ne!(done.outcome, BuildOutcome::Succeeded);
     }
 
     /// The row "a report: a step before makepkg failed".
