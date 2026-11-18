@@ -231,10 +231,9 @@ async fn prepare_job(
     // 2. Stage build credentials, then write per-package configs + ensure base
     //    chroot. The credential is the agent's, which loaded the key at
     //    worker start; only `known_hosts` is read per job.
-    let secrets_dir = credentials::secrets_dir(&cfg.data_dir);
     let credential = credentials::stage_for_job(
         cfg.ssh_known_hosts.as_deref(),
-        &secrets_dir,
+        &credentials::known_hosts_dir(&cfg.data_dir),
         agent_socket().as_deref(),
     )
     .context("staging build credentials")?;
@@ -407,9 +406,24 @@ async fn prepare_bind_mounts(
             host: dir.to_path_buf(),
             chroot: dir.to_path_buf(),
         });
+        binds.extend(known_hosts_bind(cfg));
     }
 
     binds
+}
+
+/// The staged `known_hosts`, at the same path inside the chroot, which is the
+/// path the build's `GIT_SSH_COMMAND` names; none when none is configured.
+///
+/// Its directory is the worker's, `0755` with the file `0644`, so the build
+/// user inside reads it and cannot change it.
+fn known_hosts_bind(cfg: &Config) -> Option<BindMount> {
+    cfg.ssh_known_hosts.as_ref()?;
+    let dir = credentials::known_hosts_dir(&cfg.data_dir);
+    Some(BindMount {
+        host: dir.clone(),
+        chroot: dir,
+    })
 }
 
 /// Download sources, run the build and upload its successful artifacts.
@@ -1215,6 +1229,34 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A configured `known_hosts` is bound into the chroot at the path the
+    /// build's `GIT_SSH_COMMAND` names, which is where it was staged; none is
+    /// bound without one.
+    #[test]
+    fn the_staged_known_hosts_is_bound_where_ssh_looks_for_it() {
+        let mut cfg = Config::from_process_env();
+        cfg.data_dir = PathBuf::from("/var/lib/aurcache-worker");
+        cfg.ssh_known_hosts = None;
+        assert_eq!(known_hosts_bind(&cfg), None);
+
+        cfg.ssh_known_hosts = Some(PathBuf::from("/run/secrets/known_hosts"));
+        let staged = credentials::known_hosts_dir(&cfg.data_dir);
+        assert_eq!(
+            known_hosts_bind(&cfg),
+            Some(BindMount {
+                host: staged.clone(),
+                chroot: staged.clone(),
+            })
+        );
+        let command = credentials::git_ssh_command(Some(
+            &staged
+                .join(credentials::KNOWN_HOSTS_FILE)
+                .display()
+                .to_string(),
+        ));
+        assert!(command.contains(&staged.display().to_string()), "{command}");
     }
 
     fn with_limits(build: Option<u64>, total: Option<u64>) -> Config {
