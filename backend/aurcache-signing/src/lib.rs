@@ -1293,7 +1293,7 @@ mod tests {
             certified.stderr
         );
         let exported = gpg.export("--export-secret-keys", &ours, "");
-        let parsed = SignedSecretKey::from_bytes(exported.as_slice()).unwrap();
+        let parsed = parse_secret(&exported).unwrap();
         assert!(
             parsed
                 .details
@@ -1388,6 +1388,40 @@ mod tests {
             std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
             let verified = gpg.verify([signature.to_str().unwrap(), content.to_str().unwrap()]);
             assert!(verified.success, "gpg --verify: {}", verified.stderr);
+        }
+    }
+
+    /// What reads a supplied key reads every GnuPG key rPGP refuses for its
+    /// checksum, armored or binary, primary or subkey: the bit count rPGP
+    /// recomputes for the secret is anything from 249 down, so the checksum
+    /// it expects is off by a different amount for each key.
+    #[test]
+    fn every_gnupg_key_rpgp_refuses_for_its_checksum_is_read() {
+        let keys: [(&str, &[u8]); 3] = [
+            (
+                "248 bits once its leading zero is dropped",
+                include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg"),
+            ),
+            (
+                "247 bits once its leading zero is dropped, armored",
+                include_bytes!("../testdata/gnupg-unprotected-leading-zero.asc"),
+            ),
+            (
+                "a subkey's",
+                include_bytes!("../testdata/gnupg-unprotected-leading-zero-subkey.gpg"),
+            ),
+        ];
+        for (secret, bytes) in keys {
+            let binary = dearmored(bytes).unwrap_or_else(|| bytes.to_vec());
+            assert!(
+                SignedSecretKey::from_bytes(binary.as_slice()).is_err(),
+                "rPGP reads a secret of {secret} now; `gnupg_checksums` can go"
+            );
+            let key = parse_secret(bytes).unwrap_or_else(|e| panic!("a secret of {secret}: {e}"));
+            assert!(
+                key.verify_bindings().is_ok(),
+                "a secret of {secret}: the key's own signatures check"
+            );
         }
     }
 
