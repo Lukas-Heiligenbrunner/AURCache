@@ -421,6 +421,7 @@ impl Chroots {
             pool.snapshot_next().await?;
             devtools::upgrade_candidate(&pool.next_root()).await?;
             devtools::ensure_multilib(&pool.next_root()).await;
+            devtools::ensure_utc_localtime(&pool.next_root()).await?;
             devtools::check_candidate(&pool.next_root()).await?;
             // The swap is atomic; a refusal is a failed check like any other.
             pool.exchange_root()
