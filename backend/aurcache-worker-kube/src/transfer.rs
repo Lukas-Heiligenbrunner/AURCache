@@ -30,6 +30,10 @@ use tokio::sync::mpsc;
 /// The most a manifest may be. It is a line per package and a report of a
 /// few lines; anything near this is not one.
 const MANIFEST_LIMIT: u64 = 4 * 1024 * 1024;
+/// How long `manifest` may take. It hashes every package, so this is what
+/// tens of gigabytes take on a slow disk, and far more than a build's
+/// packages usually do.
+const MANIFEST_TIME: Duration = Duration::from_secs(30 * 60);
 /// The most log held back while waiting for the end of a line.
 const LINE_CAP: usize = 64 * 1024;
 /// How long to wait before following the log again after its stream broke.
@@ -235,8 +239,19 @@ impl<C: Cluster> Agent<'_, C> {
     }
 
     /// What the build left: its report, and each package's name, size and
-    /// digest.
+    /// digest, within [`MANIFEST_TIME`].
     pub async fn manifest(&self) -> Result<Handback> {
+        tokio::time::timeout(MANIFEST_TIME, self.read_manifest())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "the pod did not say what the build left within {} minutes",
+                    MANIFEST_TIME.as_secs() / 60
+                )
+            })?
+    }
+
+    async fn read_manifest(&self) -> Result<Handback> {
         let argv = [self.bin, "manifest", "--work", WORK];
         let Exec { stdout, ended, .. } = self
             .cluster
