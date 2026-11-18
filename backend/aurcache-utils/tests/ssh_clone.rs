@@ -3,7 +3,9 @@
 //! The server runs as this user on a free loopback port and authenticates
 //! this user only, so nothing here needs root. It needs OpenSSH's `sshd` and
 //! `ssh-keygen`, and `git-upload-pack` on this user's `PATH` for the server
-//! side of the fetch. Without them each test says it was skipped and why.
+//! side of the fetch. Without them each test says it was skipped and why --
+//! except in CI, which installs them, and where a skip would hide a broken
+//! job: there it fails.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -28,8 +30,9 @@ impl Drop for Sshd {
     }
 }
 
-/// Skip a test this machine cannot run, saying why.
+/// Skip a test this machine cannot run, saying why; fail it in CI.
 fn skip(why: &str) -> Option<Sshd> {
+    assert!(std::env::var_os("CI").is_none(), "{why}, which CI installs");
     eprintln!("skipped: {why}");
     None
 }
