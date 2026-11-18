@@ -207,16 +207,29 @@ fn resolve_writable_dirs(
 ///
 /// A missing file means "protect nothing", which is the correct default for a
 /// worker with no secrets on disk. Blank lines and `#` comments are ignored.
+///
+/// Each listed path that exists is protected at its real path too. The read
+/// walk keeps a path unreadable as it is written, so a secret behind a
+/// symlink -- a Kubernetes secret is `key -> ..data/key` -- or under a linked
+/// directory would otherwise stay readable where it really is.
 fn protected_paths(file: &Path) -> Vec<PathBuf> {
     let Ok(contents) = std::fs::read_to_string(file) else {
         return Vec::new();
     };
-    contents
+    let listed: Vec<PathBuf> = contents
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(PathBuf::from)
-        .collect()
+        .collect();
+    let mut real: Vec<PathBuf> = listed
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|real| !listed.contains(real))
+        .collect();
+    real.sort();
+    real.dedup();
+    listed.into_iter().chain(real).collect()
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -391,6 +404,29 @@ mod tests {
                 PathBuf::from("/var/lib/aurcache-worker/secrets"),
                 PathBuf::from("/etc/aurcache/identity"),
             ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed path behind a symlink is protected where it really is too.
+    #[test]
+    fn a_listed_symlink_is_protected_at_its_real_path() {
+        let dir =
+            std::env::temp_dir().join(format!("aurcache-sandbox-test-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stamped = dir.join("secret/..2026_11_17");
+        std::fs::create_dir_all(&stamped).unwrap();
+        std::fs::write(stamped.join("key"), "secret").unwrap();
+        std::os::unix::fs::symlink("..2026_11_17", dir.join("secret/..data")).unwrap();
+        std::os::unix::fs::symlink("..data/key", dir.join("secret/key")).unwrap();
+        let file = dir.join("list");
+        std::fs::write(&file, format!("{}\n", dir.join("secret/key").display())).unwrap();
+
+        let protected = protected_paths(&file);
+        assert_eq!(protected[0], dir.join("secret/key"));
+        assert!(
+            protected.contains(&std::fs::canonicalize(stamped.join("key")).unwrap()),
+            "{protected:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
