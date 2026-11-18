@@ -102,6 +102,48 @@ Packages for `aarch64` and `armv7h` build as they did, through the host's
 qemu/binfmt handlers; see [the Docker
 worker](../workers/docker.md#other-architectures).
 
+## How the Docker worker builds
+
+This applies to the hybrid image's embedded worker and to any Docker worker,
+whether it comes from 0.5 or from 0.6. The Docker worker now runs each build
+with a build agent it puts in the build directory. The agent prepares the
+container as root, then runs makepkg as an unprivileged user. Packages that
+built before still build, but some things change:
+
+- **Build code has no `sudo`.** The container has no capabilities beyond the
+  few the agent needs, and it sets `no-new-privileges`. A PKGBUILD that runs
+  `sudo` itself now fails. Dependencies are still installed: makepkg asks the
+  agent for them.
+- **`--install` and `--rmdeps` in a package's build flags have no effect.** The
+  container is discarded when the build ends, so there is nothing to install
+  into or to clean up, and the worker leaves both flags out.
+- **A failure before makepkg is the worker's, not the package's.** If the image
+  upgrade (`pacman -Sy`, then `pacman -Su`) fails, for example because a
+  mirror is down, the server ends the build and queues a new one while the
+  package has attempts left. It no longer fails the package. A PGP key that
+  cannot be fetched is noted in the build log and the build goes on, as on
+  the chroot worker.
+- **Every build starts from a fresh tree.** The persistent build directory
+  setting has no effect on this worker.
+- **`BUILD_ARTIFACT_DIR` must allow executing.** The agent is run from the
+  build directory, so one on a filesystem mounted `noexec` fails every build
+  as its container starts. The worker warns about it when it starts.
+- **Build containers have a new name**, `aurcache_build_<worker>_<build>`, so
+  that two instances on one Docker daemon keep apart. A container an older
+  worker left behind under the old name is not removed by the new one.
+- **Builds report what they used.** Each build reports its disk use, its VCS
+  commits and, where the engine's cgroup allows it, its peak memory. An
+  out-of-memory failure says so and names `MEMORY_LIMIT`.
+- **`/dev/shm` follows the memory limit.** It is as large as `MEMORY_LIMIT`, or
+  2 GiB when no limit is set, where Docker's default is 64 MiB.
+- **A custom `BUILDER_IMAGE`** needs pacman, makepkg, gpg and `find`. It no longer needs
+  `sudo` or an `ab` user. An image that worked before still works.
+- **Foreign architectures no longer need qemu's `C` flag.** A binfmt handler
+  registered for `sudo` to work under emulation can stay as it is.
+
+The builder image itself has not changed, so a worker that has not been
+upgraded yet keeps building with the same image.
+
 ## Afterwards
 
 The hybrid image is for keeping an existing setup running. When convenient,

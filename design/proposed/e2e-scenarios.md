@@ -2,8 +2,8 @@
 
 `scripts/test-e2e.sh` began as one test: add a package, wait for it, install it.
 Each variant since has been added by copying it. The hybrid scripts are thin
-wrappers that set `E2E_COMPOSE_FILE`, `E2E_SERVICES` and
-`E2E_EXPECT_DISK_USAGE`. `test-e2e-ssh.sh` is a fork with its own `dc`, `log`,
+wrappers that set `E2E_COMPOSE_FILE` and `E2E_SERVICES`.
+`test-e2e-ssh.sh` is a fork with its own `dc`, `log`,
 `cleanup`, readiness loops and status-code table. The next tests to write
 (building the same package twice to exercise the kept build tree, a
 dependency chain, a worker restart) would each be another fork. Most of their
@@ -205,7 +205,7 @@ recreate, since their data volume survives, so this means waiting for the
 same names to come back, not for new enrollments.
 
 **Capabilities** are the only topology facts a scenario sees. Today that
-covers `disk-usage` (which replaces `E2E_EXPECT_DISK_USAGE`), `chroot`, and
+covers `disk-usage` (which every worker these suites run now reports), `chroot`, and
 `kept-tree` (the builder can keep a build tree between builds), and
 `multi-worker` (more than one worker, for scenarios about routing). A scenario
 declares the capabilities it needs in its header, and the harness skips it,
