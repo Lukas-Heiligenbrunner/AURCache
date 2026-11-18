@@ -1,0 +1,16 @@
+# What the test changes on the shipped server: its own crates log at debug, and
+# its image is taken from the node, where the test loads the one it built.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache
+  namespace: aurcache
+spec:
+  template:
+    spec:
+      containers:
+        - name: aurcache
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LOG_LEVEL
+              value: info,aurcache=debug,aurcache_api=debug,aurcache_utils=debug

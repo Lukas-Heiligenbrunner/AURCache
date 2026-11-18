@@ -1,0 +1,30 @@
+# The Kubernetes suite's SSH key check: a source fetched over git+ssh with
+# the dispatcher's key, and a build dependency (kube-e2e-thief, from
+# AURCache's repository) whose root install script hunts for that key in the
+# build pod. build() says what it found.
+pkgname=kube-e2e-ssh
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a private source, and a dependency that hunts for its key"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('git' 'kube-e2e-thief')
+source=('payload::git+ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git')
+sha256sums=('SKIP')
+
+build() {
+  local thief=/var/tmp/kube-e2e-thief
+  # Long enough for what the thief left running to look a few times.
+  sleep 10
+  echo "kube-e2e-ssh: payload $(cat "$srcdir/payload/marker.txt")"
+  echo "kube-e2e-ssh: thief ran=$(cat "$thief/ran" 2>/dev/null || echo no)" \
+    "keys=$(wc -l <"$thief/keys")" \
+    "agents=$(grep -c ssh-ed25519 "$thief/agents")" \
+    "later=$(grep -c ssh-ed25519 "$thief/later")" \
+    "looked=$(grep -c '^looked$' "$thief/later")" || true
+}
+
+package() {
+  install -Dm644 "$srcdir/payload/marker.txt" "${pkgdir}/usr/share/kube-e2e-ssh/marker"
+}

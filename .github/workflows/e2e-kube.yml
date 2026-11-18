@@ -1,0 +1,101 @@
+name: E2E (Kubernetes)
+
+# The Kubernetes worker's end-to-end suite: a throwaway kind cluster, the
+# server and the worker built from this tree, and real builds in pods (see
+# scripts/test-e2e-kube.sh). It builds two images and pulls the builder image
+# into the cluster, so it takes a while, and it reaches the AUR and the Arch
+# mirrors; like the other end-to-end suite it runs once a night, when something
+# landed, rather than on every push.
+#
+# To run it on a pull request, add the `run-e2e-kube` label; the job removes it
+# when done, so adding it again runs the suite again.
+on:
+  schedule:
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+  # Removing the trigger label once the run finishes.
+  issues: write
+
+env:
+  KIND_VERSION: v0.33.0
+  # kind-linux-amd64 of that release, as its .sha256sum file gives it.
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+
+jobs:
+  e2eKube:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-e2e-kube'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The server image's build reads the PKGBUILDs from the AUR
+          # submodules under packaging/.
+          submodules: recursive
+
+      - name: Check for new commits
+        id: changed
+        run: |
+          # Scheduled runs only go ahead when HEAD is newer than the last slot
+          # (24h plus slack for queue delays); a manual or label-triggered run
+          # always does.
+          if [ "${{ github.event_name }}" = "schedule" ] \
+            && [ "$(git log -1 --format=%ct)" -lt "$(($(date +%s) - 90000))" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No commits in the last 25h; skipping."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The cluster holds the builder image, a build of a 2 GiB package and the
+      # published copy of it, beside the two images built here. The runner's
+      # preinstalled toolchains this does not use are most of its disk.
+      - name: Free disk space
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install kind
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          dir="$RUNNER_TEMP/kind"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64"
+          echo "$KIND_SHA256  $dir/kind" | sha256sum --check --strict
+          chmod +x "$dir/kind"
+          echo "KIND=$dir/kind" >> "$GITHUB_ENV"
+
+      - name: Set up Docker
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-docker-action@v5
+
+      - name: Set up Docker Buildx
+        if: steps.changed.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Run the Kubernetes E2E test
+        if: steps.changed.outputs.run == 'true'
+        env:
+          AURCACHE_TEST_PREFIX: ci
+          CLEANUP: '1'
+          E2E_SCRATCH: ${{ runner.temp }}/kube-e2e
+        run: ./scripts/test-e2e-kube.sh hello
+
+      # The label means "run requested". Taking it back off once the run is
+      # over, pass or fail, lets adding it again trigger a fresh run.
+      # Best-effort: fork PRs get a read-only token.
+      - name: Remove the trigger label
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh pr edit ${{ github.event.pull_request.number }}
+          --remove-label run-e2e-kube
