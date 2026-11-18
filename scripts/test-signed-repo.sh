@@ -3,8 +3,9 @@
 #
 # The unit tests verify signatures with GnuPG; this asks pacman itself, in an
 # Arch container with no network, against a repository the server's own code
-# wrote (backend/aurcache-utils/tests/signed_repository.rs): one package the
-# backfill signed, one published signed. It asserts that
+# wrote (backend/aurcache-utils/tests/signed_repository.rs), under a name of
+# its own (`signed_check`): one package the backfill signed, one published
+# signed. It asserts that
 #
 #   1. a client that does not trust the key refuses the repository even with
 #      `SigLevel = Optional TrustAll`, as the documentation warns;
@@ -50,7 +51,7 @@ Architecture = auto
 SigLevel = Required DatabaseOptional
 LocalFileSigLevel = Optional
 
-[repo]
+[signed_check]
 SigLevel = $1
 Server = file:///srv/repo/\$arch
 CONF
@@ -58,7 +59,7 @@ CONF
 
 reset() {
 	pacman -Rns --noconfirm signed-later signed-now >/dev/null 2>&1
-	rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/repo.*
+	rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/signed_check.*
 }
 
 conf "Optional TrustAll"
@@ -82,27 +83,27 @@ done
 echo "ok 2: SigLevel = Required installs both packages"
 reset
 
-cp $X/repo.db.tar.gz /tmp/db
-gzip -dc /tmp/db | gzip -9n > $X/repo.db.tar.gz
-[ "$(sha256sum < /tmp/db)" != "$(sha256sum < $X/repo.db.tar.gz)" ] || fail "3: database unchanged"
+cp $X/signed_check.db.tar.gz /tmp/db
+gzip -dc /tmp/db | gzip -9n > $X/signed_check.db.tar.gz
+[ "$(sha256sum < /tmp/db)" != "$(sha256sum < $X/signed_check.db.tar.gz)" ] || fail "3: database unchanged"
 if pacman -Sy --noconfirm >/tmp/out 2>&1; then
 	cat /tmp/out
 	fail "3: a database not matching its signature was accepted"
 fi
 grep -q "PGP signature" /tmp/out || { cat /tmp/out; fail "3: refused for another reason"; }
-echo "ok 3: a database not matching repo.db.sig is refused"
-cp /tmp/db $X/repo.db.tar.gz
+echo "ok 3: a database not matching its signature is refused"
+cp /tmp/db $X/signed_check.db.tar.gz
 reset
 
 # signed-now's signature served for signed-later, beside it and in its entry.
 cp $X/signed-now-1.0-1-any.pkg.tar.zst.sig $X/signed-later-1.0-1-any.pkg.tar.zst.sig
-mkdir /tmp/db.d && bsdtar -xzf $X/repo.db.tar.gz -C /tmp/db.d
+mkdir /tmp/db.d && bsdtar -xzf $X/signed_check.db.tar.gz -C /tmp/db.d
 OTHER=$(awk '/^%PGPSIG%$/ { getline; print; exit }' /tmp/db.d/signed-now-1.0-1/desc)
 awk -v sig="$OTHER" 'swap { print sig; swap = 0; next } /^%PGPSIG%$/ { swap = 1 } { print }' \
 	/tmp/db.d/signed-later-1.0-1/desc > /tmp/desc
 mv /tmp/desc /tmp/db.d/signed-later-1.0-1/desc
-rm $X/repo.db.tar.gz
-bsdtar -czf $X/repo.db.tar.gz -C /tmp/db.d signed-later-1.0-1 signed-now-1.0-1
+rm $X/signed_check.db.tar.gz
+bsdtar -czf $X/signed_check.db.tar.gz -C /tmp/db.d signed-later-1.0-1 signed-now-1.0-1
 conf "PackageRequired DatabaseNever"
 if pacman -Sy --noconfirm signed-later >/tmp/out 2>&1; then
 	cat /tmp/out

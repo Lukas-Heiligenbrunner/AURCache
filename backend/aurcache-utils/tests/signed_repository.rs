@@ -57,6 +57,10 @@ async fn publish(db: &DatabaseConnection, repo: &Repository, build_id: i32, pkgn
     repo.discard_staging(build_id).await;
 }
 
+/// The repository's name, which `scripts/test-signed-repo.sh` configures
+/// pacman with.
+const NAME: &str = "signed_check";
+
 #[tokio::test]
 #[ignore = "writes a repository for scripts/test-signed-repo.sh"]
 async fn write_a_signed_repository() {
@@ -67,14 +71,18 @@ async fn write_a_signed_repository() {
     let db = aurcache_db::testing::memory_db().await;
     let root = out.join("repo");
 
-    let unsigned = Repository::new(&root);
+    // A name of its own, so that pacman checks the signatures under it.
+    let unsigned = Repository::new(&root).with_name(NAME.into()).unwrap();
     unsigned.init().unwrap();
     publish(&db, &unsigned, 1, "signed-later").await;
 
     let key = InstanceKey::load_or_create(&out.join("ca").join(KEY_FILE), None).unwrap();
     std::fs::write(out.join("key.asc"), key.public_key()).unwrap();
     std::fs::write(out.join("fingerprint"), key.fingerprint()).unwrap();
-    let repo = Repository::new(&root).with_key(key);
+    let repo = Repository::new(&root)
+        .with_name(NAME.into())
+        .unwrap()
+        .with_key(key);
     repo.init().unwrap();
     assert_eq!(
         backfill(&db, &repo).await.unwrap(),
@@ -83,13 +91,13 @@ async fn write_a_signed_repository() {
     publish(&db, &repo, 2, "signed-now").await;
 
     for name in [
-        "signed-later-1.0-1-any.pkg.tar.zst.sig",
-        "signed-now-1.0-1-any.pkg.tar.zst.sig",
-        "repo.db.sig",
-        "repo.files.sig",
+        "signed-later-1.0-1-any.pkg.tar.zst.sig".to_string(),
+        "signed-now-1.0-1-any.pkg.tar.zst.sig".to_string(),
+        format!("{NAME}.db.sig"),
+        format!("{NAME}.files.sig"),
     ] {
         assert!(
-            Path::new(&root).join("x86_64").join(name).is_file(),
+            Path::new(&root).join("x86_64").join(&name).is_file(),
             "{name}"
         );
     }

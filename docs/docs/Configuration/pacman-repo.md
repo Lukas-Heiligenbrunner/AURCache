@@ -98,7 +98,9 @@ With `AURCACHE_SIGN=true`, the server signs:
 - every package it publishes, with a detached `<package>.sig` beside it and the
   same signature in its `repo.db` entry (`%PGPSIG%`, as `repo-add
   --include-sigs` writes it);
-- `repo.db` and `repo.files`, as `repo.db.sig` and `repo.files.sig`.
+- `repo.db` and `repo.files`, as `repo.db.sig` and `repo.files.sig` — under
+  the repository's name, when `AURCACHE_REPO_NAME` gives it another. Renaming
+  a signed repository renames these with its databases.
 
 It signs with one OpenPGP key per instance, which it creates the first time it
 starts with signing on, and prints the fingerprint of at every start:
@@ -158,14 +160,26 @@ the CA: losing it means a new key, which every client has to trust again.
 - `AURCACHE_SIGNING_KEY_FILE` points at a key you supply instead — a Docker
   secret, a separate mount. The server reads it and never writes it. It may be
   armored or binary, and needs a primary key or subkey that signs; a key
-  exported with `gpg --export-secret-keys` works, and so does one exported
-  with `gpg --export-secret-subkeys`, its primary key kept offline. Its newest
-  valid signing subkey signs, as GnuPG picks; the server warns from 30 days
-  before that subkey expires, then signs with the next valid one, and refuses
-  to start with a key where nothing signs. Now and then a key GnuPG exports
-  unprotected cannot be read here, though GnuPG reads it (about one Ed25519
-  secret in 256, and a key and each of its subkeys has one); the server says
-  so, and locking the key with a passphrase (`gpg --passwd`) gets around it.
+  exported with `gpg --export-secret-keys` works, certifications by others
+  included, and so does one exported with `gpg --export-secret-subkeys`, its
+  primary key kept offline. A server that does not sign says so when either
+  variable is set. Its newest valid signing subkey signs, as GnuPG picks, and
+  the server refuses to start with a key where nothing signs. Prefer an
+  Ed25519 key, as the server generates: an RSA key signs too, but through an
+  RSA implementation with a known timing side channel
+  ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)),
+  and the server warns about one.
+- **Subkeys expire.** From 30 days before the signing subkey expires, the
+  server says so at start and once a day after. A day before it expires, the
+  server moves on to the next valid signing subkey, if the key has one, and
+  signs everything again with it; without one, nothing signs once it has
+  expired, and publishing fails until the server has a key that does. Adding
+  a subkey or extending one (`gpg --quick-set-expire`) changes the public
+  key: give the server the new key file and restart it, and have every
+  client import the key again before the old subkey expires
+  (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`) — pacman checks a
+  signature against the key as it imported it, and refuses one by a subkey it
+  has never seen.
 - `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names a file holding a passphrase:
   a key the server creates is locked with it, and a supplied one unlocked
   with it. It protects a copy of the key file — a backup, a volume snapshot —
