@@ -34,6 +34,8 @@ Status: **Proposed** · Last updated: 2026-11-18
 - **The hybrid topologies run weekly**, not nightly.
 - **The isolation suite's unconfined control is stock `makechrootpkg`** for
   as long as devtools ships it.
+- **The demo compose file moves without a copy.** Nothing outside the
+  repository reads `compose/docker-compose.demo.yaml` by path.
 
 ## Inventory
 
@@ -382,7 +384,7 @@ files:
   test in `aurcli` beside the comparison test asserts each copy equals its
   original after that line, so the two cannot drift;
 - leaves `compose/README.md` as a pointer, and no copy of the demo file,
-  which is published by no URL;
+  which nothing outside the repository reads by path;
 - adds a release-notes line: the new paths, and that the old ones go in the
   next release.
 
@@ -433,8 +435,9 @@ that `kubernetes/` never ships at its old path.
    kernel test binaries run; a second `master` run restores the cache and
    its Rust job is shorter; a PR run restores and saves nothing.
 4. **`deploy/`.** `kubernetes/` to `deploy/kubernetes/` (no copy); the
-   three user compose files to `deploy/compose/`, with the two copies, their
-   test and the release-notes line as above; docs, `README.md`, `AGENTS.md`,
+   three user compose files to `deploy/compose/`, with copies of the turnkey
+   and remote-worker files (none of the demo file), their test and the
+   release-notes line as above; docs, `README.md`, `AGENTS.md`,
    `aurcli`'s comments and test. Verifies: `kubectl kustomize` renders the
    same manifests from the new paths as from the old (`diff` of the output);
    `aurcli`'s comparison and copy tests pass; the docs build; the raw URL of
@@ -472,10 +475,3 @@ that `kubernetes/` never ships at its old path.
     and the copy test.
 
 Then the scenarios listed in `e2e-scenarios.md`, one file each.
-
-## Open questions
-
-- **The demo instance.** Does anything outside the repository read
-  `compose/docker-compose.demo.yaml` by path (the deployed demo's own
-  setup)? If so it moves to `deploy/compose/` in step 4 too, or gets a copy
-  like the other two.
