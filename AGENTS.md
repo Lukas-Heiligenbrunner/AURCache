@@ -114,6 +114,9 @@ CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
 nightly instead, and only when something landed that day. It cannot cover a
 pool on a block device or zvol, or an image on ZFS; the runner has neither.
 Add the `run-e2e` label to a pull request to run the e2e suite there on demand.
+Every pull request also builds its server image for each architecture; the
+`preview-image` label publishes the head commit's image to GHCR (see
+`.github/workflows/PR-IMAGES.md`).
 
 Unit and integration tests are cheap (backend ~8s, frontend <1s) and should be
 the reflex. They render components directly, though, so they cannot see whether

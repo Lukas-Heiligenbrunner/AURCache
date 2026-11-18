@@ -1,37 +1,76 @@
 # Pull request images
 
-PRs targeting master, including forks, build without registry credentials in
-`docker-pr-build.yml`. It is the only workflow that builds a PR's images:
-`docker-build.yml` runs on pushes to master and on tags alone. The build runs
-`scripts/build-images.sh`, the same script a release uses, for every
-architecture a release has, and its `--oci-dir` output -- one OCI directory
-layout holding all of them -- is retained as an Actions artifact for three
-days.
+A pull request's server image can be published to GHCR for testing, once a
+maintainer approves it. Three workflows do this, so that PR code -- a fork's
+included -- never runs where a token can push images.
 
-After a successful build, `docker-pr-publish.yml` runs from the default branch
-on a fresh GitHub-hosted runner. It validates the source workflow and finds an
-open PR whose head still matches the built commit. It copies the layout with
-Skopeo; it never executes the image or checks out PR code.
+## Build: `docker-pr-build.yml`
+
+Every PR targeting master, forks included, builds without registry
+credentials: a read-only token, no registry login, no shared build cache. It
+is the only workflow that builds a PR's images; `docker-build.yml` runs on
+pushes to master and on tags alone. The build runs `scripts/build-images.sh`,
+the same script a release uses, for every architecture a release has, and its
+`--oci-dir` output -- one OCI directory layout holding all of them -- is kept
+as an Actions artifact for seven days. A new push cancels the build of the
+previous one.
+
+Fork builds remain subject to GitHub's contributor approval policy.
+
+## Approval: the `preview-image` label
+
+Nothing is published until a maintainer adds the `preview-image` label. The
+label approves the commit that is the PR's head when it is applied, and no
+later push: a commit pushed after the label, or pushed again after it, is
+published only once a maintainer removes and re-applies it. Only people with
+triage access can label a PR; do not let automation apply this label.
+
+## Publish: `docker-pr-publish.yml`
+
+Runs from the default branch, on a fresh GitHub-hosted runner, when a PR build
+finishes and when the label is added. Either way it reads the current state
+from GitHub's API and publishes only when:
+
+- the PR is open against master;
+- it carries the label;
+- the latest build of its head commit, from the PR's own branch, succeeded;
+- the label was applied after that build was created.
+
+It downloads that build's artifact and copies the layout with skopeo; it never
+checks out PR code or runs the image. The destination comes from the API, not
+from the artifact. One publish runs at a time per PR head branch.
 
 Each commit is published as one multi-architecture image (amd64, arm64 and
 armv7), so `docker pull` picks the host's:
 
 - `ghcr.io/<owner>/<repo>-preview:pr-<number>-<full-head-sha>`
 
-After the push succeeds, the publisher posts a PR comment with the image
-reference and pull command. Re-running the same commit updates its existing
-comment. The publishing job also lists the image in the run summary. Preview images
-contain untrusted PR code. Their tags and package are separate from releases;
-there is no mutable `latest` or `pr-<number>` alias. The publisher intentionally
-rejects closed PRs and runs superseded by a new commit.
+The package is separate from the release images and has no mutable tag, no
+`latest` and no `pr-<number>`. After the push the publisher writes the image
+reference into one comment on the PR, edited in place for every later commit,
+and into the run summary. Preview images contain untrusted PR code.
 
-The publishing workflow must land on the default branch before it can run.
-Fork builds remain subject to GitHub's contributor approval policy. The preview
-GHCR package needs public visibility for anonymous pulls (new packages may
-initially be private), and the repository must retain Actions write access to
-that package. No personal access token or deploy key is required.
+## Cleanup: `docker-pr-cleanup.yml`
 
-Keep the publisher independent of the build workspace: do not add PR checkout,
-PR scripts, shared build caches, or image execution to it. Download artifacts
-only from the triggering run, and derive destinations from GitHub API metadata,
-never from artifact contents.
+Deletes a PR's images when it closes, and every day deletes those of closed
+PRs and any published more than 30 days ago, along with the untagged platform
+and attestation versions each image lists.
+
+## Setup
+
+- The workflows must be on the default branch before the publisher and the
+  cleanup can run.
+- Create the `preview-image` label.
+- After the first publish creates the preview package, make it public for
+  anonymous pulls. The repository needs write access to it to publish and the
+  Admin role to delete versions (package settings, Manage Actions access).
+  No personal access token or deploy key is required.
+
+## Keeping it safe
+
+The publisher and the cleanup hold a token that can push packages. Keep them
+independent of the build: do not add a checkout of PR code, PR scripts, shared
+build caches or running the image to them. Download artifacts only from the
+build run the publisher approved, and derive destinations and PR numbers from
+GitHub's API, never from artifact contents. Pin the actions they use by
+commit.
