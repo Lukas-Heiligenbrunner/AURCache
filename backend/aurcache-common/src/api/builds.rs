@@ -82,12 +82,12 @@ pub struct BuildSummary {
     /// this is that cgroup's `memory.peak`, covering every process in the tree.
     ///
     /// `None` where no figure was reported -- a build from before figures were
-    /// recorded, the Docker worker (Docker exposes no peak on cgroup v2), or a worker
-    /// whose cgroup subtree could not be prepared.
+    /// recorded, or a worker that could not prepare or read the build's cgroup.
     pub peak_memory: Option<i64>,
     /// Disk the build used on its worker, part by part. `None` where no
-    /// figure was reported: a build from before figures were recorded, or a
-    /// worker without a storage pool.
+    /// figure was reported: a build from before figures were recorded, or one
+    /// its worker could not measure. A container worker fills the work
+    /// directory's part alone.
     #[cfg_attr(feature = "db", sea_orm(skip))]
     pub disk_usage: Option<DiskUsage>,
     /// The failed chroot the worker kept for inspection, when it kept one.
