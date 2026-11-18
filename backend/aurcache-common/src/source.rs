@@ -101,8 +101,9 @@ pub fn ssh_remote(url: &str) -> Option<SshRemote> {
     let url = url.trim();
     match url.split_once("://") {
         Some((scheme, rest)) => {
-            let scheme = scheme.to_ascii_lowercase();
-            if !matches!(scheme.as_str(), "ssh" | "git+ssh" | "ssh+git") {
+            // Case-sensitive, as libgit2 compares it: `SSH://` is not a URL
+            // it would reach over SSH.
+            if !matches!(scheme, "ssh" | "git+ssh" | "ssh+git") {
                 return None;
             }
             let (authority, path) = match rest.find('/') {
@@ -114,7 +115,7 @@ pub fn ssh_remote(url: &str) -> Option<SshRemote> {
                 Some((userinfo, host)) => (userinfo.split(':').next(), host),
                 None => (None, authority),
             };
-            let (host, port) = split_host_port(host_port)?;
+            let HostPort { host, port } = split_host_port(host_port)?;
             remote(user, host, port, path)
         }
         None => {
@@ -139,8 +140,14 @@ pub fn ssh_remote(url: &str) -> Option<SshRemote> {
     }
 }
 
+/// A URL authority's host, and its port if it gives one.
+struct HostPort<'a> {
+    host: &'a str,
+    port: Option<u16>,
+}
+
 /// `host[:port]` or `[v6-literal][:port]`, or `None` when the port is not one.
-fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
+fn split_host_port(authority: &str) -> Option<HostPort<'_>> {
     let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
         let (inside, after) = bracketed.split_once(']')?;
         match after.strip_prefix(':') {
@@ -159,7 +166,7 @@ fn split_host_port(authority: &str) -> Option<(&str, Option<u16>)> {
         None | Some("") => None,
         Some(port) => Some(port.parse().ok()?),
     };
-    Some((host, port))
+    Some(HostPort { host, port })
 }
 
 fn remote(user: Option<&str>, host: &str, port: Option<u16>, path: &str) -> Option<SshRemote> {
@@ -293,7 +300,7 @@ mod tests {
             Some(ssh(Some("aur"), "aur.archlinux.org", None, "/paru.git"))
         );
         assert_eq!(
-            ssh_remote("SSH+GIT://host/repo"),
+            ssh_remote("ssh+git://host/repo"),
             Some(ssh(None, "host", None, "/repo"))
         );
         assert_eq!(
@@ -371,6 +378,8 @@ mod tests {
             "paru-git",
             // Not a port: refused rather than guessed at.
             "ssh://host:ssh/repo",
+            // libgit2 reads the scheme case-sensitively, so neither does this.
+            "SSH://host/repo",
             "ssh:///repo",
             "@:repo",
         ] {

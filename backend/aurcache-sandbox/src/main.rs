@@ -72,15 +72,18 @@ fn grant(
 
 /// The entries of `dir` that are not symlinks; none when it cannot be read.
 ///
-/// A symlink is left out because granting it would grant its target:
-/// [`grant`] opens the path, which follows the link, and the rule then covers
-/// everything beneath wherever it points. A Kubernetes secret is
-/// `key -> ..data/key` with `..data -> ..<timestamp>`, so granting `..data`
-/// granted the very secret kept private as `key`; `/var/run -> /run` did the
-/// same for systemd credentials. Leaving links out costs nothing: a link's
-/// target is granted at its own path, where the walk reaches it -- unless it
-/// is private, which is the point. Landlock checks the resolved file, so
-/// reading through a link still works wherever its target is granted.
+/// A symlink is left out because granting it grants its target: [`grant`]
+/// opens the path, which follows the link, and the rule covers everything
+/// beneath wherever it points. In a Kubernetes secret, `key -> ..data/key` and
+/// `..data -> ..<timestamp>`, granting `..data` would grant the secret kept
+/// private as `key`; `/var/run -> /run` would do the same for a systemd
+/// credential.
+///
+/// The walk reaches a link's target at its real path and grants it there,
+/// unless it is private, and Landlock checks the resolved file, so reading
+/// through a link works wherever its target is granted. That holds for the
+/// private paths too only when they are given by their real paths as well,
+/// which is the caller's to do.
 fn list_dir(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
