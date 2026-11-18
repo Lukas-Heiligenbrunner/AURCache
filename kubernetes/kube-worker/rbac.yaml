@@ -1,0 +1,68 @@
+# What the dispatcher may do, and only where. It holds no cluster-wide role,
+# and no role at all in its own namespace: everything it is allowed is in the
+# builds' namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+---
+# Build pods run as this account, which is bound to nothing and whose token is
+# never mounted: a build holds no credential for the Kubernetes API.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aurcache-build
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-build
+    app.kubernetes.io/component: kube-worker
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+rules:
+  # Create a pod per build, watch it, and delete it. `deletecollection` is how
+  # the dispatcher removes every pod of its own that is still there: when it
+  # starts, the ones a previous run left, and when it is told to stop, the
+  # ones it has not already deleted.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, watch, delete, deletecollection]
+  # Hand the job in and the packages out, through the pod's own standard
+  # streams. `get` is for the WebSocket upgrade, which some API servers
+  # authorize as a `get`.
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create, get]
+  # The tail of a container's log, for a build that failed to start.
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-kube-worker
+    app.kubernetes.io/component: kube-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aurcache-kube-worker
+subjects:
+  - kind: ServiceAccount
+    name: aurcache-kube-worker
+    namespace: aurcache

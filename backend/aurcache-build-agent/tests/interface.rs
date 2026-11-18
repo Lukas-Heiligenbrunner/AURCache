@@ -15,7 +15,7 @@
 //! a new interface. A fixture already committed is never rewritten to make
 //! this pass: that is the break it exists to catch.
 
-use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
+use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
@@ -143,6 +143,34 @@ fn reports() -> Vec<BuildReport> {
     all
 }
 
+fn handbacks() -> Vec<Handback> {
+    vec![
+        Handback {
+            interface: INTERFACE,
+            report: Some(report(Ended::Exited { code: 0 })),
+            artifacts: vec![
+                Artifact {
+                    name: "hello-1.0-1-x86_64.pkg.tar.zst".to_string(),
+                    size: 4096,
+                    sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                        .to_string(),
+                },
+                Artifact {
+                    name: "hello-docs-1.0-1-any.pkg.tar.zst".to_string(),
+                    size: 0,
+                    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
+                },
+            ],
+        },
+        Handback {
+            interface: INTERFACE,
+            report: None,
+            artifacts: Vec::new(),
+        },
+    ]
+}
+
 #[test]
 fn spec() {
     check("spec", &specs());
@@ -151,6 +179,11 @@ fn spec() {
 #[test]
 fn build_report() {
     check("report", &reports());
+}
+
+#[test]
+fn handback() {
+    check("handback", &handbacks());
 }
 
 /// A worker of a later build may add an optional field the agent does not
@@ -172,7 +205,7 @@ fn a_spec_with_an_unknown_field_still_reads() {
 /// read it before anything else.
 #[test]
 fn every_document_carries_the_interface() {
-    for name in ["spec", "report"] {
+    for name in ["spec", "report", "handback"] {
         let text = std::fs::read_to_string(fixture(name)).unwrap();
         let samples: Vec<Value> = serde_json::from_str(&text).unwrap();
         for sample in samples {
