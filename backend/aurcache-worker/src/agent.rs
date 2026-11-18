@@ -286,9 +286,103 @@ fn chown_group(path: &Path, gid: u32) -> Result<()> {
     Ok(())
 }
 
+/// The file `aurcache-sandbox` reads the paths a build may not read from.
+pub const SANDBOX_POLICY: &str = "/etc/aurcache/sandbox-protected";
+
+/// The first Landlock ABI that can restrict connecting to pathname UNIX
+/// sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1).
+const RESOLVE_UNIX_ABI: i64 = 9;
+
+/// How far a build that is not offered the key is kept from the agent, on
+/// this machine.
+///
+/// Inside its chroot it never is: the agent's directory is mounted only into
+/// the chroot of a build offered the key. Outside it -- the PKGBUILD code
+/// `makechrootpkg` runs on the worker -- it is the sandbox that refuses the
+/// socket, which takes a kernel that can and a policy that names the agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostSideGate {
+    /// Refused outside the chroot as well.
+    Enforced,
+    /// This kernel's Landlock cannot restrict UNIX sockets.
+    KernelCannot,
+    /// The sandbox's policy does not protect the agent's directory.
+    PolicyMissesAgent,
+}
+
+/// The [`HostSideGate`] this machine gives the agent under `data_dir`.
+#[must_use]
+pub fn host_side_gate(data_dir: &Path) -> HostSideGate {
+    if landlock_abi() < RESOLVE_UNIX_ABI {
+        return HostSideGate::KernelCannot;
+    }
+    let policy = std::fs::read_to_string(SANDBOX_POLICY).unwrap_or_default();
+    if !protects(&policy, &dir(data_dir)) {
+        return HostSideGate::PolicyMissesAgent;
+    }
+    HostSideGate::Enforced
+}
+
+/// The kernel's Landlock ABI version, or a negative number without Landlock.
+fn landlock_abi() -> i64 {
+    // SAFETY: `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
+    // reads nothing and creates nothing; it only answers the version.
+    unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            1u32,
+        )
+    }
+}
+
+/// Whether the sandbox `policy` keeps builds out of `dir`: a listed path is
+/// `dir` or one of its parents.
+fn protects(policy: &str, dir: &Path) -> bool {
+    policy
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .any(|line| dir.starts_with(line))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A listed directory protects what is beneath it, never its siblings, and
+    /// comments and blank lines list nothing.
+    #[test]
+    fn the_policy_protects_a_listed_path_and_its_contents() {
+        let policy = "# the agent\n\n/var/lib/aurcache-worker/agent\n/etc/secret\n";
+        assert!(protects(
+            policy,
+            Path::new("/var/lib/aurcache-worker/agent")
+        ));
+        assert!(protects(
+            "/var/lib/aurcache-worker\n",
+            Path::new("/var/lib/aurcache-worker/agent")
+        ));
+        assert!(!protects(policy, Path::new("/var/lib/aurcache-worker")));
+        assert!(!protects(policy, Path::new("/srv/worker/agent")));
+        assert!(!protects(
+            "# /var/lib/aurcache-worker/agent\n",
+            Path::new("/var/lib/aurcache-worker/agent")
+        ));
+        assert!(!protects("", Path::new("/var/lib/aurcache-worker/agent")));
+    }
+
+    /// The policy the packages ship protects the agent of a worker in its
+    /// default data directory, which is what the startup check reads.
+    #[test]
+    fn the_shipped_policy_protects_the_default_agent() {
+        let policy = include_str!("../../../packaging/sandbox-protected");
+        assert!(protects(
+            policy,
+            &dir(Path::new("/var/lib/aurcache-worker"))
+        ));
+    }
 
     /// The bind mount is the directory, not the socket: the socket's inode is
     /// replaced whenever the agent restarts, and a bind to the old one would

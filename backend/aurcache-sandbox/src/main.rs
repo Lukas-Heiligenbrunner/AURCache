@@ -56,10 +56,12 @@ fn grant(
     let Ok(metadata) = std::fs::metadata(path) else {
         return Ok(ruleset);
     };
+    // `ResolveUnix` is a file right too: it is how one socket is granted.
     let access = if metadata.is_dir() {
         access
     } else {
-        access & (AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::Execute)
+        access
+            & (AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::Execute | AccessFs::ResolveUnix)
     };
     if access.is_empty() {
         return Ok(ruleset);

@@ -101,6 +101,34 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
+/// Say whether a build that is not offered the SSH key -- by `build_ssh_key`
+/// or `WORKER_GIT_SSH_PACKAGES` -- is kept from it outside its chroot too.
+///
+/// Inside the chroot it always is. Outside, it takes the sandbox, and so a
+/// kernel and a policy that can: where either cannot, the worker still builds,
+/// and says what that leaves open.
+fn announce_host_side_gate(data_dir: &std::path::Path) {
+    let agent = agent::dir(data_dir);
+    match agent::host_side_gate(data_dir) {
+        agent::HostSideGate::Enforced => tracing::info!(
+            "Builds not offered the SSH key are refused its agent outside their chroot \
+             as well (Landlock)"
+        ),
+        agent::HostSideGate::KernelCannot => tracing::warn!(
+            "This kernel's Landlock cannot restrict UNIX sockets (it needs ABI 9, Linux \
+             7.1): build_ssh_key and {PACKAGES_VAR} keep the SSH key out of a build's \
+             chroot, but not from its PKGBUILD code running outside the chroot"
+        ),
+        agent::HostSideGate::PolicyMissesAgent => tracing::warn!(
+            "{} does not list {}: build_ssh_key and {PACKAGES_VAR} keep the SSH key out \
+             of a build's chroot, but not from its PKGBUILD code running outside the \
+             chroot. Add that directory to the file",
+            agent::SANDBOX_POLICY,
+            agent.display()
+        ),
+    }
+}
+
 /// Say which packages the build SSH key may go to, when
 /// `WORKER_GIT_SSH_PACKAGES` limits them.
 ///
@@ -153,6 +181,7 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
                 "Build credential available through {}",
                 a.socket().display()
             );
+            announce_host_side_gate(&core.data_dir);
             Some(a)
         }
         Ok(None) => None,

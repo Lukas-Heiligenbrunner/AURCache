@@ -411,18 +411,55 @@ offered it: no `SSH_AUTH_SOCK` export in its `makepkg.conf`, no mount of the
 agent's directory into its chroot, no `SSH_AUTH_SOCK` inherited from the
 worker's environment.
 
+**Outside the chroot: the sandbox's socket rule.** Inside its chroot, a
+build that is not offered the key never sees the agent. Outside it, the
+PKGBUILD code `makechrootpkg` runs on the worker -- sourcing the PKGBUILD,
+`makepkg --verifysource` -- runs as the same build user the agent belongs to.
+The agent has to: OpenSSH's ssh-agent serves only its own uid (and root), and
+the build inside the chroot is that uid. So no file permission tells one
+build from another, and the socket's path is no secret either: it is fixed,
+and `/proc/<pid>/environ` shows `SSH_AUTH_SOCK` to every process of the uid.
+
+What does tell them apart is the sandbox both host-side sites already run
+under. Where the kernel's Landlock has `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (ABI
+9, Linux 7.1), `aurcache-sandbox` handles that right and grants it where it
+grants reads: everywhere but the protected paths in
+`/etc/aurcache/sandbox-protected`, which now name the agent's directory. The
+walk that keeps secrets unreadable keeps the agent's socket unreachable, while
+the sockets legitimate steps use -- nss-resolve's and nscd's under `/run`, a
+gpg-agent started inside the build -- stay reachable, without enumerating
+them. A build offered the key carries `SSH_AUTH_SOCK` into the sandbox, set by
+the worker before any PKGBUILD code runs (`makechrootpkg` preserves it through
+`sudo`); the sandbox grants that one socket, and only if it is a socket. The
+rule holds for the processes the sandbox starts (git, ssh), and while other
+builds use the agent: the refusal is per Landlock domain, not per path.
+
+On an older kernel the sandbox does not handle the right, so its ruleset stays
+fully enforced and sockets stay unrestricted there. The gate then holds inside
+the chroot only, and the worker says so at startup, as it does when the policy
+file does not name its agent's directory (a custom `WORKER_DATA_DIR`). That is
+the project's stance on limits a machine cannot enforce: build, and say what is
+left open.
+
+`scripts/test-sandbox.sh` holds it to that: under the shipped policy, the
+hostile fixture reaches the agent by its fixed path when unconfined, is refused
+(`EACCES`) when confined and not offered the agent -- while another process is
+using it -- and reaches it when offered.
+
 **What it guarantees.** The private key never leaves the worker, and builds
-only get an agent that signs SSH logins. **What it does not.** While a
-package that is offered the key builds, its code can log in with the key to
-any host the key can reach. And every build runs as the same build user while
-the agent's socket sits at a fixed path on the worker: PKGBUILD code that runs
-outside the chroot (sourcing, the source download) can connect to it even in
-a build that was not offered the key. Landlock, which confines that code, has
-no control over connecting to a Unix socket at the ABI the sandbox uses. So
-the gate keeps the key out of every build that does not ask for it, and is
-not a wall against one that goes looking. Closing that needs the agent out of
-reach of builds that are not offered it -- one agent per offered build,
-started and stopped with it, is the likely shape -- and remains open.
+only get an agent that signs SSH logins. A build that is not offered the key
+reaches no part of it: not in its chroot, and, on a kernel with the socket
+rule, not from its PKGBUILD code outside the chroot. **What it does not.**
+While a package that is offered the key builds, its code can log in with the
+key to any host the key can reach. The agent is not something a build can
+steal the key from: it does not hand it back, and ptrace from the build user
+is refused (Yama, and ssh-agent marks itself non-dumpable).
+
+Two alternatives were set aside. A build user per concurrent build would let
+file permissions do the work, at the cost of reworking how builds, caches and
+chroots are owned. A mount namespace per build around the host-side steps
+would hide the socket from all but its own build, at the cost of a privileged
+`unshare` in the patched `makechrootpkg`. The socket rule needs neither.
 
 A worker that does not read `ssh_key` offers its key to every build, as it
 did before the field existed; the setting is honoured by workers that read it.

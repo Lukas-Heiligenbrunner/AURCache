@@ -32,6 +32,13 @@
 # CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
 # filter keeps from mounting.
 #
+# It also covers the worker's ssh-agent, which every build can reach by its
+# fixed path, being the build user's own: a build not offered the key must be
+# refused it -- while another build is using it -- and one offered it must not.
+# The agent's directory is a protected path, and the refusal is Landlock's
+# `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (ABI 9, Linux 7.1); on an older kernel the
+# sandbox leaves sockets alone, and that leg is reported as skipped.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,7 +61,7 @@ cp docker/testpkg/hostile-fixture/PKGBUILD "$WORKDIR/"
 cat > "$WORKDIR/Dockerfile" <<'EOF'
 FROM archlinux/archlinux:latest
 RUN sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf \
- && pacman -Syu --noconfirm --needed base-devel devtools git sudo python \
+ && pacman -Syu --noconfirm --needed base-devel devtools git sudo python openssh \
  && pacman-key --init && pacman-key --populate && systemd-machine-id-setup \
  && useradd -m builder && echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 COPY aurcache-sandbox /usr/local/bin/aurcache-sandbox
@@ -74,17 +81,18 @@ EOF
 
 cat > "$WORKDIR/probe.sh" <<'EOF'
 #!/bin/bash
-# $1 = "confined" | "unconfined"
+# $1 = "confined" | "unconfined" | "offered" (confined, and offered the agent)
 set -u
 mode=$1
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 
-# The only difference between the legs is which script builds: the patched
-# copy, as the worker runs it, or the stock one from /usr/bin.
-if [[ $mode == confined ]]; then
-    build=(/usr/lib/aurcache/bin/aurcache-build "--interface=$(/usr/lib/aurcache/bin/aurcache-build --interface)")
-else
+# The legs differ in which script builds -- the patched copy, as the worker
+# runs it, or the stock one from /usr/bin -- and in whether the build is
+# offered the agent.
+if [[ $mode == unconfined ]]; then
     build=(/usr/bin/makechrootpkg)
+else
+    build=(/usr/lib/aurcache/bin/aurcache-build "--interface=$(/usr/lib/aurcache/bin/aurcache-build --interface)")
 fi
 
 mkdir -p /srv && cd /srv && rm -rf upstream.git && git init -q --bare upstream.git
@@ -104,6 +112,9 @@ mkdir -p /srv/canary && echo intact > /srv/canary/victim && touch /srv/canary/ho
 mkdir -p /var/lib/aurcache-worker/ssh
 echo SSH-KEY-MATERIAL > /var/lib/aurcache-worker/ssh/id_ed25519
 echo MTLS-KEY-MATERIAL > /var/lib/aurcache-worker/worker-key.pem
+# The worker's ssh-agent, as the worker starts it: the build user's own, at its
+# fixed path, holding a key.
+mkdir -p /var/lib/aurcache-worker/agent
 chown -R builder: /var/lib/aurcache-worker
 # A secret a deployment keeps under /run, protected by adding it to the
 # shipped list. The walk reaches /var on its way to the worker's directory,
@@ -112,6 +123,14 @@ mkdir -p /run/aurcache-secret && echo RUN-KEY-MATERIAL > /run/aurcache-secret/ke
 chown -R builder: /run/aurcache-secret
 grep -qx /run/aurcache-secret /etc/aurcache/sandbox-protected \
     || echo /run/aurcache-secret >> /etc/aurcache/sandbox-protected
+agent_sock=/var/lib/aurcache-worker/agent/agent.sock
+sudo -u builder ssh-agent -a "$agent_sock" >/dev/null
+sudo -u builder ssh-keygen -q -t ed25519 -N '' -f /tmp/agent-key
+sudo -u builder env SSH_AUTH_SOCK="$agent_sock" ssh-add -q /tmp/agent-key
+# Another build using the agent all the while, with its socket in its
+# environment -- where /proc shows it to every process of the build user.
+sudo -u builder env SSH_AUTH_SOCK="$agent_sock" \
+    sh -c 'while ssh-add -l >/dev/null; do sleep 0.2; done' &
 cp /fixture/PKGBUILD /job/pkg/PKGBUILD
 chown -R builder: /job /shared
 
@@ -138,7 +157,7 @@ cp /etc/pacman.conf /srv/pacman-upgrade.conf
 # Both legs start from a base that lists the repository, as one made from a
 # configuration that did; only the invocation differs.
 cp /srv/pacman-build.conf /chroot/root/etc/pacman.conf
-if [[ $mode == confined ]]; then
+if [[ $mode != unconfined ]]; then
     # As the worker runs it: sync with the build's configuration, upgrade with
     # the upgrade's.
     confs=(AURCACHE_PACMAN_CONF=/srv/pacman-build.conf AURCACHE_UPGRADE_CONF=/srv/pacman-upgrade.conf)
@@ -259,16 +278,25 @@ build() {
     then echo allowed; else echo refused; fi > "$startdir/sudo-install"
 }
 BUILD
-if [[ $mode == confined ]]; then
+if [[ $mode != unconfined ]]; then
     # As the worker hands them over (aurcache_worker::build_deps).
     printf 'aurcache-netprobe\ntree\n' > /srv/build-deps
     confs+=(AURCACHE_BUILD_DEPS=/srv/build-deps)
 fi
 
 cd /job/pkg
-sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 \
-    -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
-    -- --nocheck >/tmp/build.log 2>&1
+if [[ $mode == offered ]]; then
+    # As the worker runs a build it offers the key: as root, naming the build
+    # user, with the agent's socket in the environment.
+    env SRCDEST=/job/srcdest SSH_AUTH_SOCK="$agent_sock" "${confs[@]}" "${build[@]}" -U builder \
+        -c -r /chroot -l job1 \
+        -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
+        -- --nocheck >/tmp/build.log 2>&1
+else
+    sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 \
+        -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
+        -- --nocheck >/tmp/build.log 2>&1
+fi
 echo "build_exit=$?"
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"
@@ -316,19 +344,27 @@ for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
 done
 [[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
+echo "agent=$([ -s /job/pkg/agent-reached ] && echo reached || echo blocked)"
+# Whether this kernel's Landlock can restrict UNIX sockets at all (ABI >= 9).
+abi=$(python3 -c 'import ctypes; print(ctypes.CDLL(None).syscall(444, None, 0, 1))')
+echo "landlock_abi=$abi"
 EOF
 
 docker build -q -t "$IMAGE" "$WORKDIR" >/dev/null
 
 run() { docker run --rm --privileged --tmpfs /run "$IMAGE" /probe.sh "$1"; }
 
-echo "==> leg 1/2: WITHOUT the sandbox (the fixture must escape)"
+echo "==> leg 1/3: WITHOUT the sandbox (the fixture must escape)"
 unconfined=$(run unconfined) || { echo "$unconfined"; exit 1; }
 echo "$unconfined" | sed 's/^/    /'
 
-echo "==> leg 2/2: WITH the sandbox (the fixture must be contained)"
+echo "==> leg 2/3: WITH the sandbox (the fixture must be contained)"
 confined=$(run confined) || { echo "$confined"; exit 1; }
 echo "$confined" | sed 's/^/    /'
+
+echo "==> leg 3/3: WITH the sandbox, offered the agent (it must still reach it)"
+offered=$(run offered) || { echo "$offered"; exit 1; }
+echo "$offered" | sed 's/^/    /'
 
 fail=0
 check() { # name expected actual
@@ -366,6 +402,7 @@ check "unconfined: -I's root may mount"      allowed "$(get admin_mount "$unconf
 check "unconfined: -I's root may mount in a user namespace" allowed "$(get admin_userns-mount "$unconfined")"
 check "unconfined: root writes through the read-only bind" by-root,intact "$(get ro_bind "$unconfined")"
 check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
+check "unconfined: reaches the ssh-agent"  reached "$(get agent    "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -424,6 +461,15 @@ fi
 check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
+# Offered the agent, the build reaches it and builds.
+check "offered:    reaches the ssh-agent"   reached "$(get agent    "$offered")"
+check "offered:    build still succeeds"    0       "$(get build_exit "$offered")"
+# Not offered it, the build is refused it -- where the kernel can say no.
+if (( $(get landlock_abi "$confined") >= 9 )); then
+    check "confined:   ssh-agent refused"       blocked "$(get agent    "$confined")"
+else
+    echo "    skip confined:   ssh-agent refused (Landlock ABI $(get landlock_abi "$confined") < 9)"
+fi
 
 if (( fail )); then
     echo "==> FAILED"
