@@ -22,6 +22,7 @@ pub mod server_env;
 pub mod settings;
 pub mod shell;
 pub mod source;
+pub mod ssh_key;
 /// Sizes and durations as configuration writes them (`40G`, `3h`).
 pub mod units;
 /// The version string binaries report: their crate release, plus the commit

@@ -1322,6 +1322,7 @@ mod tests {
             expected_packages: vec![pkgbase.to_string()],
             timeout_secs: None,
             expected_version: "1-1".to_string(),
+            ssh_key: None,
         }
     }
 
