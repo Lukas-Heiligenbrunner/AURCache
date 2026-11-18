@@ -470,6 +470,54 @@ fn manifest_refuses_a_report_it_cannot_read() {
     assert!(ran.stderr.contains("report"), "{}", ran.stderr);
 }
 
+/// A pipe at a path, as something other than the agent could leave one.
+fn fifo_at(path: &Path) {
+    let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    // SAFETY: a valid, NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o644) }, 0);
+}
+
+/// The agent writes its report as a file. A pipe there, which nothing would
+/// ever write to its end, or a link to a report elsewhere, is no report, and
+/// neither holds `manifest` up.
+#[test]
+fn manifest_takes_no_report_from_a_pipe_or_a_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = Work::new(dir.path());
+    fs::create_dir_all(work.out()).unwrap();
+    fifo_at(&work.report());
+    assert_eq!(manifest_of(dir.path()).report, None);
+
+    fs::remove_file(work.report()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let real = Work::new(elsewhere.path());
+    fs::create_dir_all(real.out()).unwrap();
+    write_report(&real);
+    symlink(real.report(), work.report()).unwrap();
+    assert_eq!(manifest_of(dir.path()).report, None);
+}
+
+/// Nor does `tail` read a log that is not a file.
+#[test]
+fn tail_refuses_a_log_that_is_a_pipe_or_a_link() {
+    for link in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let work = Work::new(dir.path());
+        fs::create_dir_all(work.log().parent().unwrap()).unwrap();
+        if link {
+            symlink("/etc/passwd", work.log()).unwrap();
+        } else {
+            fifo_at(&work.log());
+        }
+        let ran = run(agent(["tail", "--work"])
+            .arg(dir.path())
+            .args(["--from", "0"]));
+        assert!(!ran.status.success());
+        assert!(ran.stdout.is_empty(), "{:?}", ran.stdout);
+        assert!(ran.stderr.contains("is not a file"), "{}", ran.stderr);
+    }
+}
+
 // ---- send -------------------------------------------------------------------
 
 fn send_of(work: &Path, name: &str) -> Ran {
