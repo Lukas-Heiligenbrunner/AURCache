@@ -234,14 +234,30 @@ expired signs with its new one, and a key exported with
 `gpg --export-secret-subkeys` (a stub where the primary's secret was) signs
 with its subkey. The choice is made again for every signature, so a subkey
 that expires while the server runs gives way to the next; the server warns
-from 30 days before the one it signs with expires, and refuses at start a key
-in which nothing signs. rPGP 0.21 refuses about one unprotected Ed25519
-secret in 256 that GnuPG writes: it checks the secret's checksum over its own,
-canonical encoding of the MPI, and GnuPG writes a secret whose first byte is
-zero with a bit count of 256. Not reported upstream as of 0.21.1; a
-passphrase moves the check to the decrypted bytes, which rPGP gets right, so
-the server's refusal says to lock the key (fixture and test in
-`aurcache-signing`).
+from 30 days before the one it signs with expires -- at start, and once a
+day from the backfill job -- and refuses at start a key in which nothing
+signs. A day before the subkey that signs expires (`HANDOVER_SECS`), the
+choice moves to one that signs for longer, if there is one; the backfill job
+sleeps until then (`InstanceKey::signer_changes_in`), marks the repository
+unsigned and runs again, re-signing what the old subkey signed while clients
+still accept it. Clients need the new subkey, so adding or extending one means
+importing the key again on every client; the docs say so.
+
+Only the key's own signatures are checked (`self_signed`): a certification
+by someone else, which `gpg --export-secret-keys` includes, would fail rPGP's
+`verify_bindings` for want of its issuer.
+
+rPGP 0.21 refuses about one unprotected Ed25519 secret in 256 that GnuPG
+writes: it checks the secret's checksum over its own, canonical encoding of
+the MPI, and GnuPG writes a secret whose first byte is zero with a bit count
+of 256. Not reported upstream as of 0.21.1. `gnupg_checksums` reads such a
+key with the checksum rPGP computes, found by the packet's bytes rather than
+rPGP's error text, and only where GnuPG's own checksum is right, so a damaged
+key stays refused (fixtures and a GnuPG check in `aurcache-signing`).
+
+RSA keys sign through the `rsa` crate, which `pgp` brings and which has an
+unfixed timing side channel (RUSTSEC-2023-0071); the server warns about an
+RSA signer, and the docs recommend Ed25519, which it generates.
 
 A passphrase protects the file only from someone who cannot also read the
 passphrase, and the server reads it at every publish. It is optional
@@ -320,20 +336,25 @@ grace period, as they are.
 ### Backfill
 
 **Built** (`aurcache_utils::signing::backfill`), signing everything published
-whose entry carries no `%PGPSIG%` this key issued: published before signing,
-or under another key.
+whose entry carries no `%PGPSIG%` by the key over the file as it is:
+published before signing, under another key or another of its subkeys, or
+with a signature that names the key but is not over the file
+(`Repository::unsigned`, which reads each file the key signed whole, on a
+blocking thread, outside the lock -- once per run, and a run is at start and
+when the signer changes).
 
 Per platform:
 
-1. Read `repo.db` without the lock and pick the entries to sign.
+1. Read `<name>.db` without the lock and pick the entries to sign.
 2. For each, link the published file (copy, where there are no hard links)
    into `.staging/resign/<platform>/`, and `describe` the copy — which signs
    it. A copy, so that whatever an update does to the published name, this
    one keeps the file that was signed.
-3. `begin()`, read `repo.db` again under the lock, and `Update::resign` each
-   copy whose file is still listed, with the same `%SHA256SUM%`, and still
-   not signed by the key. Retired files are skipped, files published again
-   meanwhile were signed by their publication, and anything else is reported.
+3. `begin()`, read `<name>.db` again under the lock, and `Update::resign` each
+   copy whose entry is the one picked -- the same `%SHA256SUM%` -- and whose
+   file is what that entry describes. Retired files are skipped, files
+   published again meanwhile were signed by their publication (checked by
+   issuer only, cheaply, under the lock), and anything else is reported.
 4. `commit` with no SQL: the plan moves each `.sig` in and the databases over,
    signed. `Update::resign` replaces an entry and moves only the signature;
    the package file never moves.
