@@ -147,6 +147,12 @@ what they receive:
    - `expected_packages` and `expected_version`: what the build should
      produce. A real build's packages are whatever makepkg makes; these are
      for a worker that fabricates them.
+   - `ssh_key`, optional: which of the worker's SSH keys the build may use,
+     by name. `{"name": "default"}` names one, `{"name": null}` says none,
+     and a job without the field names nothing, which a worker reads as
+     `default`. Only the name is sent; a worker maps it to a key through its
+     own configuration, may refuse it under its own policy, and fails the
+     build (`failed`) when it holds no key by that name.
 3. **Stream the log.** `POST /api/worker/jobs/{build_id}/logs` appends UTF-8
    text to the build's log, as the build prints it.
 4. **Upload the packages.** `POST

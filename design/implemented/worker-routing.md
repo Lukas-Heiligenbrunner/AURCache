@@ -346,6 +346,99 @@ A generic `WORKER_BIND_MOUNTS=host:chroot,…` appending extra `-d` pairs (or `-
 for read-only, where the installed devtools supports it) covers the same need for
 credentials that are not SSH — a `.netrc`, an API token, a licence file.
 
+### Which builds are offered a key
+
+A worker's key is not offered to every build it runs. Two settings decide,
+one on each side, and a build gets a key only when both allow it.
+
+**The server names the key: `build_ssh_key`.** A package setting
+(`BUILD_SSH_KEY` in the environment, a global value, a per-package override,
+resolved `Package -> Env -> Global -> Default` like the others) whose value is
+the *name* of a worker-held key. Its built-in default is unset: no build is
+offered a key until one is named. A deployment whose packages fetch over SSH
+sets it after upgrading the server, to `default` globally or on the packages
+that need it.
+
+The job carries the name in an optional field, `JobDescriptor::ssh_key`, as
+`SshKeyRequest { name: Option<String> }`:
+
+| On the wire | Means | The worker |
+|---|---|---|
+| no `ssh_key` | a server that names no key | offers `default`, as before names existed |
+| `{"name": null}` | no key | offers none |
+| `{"name": "default"}` | that key | offers it, if it holds it |
+
+A struct around the name rather than `Option<Option<String>>`, which serde
+cannot tell apart from a plain `Option` without a helper, and rather than an
+enum, whose next variant would reach an older worker as a value it cannot
+read. Protocol 1 gains only this optional field, with a fixture of its own;
+the committed fixtures, which lack it, still decode, as "absent".
+
+A name is an abstract label, `[a-z0-9][a-z0-9_-]{0,63}`
+(`aurcache_common::ssh_key::validate_name`), checked when the setting is
+stored and again by the worker before any lookup. It is never a path: the
+worker maps it to a key through its own configuration alone, and opens
+nothing derived from what the server sent. The key itself never travels.
+
+**The worker sets a ceiling: `WORKER_GIT_SSH_PACKAGES`.** Exact pkgbases,
+matched as `WORKER_PACKAGES` matches. Unset, every build the server allows;
+set, only those packages; set but empty, none -- the one way to say "no
+build", and an empty value can then never widen who gets the key. It is plain
+environment that the worker alone reads, and is listed among the variables a
+worker must never declare (`settings.rs`), like `WORKER_GIT_SSH_KEY`: the
+server can narrow who gets a key, by naming none, but never widen it past the
+worker's list. Set without a key to offer (the configured one missing, the
+agent not started), the worker warns at startup rather than refusing to: a
+worker without a credential already builds without one, and the list only
+narrows who would get it.
+
+The recommended shape for a dedicated key is the same list in
+`WORKER_PACKAGES` and `WORKER_GIT_SSH_PACKAGES`: those packages build only on
+that worker, and only they are offered its key.
+
+**The decision is shared by every executor.** `aurcache_worker_core::ssh_key`
+holds `SshPackages` (the ceiling), `SshKeys<K>` (the worker's keys by name,
+`K` being whatever the executor hands a build -- an agent's socket here) and
+`offer(job, &keys, &packages) -> SshOffer`. Each outcome has its own line in
+the build log: not requested, no key by that name on this worker (which fails
+the build before anything is prepared, since it would otherwise fail at a
+source fetch that names no key), or the package not in
+`WORKER_GIT_SSH_PACKAGES`. A worker with no key says nothing about keys to a
+build that did not name one.
+
+The chroot worker withholds the whole credential from a build that is not
+offered it: no `SSH_AUTH_SOCK` export in its `makepkg.conf`, no mount of the
+agent's directory into its chroot, no `SSH_AUTH_SOCK` inherited from the
+worker's environment.
+
+**What it guarantees.** The private key never leaves the worker, and builds
+only get an agent that signs SSH logins. **What it does not.** While a
+package that is offered the key builds, its code can log in with the key to
+any host the key can reach. And every build runs as the same build user while
+the agent's socket sits at a fixed path on the worker: PKGBUILD code that runs
+outside the chroot (sourcing, the source download) can connect to it even in
+a build that was not offered the key. Landlock, which confines that code, has
+no control over connecting to a Unix socket at the ABI the sandbox uses. So
+the gate keeps the key out of every build that does not ask for it, and is
+not a wall against one that goes looking. Closing that needs the agent out of
+reach of builds that are not offered it -- one agent per offered build,
+started and stopped with it, is the likely shape -- and remains open.
+
+A worker that does not read `ssh_key` offers its key to every build, as it
+did before the field existed; the setting is honoured by workers that read it.
+
+**Several keys, later.** Nothing in the job or the setting assumes one key:
+the worker already resolves names through a lookup. A worker holding several
+would name them as explicit `name=path` pairs, such as
+`WORKER_GIT_SSH_KEYS=gitlab=/run/secrets/gitlab_key,github=/run/secrets/gh`,
+beside `WORKER_GIT_SSH_KEY`, which stays `default`. Routing is then additive
+too: workers would advertise the names they hold in an optional
+`RegisterRequest` field, which older servers ignore, and the server could hand
+a job naming key X only to workers that hold X, the way affinity already
+narrows who may claim a job. A worker could report each name's public-key
+fingerprint there as well, so the UI shows which key a name is. None of these
+change a message a peer already reads.
+
 ### Rejected: a key-management API on the worker
 
 The worker today has **zero inbound network surface** — it is a pure outbound
