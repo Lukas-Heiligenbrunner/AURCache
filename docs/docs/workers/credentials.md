@@ -97,6 +97,12 @@ ssh-keyscan github.com > known_hosts
       WORKER_SSH_KNOWN_HOSTS: /etc/aurcache-worker/ssh/known_hosts
 ```
 
+A host that file does not name is then refused: the fetch fails with `Host key
+verification failed`. The worker copies the file before each build to
+`<WORKER_DATA_DIR>/ssh-known-hosts/`, readable by builds and changeable only by
+the worker, so the original only has to be readable by the worker; a `0600`
+secret is fine. A replaced file takes effect at the next build.
+
 ## The key is not visible to the package
 
 `makepkg` downloads sources **before** the build chroot is entered, so the
