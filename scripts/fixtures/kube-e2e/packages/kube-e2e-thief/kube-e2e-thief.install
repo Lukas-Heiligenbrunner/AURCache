@@ -6,20 +6,20 @@ post_install() {
   local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
   grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
     2>/dev/null | grep -v "^$out/" >"$out/keys"
-  _sockets() {
-    find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null
-  }
-  for socket in $(_sockets); do
-    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
-  done >"$out/agents"
-  (
-    for _ in $(seq 300); do
-      for socket in $(_sockets); do
-        SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L 2>&1
-      done
-      echo looked
-      sleep 1
-    done >>"$out/later"
-  ) </dev/null >/dev/null 2>&1 &
+  # Every socket that answers as an agent, asked for an SSHSIG: a signature
+  # that is no login, which ssh-agent makes like any other.
+  : >"$out/agents"
+  : >"$out/sshsig"
+  for socket in $(find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null); do
+    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L >"$out/pub" 2>/dev/null || continue
+    grep -q '^ssh-' "$out/pub" || continue
+    echo "$socket" >>"$out/agents"
+    if echo payload | SSH_AUTH_SOCK=$socket timeout 10 \
+      ssh-keygen -Y sign -f "$out/pub" -n file >/dev/null 2>&1; then
+      echo signed >>"$out/sshsig"
+    else
+      echo refused >>"$out/sshsig"
+    fi
+  done
   chmod -R a+rX "$out"
 }

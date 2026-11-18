@@ -1,7 +1,8 @@
 # The Kubernetes suite's SSH key check: a source fetched over git+ssh with
-# the dispatcher's key, and a build dependency (kube-e2e-thief, from
-# AURCache's repository) whose root install script hunts for that key in the
-# build pod. build() says what it found.
+# the dispatcher's key, the same server reached again from build(), and a
+# build dependency (kube-e2e-thief, from AURCache's repository) whose root
+# install script hunts for that key in the build pod. build() hunts too, and
+# says what both found.
 pkgname=kube-e2e-ssh
 pkgver=1.0.0
 pkgrel=1
@@ -14,15 +15,26 @@ source=('payload::git+ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git
 sha256sums=('SKIP')
 
 build() {
-  local thief=/var/tmp/kube-e2e-thief
-  # Long enough for what the thief left running to look a few times.
-  sleep 10
+  local thief=/var/tmp/kube-e2e-thief reached=failed sshsig=refused
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
   echo "kube-e2e-ssh: payload $(cat "$srcdir/payload/marker.txt")"
+  # A fetch from a function, which no source list shows.
+  if git ls-remote ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git >/dev/null 2>&1; then
+    reached=reached
+  fi
+  ssh-add -L >"$srcdir/agent.pub" 2>/dev/null
+  if echo payload | ssh-keygen -Y sign -f "$srcdir/agent.pub" -n file >/dev/null 2>&1; then
+    sshsig=signed
+  fi
+  echo "kube-e2e-ssh: build ssh=$reached" \
+    "keys=$(grep -rlsIF -e "$armour" /etc /var /tmp /work /aurcache /home /run /proc/self/environ \
+      2>/dev/null | grep -vc "^$thief/")" \
+    "sshsig=$sshsig"
   echo "kube-e2e-ssh: thief ran=$(cat "$thief/ran" 2>/dev/null || echo no)" \
     "keys=$(wc -l <"$thief/keys")" \
-    "agents=$(grep -c ssh-ed25519 "$thief/agents")" \
-    "later=$(grep -c ssh-ed25519 "$thief/later")" \
-    "looked=$(grep -c '^looked$' "$thief/later")" || true
+    "agents=$(wc -l <"$thief/agents")" \
+    "sshsig=$(sort -u "$thief/sshsig" | tr '\n' ' ' | sed 's/ $//')" || true
 }
 
 package() {

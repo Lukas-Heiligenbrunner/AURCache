@@ -1,5 +1,7 @@
 # What the test changes on the shipped server: its own crates log at debug, and
-# its image is taken from the node, where the test loads the one it built.
+# its image is taken from the node, where the test loads the one it built. That
+# goes for every container that runs it, the one that prepares the volume
+# included.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,6 +10,9 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: data-dir
+          imagePullPolicy: IfNotPresent
       containers:
         - name: aurcache
           imagePullPolicy: IfNotPresent
