@@ -39,6 +39,12 @@
 //!   filesystem, and reading is not how one build corrupts another; what must
 //!   stay secret is short and known. With no list, reads are not restricted;
 //!   a list that exists but cannot be read refuses the build.
+//! - **UNIX sockets**: on a kernel whose Landlock has
+//!   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (ABI 9), a build may connect to the
+//!   pathname sockets the reads above allow and to nothing beneath a protected
+//!   path -- which is where the worker's ssh-agent lives. A build offered the
+//!   agent is told so by `SSH_AUTH_SOCK`, and may connect to that one socket
+//!   as well. Older kernels cannot say, and leave sockets unrestricted.
 //!
 //! What this cannot do is protect a secret already in the process environment:
 //! a PKGBUILD reads it without touching the filesystem. makechrootpkg reaches
@@ -58,6 +64,13 @@ use std::process::ExitCode;
 /// directory; `makechrootpkg` sets both immediately before invoking `makepkg`,
 /// so a PKGBUILD cannot influence them.
 const WRITABLE_FROM_ENV: [&str; 2] = ["SRCDEST", "BUILDDIR"];
+
+/// The variable naming the ssh-agent socket a build was offered.
+///
+/// Set by the worker only for a build offered its SSH key, and carried to here
+/// by `makechrootpkg`'s `sudo --preserve-env=GNUPGHOME,SSH_AUTH_SOCK` before any
+/// PKGBUILD code runs, so a PKGBUILD cannot name one for itself.
+const AGENT_SOCKET_FROM_ENV: &str = "SSH_AUTH_SOCK";
 
 /// File listing paths a build may not read, one per line.
 ///
@@ -143,7 +156,10 @@ fn run(request: &Request) -> Result<Infallible, Failure> {
     } else {
         crate::read_grants_excluding(&protected, crate::list_dir)
     };
-    restrict(&writable_dirs(), &read).map_err(|e| Failure::Unconfined(e.to_string()))?;
+    let sockets = unix_sockets(!read.is_empty() && resolve_unix_supported(), |key| {
+        std::env::var_os(key).map(PathBuf::from)
+    });
+    restrict(&writable_dirs(), &read, &sockets).map_err(|e| Failure::Unconfined(e.to_string()))?;
 
     let err = std::process::Command::new(&request.program)
         .args(&request.args)
@@ -207,6 +223,40 @@ fn resolve_writable_dirs(
         .collect();
     dirs.extend(cwd);
     dirs
+}
+
+/// Which pathname UNIX sockets made outside the sandbox a build may connect to.
+#[derive(Debug, PartialEq, Eq)]
+enum UnixSockets {
+    /// Any: this kernel cannot restrict them, or nothing is protected.
+    Any,
+    /// Those beneath the read grants, and `agent` -- the ssh-agent's socket,
+    /// when the build was offered it.
+    Granted { agent: Option<PathBuf> },
+}
+
+/// The socket policy for a build, from whether it can be enforced (`enforce`)
+/// and what the environment the build was started with names.
+fn unix_sockets(enforce: bool, lookup: impl Fn(&str) -> Option<PathBuf>) -> UnixSockets {
+    if !enforce {
+        return UnixSockets::Any;
+    }
+    UnixSockets::Granted {
+        agent: lookup(AGENT_SOCKET_FROM_ENV).filter(|path| !path.as_os_str().is_empty()),
+    }
+}
+
+/// Whether this kernel's Landlock can restrict connecting to pathname UNIX
+/// sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, ABI 9, Linux 7.1).
+///
+/// Asked by creating a ruleset that requires the right, which restricts
+/// nothing: it is only a file descriptor, dropped at once.
+fn resolve_unix_supported() -> bool {
+    Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(AccessFs::ResolveUnix)
+        .and_then(Ruleset::create)
+        .is_ok()
 }
 
 /// Read the deployment's protected-path list, if it has one.
@@ -324,8 +374,13 @@ fn dangles(path: &Path) -> bool {
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
-/// `read` empty leaves reads unrestricted.
-fn restrict(allow: &[PathBuf], read: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+/// `read` empty leaves reads unrestricted; `sockets` says which UNIX sockets
+/// made outside it the build may connect to.
+fn restrict(
+    allow: &[PathBuf],
+    read: &[PathBuf],
+    sockets: &UnixSockets,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Writing implies being able to move things around inside a writable tree,
     // and makepkg renames across directories as a matter of course (tar
     // extraction, breezy staging a pack into `packs/`, ...). Landlock only
@@ -343,6 +398,16 @@ fn restrict(allow: &[PathBuf], read: &[PathBuf]) -> Result<(), Box<dyn std::erro
     } else {
         write | read_only
     };
+    // Connecting to a socket is granted where reading is: everywhere but the
+    // protected paths, of which the ssh-agent's directory is one. Handled only
+    // where the kernel has the right, so the ruleset stays fully enforced on
+    // one that does not.
+    let resolve = match sockets {
+        UnixSockets::Any => landlock::BitFlags::<AccessFs>::empty(),
+        UnixSockets::Granted { .. } => AccessFs::ResolveUnix.into(),
+    };
+    let handled = handled | resolve;
+    let read_only = read_only | resolve;
     // The floor is V2, whose shortfalls the `FullyEnforced` check below
     // catches anyway.
     let mut ruleset = Ruleset::default()
@@ -356,6 +421,20 @@ fn restrict(allow: &[PathBuf], read: &[PathBuf]) -> Result<(), Box<dyn std::erro
 
     for path in allow {
         ruleset = crate::grant(ruleset, path, handled)?;
+    }
+
+    // The agent's own socket, for a build that was offered it. A socket and
+    // nothing else: a variable naming a directory, or `/`, would grant every
+    // socket beneath it.
+    if let UnixSockets::Granted {
+        agent: Some(socket),
+    } = sockets
+        && std::fs::metadata(socket).is_ok_and(|m| {
+            use std::os::unix::fs::FileTypeExt;
+            m.file_type().is_socket()
+        })
+    {
+        ruleset = crate::grant(ruleset, socket, resolve)?;
     }
 
     // makepkg and the PKGBUILDs it sources redirect to and from /dev/null
@@ -398,6 +477,43 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    /// Where sockets can be restricted, a build is granted the agent's socket
+    /// only when its environment names one; where they cannot, nothing is
+    /// claimed about them.
+    #[test]
+    fn the_agent_socket_is_granted_only_to_a_build_offered_it() {
+        let offered =
+            lookup_from(&[("SSH_AUTH_SOCK", "/var/lib/aurcache-worker/agent/agent.sock")]);
+        assert_eq!(
+            unix_sockets(true, &offered),
+            UnixSockets::Granted {
+                agent: Some(PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock"))
+            }
+        );
+        assert_eq!(
+            unix_sockets(true, lookup_from(&[])),
+            UnixSockets::Granted { agent: None }
+        );
+        assert_eq!(
+            unix_sockets(true, lookup_from(&[("SSH_AUTH_SOCK", "")])),
+            UnixSockets::Granted { agent: None }
+        );
+        assert_eq!(unix_sockets(false, offered), UnixSockets::Any);
+    }
+
+    /// The shipped policy protects the agent's directory, which is what keeps
+    /// a build that was not offered the key from its socket.
+    #[test]
+    fn the_shipped_policy_protects_the_agent() {
+        let policy = include_str!("../../../packaging/sandbox-protected");
+        assert!(
+            policy
+                .lines()
+                .any(|line| line.trim() == "/var/lib/aurcache-worker/agent"),
+            "packaging/sandbox-protected must list the agent's directory"
+        );
     }
 
     /// The one form the patched makechrootpkg uses.
