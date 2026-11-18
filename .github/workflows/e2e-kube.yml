@@ -18,8 +18,9 @@ on:
 
 permissions:
   contents: read
-  # Removing the trigger label once the run finishes.
-  issues: write
+  # Removing the trigger label once the run finishes: a pull request's labels
+  # are changed through the pull request.
+  pull-requests: write
 
 env:
   KIND_VERSION: v0.33.0
@@ -30,6 +31,9 @@ jobs:
   e2eKube:
     if: github.event_name != 'pull_request' || github.event.label.name == 'run-e2e-kube'
     runs-on: ubuntu-latest
+    # A run takes about twenty minutes on a workstation; one that has hung is
+    # not left to the six hours a job may take.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,6 +90,10 @@ jobs:
           AURCACHE_TEST_PREFIX: ci
           CLEANUP: '1'
           E2E_SCRATCH: ${{ runner.temp }}/kube-e2e
+          # Not covered here: a kind node cannot start a pod in a user
+          # namespace (its sysfs mount is refused), and left to find that out
+          # the suite would skip the leg without anyone seeing.
+          E2E_USER_NAMESPACES: '0'
         run: ./scripts/test-e2e-kube.sh hello
 
       # The label means "run requested". Taking it back off once the run is

@@ -81,8 +81,9 @@ cd docs && yarn install --frozen-lockfile && yarn build
 # container's flags (docker, ~3 min; needs python3, git and OpenSSH)
 ./scripts/test-build-agent.sh
 
-# the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker;
-# ~15 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk with room)
+# the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker,
+# ssh-keygen; ~20 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk
+# with room)
 ./scripts/test-e2e-kube.sh hello
 E2E_BIG=0 ./scripts/test-e2e-kube.sh              # without the 2 GiB package
 KEEP=1 ./scripts/test-e2e-kube.sh                 # leave the cluster up, then:
@@ -124,8 +125,11 @@ they cover, rather than running all of them as a matter of course:
   `kubernetes/kube-worker/`, the kube-worker image, or the agent's transfer
   subcommands. It builds the server and worker images, starts a kind cluster
   from the shipped manifests, and builds in real pods: enrollment, the
-  NetworkPolicy, a quota, the repository, cancel, a crash, a stop, a 2 GiB
-  relay. The executor's lifecycle against a fake cluster is in `cargo test`
+  NetworkPolicy, a quota, the repository, a source over the SSH link,
+  cancel, a crash, a stop, a pod that cannot start, a 2 GiB relay. Build pods
+  in user namespaces are not covered where it runs in kind, CI included: a
+  kind node cannot start one, and the leg is skipped. The executor's
+  lifecycle against a fake cluster is in `cargo test`
   (`aurcache-worker-kube/tests/`), so most changes there need no cluster; the
   `#[ignore]`d tests in `kube_cluster.rs` and `tests/live.rs` run against one
   with `AURCACHE_KUBE_TESTS=1`.

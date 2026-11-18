@@ -16,8 +16,9 @@ on:
 
 permissions:
   contents: read
-  # Removing the trigger label once the run finishes.
-  issues: write
+  # Removing the trigger label once the run finishes: a pull request's labels
+  # are changed through the pull request.
+  pull-requests: write
 
 jobs:
   e2eTest:
