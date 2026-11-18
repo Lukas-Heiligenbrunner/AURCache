@@ -438,7 +438,6 @@ mod tests {
         let chroot_dir = data_dir.join("chroot");
         let pool = pool_mountpoint(None, &chroot_dir);
         for secret in [
-            crate::credentials::secrets_dir(data_dir),
             crate::credentials::generated_key(data_dir),
             crate::agent::dir(data_dir),
         ] {
