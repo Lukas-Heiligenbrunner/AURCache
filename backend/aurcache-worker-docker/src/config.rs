@@ -1,10 +1,9 @@
 //! Configuration for the Docker worker's executor.
 //!
-//! These are the pre-worker environment variables, read under their original
-//! names and with their original meanings, because the whole point of this
-//! executor is that an existing deployment keeps behaving as it did. The two
+//! The variables keep the names and meanings the single-container image gave
+//! them, so a deployment that sets them keeps behaving as it did. The two
 //! limits are declared settings as well (see [`crate::settings`]), so they can
-//! also be set from the server -- `CPU_LIMIT` still pins, as it always did.
+//! also be set from the server; a plain `CPU_LIMIT` still pins.
 
 use crate::settings::keys;
 use aurcache_worker_core::config::{CoreConfig, env_opt};

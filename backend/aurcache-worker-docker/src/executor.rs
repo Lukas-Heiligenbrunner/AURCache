@@ -1,13 +1,12 @@
 //! The Docker worker's executor.
 //!
-//! Reproduces the pre-worker build strategy: create a container from the
-//! builder image, bind a shared build directory into it, run `makepkg`, stream
-//! its output as build logs, then upload whatever landed in the directory.
+//! For each job: create a container from the builder image, bind a shared
+//! build directory into it, run `makepkg`, stream its output as build logs,
+//! then upload whatever landed in the directory.
 //!
-//! It builds in a container rather than a clean
-//! chroot, so a build can see whatever the image accumulated from the previous
-//! `pacman -Syu`, and it offers none of the chroot worker's caches or
-//! credential handling. New deployments should use `aurcache-worker`.
+//! It builds in a container from a reused image rather than in a clean chroot,
+//! so a build sees whatever the image holds, and it offers none of the chroot
+//! worker's caches or credential handling.
 
 use anyhow::{Context, Result, anyhow};
 use aurcache_common::worker::{BuildOutcome, CompleteReport};
