@@ -71,11 +71,22 @@ pub enum Admission {
     Refused {
         message: String,
     },
-    /// The question did not get an answer; ask again.
-    Unknown {
+    /// The question reached no API server. A pod created now would not
+    /// reach one either.
+    Unreached {
+        message: String,
+    },
+    /// An API server answered without judging the pod: the name it was
+    /// asked about is taken. Nothing is known against the cluster.
+    Unjudged {
         message: String,
     },
 }
+
+/// The shortest grace a pod is deleted with. None at all is a force
+/// deletion: the pod leaves the API before its node has confirmed that its
+/// containers are gone.
+pub const PROMPT: Duration = Duration::from_secs(1);
 
 /// Whether an exec's stdin is given to the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

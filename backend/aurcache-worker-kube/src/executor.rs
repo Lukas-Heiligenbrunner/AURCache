@@ -8,7 +8,7 @@
 //! relayed to the server. Whatever happens on the way, the pod is deleted
 //! before the report is returned.
 
-use crate::cluster::{Admission, Cluster, CreateError};
+use crate::cluster::{Admission, Cluster, CreateError, PROMPT};
 use crate::config::Config;
 use crate::outcome::{self, BuildEnd, Observed};
 use crate::pod::{self, BUILD, PodInputs};
@@ -88,6 +88,12 @@ pub struct KubeExecutor<C: Cluster> {
     held: Mutex<HashSet<i32>>,
 }
 
+/// A pod of this dispatcher's that no node takes.
+struct Waiting {
+    pod: String,
+    message: String,
+}
+
 /// What one build is made from, beside the configuration.
 pub struct Build<'a, U> {
     pub claimed: &'a ClaimedJob,
@@ -108,8 +114,12 @@ pub struct Build<'a, U> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Readiness {
     Ready,
-    /// The cluster did not answer whether it admits a build pod.
+    /// The cluster answered without saying whether it admits a build pod.
     Unsure {
+        message: String,
+    },
+    /// The cluster's API did not answer at all.
+    Unreachable {
         message: String,
     },
     /// One of this dispatcher's pods has no node to go to.
@@ -164,6 +174,17 @@ impl<C: Cluster> KubeExecutor<C> {
             readiness: Mutex::new(Readiness::Ready),
             held: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// A pod of this dispatcher's that no node takes, if there is one.
+    fn waiting(&self) -> Option<Waiting> {
+        self.cluster.pods().into_iter().find_map(|pod| {
+            let message = outcome::unschedulable(&pod)?;
+            Some(Waiting {
+                pod: pod.metadata.name.clone().unwrap_or_default(),
+                message,
+            })
+        })
     }
 
     /// Delete the pods a previous process of this dispatcher left: the server
@@ -245,7 +266,7 @@ impl<C: Cluster> KubeExecutor<C> {
                 .collect()
         };
         for name in orphans {
-            match self.cluster.delete(&name, Duration::ZERO).await {
+            match self.cluster.delete(&name, PROMPT).await {
                 Ok(()) => tracing::warn!("Deleted pod {name}, which no build of this worker held"),
                 Err(error) => tracing::warn!("{error:#}"),
             }
@@ -418,7 +439,7 @@ impl<C: Cluster> KubeExecutor<C> {
             Err(CreateError::Exists) => {}
         }
         tracing::warn!("pod {name} exists already; deleting it to build in a fresh one");
-        self.cluster.delete(name, Duration::ZERO).await?;
+        self.cluster.delete(name, PROMPT).await?;
         let mut generation = self.cluster.generation();
         let gone = async {
             while self.cluster.pod(name).is_some() {
@@ -574,15 +595,14 @@ impl<C: Cluster> KubeExecutor<C> {
                 message: format!("{error:#}"),
             };
         }
-        let waiting = self.cluster.pods().into_iter().find_map(|pod| {
-            let message = outcome::unschedulable(&pod)?;
-            Some(Readiness::Unschedulable {
-                pod: pod.metadata.name.clone().unwrap_or_default(),
-                message,
-            })
-        });
-        if let Some(waiting) = waiting {
-            return waiting;
+        // A pod without a node holds claims back: a claim cannot name an
+        // architecture, and the next build would wait for a node too. One
+        // architecture per dispatcher keeps that true.
+        if let Some(found) = self.waiting() {
+            return Readiness::Unschedulable {
+                pod: found.pod,
+                message: found.message,
+            };
         }
         let Ok(probe) = self.representative(cfg) else {
             return Readiness::Ready;
@@ -590,7 +610,8 @@ impl<C: Cluster> KubeExecutor<C> {
         match self.cluster.admits(&probe).await {
             Admission::Admitted => Readiness::Ready,
             Admission::Refused { message } => Readiness::Refused { message },
-            Admission::Unknown { message } => Readiness::Unsure { message },
+            Admission::Unjudged { message } => Readiness::Unsure { message },
+            Admission::Unreached { message } => Readiness::Unreachable { message },
         }
     }
 
@@ -631,8 +652,11 @@ impl<C: Cluster> KubeExecutor<C> {
         match found {
             Readiness::Ready => tracing::info!("Claiming builds again"),
             Readiness::Unsure { message } => tracing::warn!(
-                "Could not ask the cluster whether it admits a build pod; claiming builds \
+                "The cluster did not say whether it admits a build pod; claiming builds \
                  anyway: {message}"
+            ),
+            Readiness::Unreachable { message } => tracing::warn!(
+                "Not claiming builds while the cluster's API does not answer: {message}"
             ),
             Readiness::Unschedulable { pod, message } => tracing::warn!(
                 "Not claiming builds while pod {pod} has no node to run on: {message}"
@@ -707,8 +731,8 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
     }
 
     /// No claim while the cluster could not start the build: a claimed job
-    /// holds a lease, and one whose pod is refused or left pending spends an
-    /// attempt for nothing.
+    /// holds a lease, and one whose pod is refused, left pending or cannot
+    /// even be asked for spends an attempt for nothing.
     async fn ready_for_work(&self, _claimed: usize) -> bool {
         self.reap().await;
         let cfg = self.cfg.current();
