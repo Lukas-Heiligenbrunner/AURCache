@@ -62,17 +62,23 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
                     },
                 }
                 PersistBuildDirField { key: "persist-{pkg.name}", pkgbase: pkg.name.clone(), entry }
-                PackageLimitField {
+                PackageValueField {
                     key: "artifact-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::ArtifactSize,
+                    which: PackageValue::ArtifactSize,
                 }
-                PackageLimitField {
+                PackageValueField {
                     key: "timeout-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::JobTimeout,
+                    which: PackageValue::JobTimeout,
+                }
+                PackageValueField {
+                    key: "ssh-key-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    which: PackageValue::SshKey,
                 }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
@@ -208,19 +214,21 @@ fn PersistBuildDirField(
 }
 
 /// A server setting this package may set for itself: the largest file its
-/// builds may upload, or how long one may run.
+/// builds may upload, how long one may run, or the SSH key its builds may use.
 ///
-/// Both resolve per package (see `Setting::MaxArtifactSize`), so one outsized
-/// or slow package can be allowed more without raising the limit for all.
-/// Shown as it is written (`20G`, `3h`), with where the value comes from;
-/// typing a new one offers Save, and a package override offers Reset.
+/// Each resolves per package (see `Setting::MaxArtifactSize`), so one outsized
+/// or slow package can be allowed more without raising the limit for all, and
+/// one package can be given a key no other build gets. Shown as it is written
+/// (`20G`, `3h`, `default`), with where the value comes from; typing a new one
+/// offers Save, and a package override offers Reset. Saving an empty value is
+/// a value too: for the SSH key, "none for this package".
 #[component]
-fn PackageLimitField(
+fn PackageValueField(
     pkgbase: String,
     mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
-    limit: PackageLimit,
+    which: PackageValue,
 ) -> Element {
-    let setting = limit.setting();
+    let setting = which.setting();
     use crate::setting_editor::{
         MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
     };
@@ -231,7 +239,7 @@ fn PackageLimitField(
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|settings| limit.shown(settings).value);
+        .map(|settings| which.shown(settings).value);
     let mut draft = use_editor_draft(loaded);
     let scope = SettingScope::Package(pkgbase);
     let save_scope = scope.clone();
@@ -263,7 +271,7 @@ fn PackageLimitField(
 
     rsx! {
         div { class: "flex gap-2 py-1 text-sm items-center",
-            span { class: "opacity-60 w-32 shrink-0", "{limit.label()}" }
+            span { class: "opacity-60 w-32 shrink-0", "{which.label()}" }
             div { class: "min-w-0 flex-1",
                 match &*entry.read_unchecked() {
                     None => rsx! { span { class: "loading loading-spinner loading-xs" } },
@@ -271,7 +279,7 @@ fn PackageLimitField(
                         span { class: "text-xs text-error", "Could not load the setting: {e}" }
                     },
                     Some(Ok(settings)) => {
-                        let SettingsEntry { value: current, source } = limit.shown(settings);
+                        let SettingsEntry { value: current, source } = which.shown(settings);
                         // No lock for an environment variable: a package's own
                         // value outranks it (Package -> Env -> Global -> Default),
                         // so an override here still applies.
@@ -281,7 +289,7 @@ fn PackageLimitField(
                                 input {
                                     r#type: "text",
                                     class: "input input-bordered input-xs w-24 font-mono",
-                                    placeholder: limit.placeholder(),
+                                    placeholder: which.placeholder(),
                                     disabled: busy(),
                                     value: draft().text(),
                                     oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
@@ -307,7 +315,7 @@ fn PackageLimitField(
                                 if source == SettingSource::Package && !busy() {
                                     button {
                                         class: "btn btn-ghost btn-xs",
-                                        title: "Discard this package's limit and use the global one again",
+                                        title: "Discard this package's value and use the global one again",
                                         onclick: reset,
                                         "Reset"
                                     }
@@ -324,18 +332,20 @@ fn PackageLimitField(
     }
 }
 
-/// The limits a package may set for itself, each shown by [`PackageLimitField`].
+/// The values a package may set for itself, each shown by [`PackageValueField`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackageLimit {
+enum PackageValue {
     ArtifactSize,
     JobTimeout,
+    SshKey,
 }
 
-impl PackageLimit {
+impl PackageValue {
     const fn setting(self) -> Setting {
         match self {
             Self::ArtifactSize => Setting::MaxArtifactSize,
             Self::JobTimeout => Setting::JobTimeout,
+            Self::SshKey => Setting::BuildSshKey,
         }
     }
 
@@ -343,6 +353,7 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "Max artifact size",
             Self::JobTimeout => "Job timeout",
+            Self::SshKey => "Build SSH key",
         }
     }
 
@@ -350,6 +361,8 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "20G",
             Self::JobTimeout => "1h",
+            // Empty is no key, so the hint must not read as a value in force.
+            Self::SshKey => "none",
         }
     }
 
@@ -365,6 +378,10 @@ impl PackageLimit {
                     settings.job_timeout.value,
                 )),
                 source: settings.job_timeout.source,
+            },
+            Self::SshKey => SettingsEntry {
+                value: settings.build_ssh_key.value.clone().unwrap_or_default(),
+                source: settings.build_ssh_key.source,
             },
         }
     }

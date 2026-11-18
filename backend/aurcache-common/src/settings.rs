@@ -44,6 +44,9 @@ pub struct ApplicationSettings {
     /// Let a PKGBUILD reach the network while the server parses it.
     /// See [`Setting::ParseNetwork`].
     pub parse_network: SettingsEntry<bool>,
+    /// The name of the worker-held SSH key this package's builds may use;
+    /// `None` for none. See [`Setting::BuildSshKey`].
+    pub build_ssh_key: SettingsEntry<Option<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +78,7 @@ pub enum Setting {
     MakepkgConf,
     PacmanConf,
     ParseNetwork,
+    BuildSshKey,
 }
 
 /// Keys of settings that no longer exist, which may still be stored or dumped.
@@ -121,7 +125,7 @@ impl Setting {
     /// separately: two lists drift, and a setting served by `GET /settings`
     /// but unknown to `PATCH /settings/<key>` cannot be changed through the
     /// API at all.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::VersionCheckInterval,
         Self::AutoUpdateSchedule,
         Self::BuildOnNewVersion,
@@ -132,6 +136,7 @@ impl Setting {
         Self::MakepkgConf,
         Self::PacmanConf,
         Self::ParseNetwork,
+        Self::BuildSshKey,
     ];
 
     /// This setting's stable key, environment variable, built-in default and
@@ -246,6 +251,16 @@ impl Setting {
                 default: "false",
                 scope: Scope::Global,
             },
+            // The name of a key the worker holds, never the key: the job
+            // carries the name and the worker maps it to a key of its own.
+            // Unset by default, so no build reaches an SSH key unless it is
+            // named for it -- here for every package, or per package.
+            Self::BuildSshKey => SettingsMeta {
+                key: "build_ssh_key",
+                env_name: Some("BUILD_SSH_KEY"),
+                default: "",
+                scope: Scope::Package,
+            },
         }
     }
 
@@ -291,6 +306,9 @@ impl Setting {
             Self::AutoUpdateSchedule => crate::schedule::Schedule::parse(value, 0)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
+            // Empty is "no key".
+            Self::BuildSshKey if value.is_empty() => Ok(()),
+            Self::BuildSshKey => crate::ssh_key::validate_name(value),
             Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
     }
@@ -325,6 +343,19 @@ mod tests {
                 assert!(setting.validate(invalid).is_err());
             }
         }
+    }
+
+    /// A key name is checked before it is stored, so the setting can only ever
+    /// name a key, never a path; empty is "no key".
+    #[test]
+    fn the_ssh_key_setting_takes_a_name_or_nothing() {
+        let setting = Setting::BuildSshKey;
+        assert_eq!(setting.validate(""), Ok(()));
+        assert_eq!(setting.validate("default"), Ok(()));
+        assert_eq!(setting.validate("gitlab-ci"), Ok(()));
+        assert!(setting.validate("/run/secrets/key").is_err());
+        assert!(setting.validate("Default").is_err());
+        assert!(setting.validate(" default").is_err());
     }
 
     /// A duration is checked before it is stored, and zero is refused: it
@@ -371,6 +402,7 @@ mod tests {
                 Setting::MakepkgConf => 7,
                 Setting::PacmanConf => 8,
                 Setting::ParseNetwork => 9,
+                Setting::BuildSshKey => 10,
             }
         }
 

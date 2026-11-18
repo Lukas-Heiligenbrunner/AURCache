@@ -282,6 +282,30 @@ pub struct JobDescriptor {
     /// for a VCS package is not known until it runs, and publishing takes it
     /// from the archives' names.
     pub expected_version: String,
+    /// Which of the worker's SSH keys this build may use: the package's
+    /// `build_ssh_key` setting.
+    ///
+    /// Absent from a server that does not send it, where a worker offers its
+    /// [`ssh_key::DEFAULT`](crate::ssh_key::DEFAULT) key to the build. Only the
+    /// name travels: the key itself never leaves the worker, which maps the
+    /// name to a key through its own configuration alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key: Option<SshKeyRequest>,
+}
+
+/// The SSH key a job asks its worker for, by name.
+///
+/// A struct around the name rather than the name itself, so that "the server
+/// sent nothing" (no `ssh_key` at all), "no key" (`{"name": null}`) and "this
+/// key" (`{"name": "default"}`) are three different messages, each of which
+/// serde reads without help.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SshKeyRequest {
+    /// The key's name, in the form [`crate::ssh_key::validate_name`] accepts;
+    /// `None` for no key.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// One `git+` source of a build, as the worker needs to find it.
@@ -459,6 +483,9 @@ mod tests {
             expected_packages: vec!["hello".into(), "hello-docs".into()],
             timeout_secs: Some(3600),
             expected_version: "1.0-1".into(),
+            ssh_key: Some(SshKeyRequest {
+                name: Some("default".into()),
+            }),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {
                 source_url: "git+https://example.test/repo.git".into(),
@@ -473,6 +500,28 @@ mod tests {
         assert_eq!(job.mirrorlist, back.mirrorlist);
         assert_eq!(job.expected_packages, back.expected_packages);
         assert_eq!(job.expected_version, back.expected_version);
+        assert_eq!(job.ssh_key, back.ssh_key);
+    }
+
+    /// The three things a job can say about an SSH key read back as three
+    /// different values: nothing (a server that does not send the field), no
+    /// key, and a named one.
+    #[test]
+    fn a_jobs_ssh_key_tells_absent_none_and_named_apart() {
+        let read = |json: &str| serde_json::from_str::<SshKeyRequest>(json).unwrap();
+        assert_eq!(read(r#"{"name":null}"#), SshKeyRequest { name: None });
+        assert_eq!(read("{}"), SshKeyRequest { name: None });
+        assert_eq!(
+            read(r#"{"name":"default"}"#),
+            SshKeyRequest {
+                name: Some("default".into())
+            }
+        );
+        // "No key" is sent as such, not left out, which would read as nothing.
+        assert_eq!(
+            serde_json::to_string(&SshKeyRequest { name: None }).unwrap(),
+            r#"{"name":null}"#
+        );
     }
 
     fn range(min: u32, max: u32) -> ProtocolRange {

@@ -165,6 +165,15 @@ fn SettingsSections(
                 editor: Editor::Text { placeholder: "20G".to_string(), wide: false },
                 save,
             }
+            SettingRow {
+                setting: Setting::BuildSshKey,
+                label: "Build SSH key",
+                description: "Which of a worker's SSH keys builds may use: default is the key the worker holds. Empty gives builds none. A package's own setting overrides it.",
+                value: settings.build_ssh_key.value.clone().unwrap_or_default(),
+                source: settings.build_ssh_key.source,
+                editor: Editor::Text { placeholder: "none".to_string(), wide: false },
+                save,
+            }
         }
 
         ApiAccessSection {}
