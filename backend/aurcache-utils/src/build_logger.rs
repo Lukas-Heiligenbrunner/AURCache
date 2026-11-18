@@ -26,6 +26,11 @@ fn resolved_limit(limit: Option<u64>) -> u64 {
 pub use aurcache_common::fs::{build_log_dir, build_log_path, build_log_root};
 
 /// Append `text` to a build's log, creating the file on first write.
+///
+/// The text is in the file when this returns: a `tokio::fs::File` hands a
+/// write to a blocking thread and reports success before it has run, so
+/// without the flush a reader could miss it, the next append could land
+/// before it, and its error would go nowhere.
 pub async fn append_build_output(pkgbase: &str, number: i32, text: &str) -> anyhow::Result<()> {
     let path = build_log_path(pkgbase, number);
     if let Some(parent) = path.parent() {
@@ -37,6 +42,7 @@ pub async fn append_build_output(pkgbase: &str, number: i32, text: &str) -> anyh
         .open(&path)
         .await?;
     file.write_all(text.as_bytes()).await?;
+    file.flush().await?;
     Ok(())
 }
 
