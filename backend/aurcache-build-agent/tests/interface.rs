@@ -1,10 +1,11 @@
 //! The agent's interface as JSON, held as fixtures.
 //!
 //! The agent and the worker that runs it may be different builds: a worker
-//! can be handed another agent (`WORKER_BUILD_AGENT`). So the spec a worker
-//! writes and the report the agent writes are frozen for each interface
-//! number under `fixtures/interface-<n>/`, and each fixture must decode and
-//! encode back to exactly the same JSON.
+//! can be handed another agent (`WORKER_BUILD_AGENT`), and the Kubernetes
+//! worker's comes from an image someone named. So the spec a worker writes,
+//! the report the agent writes and the hand-back it prints are frozen for
+//! each interface number under `fixtures/interface-<n>/`, and each fixture
+//! must decode and encode back to exactly the same JSON.
 //!
 //! Within an interface these types only gain optional fields, and a new one
 //! is `#[serde(default, skip_serializing_if = "Option::is_none")]`, which
