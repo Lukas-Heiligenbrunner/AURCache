@@ -1,19 +1,19 @@
 name: Publish PR Docker Images
 
 # Pushes the server image docker-pr-build.yml built for a pull request to
-# GHCR, once a maintainer has approved that commit with the `preview-image`
-# label. See PR-IMAGES.md.
+# GHCR, for PRs a maintainer has labelled `preview-image`. See PR-IMAGES.md.
 #
 # Runs from the default branch with a token that can push packages, so it
 # never checks out, builds or runs PR code: the artifact is the only thing it
-# takes from the build, and it only hands that to skopeo. Which PR, which
-# commit and where to push come from GitHub's API.
+# takes from the build, and it only hands that to jq and skopeo. Which PR,
+# which commit, where to push and what the image says about its origin all
+# come from GitHub's API.
 on:
-  # A build finished: publish it if its commit is already approved.
+  # A build finished: publish it if its PR is labelled.
   workflow_run:
     workflows: [Build PR Docker Images]
     types: [completed]
-  # A maintainer approved the PR's head: publish its build if it is done.
+  # A maintainer labelled the PR: publish its head's build if it is done.
   pull_request_target:
     branches: [master]
     types: [labeled]
@@ -45,25 +45,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read # the build run and its artifact
-      issues: read # when the label was applied
       pull-requests: read # the PR, its head and its labels
       packages: write # the push
     outputs:
-      publish: ${{ steps.approved.outputs.publish }}
-      pr: ${{ steps.approved.outputs.pr }}
-      sha: ${{ steps.approved.outputs.sha }}
-      image: ${{ steps.approved.outputs.image }}
-      tag: ${{ steps.approved.outputs.tag }}
+      publish: ${{ steps.build.outputs.publish }}
+      pr: ${{ steps.build.outputs.pr }}
+      sha: ${{ steps.build.outputs.sha }}
+      image: ${{ steps.build.outputs.image }}
+      tag: ${{ steps.build.outputs.tag }}
     steps:
       # Publishes only when all of these hold, read from the API at this
-      # moment: the PR is open against master; it carries the label; the
-      # latest build of its head commit succeeded; and the label was applied
-      # after that build was created, which is after the commit was pushed.
-      # A push after the label is not approved by it, so neither is a build
-      # of the same commit started by a later push (force-pushing an older
-      # commit back).
-      - name: Find the approved build
-        id: approved
+      # moment: the PR is open against master and carries the label; and the
+      # run is the latest build of the PR's current head commit, from the
+      # PR's own branch, and it succeeded. A build of a commit the PR has
+      # since moved on from is never published, nor one superseded by a
+      # later build of the same commit.
+      - name: Find the PR's build
+        id: build
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           LABEL: preview-image
@@ -147,17 +145,6 @@ jobs:
               return skip(`The latest build of ${sha} did not succeed`);
             }
 
-            const events = await github.paginate(github.rest.issues.listEvents, {
-              owner, repo, issue_number: pr.number, per_page: 100
-            });
-            const approvedAt = Math.max(...events
-              .filter(event => event.event === 'labeled' && event.label?.name === LABEL)
-              .map(event => Date.parse(event.created_at)));
-            if (!(approvedAt > Date.parse(build.created_at))) {
-              return skip(`${LABEL} was applied before ${sha} was pushed; ` +
-                'remove and re-apply it to approve this commit');
-            }
-
             const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
               owner, repo, run_id: build.id, name: ARTIFACT
             });
@@ -167,45 +154,106 @@ jobs:
             }
 
             // Fixed here, never taken from the artifact.
-            const image = `ghcr.io/${thisRepo.toLowerCase()}-preview`;
             core.setOutput('publish', 'true');
             core.setOutput('pr', String(pr.number));
+            core.setOutput('pr_url', pr.html_url);
+            core.setOutput('source', pr.head.repo.html_url);
             core.setOutput('sha', sha);
             core.setOutput('run', String(build.id));
-            core.setOutput('image', image);
+            core.setOutput('image', `ghcr.io/${thisRepo.toLowerCase()}-preview`);
             core.setOutput('tag', `pr-${pr.number}-${sha}`);
+            core.setOutput('latest', `pr-${pr.number}`);
 
       - name: Download the build's image
-        if: steps.approved.outputs.publish == 'true'
+        if: steps.build.outputs.publish == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
-          run-id: ${{ steps.approved.outputs.run }}
+          run-id: ${{ steps.build.outputs.run }}
           name: server-image
           path: ${{ runner.temp }}/image
 
       - name: Install skopeo
-        if: steps.approved.outputs.publish == 'true'
+        if: steps.build.outputs.publish == 'true'
         run: sudo apt-get update && sudo apt-get install -y skopeo
 
-      # skopeo reads the OCI layout directly: no PR-controlled tar archive is
-      # unpacked, and nothing in it is run. `--all` keeps every architecture
-      # under the one tag.
-      - name: Copy the image to the preview package
-        if: steps.approved.outputs.publish == 'true'
+      # The layout is the build's, so it is checked before anything reads it:
+      # no symlinks, one image index, whose bytes match its digest. That index
+      # is then re-serialized with the annotations below, which come from the
+      # API and so are what says which commit and PR an image was built from;
+      # whatever the build wrote into the layout is not. Only the top-level
+      # index changes: the platform images and their attestations keep their
+      # digests. jq's output drops duplicate keys, and ours replace any of the
+      # same name the build set.
+      #
+      # skopeo then reads the layout directly: no PR-controlled tar archive is
+      # unpacked and nothing in it is run. `--all` pushes every architecture
+      # under the one index, and `--preserve-digests` refuses to push
+      # anything but the exact index annotated here.
+      - name: Push the image to the preview package
+        if: steps.build.outputs.publish == 'true'
+        shell: bash
         env:
           REGISTRY_TOKEN: ${{ github.token }}
           REGISTRY_USER: ${{ github.repository_owner }}
-          IMAGE: ${{ steps.approved.outputs.image }}
-          TAG: ${{ steps.approved.outputs.tag }}
+          LAYOUT: ${{ runner.temp }}/image
+          IMAGE: ${{ steps.build.outputs.image }}
+          TAG: ${{ steps.build.outputs.tag }}
+          LATEST: ${{ steps.build.outputs.latest }}
+          SHA: ${{ steps.build.outputs.sha }}
+          PR: ${{ steps.build.outputs.pr }}
+          PR_URL: ${{ steps.build.outputs.pr_url }}
+          SOURCE: ${{ steps.build.outputs.source }}
         run: |
-          printf '%s' "$REGISTRY_TOKEN" | skopeo login \
-            --authfile "$RUNNER_TEMP/registry-auth.json" \
+          if [[ -n $(find "$LAYOUT" -type l) ]]; then
+            echo "error: the image layout holds symlinks" >&2
+            exit 1
+          fi
+          blobs=$LAYOUT/blobs/sha256
+          built=$(jq -r '.manifests | if length == 1 then .[0].digest
+            else error("expected one image in the layout") end' "$LAYOUT/index.json")
+          if [[ ! $built =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "error: unexpected image digest" >&2
+            exit 1
+          fi
+          echo "${built#sha256:}  $blobs/${built#sha256:}" | sha256sum -c --quiet -
+
+          jq -c --arg revision "$SHA" --arg source "$SOURCE" --arg url "$PR_URL" \
+            --arg description "Preview of pull request #$PR at $SHA. Untrusted PR code." '
+            if .mediaType == "application/vnd.oci.image.index.v1+json" then .
+            else error("expected an OCI image index") end
+            | .annotations = ((.annotations // {}) + {
+                "org.opencontainers.image.revision": $revision,
+                "org.opencontainers.image.source": $source,
+                "org.opencontainers.image.url": $url,
+                "org.opencontainers.image.description": $description
+              })' "$blobs/${built#sha256:}" > "$RUNNER_TEMP/index"
+          hex=$(sha256sum "$RUNNER_TEMP/index" | cut -d' ' -f1)
+          mv "$RUNNER_TEMP/index" "$blobs/$hex"
+          jq -n --arg digest "sha256:$hex" --argjson size "$(stat -c %s "$blobs/$hex")" '{
+            schemaVersion: 2,
+            mediaType: "application/vnd.oci.image.index.v1+json",
+            manifests: [{
+              mediaType: "application/vnd.oci.image.index.v1+json",
+              digest: $digest, size: $size,
+              annotations: { "org.opencontainers.image.ref.name": "preview" }
+            }]
+          }' > "$LAYOUT/index.json"
+
+          auth=$RUNNER_TEMP/registry-auth.json
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" \
             --username "$REGISTRY_USER" --password-stdin ghcr.io
-          skopeo copy --all \
-            --authfile "$RUNNER_TEMP/registry-auth.json" \
-            "oci:$RUNNER_TEMP/image" "docker://$IMAGE:$TAG"
-          echo "Preview image: \`$IMAGE:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            "oci:$LAYOUT:preview" "docker://$IMAGE:$TAG"
+          # The PR's latest published commit. Only a build of the PR's
+          # current head gets here, so this never moves backwards.
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            "docker://$IMAGE:$TAG" "docker://$IMAGE:$LATEST"
+          {
+            echo "Preview image: \`$IMAGE:$TAG\` (also \`$IMAGE:$LATEST\`)"
+            echo
+            echo "Digest: \`sha256:$hex\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   comment:
     # After the push succeeds, on a runner that never sees the artifact; the
@@ -240,18 +288,18 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body = [
               marker,
-              `The preview image for ${sha} is ready:`,
+              `The preview image for commit \`${sha}\` is ready:`,
               '',
               '```',
               `docker pull ${IMAGE}:${TAG}`,
               '```',
               '',
-              'It holds amd64, arm64 and armv7; `docker pull` picks the host\'s.',
+              `\`${IMAGE}:pr-${issue_number}\` follows this PR's latest published commit.`,
+              'The image holds amd64, arm64 and armv7; `docker pull` picks the host\'s.',
               'It contains untrusted PR code.',
               '',
-              'A later commit is published when a maintainer removes and re-applies',
-              'the `preview-image` label. Images are deleted when the PR closes, or',
-              `30 days after they were published. ([Publishing run](${runUrl}))`
+              'While the `preview-image` label stays on, every new commit is published',
+              `the same way. ([Publishing run](${runUrl}))`
             ].join('\n');
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number, per_page: 100

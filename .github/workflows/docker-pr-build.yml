@@ -40,6 +40,6 @@ jobs:
           name: server-image
           path: ${{ runner.temp }}/oci/server
           compression-level: 0
-          # How long a maintainer has to approve the commit before its
-          # build must be re-run to publish it.
+          # How long labelling the PR can still publish this build; after
+          # that, the build has to be re-run.
           retention-days: 7
