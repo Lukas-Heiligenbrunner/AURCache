@@ -55,6 +55,18 @@ spec:
       enableServiceLinks: false
       # Nothing here talks to the Kubernetes API.
       automountServiceAccountToken: false
+      initContainers:
+        # Some provisioners (local-path among them) create a volume's
+        # directory world-writable. The server closes its own state
+        # directories under /app at every start; this closes /app itself, so
+        # no other user in the pod can create files beside them.
+        - name: data-dir
+          image: ghcr.io/lukas-heiligenbrunner/aurcache-server:git
+          imagePullPolicy: Always
+          command: [chmod, "0755", /app]
+          volumeMounts:
+            - name: data
+              mountPath: /app
       containers:
         - name: aurcache
           # `git`, built from master, until a release after 0.6.0 is out: the
@@ -133,10 +145,12 @@ spec:
           # the server stays its only writer. A container in the server's pod
           # rather than a Deployment of its own, because the volume is
           # ReadWriteOnce.
-          image: nginx:1.29-alpine
-          # nginx starts as root, binds port 80 and drops to its own user for
-          # the workers: that is all it keeps. It writes only its cache, its
-          # pid file and temporary files, in the volumes below.
+          image: nginx:1.30-alpine
+          # nginx starts as root and keeps only what that start needs: binding
+          # port 80 (NET_BIND_SERVICE), giving its cache directories to its own
+          # user (CHOWN), and switching its workers to that user (SETUID,
+          # SETGID). It writes only its cache, its pid file and temporary
+          # files, in the volumes below.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

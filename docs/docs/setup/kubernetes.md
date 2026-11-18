@@ -166,8 +166,14 @@ and with it every enrolled worker, so it is the one to back up.
 nginx runs in the server's pod rather than in a Deployment of its own because
 the data volume is `ReadWriteOnce`: only one node can mount it. It reads the
 volume read-only and the server stays its only writer. It runs with a
-read-only root filesystem and no capabilities beyond the four it needs to bind
-port 80 and drop to its own user.
+read-only root filesystem and four capabilities: `NET_BIND_SERVICE` to bind
+port 80, `CHOWN` to give its cache directories to its own user, and `SETUID`
+and `SETGID` to switch its workers to that user.
+
+Some provisioners, `local-path` among them, create a volume's directory
+world-writable. The server closes its own state directories under `/app` at
+every start, and an init container closes `/app` itself (mode `0755`), so no
+other user in the pod can create files beside them.
 
 The server runs as root, as it does under Docker: each PKGBUILD parse runs as a
 separate unprivileged user, and switching to it takes the default `SETUID` and
@@ -235,10 +241,13 @@ A stopped worker's builds are requeued once their lease runs out, a minute by
 default, and start again on another worker. To drain a node without losing
 work, [stop the worker's intake](../workers/managing.md#stopping-a-workers-intake)
 first, and resume it once the node is back. A stopped intake survives the
-worker restarting, so without the resume it never builds again:
+worker restarting, so without the resume it never builds again.
+`--delete-emptydir-data` is needed because the worker's `/run` and nginx's
+cache are `emptyDir` volumes, which `kubectl drain` otherwise refuses to
+evict; nothing in them outlives a restart anyway:
 
 ```bash
-aurcli worker pause <id> --wait && kubectl drain <node> --ignore-daemonsets
+aurcli worker pause <id> --wait && kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 # ... maintenance, then:
 kubectl uncordon <node>
 aurcli worker resume <id>
@@ -305,8 +314,9 @@ evicting pods, the server's included.
 
 A StatefulSet's `volumeClaimTemplates` cannot be changed once it exists:
 `kubectl apply` refuses a new pool size, or `components/pool-image` added to a
-running deployment, with `spec: Forbidden: updates to statefulset spec ... are
-forbidden`. The claims it already made are ordinary PersistentVolumeClaims,
+running deployment. Recent Kubernetes says `spec.volumeClaimTemplates: Invalid
+value: ...: field is immutable`; older releases say `spec: Forbidden: updates
+to statefulset spec for fields other than ... are forbidden`. The claims it already made are ordinary PersistentVolumeClaims,
 though, and are changed one by one.
 
 **To grow a pool**, if the storage class allows volume expansion, expand each
@@ -357,13 +367,22 @@ its claims end in `-aurcache-worker-arm64-N`, and its pods carry
 A chroot build runs in its worker pod's network namespace, so package code can
 connect wherever the worker can. The worker installs one firewall rule for its
 builds, which keeps them off the server's worker port, and nothing else. Without
-a NetworkPolicy, a PKGBUILD can reach other Services in the cluster, the
-Kubernetes API, the nodes, and the cloud metadata endpoint (`169.254.169.254`),
-which on some clouds hands out the node's credentials.
+a NetworkPolicy, a PKGBUILD can reach:
+
+- **the server's web API**, `aurcache:8080`. Without
+  [OAuth](../Configuration/authentication.md) configured, anyone who reaches it
+  can use it without logging in: list, add and delete packages, change
+  settings. A build can do the same;
+- other Services in the cluster, the Kubernetes API and the nodes;
+- the cloud metadata endpoint (`169.254.169.254`), which on some clouds hands
+  out the node's credentials.
+
+Configure OAuth, enable the policy below, or both. The policy keeps builds off
+port 8080 whether or not OAuth is on.
 
 `components/chroot-worker-egress` is a NetworkPolicy for the worker pods that
 allows DNS, the server's repository and worker ports, and public addresses, and
-refuses private, link-local and carrier-grade NAT ranges. It applies to the
+refuses private, link-local, carrier-grade NAT, class E and NAT64 ranges. It applies to the
 worker process as much as to its builds, since they share an address. Before
 enabling it:
 
@@ -373,12 +392,20 @@ enabling it:
   which is how CoreDNS runs on most distributions. If yours differs, every
   name lookup fails until you adjust it;
 - with **NodeLocal DNSCache** (Kubespray's default, an option on GKE and EKS),
-  pods resolve through a link-local address on their node, such as
-  `169.254.25.10` or `169.254.20.10`. The policy refuses link-local addresses,
-  and the cache is not a `kube-dns` pod, so lookups fail. Uncomment the rule
-  for it in the component's `networkpolicy.yaml`: an `ipBlock` for that
-  address's `/32` on port 53, UDP and TCP. The `nameserver` line of
-  `/etc/resolv.conf` in any pod names the address;
+  pods resolve through a cache on their own node, which is not a `kube-dns`
+  pod. It listens on a link-local address such as `169.254.25.10` or
+  `169.254.20.10` and, in some setups (GKE's, and iptables mode), on the
+  kube-dns Service's ClusterIP too, which the node intercepts. The policy
+  refuses both, so lookups fail. Uncomment the rule for it in the component's
+  `networkpolicy.yaml`, with an `ipBlock` `/32` on port 53, UDP and TCP, for
+  each address the cache listens on. A pod's `/etc/resolv.conf` may name only
+  the ClusterIP; the cache's own arguments list them all:
+
+  ```bash
+  kubectl -n kube-system get daemonset node-local-dns \
+    -o jsonpath='{.spec.template.spec.containers[0].args}'   # see -localip
+  ```
+
 - anything builds must reach on a private address (a source mirror, a git
   server, an HTTP proxy) needs a rule of its own.
 
@@ -387,7 +414,9 @@ including whatever of the cluster's own has one: a managed control plane's
 API endpoint, nodes with public IPs, and the kubelet and NodePorts on them.
 The policy keeps builds off the API server and the nodes only where those are
 on private addresses. Where they are not, add their ranges to the `except`
-list of the public-address rule (an example is commented there).
+list of the public-address rule (an example is commented there). The same goes
+for a cluster whose pods or nodes have global IPv6 addresses, such as EKS in
+IPv6 mode: the policy cannot know those ranges, so add them too.
 
 Where node credentials matter, also block the metadata endpoint for pods at the
 cloud's own level (IMDSv2 with a hop limit of 1 on AWS, Workload Identity on
@@ -580,8 +609,9 @@ pool-aurcache-worker-0` says so in its events (`rancher.io/local-path does not
 support block volume provisioning`, for one). Use `components/pool-image`, or
 name a class that can in the `pool` claim template.
 
-**`kubectl apply` says updates to the StatefulSet spec are forbidden.** A
-volume template changed: a size, a storage class, or `components/pool-image`.
+**`kubectl apply` says `spec.volumeClaimTemplates` is immutable** (or, on
+older releases, that updates to the StatefulSet spec are forbidden). A volume
+template changed: a size, a storage class, or `components/pool-image`.
 See [Changing the volumes later](#changing-the-volumes-later).
 
 **`components/pool-image` changed nothing: the workers still have a `pool`
@@ -597,7 +627,8 @@ older than 6.7, or has no btrfs. Run the worker on nodes that have both (a
 **The worker cannot connect: the certificate is not valid for the name.** The
 host in the worker's `AURCACHE_URL` is not in the server's `AURCACHE_TLS_SANS`.
 The manifests list `aurcache` and its namespaced forms in the `aurcache`
-namespace; deploying to another namespace means changing those too.
+namespace; deploying to another namespace means changing those too, with
+everything else `kubernetes/server/kustomization.yaml` lists.
 
 **`Failed to create the directory $PKGDEST`, with the node's Docker or Podman
 socket mounted into the pod.** The daemon binds `BUILD_ARTIFACT_DIR` from the
