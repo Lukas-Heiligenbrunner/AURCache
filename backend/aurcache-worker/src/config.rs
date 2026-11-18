@@ -11,6 +11,7 @@ use crate::cgroup::BuildLimits;
 use crate::settings::keys;
 use aurcache_worker_core::config::{CoreConfig, env_opt};
 use aurcache_worker_core::settings::WorkerSettings;
+use aurcache_worker_core::ssh_key::SshPackages;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -26,6 +27,10 @@ pub struct Config {
     pub git_ssh_key: Option<PathBuf>,
     /// Optional `known_hosts` to trust inside the build chroot.
     pub ssh_known_hosts: Option<PathBuf>,
+    /// The packages the build credential may be offered to
+    /// (`WORKER_GIT_SSH_PACKAGES`). The machine's alone, like the key: a
+    /// ceiling the server can never widen.
+    pub ssh_packages: SshPackages,
     /// Extra `host:chroot` bind mounts exposed to every build, for credentials
     /// that are not SSH (a `.netrc`, an API token, a licence file).
     pub bind_mounts: Vec<crate::build::BindMount>,
@@ -119,6 +124,7 @@ impl Config {
             data_dir: core.data_dir.clone(),
             git_ssh_key: env_opt("WORKER_GIT_SSH_KEY").map(PathBuf::from),
             ssh_known_hosts: env_opt("WORKER_SSH_KNOWN_HOSTS").map(PathBuf::from),
+            ssh_packages: SshPackages::from_env(),
             bind_mounts: env_opt("WORKER_BIND_MOUNTS")
                 .map(|raw| crate::credentials::parse_bind_mounts(&raw))
                 .unwrap_or_default(),

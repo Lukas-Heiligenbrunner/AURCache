@@ -16,6 +16,7 @@ use aurcache_worker::{build, credentials, oneshot};
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::Runner;
+use aurcache_worker_core::ssh_key::{PACKAGES_VAR, SshPackages};
 use aurcache_worker_core::{config::CoreConfig, enroll};
 
 #[derive(Parser)]
@@ -100,6 +101,32 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
+/// Say which packages the build SSH key may go to, when
+/// `WORKER_GIT_SSH_PACKAGES` limits them.
+///
+/// Set with no key to offer -- the configured one missing, or the agent not
+/// started -- it is a warning rather than a refusal to start: the worker
+/// already builds without a credential then, and the list only narrows who
+/// gets one.
+fn announce_ssh_packages(packages: &SshPackages, has_key: bool) {
+    let SshPackages::Only(names) = packages else {
+        return;
+    };
+    if !has_key {
+        tracing::warn!(
+            "{PACKAGES_VAR} is set, but this worker has no build SSH key; the packages \
+             it lists build without one"
+        );
+    } else if names.is_empty() {
+        tracing::info!("{PACKAGES_VAR} is empty: no build is offered the SSH key");
+    } else {
+        tracing::info!(
+            "The build SSH key is offered only to: {} ({PACKAGES_VAR})",
+            names.join(", ")
+        );
+    }
+}
+
 async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // What a previous run left in the storage pool is swept when the
     // executor opens it, before anything can claim work.
@@ -137,6 +164,8 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
             None
         }
     };
+
+    announce_ssh_packages(&cfg.ssh_packages, _agent.is_some());
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
