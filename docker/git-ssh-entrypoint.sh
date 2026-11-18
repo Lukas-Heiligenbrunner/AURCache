@@ -5,7 +5,14 @@ set -eu
 
 MARKER="${MARKER:-aurcache-ssh-credential-reached-the-chroot}"
 
-ssh-keygen -A                      # host keys (new per run; clients use accept-new)
+# The host key the test made, when it made one, so it can write a
+# `known_hosts` naming this server before the server exists; `ssh-keygen -A`
+# then only adds the types still missing.
+if [ -f /keys/host_ed25519 ]; then
+    install -m 600 /keys/host_ed25519 /etc/ssh/ssh_host_ed25519_key
+    install -m 644 /keys/host_ed25519.pub /etc/ssh/ssh_host_ed25519_key.pub
+fi
+ssh-keygen -A                      # the other host keys, new per run
 install -d -m 700 -o git -g git /home/git/.ssh
 install -m 600 -o git -g git /keys/id_ed25519.pub /home/git/.ssh/authorized_keys
 
