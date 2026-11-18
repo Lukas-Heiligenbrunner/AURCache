@@ -175,7 +175,9 @@ cleanup() {
 
     log "=== Cleaning up ==="
     # Named volumes make cleanup trivial and root-owned-file-proof.
-    if [ -n "${E2E_WORKER_DATA:-}" ]; then
+    # Only with a builder image already there: after an early failure,
+    # emptying would first build one.
+    if [ -n "${E2E_WORKER_DATA:-}" ] && [ -n "$(dc images -q builder 2>/dev/null)" ]; then
         dc stop -t 10 >/dev/null 2>&1 || true
         fresh_worker_data >/dev/null 2>&1 || true
     fi
@@ -189,22 +191,28 @@ cleanup() {
 # storage in a host directory instead, which `down -v` leaves alone: a worker
 # started on it would keep the identity it enrolled with against a CA the
 # stack no longer has. Emptied from inside the image, as root, since what is
-# there belongs to the image's users, and handed back to the worker's.
+# there belongs to the image's users, and handed back to the worker's. The
+# builder is stopped and removed first: a running one has its pool mounted in
+# there.
 #
 # Emptying runs as root on whatever the variable names, so it only ever
 # empties a directory this function made: an absolute path that is empty or
-# carries its marker. A typo naming a directory with anything else in it is
-# refused, not emptied. The marker itself is kept through the emptying, so a
-# delete that fails half-way does not lock the directory out next time.
+# carries its marker. Anything else is refused, not emptied -- a fresh
+# filesystem's root too, for its `lost+found`, so give it a subdirectory. The
+# check is made where the delete runs, as root on the same view of the
+# directory, and here as well, refusing a directory this user cannot list.
+# The marker is kept through the emptying, so a delete that fails half-way
+# does not lock the directory out next time, and `-xdev` keeps the delete off
+# anything mounted inside.
 #
 # Only stacks with a `builder` service, the default compose file's worker,
 # use the directory; for the others (the hybrid suites) the variable is
-# ignored. A remote Docker daemon is refused: the marker is checked here, but
-# the emptying would run on the daemon's host, on whatever is there.
+# ignored. A remote Docker daemon is refused: the delete would run on the
+# daemon's host, on whatever is there.
 fresh_worker_data() {
     [ -n "${E2E_WORKER_DATA:-}" ] || return 0
     dc config --services 2>/dev/null | grep -qx builder || return 0
-    local marker=.aurcache-e2e-worker-data daemon
+    local marker=.aurcache-e2e-worker-data inside=/var/lib/aurcache-worker daemon listing
     case "$E2E_WORKER_DATA" in
         /) log "ERROR: E2E_WORKER_DATA must not be /" >&2; return 1 ;;
         /*) ;;
@@ -216,14 +224,27 @@ fresh_worker_data() {
         *) log "ERROR: E2E_WORKER_DATA needs a local Docker daemon, not $daemon" >&2; return 1 ;;
     esac
     mkdir -p "$E2E_WORKER_DATA"
-    if [ ! -e "$E2E_WORKER_DATA/$marker" ] && [ -n "$(ls -A "$E2E_WORKER_DATA")" ]; then
+    if ! listing=$(ls -A "$E2E_WORKER_DATA" 2>/dev/null); then
+        log "ERROR: $E2E_WORKER_DATA cannot be listed; refusing to empty it" >&2
+        return 1
+    fi
+    if [ ! -e "$E2E_WORKER_DATA/$marker" ] && [ -n "$listing" ]; then
         log "ERROR: $E2E_WORKER_DATA is not empty and was not made for the e2e worker; refusing to empty it" >&2
         return 1
     fi
-    dc run --rm --no-deps --user root --entrypoint sh builder -c \
-        "touch /var/lib/aurcache-worker/$marker &&
-         find /var/lib/aurcache-worker -mindepth 1 ! -path /var/lib/aurcache-worker/$marker -delete &&
-         chown aurcache:aurcache /var/lib/aurcache-worker"
+    dc rm --stop --force builder >/dev/null 2>&1 || true
+    if ! dc run --rm --no-deps --user root --entrypoint sh builder -c "
+        cd $inside || exit 3
+        if [ ! -e $marker ] && [ -n \"\$(ls -A)\" ]; then
+            echo 'E2E_WORKER_DATA is not empty and was not made for the e2e worker' >&2
+            exit 3
+        fi
+        touch $marker &&
+        find $inside -xdev -mindepth 1 ! -path $inside/$marker -delete &&
+        chown aurcache:aurcache $inside"; then
+        log "ERROR: could not empty $E2E_WORKER_DATA" >&2
+        return 1
+    fi
 }
 
 wait_for_service() {

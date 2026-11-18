@@ -57,8 +57,10 @@ services:
       - enroll:/enroll
       # The storage pool and every chroot live here, which a build needs tens
       # of GiB of. E2E_WORKER_DATA names a host directory to use instead of
-      # the volume, for a machine whose Docker data root has no room. It must
-      # be writable by the image's `aurcache` user, as the volume would be.
+      # the volume, for a machine whose Docker data root has no room: a
+      # directory of its own, such as a subdirectory of a scratch disk. The
+      # e2e scripts empty it between stacks and hand it to the worker's user
+      # (scripts/lib/e2e.sh, fresh_worker_data).
       - ${E2E_WORKER_DATA:-worker_data}:/var/lib/aurcache-worker
     privileged: true
     tmpfs:
