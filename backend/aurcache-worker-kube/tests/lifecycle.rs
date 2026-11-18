@@ -110,7 +110,7 @@ async fn the_pod_is_rendered_from_the_job_and_the_configuration() {
         .await;
     let rendered = rig.cluster.rendered();
     let spec = rendered[0].spec.as_ref().unwrap();
-    assert_eq!(spec.active_deadline_seconds, Some(3600 + 3600));
+    assert_eq!(spec.active_deadline_seconds, Some(3600 + 300));
     assert_eq!(spec.init_containers.as_ref().unwrap()[0].name, STAGE);
     let build = &spec.containers[0];
     assert_eq!(build.name, BUILD);
@@ -762,7 +762,7 @@ async fn a_leftover_pod_of_the_same_name_is_replaced() {
             Call::Create(name.clone()),
             Call::Delete {
                 name: name.clone(),
-                grace: Duration::ZERO
+                grace: aurcache_worker_kube::cluster::PROMPT
             },
             Call::Create(name.clone()),
         ]
@@ -848,7 +848,7 @@ async fn pods_nobody_holds_are_deleted_before_a_claim() {
     assert!(rig.executor.ready_for_work(0).await);
     let gone = |name: &str| Call::Delete {
         name: name.to_string(),
-        grace: Duration::ZERO,
+        grace: aurcache_worker_kube::cluster::PROMPT,
     };
     assert_eq!(rig.cluster.deletions(), [gone(&pod_name(3))]);
 }
@@ -902,10 +902,24 @@ async fn no_claim_while_the_cluster_refuses_a_build_pod() {
 
     rig.cluster.set_admission(Admission::Admitted);
     assert!(rig.executor.ready_for_work(0).await);
-    // A question that got no answer does not stop the worker.
-    rig.cluster.set_admission(Admission::Unknown {
-        message: "the API server timed out".to_string(),
+    // An answer that judged nothing does not stop the worker.
+    rig.cluster.set_admission(Admission::Unjudged {
+        message: "a pod of that name exists".to_string(),
     });
+    assert!(rig.executor.ready_for_work(0).await);
+}
+
+/// A dry run that reached no API server says a create would reach none: the
+/// build would be claimed only to be handed back.
+#[tokio::test(start_paused = true)]
+async fn no_claim_while_the_api_server_does_not_answer() {
+    let rig = Rig::new(Script::default());
+    rig.cluster.set_admission(Admission::Unreached {
+        message: "error trying to connect: connection refused".to_string(),
+    });
+    assert!(!rig.executor.ready_for_work(0).await);
+    assert!(!rig.cluster.has_pod(&pod_name(0)));
+    rig.cluster.set_admission(Admission::Admitted);
     assert!(rig.executor.ready_for_work(0).await);
 }
 

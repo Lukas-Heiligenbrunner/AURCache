@@ -37,10 +37,12 @@ const AGENT_IN_IMAGE: &str = "/usr/local/bin";
 /// The user `stage` and `hold` run as.
 const NOBODY: i64 = 65534;
 /// A build pod outlives its build's timeout by this long, then the kubelet
-/// ends it, whether or not a dispatcher is there to. The timeout bounds the
-/// build and not the hand-back, so this is also how long the packages of a
-/// build that ended at its timeout have to reach the server.
-const DEADLINE_GRACE: Duration = Duration::from_secs(60 * 60);
+/// ends it, whether or not a dispatcher is there to. It is the server's own
+/// backstop: that long after a build's timeout the server takes the build
+/// back from a worker that has not reported it (`REAP_BACKSTOP_GRACE`, five
+/// minutes unless the server was told otherwise), and accepts nothing of it
+/// afterwards. A pod kept longer would hold packages nobody takes.
+const DEADLINE_GRACE: Duration = Duration::from_secs(5 * 60);
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const LABEL_DISPATCHER: &str = "aurcache.io/dispatcher";
@@ -172,6 +174,28 @@ pub fn build_agent_path() -> String {
     format!("{TOOLS}/{}", layout::BIN_NAME)
 }
 
+/// What a container that only runs the agent's own subcommands asks for.
+///
+/// Stated on every such container, limits included: a ResourceQuota on
+/// `requests.cpu`, `requests.memory`, `limits.cpu` or `limits.memory`
+/// refuses a pod with a container that leaves the line out. The CPU limit is
+/// one whole CPU, which is all a subcommand uses: it is what hashes and
+/// sends the packages.
+#[must_use]
+pub fn helper_resources() -> ResourceRequirements {
+    ResourceRequirements {
+        requests: Some(BTreeMap::from([
+            ("cpu".to_string(), quantity("10m")),
+            ("memory".to_string(), quantity("16Mi")),
+        ])),
+        limits: Some(BTreeMap::from([
+            ("cpu".to_string(), quantity("1")),
+            ("memory".to_string(), quantity("64Mi")),
+        ])),
+        ..ResourceRequirements::default()
+    }
+}
+
 fn stage(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: STAGE.to_string(),
@@ -183,6 +207,7 @@ fn stage(inputs: &PodInputs<'_>) -> Container {
                 .to_vec(),
         ),
         security_context: Some(unprivileged()),
+        resources: Some(helper_resources()),
         volume_mounts: Some(vec![
             mount("work", WORK, false),
             mount("tools", TOOLS, false),
@@ -214,21 +239,13 @@ fn build(inputs: &PodInputs<'_>) -> Container {
 }
 
 fn hold(inputs: &PodInputs<'_>) -> Container {
-    let small = |text: &str| quantity(text);
     Container {
         name: HOLD.to_string(),
         image: Some(inputs.agent_image.to_string()),
         image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(vec![agent_path(), "hold".to_string()]),
         security_context: Some(unprivileged()),
-        resources: Some(ResourceRequirements {
-            requests: Some(BTreeMap::from([
-                ("cpu".to_string(), small("10m")),
-                ("memory".to_string(), small("16Mi")),
-            ])),
-            limits: Some(BTreeMap::from([("memory".to_string(), small("64Mi"))])),
-            ..ResourceRequirements::default()
-        }),
+        resources: Some(helper_resources()),
         volume_mounts: Some(vec![mount("work", WORK, true)]),
         ..Container::default()
     }
@@ -429,6 +446,10 @@ mod tests {
             "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
             "capabilities": {"drop": ["ALL"]},
         });
+        let helper = json!({
+            "requests": {"cpu": "10m", "memory": "16Mi"},
+            "limits": {"cpu": "1", "memory": "64Mi"},
+        });
         let limits = json!({"cpu": "1500m", "memory": "8589934592",
                             "ephemeral-storage": "32212254720"});
         assert_eq!(
@@ -448,7 +469,7 @@ mod tests {
                 },
                 "spec": {
                     "restartPolicy": "Never",
-                    "activeDeadlineSeconds": 7200,
+                    "activeDeadlineSeconds": 3900,
                     "serviceAccountName": "aurcache-build",
                     "automountServiceAccountToken": false,
                     "enableServiceLinks": false,
@@ -462,6 +483,7 @@ mod tests {
                         "command": ["/usr/local/bin/aurcache-build-agent", "stage",
                                     "--work", "/work", "--tools", "/aurcache/bin"],
                         "securityContext": unprivileged,
+                        "resources": helper,
                         "volumeMounts": [
                             {"name": "work", "mountPath": "/work"},
                             {"name": "tools", "mountPath": "/aurcache/bin"},
@@ -495,10 +517,7 @@ mod tests {
                             "imagePullPolicy": "Always",
                             "command": ["/usr/local/bin/aurcache-build-agent", "hold"],
                             "securityContext": unprivileged,
-                            "resources": {
-                                "requests": {"cpu": "10m", "memory": "16Mi"},
-                                "limits": {"memory": "64Mi"},
-                            },
+                            "resources": helper,
                             "volumeMounts": [{"name": "work", "mountPath": "/work",
                                               "readOnly": true}],
                         },
@@ -591,7 +610,36 @@ mod tests {
         let none = render_with(&config(), 1, "x86_64", None).unwrap();
         assert_eq!(spec(&none).active_deadline_seconds, None);
         let pod = render_with(&config(), 1, "x86_64", Some(60)).unwrap();
-        assert_eq!(spec(&pod).active_deadline_seconds, Some(3660));
+        assert_eq!(spec(&pod).active_deadline_seconds, Some(360));
+    }
+
+    /// A ResourceQuota on a compute resource refuses a pod with a container
+    /// that does not state it. With the worker's limits set, every container
+    /// states all four lines.
+    #[test]
+    fn every_container_states_its_cpu_and_memory_once_the_build_is_limited() {
+        let mut cfg = config();
+        cfg.tunables.cpus = Some(2.0);
+        cfg.tunables.memory = Some(4 << 30);
+        let pod = pod(&cfg);
+        let spec = spec(&pod);
+        let all = spec
+            .init_containers
+            .iter()
+            .flatten()
+            .chain(&spec.containers);
+        let mut seen = 0;
+        for container in all {
+            let resources = container.resources.as_ref().unwrap();
+            for lines in [&resources.requests, &resources.limits] {
+                let lines = lines.as_ref().unwrap();
+                for line in ["cpu", "memory"] {
+                    assert!(lines.contains_key(line), "{}: {line}", container.name);
+                }
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
     }
 
     #[test]
