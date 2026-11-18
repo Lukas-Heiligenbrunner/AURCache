@@ -22,6 +22,12 @@ set -euo pipefail
 #   2. authorised — the worker is pointed at the key the server accepts. The
 #      build must succeed AND the payload's marker must appear in the installed
 #      package, proving the fetch really happened.
+#   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
+#      server's host key. The build must succeed.
+#   4. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
+#      build MUST fail, refused at host-key verification: the host-side fetch
+#      checks the server against the configured list instead of trusting it
+#      on first use.
 #
 #   ./scripts/test-e2e-ssh.sh [timeout]
 
@@ -55,7 +61,7 @@ trap cleanup EXIT
 # Bring the stack up and drive one build to a terminal state, leaving what it
 # came to in `phase_result`: `success`, `failed`, or why it came to neither.
 run_phase() {
-    local phase="$1" key="$2" output
+    local phase="$1" key="$2" known_hosts="${3-}" output
     log "=== Phase: $phase ==="
     dc down -v --remove-orphans >/dev/null 2>&1 || true
     fresh_worker_data >/dev/null
@@ -63,6 +69,11 @@ run_phase() {
     # function but does not reliably reach `docker compose` beneath it, which
     # silently made the "authorised" phase identical to the unauthorised one.
     export WORKER_GIT_SSH_KEY="$key"
+    if [ -n "$known_hosts" ]; then
+        export WORKER_SSH_KNOWN_HOSTS="$known_hosts"
+    else
+        unset WORKER_SSH_KNOWN_HOSTS
+    fi
     dc up -d --build >/dev/null
 
     wait_for_service || { dump_logs_on_failure; exit 1; }
@@ -96,8 +107,16 @@ ssh-keygen -q -t ed25519 -N '' -C aurcache-ssh-test -f "$KEYDIR/id_ed25519"
 # unreadable there. Widen them: this key exists only for the duration of the
 # run, and the worker reads it into its ssh-agent at startup, which applies no
 # permission check -- the same as a root-owned Docker secret needs.
+# The git server's host key, made here so a `known_hosts` can name it before
+# the server starts; and one naming another host only.
+ssh-keygen -q -t ed25519 -N '' -C gitssh -f "$KEYDIR/host_ed25519"
+printf 'gitssh %s\n' "$(cut -d' ' -f1,2 "$KEYDIR/host_ed25519.pub")" >"$KEYDIR/known_hosts"
+ssh-keygen -q -t ed25519 -N '' -C elsewhere -f "$KEYDIR/other_host_ed25519"
+printf 'elsewhere.invalid %s\n' "$(cut -d' ' -f1,2 "$KEYDIR/other_host_ed25519.pub")" \
+    >"$KEYDIR/known_hosts.other"
 chmod 755 "$KEYDIR"
-chmod 644 "$KEYDIR/id_ed25519" "$KEYDIR/id_ed25519.pub"
+chmod 644 "$KEYDIR/id_ed25519" "$KEYDIR/id_ed25519.pub" "$KEYDIR/known_hosts" \
+    "$KEYDIR/known_hosts.other" "$KEYDIR/host_ed25519.pub" "$KEYDIR/host_ed25519"
 
 # ---- Phase 1: the fixture must genuinely require the credential ------------
 run_phase "unauthorised (expect failure)" ""
@@ -142,6 +161,29 @@ if [ "$found" != "$SSH_TEST_MARKER" ]; then
     log "ERROR: marker missing from the built package (got: '${found:-<nothing>}')"
     exit 1
 fi
+
+# ---- Phase 3: a configured known_hosts naming the server must build --------
+run_phase "known_hosts names the server (expect success)" "/keys/id_ed25519" "/keys/known_hosts"
+if [ "$phase_result" != "success" ]; then
+    log "ERROR: build was '$phase_result' with the server's host key in WORKER_SSH_KNOWN_HOSTS"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    build succeeded against the pinned host key"
+
+# ---- Phase 4: a host the configured known_hosts does not name is refused ----
+run_phase "known_hosts names another host (expect failure)" "/keys/id_ed25519" "/keys/known_hosts.other"
+if [ "$phase_result" != "failed" ]; then
+    log "ERROR: build was '$phase_result' against a host WORKER_SSH_KNOWN_HOSTS does not name"
+    dump_logs_on_failure
+    exit 1
+fi
+if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "Host key verification failed"; then
+    log "ERROR: the build of $CURRENT_BUILD_REF failed, but not at host-key verification"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    build refused the unknown host at host-key verification"
 
 log "=== SSH credential test complete ==="
 log "    marker: $found"

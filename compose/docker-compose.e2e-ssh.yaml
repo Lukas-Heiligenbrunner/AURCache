@@ -30,5 +30,8 @@ services:
       - gitssh
     environment:
       - WORKER_GIT_SSH_KEY=${WORKER_GIT_SSH_KEY:-}
+      # Passed through only when the test sets it: unset, the worker accepts a
+      # host key on first use.
+      - WORKER_SSH_KNOWN_HOSTS
     volumes:
       - ${SSH_TEST_KEYS:?set SSH_TEST_KEYS to the generated keypair directory}:/keys:ro
