@@ -256,7 +256,8 @@ pub async fn preview(
     options: &RestoreOptions,
 ) -> anyhow::Result<Vec<RestoreEntry>> {
     let mut entries = Vec::new();
-    // The secrets a real restore would refuse on, said up front.
+    // The secrets a real restore would refuse on, said up front -- and then
+    // nothing else, since a refused restore imports no package either.
     if let Err(e) = plan_ssh(ssh, dump, options).await {
         entries.push(RestoreEntry {
             pkgbase: String::new(),
@@ -264,6 +265,7 @@ pub async fn preview(
                 error: format!("nothing would be imported: {e:#}"),
             },
         });
+        return Ok(entries);
     }
     for pkgbase in dump.packages.keys() {
         let existing = package_row(db, pkgbase).await?;

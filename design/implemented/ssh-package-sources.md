@@ -214,12 +214,23 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
   is read from the file, never from what is loaded. The passphrase is never
   carried, and a pinned `AURCACHE_SSH_KNOWN_HOSTS` is the operator's file, so it
   is not carried either.
-- **Restore** follows the policy shared with the signing key (#434):
-  - *Validate first.* `SshAccess::plan_restore` writes nothing: it checks that
-    the dump's key opens here (a protected key needs this server's passphrase
-    file, and an OpenSSH-format key is decrypted to prove it), that the files
-    it would write can be written (`probe_writable`), and that the dump's
-    trusted hosts do not contradict this server's. Any failure refuses the
+- **Restore** follows the policy shared with the signing key's restore:
+  - *Validate first, and only what will be written.* `SshAccess::plan_restore`
+    changes nothing (it writes only a probe file, which it removes). It checks
+    that the files it would write can be written (`probe_writable`), that the
+    dump's trusted hosts do not contradict this server's, and that the dump's
+    key is fit for where it goes:
+    - as the key in use, it must open here (a protected key needs this
+      server's passphrase file, and is decrypted to prove it);
+    - beside an operator's key, unused, it is checked against this server's
+      passphrase when there is one, and not made to need one when there is
+      not;
+    - where the operator's key file is the server's own, it is not written,
+      so nothing about it is demanded.
+
+    An unprotected dump key written on a server with a passphrase file is
+    protected with that passphrase first, so a server that keeps its key
+    protected does not end up with one in the clear. Any failure refuses the
     whole restore before pass 1 ("nothing was imported: …"); the dry run
     reports the same. `apply_restore` then runs after the rows, and the loaded
     key, behind a lock, is reloaded. "Installed" is reported only for a key
@@ -234,12 +245,16 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     Names are compared in lower case, and a hashed entry under each name this
     server writes plainly, hashed with that entry's salt. A hashed entry that
     resolves to none of them is added only when this server has no hashed
-    entries of its own, which it could not compare it with.
+    entries of its own, which it could not compare it with. A pattern entry
+    (`*`, `?`) is compared under each plain name it matches, and left out when
+    this server has hashed or pattern entries it could not list.
   - *Order:* the host keys are applied before the key, since their merge is
     checked again under the lock and may still refuse; a failure after that
     reports what had changed (`PartialRestore`).
-  - *Only checkable keys:* a key encrypted in an older (PEM) format cannot be
-    shown to open before it is written, so a restore refuses it. After a key
+  - *Only checkable keys:* a key in an older (PEM) format, encrypted or not,
+    cannot be shown to be a key that opens before it is written -- its `.pub`
+    would be taken on its word -- so a restore refuses it, suggesting
+    `ssh-keygen -p` to convert it. After a key
     is installed, the server reloads it and reports "installed" only if what
     it loaded is that key.
   - *`--clear` is a fresh install* plus what the dump carries: the dump's key
@@ -253,7 +268,7 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     regenerated key is `restore.ssh_key_replaced`. A pinned
     `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
 - **Archive modes:** the SSH key, the CA key and the token hashes are written
-  `0600` in the archive (`append_private`), as #434's signing key is.
+  `0600` in the archive (`append_private`), as the signing key is.
 - **Validation:** SSH files in a dump without the CA are refused, as tokens
   are -- secrets travel together -- and so is a public key without its private
   key. The schema version is unchanged: the files are optional, and an older

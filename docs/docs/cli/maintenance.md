@@ -32,19 +32,22 @@ to every repository:
 
 What a restore does with them:
 
-- **Everything is checked first.** The dump's key has to open on this server:
-  a protected key needs this server's `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`
-  to hold its passphrase. If it does not open, or a file the restore would
-  write cannot be written, the restore is refused whole, before any package
-  is imported, and `--dry-run` says so too.
+- **Everything is checked first, as it will be used.** A dump key that is to
+  become the key in use has to open on this server: a protected key needs this
+  server's `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` to hold its passphrase. If it
+  does not open, or a file the restore would write cannot be written, the
+  restore is refused whole, before any package is imported, and `--dry-run`
+  says so (and nothing else).
 - **Without `--secrets copy` or `--clear`, the SSH key is left alone.**
 - **`--secrets copy`** puts the key in the server's own place,
   `AURCACHE_SSH_DIR/id_ed25519`, replacing the one a new server generated, and
   the server clones with it at once. The trusted host keys are merged into the
   server's own: none it recorded is lost, and a dump that trusts a different
   key of the same type for a host this server already knows is refused. A key
-  encrypted in an older format is refused too, since it cannot be shown to
-  open: convert it with `ssh-keygen -p` and take the dump again.
+  in an older (PEM) format is refused too, since it cannot be checked before it
+  is written: convert it with `ssh-keygen -p` and take the dump again. A
+  server with `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` protects an unprotected
+  dump key with that passphrase before writing it.
 - **`--clear` is a fresh install plus what the dump carries.** The key and the
   trusted host keys are the dump's. A dump without them leaves the server as a
   new one starts: a freshly generated key, which every repository has to be

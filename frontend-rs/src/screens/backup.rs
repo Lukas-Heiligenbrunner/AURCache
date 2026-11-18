@@ -370,7 +370,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else."
+                         instance ends up as the dump describes and nothing else. Its SSH \
+                         key is replaced too: by the dump's if it carries one, otherwise by \
+                         a newly generated key, with no trusted hosts -- every git remote \
+                         then has to be given the new key."
                     }
                 }
             }
@@ -388,7 +391,8 @@ fn RestoreOptionsForm(
                     div { class: "text-xs opacity-60",
                         "Replaces this server's CA with the dump's. Every certificate your \
                          current workers hold was signed by the old one and stops working; \
-                         they re-enrol. Ignored if the dump carries no secrets."
+                         they re-enrol. The dump's SSH key and trusted hosts are taken too. \
+                         Ignored if the dump carries no secrets."
                     }
                 }
             }

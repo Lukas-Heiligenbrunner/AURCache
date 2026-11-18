@@ -378,8 +378,9 @@ enum KeyPlan {
         configured: PathBuf,
     },
     /// The operator's key file is where the dump's key would go: left alone.
+    /// The dump's public half is known only if its key could be read.
     Skip {
-        public_key: PublicKey,
+        public_key: Option<PublicKey>,
         configured: PathBuf,
     },
     /// A fresh install has no key of its own yet: remove it, and generate one
@@ -627,8 +628,11 @@ impl SshAccess {
                 public_key,
                 configured,
             } => KeyRestored::Skipped {
-                fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
-                same_key: self.uses(&public_key),
+                fingerprint: public_key.as_ref().map_or_else(
+                    || "an unreadable key".to_string(),
+                    |k| k.fingerprint(HashAlg::Sha256).to_string(),
+                ),
+                same_key: public_key.as_ref().is_some_and(|k| self.uses(k)),
                 configured,
             },
             KeyPlan::Reset { own, regenerate } => {
@@ -707,26 +711,39 @@ fn plan_key(
         });
     };
 
-    // Checked to open here, before anything is written: a key that cannot
-    // be used must not take the place of one that can.
+    // What is checked is what will be written, and as it will be used.
     let file = key_file(carried.private_key.as_bytes(), || {
         match &carried.public_key {
             Some(line) => PublicKey::from_openssh(line.trim())
                 .context("the dump's SSH public key does not parse"),
             None => bail!(
                 "the dump's SSH key is not in OpenSSH's format, and the dump carries no public \
-             half to tell which key it is"
+                 half to tell which key it is"
             ),
         }
-    })?;
-    // Only a key in OpenSSH's format can be shown to open before it is
-    // installed. An older encrypted one would be taken on the passphrase's
-    // word, and replace a working key with one libssh2 may refuse.
-    if matches!(file.protection, Protection::LegacyEncrypted) {
+    });
+
+    // The operator's key file is where the dump's key would go: nothing is
+    // written, so nothing about the dump's key is demanded either.
+    if let Some(configured) = configured.as_ref().filter(|c| same_file(&own, c)) {
+        return Ok(KeyPlan::Skip {
+            public_key: file.ok().map(|f| f.public_key),
+            configured: configured.clone(),
+        });
+    }
+
+    let file = file?;
+    // Only a key in OpenSSH's format can be shown to be a key, and to open,
+    // before it is written. One in an older format would be taken on its
+    // `.pub`'s word, and could replace a working key with nothing usable.
+    if matches!(
+        file.protection,
+        Protection::Legacy | Protection::LegacyEncrypted
+    ) {
         bail!(
-            "the dump's SSH key is encrypted in an older format, which cannot be checked to \
-             open before it is installed; convert it with `ssh-keygen -p -f <key>` on the \
-             server it came from, and take the dump again"
+            "the dump's SSH key is in an older format, which cannot be checked before it is \
+             installed; convert it with `ssh-keygen -p -f <key>` on the server it came from, \
+             and take the dump again"
         );
     }
     let passphrase = config
@@ -734,17 +751,26 @@ fn plan_key(
         .as_deref()
         .map(Passphrase::read)
         .transpose()?;
-    unlock(
-        &file,
-        passphrase,
-        &"the dump's SSH key",
-        config.passphrase_file.as_deref(),
-    )?;
-    let private_key = Zeroizing::new(carried.private_key.clone());
-    let public_key = file.public_key;
+    // A server that protects its key with a passphrase keeps an unprotected
+    // dump key protected with that passphrase, rather than unprotected on disk.
+    let private_key = match (&file.protection, &passphrase) {
+        (Protection::None, Some(passphrase)) => lock(&carried.private_key, passphrase)?,
+        _ => Zeroizing::new(carried.private_key.clone()),
+    };
+    let public_key = file.public_key.clone();
 
     Ok(match configured {
+        // The key in use from now on: it must open with this server's
+        // passphrase, if it needs one.
         None => {
+            if !matches!(file.protection, Protection::None) {
+                unlock(
+                    &file,
+                    passphrase,
+                    &"the dump's SSH key",
+                    config.passphrase_file.as_deref(),
+                )?;
+            }
             probe_writable(&own)?;
             KeyPlan::Install {
                 own,
@@ -752,11 +778,18 @@ fn plan_key(
                 public_key,
             }
         }
-        Some(configured) if same_file(&own, &configured) => KeyPlan::Skip {
-            public_key,
-            configured,
-        },
+        // Written beside the operator's key and not used. The passphrase that
+        // would open it, were it ever the key in use, is this server's; it is
+        // checked when there is one, and not demanded when there is not.
         Some(configured) => {
+            if passphrase.is_some() && !matches!(file.protection, Protection::None) {
+                unlock(
+                    &file,
+                    passphrase,
+                    &"the dump's SSH key",
+                    config.passphrase_file.as_deref(),
+                )?;
+            }
             probe_writable(&own)?;
             KeyPlan::Beside {
                 own,
@@ -766,6 +799,17 @@ fn plan_key(
             }
         }
     })
+}
+
+/// `pem`, an unprotected OpenSSH key, protected with `passphrase`.
+fn lock(pem: &str, passphrase: &Passphrase) -> anyhow::Result<Zeroizing<String>> {
+    let key = PrivateKey::from_openssh(pem).context("reading the dump's SSH key")?;
+    let locked = key
+        .encrypt(&mut ssh_key::rand_core::OsRng, passphrase.as_str())
+        .context("protecting the dump's SSH key with this server's passphrase")?;
+    locked
+        .to_openssh(LineEnding::LF)
+        .context("encoding the dump's SSH key")
 }
 
 /// What to do with the server's `known_hosts`, given the one a dump carries.
@@ -810,7 +854,9 @@ fn plan_hosts(
 /// An entry naming a host `ours` holds to another key of the same type is
 /// refused: merging it would let a restore move trust backwards. Another
 /// type is no conflict -- OpenSSH keeps one key per type, and GitHub has
-/// several. A hashed entry is compared under each name `ours` writes plainly,
+/// several. A pattern entry (`*`, `?`) is compared under each name `ours`
+/// writes plainly that it matches, and left out when `ours` has names it
+/// cannot list. A hashed entry is compared under each name `ours` writes plainly,
 /// hashed with that entry's salt; one that matches none of them names a host
 /// `ours` does not know plainly, which is safe to add only when `ours` holds
 /// no hashed entries either. Otherwise it is left out, as is a line that does
@@ -824,12 +870,19 @@ fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<V
             HostPatterns::HashedName { .. } => None,
         })
         .flatten()
-        .filter(|p| !p.starts_with('!') && !p.contains(['*', '?']))
+        .filter(|p| !p.starts_with('!') && !is_glob(p))
         .map(|p| p.to_ascii_lowercase())
         .collect();
     let ours_hashed = ours
         .iter()
         .any(|e| matches!(e.host_patterns(), HostPatterns::HashedName { .. }));
+    // Names this server holds that cannot be listed: hashed ones, and
+    // patterns of its own.
+    let ours_unlisted = ours_hashed
+        || ours.iter().any(|e| match e.host_patterns() {
+            HostPatterns::Patterns(patterns) => patterns.iter().any(|p| is_glob(p)),
+            HostPatterns::HashedName { .. } => false,
+        });
 
     let mut lines = Vec::new();
     for line in carried.lines().map(str::trim) {
@@ -842,11 +895,30 @@ fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<V
         };
         if entry.marker().is_none() {
             let names: Vec<String> = match entry.host_patterns() {
-                HostPatterns::Patterns(patterns) => patterns
-                    .iter()
-                    .filter(|p| !p.starts_with('!') && !p.contains(['*', '?']))
-                    .map(|p| p.to_ascii_lowercase())
-                    .collect(),
+                HostPatterns::Patterns(patterns) => {
+                    // A pattern names every host it matches: each this server
+                    // knows is compared. One it cannot list could be among
+                    // them, so then the entry is left out.
+                    if patterns.iter().any(|p| is_glob(p)) && ours_unlisted {
+                        tracing::warn!(
+                            "Leaving out a pattern entry of the dump's known_hosts: this \
+                             server's own hashed or pattern entries cannot be compared with it"
+                        );
+                        continue;
+                    }
+                    let mut names: Vec<String> = patterns
+                        .iter()
+                        .filter(|p| !p.starts_with('!') && !is_glob(p))
+                        .map(|p| p.to_ascii_lowercase())
+                        .collect();
+                    names.extend(
+                        plain_names
+                            .iter()
+                            .filter(|name| self::names(entry.host_patterns(), name))
+                            .cloned(),
+                    );
+                    names
+                }
                 hashed @ HostPatterns::HashedName { .. } => {
                     let resolved: Vec<String> = plain_names
                         .iter()
@@ -870,6 +942,11 @@ fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<V
         lines.push(line.to_string());
     }
     Ok(lines)
+}
+
+/// Whether a `known_hosts` host pattern matches more than one name.
+fn is_glob(pattern: &str) -> bool {
+    pattern.contains(['*', '?'])
 }
 
 /// Refuse `presented` for `name` when `ours` holds another key of the same
