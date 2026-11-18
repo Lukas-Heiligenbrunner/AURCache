@@ -133,7 +133,7 @@ of them from the worker or the build.
 | step | today | in the runner |
 |---|---|---|
 | copy the base | the worker's pool snapshot (`chroots.rs`); `makechrootpkg` finds it | unchanged |
-| refresh the copy (`-u`) | `arch-nspawn copy pacman -Syuu` | the same command, in the runner's nspawn |
+| refresh the copy | the patched script: `pacman -Sy` with the build's `pacman.conf`, then `pacman -Suu --config` the same without AURCache's repository (`devtools::PacmanConfs`) | the same two commands, in the runner's nspawn |
 | drop-in, `pacman.conf`, mirrorlist | the worker stages files, the patched script `install`s the drop-in as root | the runner writes them into the copy, from data |
 | download sources | **host**, as `builder`, Landlocked, `GNUPGHOME` replica, agent socket | **inside the container**, as `builduser` |
 | poisoned cache retry | patched into `download_sources` | the in-container script, same rule |

@@ -20,6 +20,13 @@ the builder image with the engine's resource limits, streams the container's
 output into the build log, and uploads the packages the build leaves in the
 directory. The builder image needs pacman, makepkg and gpg.
 
+A build first syncs every repository, AURCache's included, then upgrades the
+container from the official ones alone -- or those the `pacman_conf` setting
+lists -- and only then installs its dependencies, which may come from
+AURCache. An upgrade that could see AURCache's repository would act on the
+`replaces=` of a package built there, and swap it in for any package in the
+image it names that the official repositories no longer carry.
+
 With `BUILD_ARTIFACT_DIR` set the worker builds against the mounted Docker
 socket: the directory must be a path the Docker daemon can bind, with the same
 directory visible to the worker. Without it, the [hybrid image](./hybrid.md)

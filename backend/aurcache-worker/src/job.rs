@@ -99,6 +99,7 @@ async fn run_job_inner(
         cfg,
         cgroups,
         dropin: &prepared.dropin,
+        pacman: &prepared.pacman,
         lease: &lease,
         chroots: &shared.chroots,
     };
@@ -117,6 +118,7 @@ async fn run_job_inner(
 struct PreparedJob {
     caches: JobCaches,
     dropin: PathBuf,
+    pacman: devtools::PacmanConfs,
     binds: Vec<BindMount>,
 }
 
@@ -246,19 +248,19 @@ async fn prepare_job(
 
     let cfg_dir = workdir.join("config");
     // The server sends no `[repo]` section; the worker appends one rendered for
-    // the host it reaches the server on (see aurcache_worker_core::repo).
-    let pacman_conf =
-        aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
+    // the host it reaches the server on (see aurcache_worker_core::repo) to
+    // the build's configuration, and keeps it out of the upgrade's.
     let devtools::StagedConfigs {
         makepkg_overrides,
-        pacman_conf,
+        pacman,
     } = devtools::write_configs(
         &cfg_dir,
         &build::with_parallelism(
             &credentials::augment_makepkg_conf(&job.makepkg_conf, credential.as_ref()),
             parallelism_cpus(&cfg.tunables.build_limits, &cfg.tunables.total_build_limits),
         ),
-        &pacman_conf,
+        &job.pacman_conf,
+        client.repo(),
         mirrorlist,
         cache.pacman_pkg().as_deref(),
     )
@@ -267,7 +269,7 @@ async fn prepare_job(
     log(client, build_id, "[worker] preparing chroot\n").await;
     shared
         .chroots
-        .refresh(&pacman_conf, Some((client, build_id)))
+        .refresh(&pacman.upgrade, client.repo(), Some((client, build_id)))
         .await
         .context("preparing base chroot")?;
 
@@ -299,6 +301,7 @@ async fn prepare_job(
     Ok(PreparedJob {
         caches,
         dropin,
+        pacman,
         binds,
     })
 }
@@ -659,6 +662,8 @@ struct WorkerContext<'a> {
     /// This build's makepkg overrides, which `makechrootpkg` installs into the
     /// chroot copy it makes for it.
     dropin: &'a Path,
+    /// The configurations the build script syncs, upgrades and builds with.
+    pacman: &'a devtools::PacmanConfs,
 }
 
 /// The completed process and its resource report, ready for artifact handling.
@@ -777,6 +782,9 @@ async fn execute_build_process(
         // builds share one -- and the host-side source download reads the same
         // copy, which a bind mount inside the container would not reach.
         cmd.env("AURCACHE_DROPIN", ctx.dropin);
+        // The copy is synced with AURCache's repository and upgraded without
+        // it; see `devtools::PacmanConfs`.
+        ctx.pacman.pass_to(&mut cmd);
         cmd.spawn()
     };
 

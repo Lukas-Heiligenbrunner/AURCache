@@ -3,6 +3,7 @@
 //! the pure argument/parse helpers they rely on live in [`crate::build`].
 
 use anyhow::{Context, Result, bail};
+use aurcache_worker_core::repo::RepoSection;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -28,8 +29,8 @@ pub async fn run_capture(mut cmd: Command) -> Result<Captured> {
 }
 
 /// The variables `sudo` must pass through to devtools; see [`command`].
-const DEVTOOLS_ENV: &str =
-    "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,AURCACHE_NSPAWN_KEEP_UNIT";
+const DEVTOOLS_ENV: &str = "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,\
+                            AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF";
 
 /// Build a `Command` that runs a privileged `devtools` program via `sudo`.
 ///
@@ -39,12 +40,13 @@ const DEVTOOLS_ENV: &str =
 /// `SUDO_USER` inference, so it is `builder` and never `aurcache` -- see
 /// `build::build_command`.
 ///
-/// Four variables are preserved, because sudo would otherwise drop all of
+/// Six variables are preserved, because sudo would otherwise drop all of
 /// them: `GNUPGHOME` names this build's keyring replica (see
 /// [`prepare_job_keyring`]), `SRCDEST` the source cache `makechrootpkg` binds
 /// itself, `AURCACHE_DROPIN` the makepkg overrides it installs into this
-/// build's chroot copy, and `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
-/// stays in the build's cgroup. `PKGDEST` reaches the build through
+/// build's chroot copy, `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
+/// stays in the build's cgroup, and the last two the [`PacmanConfs`] the copy
+/// is synced, upgraded and built with. `PKGDEST` reaches the build through
 /// `makepkg.conf` instead, so preserving it here would be a no-op.
 pub fn command(program: &str) -> Command {
     let mut cmd = Command::new("sudo");
@@ -81,9 +83,11 @@ pub(crate) fn base_exists(root: &Path) -> bool {
     root.join(".arch-chroot").exists() || (root.exists() && root.join("usr").exists())
 }
 
-/// `mkarchroot` a fresh base chroot, seeded with the job's `pacman.conf`. The
-/// chroot keeps the `makepkg.conf` its own `pacman` installs; this worker's
-/// settings arrive as a drop-in instead.
+/// `mkarchroot` a fresh base chroot, seeded with the job's `pacman.conf`
+/// without AURCache's repository ([`PacmanConfs::upgrade`]): the base is only
+/// ever upgraded, and an upgrade is what that repository must stay out of.
+/// The chroot keeps the `makepkg.conf` its own `pacman` installs; this
+/// worker's settings arrive as a drop-in instead.
 ///
 /// The caller counts it against the pool's total, and removes it when this
 /// fails: what a failed creation leaves is neither usable nor counted, and
@@ -145,12 +149,68 @@ pub(crate) async fn ensure_utc_localtime(root: &Path) -> Result<()> {
 /// Upgrade a refresh candidate in place: `root.next`, never the base builds
 /// snapshot. Must exit 0: a failed upgrade is a failed refresh, and the
 /// candidate is deleted rather than swapped in.
-pub(crate) async fn upgrade_candidate(next: &Path) -> Result<()> {
+///
+/// With AURCache's repository taken out of the candidate's `pacman.conf`
+/// first ([`remove_repo`]): an upgrade acts on `replaces=`, and whatever it
+/// installed here every later build would start from.
+pub(crate) async fn upgrade_candidate(next: &Path, repo: Option<&RepoSection>) -> Result<()> {
+    if let Some(repo) = repo {
+        remove_repo(next, repo).await?;
+    }
     let mut cmd = command("arch-nspawn");
     cmd.arg(next).args(["pacman", "-Syu", "--noconfirm"]);
     let Captured { log, status } = run_capture(cmd).await?;
     if !status.success() {
         bail!("chroot upgrade returned non-zero:\n{log}");
+    }
+    Ok(())
+}
+
+/// Take AURCache's repository out of a chroot's `pacman.conf`, if it is there.
+///
+/// A base made from a configuration that listed it keeps listing it, since
+/// nothing else rewrites the base's own file. Safe on a refresh candidate
+/// only: that is a snapshot of its own, deleted if the refresh fails.
+async fn remove_repo(root: &Path, repo: &RepoSection) -> Result<()> {
+    let path = root.join("etc/pacman.conf");
+    let conf = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    let without = aurcache_worker_core::repo::remove_from_pacman_conf(&conf, repo);
+    if without == conf {
+        return Ok(());
+    }
+    tracing::info!(
+        "removing AURCache's repository from {}: a chroot is never upgraded with it",
+        path.display()
+    );
+    // The chroot is root's, so this goes through `sudo` like the rest.
+    let mut child = Command::new("sudo")
+        .args(["-n", "tee", "--"])
+        .arg(&path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning sudo tee")?;
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stdin = child.stdin.take().context("sudo tee has no stdin")?;
+        stdin
+            .write_all(without.as_bytes())
+            .await
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .context("awaiting sudo tee")?;
+    if !output.status.success() {
+        bail!(
+            "rewriting {} failed:\n{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     Ok(())
 }
@@ -406,9 +466,9 @@ pub fn stage_makepkg_dropin(staged: &Path) -> Result<PathBuf> {
 /// from the shared pool.
 ///
 /// The first path is a fixed mount point rather than the real per-job
-/// directory: the build's `pacman.conf` is inherited from the base chroot and
-/// is therefore identical for every job, so the per-job part is supplied as a
-/// bind mount over that path instead (see `job.rs`).
+/// directory: `arch-nspawn` takes the paths from the `pacman.conf` it finds,
+/// and binds them at the same paths inside, so the per-job part is supplied
+/// as a bind mount over that one path instead (see `job.rs`).
 ///
 /// Written worker-side rather than by the server because cache paths are
 /// worker-local — the same reasoning that keeps `GIT_SSH_COMMAND` out of the
@@ -444,37 +504,90 @@ pub const PER_JOB_CACHE_MOUNT: &str = "/var/cache/pacman/pkg";
 pub struct StagedConfigs {
     /// The makepkg overrides, for [`stage_makepkg_dropin`].
     pub makepkg_overrides: PathBuf,
-    pub pacman_conf: PathBuf,
+    pub pacman: PacmanConfs,
 }
 
-/// Write the per-package makepkg overrides, `pacman.conf` and mirrorlist to a
-/// staging directory the caller seeds the base chroot from.
+/// The two `pacman.conf`s a build's chroot copy is prepared with.
+///
+/// [`SCRIPT`](crate::build::SCRIPT) installs both into the copy, syncs every
+/// database `build` lists, upgrades from only those `upgrade` lists, and then
+/// builds with `build`. A dependency still comes from AURCache's repository,
+/// through makepkg's `pacman -S`, and an upgrade never sees it. One sync read
+/// through two configurations, rather than two syncs, so the build installs
+/// from exactly the databases the system was upgraded against.
+///
+/// The repository stays out of the upgrade because pacman acts on
+/// `replaces=` only while upgrading, and `--noconfirm` accepts the
+/// replacement. pacman takes an installed package's replacement from the
+/// first repository that has that package by name, and AURCache's comes last,
+/// so the official packages are not exposed -- but one installed and no longer
+/// in any repository is: a package dropped from the official ones, which a
+/// base refreshed in place keeps. An upgrade that saw AURCache's repository
+/// would install whatever package built here declares `replaces=` for it, in
+/// every later build, whether that build depends on the package or not.
+/// `pacman -S` ignores `replaces=` and, under
+/// `--noconfirm`, declines to remove a conflicting package, so installing a
+/// dependency can fail a build but not change what else is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PacmanConfs {
+    /// The job's, with AURCache's repository appended: what the build syncs
+    /// and installs from.
+    pub build: PathBuf,
+    /// The job's alone: what the system is upgraded from.
+    pub upgrade: PathBuf,
+}
+
+impl PacmanConfs {
+    /// Hand both to [`SCRIPT`](crate::build::SCRIPT), through [`command`]'s
+    /// preserved environment.
+    pub fn pass_to(&self, cmd: &mut Command) {
+        cmd.env("AURCACHE_PACMAN_CONF", &self.build)
+            .env("AURCACHE_UPGRADE_CONF", &self.upgrade);
+    }
+}
+
+/// Write the per-package makepkg overrides, `pacman.conf`s and mirrorlist to
+/// a staging directory.
 ///
 /// The makepkg file here is *only* the overrides, not a whole `makepkg.conf`:
 /// [`stage_makepkg_dropin`] filters it into the drop-in `makechrootpkg`
 /// installs in the job's chroot copy, so the chroot keeps its own defaults
 /// rather than having them replaced.
+///
+/// `pacman_conf` is the job's, which never lists AURCache's repository, and
+/// `repo` that repository as this worker reaches it. [`PacmanConfs`] says what
+/// is made of them.
 pub fn write_configs(
     dir: &Path,
     makepkg_conf: &str,
     pacman_conf: &str,
+    repo: Option<&RepoSection>,
     mirrorlist: Option<&str>,
     shared_pkg_cache: Option<&Path>,
 ) -> Result<StagedConfigs> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating config dir {}", dir.display()))?;
     let makepkg = dir.join("makepkg.conf");
-    let pacman = dir.join("pacman.conf");
+    let pacman = PacmanConfs {
+        build: dir.join("pacman.conf"),
+        upgrade: dir.join("pacman-upgrade.conf"),
+    };
 
     std::fs::write(&makepkg, makepkg_conf).context("writing makepkg overrides")?;
-    std::fs::write(&pacman, with_cache_dirs(pacman_conf, shared_pkg_cache))
+    let build = aurcache_worker_core::repo::append_to_pacman_conf(pacman_conf, repo);
+    std::fs::write(&pacman.build, with_cache_dirs(&build, shared_pkg_cache))
         .context("writing pacman.conf")?;
+    std::fs::write(
+        &pacman.upgrade,
+        with_cache_dirs(pacman_conf, shared_pkg_cache),
+    )
+    .context("writing the upgrade's pacman.conf")?;
     if let Some(list) = mirrorlist {
         std::fs::write(dir.join("mirrorlist"), list).context("writing mirrorlist")?;
     }
     Ok(StagedConfigs {
         makepkg_overrides: makepkg,
-        pacman_conf: pacman,
+        pacman,
     })
 }
 
@@ -574,6 +687,37 @@ mod tests {
         }
     }
 
+    /// A chroot whose `pacman.conf` lists AURCache's repository loses that
+    /// section before it is upgraded, and keeps everything else.
+    #[tokio::test]
+    async fn the_repository_is_removed_from_a_chroot() {
+        if !std::process::Command::new("sudo")
+            .args(["-n", "true"])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let etc = tmp.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let repo =
+            RepoSection::parse("[aurcache]\nServer = http://aurcache:8081/$arch\n".into()).unwrap();
+        let official = "[options]\nHoldPkg = pacman\n\n[core]\nInclude = x\n\n";
+        std::fs::write(
+            etc.join("pacman.conf"),
+            format!("{official}{}[options]\nCacheDir = /a\n", repo.text()),
+        )
+        .unwrap();
+
+        remove_repo(tmp.path(), &repo).await.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(etc.join("pacman.conf")).unwrap(),
+            format!("{official}[options]\nCacheDir = /a\n")
+        );
+    }
+
     /// One build's overrides go to a file of that build's own, which
     /// `makechrootpkg` then installs into the chroot copy it makes. Nothing is
     /// written to the shared base chroot, where two builds starting together
@@ -605,7 +749,13 @@ mod tests {
             .find(|a| a.starts_with("--preserve-env="))
             .expect("devtools commands must preserve an environment through sudo");
 
-        for var in ["GNUPGHOME", "SRCDEST", "AURCACHE_DROPIN"] {
+        for var in [
+            "GNUPGHOME",
+            "SRCDEST",
+            "AURCACHE_DROPIN",
+            "AURCACHE_PACMAN_CONF",
+            "AURCACHE_UPGRADE_CONF",
+        ] {
             assert!(preserve.contains(var), "{preserve} must carry {var}");
         }
     }
@@ -651,6 +801,78 @@ mod tests {
         );
     }
 
+    /// The build's configuration lists AURCache's repository and the upgrade's
+    /// does not. Past that they are the same, cache layout included, so the
+    /// upgrade reads the databases the build's sync wrote, minus one.
+    #[test]
+    fn only_the_build_configuration_lists_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = RepoSection::parse(
+            "[aurcache]\nSigLevel = Never\nServer = http://aurcache:8081/$arch\n".into(),
+        );
+        let job = "[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        let StagedConfigs { pacman, .. } = write_configs(
+            dir.path(),
+            "",
+            job,
+            repo.as_ref(),
+            None,
+            Some(Path::new("/shared/pkg")),
+        )
+        .unwrap();
+
+        let build = std::fs::read_to_string(&pacman.build).unwrap();
+        let upgrade = std::fs::read_to_string(&pacman.upgrade).unwrap();
+        assert_ne!(pacman.build, pacman.upgrade);
+        assert!(build.contains("[aurcache]"), "{build}");
+        assert!(!upgrade.contains("[aurcache]"), "{upgrade}");
+        assert!(!upgrade.contains("aurcache:8081"), "{upgrade}");
+        let cache = format!("CacheDir = {PER_JOB_CACHE_MOUNT} /shared/pkg\n");
+        assert!(build.ends_with(&cache), "{build}");
+        assert!(upgrade.ends_with(&cache), "{upgrade}");
+        // Blank lines aside: the one that set the section apart stays.
+        let lines = |conf: &str| -> Vec<String> {
+            conf.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(String::from)
+                .collect()
+        };
+        assert_eq!(
+            lines(&aurcache_worker_core::repo::remove_from_pacman_conf(
+                &build,
+                repo.as_ref().unwrap()
+            )),
+            lines(&upgrade),
+            "the upgrade's configuration is the build's without the repository"
+        );
+    }
+
+    /// Both configurations reach the build script, under the names it reads.
+    #[test]
+    fn the_configurations_reach_the_build_script() {
+        let confs = PacmanConfs {
+            build: PathBuf::from("/job/pacman.conf"),
+            upgrade: PathBuf::from("/job/pacman-upgrade.conf"),
+        };
+        let mut cmd = command("aurcache-build");
+        confs.pass_to(&mut cmd);
+        let env = |name: &str| {
+            cmd.as_std()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            env("AURCACHE_PACMAN_CONF").as_deref(),
+            Some("/job/pacman.conf")
+        );
+        assert_eq!(
+            env("AURCACHE_UPGRADE_CONF").as_deref(),
+            Some("/job/pacman-upgrade.conf")
+        );
+    }
+
     /// The staged makepkg file is the job's overrides verbatim.
     ///
     /// Nothing from the host is mixed in: that is the point of the drop-in, and
@@ -668,6 +890,7 @@ mod tests {
             dir.path(),
             "PKGDEST=/output\nMAKEFLAGS=-j4\n",
             "[options]\n",
+            None,
             None,
             None,
         )

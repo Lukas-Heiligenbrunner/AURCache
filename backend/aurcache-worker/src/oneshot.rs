@@ -32,9 +32,15 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     let chroots = &shared.chroots;
     chroots.open().await?;
     chroots
-        .refresh(&pacman_conf, None)
+        .refresh(&pacman_conf, None, None)
         .await
         .context("preparing base chroot")?;
+    // This worker knows no AURCache repository to keep out of the upgrade,
+    // so the copy is synced, upgraded and built with the host's one file.
+    let pacman = devtools::PacmanConfs {
+        build: pacman_conf.clone(),
+        upgrade: pacman_conf,
+    };
     let cache = shared.cache(cfg.tunables.cache).await;
     let pkgbase = pkgdir
         .file_name()
@@ -68,6 +74,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
                 if let Some(dir) = srcdest.as_deref() {
                     cmd.env("SRCDEST", dir);
                 }
+                pacman.pass_to(&mut cmd);
                 cmd.status().await.context("running build")
             },
         )

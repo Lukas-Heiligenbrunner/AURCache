@@ -335,6 +335,16 @@ move a few times a day rather than a few times an hour. Lower it if you would
 rather have the newest dependencies than the fastest starts; `0` refreshes
 before every build.
 
+Each build then brings its own copy of the base up to date: it syncs every
+repository, AURCache's included, upgrades from the official ones alone -- or
+those the `pacman_conf` setting lists -- and installs its dependencies, which
+may come from AURCache. The base chroot's own refresh never sees AURCache's
+repository either. pacman acts on `replaces=` only during an upgrade, and an
+upgrade that saw the repository would swap a package built there in for any
+installed package it names that the official repositories no longer carry --
+one dropped from them since the base was made -- in every build that
+followed.
+
 `WORKER_DATA_DIR` **must be a persisted volume.** It holds the worker's identity
 and its generated SSH key; if it is lost, the worker re-enrolls as a new,
 unapproved worker and generates a new key, which the remote will no longer

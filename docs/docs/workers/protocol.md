@@ -131,7 +131,16 @@ what they receive:
      operator wrote for one of them is the worker's to drop.
    - `pacman_conf`: the whole `pacman.conf`, without the AURCache repository.
      The worker appends the `[repo]` section from its registration answer,
-     with the host filled in.
+     with the host filled in, for the build to install dependencies from --
+     but never upgrades a system with that section in its configuration.
+     pacman acts on `replaces=` only during an upgrade, and `--noconfirm`
+     accepts the replacement, so an upgrade that sees the repository installs
+     a package built there in place of any installed one it names that no
+     earlier repository has (one dropped from the official repositories, say),
+     in every build that follows. Sync with the section (`pacman -Sy`), upgrade with
+     `pacman_conf` as it came (`pacman -Su --config ...`: pacman reads only
+     the databases a configuration lists), then build with the section:
+     makepkg's `pacman -S` ignores `replaces=`.
    - `build_flags`: arguments added to makepkg's command line, as given.
    - `pgp_keys` to import, and `vcs_sources`: the `git+` sources whose commit
      to report back.

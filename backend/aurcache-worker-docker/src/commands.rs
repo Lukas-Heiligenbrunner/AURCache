@@ -50,19 +50,36 @@ fn fetch_required_pgp_keys_cmd() -> String {
 /// process, which is not the container's build user: makepkg rewrites PKGBUILD
 /// in place for VCS packages (`pkgver()` at build time). The container is
 /// ephemeral, so the loosened permissions do not outlive the build.
+///
+/// The container is brought up to date first, in two steps: every database
+/// `/etc/pacman.conf` lists is synced, AURCache's repository included, and the
+/// system is then upgraded reading only the databases `upgrade_conf` lists --
+/// the same configuration without that repository. pacman acts on
+/// `replaces=` only while upgrading, and `--noconfirm` accepts the
+/// replacement, so an upgrade that could see the repository would install a
+/// package built there in place of any it names that no earlier repository
+/// has -- in an image, a package since dropped from the official ones.
+/// makepkg's `-s` then installs dependencies from all of them through
+/// `pacman -S`, which ignores `replaces=`. One sync, so the dependencies come
+/// from the databases the system was upgraded against.
 #[must_use]
 pub fn build_build_command(
     pkgbase: &str,
     build_flags: &[String],
     build_dir: &Path,
     makepkg_conf: &str,
+    upgrade_conf: &str,
 ) -> String {
     let build_dir = quote_argument(&build_dir.display().to_string());
     let conf = quote_argument(makepkg_conf);
     let quoted_pkgbase = quote_argument(pkgbase);
     let quoted_build_flags = shell_join_args(build_flags);
 
-    let self_update = "sudo pacman -Syu --noconfirm --noprogressbar --color never";
+    let pacman = "sudo pacman --noconfirm --noprogressbar --color never";
+    let self_update = format!(
+        "{pacman} -Sy && {pacman} -Su --config {upgrade_conf}",
+        upgrade_conf = quote_argument(upgrade_conf),
+    );
 
     format!(
         "{self_update} && cd {build_dir}/{quoted_pkgbase} && sudo chmod -R a+w . && \
@@ -139,6 +156,7 @@ mod tests {
             ],
             Path::new("/output/src"),
             "/output/makepkg.conf",
+            "/output/pacman-upgrade.conf",
         );
 
         assert!(cmd.contains("validpgpkeys"));
@@ -147,6 +165,41 @@ mod tests {
         assert!(cmd.contains("cd /output/src/hello"));
         assert!(cmd.contains("sudo chmod -R a+w ."));
         assert!(cmd.contains("BUILDDIR=$(mktemp -d)"));
+    }
+
+    /// The container syncs every database, then upgrades from the
+    /// configuration without AURCache's repository, before anything else.
+    /// No pacman call in the command both syncs and upgrades: one that did
+    /// would upgrade with the repository in view, and act on a `replaces=`
+    /// in it.
+    #[test]
+    fn the_upgrade_never_sees_the_repository() {
+        let cmd = build_build_command(
+            "hello",
+            &["--noconfirm".to_string()],
+            Path::new("/output/src"),
+            "/output/makepkg.conf",
+            "/output/pacman-upgrade.conf",
+        );
+        let pacman = "sudo pacman --noconfirm --noprogressbar --color never";
+        assert!(
+            cmd.starts_with(&format!(
+                "{pacman} -Sy && {pacman} -Su --config /output/pacman-upgrade.conf && "
+            )),
+            "{cmd}"
+        );
+        for (index, _) in cmd.match_indices("pacman ") {
+            let call = cmd[index..].split("&&").next().unwrap_or_default();
+            let upgrades = call.split_whitespace().any(|word| {
+                word.strip_prefix('-')
+                    .filter(|letters| !letters.starts_with('-'))
+                    .is_some_and(|letters| letters.contains('S') && letters.contains('u'))
+            });
+            assert!(
+                !upgrades || call.contains("--config /output/pacman-upgrade.conf"),
+                "an upgrade with the build's configuration: {call}"
+            );
+        }
     }
 
     /// A pkgbase is attacker-influenced (it is whatever the user asked to
@@ -211,6 +264,7 @@ mod tests {
             &["--noconfirm".to_string()],
             Path::new("/output/src"),
             "/output/makepkg.conf",
+            "/output/pacman-upgrade.conf",
         );
         let conf = wrap_with_config("MK", "/output/makepkg.conf", &build);
         // The system defaults must be pulled in first: makepkg loads exactly

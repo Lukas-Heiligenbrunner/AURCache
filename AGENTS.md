@@ -100,8 +100,8 @@ they cover, rather than running all four as a matter of course:
 - `test-e2e-hybrid-legacy.sh` — the same image in host mode, against the
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container.
-- `test-sandbox.sh` — only for changes to `aurcache-sandbox` or the PKGBUILD
-  sourcing path.
+- `test-sandbox.sh` — only for changes to `aurcache-sandbox`, the PKGBUILD
+  sourcing path, or how the patched makechrootpkg upgrades a build's system.
 - `test-kernel.sh` — for changes to `aurcache-chroot`, the worker's pool or
   cache volumes, or its cgroups. It runs the tests `cargo test` leaves out
   (`AURCACHE_POOL_TESTS`, `#[ignore]`d cgroup tests) as root in a privileged

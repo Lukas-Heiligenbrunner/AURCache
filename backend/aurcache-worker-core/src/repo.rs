@@ -204,11 +204,7 @@ fn location(section: &str) -> Option<Location> {
     let mut server: Option<&str> = None;
     for line in section.lines() {
         let trimmed = line.trim();
-        if let Some(header) = trimmed
-            .strip_prefix('[')
-            .and_then(|rest| rest.split(']').next())
-            .filter(|n| !n.is_empty())
-        {
+        if let Some(header) = header(trimmed) {
             name = Some(header);
         } else if let Some(s) = trimmed
             .strip_prefix("Server =")
@@ -234,6 +230,14 @@ fn location(section: &str) -> Option<Location> {
     })
 }
 
+/// The name a `pacman.conf` section header gives, `None` for any other line.
+fn header(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix('[')
+        .and_then(|rest| rest.split(']').next())
+        .filter(|name| !name.is_empty())
+}
+
 /// Append this worker's `[repo]` section, if it has one, to a job's
 /// `pacman.conf`.
 #[must_use]
@@ -247,6 +251,37 @@ pub fn append_to_pacman_conf(pacman_conf: &str, section: Option<&RepoSection>) -
     }
     out.push('\n');
     out.push_str(section.text());
+    out
+}
+
+/// A `pacman.conf` with every section named like this worker's `[repo]`
+/// section taken out, everything else kept as it was. Comments and blank lines
+/// stay too, wherever they are: they change nothing, and one just above the
+/// next section is usually about that section.
+///
+/// For a system upgrade: pacman acts on a package's `replaces=` only while
+/// upgrading, and `--noconfirm` accepts the replacement, so an upgrade that
+/// could see the repository would install a package AURCache built in place
+/// of what it names -- any installed package no earlier repository has by
+/// name, such as one since dropped from the official ones. pacman reads the
+/// databases a configuration lists and no others, so leaving the section out
+/// is enough.
+#[must_use]
+pub fn remove_from_pacman_conf(pacman_conf: &str, section: &RepoSection) -> String {
+    let Some(name) = section.text().lines().find_map(header) else {
+        return pacman_conf.to_string();
+    };
+    let mut out = String::new();
+    let mut inside = false;
+    for line in pacman_conf.split_inclusive('\n') {
+        if let Some(header) = header(line) {
+            inside = header == name;
+        }
+        let inert = line.trim().is_empty() || line.trim_start().starts_with('#');
+        if !inside || inert {
+            out.push_str(line);
+        }
+    }
     out
 }
 
@@ -429,6 +464,42 @@ mod tests {
             at("[repo]\nServer = http://[::1]:8081/$arch\n"),
             Some(endpoint("::1", 8081))
         );
+    }
+
+    /// The upgrade configuration is the build's without AURCache's
+    /// repository, and with every other section and line where it was.
+    #[test]
+    fn removing_the_section_takes_out_only_the_section() {
+        let section = RepoSection::parse(
+            "[aurcache]\nSigLevel = Never\nServer = http://aurcache:8081/$arch\n".into(),
+        )
+        .unwrap();
+        let job = "[options]\nHoldPkg = pacman\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        let build = format!(
+            "{}[options]\nCacheDir = /a /b\n",
+            append_to_pacman_conf(job, Some(&section))
+        );
+
+        let upgrade = remove_from_pacman_conf(&build, &section);
+
+        assert_eq!(
+            upgrade,
+            format!("{job}\n[options]\nCacheDir = /a /b\n"),
+            "{upgrade}"
+        );
+        assert!(!upgrade.contains("aurcache"), "{upgrade}");
+    }
+
+    /// The section is known by its name, so one whose server line changed
+    /// since it was written -- another host, another port -- still goes.
+    #[test]
+    fn removing_matches_the_section_by_name() {
+        let now = RepoSection::parse("[repo]\nServer = http://new:9000/$arch\n".into()).unwrap();
+        let conf =
+            "[core]\nInclude = x\n[repo]\nSigLevel = Never\nServer = http://old:8081/$arch\n";
+        assert_eq!(remove_from_pacman_conf(conf, &now), "[core]\nInclude = x\n");
+        // A configuration without it is left exactly as it was.
+        assert_eq!(remove_from_pacman_conf("[core]\n", &now), "[core]\n");
     }
 
     #[test]

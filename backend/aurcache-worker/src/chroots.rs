@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use aurcache_chroot::{BuildVolumes, Pool, PoolConfig, Usage};
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::report_warning;
+use aurcache_worker_core::repo::RepoSection;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -329,7 +330,8 @@ impl Chroots {
     /// Refreshing costs ~13s, and Arch's repositories move a few times a day,
     /// so it happens at most once per `WORKER_CHROOT_REFRESH_INTERVAL` rather
     /// than per build. Every build still syncs its own snapshot before it
-    /// starts (`makechrootpkg -u`); this bounds how much that has to fetch.
+    /// starts (see [`devtools::PacmanConfs`]); this bounds how much that has
+    /// to fetch.
     ///
     /// As a new snapshot, swapped in: the base is snapshotted to `root.next`,
     /// which is upgraded and checked, then exchanged into `root`'s place while
@@ -339,11 +341,16 @@ impl Chroots {
     /// holds up a build start, and a failed refresh leaves the base exactly as
     /// it was. See `design/implemented/btrfs-snapshots.md`.
     ///
-    /// `report_to` names who to tell about a problem preparing the chroot, and
-    /// the build to file it under -- `None` for `build-once`.
+    /// `pacman_conf` is what a new base is made from, and must not list
+    /// AURCache's repository; `repo` is that repository, which the upgrade
+    /// takes out of a base that does list it (see
+    /// [`devtools::upgrade_candidate`]). `report_to` names who to tell about a
+    /// problem preparing the chroot, and the build to file it under -- `None`
+    /// for `build-once`.
     pub async fn refresh(
         &self,
         pacman_conf: &Path,
+        repo: Option<&RepoSection>,
         report_to: Option<(&WorkerClient, i32)>,
     ) -> Result<PathBuf> {
         let guard = self.open_pool().await?;
@@ -415,11 +422,11 @@ impl Chroots {
         // warning, and `last` is stamped anyway, so a refresh that fails waits
         // out the interval instead of running before every build. Builds are
         // not exposed to the stale base by this: each still runs its own
-        // `makechrootpkg -u` in its snapshot, where the same failure shows up
+        // sync and upgrade in its snapshot, where the same failure shows up
         // in that build's log.
         let candidate = async {
             pool.snapshot_next().await?;
-            devtools::upgrade_candidate(&pool.next_root()).await?;
+            devtools::upgrade_candidate(&pool.next_root(), repo).await?;
             devtools::ensure_multilib(&pool.next_root()).await;
             devtools::ensure_utc_localtime(&pool.next_root()).await?;
             devtools::check_candidate(&pool.next_root()).await?;
