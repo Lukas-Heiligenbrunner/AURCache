@@ -56,11 +56,17 @@ fn logs() -> &'static std::path::Path {
     .path()
 }
 
+/// Held by an upgrade while it writes the logs, and by a test while it reads
+/// them. Every upgrade here writes the same files, and writing one truncates
+/// it first, so a read beside another test's upgrade can find it empty.
+static LOGS_IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A seeded 0.5.0 database, upgraded.
 async fn upgraded() -> DatabaseConnection {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     Migrator::up(&db, Some(UPSTREAM)).await.unwrap();
     db.execute_unprepared(SEED).await.unwrap();
+    let _logs = LOGS_IN_USE.lock().await;
     logs();
     Migrator::up(&db, None).await.unwrap();
     db
@@ -147,6 +153,7 @@ async fn a_0_5_database_is_upgraded() {
     );
     // Logs left the database, named after the build; an empty one made no
     // file.
+    let _logs = LOGS_IN_USE.lock().await;
     let read = |path: &str| std::fs::read_to_string(logs().join(path)).ok();
     assert_eq!(read("hello/1.log").as_deref(), Some("first log"));
     assert_eq!(read("hello/2.log"), None);
