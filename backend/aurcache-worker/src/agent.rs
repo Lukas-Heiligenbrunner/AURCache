@@ -291,7 +291,7 @@ pub const SANDBOX_POLICY: &str = "/etc/aurcache/sandbox-protected";
 
 /// The first Landlock ABI that can restrict connecting to pathname UNIX
 /// sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1).
-const RESOLVE_UNIX_ABI: i64 = 9;
+const RESOLVE_UNIX_ABI: libc::c_long = 9;
 
 /// How far a build that is not offered the key is kept from the agent, on
 /// this machine.
@@ -324,7 +324,7 @@ pub fn host_side_gate(data_dir: &Path) -> HostSideGate {
 }
 
 /// The kernel's Landlock ABI version, or a negative number without Landlock.
-fn landlock_abi() -> i64 {
+fn landlock_abi() -> libc::c_long {
     // SAFETY: `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
     // reads nothing and creates nothing; it only answers the version.
     unsafe {
