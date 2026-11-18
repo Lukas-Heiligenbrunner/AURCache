@@ -10,6 +10,7 @@ sidebar_position: 1
 |---|---|
 | `aurcache-server` | The server. This is what most setups want. |
 | `aurcache-worker` | A build worker. Multi-arch (`amd64`, `arm64`, `arm/v7`). |
+| `aurcache-worker-kube` | The Kubernetes worker, which builds each package in its own pod. |
 | `aurcache` | The hybrid compatibility image, for single-container compose files; see [Hybrid](../../workers/hybrid.md). |
 | `aurcache-builder-v2` | Spawned per build by the Docker worker, which the hybrid image runs. |
 | `aurcache-builder` | The image AURCache 0.5.0 builds in. No longer published; 0.5.0 keeps pulling the last one. |
