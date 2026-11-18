@@ -311,6 +311,7 @@ See [Mirrorlist](../Configuration/mirrorlist.md) for the server side.
 | Variable | Type | Description | Default |
 |---|---|---|---|
 | `WORKER_GIT_SSH_KEY` | Path | SSH key for authenticated sources. When set, no key is generated | generate one |
+| `WORKER_GIT_SSH_PACKAGES` | String | The only pkgbases this worker offers its SSH key to, comma separated; set but empty is none. Read from the environment only, never set by the server | every package the server's **Build SSH key** setting names a key for |
 | `WORKER_SSH_KNOWN_HOSTS` | Path | `known_hosts` naming the only hosts to trust when fetching sources. A build fails while it cannot be read | accept on first use |
 | `WORKER_BIND_MOUNTS` | String | Extra `host:chroot` mounts, comma separated | empty |
 
