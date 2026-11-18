@@ -12,7 +12,7 @@
 //! a pipe of its own, drained by a task of its own, because a full stderr pipe
 //! would stop stdout and the exit status with it.
 
-use crate::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin};
+use crate::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, PROMPT, Stdin};
 use crate::pod;
 use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
@@ -159,7 +159,7 @@ impl Cluster for KubeCluster {
 
     async fn sweep(&self) -> Result<usize> {
         let params = DeleteParams {
-            grace_period_seconds: Some(0),
+            grace_period_seconds: Some(u32::try_from(PROMPT.as_secs()).unwrap_or(1)),
             ..DeleteParams::default()
         };
         let list = ListParams::default().labels(&self.selector);
@@ -294,22 +294,22 @@ fn rejection(err: &kube::Error) -> Rejection {
 /// Whatever the API server itself answers with, other than a taken name,
 /// is what a pod created now would get too: not only admission's refusals,
 /// but a namespace that is not there (404), a webhook the server must ask
-/// and cannot (5xx), and a server shedding load (429). Only a question that
-/// reached no server leaves the answer open.
+/// and cannot (5xx), and a server shedding load (429). A question that
+/// reached no server says a create would reach none either.
 fn admission(err: &kube::Error) -> Admission {
     let kube::Error::Api(status) = err else {
-        return Admission::Unknown {
+        return Admission::Unreached {
             message: err.to_string(),
         };
     };
     match status.code {
-        409 => Admission::Unknown {
+        409 => Admission::Unjudged {
             message: "a pod of that name exists, so the dry run could not judge it".to_owned(),
         },
         400..=599 => Admission::Refused {
             message: describe(status),
         },
-        _ => Admission::Unknown {
+        _ => Admission::Unreached {
             message: err.to_string(),
         },
     }
@@ -626,16 +626,15 @@ mod tests {
     }
 
     #[test]
-    fn a_dry_run_that_could_not_judge_is_no_answer() {
-        for err in [
-            api(409, "AlreadyExists", "exists"),
-            kube::Error::LinesCodecMaxLineLengthExceeded,
-        ] {
-            assert!(
-                matches!(admission(&err), Admission::Unknown { .. }),
-                "for {err}"
-            );
-        }
+    fn a_taken_name_is_not_judged_and_no_server_is_not_reached() {
+        assert!(matches!(
+            admission(&api(409, "AlreadyExists", "exists")),
+            Admission::Unjudged { .. }
+        ));
+        assert!(matches!(
+            admission(&kube::Error::LinesCodecMaxLineLengthExceeded),
+            Admission::Unreached { .. }
+        ));
     }
 
     #[test]
@@ -1073,9 +1072,9 @@ mod live {
             cluster.log_tail(&name, "main", 1).await.unwrap(),
             "second\n"
         );
-        cluster.delete(&name, Duration::ZERO).await.unwrap();
+        cluster.delete(&name, PROMPT).await.unwrap();
         until(&cluster, &name, RUNNING, |pod| pod.is_none()).await;
-        cluster.delete(&name, Duration::ZERO).await.unwrap();
+        cluster.delete(&name, PROMPT).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1144,7 +1143,7 @@ mod live {
         assert_eq!(noisy.stdout, b"done\n");
         assert_eq!(noisy.end, ExecEnd::Succeeded);
 
-        cluster.delete(&name, Duration::ZERO).await.unwrap();
+        cluster.delete(&name, PROMPT).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1219,7 +1218,7 @@ mod live {
             "memory grew by {:.1} MiB",
             mib(peak.saturating_sub(before))
         );
-        cluster.delete(&name, Duration::ZERO).await.unwrap();
+        cluster.delete(&name, PROMPT).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1317,7 +1316,7 @@ mod live {
         assert_eq!(cluster.admits(&plain).await, Admission::Admitted);
         // The dry run created nothing: the name is still free.
         cluster.create(&plain).await.unwrap();
-        cluster.delete(&name, Duration::ZERO).await.unwrap();
+        cluster.delete(&name, PROMPT).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1344,7 +1343,7 @@ mod live {
         );
         cluster.create(&deadline(&first)).await.unwrap();
         let answer = cluster.admits(&deadline(&second)).await;
-        cluster.delete(&first, Duration::ZERO).await.unwrap();
+        cluster.delete(&first, PROMPT).await.unwrap();
         let Admission::Refused { message } = answer else {
             panic!("admitted past the quota ({answer:?}); is the quota from the setup there?");
         };
