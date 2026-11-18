@@ -550,6 +550,16 @@ impl Repository {
         }
     }
 
+    /// Record that what the repository lists may not all carry the key's
+    /// signature any more -- the component key that signs changed, and what
+    /// the old one signed waits to be signed again -- until a backfill finds
+    /// nothing left.
+    pub fn mark_unsigned(&self) {
+        if let Some(signing) = &self.signing {
+            signing.complete.store(false, Ordering::Release);
+        }
+    }
+
     /// Create the databases of every platform that has none yet, and the
     /// links pacman fetches their signatures through -- or, for a repository
     /// that does not sign, remove any signatures of its databases left from
@@ -677,6 +687,33 @@ impl Repository {
             }
         })
         .await?
+    }
+
+    /// The entries `platform`'s database lists whose file does not carry the
+    /// key's signature over what it is now: unsigned, signed by another key
+    /// or another of its subkeys, or with a `%PGPSIG%` that names the key but
+    /// is not over the file. Each file the key signed is read whole to tell,
+    /// on a blocking thread and without the lock: a change may land
+    /// meanwhile, which [`Update::resign`]'s caller checks.
+    pub async fn unsigned(&self, platform: Platform) -> anyhow::Result<Vec<ListedPackage>> {
+        let Some(key) = self.key_handle() else {
+            return Ok(Vec::new());
+        };
+        let listed = self.listed(platform).await?;
+        let dir = Self::platform_dir(&self.root, platform);
+        let unsigned = tokio::task::spawn_blocking(move || {
+            listed
+                .into_iter()
+                .filter(|entry| {
+                    !entry.signature.as_deref().is_some_and(|signature| {
+                        key.issued(signature)
+                            && key.verifies_file(signature, &dir.join(&entry.filename))
+                    })
+                })
+                .collect()
+        })
+        .await?;
+        Ok(unsigned)
     }
 
     /// Where a backfill stages copies of `platform`'s published files, to sign
@@ -2154,6 +2191,109 @@ mod tests {
 
     fn archive(repo: &Repository, name: &str) -> PathBuf {
         repo.root().join("x86_64").join(name)
+    }
+
+    /// A repository with a name of its own signs under that name: the links
+    /// pacman fetches the signatures through, the signatures an update
+    /// writes and the ones signed in place all carry it, and the sweep keeps
+    /// them all.
+    #[tokio::test]
+    async fn a_named_repository_signs_under_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path())
+            .with_name("custom_name".into())
+            .unwrap()
+            .with_key(InstanceKey::generate(None).unwrap());
+        repo.init().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let dir = tmp.path().join("x86_64");
+        for suffix in ["db", "files"] {
+            assert_eq!(
+                std::fs::read_link(dir.join(format!("custom_name.{suffix}.sig"))).unwrap(),
+                PathBuf::from(format!("custom_name.{suffix}.tar.gz.sig"))
+            );
+        }
+        repo.sign_databases(&db).await.unwrap();
+        assert!(signed(&repo, &dir.join("custom_name.db.tar.gz")));
+
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        for database in ["custom_name.db.tar.gz", "custom_name.files.tar.gz"] {
+            assert!(signed(&repo, &dir.join(database)), "{database}");
+        }
+        assert!(signed(&repo, &platform_file(&repo, "foo", "1.0-1")));
+        assert!(repo.unsigned(Platform::X86_64).await.unwrap().is_empty());
+        assert!(
+            !std::fs::read_dir(&dir).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("repo.")),
+            "something carries the default name"
+        );
+
+        let grace = Duration::from_secs(60);
+        let later = Instant::now() + grace * 2;
+        assert_eq!(repo.sweep_at(&db, later, grace).await.unwrap(), 0);
+        for suffix in ["db", "files"] {
+            assert!(
+                dir.join(format!("custom_name.{suffix}.tar.gz.sig"))
+                    .is_file()
+            );
+            assert!(dir.join(format!("custom_name.{suffix}.sig")).exists());
+        }
+    }
+
+    /// Renaming a signed repository renames its signatures with its
+    /// databases: a platform where only a signature of the old name is left
+    /// is refused like one with the old database, and renamed whole, it signs
+    /// under the new name with nothing to sign again.
+    #[tokio::test]
+    async fn a_signed_repository_is_renamed_with_its_signatures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join("key.asc");
+        InstanceKey::load_or_create(&key_path, None).unwrap();
+        let key = || InstanceKey::load(&key_path, None).unwrap();
+        let repo = Repository::new(tmp.path()).with_key(key());
+        repo.init().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        repo.sign_databases(&db).await.unwrap();
+
+        let dir = tmp.path().join("x86_64");
+        let moved = tmp.path().join("elsewhere");
+        std::fs::create_dir(&moved).unwrap();
+        std::fs::rename(dir.join(DB_ARCHIVE), moved.join(DB_ARCHIVE)).unwrap();
+        let renamed = || {
+            Repository::new(tmp.path())
+                .with_name("custom_name".into())
+                .unwrap()
+                .with_key(key())
+        };
+        let error = renamed().init().unwrap_err().to_string();
+        assert!(error.contains("their signatures"), "{error}");
+        std::fs::rename(moved.join(DB_ARCHIVE), dir.join(DB_ARCHIVE)).unwrap();
+
+        for platform in Platform::ALL {
+            let dir = Repository::platform_dir(tmp.path(), platform);
+            for suffix in ["db", "files"] {
+                for archive in [format!("{suffix}.tar.gz"), format!("{suffix}.tar.gz.sig")] {
+                    let old = dir.join(format!("repo.{archive}"));
+                    if old.exists() {
+                        std::fs::rename(&old, dir.join(format!("custom_name.{archive}"))).unwrap();
+                    }
+                }
+                for link in [format!("repo.{suffix}"), format!("repo.{suffix}.sig")] {
+                    let _ = std::fs::remove_file(dir.join(link));
+                }
+            }
+        }
+        let repo = renamed();
+        repo.init().unwrap();
+        assert!(signed(&repo, &dir.join("custom_name.db.tar.gz")));
+        assert!(repo.unsigned(Platform::X86_64).await.unwrap().is_empty());
+        assert_eq!(listed(&repo), ["foo-1.0-1"]);
     }
 
     /// A signing repository publishes each package with its detached

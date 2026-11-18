@@ -18,6 +18,7 @@ use pgp::composed::{
     SignedPublicKey, SignedSecretKey, SignedSecretSubKey, SubkeyParamsBuilder,
 };
 use pgp::crypto::hash::HashAlgorithm;
+use pgp::crypto::public_key::PublicKeyAlgorithm;
 use pgp::packet::{Signature, SignatureType, SubpacketData};
 use pgp::ser::Serialize;
 use pgp::types::{
@@ -40,6 +41,11 @@ const HASH: HashAlgorithm = HashAlgorithm::Sha512;
 
 /// How long before the key that signs expires the server starts saying so.
 const EXPIRY_NOTICE_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// How long before the key that signs expires the server moves on to the
+/// next one that signs, when there is one: time for everything to be signed
+/// again with it before clients refuse what the old one signed.
+pub const HANDOVER_SECS: u64 = 24 * 60 * 60;
 
 /// The instance key, unlocked and ready to sign.
 ///
@@ -81,6 +87,16 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
         Err(_) => false,
     };
     if !on {
+        for configured in [
+            server_env::AURCACHE_SIGNING_KEY_FILE,
+            server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE,
+        ] {
+            if configured.get_os().is_some() {
+                tracing::warn!(
+                    "{configured} is set, but {sign} is not on: the repository is not signed"
+                );
+            }
+        }
         return Ok(None);
     }
     let passphrase = server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE
@@ -94,36 +110,164 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
     Ok(Some(key))
 }
 
-/// A secret key, armored or binary.
+/// A secret key, armored or binary -- or one rPGP refuses only for how
+/// GnuPG wrote its checksum ([`gnupg_checksums`]), read with that checksum as
+/// rPGP computes it.
 fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
-    let armored = match SignedSecretKey::from_armor_single(bytes) {
-        Ok((key, _headers)) => return Ok(key),
-        Err(error) => error,
-    };
-    let binary = match SignedSecretKey::from_bytes(bytes) {
-        Ok(key) => return Ok(key),
-        Err(error) => error,
-    };
-    if [armored, binary]
-        .iter()
-        .any(|error| error.to_string().contains("Invalid checksum"))
+    if let Ok((key, _headers)) = SignedSecretKey::from_armor_single(bytes) {
+        return Ok(key);
+    }
+    if let Ok(key) = SignedSecretKey::from_bytes(bytes) {
+        return Ok(key);
+    }
+    let binary = dearmored(bytes).unwrap_or_else(|| bytes.to_vec());
+    if let Some(key) = gnupg_checksums(&binary)
+        .and_then(|repaired| SignedSecretKey::from_bytes(repaired.as_slice()).ok())
     {
-        bail!(UNREADABLE_UNPROTECTED);
+        return Ok(key);
     }
     bail!("not an OpenPGP secret key")
 }
 
-/// Why a key GnuPG reads can be refused here, and the way around it.
+/// The packets in `bytes`, when they are armored.
+fn dearmored(bytes: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    if !text.trim_start().starts_with("-----BEGIN PGP") {
+        return None;
+    }
+    let mut binary = Vec::new();
+    pgp::armor::Dearmor::new(text.trim_start().as_bytes())
+        .read_to_end(&mut binary)
+        .ok()?;
+    Some(binary)
+}
+
+/// The key packets in `binary` with the checksum of each unprotected
+/// Ed25519 secret GnuPG wrote in a way rPGP does not read, made what rPGP
+/// computes; `None` when there is none.
 ///
-/// rPGP (0.21) checks an unprotected secret key's checksum over its own
-/// encoding of the secret, not over the bytes in the file, and GnuPG writes
-/// an Ed25519 secret whose first byte is zero with a bit count rPGP does not
-/// keep -- about one secret in 256. A passphrase moves the check to the
-/// decrypted bytes, which rPGP gets right.
-const UNREADABLE_UNPROTECTED: &str = "its checksum does not match as rPGP, which reads \
-     signing keys here, computes it: GnuPG writes about one unprotected Ed25519 secret in \
-     256 that way. Lock it with a passphrase (gpg --passwd), export it again, and give the \
-     passphrase with AURCACHE_SIGNING_KEY_PASSPHRASE_FILE";
+/// rPGP (0.21) checks an unprotected secret's checksum over its own,
+/// canonical encoding of the secret rather than over the bytes in the file,
+/// and GnuPG writes a secret whose first byte is zero with a bit count of
+/// 256 -- about one secret in 256 -- so the two sums differ, and rPGP refuses
+/// a key GnuPG reads. Only a checksum right as GnuPG computes it is
+/// changed: a damaged key stays refused. The secret itself is the same.
+fn gnupg_checksums(binary: &[u8]) -> Option<Vec<u8>> {
+    let mut repaired = binary.to_vec();
+    let mut changed = false;
+    let mut at = 0;
+    while at < binary.len() {
+        let packet = packet_at(binary, at)?;
+        // A secret key or secret subkey.
+        if matches!(packet.tag, 5 | 7)
+            && let Some(fix) = eddsa_checksum(&binary[packet.body..packet.end])
+        {
+            let checksum = packet.body + fix.offset;
+            repaired[checksum..checksum + 2].copy_from_slice(&fix.checksum.to_be_bytes());
+            changed = true;
+        }
+        at = packet.end;
+    }
+    changed.then_some(repaired)
+}
+
+/// Where an OpenPGP packet's body is, and its tag.
+struct PacketSpan {
+    tag: u8,
+    body: usize,
+    end: usize,
+}
+
+/// The packet starting at `at` in `bytes`, if its header is one a key file
+/// has: either format, with a definite length.
+fn packet_at(bytes: &[u8], at: usize) -> Option<PacketSpan> {
+    let first = *bytes.get(at)?;
+    if first & 0x80 == 0 {
+        return None;
+    }
+    let be = |from: usize, len: usize| -> Option<usize> {
+        let field = bytes.get(from..from + len)?;
+        Some(field.iter().fold(0, |acc, b| (acc << 8) | usize::from(*b)))
+    };
+    let (tag, len, header) = if first & 0x40 != 0 {
+        let l1 = usize::from(*bytes.get(at + 1)?);
+        let (len, header) = match l1 {
+            0..=191 => (l1, 2),
+            192..=223 => (((l1 - 192) << 8) + be(at + 2, 1)? + 192, 3),
+            255 => (be(at + 2, 4)?, 6),
+            _ => return None,
+        };
+        (first & 0x3f, len, header)
+    } else {
+        let (len, header) = match first & 3 {
+            0 => (be(at + 1, 1)?, 2),
+            1 => (be(at + 1, 2)?, 3),
+            2 => (be(at + 1, 4)?, 5),
+            _ => return None,
+        };
+        ((first >> 2) & 0x0f, len, header)
+    };
+    let body = at + header;
+    let end = body.checked_add(len)?;
+    (end <= bytes.len()).then_some(PacketSpan { tag, body, end })
+}
+
+/// The checksum rPGP expects in an unprotected v4 Ed25519 (legacy EdDSA)
+/// secret key packet's `body`, and where it is, when GnuPG's differs only
+/// for writing the secret with a bit count rPGP does not keep.
+struct ChecksumFix {
+    offset: usize,
+    checksum: u16,
+}
+
+fn eddsa_checksum(body: &[u8]) -> Option<ChecksumFix> {
+    let byte = |i: usize| body.get(i).copied();
+    let u16_at = |i: usize| Some(u16::from_be_bytes([byte(i)?, byte(i + 1)?]));
+    // Version 4, then four bytes of creation time, then the algorithm.
+    if byte(0)? != 4 || byte(5)? != 22 {
+        return None;
+    }
+    let oid = usize::from(byte(6)?);
+    let point = 7 + oid;
+    let usage = point + 2 + usize::from(u16_at(point)?).div_ceil(8);
+    // Unprotected: the secret follows in the clear, then its checksum.
+    if byte(usage)? != 0 {
+        return None;
+    }
+    let mpi = usage + 1;
+    let declared = usize::from(u16_at(mpi)?);
+    let data = body.get(mpi + 2..mpi + 2 + declared.div_ceil(8))?;
+    let offset = mpi + 2 + data.len();
+    if offset + 2 != body.len() {
+        return None;
+    }
+    let sum = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .fold(0u16, |acc, b| acc.wrapping_add(u16::from(*b)))
+    };
+    if sum(&body[mpi..offset]) != u16_at(offset)? {
+        return None;
+    }
+    let canonical = significant_bits(data);
+    if canonical == declared {
+        return None;
+    }
+    let header = u16::try_from(canonical).ok()?.to_be_bytes();
+    Some(ChecksumFix {
+        offset,
+        checksum: sum(&header).wrapping_add(sum(data)),
+    })
+}
+
+/// How many bits `data`, a big-endian number, takes once its leading zeros
+/// are dropped -- what an MPI's bit count says.
+fn significant_bits(data: &[u8]) -> usize {
+    let Some(first) = data.iter().position(|b| *b != 0) else {
+        return 0;
+    };
+    (data.len() - first - 1) * 8 + (8 - data[first].leading_zeros() as usize)
+}
 
 /// The passphrase in `path`, without the newline an editor or `echo` leaves
 /// at its end.
@@ -205,12 +349,21 @@ impl InstanceKey {
     }
 
     fn new(key: SignedSecretKey, passphrase: Password) -> anyhow::Result<Self> {
+        let key = self_signed(key);
         key.verify_bindings()
             .context("the key's self-signatures do not verify")?;
         let now = now();
         let choice = choose(&key, now).ok_or_else(|| anyhow!(NOTHING_SIGNS))?;
         if let Some(notice) = expiry_notice(&key, choice, now) {
             tracing::warn!("{notice}");
+        }
+        if is_rsa(signing_algorithm(&key, choice.signer)) {
+            tracing::warn!(
+                "the repository's signing {} is an RSA key: it signs, but through an RSA \
+                 implementation with a known timing side channel (RUSTSEC-2023-0071); an \
+                 Ed25519 key, which the server generates, has none",
+                describe(&key, choice.signer)
+            );
         }
         let fingerprint = format!("{:X}", key.primary_key.fingerprint());
         let public_key = SignedPublicKey::from(key.clone())
@@ -280,6 +433,66 @@ impl InstanceKey {
         }
         .context("signing")?;
         Ok(signature.to_bytes()?)
+    }
+
+    /// What to tell the operator now about the key that signs: when it
+    /// expires and what signs after it, from [`EXPIRY_NOTICE_SECS`] before;
+    /// `None` until then, and for a key that does not expire.
+    #[must_use]
+    pub fn expiry_notice(&self) -> Option<String> {
+        let now = now();
+        expiry_notice(&self.key, choose(&self.key, now)?, now)
+    }
+
+    /// When the component key that signs now stops being the one that signs
+    /// -- [`HANDOVER_SECS`] before it expires, or when it expires -- as a
+    /// time from now; `None` when it never does. What it signed until then
+    /// is signed again by a backfill once it has changed.
+    #[must_use]
+    pub fn signer_changes_in(&self) -> Option<std::time::Duration> {
+        let now = now();
+        let expires = choose(&self.key, now)?.expires?;
+        let at = if expires.saturating_sub(HANDOVER_SECS) > now {
+            expires - HANDOVER_SECS
+        } else {
+            expires
+        };
+        Some(std::time::Duration::from_secs(at.saturating_sub(now)))
+    }
+
+    /// The fingerprint of the component key that signs now -- what tells one
+    /// signer from the next -- or `None` when nothing signs.
+    #[must_use]
+    pub fn signer_fingerprint(&self) -> Option<String> {
+        self.issuer()
+            .ok()
+            .map(|issuer| format!("{:X}", issuer.fingerprint))
+    }
+
+    /// Whether `signature` is this key's signature over the file at `path`,
+    /// read as it streams by rather than whole.
+    #[must_use]
+    pub fn verifies_file(&self, signature: &[u8], path: &Path) -> bool {
+        let Ok(parsed) = DetachedSignature::from_bytes(signature) else {
+            return false;
+        };
+        if parsed.signature.typ() != Some(SignatureType::Binary) {
+            return false;
+        }
+        let (Ok(signer), Ok(file)) = (self.signer(), std::fs::File::open(path)) else {
+            return false;
+        };
+        let file = BufReader::new(file);
+        match signer {
+            Signer::Primary => parsed
+                .signature
+                .verify(self.key.primary_key.public_key(), file)
+                .is_ok(),
+            Signer::Subkey(index) => parsed
+                .signature
+                .verify(self.key.secret_subkeys[index].key.public_key(), file)
+                .is_ok(),
+        }
     }
 
     /// A detached signature over the file at `path`.
@@ -392,9 +605,11 @@ struct Validity {
 /// The newest subkey that signs at `now`, else the primary key if it does, as
 /// GnuPG picks: a key this server generated signs with its one subkey, and
 /// one an operator supplies -- whose old subkeys may have expired -- with its
-/// newest valid one. `None` when nothing in it signs.
+/// newest valid one. Within [`HANDOVER_SECS`] of its expiry, a subkey gives
+/// way to one that signs for longer, if there is one. `None` when nothing in
+/// it signs.
 fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
-    let subkey = key
+    let candidates: Vec<Candidate> = key
         .secret_subkeys
         .iter()
         .enumerate()
@@ -405,7 +620,16 @@ fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
                 validity,
             })
         })
-        .max_by_key(|candidate| candidate.created);
+        .collect();
+    let lasting = candidates.iter().filter(|candidate| {
+        candidate
+            .validity
+            .expires
+            .is_none_or(|expires| expires > now + HANDOVER_SECS)
+    });
+    let subkey = lasting
+        .max_by_key(|candidate| candidate.created)
+        .or_else(|| candidates.iter().max_by_key(|candidate| candidate.created));
     match subkey {
         Some(candidate) => Some(Choice {
             signer: Signer::Subkey(candidate.index),
@@ -487,6 +711,53 @@ fn current(created: u64, sig: &Signature, now: u64) -> Option<Validity> {
         Some(at) if at <= now => None,
         _ => Some(Validity { expires }),
     }
+}
+
+/// `key` with only the signatures its own primary key made, which is what
+/// checking it takes: a certification someone else made -- a colleague's,
+/// which `gpg --export-secret-keys` includes -- says something about the key
+/// rather than being part of it, and rPGP's `verify_bindings` refuses one
+/// whose issuer it does not have. A user ID left with no signature goes too.
+fn self_signed(mut key: SignedSecretKey) -> SignedSecretKey {
+    let fingerprint = key.primary_key.fingerprint();
+    let id = key.primary_key.legacy_key_id();
+    let own = |sig: &Signature| {
+        let fingerprints = sig.issuer_fingerprint();
+        let ids = sig.issuer_key_id();
+        // Naming no issuer, it can only be checked against the key itself.
+        (fingerprints.is_empty() && ids.is_empty())
+            || fingerprints.contains(&&fingerprint)
+            || ids.contains(&&id)
+    };
+    let details = &mut key.details;
+    details.direct_signatures.retain(own);
+    details.revocation_signatures.retain(own);
+    for user in &mut details.users {
+        user.signatures.retain(own);
+    }
+    details.users.retain(|user| !user.signatures.is_empty());
+    for attribute in &mut details.user_attributes {
+        attribute.signatures.retain(own);
+    }
+    details
+        .user_attributes
+        .retain(|attribute| !attribute.signatures.is_empty());
+    key
+}
+
+/// The algorithm of the component key `signer` of `key`.
+fn signing_algorithm(key: &SignedSecretKey, signer: Signer) -> PublicKeyAlgorithm {
+    match signer {
+        Signer::Primary => key.primary_key.algorithm(),
+        Signer::Subkey(index) => key.secret_subkeys[index].key.algorithm(),
+    }
+}
+
+fn is_rsa(algorithm: PublicKeyAlgorithm) -> bool {
+    matches!(
+        algorithm,
+        PublicKeyAlgorithm::RSA | PublicKeyAlgorithm::RSASign
+    )
 }
 
 /// Whether `sig` carries a key flags subpacket at all.
@@ -945,7 +1216,8 @@ mod tests {
     }
 
     /// A signing subkey close to expiring is announced, with what signs once
-    /// it has; at that time the next one signs.
+    /// it has; a day before it expires the next one signs, which is when the
+    /// signer changes.
     #[test]
     fn a_subkey_close_to_expiring_is_announced() {
         let tmp = tempfile::tempdir().unwrap();
@@ -977,37 +1249,146 @@ mod tests {
             "{notice}"
         );
 
-        let after = choose(&key.key, choice.expires.unwrap()).unwrap();
+        let expires = choice.expires.unwrap();
+        let changes_in = key.signer_changes_in().unwrap().as_secs();
+        assert!(
+            (expires - HANDOVER_SECS - now).abs_diff(changes_in) <= 5,
+            "{changes_in}"
+        );
+        let handed_over = choose(&key.key, expires - HANDOVER_SECS + 1).unwrap();
+        assert_eq!(handed_over.signer, Signer::Subkey(0));
+        let after = choose(&key.key, expires).unwrap();
         assert_eq!(after.signer, Signer::Subkey(0));
         assert_eq!(expiry_notice(&key.key, after, now), None);
     }
 
-    /// About one unprotected Ed25519 key GnuPG exports in 256 -- a secret
-    /// beginning with a zero byte -- is one rPGP refuses ("Invalid
-    /// checksum"), though GnuPG reads it: refused here with the way around it,
-    /// which this same key, locked with `gpg --passwd`, shows works. When this
-    /// test fails because the key loads, rPGP reads such keys, and the advice
-    /// can go.
+    /// A supplied key someone else certified -- a colleague's signature on
+    /// its user ID, which `gpg --export-secret-keys` includes -- loads: only
+    /// its own signatures are checked, and it signs what GnuPG verifies.
     #[test]
-    fn a_gnupg_key_rpgp_cannot_read_is_refused_with_the_way_around_it() {
+    fn a_key_someone_else_certified_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped: gpg is not installed");
+            return;
+        };
+        let Some(ours) = gpg.make("Certified <ops@localhost>", "cert", "") else {
+            return;
+        };
+        let added = gpg.unattended(&["--quick-add-key", &ours, "ed25519", "sign", "never"]);
+        assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
+        let Some(colleague) = gpg.make("Colleague <colleague@localhost>", "cert", "") else {
+            return;
+        };
+        let certified = gpg.unattended(&[
+            "--yes",
+            "--default-key",
+            &colleague,
+            "--quick-sign-key",
+            &ours,
+        ]);
+        assert!(
+            certified.success,
+            "gpg --quick-sign-key: {}",
+            certified.stderr
+        );
+        let exported = gpg.export("--export-secret-keys", &ours, "");
+        let parsed = SignedSecretKey::from_bytes(exported.as_slice()).unwrap();
+        assert!(
+            parsed
+                .details
+                .users
+                .iter()
+                .flat_map(|user| &user.signatures)
+                .any(|sig| sig
+                    .issuer_fingerprint()
+                    .iter()
+                    .any(|issuer| format!("{issuer:X}") == colleague)),
+            "the export carries the colleague's certification"
+        );
+        assert!(
+            parsed.verify_bindings().is_err(),
+            "rPGP checks a certification it has no key for again; `self_signed` may go"
+        );
+        let path = tmp.path().join("certified.gpg");
+        std::fs::write(&path, &exported).unwrap();
+
+        let key = InstanceKey::load(&path, None).unwrap();
+        assert_eq!(key.fingerprint(), ours);
+        let content = tmp.path().join("content");
+        std::fs::write(&content, CONTENT).unwrap();
+        let signature = tmp.path().join("content.sig");
+        std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
+        let verified = gpg.verify([signature.to_str().unwrap(), content.to_str().unwrap()]);
+        assert!(verified.success, "gpg --verify: {}", verified.stderr);
+        assert!(key.verifies_file(&std::fs::read(&signature).unwrap(), &content));
+        std::fs::write(&content, b"something else").unwrap();
+        assert!(!key.verifies_file(&std::fs::read(&signature).unwrap(), &content));
+    }
+
+    /// About one unprotected Ed25519 secret GnuPG exports in 256 -- one
+    /// beginning with a zero byte -- is one rPGP refuses ("Invalid checksum"),
+    /// though GnuPG reads it: read here all the same, with only its checksum
+    /// changed, and what it signs is what GnuPG verifies. A protected copy
+    /// of the same key never had the problem.
+    #[test]
+    fn a_gnupg_key_rpgp_would_refuse_for_its_checksum_signs() {
+        let refused = include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg");
+        assert!(
+            SignedSecretKey::from_bytes(&refused[..]).is_err(),
+            "rPGP reads such keys now; `gnupg_checksums` can go"
+        );
+        let repaired = gnupg_checksums(refused).unwrap();
+        let differing = refused
+            .iter()
+            .zip(&repaired)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!((1..=2).contains(&differing), "{differing} bytes changed");
+        let generated = InstanceKey::generate(None).unwrap();
+        assert!(gnupg_checksums(&generated.key.to_bytes().unwrap()).is_none());
+
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("unprotected.gpg");
+        std::fs::write(&path, refused).unwrap();
+        let key = InstanceKey::load(&path, None).unwrap();
+        let protected = tmp.path().join("protected.gpg");
         std::fs::write(
-            &path,
-            include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg"),
-        )
-        .unwrap();
-        let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
-        assert!(error.contains(UNREADABLE_UNPROTECTED), "{error}");
-
-        let path = tmp.path().join("protected.gpg");
-        std::fs::write(
-            &path,
+            &protected,
             include_bytes!("../testdata/gnupg-protected-leading-zero.gpg"),
         )
         .unwrap();
-        let key = InstanceKey::load(&path, Some("testpw")).unwrap();
-        assert!(key.verifies(&key.sign(CONTENT).unwrap(), CONTENT));
+        assert_eq!(
+            InstanceKey::load(&protected, Some("testpw"))
+                .unwrap()
+                .fingerprint(),
+            key.fingerprint()
+        );
+
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped the GnuPG check: gpg is not installed");
+            return;
+        };
+        // A primary key that signs, and a signing subkey under a primary
+        // that only certifies, each with the secret GnuPG wrote that way.
+        let subkey = tmp.path().join("subkey.gpg");
+        std::fs::write(
+            &subkey,
+            include_bytes!("../testdata/gnupg-unprotected-leading-zero-subkey.gpg"),
+        )
+        .unwrap();
+        let by_subkey = InstanceKey::load(&subkey, None).unwrap();
+        assert_eq!(by_subkey.signer().unwrap(), Signer::Subkey(0));
+        for (key, file) in [(&key, &path), (&by_subkey, &subkey)] {
+            let imported = gpg.unattended(&["--import", file.to_str().unwrap()]);
+            assert!(imported.success, "gpg --import: {}", imported.stderr);
+            let content = tmp.path().join("content");
+            std::fs::write(&content, CONTENT).unwrap();
+            let signature = tmp.path().join("content.sig");
+            std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
+            let verified = gpg.verify([signature.to_str().unwrap(), content.to_str().unwrap()]);
+            assert!(verified.success, "gpg --verify: {}", verified.stderr);
+        }
     }
 
     /// A throwaway GnuPG home, whose agent is stopped when it is dropped.

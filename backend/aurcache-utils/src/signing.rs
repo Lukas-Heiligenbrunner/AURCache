@@ -66,10 +66,12 @@ struct Pass {
     problems: Vec<String>,
 }
 
-/// A published file's copy, signed and described.
+/// A published file's copy, signed and described, with the entry the
+/// database had for it when it was found not signed.
 struct Staged {
     path: PathBuf,
     entry: PackageEntry,
+    before: ListedPackage,
 }
 
 async fn backfill_platform(
@@ -78,13 +80,7 @@ async fn backfill_platform(
     key: &InstanceKey,
     platform: Platform,
 ) -> anyhow::Result<Pass> {
-    let unsigned: Vec<String> = repo
-        .listed(platform)
-        .await?
-        .into_iter()
-        .filter(|listed| !signed_by(key, listed))
-        .map(|listed| listed.filename)
-        .collect();
+    let unsigned = repo.unsigned(platform).await?;
     let mut pass = Pass::default();
     if unsigned.is_empty() {
         return Ok(pass);
@@ -95,10 +91,12 @@ async fn backfill_platform(
     discard(repo, platform).await;
     for batch in unsigned.chunks(BATCH) {
         let mut staged = Vec::with_capacity(batch.len());
-        for filename in batch {
-            match stage(repo, platform, filename).await {
+        for before in batch {
+            match stage(repo, platform, before).await {
                 Ok(copy) => staged.push(copy),
-                Err(e) => pass.problems.push(format!("{platform}/{filename}: {e:#}")),
+                Err(e) => pass
+                    .problems
+                    .push(format!("{platform}/{}: {e:#}", before.filename)),
             }
         }
         pass.signed += resign(db, repo, key, platform, staged, &mut pass.problems).await?;
@@ -107,15 +105,24 @@ async fn backfill_platform(
     Ok(pass)
 }
 
-/// Copy, sign and describe one published file.
-async fn stage(repo: &Repository, platform: Platform, filename: &str) -> anyhow::Result<Staged> {
-    let path = repo.stage_published(platform, filename).await?;
+/// Copy, sign and describe the published file `before` lists.
+async fn stage(
+    repo: &Repository,
+    platform: Platform,
+    before: &ListedPackage,
+) -> anyhow::Result<Staged> {
+    let path = repo.stage_published(platform, &before.filename).await?;
     let entry = repo.describe(path.clone()).await?;
-    Ok(Staged { path, entry })
+    Ok(Staged {
+        path,
+        entry,
+        before: before.clone(),
+    })
 }
 
 /// Replace the entries of the files `staged` copied, in one update, where the
-/// repository still lists the same file unsigned. Returns how many it did.
+/// repository still lists the same file -- found not signed by the key over
+/// what it is, before the lock. Returns how many it did.
 async fn resign(
     db: &DatabaseConnection,
     repo: &Repository,
@@ -135,18 +142,30 @@ async fn resign(
         .map(|listed| (listed.filename.clone(), listed))
         .collect();
     let mut count = 0;
-    for Staged { path, entry } in staged {
+    for Staged {
+        path,
+        entry,
+        before,
+    } in staged
+    {
         match listed.get(&entry.filename) {
             // Retired since: nothing to sign.
             None => {}
-            // Published again since, and signed by that.
-            Some(now) if signed_by(key, now) => {}
-            Some(now) if now.sha256sum.as_deref() == Some(entry.sha256sum.as_str()) => {
+            // Published again since: signed as it was, or left to the next run.
+            Some(now) if now.sha256sum != before.sha256sum => {
+                if !signed_by(key, now) {
+                    problems.push(format!(
+                        "{platform}/{}: not the file that was signed any more",
+                        entry.filename
+                    ));
+                }
+            }
+            Some(_) if before.sha256sum.as_deref() == Some(entry.sha256sum.as_str()) => {
                 update.resign(platform, path, entry);
                 count += 1;
             }
             Some(_) => problems.push(format!(
-                "{platform}/{}: not the file that was signed any more",
+                "{platform}/{}: the file is not the one its entry describes",
                 entry.filename
             )),
         }
@@ -157,7 +176,8 @@ async fn resign(
     Ok(count)
 }
 
-/// Whether `listed`'s entry carries a signature `key` made.
+/// Whether `listed`'s entry carries a signature `key` made: what an entry
+/// the repository published since, through [`Repository::describe`], does.
 fn signed_by(key: &InstanceKey, listed: &ListedPackage) -> bool {
     listed
         .signature
@@ -310,9 +330,8 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         let key = repo.key().unwrap();
-        let copy = stage(&repo, Platform::X86_64, &filename("foo"))
-            .await
-            .unwrap();
+        let listed = repo.listed(Platform::X86_64).await.unwrap();
+        let copy = stage(&repo, Platform::X86_64, &listed[0]).await.unwrap();
         publish(&db, &unsigned, 2, "foo", "two").await;
         let db_before = std::fs::read(platform_file(tmp.path(), "repo.db.tar.gz")).unwrap();
 
@@ -326,6 +345,45 @@ mod tests {
             std::fs::read(platform_file(tmp.path(), "repo.db.tar.gz")).unwrap(),
             db_before
         );
+    }
+
+    /// An entry whose `%PGPSIG%` names the key but is not over its file --
+    /// what an issuer check alone would take for signed -- is signed again,
+    /// and so is the file beside it.
+    #[tokio::test]
+    async fn a_signature_that_only_names_the_key_is_signed_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
+        repo.init().unwrap();
+        let key = repo.key().unwrap();
+        let dir = repo.staging_dir(1);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(filename("foo"));
+        std::fs::write(&path, fake_pkg_zst("foo", "1.0-1", "one")).unwrap();
+        let mut beside = path.as_os_str().to_owned();
+        beside.push(".sig");
+        std::fs::write(&beside, key.sign(&b"something else"[..]).unwrap()).unwrap();
+        let entry = pacman_repo_utils::describe_package(&path).unwrap();
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, path, entry);
+        update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
+        let published = platform_file(tmp.path(), &filename("foo"));
+        let listed = repo.listed(Platform::X86_64).await.unwrap();
+        assert!(key.issued(listed[0].signature.as_deref().unwrap()));
+        assert_eq!(repo.unsigned(Platform::X86_64).await.unwrap().len(), 1);
+
+        assert_eq!(
+            backfill(&db, &repo).await.unwrap(),
+            Backfill::Complete { signed: 1 }
+        );
+        let listed = repo.listed(Platform::X86_64).await.unwrap();
+        assert!(key.verifies_file(listed[0].signature.as_deref().unwrap(), &published));
+        assert!(signed_beside(key, &published));
+        assert!(repo.unsigned(Platform::X86_64).await.unwrap().is_empty());
     }
 
     /// A repository that does not sign has nothing to backfill.
