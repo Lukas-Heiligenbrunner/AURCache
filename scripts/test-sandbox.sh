@@ -11,6 +11,11 @@
 # without the sandbox. A widened allow-list that reopens a hole turns the
 # "unconfined" leg green in the confined run, and this test red.
 #
+# The same two legs check the patched script's other duty: the build's system
+# upgrade never sees AURCache's repository, where a package's `replaces=`
+# would take effect. Stock `makechrootpkg -u` takes a bait from it; the
+# patched script, given the worker's two configurations, must not.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -61,7 +66,7 @@ mount -t tmpfs tmpfs /run 2>/dev/null || true
 # The only difference between the legs is which script builds: the patched
 # copy, as the worker runs it, or the stock one from /usr/bin.
 if [[ $mode == confined ]]; then
-    build=(/usr/lib/aurcache/bin/aurcache-build --interface=1)
+    build=(/usr/lib/aurcache/bin/aurcache-build "--interface=$(/usr/lib/aurcache/bin/aurcache-build --interface)")
 else
     build=(/usr/bin/makechrootpkg)
 fi
@@ -85,8 +90,38 @@ chown -R builder: /job /shared
 
 [[ -d /chroot/root ]] || mkarchroot -C /etc/pacman.conf -M /etc/makepkg.conf /chroot/root base-devel git >/dev/null 2>&1
 
+# The build's upgrade must not see AURCache's repository: pacman acts on
+# `replaces=` only while upgrading. What a repository listed last can replace
+# is an installed package no earlier one has (one since dropped from the
+# official repositories), so the chroot gets one, and a local repository named
+# like AURCache's gets a bait that replaces it.
+for p in stale bait; do
+    mkdir -p "/job/$p" && cd "/job/$p"
+    printf 'pkgname=aurcache-%s\npkgver=1\npkgrel=1\narch=(any)\npackage() { :; }\n' "$p" > PKGBUILD
+    [[ $p == bait ]] && printf '%s=(aurcache-stale)\n' provides conflicts replaces >> PKGBUILD
+    chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
+done
+cp /job/stale/aurcache-stale-1-1-any.pkg.tar.zst /chroot/root/stale.pkg.tar.zst
+arch-nspawn /chroot/root pacman -U --noconfirm /stale.pkg.tar.zst >/dev/null 2>&1
+mkdir -p /srv/aurcache && cp /job/bait/*.pkg.tar.zst /srv/aurcache/
+repo-add -q /srv/aurcache/aurcache.db.tar.gz /srv/aurcache/*.pkg.tar.zst
+section=$'\n[aurcache]\nSigLevel = Never\nServer = file:///srv/aurcache\n'
+cp /etc/pacman.conf /srv/pacman-upgrade.conf
+{ cat /etc/pacman.conf; printf '%s' "$section"; } > /srv/pacman-build.conf
+# Both legs start from a base that lists the repository, as one made from a
+# configuration that did; only the invocation differs.
+cp /srv/pacman-build.conf /chroot/root/etc/pacman.conf
+if [[ $mode == confined ]]; then
+    # As the worker runs it: sync with the build's configuration, upgrade with
+    # the upgrade's.
+    confs=(AURCACHE_PACMAN_CONF=/srv/pacman-build.conf AURCACHE_UPGRADE_CONF=/srv/pacman-upgrade.conf)
+else
+    confs=()
+    build+=(-u)
+fi
+
 cd /job/pkg
-sudo -u builder env SRCDEST=/job/srcdest "${build[@]}" -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
+sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"
@@ -98,6 +133,8 @@ echo "workdir=$([ -e /shared/work-other/EVIL_pkgbuild ] && echo written || echo 
 echo "mktemp=$([ -s /job/pkg/mktemp-ok ] && echo works || echo broken)"
 echo "sshkey=$([ -s /job/pkg/stolen-ssh ] && echo read || echo blocked)"
 echo "mtlskey=$([ -s /job/pkg/stolen-mtls ] && echo read || echo blocked)"
+# What the build's copy has installed under the stale package's name.
+echo "upgrade=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-stale 2>&1)"
 EOF
 
 docker build -q -t "$IMAGE" "$WORKDIR" >/dev/null
@@ -126,6 +163,7 @@ check "unconfined: writes other srcdest"    pwned   "$(get srcdest  "$unconfined
 check "unconfined: writes other workdir"    written "$(get workdir  "$unconfined")"
 check "unconfined: reads ssh key"          read    "$(get sshkey   "$unconfined")"
 check "unconfined: reads mTLS identity"    read    "$(get mtlskey  "$unconfined")"
+check "unconfined: upgrade takes the bait" aurcache-bait "$(get upgrade "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -134,6 +172,7 @@ check "confined:   ssh key unreadable"     blocked "$(get sshkey   "$confined")"
 check "confined:   mTLS identity unreadable" blocked "$(get mtlskey "$confined")"
 check "confined:   mktemp still works"     works   "$(get mktemp    "$confined")"
 check "confined:   build still succeeds"    0       "$(get build_exit "$confined")"
+check "confined:   upgrade never sees AURCache's repository" aurcache-stale "$(get upgrade "$confined")"
 
 if (( fail )); then
     echo "==> FAILED"

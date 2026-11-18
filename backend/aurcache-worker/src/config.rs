@@ -71,7 +71,7 @@ pub struct Tunables {
     ///
     /// This bounds how stale the *shared* base may be, not what a build sees:
     /// every build syncs its own chroot copy before it starts
-    /// (`makechrootpkg -u`, see [`crate::build::build_command`]), because
+    /// (see [`crate::devtools::PacmanConfs`]), because
     /// AURCache's own repository moves whenever a build finishes rather than a
     /// few times a day. Keeping the base close to current is what leaves that
     /// per-build sync with nothing to download.

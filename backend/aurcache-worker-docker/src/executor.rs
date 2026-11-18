@@ -40,6 +40,10 @@ const CONTAINER_PKGDEST: &str = "/output";
 const CONTAINER_SRC: &str = "/output/src";
 /// Where the job's makepkg config is written, inside the bind mount.
 const MAKEPKG_CONF_PATH: &str = "/output/makepkg.conf";
+/// The `pacman.conf` the container is upgraded from, in the build directory:
+/// the job's, without AURCache's repository. Read by path rather than bound
+/// over a file, since no package owns it.
+const UPGRADE_CONF_NAME: &str = "pacman-upgrade.conf";
 const BUILD_USER: &str = "ab";
 
 /// Builds each package in a container spawned from the builder image.
@@ -195,13 +199,18 @@ impl DockerExecutor {
         }
 
         // The server sends no `[repo]` section; append the one rendered for the
-        // host this worker reaches the server on.
+        // host this worker reaches the server on. The job's configuration as
+        // it came is what the container is upgraded from: see
+        // `commands::build_build_command`.
         let pacman_conf =
             aurcache_worker_core::repo::append_to_pacman_conf(&job.pacman_conf, client.repo());
         let path = local_dir.join("pacman.conf");
         std::fs::write(&path, &pacman_conf)
             .with_context(|| format!("writing {}", path.display()))?;
         binds.push(etc_bind(host_dir, "pacman.conf", "/etc/pacman.conf"));
+        let path = local_dir.join(UPGRADE_CONF_NAME);
+        std::fs::write(&path, &job.pacman_conf)
+            .with_context(|| format!("writing {}", path.display()))?;
 
         let cmd = commands::wrap_with_config(
             &commands::with_layout(&job.makepkg_conf, CONTAINER_PKGDEST),
@@ -211,6 +220,7 @@ impl DockerExecutor {
                 &job.build_flags,
                 Path::new(CONTAINER_SRC),
                 MAKEPKG_CONF_PATH,
+                &format!("{CONTAINER_PKGDEST}/{UPGRADE_CONF_NAME}"),
             ),
         );
 

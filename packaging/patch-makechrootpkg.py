@@ -5,7 +5,8 @@ Mostly the first. The `arch-nspawn` wrapper patch is not about confinement
 and says so; it opts out of a systemd-nspawn default that is about to change.
 The three after it close the other direction: links the build leaves in its
 output directories, which `makechrootpkg` would otherwise `chown` through as
-root on the host.
+root on the host. The upgrade patch keeps one build's output from reaching
+into the next: see its comment.
 
 A PKGBUILD is bash. Sourcing one runs it. `makechrootpkg` does that twice
 *outside* the chroot, as the build user:
@@ -53,7 +54,7 @@ DST = os.environ.get("AURCACHE_BUILD_DST", "/usr/lib/aurcache/bin/aurcache-build
 # The interface the copy speaks, as `aurcache_worker::build::INTERFACE` (a unit
 # test there checks the two agree). Bump both when the worker starts relying on
 # something a copy derived by the previous version of this file would not do.
-INTERFACE = "1"
+INTERFACE = "2"
 
 
 def _no_follow(description: str, var: str) -> tuple[str, str, str]:
@@ -228,7 +229,69 @@ prepare_chroot
         'SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER "${BASH_SOURCE[0]}" "$@"',
         "check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,"
         "SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER,AURCACHE_DROPIN,"
-        f'AURCACHE_NSPAWN_KEEP_UNIT "${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
+        "AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF "
+        f'"${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
+    ),
+    (
+        # `-u` runs `pacman -Syuu` in the copy with every repository its
+        # pacman.conf lists -- for the worker, AURCache's own among them. An
+        # upgrade is where pacman acts on `replaces=`, and `--noconfirm`
+        # accepts the replacement. pacman looks for an installed package's
+        # replacement in each repository in turn, stopping at the first that
+        # has it by name, and AURCache's comes last: what it can replace is an
+        # installed package no official repository has any more, which a base
+        # chroot refreshed in place keeps. A package AURCache built that
+        # declares `replaces=` for one would be installed as root into every
+        # later build, including builds that do not depend on it, and so into
+        # their output.
+        #
+        # So `-u` is refused, and the worker hands over two configurations
+        # instead (`aurcache_worker::devtools::PacmanConfs`): the build's, with
+        # AURCache's repository, and the upgrade's, the same without it. Both
+        # are installed into the copy; every database the build's lists is
+        # synced; the system is upgraded reading only those the upgrade's
+        # lists, since pacman loads the databases a configuration names and no
+        # others; and the build installs its dependencies with the build's,
+        # through `pacman -S`, which ignores `replaces=`. One sync rather than
+        # one per configuration, so the build installs from exactly the
+        # databases the system was upgraded against.
+        #
+        # `-uu`, as devtools does: with only the operator's repositories in
+        # the configuration, a downgrade can only be to what those serve.
+        #
+        # Either step failing fails the build. A system left un-upgraded
+        # against databases already synced is a partial upgrade, which the
+        # dependency install would then build on.
+        #
+        # Neither variable set (anyone running this copy by hand) skips the
+        # sync, as `makechrootpkg` without `-u` does.
+        "-u refused; the copy synced, then upgraded without AURCache's repository",
+        '(( update_first )) && arch-nspawn "$copydir" \\\n'
+        '\t\t--machine="$(machine_name upgrade-packages)" \\\n'
+        '\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\\n'
+        "\t\tpacman -Syuu --noconfirm\n",
+        """(( update_first )) &&
+\tdie 'aurcache-build does not take -u, which upgrades with every repository the chroot lists; set AURCACHE_PACMAN_CONF and AURCACHE_UPGRADE_CONF instead'
+
+if [[ -n ${AURCACHE_PACMAN_CONF:-} || -n ${AURCACHE_UPGRADE_CONF:-} ]]; then
+\t[[ -n ${AURCACHE_PACMAN_CONF:-} && -n ${AURCACHE_UPGRADE_CONF:-} ]] ||
+\t\tdie 'AURCACHE_PACMAN_CONF and AURCACHE_UPGRADE_CONF are set together or not at all'
+\tinstall -Dm644 "$AURCACHE_PACMAN_CONF" "$copydir/etc/pacman.conf" ||
+\t\tdie "Unable to install %s" "$AURCACHE_PACMAN_CONF"
+\tinstall -Dm644 "$AURCACHE_UPGRADE_CONF" "$copydir/etc/aurcache/pacman-upgrade.conf" ||
+\t\tdie "Unable to install %s" "$AURCACHE_UPGRADE_CONF"
+\tarch-nspawn "$copydir" \\
+\t\t--machine="$(machine_name sync-databases)" \\
+\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\tpacman -Sy --noconfirm ||
+\t\tdie "Could not sync the package databases."
+\tarch-nspawn "$copydir" \\
+\t\t--machine="$(machine_name upgrade-packages)" \\
+\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\tpacman -Suu --noconfirm --config /etc/aurcache/pacman-upgrade.conf ||
+\t\tdie "Could not upgrade the chroot."
+fi
+""",
     ),
     (
         "direct `source PKGBUILD` for pkgbase/pkgname",

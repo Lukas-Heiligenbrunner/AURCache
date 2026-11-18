@@ -34,7 +34,7 @@ pub const SCRIPT: &str = "/usr/lib/aurcache/bin/aurcache-build";
 /// Must equal `INTERFACE` in `packaging/patch-makechrootpkg.py`; bump both
 /// when the worker starts relying on something a copy derived by the previous
 /// patcher would not do.
-pub const INTERFACE: &str = "1";
+pub const INTERFACE: &str = "2";
 
 /// Refuse to start unless [`SCRIPT`] is there and speaks [`INTERFACE`].
 ///
@@ -118,23 +118,26 @@ pub fn build_command(
     // would run the build, and a build could then read the worker's mTLS
     // identity and credentials by ordinary file permissions.
     argv.extend(["-U".to_string(), build_user.to_string()]);
-    // `pacman -Syuu` inside *this build's* copy, before the build starts.
+    // No `-u`, whose `pacman -Syuu` upgrades with every repository the copy
+    // lists, AURCache's included -- and an upgrade is where pacman acts on a
+    // package's `replaces=`. [`SCRIPT`] syncs and upgrades this build's copy
+    // itself, from the configurations the caller names in its environment
+    // (`crate::devtools::PacmanConfs`), and refuses `-u`.
     //
-    // The shared base is only refreshed on an interval
-    // (`WORKER_CHROOT_REFRESH_INTERVAL`, 15 minutes by default), which is right
-    // for Arch's repositories -- they move a few times a day -- and wrong for
-    // AURCache's own, which moves whenever a build here finishes. A dependency
-    // this very server built two minutes ago is in the repository and absent
-    // from the base chroot's sync databases, so the build that was unblocked by
-    // it cannot see the thing that unblocked it. That is what failed
-    // lib32-leptonica twice.
+    // Per copy, before the build starts, because the shared base is only
+    // refreshed on an interval (`WORKER_CHROOT_REFRESH_INTERVAL`, 15 minutes by
+    // default). That is right for Arch's repositories -- they move a few times
+    // a day -- and wrong for AURCache's own, which moves whenever a build here
+    // finishes: a dependency this very server built two minutes ago is in the
+    // repository and absent from the base chroot's sync databases, so the
+    // build that was unblocked by it could not see the thing that unblocked it.
     //
-    // Doing it per copy rather than by refreshing the base is what keeps it
-    // cheap: the copy is this build's alone, so nothing is locked, nothing is
-    // serialised behind it, and concurrent builds each do their own. The
-    // interval refresh still earns its keep -- it is what leaves this one with
-    // nothing to download on the large majority of builds.
-    argv.push("-u".to_string());
+    // Per copy rather than by refreshing the base is what keeps it cheap: the
+    // copy is this build's alone, so nothing is locked, nothing is serialised
+    // behind it, and concurrent builds each do their own. The interval refresh
+    // still earns its keep -- it is what leaves this one with nothing to
+    // download on the large majority of builds.
+
     // `SRCDEST` is passed through the environment instead of a bind mount:
     // devtools reads it directly and binds it itself, which avoids competing
     // with its own `--bind=$SRCDEST:/srcdest`.
@@ -245,19 +248,32 @@ mod tests {
         );
         assert!(!cmd.iter().any(|a| a == "systemd-run"));
         assert!(!cmd.iter().any(|a| a == "--pkgdest"));
-        assert!(joined.contains("aurcache-build --interface=1 -r /chroot -l job-42"));
+        assert!(joined.contains(&format!(
+            "aurcache-build --interface={INTERFACE} -r /chroot -l job-42"
+        )));
         // Builds must never inherit the worker's user via SUDO_USER.
         assert!(joined.contains("-U builder"));
         assert!(joined.contains("-- --nocheck"));
     }
 
-    /// Every build syncs its own chroot first. The shared base is refreshed
-    /// on an interval, and a dependency AURCache built since that interval
-    /// last elapsed is in the repository but not in the base's sync databases.
+    /// `-u` upgrades with every repository the copy lists, AURCache's
+    /// included, and an upgrade acts on the `replaces=` of what it can see
+    /// (see `devtools::PacmanConfs`). The script syncs and upgrades the copy
+    /// itself, from configurations passed in its environment, so no `-u` --
+    /// alone or in a bundle -- reaches it, whatever the build flags say.
     #[test]
-    fn every_build_refreshes_its_own_copy() {
-        let cmd = build_command(Path::new("/chroot"), "job-1", &[], &[], "builder");
-        assert!(cmd.iter().any(|a| a == "-u"), "{}", cmd.join(" "));
+    fn no_build_asks_makechrootpkg_to_upgrade() {
+        let flags = ["--noconfirm".to_string(), "--syncdeps".to_string()];
+        let cmd = build_command(Path::new("/chroot"), "job-1", &[], &flags, "builder");
+        let separator = cmd.iter().position(|a| a == "--").unwrap();
+        for arg in &cmd[1..separator] {
+            let short = arg.strip_prefix('-').filter(|rest| !rest.starts_with('-'));
+            assert!(
+                !short.is_some_and(|letters| letters.contains('u')),
+                "{}",
+                cmd.join(" ")
+            );
+        }
     }
 
     /// The worker makes and deletes each build's chroot, so devtools must do
