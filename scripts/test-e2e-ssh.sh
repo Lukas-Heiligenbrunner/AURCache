@@ -160,6 +160,21 @@ if dc logs builder 2>&1 | grep -q "Build SSH key:"; then
     exit 1
 fi
 
+# The image's sandbox must refuse the agent to builds outside their chroot
+# that were not offered it, which takes this kernel's Landlock and the shipped
+# policy. On a kernel without the right the worker says so instead, and this
+# only reports it: the in-chroot gate is what phase 3 checks.
+if dc logs builder 2>&1 | grep -q "refused its agent outside their chroot as well"; then
+    log "    host-side gate enforced (Landlock)"
+elif dc logs builder 2>&1 | grep -q "Landlock cannot restrict UNIX sockets"; then
+    log "    host-side gate not enforced on this kernel (in-chroot only)"
+else
+    log "ERROR: the worker did not say whether builds are kept from its agent"
+    log "       outside their chroot; the shipped sandbox policy may not name it."
+    dump_logs_on_failure
+    exit 1
+fi
+
 # ---- The marker proves the SSH fetch actually happened ---------------------
 log "=== Verifying the payload reached the package ==="
 found="$(docker run --rm -i --network "$(e2e_network)" -e FIXTURE="$FIXTURE" \

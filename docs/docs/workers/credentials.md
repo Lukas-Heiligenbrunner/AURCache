@@ -217,20 +217,34 @@ What this guarantees:
   signs SSH logins and nothing else. Nothing a build captures outlives it.
 - A build that is not offered the key gets none of it: no socket in its
   `makepkg.conf` or its environment, and no agent mounted into its chroot.
+- Nor can such a build reach the agent by its path. Every build runs as the
+  same build user, which the agent belongs to, so file permissions cannot keep
+  one build from it; the sandbox around the PKGBUILD code that runs outside
+  the chroot does. It refuses a connection to any UNIX socket beneath the
+  paths the worker keeps private, the agent's among them, and lets a build
+  offered the key connect to the agent's socket alone. This holds while other
+  builds are using the agent.
+
+The last point takes Landlock's `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (Landlock
+ABI 9, Linux 7.1 and later). On an older kernel the sandbox cannot restrict
+sockets: the key still stays out of every chroot that is not offered it, but
+PKGBUILD code running outside the chroot can reach the agent by its path. The
+worker says which applies when it starts:
+
+```
+INFO Builds not offered the SSH key are refused its agent outside their chroot as well (Landlock)
+```
+
+The sandbox reads the paths it keeps private from
+`/etc/aurcache/sandbox-protected`, which names the agent's directory under the
+default `WORKER_DATA_DIR`. A worker whose data directory is elsewhere warns at
+startup until its `agent` directory is added to that file.
 
 What it does not:
 
 - While a package that is offered the key builds, its code can log in with the
   key to any host the key can reach. Offer it only to packages whose PKGBUILDs
   you trust with that access.
-- Every build on a worker runs as the same build user, and the agent's socket
-  is at a fixed path on the worker. A PKGBUILD written to look for it can reach
-  it from the code that runs outside the chroot — sourcing the PKGBUILD,
-  downloading its sources — even when its build is not offered the key. The
-  settings above keep the key out of every build that does not ask for it; they
-  are not a wall against one that goes looking. `WORKER_PACKAGES` reserves
-  packages to a worker without keeping other packages off it, so a key on a
-  worker is within reach of every PKGBUILD that worker builds.
 - A worker that does not read the key name a job carries offers its key to
   every build it runs, whatever the server's setting says.
 

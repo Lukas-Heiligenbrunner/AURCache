@@ -48,6 +48,14 @@ $(cat /var/lib/aurcache-worker/worker-key.pem >> ./stolen-mtls 2>/dev/null)
 # its way to the worker's directory under /var.
 $(cat /run/aurcache-secret/key >> ./stolen-run 2>/dev/null)
 
+# The worker's ssh-agent, by its fixed path rather than by any environment
+# this build was given: a build not offered the key must not reach it, and one
+# offered it must. Only a success is recorded, so either host-side run reaching
+# it shows; the chroot has no such path.
+$([ -d /var/lib/aurcache-worker ] &&
+    SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/agent.sock ssh-add -l >/dev/null 2>&1 &&
+    echo reached >> ./agent-reached)
+
 package() {
     install -Dm644 /dev/null "$pkgdir/usr/share/hostile-fixture/marker"
 }
