@@ -129,6 +129,18 @@ impl Tunables {
         }
     }
 
+    /// The CPUs a build may use, which size its parallelism; `None` for
+    /// unlimited.
+    #[must_use]
+    pub fn cpus(&self) -> Option<f64> {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a CPU count needs no more than f64's 53 bits"
+        )]
+        let cpus = self.cpu_limit as f64 / 1000.0;
+        (self.cpu_limit > 0).then_some(cpus)
+    }
+
     /// Docker's `NanoCpus`, or `None` for unlimited.
     #[must_use]
     pub fn nano_cpus(&self) -> Option<i64> {
@@ -173,6 +185,8 @@ mod tests {
     #[test]
     fn limits_convert_to_docker_units() {
         assert_eq!(cfg(2000, 512).nano_cpus(), Some(2_000_000_000));
+        assert_eq!(cfg(1500, 512).cpus(), Some(1.5));
+        assert_eq!(cfg(0, 512).cpus(), None);
         assert_eq!(cfg(2000, 512).memory_bytes(), Some(512 * 1024 * 1024));
     }
 

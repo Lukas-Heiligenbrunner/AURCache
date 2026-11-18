@@ -6,6 +6,7 @@
 
 use anyhow::{Result, anyhow};
 
+use aurcache_worker_container::tag;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
@@ -27,7 +28,7 @@ async fn main() -> Result<()> {
     })?;
 
     let identity = Identity::load_or_create(&core.data_dir)?;
-    let executor = DockerExecutor::connect(cfg).await?;
+    let executor = DockerExecutor::connect(cfg, tag::of(&identity.fingerprint)?).await?;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, DockerExecutor::KIND).await?;

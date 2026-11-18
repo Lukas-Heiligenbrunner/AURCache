@@ -81,13 +81,18 @@ worker)
         "$PKGDIR/etc/sudoers.d/aurcache-worker"
     ;;
 worker-docker)
-    # The Docker worker delegates builds to containers, so it needs none of
-    # the chroot machinery the chroot worker installs -- no sandbox, no
-    # aurcache-build, no sudoers entry. Just the binary and the users and
-    # directories it shares with the chroot worker.
+    # The Docker worker builds each package in a container of its own, so it
+    # needs none of the chroot machinery the chroot worker installs -- no
+    # sandbox, no aurcache-build, no sudoers entry. The binary, the users and
+    # directories it shares with the chroot worker, and the build agent: the
+    # statically linked program the worker copies into every build's
+    # container to run the build there. The worker looks for it at this path
+    # (aurcache_worker_container::agent::INSTALLED).
     declare_from aurcache-worker
     install -Dm755 "$BINDIR/aurcache-worker-docker" \
         "$PKGDIR/usr/bin/aurcache-worker-docker"
+    install -Dm755 "$BINDIR/aurcache-build-agent" \
+        "$PKGDIR/usr/lib/aurcache/bin/aurcache-build-agent"
     ;;
 cli)
     # The client is one binary with no service, users or state of its own.

@@ -8,9 +8,9 @@
 //! each worker tells it what it accepts.
 //!
 //! What a build may *reach* is not declared. The builder image (`BUILDER_IMAGE`)
-//! decides the user and the privileges a build runs with, and the build
-//! directory (`BUILD_ARTIFACT_DIR`) is a host path bound into every container,
-//! so both stay the machine's. See `design/implemented/worker-configuration.md`.
+//! decides what a build runs on, and the build directory
+//! (`BUILD_ARTIFACT_DIR`) is a host path bound into every container, so both
+//! stay the machine's. See `design/implemented/worker-configuration.md`.
 
 use aurcache_common::worker_config::{Applies, ValueKind};
 use aurcache_worker_core::settings::{Builtin, SettingSpec};

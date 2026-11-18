@@ -697,6 +697,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-build-agent"
+version = "0.1.0"
+dependencies = [
+ "aurcache-common",
+ "clap",
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
 name = "aurcache-ca"
 version = "0.1.0"
 dependencies = [
@@ -910,6 +924,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurcache-worker-container"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aurcache-build-agent",
+ "aurcache-common",
+ "aurcache-worker-core",
+ "flate2",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aurcache-worker-core"
 version = "0.1.0"
 dependencies = [
@@ -951,11 +981,16 @@ name = "aurcache-worker-docker"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "aurcache-build-agent",
  "aurcache-common",
+ "aurcache-worker-container",
  "aurcache-worker-core",
  "bollard",
+ "bytes",
  "futures",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
