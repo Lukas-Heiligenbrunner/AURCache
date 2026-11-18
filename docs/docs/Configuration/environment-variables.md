@@ -179,7 +179,9 @@ once and how long it will let one run.
 
 :::note Per-build container settings
 `BUILDER_IMAGE`, `CPU_LIMIT`, `MEMORY_LIMIT` and `BUILD_ARTIFACT_DIR`
-configure the per-build container of the [Docker worker](../workers/docker.md). On the server they do nothing: a worker limits its own builds with
+configure the per-build container of the
+[Docker worker](../workers/docker.md). On the server they do nothing: a worker
+limits its own builds with
 [`WORKER_BUILD_MEMORY_MAX`, `WORKER_BUILD_CPUS` and their `WORKER_TOTAL_BUILD_*` totals](../workers/split-chroot.md#resource-limits),
 and uploads packages over the API rather than through a shared directory.
 

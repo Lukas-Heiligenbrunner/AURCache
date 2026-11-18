@@ -25,6 +25,39 @@ socket: the directory must be a path the Docker daemon can bind, with the same
 directory visible to the worker. Without it, the [hybrid image](./hybrid.md)
 builds against a Podman it runs inside its own container.
 
+## Running it by itself
+
+Outside the hybrid image the worker is one program, `aurcache-worker-docker`,
+from the AUR package of that name. The package installs the program and the
+`aurcache` user and directories, and no service unit: start it from a unit of
+your own, as a user that may use the engine's socket (`/var/run/docker.sock`,
+or the Unix socket `DOCKER_HOST` names). There is no image of it alone.
+
+It connects to AURCache and is approved like the chroot worker, with the same
+variables: [Connecting to AURCache](./split-chroot.md#connecting-to-aurcache),
+[Identity and capabilities](./split-chroot.md#identity-and-capabilities), and
+`WORKER_DATA_DIR` for its key. These are its own:
+
+| Variable | Description | Default |
+|---|---|---|
+| `BUILD_ARTIFACT_DIR` | The build directory as the engine's daemon sees it: the path it binds into each build container. The worker does not start without it | none |
+| `BUILD_ARTIFACT_DIR_LOCAL` | The same directory as the worker sees it | `builds` under the worker's working directory |
+| `BUILDER_IMAGE` | The image builds run in | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` |
+| `AURCACHE_BUILDER_NETWORK` | The Docker network build containers join, or `host` | the network namespace of the worker's own container |
+
+Set both directory variables, to the same path when the worker and the daemon
+run on one host. `BUILD_ARTIFACT_DIR_LOCAL` does not default to
+`BUILD_ARTIFACT_DIR`: left unset, the worker writes each job under its working
+directory while the daemon binds the other path, and every build starts in an
+empty directory. In the hybrid image that default is `/app/builds`, which is
+where its compose files mount the host's directory.
+
+A build installs its dependencies from AURCache's repository at the address
+the worker itself uses, so that address has to mean the same thing inside a
+build container. The default arranges that for a worker that runs in a
+container. For one that runs on the host, set `AURCACHE_BUILDER_NETWORK=host`,
+or name a network on which `AURCACHE_REPO_URL` resolves.
+
 ## Settings
 
 Its tunables are `CPU_LIMIT` (milli-CPUs) and `MEMORY_LIMIT` (MB, negative for
@@ -46,6 +79,14 @@ platform, its builds fail; register one
 (`docker run --privileged --rm tonistiigi/binfmt --install all`) or set
 `WORKER_ARCHES` to the platforms this host can build, comma separated
 (`x86_64`, `aarch64`, `armv7h`).
+
+A build runs `sudo` (pacman, to install its dependencies), so a foreign
+platform also needs its handler registered with the `C` flag, or `sudo` stops
+with `effective uid is not 0`: qemu has to run it with the binary's own setuid
+credentials. `tonistiigi/binfmt` sets it; Arch's `qemu-user-static-binfmt`
+does not, and a copy of its `/usr/lib/binfmt.d/qemu-<arch>-static.conf` in
+`/etc/binfmt.d/` with the flags `FP` changed to `FPC` does, at the next boot or
+`systemctl restart systemd-binfmt`.
 
 It competes for those builds like any worker that builds them, so give a
 faster one a higher [priority](./routing.md), or pause this one, to keep it
