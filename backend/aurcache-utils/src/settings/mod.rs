@@ -55,6 +55,8 @@ pub mod key {
     pub const MAKEPKG_CONF: Key<String> = Key::of(Setting::MakepkgConf);
     pub const PACMAN_CONF: Key<String> = Key::of(Setting::PacmanConf);
     pub const PARSE_NETWORK: Key<bool> = Key::of(Setting::ParseNetwork);
+    /// The name of a worker-held SSH key; empty is none.
+    pub const BUILD_SSH_KEY: Key<Option<String>> = Key::of(Setting::BuildSshKey);
 }
 
 /// One setting's value for `pkg_id` (`None` for the whole server), and where it
@@ -246,6 +248,7 @@ pub async fn all(
         build_on_new_version: resolve(&stored, key::BUILD_ON_NEW_VERSION),
         persistent_builddir: resolve(&stored, key::PERSISTENT_BUILDDIR),
         parse_network: resolve(&stored, key::PARSE_NETWORK),
+        build_ssh_key: resolve(&stored, key::BUILD_SSH_KEY),
     })
 }
 
@@ -443,5 +446,43 @@ mod tests {
         assert_eq!(package.max_artifact_size.source, SettingSource::Package);
         let other = super::all(&db, Some(2)).await.unwrap();
         assert_eq!(other.max_artifact_size.source, SettingSource::Global);
+    }
+
+    /// No SSH key by default; a server-wide name reaches every package, and a
+    /// package's own value -- an empty one included -- outranks it.
+    #[tokio::test]
+    async fn the_ssh_key_is_off_until_named_and_a_package_can_opt_out() {
+        let db = db().await;
+        let unset = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
+        assert_eq!(unset.value, None);
+        assert_eq!(unset.source, SettingSource::Default);
+
+        write(
+            &db,
+            [
+                Change {
+                    setting: Setting::BuildSshKey,
+                    pkg_id: None,
+                    value: Some("default".to_string()),
+                },
+                Change {
+                    setting: Setting::BuildSshKey,
+                    pkg_id: Some(2),
+                    value: Some(String::new()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let global = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
+        assert_eq!(global.value.as_deref(), Some("default"));
+        assert_eq!(global.source, SettingSource::Global);
+        let opted_out = get(&db, key::BUILD_SSH_KEY, Some(2)).await.unwrap();
+        assert_eq!(opted_out.value, None);
+        assert_eq!(opted_out.source, SettingSource::Package);
+        assert_eq!(
+            super::all(&db, Some(2)).await.unwrap().build_ssh_key,
+            opted_out
+        );
     }
 }

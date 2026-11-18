@@ -5,7 +5,9 @@ use crate::settings;
 use crate::snapshot::SnapshotStore;
 use crate::vcs_check::job_vcs_sources;
 use aurcache_common::digest::sha256_hex;
-use aurcache_common::worker::{JobDescriptor, MirrorlistOffer, MirrorlistPreference};
+use aurcache_common::worker::{
+    JobDescriptor, MirrorlistOffer, MirrorlistPreference, SshKeyRequest,
+};
 use aurcache_db::builds;
 use aurcache_db::prelude::Packages;
 use sea_orm::{DatabaseConnection, EntityTrait};
@@ -81,6 +83,8 @@ pub async fn descriptor(
         .value
         .0;
 
+    let ssh_key = ssh_key(db, build.pkg_id).await?;
+
     // Before `pkg.name` moves into the descriptor below.
     let packages = crate::publish::expected_pkgnames(&pkg);
     Ok(JobDescriptor {
@@ -97,7 +101,22 @@ pub async fn descriptor(
         mirrorlist,
         pgp_keys,
         vcs_sources,
+        ssh_key: Some(ssh_key),
     })
+}
+
+/// The worker-held SSH key `pkg_id`'s builds may use, by name: its
+/// `build_ssh_key` setting.
+///
+/// Always sent, "no key" included: a job without the field is how a server
+/// that names no keys speaks, and a worker reads that as "the default key".
+async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<SshKeyRequest> {
+    let name = settings::get(db, settings::key::BUILD_SSH_KEY, Some(pkg_id))
+        .await?
+        .value
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    Ok(SshKeyRequest { name })
 }
 
 /// Decide what to put in a job descriptor for the mirrorlist.
@@ -134,9 +153,42 @@ fn resolve_mirrorlist(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_mirrorlist;
-    use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference};
+    use super::{resolve_mirrorlist, ssh_key};
+    use crate::settings::{Change, write};
+    use aurcache_common::settings::Setting;
+    use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference, SshKeyRequest};
     use std::collections::BTreeMap;
+
+    /// The job names the key the package's setting names, and says "none"
+    /// outright when the setting names none -- never leaves it out.
+    #[tokio::test]
+    async fn the_job_carries_the_packages_ssh_key_setting() {
+        use sea_orm_migration::MigratorTrait;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        aurcache_db::migration::Migrator::up(&db, None)
+            .await
+            .unwrap();
+
+        assert_eq!(ssh_key(&db, 1).await.unwrap(), SshKeyRequest { name: None });
+
+        write(
+            &db,
+            [Change {
+                setting: Setting::BuildSshKey,
+                pkg_id: Some(1),
+                value: Some("default".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ssh_key(&db, 1).await.unwrap(),
+            SshKeyRequest {
+                name: Some("default".to_string())
+            }
+        );
+        assert_eq!(ssh_key(&db, 2).await.unwrap(), SshKeyRequest { name: None });
+    }
 
     fn holding(arch: &str, checksum: &str) -> MirrorlistPreference {
         let mut checksums = BTreeMap::new();
