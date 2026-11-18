@@ -6,6 +6,8 @@
 //! consumer can take `default-features = false` and still get the types.
 
 pub mod api;
+pub mod artifact;
+pub mod build_deps;
 pub mod build_flags;
 pub mod build_state;
 /// SHA-256 as lowercase hex. Requires the `digest` feature.

@@ -1,0 +1,219 @@
+# Regression fixture for the build agent. NOT a real package.
+#
+# `scripts/test-build-agent.sh` builds this with `aurcache-build-agent build`
+# in a container under the flags a worker gives one. It runs as the build user
+# twice: sourced by `makepkg --printsrcinfo`, which the agent reads its
+# dependencies from before root installs them, and in `build()`. Both times it
+# tries what a hostile package would: becoming root, finding something of
+# root's to talk to, writing the report. It prints one `probe name=value` line
+# per attempt, and the script asserts each of them.
+#
+# Both polarities: the same build shows what must work. `tree` is not in the
+# builder image, so it is only there if root installed it before the build;
+# the git source is only cloned if makepkg ran with a working environment.
+#
+# With AURCACHE_TEST_FORGE set, what `--printsrcinfo` prints also names a
+# package file it made, whose install scriptlet would leave a mark in the work
+# directory, and words that are pacman's options: they reach root's pacman as
+# targets, which it cannot find, and the build fails before it starts.
+#
+# With AURCACHE_TEST_REPO set (by the job's makepkg.conf), it depends on
+# `aurcache-agent-thief`, from the test's own repository, whose install
+# scriptlet runs as root, and reports whether the image's upgrade saw that
+# repository.
+#
+# It expects what the script sets up: the work directory at /work, and a
+# repository at /srv/aurcache-agent-test/upstream.git.
+pkgname=aurcache-agent-hostile
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Hostile fixture for the build agent's container test"
+arch=('any')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('tree' 'git')
+source=("fixture::git+file:///srv/aurcache-agent-test/upstream.git")
+sha256sums=('SKIP')
+if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
+  makedepends+=('aurcache-agent-thief')
+fi
+
+_work=/work
+_scratch=/var/lib/aurcache-build
+_thief=/var/tmp/aurcache-thief
+
+_probe() {
+  printf 'probe %s=%s\n' "$1" "$2"
+}
+
+# One line of /proc/self/status.
+_status() {
+  awk -v field="$1:" '$1 == field { print $2 }' /proc/self/status
+}
+
+# Try a command that must fail: `blocked` when it did, `worked` when it did not.
+# makepkg aborts the build on any command that fails outside a condition, so
+# every attempt is made inside one.
+_attempt() {
+  local name=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    _probe "$name" worked
+  else
+    _probe "$name" blocked
+  fi
+}
+
+_write() {
+  : >"$1"
+}
+
+_append() {
+  : >>"$1"
+}
+
+# A package whose install script, were root ever to install it, leaves a mark.
+_make_evil_package() { # where
+  mkdir -p "$1/evil"
+  (
+    cd "$1/evil"
+    printf '%s\n' 'pkgname = aurcache-agent-evil' 'pkgver = 1-1' 'pkgdesc = evil' \
+      'builddate = 0' 'size = 0' 'arch = any' >.PKGINFO
+    printf '%s\n' 'post_install() {' "  touch $_work/evil-ran" '}' >.INSTALL
+    bsdtar -cf - .PKGINFO .INSTALL | zstd -q >"$1/aurcache-agent-evil-1-1-any.pkg.tar.zst"
+  )
+}
+
+# Root's processes but the agent, by pid; `none` when there is none.
+_root_processes() {
+  ps -e -o uid=,pid= | awk '$1 == 0 && $2 != 1 { print $2 }' | paste -sd, | grep . || echo none
+}
+
+# Listening unix sockets this user could connect to and does not own, which
+# root could be behind: an abstract one, or one it may write to.
+_foreign_listeners() {
+  local path count=0
+  while read -r path; do
+    if [[ $path == @* ]] || { [[ -w $path ]] && [[ ! -O $path ]]; }; then
+      count=$((count + 1))
+    fi
+  done < <(awk 'NR > 1 && $4 == "00010000" { print $8 }' /proc/net/unix)
+  echo "$count"
+}
+
+# What this process is, and that it has no way back to root. Every name is
+# prefixed with $1.
+_identity_and_root() {
+  local at=$1
+  _probe "${at}uid" "$(id -u)"
+  _probe "${at}gid" "$(id -g)"
+  _probe "${at}groups" "$(id -G)"
+  _probe "${at}capeff" "$(_status CapEff)"
+  _probe "${at}capprm" "$(_status CapPrm)"
+  _probe "${at}capinh" "$(_status CapInh)"
+  _probe "${at}capamb" "$(_status CapAmb)"
+  _probe "${at}nonewprivs" "$(_status NoNewPrivs)"
+  _attempt "${at}sudo" sudo -n true
+  _attempt "${at}su" su -c true root
+  _attempt "${at}kill-init" kill -KILL 1
+  _attempt "${at}term-init" kill -TERM 1
+  _attempt "${at}read-init-environment" cat /proc/1/environ
+  _attempt "${at}write-passwd" _append /etc/passwd
+  _attempt "${at}write-pacman-conf" _append /etc/pacman.conf
+  # Nothing of root's to ask for anything: no process but the agent, and no
+  # socket that is not this user's own.
+  _probe "${at}root-processes" "$(_root_processes)"
+  _probe "${at}foreign-listeners" "$(_foreign_listeners)"
+}
+
+# Sourced by `makepkg --printsrcinfo`, before root installs what it prints:
+# its probes go to stderr, which the agent puts in the build log, since
+# stdout is the `.SRCINFO`.
+if (( ${PRINTSRCINFO:-0} )); then
+  _identity_and_root srcinfo- >&2
+  # Something left running, which must not see root's install: the agent
+  # ends it first. build() looks for it.
+  setsid sleep 3600 </dev/null >/dev/null 2>&1 &
+  echo "$!" >"$HOME/srcinfo-lingerer"
+  if [[ -n ${AURCACHE_TEST_FORGE:-} ]]; then
+    _make_evil_package "$HOME"
+    printf 'pkgbase = aurcache-agent-hostile\n'
+    printf '\tmakedepends = %s\n' "$HOME/aurcache-agent-evil-1-1-any.pkg.tar.zst" \
+      "file://$HOME/aurcache-agent-evil-1-1-any.pkg.tar.zst" '-U' '--overwrite=*' \
+      "--hookdir=$HOME"
+  fi
+fi
+
+build() {
+  _identity_and_root ""
+  local lingerer
+  lingerer=$(cat "$HOME/srcinfo-lingerer" 2>/dev/null) || lingerer=
+  if [[ -n $lingerer ]] && kill -0 "$lingerer" 2>/dev/null; then
+    _probe srcinfo-lingerer alive
+  else
+    _probe srcinfo-lingerer "${lingerer:+gone}"
+  fi
+
+  if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
+    # The upgrade of the image saw the job's repositories and not the one
+    # this build's dependency came from.
+    _probe build-conf-repository "$(grep -c '^\[thief\]' /etc/pacman.conf)"
+    _probe upgrade-conf-repository "$(grep -c '^\[thief\]' /etc/aurcache/pacman-upgrade.conf)"
+    if [[ -e /var/tmp/aurcache-upgrade-bait ]]; then
+      _probe upgrade-bait taken
+    else
+      _probe upgrade-bait left
+    fi
+    _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
+  fi
+
+  # The work directory is root's: nothing beside `out/`, nothing in it, and
+  # no renaming it away. `pkg/` is where packages go, and is the build's.
+  _attempt write-report _write "$_work/out/report.json"
+  _attempt rename-out mv "$_work/out" "$_work/out.moved"
+  _attempt write-work _write "$_work/planted"
+  _attempt write-log _append "$_work/log/build.log"
+  _attempt remove-log rm -f "$_work/log/build.log"
+  _attempt write-makepkg-conf _append "$(dirname "$BUILDDIR")/makepkg.conf"
+  _attempt write-pkg _write "$_work/pkg/.probe"
+  rm -f "$_work/pkg/.probe"
+
+  # What must have worked for the build to get here.
+  if tree --version >/dev/null 2>&1; then
+    _probe dependency installed
+  else
+    _probe dependency missing
+  fi
+  if [[ -f $srcdir/fixture/README ]]; then
+    _probe source cloned
+  else
+    _probe source missing
+  fi
+
+  # Processes orphaned in here become the agent's children, since it is the
+  # container's first process, and it collects them when they end.
+  for _ in 1 2 3 4 5; do
+    (sleep 0.2 &)
+  done
+  sleep 2
+  _probe zombies "$(ps -e -o stat= | grep -c '^Z')"
+
+  # Things in pkg/ that are not packages: the agent hands back files only,
+  # and follows no link.
+  ln -s /etc/passwd "$_work/pkg/aurcache-agent-link-1-1-any.pkg.tar.zst"
+  mkdir -p "$_work/pkg/not-a-package/inside"
+
+  # Something the build leaves running, holding its output open: the agent
+  # ends it before it reports.
+  (setsid sleep 3600 &)
+
+  # For the legs that stop a build half-way.
+  if [[ -n ${AURCACHE_TEST_LINGER:-} ]]; then
+    _probe lingering "$AURCACHE_TEST_LINGER"
+    sleep "$AURCACHE_TEST_LINGER"
+  fi
+}
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/aurcache-agent-hostile/marker"
+}

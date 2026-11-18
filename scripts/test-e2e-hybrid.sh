@@ -22,7 +22,5 @@ E2E_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/compose/docker-compose.e2e-hybrid.yam
 export E2E_COMPOSE_FILE
 # One container fills both roles, so only one service must stay alive.
 export E2E_SERVICES="aurcache"
-# The container builder has no storage pool, so its builds report no disk use.
-export E2E_EXPECT_DISK_USAGE=0
 
 exec "$SCRIPT_DIR/test-e2e.sh" "${1:-hello}" "${2:-8090}" "${3:-900}"

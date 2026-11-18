@@ -1,0 +1,14 @@
+# The install scriptlet of `aurcache-agent-thief`, a fixture of
+# scripts/test-build-agent.sh. NOT a real package.
+#
+# It runs as root in the build container when a build installs the package
+# as a dependency, from the test's own repository, and leaves a mark in
+# /var/tmp/aurcache-thief for the build to report. It also leaves a process
+# of root's running, which the agent must end before the build starts.
+post_install() {
+  local out=/var/tmp/aurcache-thief
+  mkdir -p "$out"
+  echo yes >"$out/ran"
+  chmod -R a+rX "$out"
+  setsid sleep 3600 </dev/null >/dev/null 2>&1 &
+}
