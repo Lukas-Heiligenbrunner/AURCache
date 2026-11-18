@@ -107,12 +107,14 @@ they cover, rather than running all of them as a matter of course:
 
 - `test-build-agent.sh` (`just test-agent`) — for changes to
   `aurcache-build-agent`: the agent built static, running a real build and a
-  hostile one in the builder image with the capabilities and flags a build
-  container gets. Docker only.
+  hostile one in the builder image with a build pod's capabilities and flags.
+  Docker only, no cluster, and the first thing to run for either container
+  worker, since both run this agent.
 - `test-e2e-hybrid.sh` — for changes to the hybrid image itself (its
   entrypoint, the embedded worker's loopback enrollment, the Podman it runs in
-  DinD mode), to the Docker worker, which is its only builder, or to what
-  that worker builds with (`aurcache-worker-container`, the agent).
+  DinD mode), to the Docker worker, which is its only builder, or to what that
+  worker shares with the Kubernetes one (`aurcache-worker-container`, the
+  agent).
 - `test-e2e-hybrid-legacy.sh` — the same image in host mode, against the
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container. `E2E_BUILD_DIR` names that
@@ -169,17 +171,24 @@ defect this frontend has had was of that kind.
   `backend/aurcache-worker` is the `devtools` chroot executor, on the storage pool in
   `backend/aurcache-chroot`; `aurcache-worker-docker` is the per-build container executor
   (the hybrid image embeds it), and `aurcache-worker-demo` produces synthetic packages for demo instances.
-- The Docker worker runs each build with a build agent. `backend/aurcache-build-agent` is the program
+  `backend/aurcache-worker-kube` is the Kubernetes worker: a dispatcher that builds each job in a pod of
+  its own and relays the packages from the pod to the server without storing them. Everything it asks of
+  Kubernetes goes through the `Cluster` trait (`cluster.rs`; `kube_cluster.rs` is the one implementation
+  over a real API server), so the lifecycle in `executor.rs` is tested against a fake; `pod.rs` renders
+  the pod and is where what a build may do is decided.
+- The two container workers run a build the same way. `backend/aurcache-build-agent` is the program
   inside the build container: statically linked, brought by the worker and not part of the builder
   image, it does a root step (pacman configuration, image upgrade, build user), has that user (no
   capabilities, `no_new_privs`) print the `.SRCINFO`, installs the dependencies it names as root, then
   drops to that user for good, runs makepkg without `-s`, and writes a report. Which dependencies a
   build installs is `aurcache_common::build_deps`, the same rule the chroot worker's `stage_build_deps`
   uses. Its library half is the interface the workers speak to it (`BuildSpec`, `BuildReport`,
-  the work directory's layout), pinned by fixtures under `tests/fixtures/interface-1/`.
-  `backend/aurcache-worker-container` is the worker's side: a claimed job into a spec and its input,
-  how a container ended into one terminal report, and the OpenSSH `ssh-agent` it starts for each build that
-  is given the worker's SSH key, with the link a build reaches it over.
+  the work directory's layout), pinned by fixtures under `tests/fixtures/interface-1/`; its transfer
+  subcommands (`stage`, `receive`, `tail`, `manifest`, `send`, `probe`, `hold`) are what the Kubernetes worker
+  runs through `exec`. `backend/aurcache-worker-container` is the workers' side: a claimed job into a
+  spec and its input, how a container ended into one terminal report, so a build ends for the same
+  reason on either, and the OpenSSH `ssh-agent` it starts for each build that is given the worker's SSH
+  key, with the link a build reaches it over.
   `backend/aurcache-sandbox` confines PKGBUILD code with Landlock, for the server's parse and a build.
 - `backend/aurcache-cli` is a typed CLI for the HTTP API (`cargo run -p aurcache-cli -- ...`); the reusable
   Rust client library backing it lives in `backend/aurcache-client`. It authenticates via

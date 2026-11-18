@@ -1,0 +1,16 @@
+# Where build pods run. Kept apart from the server and the dispatcher: builds
+# run package code and need a few capabilities, which the `baseline` level
+# allows, where the dispatcher itself needs none and passes `restricted`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aurcache-builds
+  labels:
+    app.kubernetes.io/name: aurcache-builds
+    app.kubernetes.io/component: kube-worker
+    # Pod Security Admission. A build container starts as root with every
+    # capability dropped and seven added back (CHOWN, DAC_OVERRIDE, FOWNER,
+    # FSETID, SETUID, SETGID, KILL), which `restricted` forbids and `baseline`
+    # allows. Nothing is privileged, and nothing is mounted from the node.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest

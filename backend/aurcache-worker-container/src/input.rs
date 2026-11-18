@@ -17,6 +17,16 @@ pub fn write(work: &Path, spec: &BuildSpec, source: &[u8]) -> Result<()> {
     put(&input.join(INPUT_SOURCE), source)
 }
 
+/// The same two as one tar, for a worker that reaches its build container
+/// only through `exec`: what the agent's `receive` reads from its standard
+/// input.
+pub fn pack(spec: &BuildSpec, source: &[u8]) -> Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    add(&mut tar, INPUT_SPEC, &to_json(spec)?)?;
+    add(&mut tar, INPUT_SOURCE, source)?;
+    tar.into_inner().context("finishing the input archive")
+}
+
 fn to_json(spec: &BuildSpec) -> Result<Vec<u8>> {
     serde_json::to_vec(spec).context("encoding the build spec")
 }
@@ -26,10 +36,20 @@ fn put(path: &Path, bytes: &[u8]) -> Result<()> {
     write_public(path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
+fn add(tar: &mut tar::Builder<Vec<u8>>, name: &str, bytes: &[u8]) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_entry_type(tar::EntryType::Regular);
+    tar.append_data(&mut header, name, bytes)
+        .with_context(|| format!("adding {name} to the input archive"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use aurcache_build_agent::spec::INTERFACE;
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
 
     fn spec() -> BuildSpec {
@@ -51,18 +71,51 @@ mod tests {
         }
     }
 
+    struct Entry {
+        name: String,
+        mode: u32,
+        bytes: Vec<u8>,
+    }
+
+    fn entries(archive: &[u8]) -> Vec<Entry> {
+        tar::Archive::new(archive)
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                Entry {
+                    name: entry.path().unwrap().to_string_lossy().into_owned(),
+                    mode: entry.header().mode().unwrap(),
+                    bytes,
+                }
+            })
+            .collect()
+    }
+
     #[test]
-    fn write_produces_the_two_files_anyone_may_read() {
+    fn pack_is_exactly_the_two_entries() {
+        let source = b"\x1f\x8bnot really gzip";
+        let found = entries(&pack(&spec(), source).unwrap());
+        let names: Vec<_> = found.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, [INPUT_SPEC, INPUT_SOURCE]);
+        let decoded: BuildSpec = serde_json::from_slice(&found[0].bytes).unwrap();
+        assert_eq!(decoded, spec());
+        assert_eq!(found[1].bytes, source);
+        assert!(found.iter().all(|e| e.mode == 0o644));
+    }
+
+    #[test]
+    fn write_produces_the_same_two_files() {
         let work = tempfile::tempdir().unwrap();
         write(work.path(), &spec(), b"source").unwrap();
         let input = work.path().join("in");
-        let decoded: BuildSpec =
-            serde_json::from_slice(&fs::read(input.join(INPUT_SPEC)).unwrap()).unwrap();
-        assert_eq!(decoded, spec());
-        assert_eq!(fs::read(input.join(INPUT_SOURCE)).unwrap(), b"source");
-        for name in [INPUT_SPEC, INPUT_SOURCE] {
-            let mode = fs::metadata(input.join(name)).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o644, "{name}");
+        for entry in entries(&pack(&spec(), b"source").unwrap()) {
+            let file = input.join(&entry.name);
+            assert_eq!(fs::read(&file).unwrap(), entry.bytes, "{}", entry.name);
+            let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644);
         }
         let mut listed: Vec<_> = fs::read_dir(&input)
             .unwrap()
@@ -82,13 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_source_is_still_a_file() {
-        let work = tempfile::tempdir().unwrap();
-        write(work.path(), &spec(), b"").unwrap();
-        assert!(
-            fs::read(work.path().join("in").join(INPUT_SOURCE))
-                .unwrap()
-                .is_empty()
-        );
+    fn an_empty_source_is_still_an_entry() {
+        let found = entries(&pack(&spec(), b"").unwrap());
+        assert_eq!(found.len(), 2);
+        assert!(found[1].bytes.is_empty());
     }
 }
