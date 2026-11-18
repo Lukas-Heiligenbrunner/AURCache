@@ -20,7 +20,7 @@
 //! (`scripts/test-e2e.sh`).
 
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aurcache_common::build_state::{BuildState, EndReason};
 use aurcache_common::settings::Setting;
@@ -28,6 +28,7 @@ use aurcache_common::worker::{BuildOutcome, ClaimRequest, CompleteReport, Mirror
 use aurcache_db::builds;
 use aurcache_db::files;
 use aurcache_db::helpers::worker_store;
+use aurcache_utils::repository::Repository;
 use aurcache_utils::settings;
 use aurcache_worker_core::client::{WorkerClient, fetch_and_pin_ca};
 use aurcache_worker_core::config::CoreConfig;
@@ -86,16 +87,30 @@ async fn seed_build(db: &DatabaseConnection, id: i32, platform: &str, start: i64
     .unwrap();
 }
 
-/// The build's status once it is no longer being published.
-async fn settled_status(db: &DatabaseConnection, id: i32) -> BuildState {
-    for _ in 0..100 {
+/// How long a wait below goes on before it is taken for a hang. Not how long
+/// anything should take: publishing syncs the repository to disk, and on a
+/// busy machine that alone can take tens of seconds.
+const STUCK: Duration = Duration::from_secs(180);
+
+/// The build's status once its publication has finished.
+///
+/// The status alone does not say so: publishing settles the status first,
+/// then announces it and promotes dependents, and only then removes the
+/// staging directory, which is what a restart resumes from.
+async fn settled_status(db: &DatabaseConnection, repo: &Repository, id: i32) -> BuildState {
+    let deadline = Instant::now() + STUCK;
+    loop {
         let status = build_status(db, id).await;
-        if status != BuildState::Publishing {
+        let staged = repo.staging_dir(id).exists();
+        if status != BuildState::Publishing && !staged {
             return status;
         }
+        assert!(
+            Instant::now() < deadline,
+            "build {id} is still publishing: {status:?}, staging kept: {staged}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("build {id} is still publishing");
 }
 
 async fn build_status(db: &DatabaseConnection, id: i32) -> BuildState {
@@ -142,7 +157,7 @@ async fn fake_worker_protocol_roundtrip() {
     let ca = aurcache_ca::Ca::load_or_create(&ca_dir).unwrap();
     let repo_root = tmp.path().join("repo");
     let repo = std::sync::Arc::new(
-        aurcache_utils::repository::Repository::new(&repo_root)
+        Repository::new(&repo_root)
             .with_name("custom_name".into())
             .unwrap(),
     );
@@ -151,7 +166,7 @@ async fn fake_worker_protocol_roundtrip() {
         db.clone(),
         ca,
         std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
-        repo,
+        std::sync::Arc::clone(&repo),
         aurcache_activitylog::activity_utils::ActivityLog::discarding(),
         // Read as the server reads them, so AURCACHE_WORKER_PORT above applies.
         aurcache_api::listen::ListenAddresses::from_env().unwrap(),
@@ -159,15 +174,14 @@ async fn fake_worker_protocol_roundtrip() {
 
     // Wait for the TLS listener to accept and serve the CA.
     let base = format!("https://localhost:{port}");
-    let mut up = false;
-    for _ in 0..80 {
-        if fetch_and_pin_ca(&base, None).await.is_ok() {
-            up = true;
-            break;
-        }
+    let deadline = Instant::now() + STUCK;
+    while fetch_and_pin_ca(&base, None).await.is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "worker protocol listener did not come up on :{port}"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert!(up, "worker protocol listener did not come up on :{port}");
 
     // Enroll a synthetic worker with the production client + enrollment flow.
     // The shared enrollment token makes the server auto-approve it.
@@ -420,7 +434,7 @@ async fn fake_worker_protocol_roundtrip() {
         .expect("complete{success} should be accepted");
 
     // Accepted, then published in the background.
-    assert_eq!(settled_status(&db, 1).await, BuildState::Successful);
+    assert_eq!(settled_status(&db, &repo, 1).await, BuildState::Successful);
     let repo_db = repo_root.join("x86_64").join("custom_name.db.tar.gz");
     assert!(repo_db.exists(), "repo db should be written at {repo_db:?}");
     let file_rows = files::Entity::find()
@@ -483,7 +497,7 @@ async fn fake_worker_protocol_roundtrip() {
         .expect("the worker's part is done either way");
     // Refused at publishing, which is the server's: the build fails, and
     // nothing of it reaches the repository.
-    assert_eq!(settled_status(&db, 2).await, BuildState::Failed);
+    assert_eq!(settled_status(&db, &repo, 2).await, BuildState::Failed);
     let evil_rows = files::Entity::find()
         .filter(files::Column::PackageId.eq(2))
         .all(&db)
