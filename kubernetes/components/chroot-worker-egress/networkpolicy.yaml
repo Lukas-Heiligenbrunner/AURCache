@@ -25,12 +25,16 @@ spec:
         - protocol: TCP
           port: 53
     # Name resolution on a cluster with NodeLocal DNSCache (Kubespray's
-    # default, an option on GKE and EKS). There, pods resolve through a
-    # link-local address on their own node, served by a host-network process
-    # that the rule above cannot select, and that the link-local exception
-    # below refuses. Uncomment this with your cluster's address: the
-    # `nameserver` line of /etc/resolv.conf in any pod (169.254.20.10 and
-    # 169.254.25.10 are the usual ones).
+    # default, an option on GKE and EKS). There, pods resolve through a cache
+    # on their own node, a host-network process the rule above cannot
+    # select, listening on a link-local address (169.254.20.10 and
+    # 169.254.25.10 are the usual ones) and, in some setups (GKE's, and
+    # iptables mode), on the kube-dns Service's ClusterIP as well, which
+    # the node then intercepts. Both are addresses the exceptions below
+    # refuse. Uncomment this for each address the cache listens on: the
+    # `-localip` argument of the `node-local-dns` DaemonSet in kube-system
+    # lists them, where the `nameserver` line of a pod's /etc/resolv.conf
+    # may show only the ClusterIP.
     # - to:
     #     - ipBlock:
     #         cidr: 169.254.20.10/32
@@ -65,6 +69,8 @@ spec:
               - 100.64.0.0/10     # carrier-grade NAT, used by some clusters
               - 169.254.0.0/16    # link-local: the cloud metadata endpoint
               - 127.0.0.0/8
+              - 0.0.0.0/8
+              - 240.0.0.0/4       # class E, which some clusters give pods
               # - 203.0.113.0/24  # e.g. your nodes' or API endpoint's public range
         - ipBlock:
             cidr: ::/0
@@ -72,3 +78,8 @@ spec:
               - fc00::/7          # unique local
               - fe80::/10         # link-local
               - ::1/128
+              - 64:ff9b::/96      # NAT64: reaches IPv4, private ranges included
+              - 64:ff9b:1::/48    # local-use NAT64
+              # A cluster whose pods or nodes have global IPv6 addresses (EKS
+              # in IPv6 mode, for one) needs their ranges here as well:
+              # - 2001:db8::/56

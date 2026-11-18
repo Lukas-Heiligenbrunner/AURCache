@@ -3,18 +3,20 @@
 # A build runs in its worker pod's network namespace, so package code reaches
 # whatever the worker reaches. The worker's own firewall rule keeps builds off
 # the server's worker port and nothing else. Without a policy, a PKGBUILD can
-# connect to other Services, the Kubernetes API, the nodes, and the cloud
-# metadata endpoint (169.254.169.254), which on some clouds hands out the
-# node's credentials.
+# connect to the server's web API on port 8080 -- which, without OAuth
+# configured, anyone reaching it can use without logging in -- and to other
+# Services, the Kubernetes API, the nodes, and the cloud metadata endpoint
+# (169.254.169.254), which on some clouds hands out the node's credentials.
 #
 # This policy lets worker pods reach DNS, the server's repository and worker
-# ports, and public addresses, and nothing else. "Public addresses" includes
-# whatever of the cluster's own has one -- a managed control plane's API
-# endpoint, nodes with public IPs and their kubelet and NodePorts -- so this
-# keeps builds off those only once their addresses are added to its `except`
-# list. It applies to the worker process as much as to its builds, since they
-# share an address, and only on a CNI that enforces NetworkPolicy (Calico,
-# Cilium, kube-router, k3s's built-in one; not flannel alone).
+# ports (not 8080), and public addresses, and nothing else. "Public
+# addresses" includes whatever of the cluster's own has one -- a managed
+# control plane's API endpoint, nodes with public IPs and their kubelet and
+# NodePorts -- so this keeps builds off those only once their addresses are
+# added to its `except` list. It applies to the worker process as much as to
+# its builds, since they share an address, and only on a CNI that enforces
+# NetworkPolicy (Calico, Cilium, kube-router, k3s's built-in one; not flannel
+# alone).
 #
 # Check these before enabling it:
 #   - DNS: it allows pods labelled `k8s-app: kube-dns` in any namespace, which
@@ -22,11 +24,16 @@
 #     every name lookup fails.
 #   - NodeLocal DNSCache (Kubespray's default, an option on GKE and EKS)
 #     serves on a link-local address such as 169.254.25.10 or 169.254.20.10,
-#     which this policy refuses, and is not a `kube-dns` pod. Uncomment the
-#     rule for it in networkpolicy.yaml: an ipBlock for that /32 on port 53,
-#     UDP and TCP.
+#     and in some setups on the kube-dns ClusterIP too, all of which this
+#     policy refuses; it is not a `kube-dns` pod. Uncomment the rule for it
+#     in networkpolicy.yaml: an ipBlock for each such /32 on port 53, UDP and
+#     TCP. The `-localip` argument of the `node-local-dns` DaemonSet lists
+#     the addresses.
 #   - Anything the builds must reach on a private address -- a source mirror,
 #     a git server, an HTTP proxy in your network -- needs a rule of its own.
+#   - Ranges it cannot know: a cluster whose pods or nodes have global IPv6
+#     addresses (EKS in IPv6 mode) or public IPv4 ones needs them added to
+#     the `except` lists.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
