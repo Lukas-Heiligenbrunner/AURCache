@@ -14,16 +14,18 @@ set -euo pipefail
 # server that authorises it — so this runs in CI wherever Docker does, with no
 # secret committed or configured.
 #
-# Four phases, in order:
+# The server names the worker's `default` key for every build
+# (`BUILD_SSH_KEY=default` in the overlay). Five phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
 #      agent key picked up).
-#   2. authorised — the worker is pointed at the key the server accepts. The
-#      build must succeed AND the payload's marker must appear in the installed
-#      package twice, proving both fetches really happened: the `source=` one
-#      on the worker, and the `prepare()` clone inside the chroot, through the
-#      agent's socket bound in there.
+#   2. authorised — the worker is pointed at the key the server accepts, and
+#      `WORKER_GIT_SSH_PACKAGES` lists the fixture. The build must succeed AND
+#      the payload's marker must appear in the installed package twice,
+#      proving both fetches really happened: the `source=` one on the worker,
+#      and the `prepare()` clone inside the chroot, through the agent's socket
+#      bound in there.
 #   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
@@ -32,6 +34,8 @@ set -euo pipefail
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
 #      on first use.
+#   5. not listed — the same key, but `WORKER_GIT_SSH_PACKAGES` names another
+#      package. The build MUST fail, and its log must say why.
 #
 #   ./scripts/test-e2e-ssh.sh [timeout]
 
@@ -65,7 +69,7 @@ trap cleanup EXIT
 # Bring the stack up and drive one build to a terminal state, leaving what it
 # came to in `phase_result`: `success`, `failed`, or why it came to neither.
 run_phase() {
-    local phase="$1" key="$2" known_hosts="${3-}" output
+    local phase="$1" key="$2" known_hosts="${3-}" ssh_packages="${4-}" output
     log "=== Phase: $phase ==="
     dc down -v --remove-orphans >/dev/null 2>&1 || true
     fresh_worker_data >/dev/null
@@ -77,6 +81,12 @@ run_phase() {
         export WORKER_SSH_KNOWN_HOSTS="$known_hosts"
     else
         unset WORKER_SSH_KNOWN_HOSTS
+    fi
+    # Unset unless a phase names packages: set but empty lists none.
+    if [ -n "$ssh_packages" ]; then
+        export WORKER_GIT_SSH_PACKAGES="$ssh_packages"
+    else
+        unset WORKER_GIT_SSH_PACKAGES
     fi
     dc up -d --build >/dev/null
 
@@ -133,7 +143,7 @@ fi
 log "    build failed as required"
 
 # ---- Phase 2: with the authorised key it must build ------------------------
-run_phase "authorised (expect success)" "/keys/id_ed25519"
+run_phase "authorised and listed (expect success)" "/keys/id_ed25519" "" "$FIXTURE"
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the authorised key"
     dump_logs_on_failure
@@ -188,6 +198,22 @@ if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "Hos
     exit 1
 fi
 log "    build refused the unknown host at host-key verification"
+
+# ---- Phase 5: a package the worker does not list gets no key ---------------
+run_phase "not in WORKER_GIT_SSH_PACKAGES (expect failure)" "/keys/id_ed25519" "" "some-other-package"
+if [ "$phase_result" != "failed" ]; then
+    log "ERROR: build was '$phase_result' for a package WORKER_GIT_SSH_PACKAGES does not list"
+    dump_logs_on_failure
+    exit 1
+fi
+expected="no SSH key offered: $FIXTURE is not in this worker's WORKER_GIT_SSH_PACKAGES"
+if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "$expected"; then
+    log "ERROR: the build log of $CURRENT_BUILD_REF does not say why it had no key"
+    log "       (expected: $expected)"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    build failed without the key, and its log says why"
 
 log "=== SSH credential test complete ==="
 log "    markers: ${found//$'\n'/, }"

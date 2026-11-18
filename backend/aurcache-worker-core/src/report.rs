@@ -84,6 +84,14 @@ pub fn interrupted(reason: impl std::fmt::Display) -> CompleteReport {
     }
 }
 
+/// A terminal report for a build this worker will not start, because the job
+/// asks for something this worker cannot give it -- an SSH key it does not
+/// hold. Failed rather than interrupted: the job would ask the same again.
+#[must_use]
+pub fn refused(reason: impl std::fmt::Display) -> CompleteReport {
+    failure(None, reason.to_string())
+}
+
 /// A terminal report for a build aborted before it started (cancel observed
 /// during setup, so there is no process exit status).
 #[must_use]

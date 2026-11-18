@@ -11,8 +11,18 @@
 #
 # `WORKER_GIT_SSH_KEY` is set by the test rather than here: the first phase
 # deliberately runs *without* it, to prove the fixture genuinely requires
-# authentication and the test cannot pass for the wrong reason.
+# authentication and the test cannot pass for the wrong reason. So is
+# `WORKER_GIT_SSH_PACKAGES`, passed through only when the test sets it: set but
+# empty would list no package at all, which is not what a phase without it
+# means.
+#
+# The server names the worker's `default` key for every build: without
+# `BUILD_SSH_KEY`, no build is offered a key.
 services:
+  aurcache:
+    environment:
+      - BUILD_SSH_KEY=default
+
   gitssh:
     build:
       context: ..
@@ -33,5 +43,6 @@ services:
       # Passed through only when the test sets it: unset, the worker accepts a
       # host key on first use.
       - WORKER_SSH_KNOWN_HOSTS
+      - WORKER_GIT_SSH_PACKAGES
     volumes:
       - ${SSH_TEST_KEYS:?set SSH_TEST_KEYS to the generated keypair directory}:/keys:ro
