@@ -175,9 +175,9 @@ spec:
             #       aurcache-build-ssh --from-file=ssh-privatekey=./id_ed25519 \
             #       --from-file=known_hosts=./known_hosts
             #
-            # The key stays in this pod. Builds ask this worker for signatures
-            # while makepkg downloads their sources, and never hold the key;
-            # nothing a build installs can reach it.
+            # The key stays in this pod. Builds ask this worker to sign their
+            # SSH logins while they run, and never hold the key: a build can
+            # use it, and nothing in a build can copy it.
             # - name: WORKER_GIT_SSH_KEY
             #   value: /etc/aurcache-ssh/ssh-privatekey
             # - name: WORKER_SSH_KNOWN_HOSTS

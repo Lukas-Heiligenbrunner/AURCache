@@ -579,9 +579,9 @@ Beside what every worker reads (`AURCACHE_URL`, `WORKER_DATA_DIR`,
 |---|---|---|---|
 | `WORKER_KUBE_NAMESPACE` | `aurcache-builds` | no | where build pods go |
 | `WORKER_KUBE_BUILDER_IMAGE` | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` | no | the build container's image |
-| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | no | for the builder image; `IfNotPresent` for an image loaded by hand |
-| `WORKER_KUBE_AGENT_IMAGE` | the dispatcher's own pod's image | no | the `stage` and `hold` containers' image |
-| `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none; the manifests set them from the downward API | no | which pod to read that image from |
+| `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | no | for every container of a build pod and of the probe's; `IfNotPresent` for images loaded by hand |
+| `WORKER_KUBE_AGENT_IMAGE` | none; the manifests set it to the Deployment's own image | no | the `stage` and `hold` containers' image, and the probe's |
+| `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none | no | without `WORKER_KUBE_AGENT_IMAGE`: the dispatcher's own pod, whose image it then reads through the API and uses by digest. The shipped Role does not allow that read, and the manifests do not set these |
 | `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | no | the SSH key and its hosts' keys, files in the dispatcher's pod; both or neither (`kubernetes-executor.md`, "Credentials and PGP keys") |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | no | `hostUsers: false` on build pods |
 | `WORKER_KUBE_POD_TEMPLATE` | none | no | path of a JSON file: `tolerations`, `affinity`, `nodeSelector`, `priorityClassName`, `runtimeClassName`, `imagePullSecrets`, `schedulerName`, `topologySpreadConstraints`, `labels`, `annotations`; an unknown field is an error at startup |
@@ -1658,7 +1658,7 @@ Before wave 2:
    Confirm.
 5. **Behaviour changes for Docker worker users on upgrade**: build code
    loses `sudo`; `makepkg -i` and `-r` in build flags stop working; a
-   failed `pacman -Syu` or key import is reported as the worker's problem
+   failed image upgrade or key import is reported as the worker's problem
    and the build is queued again while it has attempts, where it failed
    the build before. Acceptable in a minor release, with a line in the
    upgrade notes?

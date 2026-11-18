@@ -134,9 +134,17 @@ one key each report only their own builds, so each report abandons what the
 other holds. A rolling update does the same for a moment, which is why the
 Deployment uses `Recreate`. For more builds at once, raise
 `WORKER_CONCURRENCY`. For a second worker (other architectures, its own
-credential), copy `worker.yaml` and the ServiceAccount, Roles and RoleBindings
-under other names: it enrolls as a worker of its own and can share the builds'
-namespace.
+credential), copy `worker.yaml` under another name: it enrolls as a worker of
+its own.
+
+Give each dispatcher a builds namespace of its own (`WORKER_KUBE_NAMESPACE`,
+with the namespace, the builds' ServiceAccount, the Role and RoleBinding, the
+NetworkPolicy and the quota copied under it). Kubernetes cannot limit a Role
+to pods carrying a label, so two dispatchers in one builds namespace may each
+`exec` into the other's build pods, and so use the SSH key the other has
+while a build of its runs. For the same reason keep nothing else
+in a builds
+namespace: whoever may create pods in a namespace can mount any Secret in it.
 
 ### Stopping and updating
 
@@ -214,10 +222,13 @@ cluster protect itself, not as a guarantee.
 - **There is no worker-wide total.** A ResourceQuota on the builds' namespace is
   the tool for a ceiling on all builds together, and the dispatcher honours it:
   it does not claim a build the namespace has no room for. A quota on
-  `requests.cpu` or `requests.memory` needs the per-build limits set, and one on
-  `requests.ephemeral-storage` needs the disk limit, because a quota makes the
-  cluster refuse any pod that does not state the resource. A pod count needs
-  nothing.
+  `requests.cpu`, `requests.memory`, `limits.cpu` or `limits.memory` needs the
+  per-build limits set, and one on `requests.ephemeral-storage` needs the disk
+  limit, because a quota makes the cluster refuse any pod with a container that
+  does not state the resource. A pod count needs nothing. Beside the build
+  itself, each build pod asks for 10m of CPU and 16Mi of memory, with limits of
+  one CPU and 64Mi, for the container that hands the packages back. Count them
+  in.
 
 ## Architectures and scheduling
 
@@ -231,6 +242,12 @@ handed back to the server, which tries it again while it has attempts left: do
 not advertise an architecture the cluster has no node for. Builds under
 emulation (binfmt on the nodes) are the operator's business: the worker only
 advertises what it is told.
+
+A worker cannot ask the server for a build of one architecture, so while any
+pod of a dispatcher's has no node to go to, it claims nothing: the next build
+might wait for a node too. Run one dispatcher per architecture: its builds
+never wait behind those of an architecture the cluster is short of. Each needs
+a builds namespace of its own (see [One replica only](#one-replica-only)).
 
 The dispatcher's image must exist for every architecture you build for, since
 part of each pod runs from it. The published image covers `x86_64`, `aarch64`
@@ -298,32 +315,44 @@ kubectl -n aurcache create secret generic aurcache-build-ssh \
 Mount it into the dispatcher (the commented `build-ssh` volume in
 `worker.yaml`), and set `WORKER_GIT_SSH_KEY=/etc/aurcache-ssh/ssh-privatekey`
 and `WORKER_SSH_KNOWN_HOSTS=/etc/aurcache-ssh/known_hosts`. The key goes under
-`ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret, in the OpenSSH
-format `ssh-keygen` writes and without a passphrase: Ed25519, RSA (signing with
-SHA-2) or ECDSA. The dispatcher reads it again at the start of each build, so a
-changed Secret is used from the next build on.
+`ssh-privatekey`, as in a `kubernetes.io/ssh-auth` Secret. It is any private
+key `ssh-add` loads, without a passphrase, since there is no one to enter it.
+The dispatcher reads it again at the start of each build, so a changed Secret
+is used from the next build on.
 
-**The key never enters a build pod.** The dispatcher holds it and answers for
-it: while makepkg downloads a build's sources, and before anything is
-installed for the build, ssh in the pod reaches the dispatcher over an exec
-stream and asks it for signatures. Once the sources are in, that link is closed
-for good, and only then are the build's dependencies installed and its
-`prepare()`, `build()` and `package()` run. Code that runs as root in the pod,
-a dependency's install script for one, finds neither the key nor a way to ask
-for a signature. What can use the key, for the length of the download, is the
-package's own PKGBUILD as makepkg reads it, and git and ssh fetching its
-sources.
+**The key never enters a build pod.** For each build, the dispatcher loads it
+into an OpenSSH `ssh-agent` in its own pod, and ssh in the build pod reaches
+that agent over an exec stream. The build has that for as long as it runs, so
+a package that clones over SSH in `prepare()` or `build()`, and not only
+through `source=`, works here as it does on the
+[chroot worker](./split-chroot.md). The dispatcher's image has OpenSSH for
+this.
 
-One consequence: a package that clones over SSH itself, in `prepare()` or
-`build()` rather than through `source=`, cannot authenticate on this worker.
-The [chroot worker](./split-chroot.md) supports it, as there the key stays on
-the host while the socket is in the chroot for the whole build.
+**What this guarantees: a build cannot take the key away.** The key is in no
+file, no variable and no process of the build pod, and in no Secret a pod
+could mount. Nothing a build can ask the agent for returns it.
 
-Signatures are still signatures: code that runs during the download can ask
-for as many as it likes, for any host. Give this worker a deploy key that opens
-only what its packages need, read-only where the host allows it. One key is
-given to every build the dispatcher runs; use [routing](./routing.md) to send
-the packages that need it to this worker.
+**What it does not: a build can use the key while it runs.** That is the
+PKGBUILD, and also a dependency's install script, which runs as root in the
+pod. `ssh-agent` signs whatever it is asked to, so the code of a build can:
+
+- log in as the key, to any host that accepts it;
+- sign anything else with it, for example a git commit or a file
+  (`ssh-keygen -Y sign`). Such a signature stays valid after the build.
+
+So:
+
+- **Use a key made for builds, and for nothing else.** A deploy key that opens
+  only what the packages need, read-only where the host allows it. One key is
+  given to every build the dispatcher runs; use [routing](./routing.md) to
+  send the packages that need it to this worker.
+- **Do not register that key as a signing key anywhere.** Not as a signing
+  key on GitHub or GitLab, and not in an `allowed_signers` file. Where nobody
+  trusts the key's signatures, a signature a build made with it is worth
+  nothing.
+
+A build fetches such sources with `git` and `openssh`. Where the builder image
+lacks either, the build installs it at its start.
 
 **`known_hosts` is required.** It holds the host keys of the servers the key is
 used with, and a build's ssh accepts no host that is not in it. A pod is new
@@ -362,7 +391,7 @@ it edited, and `networkpolicy.yaml` has a comment at each place:
   pods resolve through a link-local address on their node, such as
   `169.254.25.10` or `169.254.20.10`. The policy refuses link-local addresses,
   and the cache is not a `kube-dns` pod, so lookups fail: builds resolve
-  nothing, and every one stops at its first `pacman -Syu`. Uncomment the rule
+  nothing, and every one stops at its first `pacman -Sy`. Uncomment the rule
   for it in `networkpolicy.yaml`: an `ipBlock` for that address's `/32` on
   port 53, UDP and TCP. The `nameserver` line of `/etc/resolv.conf` in any pod
   names the address.
@@ -409,10 +438,13 @@ starts.
   ends the builds those pods ran (their log ends with
   `Abandoned: its worker stopped reporting it.`) and queues a new build of each
   package, under a new number, while the package has attempts left. Pods also
-  bound themselves: each carries a deadline of its build's timeout plus an
-  hour, so one outlives a dispatcher that never comes back by at most that.
-  The hour is for the hand-back: the timeout stops a build, not the upload of
-  what it made.
+  bound themselves: each carries a deadline of its build's timeout plus five
+  minutes, so one outlives a dispatcher that never comes back by at most that.
+  Five minutes is what the server allows too: that long after a build's
+  timeout it takes the build back from a worker that has not reported it
+  (`REAP_BACKSTOP_GRACE` on the server), and accepts nothing of it afterwards.
+  A build that ends close to its timeout with packages too large to hand back
+  in that time is built again; give such a package a longer timeout.
 - **`--install` and `--rmdeps` in a package's build flags.** The build's
   system is the pod, which is discarded, so there is nothing to install into
   or to clean up. The flags are left out rather than passed to makepkg, which
@@ -445,18 +477,20 @@ says which, once per change:
 ```
 Not claiming builds: the cluster refuses a build pod: <the cluster's message>
 Not claiming builds while pod <name> has no node to run on: <the scheduler's message>
+Not claiming builds while the cluster's API does not answer: <the error>
 Claiming builds again
 ```
 
 The cluster's message names the cause: a ResourceQuota with no room, the
 builds' namespace at the wrong Pod Security level, a missing ServiceAccount, or
 a policy webhook. Check `kubectl -n aurcache-builds get events` and
-`kubectl -n aurcache-builds describe resourcequota`. If the question itself
-fails, the dispatcher logs
-`Could not ask the cluster whether it admits a build pod; claiming builds anyway`
-and goes on. Anything the API server itself answers is taken as its answer for
-a real pod too: a builds namespace that does not exist, a webhook that is
-down, a server turning requests away.
+`kubectl -n aurcache-builds describe resourcequota`. Anything the API server
+itself answers is taken as its answer for a real pod too: a builds namespace
+that does not exist, a webhook that is down, a server turning requests away.
+A question that reaches no API server holds claims back as well: a pod could
+not be created either, and each build claimed meanwhile would be handed
+straight back and cost its package an attempt. Claiming resumes with the first
+answer.
 
 Before each claim the dispatcher also deletes any pod of its own that no build
 of its holds: one whose delete failed earlier. It logs `Deleted pod <name>, which no build of this worker held`.
@@ -485,7 +519,7 @@ tried again.** A node took the pod and could not start it within
 status seldom says why; `kubectl -n aurcache-builds get events` does. The
 usual cause is a pod network the node cannot set up.
 
-**Every build fails at `pacman -Syu` with `Could not resolve host`.** Builds
+**Every build fails at `pacman -Sy` with `Could not resolve host`.** Builds
 cannot reach the cluster's DNS. On a cluster with NodeLocal DNSCache, see
 [What a build can reach](#what-a-build-can-reach).
 
@@ -501,9 +535,11 @@ builds pulls the dispatcher's image, not only the one it runs on.
 
 **Builds with an SSH key end at their `credential` step.** The log says
 why: `the worker did not open the link` when the dispatcher could not exec into
-the build container (check that its Role still allows `pods/exec`), or `the SSH
-link to the worker broke` when the exec stream ended during the download. The
-server builds the package again. See [Build credentials](#build-credentials).
+the build container (check that its Role still allows `pods/exec`). The server
+builds the package again. A link that ends while the build runs does not stop
+it: the log says `the SSH link to the worker broke during the build`, and only
+a fetch that still needed the key fails. See
+[Build credentials](#build-credentials).
 
 **The dispatcher will not start.** It names the problem: a yes/no variable that
 is not `true` or `false`, a pull policy outside the three, a pod template that
