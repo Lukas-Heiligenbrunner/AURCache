@@ -6,6 +6,9 @@ Move a document here once work against it starts, and on to `implemented/`
 once what it describes is built, noting any part deliberately left out in its
 status line.
 
-- `container-workers.md`: the build agent, and the Docker worker moved onto
-  it. Built; it moves with the Kubernetes worker's design, which builds on it.
+- `kubernetes-executor.md`, `container-workers.md` and
+  `kubernetes-executor-plan.md`: the Kubernetes worker and the build agent it
+  shares with the Docker worker. Built on `feat/kubernetes-executor`; they
+  move once that is merged and what `kubernetes-executor.md` lists under
+  "Still open" is settled or accepted.
 - `worker-protocol-versioning.md`: negotiation done, component tags open.

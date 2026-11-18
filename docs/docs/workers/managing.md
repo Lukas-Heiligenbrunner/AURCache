@@ -15,6 +15,7 @@ The **Type** column says how each worker builds:
 |---|---|
 | `chroot` | The `devtools` chroot worker. |
 | `docker` | The [Docker worker](./docker.md). |
+| `kubernetes` | The [Kubernetes worker](./kubernetes.md). |
 | `—` | The worker enrolled before workers reported this; restarting it fills it in. |
 
 A worker reports whatever it calls itself, so a future build strategy appears
