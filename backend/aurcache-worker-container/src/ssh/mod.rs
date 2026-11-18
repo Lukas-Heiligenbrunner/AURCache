@@ -68,6 +68,15 @@ impl CredentialFiles {
         }
     }
 
+    /// Whether both files are there to be read, without starting anything.
+    /// Whether the key is one ssh-agent takes is [`Self::load`]'s to find.
+    pub fn readable(&self) -> Result<()> {
+        read_known_hosts(&self.known_hosts)?;
+        std::fs::File::open(&self.key)
+            .with_context(|| format!("reading the SSH key {}", self.key.display()))?;
+        Ok(())
+    }
+
     /// Read the hosts' keys, and start an ssh-agent that has the key.
     pub async fn load(&self) -> Result<Credential> {
         let known_hosts = read_known_hosts(&self.known_hosts)?;
@@ -139,12 +148,17 @@ mod tests {
         std::fs::write(&files.known_hosts, "# nothing\n\n").unwrap();
         let said = format!("{:#}", files.load().await.err().unwrap());
         assert!(said.contains("no host key"), "{said}");
+        assert!(files.readable().is_err());
         std::fs::write(&files.known_hosts, "github.com ssh-ed25519 AAAA\n").unwrap();
+        files.readable().unwrap();
         let loaded = files.load().await.unwrap();
         assert_eq!(loaded.known_hosts, "github.com ssh-ed25519 AAAA\n");
         assert_eq!(loaded.agent.identity(), key.listed);
         std::fs::write(&files.key, "not a key").unwrap();
         let said = format!("{:#}", files.load().await.err().unwrap());
+        assert!(said.contains("ssh-privatekey"), "{said}");
+        std::fs::remove_file(&files.key).unwrap();
+        let said = format!("{:#}", files.readable().unwrap_err());
         assert!(said.contains("ssh-privatekey"), "{said}");
     }
 }

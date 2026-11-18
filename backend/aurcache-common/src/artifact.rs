@@ -1,11 +1,10 @@
 //! Which file names are built packages.
 //!
-//! A worker asks it of every name a build left before uploading the file,
-//! and the name then becomes a URL path segment and a file in the
-//! repository. It is here, beside the types every party speaks, so that
-//! anything else that handles a build's output asks the same question the
-//! same way: two copies of the rule would let one accept what the other
-//! refuses.
+//! Shared because every party that handles a build's output asks the same
+//! question of a name it did not choose: a worker before uploading, the build
+//! agent before listing or sending a file, and a worker again before putting a
+//! name it was handed into a URL. Two copies of the rule would let one of them
+//! accept what the other refuses.
 
 /// True for a built package artifact filename.
 ///
