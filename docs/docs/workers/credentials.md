@@ -228,31 +228,46 @@ accepting hosts on first use.
 ## What a build can do with the key
 
 Builds never hold the key. The worker loads it into an ssh-agent that runs as
-the build user, and a build that is offered the key is given the agent's socket
-— in its `makepkg.conf`, for the source download, and with the agent's
-directory bound read-only into its chroot, for a PKGBUILD that clones in
-`prepare()`. The agent signs SSH logins; it never hands the key back.
+the build user, and what a build can reach is that agent, never the key:
+
+- **The key file never enters the chroot**, for any build. It stays on the
+  worker, which reads it once into the agent; a generated key stays in the
+  worker's data directory, which the build user cannot read.
+- **A build offered the key reaches the agent inside its chroot**, as well as
+  for the source download outside it. The agent's directory is bound read-only
+  into the chroot at the same path, and `SSH_AUTH_SOCK` in the build's
+  `makepkg.conf` names its socket, so `prepare()`, `build()` and `package()`
+  can have the agent sign SSH logins: a PKGBUILD that clones from an
+  authenticated remote in `prepare()`, rather than declaring it in `source=()`,
+  works. Declared sources are still the better path — they are what gets
+  checksummed, and what gets fetched before any package code runs. The agent
+  signs; it never hands the key back.
+- **The bind is read-only**, so a build can connect to the socket but cannot
+  remove or replace it for the next build: root in the build's container runs
+  without `CAP_SYS_ADMIN` and cannot remount it writable, and a user namespace
+  a build makes for itself cannot either.
+- **A build that is not offered the key gets no bind of the agent's directory
+  and no `SSH_AUTH_SOCK`**, in its `makepkg.conf` or its environment. Its
+  sources are fetched without a key.
 
 What this guarantees:
 
 - The private key never leaves the worker. It is not sent to the server, not
   stored there, and not in any job; only the key's name travels.
-- The build user cannot read the key file, and builds get only the agent, which
-  signs SSH logins and nothing else. Nothing a build captures outlives it.
-- A build that is not offered the key gets none of it: no socket in its
-  `makepkg.conf` or its environment, and no agent mounted into its chroot.
-- Nor can such a build reach the agent by its path. Every build runs as the
-  same build user, which the agent belongs to, so file permissions cannot keep
-  one build from it; the sandbox around the PKGBUILD code that runs outside
-  the chroot does. It refuses a connection to any UNIX socket beneath the
-  paths the worker keeps private, the agent's among them, and lets a build
-  offered the key connect to the agent's socket alone. This holds while other
-  builds are using the agent.
+- Builds get only the agent, which signs SSH logins and nothing else. Nothing a
+  build captures outlives it.
+- A build that is not offered the key cannot reach the agent by its path
+  either. Every build runs as the same build user, which the agent belongs
+  to, so file permissions cannot keep one build from it; the sandbox around
+  the PKGBUILD code that runs outside the chroot does. It refuses a connection
+  to any UNIX socket beneath the paths the worker keeps private, the agent's
+  among them, and lets a build offered the key connect to the agent's socket
+  alone. This holds while other builds are using the agent.
 
 The last point takes Landlock's `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (Landlock
 ABI 9, Linux 7.1 and later). On an older kernel the sandbox cannot restrict
-sockets, so **any build on a worker holding a key can reach it**: the key still
-stays out of every chroot that is not offered it, but PKGBUILD code running
+sockets, so **any build on a worker holding a key can reach it**: the agent
+still stays out of every chroot that is not offered it, but PKGBUILD code running
 outside the chroot reaches the agent by its path, whatever **Build SSH key**
 says for its package. A worker with `WORKER_GIT_SSH_PACKAGES` set therefore
 holds no key on such a kernel, since it could not keep that list. The worker
