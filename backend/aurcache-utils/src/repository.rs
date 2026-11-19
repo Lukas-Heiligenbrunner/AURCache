@@ -507,7 +507,7 @@ impl Repository {
     /// what it signs.
     ///
     /// What was published before is signed by a backfill
-    /// ([`crate::signing::backfill`]); until one has found nothing left,
+    /// ([`crate::signing::Backfiller`]); until one has found nothing left,
     /// [`Self::signing_info`] says so.
     #[must_use]
     pub fn with_key(mut self, key: InstanceKey) -> Self {
@@ -692,27 +692,29 @@ impl Repository {
     /// The entries `platform`'s database lists whose file does not carry the
     /// key's signature over what it is now: unsigned, signed by another key
     /// or another of its subkeys, or with a `%PGPSIG%` that names the key but
-    /// is not over the file. Each file the key signed is read whole to tell,
+    /// is not over the file -- and, apart, those whose file is not there at
+    /// all. Each file the key signed is read whole to tell,
     /// on a blocking thread and without the lock: a change may land
     /// meanwhile, which [`Update::resign`]'s caller checks.
-    pub async fn unsigned(&self, platform: Platform) -> anyhow::Result<Vec<ListedPackage>> {
+    ///
+    /// An entry `verified` holds is not read again; `verified` is left
+    /// holding the entries listed now that carry the signature, for the next
+    /// call.
+    pub async fn unsigned(
+        &self,
+        platform: Platform,
+        verified: &mut Verified,
+    ) -> anyhow::Result<Unsigned> {
         let Some(key) = self.key_handle() else {
-            return Ok(Vec::new());
+            return Ok(Unsigned::default());
         };
         let listed = self.listed(platform).await?;
         let dir = Self::platform_dir(&self.root, platform);
-        let unsigned = tokio::task::spawn_blocking(move || {
-            listed
-                .into_iter()
-                .filter(|entry| {
-                    !entry.signature.as_deref().is_some_and(|signature| {
-                        key.issued(signature)
-                            && key.verifies_file(signature, &dir.join(&entry.filename))
-                    })
-                })
-                .collect()
-        })
-        .await?;
+        let known = verified.entries.remove(&platform).unwrap_or_default();
+        let Checked { unsigned, signed } =
+            tokio::task::spawn_blocking(move || check_signatures(&key, &dir, listed, &known))
+                .await?;
+        verified.entries.insert(platform, signed);
         Ok(unsigned)
     }
 
@@ -1267,20 +1269,128 @@ fn sweep_retired(
     swept
 }
 
-/// A second name for `source` at `destination`, or a copy of it where the
-/// filesystem has no hard links (SMB, some FUSE mounts): slower and twice the
-/// space for a while, but publishing still works there.
-fn link_or_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
-    match std::fs::hard_link(source, destination) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            warn!(
-                "could not hard-link {} ({error}); copying it instead",
-                source.display()
-            );
-            std::fs::copy(source, destination).map(|_| ())
+/// The entries a platform's database lists that do not carry the key's
+/// signature over their file ([`Repository::unsigned`]).
+#[derive(Debug, Default)]
+pub struct Unsigned {
+    /// Entries whose file is there to be signed.
+    pub to_sign: Vec<ListedPackage>,
+    /// Where the files of entries that are not on disk at all should be:
+    /// listed by an update that could not move them in. Nothing can sign
+    /// them, and no client can download them either.
+    pub missing: Vec<PathBuf>,
+}
+
+/// Database entries found carrying the key's signature over their file,
+/// which [`Repository::unsigned`] does not read again: kept in memory from
+/// one call to the next by whoever makes them.
+#[derive(Debug, Default)]
+pub struct Verified {
+    entries: HashMap<Platform, HashSet<VerifiedEntry>>,
+}
+
+/// An entry found carrying the key's signature over its file, as it was
+/// then: a different checksum, signature or signer is a different entry,
+/// read again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VerifiedEntry {
+    filename: String,
+    sha256sum: String,
+    signature: Vec<u8>,
+    /// The fingerprint of the component key that signed at the time.
+    signer: String,
+}
+
+impl VerifiedEntry {
+    /// What `entry` is remembered as once found signed while `signer`
+    /// signs; `None` for an entry without the checksum or signature that
+    /// tells it from the next one under the same name.
+    fn of(entry: &ListedPackage, signer: &str) -> Option<Self> {
+        Some(Self {
+            filename: entry.filename.clone(),
+            sha256sum: entry.sha256sum.clone()?,
+            signature: entry.signature.clone()?,
+            signer: signer.to_string(),
+        })
+    }
+}
+
+/// What [`check_signatures`] found.
+struct Checked {
+    unsigned: Unsigned,
+    /// The entries listed that carry the key's signature over their file.
+    signed: HashSet<VerifiedEntry>,
+}
+
+/// Sort `listed`, the entries of the database in `dir`, by whether each
+/// carries `key`'s signature over its file, reading only those `known` does
+/// not already hold.
+fn check_signatures(
+    key: &InstanceKey,
+    dir: &Path,
+    listed: Vec<ListedPackage>,
+    known: &HashSet<VerifiedEntry>,
+) -> Checked {
+    let signer = key.signer_fingerprint();
+    let mut checked = Checked {
+        unsigned: Unsigned::default(),
+        signed: HashSet::new(),
+    };
+    for entry in listed {
+        let remembered = signer
+            .as_deref()
+            .and_then(|signer| VerifiedEntry::of(&entry, signer));
+        if let Some(remembered) = remembered.as_ref().filter(|r| known.contains(r)) {
+            checked.signed.insert(remembered.clone());
+            continue;
+        }
+        let path = dir.join(&entry.filename);
+        if is_missing(&path) {
+            checked.unsigned.missing.push(path);
+            continue;
+        }
+        let signed = entry
+            .signature
+            .as_deref()
+            .is_some_and(|signature| key.issued(signature) && key.verifies_file(signature, &path));
+        if !signed {
+            checked.unsigned.to_sign.push(entry);
+        } else if let Some(remembered) = remembered {
+            checked.signed.insert(remembered);
         }
     }
+    checked
+}
+
+/// Whether nothing at all is at `path`. A file that is there but cannot be
+/// read is not missing: reading it says why.
+fn is_missing(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
+/// A second name for `source` at `destination`, or a copy of it where the
+/// filesystem has no hard links (SMB, some FUSE mounts): slower and twice the
+/// space for a while, but publishing still works there. A `source` that is
+/// not there is neither.
+fn link_or_copy(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let error = match std::fs::hard_link(source, destination) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if is_missing(source) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is not there", source.display()),
+        ));
+    }
+    warn!(
+        "could not hard-link {} ({error}); copying it instead",
+        source.display()
+    );
+    std::fs::copy(source, destination).map(|_| ())
 }
 
 /// Flush `path`, and the directory entry naming it, to disk.
@@ -2222,7 +2332,13 @@ mod tests {
             assert!(signed(&repo, &dir.join(database)), "{database}");
         }
         assert!(signed(&repo, &platform_file(&repo, "foo", "1.0-1")));
-        assert!(repo.unsigned(Platform::X86_64).await.unwrap().is_empty());
+        assert!(
+            repo.unsigned(Platform::X86_64, &mut Verified::default())
+                .await
+                .unwrap()
+                .to_sign
+                .is_empty()
+        );
         assert!(
             !std::fs::read_dir(&dir).unwrap().any(|entry| entry
                 .unwrap()
@@ -2292,7 +2408,13 @@ mod tests {
         let repo = renamed();
         repo.init().unwrap();
         assert!(signed(&repo, &dir.join("custom_name.db.tar.gz")));
-        assert!(repo.unsigned(Platform::X86_64).await.unwrap().is_empty());
+        assert!(
+            repo.unsigned(Platform::X86_64, &mut Verified::default())
+                .await
+                .unwrap()
+                .to_sign
+                .is_empty()
+        );
         assert_eq!(listed(&repo), ["foo-1.0-1"]);
     }
 
@@ -2485,6 +2607,22 @@ mod tests {
         let entry = repo.describe(path.clone()).await.unwrap();
         apply(&repo, vec![(path, entry)], &[]).await.unwrap();
         assert!(signed(&repo, &platform_file(&repo, "foo", "1.0-1")));
+    }
+
+    /// A file that is not there is neither linked nor copied, and the error
+    /// says so rather than that hard links failed.
+    #[test]
+    fn a_missing_file_is_reported_as_missing_not_copied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("gone.pkg.tar.zst");
+        let destination = tmp.path().join("copy.pkg.tar.zst");
+        let error = link_or_copy(&source, &destination).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            format!("{} is not there", source.display())
+        );
+        assert!(!destination.exists());
     }
 
     #[test]

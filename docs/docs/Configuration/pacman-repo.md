@@ -149,7 +149,9 @@ without holding up publishing. Until that has finished, the Settings page and
 `GET /api/repo/info` say so (`signing.backfilling`), and `aurcli repo config`
 keeps `SigLevel = Optional TrustAll`: a client requiring signatures would
 refuse the packages not yet signed. Whatever cannot be signed yet is retried
-later and reported in the **Logs** page.
+later and reported in the **Logs** page. A package the repository lists but
+no longer has on disk is reported there once and does not hold the rest up:
+no client can download it either, and rebuilding it publishes it again.
 
 ### The key
 
