@@ -4,8 +4,8 @@
 # even if the Landlock policy is never applied.
 #
 #   /var/lib/aurcache-worker   - the worker's, traversable so builds can reach
-#                                work/, with secrets inside readable only by
-#                                the worker.
+#                                work/. The worker creates its secrets in it
+#                                readable only by itself.
 #   .../work and the cache     - owned by *builder*, shared to the worker by
 #                                group, because makechrootpkg copies only the
 #                                build user's primary uid/gid into the chroot.
@@ -18,6 +18,5 @@
 
 
 d /var/lib/aurcache-worker       0755 aurcache aurcache -
-d /var/lib/aurcache-worker/secrets 0700 aurcache aurcache -
 d /var/lib/aurcache-worker/work  2775 builder  aurbuild -
 d /var/lib/aurcache-worker/chroot 0755 aurcache aurcache -
