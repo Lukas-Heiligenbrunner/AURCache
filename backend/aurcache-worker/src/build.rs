@@ -68,6 +68,37 @@ pub async fn check_script() -> anyhow::Result<()> {
     )
 }
 
+/// A directory of the worker's mounted into a build's chroot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindMount {
+    /// Where it is on the worker.
+    pub host: PathBuf,
+    /// Where the build sees it.
+    pub chroot: PathBuf,
+    /// Whether the build can change what it sees there.
+    pub access: Access,
+}
+
+/// What a build can do with a [`BindMount`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Read it only: `makechrootpkg -D`, systemd-nspawn's `--bind-ro=`.
+    ReadOnly,
+    /// Read and write it: `makechrootpkg -d`, systemd-nspawn's `--bind=`.
+    ReadWrite,
+}
+
+impl Access {
+    /// The `makechrootpkg` option that binds a directory this way.
+    #[must_use]
+    pub const fn flag(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "-D",
+            Self::ReadWrite => "-d",
+        }
+    }
+}
+
 /// Build the [`SCRIPT`] argv for a per-package build.
 ///
 /// No `systemd-run` wrapper: the worker places the build in a cgroup of its own
@@ -83,19 +114,12 @@ pub async fn check_script() -> anyhow::Result<()> {
 /// runs as: file ownership is what keeps the worker's identity and credentials
 /// out of reach of the code a PKGBUILD executes.
 ///
-/// A directory of the worker's mounted into a build's chroot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BindMount {
-    /// Where it is on the worker.
-    pub host: PathBuf,
-    /// Where the build sees it.
-    pub chroot: PathBuf,
-}
-
-/// `binds` become `-d host:chroot` arguments. devtools appends these *after* its
-/// own binds, so a bind here overrides one devtools made for the same target —
-/// which is how the per-job pacman cache replaces the shared one. There is no
-/// supported flag for that; `SRCDEST`, which does have one, uses it instead.
+/// `binds` become `-d host:chroot` arguments, or `-D host:chroot` for a
+/// read-only one. devtools passes systemd-nspawn these *after* its own binds,
+/// the read-only ones ahead of the read-write ones, so a bind here overrides
+/// one devtools made for the same target — which is how the per-job pacman
+/// cache replaces the shared one. There is no supported flag for that;
+/// `SRCDEST`, which does have one, uses it instead.
 pub fn build_command(
     chroot_root: &Path,
     copy_label: &str,
@@ -141,8 +165,13 @@ pub fn build_command(
     // `SRCDEST` is passed through the environment instead of a bind mount:
     // devtools reads it directly and binds it itself, which avoids competing
     // with its own `--bind=$SRCDEST:/srcdest`.
-    for BindMount { host, chroot } in binds {
-        argv.push("-d".to_string());
+    for BindMount {
+        host,
+        chroot,
+        access,
+    } in binds
+    {
+        argv.push(access.flag().to_string());
         argv.push(format!("{}:{}", host.display(), chroot.display()));
     }
     // Separator, then makepkg args (if any).
@@ -295,27 +324,30 @@ mod tests {
     fn build_command_does_not_bind_srcdest() {
         let cmd = build_command(Path::new("/chroot"), "job-1", &[], &[], "builder");
         assert!(!cmd.join(" ").contains("/srcdest"));
-        assert!(!cmd.iter().any(|a| a == "-d"));
+        assert!(!cmd.iter().any(|a| a == "-d" || a == "-D"));
         assert!(!cmd.iter().any(|a| a == "--"));
     }
 
-    /// Credentials reach the build as an extra bind mount, alongside SRCDEST.
+    /// Each bind is passed with the option for its access: `-d` binds
+    /// read-write, `-D` read-only.
     #[test]
     fn build_command_adds_bind_mounts() {
         let binds = vec![
             BindMount {
-                host: PathBuf::from("/job/secrets"),
-                chroot: PathBuf::from("/build-secrets"),
+                host: PathBuf::from("/job/cache"),
+                chroot: PathBuf::from("/var/cache/job"),
+                access: Access::ReadWrite,
             },
             BindMount {
                 host: PathBuf::from("/host/netrc"),
                 chroot: PathBuf::from("/etc/netrc"),
+                access: Access::ReadOnly,
             },
         ];
         let cmd = build_command(Path::new("/chroot"), "job-7", &binds, &[], "builder");
         let joined = cmd.join(" ");
-        assert!(joined.contains("/job/secrets:/build-secrets"));
-        assert!(joined.contains("/host/netrc:/etc/netrc"));
+        assert!(joined.contains("-d /job/cache:/var/cache/job"), "{joined}");
+        assert!(joined.contains("-D /host/netrc:/etc/netrc"), "{joined}");
         // Bind mounts are not makepkg flags; no separator should appear.
         assert!(!cmd.iter().any(|a| a == "--"));
     }

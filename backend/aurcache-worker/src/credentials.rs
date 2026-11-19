@@ -28,7 +28,7 @@ use aurcache_common::shell::quote_argument;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::build::BindMount;
+use crate::build::{Access, BindMount};
 use crate::config::Config;
 
 /// Directory the staged `known_hosts` lives in.
@@ -74,6 +74,10 @@ pub struct StagedCredential {
     /// The agent's socket, which builds reach on the same path inside the
     /// chroot and out.
     pub agent_socket: PathBuf,
+    /// The staged `known_hosts` that `git_ssh_command` names, which builds
+    /// read on the same path inside the chroot and out; `None` when none is
+    /// configured.
+    pub known_hosts: Option<PathBuf>,
 }
 
 /// Which SSH key a build should use, and where it came from.
@@ -173,14 +177,14 @@ async fn generate(path: &Path) -> Result<()> {
 /// hijacking is inherent and accepted), but it cannot obtain the key material,
 /// so nothing it steals outlives the build.
 #[must_use]
-pub fn git_ssh_command(known_hosts: Option<&str>) -> String {
+pub fn git_ssh_command(known_hosts: Option<&Path>) -> String {
     let mut cmd = String::from("ssh");
     match known_hosts {
         Some(path) => {
             // Quoted for the shell git runs this through: an unquoted path
             // with a space would split into two ssh arguments.
             cmd.push_str(" -o UserKnownHostsFile=");
-            cmd.push_str(&quote_argument(path));
+            cmd.push_str(&quote_argument(&path.display().to_string()));
         }
         // Without a known_hosts file ssh would prompt, which hangs a
         // non-interactive build forever; accept-new records on first contact
@@ -240,6 +244,8 @@ pub fn augment_makepkg_conf(base: &str, credential: Option<&StagedCredential>) -
 /// half-parsed bind mount would silently expose the wrong path into a build.
 /// Each one dropped is reported, since a mount the operator asked for and
 /// the build never sees is otherwise only discovered as a failing build.
+///
+/// Each is bound read-write: the variable has no way to ask for less.
 #[must_use]
 pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
     raw.split(',')
@@ -260,6 +266,7 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
             pair.map(|(host, chroot)| BindMount {
                 host: PathBuf::from(host),
                 chroot: PathBuf::from(chroot),
+                access: Access::ReadWrite,
             })
         })
         .collect()
@@ -287,13 +294,14 @@ pub fn stage_for_job(
         return Ok(None);
     };
     let known_hosts = match known_hosts {
-        Some(src) if src.exists() => Some(stage_known_hosts(src, dir)?.display().to_string()),
+        Some(src) if src.exists() => Some(stage_known_hosts(src, dir)?),
         _ => None,
     };
 
     Ok(Some(StagedCredential {
         git_ssh_command: git_ssh_command(known_hosts.as_deref()),
         agent_socket: agent_socket.to_path_buf(),
+        known_hosts,
     }))
 }
 
@@ -330,6 +338,7 @@ mod tests {
         StagedCredential {
             git_ssh_command: "ssh -o StrictHostKeyChecking=accept-new".to_string(),
             agent_socket: PathBuf::from(socket),
+            known_hosts: None,
         }
     }
 
@@ -372,7 +381,7 @@ mod tests {
     /// and break authenticated fetches outright.
     #[test]
     fn git_ssh_command_uses_the_agent_and_sets_host_policy() {
-        let with_hosts = git_ssh_command(Some("/staged/known_hosts"));
+        let with_hosts = git_ssh_command(Some(Path::new("/staged/known_hosts")));
         assert!(!with_hosts.contains("-i "), "must not name a key file");
         assert!(!with_hosts.contains("IdentitiesOnly"));
         assert!(with_hosts.contains("UserKnownHostsFile=/staged/known_hosts"));
@@ -453,7 +462,7 @@ mod tests {
             .arg("-c")
             .arg(format!(
                 "printf '<%s>' {}",
-                git_ssh_command(Some("/my dir/known hosts"))
+                git_ssh_command(Some(Path::new("/my dir/known hosts")))
             ))
             .output()
             .expect("sh should run");
@@ -491,10 +500,12 @@ mod tests {
                 BindMount {
                     host: PathBuf::from("/host/a"),
                     chroot: PathBuf::from("/chroot/a"),
+                    access: Access::ReadWrite,
                 },
                 BindMount {
                     host: PathBuf::from("/host/b"),
                     chroot: PathBuf::from("/chroot/b"),
+                    access: Access::ReadWrite,
                 },
             ]
         );
@@ -522,6 +533,7 @@ mod tests {
 
         assert_eq!(cred.agent_socket, socket);
         let staged = dest.join(KNOWN_HOSTS_FILE);
+        assert_eq!(cred.known_hosts.as_ref(), Some(&staged));
         assert!(cred.git_ssh_command.contains(&staged.display().to_string()));
         assert!(!cred.git_ssh_command.contains("-i "));
         assert!(!dest.join(KEY_FILE).exists(), "no key is staged");
