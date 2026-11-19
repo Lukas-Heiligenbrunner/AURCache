@@ -1517,8 +1517,14 @@ mod tests {
                 expires: Some(expires),
             }
         );
+        let day = 24 * 60 * 60;
+        assert!((expires - now).abs_diff(10 * day) <= 5, "{expires}");
         let notice = expiry_notice(&key.key, choice, now).unwrap();
-        assert!(notice.contains("stops signing in 9 days"), "{notice}");
+        let days = (expires - now) / day;
+        assert!(
+            notice.contains(&format!("stops signing in {days} days")),
+            "{notice}"
+        );
         assert!(
             notice.contains(&format!("when its primary key {primary} expires")),
             "{notice}"
