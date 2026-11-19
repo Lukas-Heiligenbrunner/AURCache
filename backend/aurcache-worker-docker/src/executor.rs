@@ -98,6 +98,7 @@ impl DockerExecutor {
         );
         tracing::info!("build containers will use network: {network:?}");
         tracing::info!("builds run with the agent at {}", agent.display());
+        check_root(&cfg.dirs.local);
         if workdir::noexec(&cfg.dirs.local) {
             tracing::warn!(
                 "{} is on a filesystem mounted noexec, and each build runs the agent from \
@@ -400,6 +401,25 @@ impl DockerExecutor {
 /// engine may be shared with a worker of another server, whose build ids are
 /// the same numbers, and a container found under a build's name is removed
 /// as a leftover.
+/// Make the directory builds go in when it is not there, and warn when
+/// others can reach into it.
+fn check_root(dir: &Path) {
+    if let Err(e) = workdir::make_root(dir) {
+        tracing::warn!("{e:#}");
+        return;
+    }
+    match workdir::reach(dir) {
+        Ok(workdir::Reach::Owner) => {}
+        Ok(workdir::Reach::Others { mode }) => tracing::warn!(
+            "{} is mode {mode:o}. Root in a build container can leave a setuid file in its \
+             build's directory there, which anyone on this host who can reach it could run \
+             while the build lasts: make it 0700, owned by this worker's user",
+            dir.display()
+        ),
+        Err(e) => tracing::warn!("{e:#}"),
+    }
+}
+
 /// The report the agent left in `dir`, read off the runtime, with what of it
 /// the job did not ask for left out.
 async fn read_report(dir: &Path, sources: &[JobVcsSource]) -> Report {

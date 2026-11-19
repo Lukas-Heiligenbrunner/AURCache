@@ -17,7 +17,7 @@ use aurcache_worker_container::input;
 use aurcache_worker_core::beneath;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
 use crate::container::BIN_DIR;
@@ -42,6 +42,46 @@ pub enum Removal {
     /// Something in it is not this worker's to remove: a build that was
     /// stopped leaves the directory root's.
     NotPermitted,
+}
+
+/// Who besides its owner can reach what is in a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Its owner alone: mode 0700, or narrower.
+    Owner,
+    /// Others as well, through this mode.
+    Others { mode: u32 },
+}
+
+/// Make the directory builds go in, mode 0700, unless it is there already.
+///
+/// Root in a build container can leave a setuid-root file in its build's
+/// directory, and Docker cannot mount a bind `nosuid`. Inside a directory
+/// only its owner can enter, nobody else on the host can run one.
+pub fn make_root(dir: &Path) -> Result<()> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(e) if e.kind() != ErrorKind::AlreadyExists => {
+            Err(e).with_context(|| format!("creating {}", dir.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Who besides its owner can reach what is in `dir`.
+pub fn reach(dir: &Path) -> Result<Reach> {
+    let mode = fs::metadata(dir)
+        .with_context(|| format!("reading the mode of {}", dir.display()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    Ok(if mode & 0o077 == 0 {
+        Reach::Owner
+    } else {
+        Reach::Others { mode }
+    })
 }
 
 /// Make `dir` for a build: the agent's copy of itself, the spec and the
@@ -357,6 +397,22 @@ mod tests {
         let big = fs::File::create(work.report()).unwrap();
         big.set_len(REPORT_LIMIT + 1).unwrap();
         assert!(unreadable(report_promptly(&scratch.0)).contains("larger than"));
+    }
+
+    #[test]
+    fn the_build_root_is_made_for_its_owner_alone() {
+        let scratch = Scratch::new("root");
+        let root = scratch.0.join("above/builds");
+        make_root(&root).unwrap();
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(reach(&root).unwrap(), Reach::Owner);
+        // One that is there already is left as it is, and said to be open.
+        set_mode(&root, 0o755).unwrap();
+        make_root(&root).unwrap();
+        assert_eq!(reach(&root).unwrap(), Reach::Others { mode: 0o755 });
+        set_mode(&root, 0o500).unwrap();
+        assert_eq!(reach(&root).unwrap(), Reach::Owner);
+        set_mode(&root, 0o700).unwrap();
     }
 
     #[test]
