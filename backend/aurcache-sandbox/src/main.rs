@@ -1,14 +1,17 @@
-//! Confine PKGBUILD code with Landlock, under one of two fixed profiles:
+//! Confine code from packages under one of three fixed profiles:
 //!
 //! ```text
 //! aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...
 //! aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] -- PROGRAM [ARGS]...
+//! aurcache-sandbox offline -- PROGRAM [ARGS]...
 //! ```
 //!
 //! - the build profile (`build.rs`): a worker's source download, which runs a
 //!   PKGBUILD outside the chroot, may write only that build's own directories;
 //! - `parse` (`parse.rs`): the server's PKGBUILD parsing, which may write
-//!   nothing and read nothing private.
+//!   nothing and read nothing private;
+//! - `offline` (`offline.rs`): a build's dependency install, which runs other
+//!   packages' scriptlets as root inside the chroot, reaches no network.
 //!
 //! Each profile owns its whole policy, stated by purpose rather than by
 //! mechanism, so a caller cannot assemble a weaker one. What they share is
@@ -18,12 +21,17 @@ use landlock::{AccessFs, BitFlags, PathBeneath, PathFd, RulesetCreated, RulesetC
 use std::path::{Path, PathBuf};
 
 mod build;
+mod offline;
 mod parse;
+mod seccomp;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os().skip(1).peekable();
     if args.next_if(|arg| arg == "parse").is_some() {
         return parse::main(args);
+    }
+    if args.next_if(|arg| arg == "offline").is_some() {
+        return offline::main(args);
     }
     build::main(args)
 }

@@ -18,6 +18,7 @@ use aurcache_worker_core::protocol::{Stop, log, report_warning, upload_artifacts
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, BindMount};
+use crate::build_deps;
 use crate::cache::Cache;
 use crate::cgroup::Hierarchy;
 use crate::chroots::Lease;
@@ -440,12 +441,14 @@ async fn execute_prepared_job(
     make_source_writable(&pkgdir)
         .await
         .context("making source writable")?;
+    let deps = stage_build_deps(ctx, client, job, &pkgdir).await?;
 
     let execution = execute_build_process(
         ctx,
         client,
         claimed,
         &pkgdir,
+        &deps,
         &prepared.caches,
         &prepared.binds,
     )
@@ -614,6 +617,33 @@ async fn finish_package_cache(
     }
 }
 
+/// Work out what the build installs before it starts and stage the list
+/// for the build script; see [`build_deps`].
+///
+/// A PKGBUILD that cannot be read fails the build here, with makepkg's
+/// words in its log, as it would have a few steps later.
+async fn stage_build_deps(
+    ctx: &WorkerContext<'_>,
+    client: &WorkerClient,
+    job: &JobDescriptor,
+    pkgdir: &Path,
+) -> Result<PathBuf> {
+    let srcinfo = match build_deps::print_srcinfo(pkgdir, &ctx.cfg.build_user).await {
+        Ok(srcinfo) => srcinfo,
+        Err(e) => {
+            let msg = format!("reading the build's dependencies failed: {e:#}");
+            log(client, job.build_id, &format!("[worker] {msg}\n")).await;
+            anyhow::bail!(msg);
+        }
+    };
+    let deps = build_deps::from_srcinfo(
+        &srcinfo,
+        &job.arch,
+        build_deps::Checks::of(&job.build_flags),
+    );
+    build_deps::stage(&workdir(ctx.cfg, job.build_id).join("config"), &deps)
+}
+
 /// Recursively open up the extracted source tree so the build user can write
 /// to it. `makechrootpkg` bind-mounts the package directory into the chroot
 /// and runs `makepkg` as `build_user`, which is not the user that unpacked
@@ -687,6 +717,7 @@ async fn execute_build_process(
     client: &Arc<WorkerClient>,
     claimed: &ClaimedJob,
     pkgdir: &Path,
+    deps: &Path,
     caches: &JobCaches,
     binds: &[BindMount],
 ) -> Result<BuildExecution> {
@@ -785,6 +816,9 @@ async fn execute_build_process(
         // The copy is synced with AURCache's repository and upgraded without
         // it; see `devtools::PacmanConfs`.
         ctx.pacman.pass_to(&mut cmd);
+        // What the script installs before the build, which then cannot
+        // become root to install anything itself; see `build_deps`.
+        cmd.env("AURCACHE_BUILD_DEPS", deps);
         cmd.spawn()
     };
 

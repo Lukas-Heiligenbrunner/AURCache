@@ -34,7 +34,7 @@ pub const SCRIPT: &str = "/usr/lib/aurcache/bin/aurcache-build";
 /// Must equal `INTERFACE` in `packaging/patch-makechrootpkg.py`; bump both
 /// when the worker starts relying on something a copy derived by the previous
 /// patcher would not do.
-pub const INTERFACE: &str = "2";
+pub const INTERFACE: &str = "3";
 
 /// Refuse to start unless [`SCRIPT`] is there and speaks [`INTERFACE`].
 ///

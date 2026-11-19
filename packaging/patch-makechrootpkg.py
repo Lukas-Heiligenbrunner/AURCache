@@ -6,7 +6,8 @@ and says so; it opts out of a systemd-nspawn default that is about to change.
 The three after it close the other direction: links the build leaves in its
 output directories, which `makechrootpkg` would otherwise `chown` through as
 root on the host. The upgrade patch keeps one build's output from reaching
-into the next: see its comment.
+into the next, and installs the build's dependencies with no network; the
+two after it leave the build no way back to root: see their comments.
 
 A PKGBUILD is bash. Sourcing one runs it. `makechrootpkg` does that twice
 *outside* the chroot, as the build user:
@@ -54,7 +55,7 @@ DST = os.environ.get("AURCACHE_BUILD_DST", "/usr/lib/aurcache/bin/aurcache-build
 # The interface the copy speaks, as `aurcache_worker::build::INTERFACE` (a unit
 # test there checks the two agree). Bump both when the worker starts relying on
 # something a copy derived by the previous version of this file would not do.
-INTERFACE = "2"
+INTERFACE = "3"
 
 
 def _no_follow(description: str, var: str) -> tuple[str, str, str]:
@@ -229,7 +230,8 @@ prepare_chroot
         'SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER "${BASH_SOURCE[0]}" "$@"',
         "check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,"
         "SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER,AURCACHE_DROPIN,"
-        "AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF "
+        "AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF,"
+        "AURCACHE_BUILD_DEPS "
         f'"${{BASH_SOURCE[0]}}" --interface={INTERFACE} "$@"',
     ),
     (
@@ -265,6 +267,22 @@ prepare_chroot
         #
         # Neither variable set (anyone running this copy by hand) skips the
         # sync, as `makechrootpkg` without `-u` does.
+        #
+        # Then the build's dependencies, which makepkg would install itself
+        # through `sudo pacman`: as root, with the build's network, running
+        # other packages' `.install` scriptlets and alpm hooks. The worker
+        # names them in `AURCACHE_BUILD_DEPS` (`aurcache_worker::build_deps`),
+        # one per line as makepkg would pass them, and they are installed
+        # here, against the databases just synced, in two steps: downloaded
+        # with network, which runs nothing from a package, then installed
+        # under `aurcache-sandbox offline`, which leaves the transaction and
+        # everything it starts no socket but a UNIX one. The sandbox is bound
+        # into the container read-only; it is the worker's own, of the same
+        # architecture as the chroot. Only what the copy does not already
+        # satisfy, as makepkg asks `pacman -T` -- otherwise a name an
+        # installed package provides could pull in a second provider. Unset,
+        # nothing is installed, and the build (which can no longer become
+        # root, below) fails on anything missing.
         "-u refused; the copy synced, then upgraded without AURCache's repository",
         '(( update_first )) && arch-nspawn "$copydir" \\\n'
         '\t\t--machine="$(machine_name upgrade-packages)" \\\n'
@@ -291,7 +309,64 @@ if [[ -n ${AURCACHE_PACMAN_CONF:-} || -n ${AURCACHE_UPGRADE_CONF:-} ]]; then
 \t\tpacman -Suu --noconfirm --config /etc/aurcache/pacman-upgrade.conf ||
 \t\tdie "Could not upgrade the chroot."
 fi
+
+if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
+\tmapfile -t _aurcache_deps <"$AURCACHE_BUILD_DEPS" ||
+\t\tdie "Unable to read %s" "$AURCACHE_BUILD_DEPS"
+\t_aurcache_missing=()
+\tif (( ${#_aurcache_deps[@]} )); then
+\t\t_aurcache_out=$(pacman --dbpath "$copydir/var/lib/pacman" -T -- "${_aurcache_deps[@]}")
+\t\tcase $? in
+\t\t\t0) ;;
+\t\t\t127) mapfile -t _aurcache_missing <<<"$_aurcache_out" ;;
+\t\t\t*) die "Could not check the build's dependencies." ;;
+\t\tesac
+\tfi
+\tif (( ${#_aurcache_missing[@]} )); then
+\t\t_aurcache_sandbox=$(command -v aurcache-sandbox) ||
+\t\t\tdie "aurcache-sandbox is needed to install the build's dependencies"
+\t\tarch-nspawn "$copydir" \\
+\t\t\t--machine="$(machine_name download-dependencies)" \\
+\t\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t\tpacman -Sw --noconfirm -- "${_aurcache_missing[@]}" ||
+\t\t\tdie "Could not download the build's dependencies."
+\t\tarch-nspawn "$copydir" \\
+\t\t\t--machine="$(machine_name install-dependencies)" \\
+\t\t\t--bind-ro="${_aurcache_sandbox//:/\\\\:}:/run/aurcache-sandbox" \\
+\t\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t\t/run/aurcache-sandbox offline -- \\
+\t\t\tpacman -S --asdeps --needed --noconfirm -- "${_aurcache_missing[@]}" ||
+\t\t\tdie "Could not install the build's dependencies."
+\tfi
+fi
 """,
+    ),
+    (
+        # devtools lets the build user run pacman as root, for makepkg to
+        # install the dependencies it finds missing -- and so lets the build
+        # itself become root in its chroot whenever it likes
+        # (`sudo pacman -U` of a package it made, with a scriptlet). The
+        # dependencies are installed before the build instead (the upgrade
+        # patch above), so the entry goes. The copy is made from a base that
+        # never had one, but one a copy was left holding goes with it.
+        "no sudoers entry letting the build user run pacman as root",
+        """\tcat > "$copydir/etc/sudoers.d/builduser-pacman" <<EOF
+builduser ALL = NOPASSWD: /usr/bin/pacman
+EOF
+\tchmod 440 "$copydir/etc/sudoers.d/builduser-pacman"
+""",
+        """\trm -f "$copydir/etc/sudoers.d/builduser-pacman"
+""",
+    ),
+    (
+        # And with no sudoers entry, no setuid program either: the build's
+        # container runs with `no_new_privs`, so sudo, su and every file
+        # capability are inert for the build user. Root dropping to that
+        # user, which is how `/chrootbuild` starts makepkg, is a `setuid()`
+        # rather than a setuid exec, and is unaffected.
+        "the build runs with no_new_privs",
+        "nspawn_build_args=(\n",
+        "nspawn_build_args=(\n\t--no-new-privileges=yes\n",
     ),
     (
         "direct `source PKGBUILD` for pkgbase/pkgname",
