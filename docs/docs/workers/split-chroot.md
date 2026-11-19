@@ -156,24 +156,26 @@ enabled in the kernel (`cat /proc/sys/fs/binfmt_misc/status`), enabling it with
 ## What runs as root
 
 A build runs as the unprivileged build user (`builder` by default) in a copy
-of the base chroot, and never becomes root in it: the build user has no
+of the base chroot, and cannot become root in it: the build user has no
 `sudo` entry in the chroot, and the build's container runs with
 `no_new_privs`, so no setuid program or file capability changes who it is.
 
 Everything a build needs installed is installed before it starts, by the
-worker, as root in the build's copy:
+worker, as root in the build's copy. Root also starts the build itself:
 
 | Step | Runs as | Network | Runs code from packages |
 |---|---|---|---|
 | Sync the package databases, upgrade the system | root | yes | official repositories only; AURCache's repository is left out of the upgrade |
 | Download the build's dependencies (`pacman -Sw`) | root | yes | no: nothing is installed |
 | Install the build's dependencies (`pacman -S --asdeps`) | root | **none** | yes: their `.install` scriptlets and alpm hooks |
+| Start the build (`/chrootbuild` reads `/etc/profile` and runs `sudo`) | root | as configured for builds | yes: whatever the dependencies installed for those, such as an `/etc/profile.d` script or a PAM module |
 | The build (`makepkg`) | build user | as configured for builds | yes: the PKGBUILD and its tools |
 
 The dependencies are what makepkg would install: the PKGBUILD's `depends`,
 `makedepends` and, unless the build runs with `--nocheck`, `checkdepends`,
-including those for the build's architecture. The worker reads them with
-`makepkg --printsrcinfo`, confined the same way as the source download. The
+including those for the build's architecture; with `--nodeps`, none. The
+worker reads them with `makepkg --printsrcinfo`, confined the same way as the
+source download, in the build's cgroup and under its limits and timeout. The
 build itself still checks them, and fails on anything missing rather than
 installing it.
 
@@ -184,7 +186,8 @@ layer it can:
 - a network namespace of its own, with nothing in it, where root may create
   one (as in the worker's container);
 - a seccomp filter: no socket but a UNIX one (IPv4 and IPv6 of every kind,
-  packet sockets and netlink all fail), and no io_uring;
+  packet sockets, netlink and vsock all fail), no io_uring, and no kernel
+  keyring, whose `request_key` would have the host resolve a name for it;
 - `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`
   dropped from every capability set, so root cannot enter another network
   namespace again or take over a process that is in one;
@@ -192,19 +195,57 @@ layer it can:
   UNIX sockets or signals outside the install (ABI 6, Linux 6.12), no
   connecting to a UNIX socket by its path (ABI 9).
 
-Either the namespace or the filter keeps the install offline on its own; if
-neither can be applied, the install is refused and the build fails. The
-build log names the layers that applied, as in
-`aurcache-sandbox offline: netns+seccomp+landlock(abi 9)`. Every process a
-scriptlet starts inherits all of them, and the container ends with the
-install.
+The install needs the namespace or the filter; if neither can be applied, it
+is refused and the build fails. The build log names the layers that applied,
+as in `aurcache-sandbox offline: netns+seccomp+landlock(abi 9)`, and every
+process a scriptlet starts inherits all of them. Each of the two alone leaves
+something the other covers:
+
+- **The namespace alone**, as on an emulated worker, leaves `AF_VSOCK`, which
+  no network namespace confines: on a worker in a virtual machine, a
+  scriptlet can reach the hypervisor's vsock services. It would leave the
+  kernel keyring too, but the container's own filter refuses that (below),
+  and under emulation, where neither filter can be installed, qemu
+  implements none of the keyring calls.
+- **The filter alone**, where root cannot create a namespace, leaves UNIX
+  sockets, and on kernels before 6.12, where Landlock does not scope them,
+  the abstract UNIX sockets of the worker's network namespace with them.
+
+The install's binds are the build's package cache and the sandbox itself:
+not its ssh-agent socket, nor anything `WORKER_BIND_MOUNTS` adds. Its
+container also drops `CAP_MKNOD`: a container kept in the build's cgroup has
+no device policy, so a device node made there would open the host's device.
+
+None of this holds root as the build starts: `/chrootbuild` runs there with
+the build's network, and runs whatever the dependencies left for it. Only a
+network policy matched on the build's cgroup holds it, since nspawn keeps
+the container in that cgroup; one matched on the build user does not. What
+every container takes away is what would get around such a policy: raw
+packets (`CAP_NET_RAW`), mounting, since a kernel NFS mount's sockets are not
+the cgroup's, and the kernel keyring. The build's container also drops
+`CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_BOOT`, `CAP_SYS_MODULE`,
+`CAP_SYS_RAWIO`, `CAP_MKNOD`, `CAP_AUDIT_CONTROL` and `CAP_LINUX_IMMUTABLE`,
+none of which root needs to become the build user. Once a dependency has run
+in the copy, the build script reads none of the copy's configuration as root,
+and follows no link in it.
+
+:::note What a build cannot do
+No setuid program works in the build, so neither do the setuid helpers some
+`check()` steps use: `newuidmap` and `newgidmap` for a user namespace with
+more than one user, or `fusermount3` for a FUSE mount. Nothing in the build
+can mount either, not even in a user namespace of its own, so a `check()`
+that runs `bwrap` or `unshare` to mount something fails, and so does one
+that uses the kernel keyring. Packages whose tests need these build with
+`--nocheck`.
+:::
 
 :::note Emulated workers
-qemu's user-mode emulation refuses seccomp filters, so on a worker run
-emulated (see
+qemu's user-mode emulation refuses seccomp filters, the sandbox's and
+nspawn's alike, so on a worker run emulated (see
 [Building for another architecture](#building-for-another-architecture)) the
 install falls back to the network namespace alone, with the capabilities
-above dropped (`aurcache-sandbox offline: netns`).
+above dropped (`aurcache-sandbox offline: netns`), and no container is
+refused mounts by a filter: only by the capabilities it lacks.
 :::
 
 ## Swarm and other runtimes
