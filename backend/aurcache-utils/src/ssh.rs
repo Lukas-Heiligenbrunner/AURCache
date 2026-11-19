@@ -856,11 +856,11 @@ fn plan_hosts(
 /// type is no conflict -- OpenSSH keeps one key per type, and GitHub has
 /// several. A pattern entry (`*`, `?`) is compared under each name `ours`
 /// writes plainly that it matches, and left out when `ours` has names it
-/// cannot list. A hashed entry is compared under each name `ours` writes plainly,
-/// hashed with that entry's salt; one that matches none of them names a host
-/// `ours` does not know plainly, which is safe to add only when `ours` holds
-/// no hashed entries either. Otherwise it is left out, as is a line that does
-/// not parse.
+/// cannot list. A hashed entry is compared under each name `ours` writes
+/// plainly, hashed with that entry's salt; one that matches none of them names
+/// a host `ours` does not know plainly, which is safe to add only when `ours`
+/// holds no hashed or pattern entries either, since those could cover it.
+/// Otherwise it is left out, as is a line that does not parse.
 fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<Vec<String>> {
     let have: std::collections::HashSet<&str> = ours_text.lines().map(str::trim).collect();
     let plain_names: Vec<String> = ours
@@ -925,10 +925,12 @@ fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<V
                         .filter(|name| names(hashed, name))
                         .cloned()
                         .collect();
-                    if resolved.is_empty() && ours_hashed {
+                    // One that names none of them could name a host only
+                    // this server's hashed or pattern entries cover.
+                    if resolved.is_empty() && ours_unlisted {
                         tracing::warn!(
                             "Leaving out a hashed entry of the dump's known_hosts: this \
-                             server's own hashed entries cannot be compared with it"
+                             server's own hashed or pattern entries cannot be compared with it"
                         );
                         continue;
                     }
@@ -2390,5 +2392,25 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A hashed entry naming a host this server pins with a pattern is left
+    /// out: merged, it would vouch for another key for that host.
+    #[test]
+    fn a_hashed_entry_cannot_override_a_pattern_this_server_holds() {
+        let ours_key = random_key();
+        let theirs = random_key();
+        let ours = format!("{}\n", line("*.example.com", &ours_key));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+        let carried = hashed("git.example.com", &theirs);
+        let lines = mergeable(&entries, &ours, &carried).unwrap();
+        assert!(lines.is_empty(), "{lines:?}");
+
+        let merged = format!("{ours}{}", lines.join("\n"));
+        let merged: Vec<Entry> = KnownHosts::new(&merged).filter_map(Result::ok).collect();
+        assert!(matches!(
+            check(&merged, "git.example.com", &theirs),
+            HostKeyCheck::Changed { .. }
+        ));
     }
 }

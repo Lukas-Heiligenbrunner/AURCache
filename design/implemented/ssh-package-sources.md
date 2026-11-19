@@ -244,8 +244,8 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     refuses it; another type is merged, as OpenSSH keeps one key per type.
     Names are compared in lower case, and a hashed entry under each name this
     server writes plainly, hashed with that entry's salt. A hashed entry that
-    resolves to none of them is added only when this server has no hashed
-    entries of its own, which it could not compare it with. A pattern entry
+    resolves to none of them is added only when this server has no hashed or
+    pattern entries of its own, which could cover the host it names. A pattern entry
     (`*`, `?`) is compared under each plain name it matches, and left out when
     this server has hashed or pattern entries it could not list.
   - *Order:* the host keys are applied before the key, since their merge is
