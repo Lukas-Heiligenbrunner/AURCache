@@ -12,12 +12,13 @@ use aurcache_common::worker::BuildOutcome;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::settings::WorkerSettings;
 use aurcache_worker_kube::cluster::{Admission, CreateError};
+use aurcache_worker_kube::config::Config;
 use aurcache_worker_kube::pod::{BUILD, HOLD, STAGE};
 use std::sync::Arc;
 use std::time::Duration;
 use support::{
-    AfterLog, Answer, Call, INPUT, Package, Receive, Rig, Script, Sending, Sink, SshLinkScript,
-    Start, claimed, pod_name, report, status,
+    AfterLog, Answer, Call, HostUsers, INPUT, Package, Receive, Rig, Script, Sending, Sink,
+    SshLinkScript, Start, claimed, config, pod_name, report, status,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -891,7 +892,7 @@ async fn no_claim_while_a_pod_is_unschedulable() {
 #[tokio::test(start_paused = true)]
 async fn no_claim_while_the_cluster_refuses_a_build_pod() {
     let rig = Rig::new(Script::default());
-    rig.cluster.set_admission(Admission::Refused {
+    rig.cluster.refuse(Admission::Refused {
         message: "exceeded quota: builds, requested: pods=1, used: pods=4, limited: pods=4"
             .to_string(),
     });
@@ -900,13 +901,57 @@ async fn no_claim_while_the_cluster_refuses_a_build_pod() {
     assert_eq!(rig.cluster.calls(), [Call::Admits(pod_name(0))]);
     assert!(!rig.cluster.has_pod(&pod_name(0)));
 
-    rig.cluster.set_admission(Admission::Admitted);
+    rig.cluster.admit();
     assert!(rig.executor.ready_for_work(0).await);
     // An answer that judged nothing does not stop the worker.
-    rig.cluster.set_admission(Admission::Unjudged {
+    rig.cluster.refuse(Admission::Unjudged {
         message: "a pod of that name exists".to_string(),
     });
     assert!(rig.executor.ready_for_work(0).await);
+}
+
+/// With `WORKER_KUBE_USER_NAMESPACES=true`, an API server that drops
+/// `spec.hostUsers` (its `UserNamespacesSupport` gate off) would run every
+/// build in its node's user namespace while the worker says otherwise. No
+/// build is claimed while a dry run comes back without it, and a pod that
+/// was created without it is deleted before anything runs in it.
+#[tokio::test(start_paused = true)]
+async fn no_build_without_the_user_namespace_it_asks_for() {
+    let cfg = Config {
+        user_namespaces: true,
+        ..config()
+    };
+    let dropping = Script {
+        host_users: HostUsers::Dropped,
+        ..Script::default()
+    };
+    let rig = Rig::configured(dropping, Sink::default(), cfg.clone());
+    assert!(!rig.executor.ready_for_work(0).await);
+    assert!(!rig.cluster.has_pod(&pod_name(0)));
+
+    let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(built.report.outcome, BuildOutcome::Interrupted);
+    assert!(
+        reason(&built).contains("UserNamespacesSupport"),
+        "{}",
+        reason(&built)
+    );
+    assert!(rig.cluster.execs().is_empty(), "nothing ran in the pod");
+    assert!(!rig.cluster.has_pod(&pod_name(7)));
+    assert!(
+        rig.cluster
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Delete { name, .. } if *name == pod_name(7)))
+    );
+
+    // Where it keeps the field, builds go on in their own user namespace.
+    let rig = Rig::configured(Script::default(), Sink::default(), cfg);
+    assert!(rig.executor.ready_for_work(0).await);
+    let built = rig.build(&claimed(8, None)).await;
+    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
+    let host_users = rig.cluster.rendered()[0].spec.as_ref().unwrap().host_users;
+    assert_eq!(host_users, Some(false));
 }
 
 /// A dry run that reached no API server says a create would reach none: the
@@ -914,12 +959,12 @@ async fn no_claim_while_the_cluster_refuses_a_build_pod() {
 #[tokio::test(start_paused = true)]
 async fn no_claim_while_the_api_server_does_not_answer() {
     let rig = Rig::new(Script::default());
-    rig.cluster.set_admission(Admission::Unreached {
+    rig.cluster.refuse(Admission::Unreached {
         message: "error trying to connect: connection refused".to_string(),
     });
     assert!(!rig.executor.ready_for_work(0).await);
     assert!(!rig.cluster.has_pod(&pod_name(0)));
-    rig.cluster.set_admission(Admission::Admitted);
+    rig.cluster.admit();
     assert!(rig.executor.ready_for_work(0).await);
 }
 
