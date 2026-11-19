@@ -39,8 +39,11 @@ spec:
   # their own builds, and each report abandons what the other holds. Recreate
   # rather than RollingUpdate for the same reason: an update must not run two
   # at once, and the volume is ReadWriteOnce. For more builds at once, raise
-  # WORKER_CONCURRENCY_DEFAULT, or run a second copy of this Deployment under
-  # another name, which enrolls as a worker of its own.
+  # WORKER_CONCURRENCY_DEFAULT. A second worker is a copy of this Deployment
+  # and of its volume claim under other names, which enrolls as a worker of
+  # its own, with a builds namespace of its own (WORKER_KUBE_NAMESPACE, and
+  # the namespace's objects copied for it; see README.md): two dispatchers in
+  # one builds namespace could each exec into the other's build pods.
   replicas: 1
   strategy:
     type: Recreate
@@ -175,9 +178,11 @@ spec:
             #       aurcache-build-ssh --from-file=ssh-privatekey=./id_ed25519 \
             #       --from-file=known_hosts=./known_hosts
             #
-            # The key stays in this pod. Builds ask this worker to sign their
-            # SSH logins while they run, and never hold the key: a build can
-            # use it, and nothing in a build can copy it.
+            # The key stays in this pod. While a build runs it can have this
+            # worker's ssh-agent sign with the key, a login or anything else,
+            # and never holds the key: a build can use it, and nothing in a
+            # build can copy it. Use a key made for builds, registered nowhere
+            # as a signing key.
             # - name: WORKER_GIT_SSH_KEY
             #   value: /etc/aurcache-ssh/ssh-privatekey
             # - name: WORKER_SSH_KNOWN_HOSTS
