@@ -517,9 +517,8 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
-    /// A restore replaced the SSH key package sources are cloned with: with
-    /// the dump's, or with a fresh one as a cleared server starts. Remotes that
-    /// knew the previous key do not know this one.
+    /// A restore replaced the SSH key package sources are cloned with by the
+    /// dump's. Remotes that knew the previous key do not know this one.
     RestoreSshKeyReplaced => ("restore.ssh_key_replaced", "Backups", "SSH key replaced") {
         fingerprint: String,
         /// Where the key it replaced is kept, when there was one.
@@ -1256,9 +1255,9 @@ impl Event {
                 fingerprint,
                 previous,
             } => {
-                let kept = previous
-                    .as_ref()
-                    .map_or_else(String::new, |p| format!(" (the previous key is kept at {p})"));
+                let kept = previous.as_ref().map_or_else(String::new, |p| {
+                    format!(" (the previous key is kept at {p})")
+                });
                 vec![text(format!(
                     "a restore replaced the SSH key package sources are cloned with, which is \
                      now {fingerprint}; a remote that knew only the previous key needs this \

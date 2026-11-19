@@ -553,7 +553,7 @@ fn write_secrets(
 }
 
 /// What a restore does with the server's SSH state: nothing unless secrets
-/// are taken, and with `--clear` a fresh install plus what the dump carries.
+/// are taken, and with `--clear` the dump's where it carries any.
 fn ssh_mode(options: &RestoreOptions) -> SshRestoreMode {
     if options.clear {
         SshRestoreMode::Fresh
@@ -623,20 +623,6 @@ fn report_key(services: &Services, key: KeyRestored) {
                 previous: previous.map(|p| p.display().to_string()),
             });
         }
-        KeyRestored::Regenerated { fingerprint } => {
-            tracing::info!(
-                "Generated a fresh SSH key ({fingerprint}) in place of the old one, as a new \
-                 server would"
-            );
-            services.activity.emit(Event::RestoreSshKeyReplaced {
-                fingerprint,
-                previous: None,
-            });
-        }
-        KeyRestored::Removed => tracing::info!(
-            "Removed the server's own SSH key file, as a new server has none; \
-             AURCACHE_GIT_SSH_KEY stays the key in use"
-        ),
         KeyRestored::Beside {
             fingerprint,
             configured,
@@ -683,9 +669,13 @@ fn report_hosts(known_hosts: &HostsRestored) {
             "Added {added} of the dump's trusted SSH host keys to {}",
             file.display()
         ),
-        HostsRestored::Replaced { file } => tracing::info!(
-            "Replaced {} with the dump's trusted SSH host keys, as a cleared server starts",
-            file.display()
+        HostsRestored::Replaced { file, previous } => tracing::info!(
+            "Replaced {} with the dump's trusted SSH host keys, as a cleared server starts{}",
+            file.display(),
+            previous.as_ref().map_or_else(String::new, |p| format!(
+                "; the previous ones are kept at {}",
+                p.display()
+            ))
         ),
         HostsRestored::Pinned { file } => tracing::info!(
             "Kept AURCACHE_SSH_KNOWN_HOSTS ({}) rather than the dump's trusted SSH host keys",

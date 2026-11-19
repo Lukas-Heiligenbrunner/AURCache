@@ -1778,7 +1778,11 @@ async fn restoring_secrets_replaces_a_freshly_generated_key() {
         let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the replaced key is not private");
     }
-    assert_eq!(std::fs::read(&kept).unwrap(), generated, "the replaced key is lost");
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        generated,
+        "the replaced key is lost"
+    );
 }
 
 /// A default restore leaves secrets alone, the SSH key with them.
@@ -1931,10 +1935,10 @@ async fn an_operators_key_in_the_dump_is_not_copied_beside_itself() {
     );
 }
 
-/// `--clear` is a fresh install: without secrets in the dump, the server's
-/// own key is a new one and it trusts no host yet.
+/// `--clear` with a dump that carries no SSH state keeps this server's, as
+/// it keeps the CA: the key the remotes know, and the hosts it trusts.
 #[tokio::test]
-async fn clearing_without_secrets_starts_ssh_afresh() {
+async fn clearing_without_secrets_keeps_the_ssh_state() {
     let source = aurcache_db::testing::memory_db().await;
     package(&source, "hello", true, None).await;
     let bytes = write_archive(&build_dump(&source, "test", None).await.unwrap()).unwrap();
@@ -1942,12 +1946,15 @@ async fn clearing_without_secrets_starts_ssh_afresh() {
     let dir = tempfile::tempdir().unwrap();
     let ssh = ssh_server(dir.path());
     let before = fingerprint(&ssh);
+    let key = std::fs::read(dir.path().join("id_ed25519")).unwrap();
+    let hosts = std::fs::read_to_string(dir.path().join("known_hosts")).unwrap();
     let restored = restore_with_ssh(&bytes, ssh, clearing()).await;
     assert!(restored.failures.is_empty(), "{:?}", restored.failures);
-    assert_ne!(fingerprint(restored.store.ssh()), before);
+    assert_eq!(fingerprint(restored.store.ssh()), before);
+    assert_eq!(std::fs::read(dir.path().join("id_ed25519")).unwrap(), key);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("known_hosts")).unwrap(),
-        ""
+        hosts
     );
 }
 
@@ -2128,7 +2135,8 @@ async fn a_key_that_will_not_be_used_needs_no_passphrase() {
 }
 
 /// `--clear` with a key in the dump: the dump's key, in use at once, and
-/// the dump's trusted hosts and nothing else.
+/// the dump's trusted hosts and nothing else. The hosts it replaced are kept
+/// beside them.
 #[tokio::test]
 async fn clearing_with_a_carried_key_installs_it() {
     let old_dir = tempfile::tempdir().unwrap();
@@ -2148,7 +2156,17 @@ async fn clearing_with_a_carried_key_installs_it() {
     assert_eq!(
         std::fs::read_to_string(new_dir.path().join("known_hosts")).unwrap(),
         std::fs::read_to_string(old_dir.path().join("known_hosts")).unwrap(),
-        "a cleared server keeps hosts the dump does not carry"
+        "a cleared server kept hosts the dump does not carry"
+    );
+    let kept: Vec<std::path::PathBuf> = std::fs::read_dir(new_dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains("known_hosts.replaced-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        std::fs::read_to_string(&kept[0]).unwrap(),
+        format!("only.here.example.com {GITHUB_ED25519}\n")
     );
 }
 

@@ -141,10 +141,10 @@ pub(crate) struct RestoreArgs {
     #[arg(long, value_enum, default_value_t = OnExisting::Skip)]
     pub(crate) on_existing: OnExisting,
     /// Replace what is here rather than adding to it. Destructive: every
-    /// package, setting and worker this instance has is removed first, and
-    /// the SSH key is replaced -- by the dump's if it carries one, otherwise
-    /// by a newly generated key with no trusted hosts, which every git remote
-    /// then has to be given.
+    /// package, setting and worker this instance has is removed first. The
+    /// dump's SSH key and trusted hosts replace this server's when it carries
+    /// them, the replaced ones kept beside them; without them this server's
+    /// stay, as its CA does.
     #[arg(long)]
     pub(crate) clear: bool,
     /// Take the dump's CA, worker certificates, token hashes and SSH key.

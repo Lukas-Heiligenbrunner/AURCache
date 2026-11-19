@@ -53,10 +53,11 @@ What a restore does with them:
   the fingerprint's `/` and `+` written `_` and `-`. To go back to it, move it
   over `id_ed25519` and restart the server. The same key is never written
   twice: one already in place, however it is protected, is left as it is.
-- **`--clear` is a fresh install plus what the dump carries.** The key and the
-  trusted host keys are the dump's. A dump without them leaves the server as a
-  new one starts: a freshly generated key, which every repository has to be
-  given again, and no trusted hosts.
+- **`--clear` takes what the dump carries.** The key and the trusted host keys
+  are the dump's when it carries them; the host keys this server had are kept
+  beside the file, as `known_hosts.replaced-sha256-…`, as a replaced key is. A
+  dump without them leaves this server's key and trusted hosts as they are, as
+  it leaves the CA: nothing has to be given a new key.
 - **What you configured is never written.** A key named by
   `AURCACHE_GIT_SSH_KEY` stays the key in use, even where it is the server's own
   key file, and the activity log says so when it differs from the dump's. A

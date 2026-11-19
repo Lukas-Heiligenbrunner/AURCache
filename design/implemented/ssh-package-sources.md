@@ -269,17 +269,19 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     `ssh-keygen -p` to convert it. After a key
     is installed, the server reloads it and reports "installed" only if what
     it loaded is that key.
-  - *`--clear` is a fresh install* plus what the dump carries: the dump's key
-    and `known_hosts`, or, without them, a freshly generated key and an empty
-    `known_hosts`.
+  - *`--clear` takes what the dump carries:* the dump's key and `known_hosts`
+    when it has them, the replaced `known_hosts` kept beside it as a replaced
+    key is. A dump without them leaves this server's key and `known_hosts`, as
+    it leaves the CA: a cleared server that regenerated its key would need it
+    added to every remote again, which a restore exists to avoid.
   - *Operator paths are never written.* A key named by `AURCACHE_GIT_SSH_KEY`
     stays in use and untouched, compared by real path so that one mounted at
     the server's own key file is not written either; the dump's key then goes
     beside it, or nowhere -- nowhere too when it is the operator's key itself,
     as in a dump from the same server, so no second copy of it is written --
     and an activity entry
-    (`restore.ssh_key_superseded`) says when the two differ. A replaced or
-    regenerated key is `restore.ssh_key_replaced`. A pinned
+    (`restore.ssh_key_superseded`) says when the two differ. A replaced key
+    is `restore.ssh_key_replaced`, with where the old one is kept. A pinned
     `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
 - **Archive modes:** the SSH key, the CA key and the token hashes are written
   `0600` in the archive (`append_private`), as the signing key is.

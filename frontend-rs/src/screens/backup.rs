@@ -370,10 +370,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else. Its SSH \
-                         key is replaced too: by the dump's if it carries one, otherwise by \
-                         a newly generated key, with no trusted hosts -- every git remote \
-                         then has to be given the new key."
+                         instance ends up as the dump describes and nothing else. The \
+                         dump's SSH key and trusted hosts replace this server's when it \
+                         carries them, and the replaced ones are kept beside them; a dump \
+                         without them leaves this server's as they are, as it leaves the CA."
                     }
                 }
             }
