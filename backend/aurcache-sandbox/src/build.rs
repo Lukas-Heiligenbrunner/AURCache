@@ -398,13 +398,13 @@ mod tests {
         let file = dir.join("list");
         std::fs::write(
             &file,
-            "# secrets\n/var/lib/aurcache-worker/secrets\n\n  /etc/aurcache/identity  \n",
+            "# secrets\n/var/lib/aurcache-worker/ssh\n\n  /etc/aurcache/identity  \n",
         )
         .unwrap();
         assert_eq!(
             protected_paths(&file),
             vec![
-                PathBuf::from("/var/lib/aurcache-worker/secrets"),
+                PathBuf::from("/var/lib/aurcache-worker/ssh"),
                 PathBuf::from("/etc/aurcache/identity"),
             ]
         );

@@ -10,12 +10,9 @@
 # stays readable, which is the intended trade: the list of secrets is short and
 # known, while the set of files a build legitimately reads is neither.
 
-# Build credentials: the SSH key used to fetch authenticated sources.
-#
-# `ssh/` is where the worker generates and keeps it; `secrets/` is the staging
-# copy. Both are listed because a path that is merely *usually* empty is not a
-# protection, and only `secrets/` was here before -- so the real key sat
-# readable beside a carefully guarded copy of itself.
+# Build credentials: the SSH key used to fetch authenticated sources, which
+# the worker generates and keeps in `ssh/`. Nothing writes `secrets/`, but a
+# worker upgraded in place may still hold a copy of a key there.
 /var/lib/aurcache-worker/ssh
 /var/lib/aurcache-worker/secrets
 

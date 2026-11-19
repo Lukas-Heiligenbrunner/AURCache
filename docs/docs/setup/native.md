@@ -109,7 +109,6 @@ Directories, with ownership that matters for the same reason:
 
 ```
 /var/lib/aurcache-worker           aurcache  worker state
-/var/lib/aurcache-worker/secrets   aurcache  0700, build credentials
 /var/lib/aurcache-worker/work      builder   2775, shared to the worker by group
 /var/lib/aurcache-worker/chroot    aurcache  the storage pool: its image and mount point
 ```
