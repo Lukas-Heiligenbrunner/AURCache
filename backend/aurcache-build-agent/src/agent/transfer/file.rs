@@ -1,10 +1,12 @@
 //! Reading and writing files in fixed-size pieces, and opening only what a
 //! build may legitimately have left.
 
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::mem::ManuallyDrop;
-use std::os::fd::FromRawFd;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -35,6 +37,72 @@ pub fn open_regular(path: &Path) -> io::Result<Opened> {
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(Opened::Other),
         Err(error) => return Err(error),
     };
+    regular(file)
+}
+
+/// A directory directly in the work directory, opened as itself.
+pub struct Beneath(OwnedFd);
+
+/// What was at a directory's name in the work directory.
+pub enum OpenedDir {
+    Dir(Beneath),
+    /// A symbolic link, never followed, or anything but a directory.
+    Other,
+}
+
+/// Open the directory `name` in `root`, the work directory, without
+/// following a link at its place.
+///
+/// `root` is a volume's mount point, which nothing in a container can
+/// replace; what is in it, root in the build container could have made
+/// anything, a link to elsewhere in this container included.
+pub fn open_dir_in(root: &Path, name: &str) -> io::Result<OpenedDir> {
+    let root = rustix::fs::open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    match rustix::fs::openat(&root, name, flags, Mode::empty()) {
+        Ok(dir) => Ok(OpenedDir::Dir(Beneath(dir))),
+        // ELOOP: a symbolic link; ENOTDIR: anything else but a directory.
+        Err(Errno::LOOP | Errno::NOTDIR) => Ok(OpenedDir::Other),
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+impl Beneath {
+    /// The regular file `name` in this directory, opened as [`open_regular`]
+    /// opens a path.
+    pub fn regular(&self, name: &str) -> io::Result<Opened> {
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let file = match rustix::fs::openat(&self.0, name, flags, Mode::empty()) {
+            Ok(fd) => File::from(fd),
+            Err(Errno::LOOP) => return Ok(Opened::Other),
+            Err(errno) => return Err(errno.into()),
+        };
+        regular(file)
+    }
+
+    /// The names in this directory that are UTF-8, `.` and `..` left out.
+    pub fn names(&self) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in rustix::fs::Dir::read_from(&self.0)? {
+            let name = entry?.file_name().to_bytes().to_vec();
+            if let Ok(name) = String::from_utf8(name)
+                && name != "."
+                && name != ".."
+            {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+}
+
+/// `file` if it is a regular file.
+fn regular(file: File) -> io::Result<Opened> {
     if file.metadata()?.mode() & libc::S_IFMT == libc::S_IFREG {
         Ok(Opened::Regular(file))
     } else {
@@ -69,7 +137,7 @@ pub fn stdout() -> ManuallyDrop<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK, Opened, open_regular, pump};
+    use super::{CHUNK, Opened, OpenedDir, open_dir_in, open_regular, pump};
     use std::io::Cursor;
     use std::os::unix::fs::symlink;
 
@@ -80,6 +148,42 @@ mod tests {
         let count = pump(&mut Cursor::new(&data), &mut out).unwrap();
         assert_eq!(count, data.len() as u64);
         assert_eq!(out, data);
+    }
+
+    /// A directory that is a link, or not a directory, is not opened; nor
+    /// is a link or a pipe in one, which is not waited on.
+    #[test]
+    fn a_directory_in_the_work_directory_is_opened_as_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("f"), b"elsewhere").unwrap();
+        std::fs::create_dir(root.path().join("pkg")).unwrap();
+        std::fs::write(root.path().join("pkg/f"), b"x").unwrap();
+        symlink("f", root.path().join("pkg/l")).unwrap();
+        let fifo = std::ffi::CString::new(root.path().join("pkg/p").to_str().unwrap()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        symlink(elsewhere.path(), root.path().join("linked")).unwrap();
+        std::fs::write(root.path().join("file"), b"").unwrap();
+
+        let OpenedDir::Dir(pkg) = open_dir_in(root.path(), "pkg").unwrap() else {
+            panic!("pkg/ is a directory");
+        };
+        let mut names = pkg.names().unwrap();
+        names.sort();
+        assert_eq!(names, ["f", "l", "p"]);
+        assert!(matches!(pkg.regular("f").unwrap(), Opened::Regular(_)));
+        assert!(matches!(pkg.regular("l").unwrap(), Opened::Other));
+        assert!(matches!(pkg.regular("p").unwrap(), Opened::Other));
+        assert!(pkg.regular("missing").is_err());
+        for other in ["linked", "file"] {
+            assert!(matches!(
+                open_dir_in(root.path(), other).unwrap(),
+                OpenedDir::Other
+            ));
+        }
+        let missing = open_dir_in(root.path(), "missing").err().unwrap();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
