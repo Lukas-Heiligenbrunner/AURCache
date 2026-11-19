@@ -1903,6 +1903,34 @@ async fn an_operators_key_and_pinned_hosts_are_never_written() {
     }
 }
 
+/// On the server a dump was taken from, the dump's key is the operator's,
+/// in use already: a restore writes no second copy of it into the server's
+/// own key file.
+#[tokio::test]
+async fn an_operators_key_in_the_dump_is_not_copied_beside_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = ssh_server(&dir.path().join("other"));
+    drop(other);
+    let operator_key = dir.path().join("operator_key");
+    std::fs::copy(dir.path().join("other/id_ed25519"), &operator_key).unwrap();
+    let own_dir = dir.path().join("ssh");
+    let server = || {
+        Arc::new(SshAccess::new(SshConfig {
+            dir: own_dir.clone(),
+            key: KeySource::Provided(operator_key.clone()),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(own_dir.join("known_hosts")),
+        }))
+    };
+    let bytes = dump_with_ssh(&server()).await;
+    let restored = restore_with_ssh(&bytes, server(), copying()).await;
+    assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    assert!(
+        !own_dir.join("id_ed25519").exists(),
+        "a second copy of the operator's key was written"
+    );
+}
+
 /// `--clear` is a fresh install: without secrets in the dump, the server's
 /// own key is a new one and it trusts no host yet.
 #[tokio::test]

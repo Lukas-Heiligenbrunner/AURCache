@@ -60,7 +60,8 @@ What a restore does with them:
 - **What you configured is never written.** A key named by
   `AURCACHE_GIT_SSH_KEY` stays the key in use, even where it is the server's own
   key file, and the activity log says so when it differs from the dump's. A
-  pinned `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
+  dump whose key is that key, as one taken on the same server is, writes no
+  copy of it anywhere. A pinned `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.

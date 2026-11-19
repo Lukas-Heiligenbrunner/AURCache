@@ -377,8 +377,9 @@ enum KeyPlan {
         public_key: PublicKey,
         configured: PathBuf,
     },
-    /// The operator's key file is where the dump's key would go: left alone.
-    /// The dump's public half is known only if its key could be read.
+    /// Nothing is written: the operator's key file is where the dump's key
+    /// would go, or the dump's key is the operator's, already in use. The
+    /// dump's public half is known only if its key could be read.
     Skip {
         public_key: Option<PublicKey>,
         configured: PathBuf,
@@ -437,7 +438,8 @@ pub enum KeyRestored {
         same_key: bool,
         previous: Option<PathBuf>,
     },
-    /// Not written: the server's own key file is the operator's.
+    /// Not written: the server's own key file is the operator's, or the
+    /// dump's key is the operator's (`same_key`).
     Skipped {
         fingerprint: String,
         configured: PathBuf,
@@ -799,6 +801,17 @@ fn plan_key(
     }
 
     let file = file?;
+    // The dump's key is the operator's, as on the server it came from: it is
+    // in use already, and a second copy would be one more file holding it.
+    if let Some(configured) = configured.as_ref().filter(|configured| {
+        read_key(configured)
+            .is_ok_and(|key| key.public_key.key_data() == file.public_key.key_data())
+    }) {
+        return Ok(KeyPlan::Skip {
+            public_key: Some(file.public_key),
+            configured: configured.clone(),
+        });
+    }
     // Only a key in OpenSSH's format can be shown to be a key, and to open,
     // before it is written. One in an older format would be taken on its
     // `.pub`'s word, and could replace a working key with nothing usable.

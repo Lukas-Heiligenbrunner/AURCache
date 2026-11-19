@@ -275,7 +275,9 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
   - *Operator paths are never written.* A key named by `AURCACHE_GIT_SSH_KEY`
     stays in use and untouched, compared by real path so that one mounted at
     the server's own key file is not written either; the dump's key then goes
-    beside it, or nowhere, and an activity entry
+    beside it, or nowhere -- nowhere too when it is the operator's key itself,
+    as in a dump from the same server, so no second copy of it is written --
+    and an activity entry
     (`restore.ssh_key_superseded`) says when the two differ. A replaced or
     regenerated key is `restore.ssh_key_replaced`. A pinned
     `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
