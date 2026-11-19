@@ -41,6 +41,13 @@ every build as its container starts. The worker warns at startup when it sees
 one. Without it, the [hybrid image](./hybrid.md)
 builds against a Podman it runs inside its own container.
 
+Keep the directory mode `0700`, owned by the worker's user. Root in a build
+container (a dependency's install script runs as root there) can leave a
+setuid-root file in its build's directory, and Docker cannot mount a bind
+`nosuid`; in a directory only its owner can enter, nobody else on the host can
+run one while the build lasts. The worker creates the directory `0700` when it
+is not there, and warns at startup when it is open to others.
+
 ### The build agent
 
 The agent is a small static program, `aurcache-build-agent`, that the worker
