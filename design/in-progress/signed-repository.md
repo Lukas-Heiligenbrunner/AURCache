@@ -3,7 +3,7 @@
 Status: **In progress** (server-side signing of packages and databases, the
 backfill, key publication, CLI and web UI done; rotation, workers verifying,
 a keyring package and a staged rollout open — see [What is left](#what-is-left))
-· Last updated: 2026-11-16
+· Last updated: 2026-11-19
 
 Upstream issue: Lukas-Heiligenbrunner/AURCache#274 ("Feature: Signed packages &
 repo"). It asks for three things:
