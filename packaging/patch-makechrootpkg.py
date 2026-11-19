@@ -314,6 +314,10 @@ fi
         # empty, nothing is installed, and the build (which can no longer
         # become root, below) fails on anything missing.
         #
+        # Both containers are given the binds over the copy's package cache,
+        # and none of the build's others: not its ssh-agent socket, not the
+        # operator's mounts.
+        #
         # Last of everything host root does in the copy. Once a scriptlet has
         # run there as root, any path in it may be a link to the host
         # (`/etc/gitconfig -> /etc/shadow`), and any file host root reads
@@ -354,15 +358,22 @@ if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \tif (( ${#_aurcache_missing[@]} )); then
 \t\t_aurcache_sandbox=$(command -v aurcache-sandbox) ||
 \t\t\tdie "aurcache-sandbox is needed to install the build's dependencies"
+\t\tmapfile -t _aurcache_cache_dirs < <(pacman-conf --config "$copydir/etc/pacman.conf" CacheDir)
+\t\t_aurcache_cache_binds=()
+\t\tfor _aurcache_bind in "${bindmounts_rw[@]}"; do
+\t\t\t_aurcache_target=${_aurcache_bind##*:}
+\t\t\tin_array "${_aurcache_target%/}" "${_aurcache_cache_dirs[@]%/}" &&
+\t\t\t\t_aurcache_cache_binds+=("$_aurcache_bind")
+\t\tdone
 \t\tarch-nspawn "$copydir" \\
 \t\t\t--machine="$(machine_name download-dependencies)" \\
-\t\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t\t"${_aurcache_cache_binds[@]}" \\
 \t\t\tpacman -Sw --noconfirm -- "${_aurcache_missing[@]}" ||
 \t\t\tdie "Could not download the build's dependencies."
 \t\tarch-nspawn "$copydir" \\
 \t\t\t--machine="$(machine_name install-dependencies)" \\
 \t\t\t--bind-ro="${_aurcache_sandbox//:/\\\\:}:/run/aurcache-sandbox" \\
-\t\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t\t"${_aurcache_cache_binds[@]}" \\
 \t\t\t/run/aurcache-sandbox offline -- \\
 \t\t\tpacman -S --asdeps --needed --noconfirm -- "${_aurcache_missing[@]}" ||
 \t\t\tdie "Could not install the build's dependencies."
