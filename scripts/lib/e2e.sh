@@ -74,7 +74,7 @@ build_cli() {
     (cd "$PROJECT_DIR/backend" && cargo build -q -p aurcache-cli)
     local target
     target=$(cd "$PROJECT_DIR/backend" && cargo metadata -q --no-deps --format-version 1 |
-        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+        jq -r '.target_directory // empty')
     [ -n "$target" ] || { echo "ERROR: cannot find Cargo's target directory"; exit 1; }
     CLI_BIN="$target/debug/aurcli"
 }
