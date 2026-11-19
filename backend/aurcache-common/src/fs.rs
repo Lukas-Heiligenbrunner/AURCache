@@ -161,6 +161,22 @@ pub fn build_log_path(pkgbase: &str, number: i32) -> PathBuf {
 /// complete old or new file; symlinks are replaced, never followed. A parent
 /// sync failure is reported after replacement. The parent must already exist.
 pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    replace(path, contents, 0o600)
+}
+
+/// Atomically replace a file every user can read and only its owner can
+/// change: `0644` on Unix, whatever the umask.
+///
+/// Replaced as [`write_private`] replaces a file: readers see a complete old
+/// or new file, and a symlink at `path` is replaced, never followed.
+pub fn write_public(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    replace(path, contents, 0o644)
+}
+
+/// Write `contents` to a new sibling of `path`, owner-only until it is
+/// complete, give it `mode` and rename it over `path`.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn replace(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -195,6 +211,13 @@ pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         }
     };
     file.write_all(contents)?;
+    // On the open file, so the umask cannot narrow it and nothing at a path
+    // can redirect it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     file.sync_all()?;
     drop(file);
     fs::rename(&temporary.0, path)?;
@@ -343,6 +366,30 @@ mod private_file_tests {
         fs::create_dir(&directory).unwrap();
         assert!(write_private(&directory, b"bad").is_err());
         assert!(directory.is_dir());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A public file is readable by everyone, and a symlink where it goes is
+    /// replaced by it: what the link pointed at is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_public_file_replaces_a_symlink_and_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, "kept").unwrap();
+        let path = dir.path().join("public");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        write_public(&path, b"new").unwrap();
+
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_file());
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read(&target).unwrap(), b"kept");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 }

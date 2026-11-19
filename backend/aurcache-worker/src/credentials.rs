@@ -24,6 +24,7 @@
 //! someone is debugging an authentication failure.
 
 use anyhow::{Context, Result};
+use aurcache_common::fs::write_public;
 use aurcache_common::shell::quote_argument;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -35,9 +36,10 @@ use crate::config::Config;
 ///
 /// ssh reads it as the build user in two places: outside the chroot, where
 /// `makechrootpkg`'s `download_sources()` runs `makepkg --verifysource`, and
-/// inside it, for a PKGBUILD that clones in `prepare()` -- it is bound there at
-/// the same path (see `job::prepare_bind_mounts`). So it is readable by the
-/// build user and writable only by the worker: [`stage_for_job`] makes it so.
+/// inside it, for a PKGBUILD that clones in `prepare()` -- it is bound there,
+/// read-only, at the same path (see `job::prepare_bind_mounts`). So it is
+/// readable by the build user and writable only by the worker:
+/// [`stage_for_job`] makes it so.
 ///
 /// Not a secret, and so not under the paths `aurcache-sandbox` keeps from the
 /// code outside the chroot (`packaging/sandbox-protected`): a `known_hosts`
@@ -45,7 +47,7 @@ use crate::config::Config;
 /// fetch fail at host-key verification. The key is never here: builds use it
 /// through the agent.
 ///
-/// The path is stable across jobs: [`stage_for_job`] overwrites what is there
+/// The path is stable across jobs: [`stage_for_job`] replaces what is there
 /// for each one, and the `known_hosts` path it puts in `GIT_SSH_COMMAND` stays
 /// the same.
 pub fn known_hosts_dir(data_dir: &Path) -> PathBuf {
@@ -284,7 +286,7 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
 /// wherever the operator put it: a docker-secret or root-owned mount would not
 /// be readable by the unprivileged build user. Read per job, so a replaced
 /// file takes effect on the next build. The destination is shared by every
-/// job (see [`known_hosts_dir`]) and simply overwritten each time.
+/// job (see [`known_hosts_dir`]) and replaced each time.
 pub fn stage_for_job(
     known_hosts: Option<&Path>,
     dir: &Path,
@@ -305,21 +307,39 @@ pub fn stage_for_job(
     }))
 }
 
-/// Copy `src` to `dir` as `known_hosts`, readable by every user and writable
-/// by the worker alone, and return where it went.
+/// Copy `src` into `dir` as `known_hosts`, readable by every user and
+/// writable by the worker alone, and return where it went.
 ///
-/// The modes are set rather than copied: `std::fs::copy` keeps the source's,
-/// and a `0600` secret mount would stay unreadable to the build user.
+/// Written beside the previous copy and renamed over it, never written
+/// through it ([`write_public`]):
+/// - whatever is at the path is replaced, not followed: a symlink planted
+///   there -- to the worker's mTLS key, say -- gives way to the copy, and what
+///   it pointed at is left as it was;
+/// - every job reads this one file, and another job's ssh may have it open:
+///   that ssh reads the previous copy whole, and one starting after the
+///   rename reads this copy whole. Neither ever sees a file being truncated
+///   and rewritten under it.
+///
+/// A directory at the path fails the job instead: the worker never makes one
+/// there, so it is not the worker's to remove.
+///
+/// The modes are the copy's own rather than the source's, so a `0600` secret
+/// mount still stages as a file the build user can read.
 fn stage_known_hosts(src: &Path, dir: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
+    let hosts = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("setting the mode of {}", dir.display()))?;
     let staged = dir.join(KNOWN_HOSTS_FILE);
-    std::fs::copy(src, &staged).context("copying known_hosts")?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))
-        .with_context(|| format!("setting the mode of {}", staged.display()))?;
-    Ok(staged)
+    match write_public(&staged, &hosts) {
+        Ok(()) => Ok(staged),
+        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => anyhow::bail!(
+            "{} is a directory, where the worker stages known_hosts; remove it",
+            staged.display()
+        ),
+        Err(e) => Err(e).with_context(|| format!("writing {}", staged.display())),
+    }
 }
 
 #[cfg(test)]
@@ -556,6 +576,30 @@ mod tests {
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dest.join(KNOWN_HOSTS_FILE)), 0o644);
         assert_eq!(mode(&dest), 0o755);
+    }
+
+    /// A directory where the copy goes fails the job, naming it, and stays
+    /// where it is.
+    #[test]
+    fn a_directory_where_known_hosts_goes_fails_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hosts = tmp.path().join("src-hosts");
+        std::fs::write(&hosts, "github.com ssh-ed25519 AAAA").unwrap();
+        let dest = known_hosts_dir(tmp.path());
+        let planted = dest.join(KNOWN_HOSTS_FILE);
+        std::fs::create_dir_all(planted.join("inside")).unwrap();
+
+        let error = stage_for_job(Some(&hosts), &dest, Some(&tmp.path().join("agent.sock")))
+            .expect_err("a directory is not replaced");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is a directory, where the worker stages known_hosts; remove it",
+                planted.display()
+            )
+        );
+        assert!(planted.join("inside").is_dir());
     }
 
     /// The sandbox keeps the paths in its policy from the PKGBUILD code that
