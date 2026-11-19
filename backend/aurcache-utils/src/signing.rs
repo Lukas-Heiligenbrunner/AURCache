@@ -86,8 +86,9 @@ impl Backfiller {
             }
             problems.extend(pass.problems);
         }
-        self.missing = still_missing;
         repo.sign_databases(db).await?;
+        // Only a run that returns its missing files has reported them.
+        self.missing = still_missing;
         Ok(if problems.is_empty() {
             Backfill::Complete { signed, missing }
         } else {
