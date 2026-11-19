@@ -33,7 +33,8 @@ at, or the one the worker generates (see below). Set **Build SSH key** to
 Until the setting names a key, no build is offered one, including on a worker
 configured with `WORKER_GIT_SSH_KEY`. A deployment whose packages fetch over
 SSH must set it after upgrading the server, globally or per package, or those
-builds fail at the source download.
+builds fail at the source download; see
+[Upgrading](../overview/upgrading.md#from-0-6).
 
 A name is a label, never a path: a lowercase letter or digit, then up to 63
 more of those, `_` or `-`. Only the name reaches the worker; the key itself
@@ -271,7 +272,9 @@ What it does not:
 
 - While a package that is offered the key builds, its code can log in with the
   key to any host the key can reach. Offer it only to packages whose PKGBUILDs
-  you trust with that access.
+  you trust with that access, and whoever can edit them on the server: changing
+  such a package's source, or a patch to its PKGBUILD, changes what runs with
+  the key.
 - A worker that does not read the key name a job carries offers its key to
   every build it runs, whatever the server's setting says.
 
