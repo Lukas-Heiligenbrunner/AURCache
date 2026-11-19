@@ -42,6 +42,12 @@ key alone on the first line. Add it to the repository as a **deploy key**
 (read-only access is all it needs), or to an account that can read the
 repositories you build from.
 
+Anyone who can use the API can add a package from any URL, and so make the
+server clone any repository this key can read, and build what is in it. Give
+the key only the repositories you mean AURCache to build: added to several
+repositories, or to an account that reads many, it gives every API user read
+access to all of them through the server.
+
 The key lives in `AURCACHE_SSH_DIR` (`./data/ssh`, so `/app/data/ssh` in the
 images), which must be persisted: a server that loses it generates a new one,
 and every remote you added the old one to then refuses it.
