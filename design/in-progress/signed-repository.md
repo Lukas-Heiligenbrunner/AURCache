@@ -356,8 +356,11 @@ whose entry carries no `%PGPSIG%` by the key over the file as it is:
 published before signing, under another key or another of its subkeys, or
 with a signature that names the key but is not over the file
 (`Repository::unsigned`, which reads each file the key signed whole, on a
-blocking thread, outside the lock -- once per run, and a run is at start and
-when the signer changes).
+blocking thread, outside the lock). A `Backfiller` runs it run after run and
+remembers, in memory, each entry it found signed -- by filename, checksum,
+signature and the subkey that signs -- so a file is read once per server
+process rather than once per run; the job keeps one for as long as the
+server runs.
 
 Per platform:
 
@@ -385,6 +388,15 @@ The job (`aurcache-scheduler`) runs it at start, and again after 1 minute,
 doubling to an hour, while it leaves anything unsigned; each run records
 `repo.signed` and `repo.signing_incomplete` events. `/repo/info` reports
 `backfilling: true` until a run finds nothing left (`Repository::mark_signed`).
+
+A file `<name>.db` lists that is not on disk -- what `Finalization::finish`
+leaves when a staged file was lost before its move -- cannot be signed, and
+no client can download it anyway. The backfill reports it once (a
+`repo.file_failed` event, action `sign`) and does not count it as unfinished,
+so it neither keeps the job retrying hourly nor keeps `backfilling` true and
+clients off `Required`. **Finding:** it used to do both, for good. Staging a
+missing file also said hard links had failed and it was copying instead; it
+says the file is not there now.
 
 **Open question resolved:** the backfill runs automatically. Turning signing
 on already breaks untrusting clients at once (above), so holding signatures
@@ -517,7 +529,9 @@ Built:
 - `aurcache-utils::signing`: the backfill signs what was published unsigned
   and leaves the packages untouched, replaces another key's signatures, does
   not give a file replaced after its copy the copy's entry, and is a no-op
-  for an unsigned repository.
+  for an unsigned repository; a listed file missing from disk is reported
+  once and does not keep it from completing; a file one run found signed is
+  not read again by the next.
 - `aurcache-utils/tests/publish.rs`: a signing server publishes a build with
   its signature, in its entry and beside it, and a signed database.
 - `aurcache-cli`: the stanza and commands for signed, backfilling and

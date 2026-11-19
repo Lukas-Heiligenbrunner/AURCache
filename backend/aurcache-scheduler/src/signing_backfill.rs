@@ -7,13 +7,16 @@
 //! repository reports itself as backfilling, and a client requiring
 //! signatures refuses whatever is still unsigned. A run that leaves something
 //! unsigned is tried again later, less and less often, so a file that cannot
-//! be signed neither stops the server nor floods the log. While the key that
-//! signs is close to expiring, the job says so once a day.
+//! be signed neither stops the server nor floods the log. A file the
+//! repository lists that is not on disk is reported once, and does not keep
+//! the backfill going: nothing can sign it. While the key that signs is
+//! close to expiring, the job says so once a day.
 
-use aurcache_activitylog::events::Event;
+use aurcache_activitylog::events::{Event, FileAction};
 use aurcache_utils::repository::Repository;
-use aurcache_utils::signing::{Backfill, backfill};
+use aurcache_utils::signing::{Backfill, Backfiller};
 use sea_orm::DatabaseConnection;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -32,8 +35,9 @@ pub fn start_signing_backfill(db: DatabaseConnection, repo: Arc<Repository>) {
         return;
     }
     tokio::spawn(async move {
+        let mut backfiller = Backfiller::default();
         loop {
-            sign_everything(&db, &repo).await;
+            sign_everything(&db, &repo, &mut backfiller).await;
             signer_changes(&repo).await;
             // What the old component key signed is not signed by the new one.
             repo.mark_unsigned();
@@ -42,29 +46,45 @@ pub fn start_signing_backfill(db: DatabaseConnection, repo: Arc<Repository>) {
 }
 
 /// Run the backfill until a run finds nothing left to sign.
-async fn sign_everything(db: &DatabaseConnection, repo: &Repository) {
+async fn sign_everything(db: &DatabaseConnection, repo: &Repository, backfiller: &mut Backfiller) {
     let mut wait = FIRST_WAIT;
     loop {
-        let outcome = backfill(db, repo).await;
-        let signed = match &outcome {
-            Ok(Backfill::Complete { signed } | Backfill::Incomplete { signed, .. }) => *signed,
-            Err(_) => 0,
-        };
-        if signed > 0 {
-            repo.log().emit(Event::RepoSigned { packages: signed });
-        }
-        let error = match outcome {
-            Ok(Backfill::Complete { .. }) => {
+        let error = match backfiller.run(db, repo).await {
+            Ok(Backfill::Complete { signed, missing }) => {
+                record(repo, signed, missing);
                 repo.mark_signed();
                 info!("Every package the repository publishes is signed");
                 return;
             }
-            Ok(Backfill::Incomplete { problems, .. }) => problems.join("; "),
+            Ok(Backfill::Incomplete {
+                signed,
+                missing,
+                problems,
+            }) => {
+                record(repo, signed, missing);
+                problems.join("; ")
+            }
             Err(e) => format!("{e:#}"),
         };
         repo.log().emit(Event::RepoSigningIncomplete { error });
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(LONGEST_WAIT);
+    }
+}
+
+/// Record what a run signed, and each listed file it found missing.
+fn record(repo: &Repository, signed: usize, missing: Vec<PathBuf>) {
+    if signed > 0 {
+        repo.log().emit(Event::RepoSigned { packages: signed });
+    }
+    for path in missing {
+        repo.log().emit(Event::RepoFileFailed {
+            path: path.display().to_string(),
+            action: FileAction::Sign,
+            error: "it is listed but not on disk, so no client can download it either; \
+                    rebuilding its package publishes it again"
+                .to_string(),
+        });
     }
 }
 
