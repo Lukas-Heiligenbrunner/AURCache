@@ -663,8 +663,11 @@ the pod to the server as one pipe:
    `aurcache-build-agent manifest --work /work` in `hold`. It answers with
    the report and a manifest, as JSON: for every regular file in `/work/pkg`
    whose name passes `is_artifact`, opened with `O_NOFOLLOW`, its name, its
-   size and its SHA-256. Nothing is running in the build container by then,
-   so the files cannot change afterwards.
+   size and its SHA-256. `pkg/` and `out/` are opened from `/work`'s handle
+   without following a link either: root in the build container could have
+   made either one, and what it points at is not the build's. Nothing is
+   running in the build container by then, so the files cannot change
+   afterwards.
 2. For each entry, the dispatcher execs
    `aurcache-build-agent send --work /work --name <name>`, whose stdout is
    the file's bytes and nothing else, and hands that stream to
