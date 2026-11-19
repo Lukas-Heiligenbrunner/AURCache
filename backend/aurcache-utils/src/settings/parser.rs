@@ -34,6 +34,24 @@ impl ParseSetting for ByteSize {
     }
 }
 
+/// The name of a worker-held SSH key, as
+/// [`aurcache_common::ssh_key::validate_name`] accepts it.
+///
+/// Its own type so that a name is checked wherever it is read from, and not
+/// only when the API stores one: `BUILD_SSH_KEY=Default` in the environment is
+/// no name, and reads as the default -- no key -- with a warning, as any value
+/// that does not parse does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshKeyName(pub String);
+
+impl FromStr for SshKeyName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        aurcache_common::ssh_key::validate_name(s).map(|()| Self(s.to_string()))
+    }
+}
+
 impl ParseSetting for String {
     fn parse_setting(s: &str) -> Result<Self, String> {
         Ok(s.to_string())
@@ -64,7 +82,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ParseSetting, Seconds};
+    use super::{ParseSetting, Seconds, SshKeyName};
+    use aurcache_common::settings::Setting;
 
     /// A duration setting reads what the worker's do: units, or plain seconds
     /// as it always took.
@@ -86,6 +105,25 @@ mod tests {
         }
         for off in ["false", "0", "no", "off", ""] {
             assert_eq!(bool::parse_setting(off), Ok(false), "{off:?}");
+        }
+    }
+
+    /// A key name is read as the API checks one before storing it, so a value
+    /// from the environment that is no name reads as no key at all.
+    #[test]
+    fn an_ssh_key_name_is_checked_wherever_it_is_read() {
+        let read = Option::<SshKeyName>::parse_setting;
+        assert_eq!(read(""), Ok(None));
+        assert_eq!(read("default"), Ok(Some(SshKeyName("default".to_string()))));
+        for bad in [
+            "Default",
+            " default",
+            "default\n",
+            "/run/secrets/key",
+            "../id",
+        ] {
+            assert!(read(bad).is_err(), "{bad:?}");
+            assert!(Setting::BuildSshKey.validate(bad).is_err(), "{bad:?}");
         }
     }
 
