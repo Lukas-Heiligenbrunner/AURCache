@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use aurcache_activitylog::activity_utils::ActivityLog;
+use aurcache_utils::repository::Repository;
 use aurcache_utils::snapshot::SnapshotStore;
 use rocket::local::asynchronous::Client;
 use rocket::{Build, Rocket};
@@ -29,6 +30,19 @@ pub async fn test_api(
     version: &str,
     mount: impl FnOnce(Rocket<Build>) -> Rocket<Build>,
 ) -> TestApi {
+    test_api_with_repository(version, |repo| repo, mount).await
+}
+
+/// [`test_api`], with the repository `repository` makes of the default one.
+///
+/// Allowed to go unused: this module is compiled into every test crate, and
+/// most never need a repository of their own.
+#[allow(dead_code)]
+pub async fn test_api_with_repository(
+    version: &str,
+    repository: impl FnOnce(Repository) -> Repository,
+    mount: impl FnOnce(Rocket<Build>) -> Rocket<Build>,
+) -> TestApi {
     let db = aurcache_db::testing::memory_db().await;
 
     let checkouts = tempfile::tempdir().expect("tempdir");
@@ -47,9 +61,7 @@ pub async fn test_api(
                 checkouts.path().to_path_buf(),
             )),
             client: Arc::new(aurcache_deps::AurClient::new()),
-            repo: Arc::new(aurcache_utils::repository::Repository::new(
-                checkouts.path().join("repo"),
-            )),
+            repo: Arc::new(repository(Repository::new(checkouts.path().join("repo")))),
             activity: ActivityLog::discarding(),
         })
         // The dump route reports which AURCache wrote a dump. Rocket's

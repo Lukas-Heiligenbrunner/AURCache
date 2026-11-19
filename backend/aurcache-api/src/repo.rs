@@ -1,9 +1,8 @@
 use crate::listen::ListenAddresses;
 use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 use aurcache_utils::services::Services;
-use rocket::http::{ContentType, Status};
 use rocket::serde::json::Json;
-use rocket::{State, get};
+use rocket::{Responder, State, get};
 use utoipa::OpenApi;
 
 use crate::auth::Authenticated;
@@ -53,12 +52,19 @@ pub fn repo_info(
     )
 )]
 #[get("/repo/key")]
-pub fn repo_key(services: &State<Services>) -> Result<(ContentType, String), Status> {
-    let key = services.repo.key().ok_or(Status::NotFound)?;
-    Ok((
-        ContentType::new("application", "pgp-keys"),
-        key.public_key().to_string(),
-    ))
+pub fn repo_key(services: &State<Services>) -> Option<PublicKey> {
+    let key = services.repo.key()?;
+    Some(PublicKey {
+        armored: key.public_key().to_string(),
+    })
+}
+
+/// An OpenPGP public key, armored, with the media type `pacman-key` and
+/// `gpg` expect of one.
+#[derive(Responder)]
+#[response(content_type = "application/pgp-keys")]
+pub struct PublicKey {
+    armored: String,
 }
 
 /// Whether the repository is signed, and with which key: `null` when it is
