@@ -12,8 +12,9 @@
 //! `makedepends` and, unless the build skips `check()`, `checkdepends`,
 //! each with its arrays for the build's architecture, as written --
 //! version constraints and provided names go to `pacman -S` the way makepkg
-//! passes them. It is read from `makepkg --printsrcinfo` of the PKGBUILD
-//! the build runs, never from a shipped `.SRCINFO`, which a patch or a
+//! passes them. Under `--nodeps`, which has makepkg check none of them, it
+//! is empty. It is read from `makepkg --printsrcinfo` of the PKGBUILD the
+//! build runs, never from a shipped `.SRCINFO`, which a patch or a
 //! maintainer's hand edit can leave describing another PKGBUILD.
 
 use std::path::{Path, PathBuf};
@@ -25,6 +26,16 @@ const RUNTIME: &str = "depends";
 const BUILDTIME: &str = "makedepends";
 const CHECKS: &str = "checkdepends";
 
+/// What a build installs before it starts, given its makepkg flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Install {
+    /// `--nodeps`: makepkg checks no dependency, so none is installed and
+    /// the PKGBUILD is not read for them.
+    Nothing,
+    /// The PKGBUILD's dependencies.
+    Dependencies(Checks),
+}
+
 /// Whether the build runs the PKGBUILD's `check()`, which decides whether
 /// `checkdepends` are installed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,18 +44,24 @@ pub enum Checks {
     Skipped,
 }
 
-impl Checks {
-    /// What makepkg does given these extra arguments.
+impl Install {
+    /// What makepkg installs given these extra arguments, in any spelling
+    /// it takes (`-d`, `-cd`, `--nodeps`).
     ///
-    /// A `check()`-less PKGBUILD or a `!check` in `BUILDENV` also skips it;
-    /// installing its `checkdepends` anyway costs a download, where leaving
-    /// one out would fail the build.
+    /// A `check()`-less PKGBUILD or a `!check` in `BUILDENV` also skips
+    /// `check()`; installing its `checkdepends` anyway costs a download,
+    /// where leaving one out would fail the build.
     #[must_use]
     pub fn of(build_flags: &[String]) -> Self {
-        if build_flags.iter().any(|flag| flag == "--nocheck") {
-            Self::Skipped
+        let flags = aurcache_common::build_flags::canonical(build_flags)
+            .unwrap_or_else(|_| build_flags.to_vec());
+        let given = |flag: &str| flags.iter().any(|f| f == flag);
+        if given("--nodeps") {
+            Self::Nothing
+        } else if given("--nocheck") {
+            Self::Dependencies(Checks::Skipped)
         } else {
-            Self::Run
+            Self::Dependencies(Checks::Run)
         }
     }
 }
@@ -234,9 +251,33 @@ pkgname = demo-docs
 
     #[test]
     fn nocheck_skips_checks() {
-        assert_eq!(Checks::of(&strings(&["--nocheck"])), Checks::Skipped);
-        assert_eq!(Checks::of(&strings(&["--skippgpcheck"])), Checks::Run);
-        assert_eq!(Checks::of(&[]), Checks::Run);
+        assert_eq!(
+            Install::of(&strings(&["--nocheck"])),
+            Install::Dependencies(Checks::Skipped)
+        );
+        assert_eq!(
+            Install::of(&strings(&["--skippgpcheck"])),
+            Install::Dependencies(Checks::Run)
+        );
+        assert_eq!(Install::of(&[]), Install::Dependencies(Checks::Run));
+    }
+
+    /// makepkg `-d` checks no dependency, so the build installs none, in
+    /// whichever spelling it was given.
+    #[test]
+    fn nodeps_installs_nothing() {
+        for flags in [
+            &["--nodeps"][..],
+            &["-d"],
+            &["-cd"],
+            &["--nocheck", "--nodeps"],
+        ] {
+            assert_eq!(Install::of(&strings(flags)), Install::Nothing, "{flags:?}");
+        }
+        assert_eq!(
+            Install::of(&strings(&["--noconfirm", "-c"])),
+            Install::Dependencies(Checks::Run)
+        );
     }
 
     #[test]
