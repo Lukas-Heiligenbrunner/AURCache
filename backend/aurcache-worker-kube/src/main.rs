@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
 /// pods a previous run left, and enrollment.
 async fn start() -> Result<Started> {
     let core = config::core_from_env();
+    aurcache_worker_container::arch::check(&core.arches)?;
     let identity = Identity::load_or_create(&core.data_dir)?;
     let cfg = Config::from_env(&core.settings, &identity.fingerprint)?;
     if let Some(files) = &cfg.credential {
