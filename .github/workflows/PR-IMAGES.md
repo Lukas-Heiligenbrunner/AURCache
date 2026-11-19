@@ -13,7 +13,9 @@ pushes to master and on tags alone. The build runs `scripts/build-images.sh`,
 the same script a release uses, for every architecture a release has, and its
 `--oci-dir` output -- one OCI directory layout holding all of them -- is kept
 as an Actions artifact for seven days. A new push cancels the build of the
-previous one.
+previous one. Once a build's artifact has expired, re-running the build makes
+a new one; each attempt of a run uploads its own, and the newest unexpired one
+is what gets published.
 
 Fork builds remain subject to GitHub's contributor approval policy.
 
@@ -22,9 +24,12 @@ Fork builds remain subject to GitHub's contributor approval policy.
 Nothing is published for a PR without the `preview-image` label. While the
 label is on, every successful build of the PR's current head is published:
 new pushes and force-pushes included, with no need to re-apply it. Labelling a
-PR therefore trusts its author's future pushes, not just the commit reviewed,
-until the label is removed; removing it stops publishing. Only people with
-triage access can label a PR; do not let automation apply this label.
+PR therefore trusts every future push to its head branch, not just the commit
+reviewed, until the label is removed -- and that is anyone who can push to the
+branch, not only the PR's author: whoever the fork's owner lets push to it, or
+anyone with write access for a branch of this repository. Removing the label
+stops publishing. Only people with triage access can label a PR; do not let
+automation apply this label.
 
 ## Publish: `docker-pr-publish.yml`
 
@@ -42,9 +47,11 @@ one superseded by a later build of the same commit. One publish runs at a time
 per PR head branch.
 
 The publisher downloads that build's artifact and never checks out PR code or
-runs the image. It checks the layout (no symlinks, one image index matching
-its digest), sets the index's annotations from the API, and copies it with
-skopeo. The destination comes from the API, not from the artifact.
+runs the image. Without the registry token, it checks the layout (only regular
+files and directories, one small image index matching its digest) and
+replaces the index's annotations with its own, from the API. Only then does a
+step holding the token copy it with skopeo. The destination comes from the
+API, not from the artifact.
 
 Each commit is published as one multi-architecture image (amd64, arm64 and
 armv7), so `docker pull` picks the host's:
@@ -55,30 +62,34 @@ armv7), so `docker pull` picks the host's:
   published commit.
 
 The package is separate from the release images; nothing in it is tagged
-`latest`. After the push the publisher writes the image reference and commit
-into one comment on the PR, edited in place for every later commit, and into
-the run summary. Preview images contain untrusted PR code, and are not deleted
-automatically.
+`latest`. After the push the publisher writes the image reference, commit and
+index digest into one comment on the PR, edited in place for every later
+commit, and into the run summary. Preview images contain untrusted PR code,
+and are not deleted automatically.
 
 ## Which commit an image holds
 
-The publisher sets these annotations on each image's index, from the API:
+The publisher replaces the annotations on each image's index with these, from
+the API; none of the build's own index annotations survive:
 
 - `org.opencontainers.image.revision`: the full head commit;
-- `org.opencontainers.image.source`: the PR's head repository;
+- `org.opencontainers.image.source`: this repository;
 - `org.opencontainers.image.url`: the PR;
 - `org.opencontainers.image.description`: the PR number and commit.
 
-With the `pr-<number>-<sha>` tag, these are what to trust:
+The PR and the commit are what identify the image, and both stay reachable
+from this repository (the commit through the PR's `refs/pull/<number>/head`)
+even after the fork is deleted. With the `pr-<number>-<sha>` tag, these are
+what to trust:
 
 ```bash
 docker buildx imagetools inspect ghcr.io/<owner>/<repo>-preview:pr-<number> \
   --format '{{json .Manifest.Annotations}}'
 ```
 
-Everything else in the image comes from the fork's build -- its other
-annotations, its labels, the version the server reports -- and is
-informational only.
+Everything else in the image comes from the PR's build -- the platform
+manifests' annotations, the image labels, the version the server reports --
+and is informational only.
 
 ## Setup
 
@@ -94,6 +105,7 @@ informational only.
 The publisher holds a token that can push packages. Keep it independent of
 the build: do not add a checkout of PR code, PR scripts, shared build caches
 or running the image to it. Download artifacts only from the build run it
-selected, check the layout before reading it, and derive destinations, PR
-numbers and annotations from GitHub's API, never from artifact contents. Pin
-the actions it uses by commit.
+selected, by id; check the layout's file types and sizes before parsing it,
+in a step without the token, which only the login and copy step holds; and
+derive destinations, PR numbers and annotations from GitHub's API, never from
+artifact contents. Pin the actions it uses by commit.
