@@ -17,13 +17,13 @@ use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
 use aurcache_worker_core::{artifacts, report};
 
-use crate::build::{self, BindMount};
+use crate::build::{self, Access, BindMount};
 use crate::build_deps;
 use crate::cache::Cache;
 use crate::cgroup::Hierarchy;
 use crate::chroots::Lease;
 use crate::config::Config;
-use crate::credentials;
+use crate::credentials::{self, StagedCredential};
 use crate::devtools;
 use crate::executor::Shared;
 
@@ -297,7 +297,7 @@ async fn prepare_job(
         log(client, build_id, &format!("[worker] {msg}\n")).await;
     }
 
-    let binds = prepare_bind_mounts(cfg, client, job, shared, &caches).await;
+    let binds = prepare_bind_mounts(cfg, client, job, shared, &caches, credential.as_ref()).await;
     Ok(PreparedJob {
         caches,
         dropin,
@@ -307,12 +307,14 @@ async fn prepare_job(
 }
 
 /// Plan operator and per-job mounts, reclaiming persistent trees before use.
+/// `credential` is what [`credentials::stage_for_job`] staged for this job.
 async fn prepare_bind_mounts(
     cfg: &Config,
     client: &Arc<WorkerClient>,
     job: &JobDescriptor,
     shared: &Shared,
     caches: &JobCaches,
+    credential: Option<&StagedCredential>,
 ) -> Vec<BindMount> {
     let cache = &caches.cache;
     // Private writable pacman cache for this job. Concurrent builds otherwise
@@ -322,6 +324,7 @@ async fn prepare_bind_mounts(
     let pkg_cache_bind = cache.pacman_pkg_job(&caches.label).map(|dir| BindMount {
         host: dir,
         chroot: PathBuf::from(devtools::PER_JOB_CACHE_MOUNT),
+        access: Access::ReadWrite,
     });
 
     // Operator-configured mounts, then this job's private pacman cache. Ours
@@ -371,6 +374,7 @@ async fn prepare_bind_mounts(
             binds.push(BindMount {
                 host: tree,
                 chroot: Path::new(devtools::BUILDDIR_MOUNT).join(&job.pkgbase),
+                access: Access::ReadWrite,
             });
         } else {
             let msg = format!(
@@ -405,24 +409,27 @@ async fn prepare_bind_mounts(
         binds.push(BindMount {
             host: dir.to_path_buf(),
             chroot: dir.to_path_buf(),
+            access: Access::ReadWrite,
         });
-        binds.extend(known_hosts_bind(cfg));
     }
+    binds.extend(credential.and_then(known_hosts_bind));
 
     binds
 }
 
-/// The staged `known_hosts`, at the same path inside the chroot, which is the
-/// path the build's `GIT_SSH_COMMAND` names; none when none is configured.
+/// The directory of the `known_hosts` staged for this job, read-only at the
+/// same path inside the chroot, which is the path the build's
+/// `GIT_SSH_COMMAND` names; none when none was staged.
 ///
-/// Its directory is the worker's, `0755` with the file `0644`, so the build
-/// user inside reads it and cannot change it.
-fn known_hosts_bind(cfg: &Config) -> Option<BindMount> {
-    cfg.ssh_known_hosts.as_ref()?;
-    let dir = credentials::known_hosts_dir(&cfg.data_dir);
+/// Read-only, so no write from inside the chroot reaches it -- whoever the
+/// build runs as -- and the worker's directory and file there (`0755`,
+/// `0644`) keep the build user from changing them outside it.
+fn known_hosts_bind(credential: &StagedCredential) -> Option<BindMount> {
+    let dir = credential.known_hosts.as_deref()?.parent()?;
     Some(BindMount {
-        host: dir.clone(),
-        chroot: dir,
+        host: dir.to_path_buf(),
+        chroot: dir.to_path_buf(),
+        access: Access::ReadOnly,
     })
 }
 
@@ -1231,32 +1238,28 @@ mod tests {
         .unwrap();
     }
 
-    /// A configured `known_hosts` is bound into the chroot at the path the
-    /// build's `GIT_SSH_COMMAND` names, which is where it was staged; none is
-    /// bound without one.
+    /// A staged `known_hosts` is bound read-only into the chroot where it was
+    /// staged, the path the build's `GIT_SSH_COMMAND` names; nothing is bound
+    /// when nothing was staged, whatever the configuration says.
     #[test]
-    fn the_staged_known_hosts_is_bound_where_ssh_looks_for_it() {
-        let mut cfg = Config::from_process_env();
-        cfg.data_dir = PathBuf::from("/var/lib/aurcache-worker");
-        cfg.ssh_known_hosts = None;
-        assert_eq!(known_hosts_bind(&cfg), None);
+    fn the_staged_known_hosts_is_bound_read_only_where_it_was_staged() {
+        let dir = credentials::known_hosts_dir(Path::new("/var/lib/aurcache-worker"));
+        let mut credential = StagedCredential {
+            git_ssh_command: credentials::git_ssh_command(None),
+            agent_socket: PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock"),
+            known_hosts: None,
+        };
+        assert_eq!(known_hosts_bind(&credential), None);
 
-        cfg.ssh_known_hosts = Some(PathBuf::from("/run/secrets/known_hosts"));
-        let staged = credentials::known_hosts_dir(&cfg.data_dir);
+        credential.known_hosts = Some(dir.join(credentials::KNOWN_HOSTS_FILE));
         assert_eq!(
-            known_hosts_bind(&cfg),
+            known_hosts_bind(&credential),
             Some(BindMount {
-                host: staged.clone(),
-                chroot: staged.clone(),
+                host: dir.clone(),
+                chroot: dir,
+                access: Access::ReadOnly,
             })
         );
-        let command = credentials::git_ssh_command(Some(
-            &staged
-                .join(credentials::KNOWN_HOSTS_FILE)
-                .display()
-                .to_string(),
-        ));
-        assert!(command.contains(&staged.display().to_string()), "{command}");
     }
 
     fn with_limits(build: Option<u64>, total: Option<u64>) -> Config {
