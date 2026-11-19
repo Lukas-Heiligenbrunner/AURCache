@@ -247,8 +247,12 @@ the runtime:
     build started can write the report or change a package.
 
 The agent exits 0 when it wrote a report, whatever the build did; the build's
-own result is in the report. On `SIGTERM` it kills everything and exits
-without one: the worker asked for the stop and already knows.
+own result is in the report. On `SIGTERM` or `SIGINT` from outside the
+container it kills everything and exits without one: the worker asked for the
+stop and already knows. The same signals from inside the container (a
+dependency's scriptlet runs as root there) are ignored, and so the kernel
+drops every other signal one of its processes sends PID 1; the agent is not
+dumpable either, so root there, without `CAP_SYS_PTRACE`, cannot trace it.
 
 ### The pacman helper
 
@@ -442,11 +446,17 @@ What changes is inside the build container:
 |---|---|---|
 | build code as root in the container | one `sudo pacman -U` away | not reachable: no `sudo`, no capabilities, `no_new_privs` |
 | root in the container, when something does run as root (a dependency's install script) | the engine's default capabilities (14 on Docker) | seven |
-| what the build can write that the worker reads | the whole shared directory, world-writable | `pkg/` only; the report is root's until the build is dead |
+| what the build can write that the worker reads | the whole shared directory, world-writable | as the build user, `pkg/` only; as root in the container (a dependency's install script), anything in the directory, while the build runs |
+| how the worker reads it back | by path, following links, waiting on pipes, without a limit | one name at a time from its parent's handle, following no link and waiting on no pipe: the report a regular file of at most 1 MiB, believed only beside an agent that exited 0, with commits only for the job's sources; the packages regular files in a `pkg/` that is a directory of its own, uploaded from the handle they were judged by |
+| who can stop the build | the engine, and anything in the container | the engine: PID 1 stops only for a signal from outside its PID namespace, and cannot be traced from inside |
+| a setuid file left in the build directory | possible, as root in the container | still possible (Docker cannot mount a bind `nosuid`); the directory builds go in is made `0700`, and the worker warns when it is open to others, so nobody else on the host can run one |
 | what the build can make root do | `pacman` with any arguments, `chmod` with any arguments | install named packages from the job's repositories |
 
-A symlink in `pkg/` named like a package is still refused twice, by
-`discover_artifacts` and by the `O_NOFOLLOW` open.
+A link in `pkg/` named like a package is no package, and a `pkg/` that is a
+link is no package directory: `discover_artifacts` opens both without
+following them, and the upload sends the file it opened. That is shared with
+the chroot worker, whose package directory is its own extraction of the
+source.
 
 ---
 
