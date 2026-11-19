@@ -177,25 +177,34 @@ including those for the build's architecture. The worker reads them with
 build itself still checks them, and fails on anything missing rather than
 installing it.
 
-The install runs under `aurcache-sandbox offline`, which needs no privilege
-of its own, so it holds the same on any kernel and in any container:
+The install runs under `aurcache-sandbox offline`, which applies every
+layer it can:
 
-- `no_new_privs`, and `CAP_NET_RAW` and `CAP_NET_ADMIN` dropped;
+- `no_new_privs`;
+- a network namespace of its own, with nothing in it, where root may create
+  one (as in the worker's container);
 - a seccomp filter: no socket but a UNIX one (IPv4 and IPv6 of every kind,
   packet sockets and netlink all fail), and no io_uring;
+- `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`
+  dropped from every capability set, so root cannot enter another network
+  namespace again or take over a process that is in one;
 - Landlock where the kernel has it: no TCP (ABI 4, Linux 6.7), no abstract
   UNIX sockets or signals outside the install (ABI 6, Linux 6.12), no
   connecting to a UNIX socket by its path (ABI 9).
 
-Every process a scriptlet starts inherits all of it, and the container ends
-with the install.
+Either the namespace or the filter keeps the install offline on its own; if
+neither can be applied, the install is refused and the build fails. The
+build log names the layers that applied, as in
+`aurcache-sandbox offline: netns+seccomp+landlock(abi 9)`. Every process a
+scriptlet starts inherits all of them, and the container ends with the
+install.
 
-:::warning Emulated workers
-qemu's user-mode emulation refuses seccomp filters, so a worker run emulated
-(see [Building for another architecture](#building-for-another-architecture))
-cannot install a build's dependencies: such a build fails with `cannot
-install the seccomp filter`. A native worker for that architecture is not
-affected.
+:::note Emulated workers
+qemu's user-mode emulation refuses seccomp filters, so on a worker run
+emulated (see
+[Building for another architecture](#building-for-another-architecture)) the
+install falls back to the network namespace alone, with the capabilities
+above dropped (`aurcache-sandbox offline: netns`).
 :::
 
 ## Swarm and other runtimes

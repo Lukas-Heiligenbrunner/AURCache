@@ -276,7 +276,8 @@ prepare_chroot
         # here, against the databases just synced, in two steps: downloaded
         # with network, which runs nothing from a package, then installed
         # under `aurcache-sandbox offline`, which leaves the transaction and
-        # everything it starts no socket but a UNIX one. The sandbox is bound
+        # everything it starts no network: a namespace of its own, a filter
+        # allowing UNIX sockets only, or both. The sandbox is bound
         # into the container read-only; it is the worker's own, of the same
         # architecture as the chroot. Only what the copy does not already
         # satisfy, as makepkg asks `pacman -T` -- otherwise a name an
