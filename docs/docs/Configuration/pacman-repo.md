@@ -139,8 +139,11 @@ directory without running the server, and a stale or swapped `repo.db`.
 :::warning Trust the key on clients right away
 pacman checks every signature it finds, even under `SigLevel = Optional`, the
 stanza above included. From the moment the server signs, a client that does
-not trust the key refuses the repository (`unknown public key`). Clients set
-to `SigLevel = Never` ignore signatures and are not affected.
+not trust the key refuses the repository with `key "<fingerprint>" is
+unknown`. That fingerprint is the signing subkey's, not the primary key's
+the server logs and the Settings page shows: adding and trusting the key as
+above takes care of both. Clients set to `SigLevel = Never` ignore signatures
+and are not affected.
 :::
 
 Packages published before signing was turned on — or signed by another key —
