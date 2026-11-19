@@ -703,6 +703,7 @@ dependencies = [
  "aurcache-common",
  "aurcache-db",
  "aurcache-deps",
+ "aurcache-signing",
  "aurcache-utils",
  "hex",
  "jiff 1.0.0",
