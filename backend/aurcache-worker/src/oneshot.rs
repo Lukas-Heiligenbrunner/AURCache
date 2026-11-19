@@ -82,10 +82,11 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
 
     let report = report::ended(None, std::time::Duration::ZERO, status.into());
     if report.outcome == BuildOutcome::Succeeded {
-        let artifacts = artifacts::discover_artifacts(&pkgdir);
+        let artifacts = artifacts::discover_artifacts(&pkgdir)
+            .with_context(|| format!("reading the packages in {}", pkgdir.display()))?;
         tracing::info!("Build succeeded: {} artifact(s)", artifacts.len());
         for a in artifacts {
-            println!("{}", a.display());
+            println!("{}", pkgdir.join(&a.name).display());
         }
         Ok(())
     } else {

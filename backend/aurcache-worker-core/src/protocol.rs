@@ -156,53 +156,28 @@ impl StopWatch {
 /// Artifacts are streamed from disk rather than read into memory: package
 /// files can be multi-gigabyte, and buffering them fully would triple the
 /// worker's peak memory (one copy in the filesystem cache, one in the read,
-/// one in the request body).
+/// one in the request body). Each is sent from the file
+/// [`artifacts::discover_artifacts`] opened, so what is uploaded is what it
+/// judged a package.
 pub async fn upload_artifacts(client: &WorkerClient, build_id: i32, pkgdir: &Path) -> Result<()> {
-    let found = artifacts::discover_artifacts(pkgdir);
+    let dir = pkgdir.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || artifacts::discover_artifacts(&dir))
+        .await
+        .context("looking for the build's packages")?
+        .map_err(|e| PackagesRefused(format!("the build's packages cannot be read: {e}")))?;
     if found.is_empty() {
         return Err(PackagesRefused("build produced no artifacts".into()).into());
     }
-    for path in found {
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .context("artifact has no filename")?
-            .to_string();
-        // `O_NOFOLLOW`, and a regular file: see `discover_artifacts`. Checked
-        // again at the open, which is the moment that decides what is read.
-        let reader = match tokio::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .await
-        {
-            Ok(reader) => reader,
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-                return Err(PackagesRefused(format!(
-                    "{} is a symlink; refusing to upload it",
-                    path.display()
-                ))
-                .into());
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("opening {}", path.display()));
-            }
-        };
-        let meta = reader
-            .metadata()
-            .await
-            .with_context(|| format!("reading {}", path.display()))?;
-        if !meta.is_file() {
-            return Err(PackagesRefused(format!(
-                "{} is not a regular file; refusing to upload it",
-                path.display()
-            ))
-            .into());
-        }
-        let len = Some(meta.len());
+    for artifact in found {
+        let name = artifact.name;
         log(client, build_id, &format!("[worker] uploading {name}\n")).await;
         client
-            .upload_artifact(build_id, &name, reader, len)
+            .upload_artifact(
+                build_id,
+                &name,
+                tokio::fs::File::from_std(artifact.file),
+                Some(artifact.len),
+            )
             .await
             .with_context(|| format!("uploading {name}"))?;
     }

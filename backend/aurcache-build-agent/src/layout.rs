@@ -18,6 +18,11 @@ pub const BUILD_UID: u32 = 1001;
 pub const BUILD_GID: u32 = 1001;
 pub const INPUT_SPEC: &str = "spec.json";
 pub const INPUT_SOURCE: &str = "source.tar.gz";
+/// The names of what a worker reads back from the work directory, for a
+/// worker that opens them one name at a time.
+pub const PKG_DIR: &str = "pkg";
+pub const OUT_DIR: &str = "out";
+pub const REPORT_FILE: &str = "report.json";
 /// The variable makepkg's environment carries the helper's socket in.
 pub const PACMAN_SOCKET_VAR: &str = "AURCACHE_PACMAN_SOCKET";
 
@@ -62,7 +67,7 @@ impl Work {
     /// `<root>/pkg`: makepkg's `PKGDEST`, what the worker collects.
     #[must_use]
     pub fn pkg(&self) -> PathBuf {
-        self.0.join("pkg")
+        self.0.join(PKG_DIR)
     }
 
     /// `<root>/log/build.log`.
@@ -74,13 +79,13 @@ impl Work {
     /// `<root>/out`: root's, until the build is over.
     #[must_use]
     pub fn out(&self) -> PathBuf {
-        self.0.join("out")
+        self.0.join(OUT_DIR)
     }
 
     /// `<root>/out/report.json`.
     #[must_use]
     pub fn report(&self) -> PathBuf {
-        self.out().join("report.json")
+        self.out().join(REPORT_FILE)
     }
 }
 

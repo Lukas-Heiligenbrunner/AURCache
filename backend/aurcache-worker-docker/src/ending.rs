@@ -19,12 +19,16 @@ pub struct Verdict {
 /// The agent's report first, even when the engine also saw an out-of-memory
 /// kill: the agent counted those itself. The engine's out-of-memory verdict
 /// only for a container that left none; anything else is not the package's.
+///
+/// The agent exits 0 if and only if it wrote its report. A report beside any
+/// other status, or none, was left by something else (root in the
+/// container, before the container was killed whole) and is not believed.
 #[must_use]
 pub fn ending(report: Report, verdict: Verdict) -> Ending {
     match report {
-        Report::Written(report) => Ending::Reported(report),
-        Report::Absent if verdict.oom_killed => Ending::OomKilled,
-        Report::Absent => Ending::Unreported {
+        Report::Written(report) if verdict.status == Some(0) => Ending::Reported(report),
+        Report::Written(_) | Report::Absent if verdict.oom_killed => Ending::OomKilled,
+        Report::Written(_) | Report::Absent => Ending::Unreported {
             detail: match verdict.status {
                 Some(status) => format!("the build agent exited with status {status}"),
                 None => "the engine gave no exit status".to_string(),
@@ -68,6 +72,20 @@ mod tests {
     fn a_report_wins_over_the_engines_oom_kill() {
         let ended = ending(Report::Written(written()), verdict(Some(0), true));
         assert_eq!(ended, Ending::Reported(written()));
+    }
+
+    /// A report beside an agent that did not exit 0 is not the agent's: it
+    /// writes one exactly when it exits 0.
+    #[test]
+    fn a_report_beside_a_failed_agent_is_not_believed() {
+        assert_eq!(
+            ending(Report::Written(written()), verdict(Some(137), true)),
+            Ending::OomKilled
+        );
+        for status in [Some(143), Some(1), None] {
+            let ended = ending(Report::Written(written()), verdict(status, false));
+            assert!(matches!(ended, Ending::Unreported { .. }), "{ended:?}");
+        }
     }
 
     #[test]

@@ -114,6 +114,16 @@ pub fn ref_candidates(git_ref: &str) -> Vec<String> {
     candidates
 }
 
+/// Whether `text` is a git object name: SHA-1 or SHA-256, in hexadecimal.
+///
+/// What an agent-run build reports as a VCS source's commit, and what its
+/// worker passes on to the server: anything else in its place was not git's
+/// answer.
+#[must_use]
+pub fn is_object_name(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl From<GitSourceSpec> for SourceData {
     fn from(spec: GitSourceSpec) -> Self {
         Self::Git { spec }
@@ -168,7 +178,7 @@ impl Display for SourceData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceData, looks_like_git_url, ref_candidates};
+    use super::{SourceData, is_object_name, looks_like_git_url, ref_candidates};
 
     /// Branches before tags, and the literal only when it is already a full
     /// ref path -- the order the server resolves in.
@@ -204,6 +214,18 @@ mod tests {
                 "{git_ref} must not resolve to HEAD"
             );
         }
+    }
+
+    #[test]
+    fn only_an_object_name_is_one() {
+        assert!(is_object_name("9fceb02d0ae598e95dc970b74767f19372d61af8"));
+        assert!(is_object_name(&"a".repeat(64)));
+        assert!(!is_object_name(""));
+        assert!(!is_object_name("9fceb02"));
+        assert!(!is_object_name(
+            "9fceb02d0ae598e95dc970b74767f19372d61af8\nand more"
+        ));
+        assert!(!is_object_name(&"g".repeat(40)));
     }
 
     #[test]
