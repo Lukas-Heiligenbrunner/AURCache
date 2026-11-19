@@ -516,10 +516,11 @@ events! {
     /// A change to the repository did not commit, and is being tried again.
     RepoCommitRetried => ("repo.commit_retry", "Server and repository", "Repository commit retried") { attempt: u32, error: String },
 
-    /// A file in the repository could not be moved or removed.
+    /// A file in the repository could not be moved, removed or signed.
     ///
-    /// A move that failed is a package the repository says it has and does
-    /// not serve.
+    /// A move that failed, or a file that could not be signed because it is
+    /// not there, is a package the repository says it has and does not
+    /// serve.
     RepoFileFailed => ("repo.file_failed", "Server and repository", "Repository file failed") {
         path: String,
         action: FileAction,
@@ -638,6 +639,7 @@ impl RestoreStep {
 pub enum FileAction {
     Move,
     Remove,
+    Sign,
 }
 
 impl FileAction {
@@ -645,6 +647,7 @@ impl FileAction {
         match self {
             Self::Move => "move",
             Self::Remove => "remove",
+            Self::Sign => "sign",
         }
     }
 }
