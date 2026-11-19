@@ -1,4 +1,5 @@
-//! The seccomp filter of the `offline` profile: no socket but a UNIX one.
+//! The seccomp filter of the `offline` profile: no socket but a UNIX one,
+//! and no kernel keyring.
 //!
 //! Classic BPF, written out by hand: the filter is a dozen instructions, and
 //! the crates that would generate it do not all know the 32-bit ARM the
@@ -10,6 +11,10 @@
 //! - `io_uring_setup(2)` fails with `ENOSYS`, since a ring can create sockets
 //!   without the `socket` system call, and programs that probe for io_uring
 //!   fall back on it;
+//! - `add_key(2)`, `request_key(2)` and `keyctl(2)` fail with `ENOSYS`: the
+//!   kernel keyring is no namespace's, and `request_key("dns_resolver", ...)`
+//!   has the host resolve a name, through a helper the kernel starts outside
+//!   every namespace -- a DNS query no network layer of this process sees;
 //! - a system call made through another ABI than this binary's (i386 or x32
 //!   on x86-64, the old ARM `socketcall`) is not filtered by number, so it
 //!   is refused: the process is killed for a foreign architecture, and the
@@ -47,6 +52,8 @@ pub struct Arch {
     pub socket: u32,
     pub socketpair: u32,
     pub io_uring_setup: u32,
+    /// `add_key`, `request_key` and `keyctl`.
+    pub keyring: [u32; 3],
     /// Numbers at or above this belong to another ABI sharing `audit` (x32).
     pub foreign_from: Option<u32>,
     /// A multiplexer that could create a socket without `socket` itself.
@@ -69,6 +76,11 @@ pub fn native() -> Option<Arch> {
         socket: nr(libc::SYS_socket),
         socketpair: nr(libc::SYS_socketpair),
         io_uring_setup: nr(libc::SYS_io_uring_setup),
+        keyring: [
+            nr(libc::SYS_add_key),
+            nr(libc::SYS_request_key),
+            nr(libc::SYS_keyctl),
+        ],
         foreign_from: Some(0x4000_0000),
         socketcall: None,
     });
@@ -78,6 +90,11 @@ pub fn native() -> Option<Arch> {
         socket: nr(libc::SYS_socket),
         socketpair: nr(libc::SYS_socketpair),
         io_uring_setup: nr(libc::SYS_io_uring_setup),
+        keyring: [
+            nr(libc::SYS_add_key),
+            nr(libc::SYS_request_key),
+            nr(libc::SYS_keyctl),
+        ],
         foreign_from: None,
         socketcall: None,
     });
@@ -87,6 +104,11 @@ pub fn native() -> Option<Arch> {
         socket: nr(libc::SYS_socket),
         socketpair: nr(libc::SYS_socketpair),
         io_uring_setup: nr(libc::SYS_io_uring_setup),
+        keyring: [
+            nr(libc::SYS_add_key),
+            nr(libc::SYS_request_key),
+            nr(libc::SYS_keyctl),
+        ],
         foreign_from: None,
         // Only the old ABI has it; an EABI kernel that still accepts it must
         // not have it create sockets.
@@ -140,7 +162,10 @@ pub fn program(arch: &Arch) -> Vec<Instruction> {
     if let Some(from) = arch.foreign_from {
         p.extend([jump(BPF_JMP_JGE_K, from, 0, 1), ret(errno(libc::ENOSYS))]);
     }
-    for nr in std::iter::once(arch.io_uring_setup).chain(arch.socketcall) {
+    let refused = std::iter::once(arch.io_uring_setup)
+        .chain(arch.keyring)
+        .chain(arch.socketcall);
+    for nr in refused {
         p.extend([jump(BPF_JMP_JEQ_K, nr, 0, 1), ret(errno(libc::ENOSYS))]);
     }
     for nr in [arch.socket, arch.socketpair] {
@@ -330,6 +355,88 @@ mod tests {
                 let mut params = [0u8; 120];
                 // SAFETY: `params` is large enough for `io_uring_params`.
                 let rc = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) };
+                #[allow(clippy::cast_possible_truncation)]
+                errno_of(rc as libc::c_int)
+            }),
+            libc::ENOSYS
+        );
+    }
+
+    /// The numbers as the kernel's tables give them
+    /// (`arch/x86/entry/syscalls/syscall_64.tbl`,
+    /// `include/uapi/asm-generic/unistd.h`, `arch/arm/tools/syscall.tbl`).
+    #[test]
+    fn the_keyring_calls_are_the_kernels() {
+        #[cfg(target_arch = "x86_64")]
+        let kernel = [248, 249, 250];
+        #[cfg(target_arch = "aarch64")]
+        let kernel = [217, 218, 219];
+        #[cfg(target_arch = "arm")]
+        let kernel = [309, 310, 311];
+        assert_eq!(native().expect("a filter").keyring, kernel);
+    }
+
+    /// `keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING, 0)`: a read,
+    /// which creates nothing and starts no helper on the host.
+    fn session_keyring() -> libc::c_int {
+        const KEYCTL_GET_KEYRING_ID: libc::c_long = 0;
+        const KEY_SPEC_SESSION_KEYRING: libc::c_long = -3;
+        // SAFETY: a plain system call with integer arguments.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_keyctl,
+                KEYCTL_GET_KEYRING_ID,
+                KEY_SPEC_SESSION_KEYRING,
+                0,
+            )
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        errno_of(rc as libc::c_int)
+    }
+
+    /// The kernel has a keyring to refuse, so the `ENOSYS` below is the
+    /// filter's.
+    #[test]
+    fn without_the_filter_the_keyring_answers() {
+        assert_ne!(in_child(session_keyring, false), libc::ENOSYS);
+    }
+
+    #[test]
+    fn the_keyring_is_refused() {
+        assert_eq!(confined(session_keyring), libc::ENOSYS);
+        assert_eq!(
+            confined(|| {
+                // SAFETY: `add_key("user", "aurcache", "x", 1, session)`;
+                // every pointer is to a static string.
+                let rc = unsafe {
+                    libc::syscall(
+                        libc::SYS_add_key,
+                        c"user".as_ptr(),
+                        c"aurcache".as_ptr(),
+                        c"x".as_ptr(),
+                        1,
+                        -3,
+                    )
+                };
+                #[allow(clippy::cast_possible_truncation)]
+                errno_of(rc as libc::c_int)
+            }),
+            libc::ENOSYS
+        );
+        assert_eq!(
+            confined(|| {
+                // SAFETY: `request_key("dns_resolver", "example.org", NULL,
+                // 0)`, which the filter refuses before the kernel could ask
+                // the host to resolve anything.
+                let rc = unsafe {
+                    libc::syscall(
+                        libc::SYS_request_key,
+                        c"dns_resolver".as_ptr(),
+                        c"example.org".as_ptr(),
+                        std::ptr::null::<libc::c_char>(),
+                        0,
+                    )
+                };
                 #[allow(clippy::cast_possible_truncation)]
                 errno_of(rc as libc::c_int)
             }),

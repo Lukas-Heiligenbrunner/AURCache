@@ -12,10 +12,10 @@
 //! 2. a network namespace of its own, with nothing in it (its loopback is
 //!    left down), where creating one is permitted: root with
 //!    `CAP_SYS_ADMIN`, as in a chroot worker's container;
-//! 3. a seccomp filter allowing only `AF_UNIX` sockets and no io_uring
-//!    (`seccomp.rs`): IP of any kind, packet sockets and netlink fail with
-//!    `EAFNOSUPPORT`. It needs no privilege, but an emulated process cannot
-//!    install one;
+//! 3. a seccomp filter allowing only `AF_UNIX` sockets, no io_uring and no
+//!    kernel keyring (`seccomp.rs`): IP of any kind, packet sockets, netlink
+//!    and vsock fail with `EAFNOSUPPORT`. It needs no privilege, but an
+//!    emulated process cannot install one;
 //! 4. `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`
 //!    dropped from every capability set, the bounding set included: without
 //!    the last two, root could `setns` back into a namespace with network
