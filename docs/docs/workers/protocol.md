@@ -156,8 +156,8 @@ what they receive:
      by name. `{"name": "default"}` names one, `{"name": null}` says none,
      and a job without the field names nothing, which a worker reads as
      `default`. Only the name is sent; a worker maps it to a key through its
-     own configuration, may refuse it under its own policy, and fails the
-     build (`failed`) when it holds no key by that name.
+     own configuration, may refuse it under its own policy, and builds
+     without a key when it holds none by that name.
 3. **Stream the log.** `POST /api/worker/jobs/{build_id}/logs` appends UTF-8
    text to the build's log, as the build prints it.
 4. **Upload the packages.** `POST

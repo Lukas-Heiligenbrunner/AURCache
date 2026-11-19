@@ -12,8 +12,9 @@
 //!    widen, since it is plain environment the worker alone reads.
 //!
 //! An executor calls [`offer`] with the claimed job and acts on the
-//! [`SshOffer`]: hand the build [`SshOffer::key`], fail it on
-//! [`SshOffer::NotHeld`], and write [`SshOffer::notice`] to its log.
+//! [`SshOffer`]: hand the build [`SshOffer::key`] when there is one, build
+//! without a key when there is none, and write [`SshOffer::notice`] to its
+//! log.
 
 use aurcache_common::ssh_key;
 use aurcache_common::worker::JobDescriptor;
@@ -119,7 +120,9 @@ pub enum SshOffer<'k, K> {
     Offered { name: String, key: &'k K },
     /// The job names no key.
     NotRequested,
-    /// The job names a key this worker does not hold.
+    /// The job names a key this worker does not hold. The build goes ahead
+    /// without one: most never use it, and one that does fails at the fetch
+    /// that needed it, with the notice above it in its log.
     NotHeld { name: String },
     /// `WORKER_GIT_SSH_PACKAGES` does not list the package.
     NotAllowed,
@@ -149,7 +152,7 @@ impl<'k, K> SshOffer<'k, K> {
             )),
             Self::NotHeld { name } => Some(format!(
                 "this worker holds no SSH key named {name:?}, which the build_ssh_key \
-                 setting names for {pkgbase}"
+                 setting names for {pkgbase}; building without one"
             )),
             Self::NotAllowed => Some(format!(
                 "no SSH key offered: {pkgbase} is not in this worker's {PACKAGES_VAR}"
@@ -337,7 +340,7 @@ mod tests {
     }
 
     /// A name the worker does not hold, or that is no name at all, is never
-    /// looked up as anything else.
+    /// looked up as anything else, and the build is handed no key.
     #[test]
     fn a_name_the_worker_does_not_hold_is_not_held() {
         for name in ["gitlab", "../ssh/id_ed25519", "/run/secrets/key", "Default"] {
@@ -357,6 +360,26 @@ mod tests {
             &SshPackages::All,
         );
         assert!(matches!(offer, SshOffer::NotHeld { .. }), "{offer:?}");
+        assert_eq!(offer.key(), None);
+    }
+
+    /// A build whose setting names a key its worker does not hold goes ahead
+    /// without one, and its log says so: a package that never fetches over
+    /// SSH builds, and one that does fails at that fetch with the reason
+    /// above it.
+    #[test]
+    fn a_key_the_worker_does_not_hold_is_built_without() {
+        let offer = offer(
+            &job("hello", Some(named("gitlab"))),
+            agent(),
+            &SshPackages::All,
+        );
+        assert_eq!(offer.key(), None);
+        assert_eq!(
+            offer.notice("hello").unwrap(),
+            "this worker holds no SSH key named \"gitlab\", which the build_ssh_key \
+             setting names for hello; building without one"
+        );
     }
 
     /// A worker with no key says nothing about keys to a build that did not

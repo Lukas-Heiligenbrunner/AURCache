@@ -39,12 +39,15 @@ A name is a label, never a path: a lowercase letter or digit, then up to 63
 more of those, `_` or `-`. Only the name reaches the worker; the key itself
 never leaves it.
 
-A build whose package names a key its worker does not hold fails at once, and
-its log says so:
+A build whose package names a key its worker does not hold goes ahead without
+one, and its log says so before anything else:
 
 ```
-[worker] this worker holds no SSH key named "gitlab", which the build_ssh_key setting names for hello
+[worker] this worker holds no SSH key named "gitlab", which the build_ssh_key setting names for hello; building without one
 ```
+
+A package that fetches nothing over SSH builds as usual. One that does fails at
+that fetch, with this line above the failure.
 
 ## Limiting a worker's key to some packages
 
