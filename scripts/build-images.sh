@@ -58,8 +58,8 @@ Options:
   -i, --images LIST         Comma-separated: server, worker, hybrid, builder,
                             demo-worker (default: server, worker, hybrid)
   -p, --platforms LIST      Target platforms (default: linux/amd64,linux/arm64,linux/arm/v7)
-      --push                Push to the registry; without it the images are
-                            built and discarded (see the note below)
+      --push                Push to the registry; without it or --oci-dir the
+                            images are loaded or discarded (see the note below)
       --toolchain-repo URL  pacman repository holding the prebuilt armv7 cross
                             toolchain, e.g. 'http://host:8081/$arch'
       --toolchain-repo-name NAME
@@ -74,8 +74,8 @@ Options:
       --oci-dir DIR         Write each image to DIR/<image> as an OCI image
                             layout, every platform in one index, instead of
                             pushing or loading it. For handing a build to
-                            another job: copy it with `skopeo copy --all`
-                            (see docker-pr-build.yml).
+                            another job, which copies it with
+                            `skopeo copy --all` (see docker-pr-publish.yml).
       --packages-dir DIR    Also write the AURCache packages the worker/hybrid
                             images built into DIR, for a native install. The
                             packager stage is replayed from the build cache, so
@@ -83,12 +83,12 @@ Options:
                             (x86_64) only.
   -h, --help                This message
 
-Without --push, what happens to the result depends on the daemon's image
-store. The classic store holds one architecture per tag, so a multi-platform
-build is discarded and only the build cache survives -- still useful for
-checking that every architecture builds. Docker's containerd image store holds
-multi-arch images, and this script loads into it when the daemon has it
-enabled. A single-platform build is always loaded.
+Without --push or --oci-dir, what happens to the result depends on the
+daemon's image store. The classic store holds one architecture per tag, so a
+multi-platform build is discarded and only the build cache survives -- still
+useful for checking that every architecture builds. Docker's containerd image
+store holds multi-arch images, and this script loads into it when the daemon
+has it enabled. A single-platform build is always loaded.
 EOF
 }
 
