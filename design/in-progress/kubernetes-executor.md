@@ -1018,7 +1018,16 @@ pod. Off, the worker runs on any cluster; the documentation recommends it
 on, and the dispatcher logs at warning severity, once at startup, that
 builds run without it. It is read from the dispatcher's environment only and
 is not a declared setting: it is part of what a build may reach, and a
-server that could set it could turn it off. Whether the root step works
+server that could set it could turn it off.
+
+An API server with the `UserNamespacesSupport` feature gate off accepts
+such a pod and drops `hostUsers` from it, as it does any field it does not
+know: the pod would run in its node's user namespace, and nothing would say
+so. So with the variable on, the dispatcher holds both answers to it: the
+dry run before each claim, and each pod it creates, must come back with
+`hostUsers: false`. A dry run without it claims nothing, and says why at
+error severity; a pod created without it is deleted before anything runs in
+it, and its build handed back. Whether the root step works
 unchanged under it is the one part of the spike not yet run in a user
 namespace; rootless Podman builds with `sudo` in `unprivileged-workers.md`
 (option H) are the strongest evidence that it does, and the end-to-end test

@@ -18,7 +18,9 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub trait Cluster: Send + Sync + 'static {
-    fn create(&self, pod: &Pod) -> impl Future<Output = Result<(), CreateError>> + Send;
+    /// Create `pod`; the pod as the API server stored it, which leaves out
+    /// any field the server does not know.
+    fn create(&self, pod: &Pod) -> impl Future<Output = Result<Pod, CreateError>> + Send;
     /// Whether the cluster would admit `pod` now: a server-side dry run.
     fn admits(&self, pod: &Pod) -> impl Future<Output = Admission> + Send;
     /// Delete one pod; one already gone is not an error.
@@ -62,25 +64,21 @@ pub enum CreateError {
 }
 
 /// What a dry run of a pod said.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Admission {
-    Admitted,
+    /// It would be created, as `pod`: what the API server would store,
+    /// without any field it does not know.
+    Admitted { pod: Box<Pod> },
     /// The cluster answered, and a pod created now would not be: admission
     /// said no, the namespace is not there, or the API server is failing or
     /// turning requests away.
-    Refused {
-        message: String,
-    },
+    Refused { message: String },
     /// The question reached no API server. A pod created now would not
     /// reach one either.
-    Unreached {
-        message: String,
-    },
+    Unreached { message: String },
     /// An API server answered without judging the pod: the name it was
     /// asked about is taken. Nothing is known against the cluster.
-    Unjudged {
-        message: String,
-    },
+    Unjudged { message: String },
 }
 
 /// The shortest grace a pod is deleted with. None at all is a force

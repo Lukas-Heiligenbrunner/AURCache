@@ -295,6 +295,20 @@ Without it the dispatcher says so each time it starts:
 Build pods share their node's user namespace: root in a build container is root on its node. Set WORKER_KUBE_USER_NAMESPACES=true where the nodes support it
 ```
 
+With it, the API server has to keep the field. One with the
+`UserNamespacesSupport` feature gate off accepts the pod and drops
+`hostUsers` from it without an error, and the pod would then share its node's
+user namespace. The dispatcher checks what the API server answers, to the dry
+run before each claim and for each pod it creates, and while the field comes
+back missing it claims no build, logging:
+
+```
+Not claiming builds: WORKER_KUBE_USER_NAMESPACES=true asks for build pods in user namespaces of their own (spec.hostUsers: false), and the API server stores them without it, so root in a build would be root on its node. The API server's UserNamespacesSupport feature gate is off: turn it on, or set WORKER_KUBE_USER_NAMESPACES=false to build in the node's user namespace
+```
+
+A pod created without it is deleted before anything runs in it, and its build
+is handed back to the server.
+
 This mode is the least exercised part of the worker: the project's test
 cluster cannot start a pod in a user namespace, so builds have not been run in
 one there. Try it with a package or two before relying on it.
