@@ -412,7 +412,10 @@ need it fails at its fetch, with the line saying why above the failure.
 The chroot worker withholds the whole credential from a build that is not
 offered it: no `SSH_AUTH_SOCK` export in its `makepkg.conf`, no mount of the
 agent's directory into its chroot, no `SSH_AUTH_SOCK` inherited from the
-worker's environment.
+worker's environment. Its keys are the agent it started, whose socket `main`
+hands the executor; the socket is never published in the worker's own
+environment, so an `SSH_AUTH_SOCK` the worker inherited is never offered, and
+a worker whose agent did not start offers nothing.
 
 **Outside the chroot: the sandbox's socket rule.** Inside its chroot, a
 build that is not offered the key never sees the agent. Outside it, the

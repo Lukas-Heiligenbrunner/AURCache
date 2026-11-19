@@ -16,7 +16,7 @@ use aurcache_worker::{build, credentials, oneshot};
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::Runner;
-use aurcache_worker_core::ssh_key::{PACKAGES_VAR, SshPackages};
+use aurcache_worker_core::ssh_key::{PACKAGES_VAR, SshKeys, SshPackages};
 use aurcache_worker_core::{config::CoreConfig, enroll};
 
 #[derive(Parser)]
@@ -165,7 +165,7 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // needing a restart. Held for the worker's lifetime: dropping it kills the
     // agent, so no stray agent outlives us holding a credential. The key is
     // read once, here: replacing it takes effect at the next restart.
-    let _agent = match agent::start(
+    let agent = match agent::start(
         &core.data_dir,
         credentials::resolve(&cfg).path(),
         &cfg.build_user,
@@ -173,9 +173,6 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     .await
     {
         Ok(Some(a)) => {
-            // Children inherit this, which is how `aurcache-build` -- and the
-            // build inside the chroot -- reach the agent.
-            unsafe { std::env::set_var("SSH_AUTH_SOCK", a.socket()) };
             tracing::info!(
                 "Build credential available through {}",
                 a.socket().display()
@@ -190,7 +187,7 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
         }
     };
 
-    announce_ssh_packages(&cfg.ssh_packages, _agent.is_some());
+    announce_ssh_packages(&cfg.ssh_packages, agent.is_some());
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
@@ -213,6 +210,10 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
         ),
     }
 
-    let executor = ChrootExecutor::new(cfg).await;
+    // The agent's socket goes to the executor, never into this process's
+    // environment: builds are offered the agent this worker started, and
+    // never one an inherited `SSH_AUTH_SOCK` names.
+    let ssh_keys = SshKeys::with_default(agent.as_ref().map(|a| a.socket().to_path_buf()));
+    let executor = ChrootExecutor::new(cfg, ssh_keys).await;
     Runner::new(core, client, executor).run().await
 }
