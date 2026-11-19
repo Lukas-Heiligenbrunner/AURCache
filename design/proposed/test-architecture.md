@@ -86,7 +86,7 @@ scratch.
 | #435 | `aurcache-utils/tests/ssh_clone.rs` (server clones over SSH from a throwaway `sshd`, per push); a third `test-e2e-ssh.sh` phase for the same server-side clone through the API; `docker/testpkg/ssh-source-fixture/`; changes to `git-ssh.Dockerfile` and its entrypoint |
 | #438 | The Kubernetes worker: `kubernetes/kube-worker/`, `docker/kube-worker.Dockerfile`, `docker/build-kube-worker.sh`. Built on #446, whose test additions it carries. |
 | #446 | `scripts/test-build-agent.sh`, a new per-push job (~3 min): the static build agent in the builder image under a build container's flags; legs: `hello` builds, a hostile build (root, the SSH key, the pacman helper), stop by SIGKILL/SIGTERM, arm64 under qemu where registered. `docker/testpkg/agent-hostile/`, `docker/testpkg/agent-thief/`, `scripts/fixtures/build-agent/key-scan.pl`, `git-ssh.Dockerfile` reused. Hybrid-legacy now runs on the agent, and the Docker worker reports disk usage. |
-| #447 | `scripts/test-e2e-kube.sh` (1375 lines, ~20 min locally, ~10 GB) and `e2e-kube.yml`, nightly and on a `run-e2e-kube` label. Eleven legs: enrollment, NetworkPolicy, ResourceQuota, a dependency only in AURCache's repository, SSH through the agent with a thief dependency, cancel, worker killed, worker pod deleted, pod that cannot start, a 2 GiB package, user namespaces, policy removed. `scripts/fixtures/kube-e2e/` (overlays, gitssh, five packages), `docker/testpkg/big/`. Deploys `kubernetes/server/` and `kubernetes/kube-worker/` as shipped: `kube-e2e/kustomization.yaml` names them as `../../../kubernetes/server` and `../../../kubernetes/kube-worker`. |
+| #447 | `tests/e2e/topologies/kube/run.sh` (1452 lines, ~20 min locally, ~10 GB) and `e2e-kube.yml`, nightly and on a `run-e2e-kube` label. Eleven legs: enrollment, NetworkPolicy, ResourceQuota, a dependency only in AURCache's repository, SSH through the agent with a thief dependency, cancel, worker killed, worker pod deleted, pod that cannot start, a 2 GiB package, user namespaces, policy removed. Beside it in `tests/e2e/topologies/kube/`: the overlays, gitssh and five packages (`packages/`); the 2 GiB package is `tests/fixtures/packages/big/`. Deploys `kubernetes/server/` and `kubernetes/kube-worker/` as shipped: its `kustomization.yaml` names them as `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`. It is the first PR to put its files where this layout says. |
 | #450 | A `test-sandbox.sh` leg: a build not offered the worker's ssh-agent is refused its socket (Landlock `RESOLVE_UNIX`, Linux 7.1). A third `test-e2e-ssh.sh` phase: a package not in `WORKER_GIT_SSH_PACKAGES` gets no key. Unit tests for the key request, the offer and the package ceiling. |
 | #452 | Two `test-e2e-ssh.sh` phases: `WORKER_SSH_KNOWN_HOSTS` naming the server builds, naming another host is refused. Unit tests for staging and binding `known_hosts`. |
 
@@ -96,11 +96,12 @@ chroot.
 
 ### Where test files are
 
-Test-only files sit in five places: `docker/testpkg/` (three package
-fixtures on master, seven once the PRs land), `docker/git-ssh*`,
+Test-only files sit in five places, six with #447: `docker/testpkg/` (three package
+fixtures on master, six once the PRs land), `docker/git-ssh*`,
 `compose/docker-compose.e2e*.yaml` (four), `scripts/fixtures/` (the frontend
-seed on master; `build-agent/` with #446, `kube-e2e/` with #447), and
-Dockerfiles written inline by `test-sandbox.sh`. Hostile packages exist three
+seed on master; `build-agent/` with #446), Dockerfiles written inline by
+`test-sandbox.sh`, and, with #447, `tests/e2e/topologies/kube/` and
+`tests/fixtures/packages/big/`, already at their final paths. Hostile packages exist three
 times (`hostile-fixture`, `agent-hostile`/`agent-thief`,
 `kube-e2e-ssh`/`kube-e2e-thief`), each with its own idea of what to try.
 
@@ -427,7 +428,7 @@ Where today's contents go:
 | `docker/git-ssh.Dockerfile`, `docker/git-ssh-entrypoint.sh` | `tests/fixtures/images/gitssh/` |
 | `scripts/fixtures/frontend-seed.sql` | `tests/browser/seed.sql` |
 | `scripts/fixtures/build-agent/` | `tests/build-isolation/agent/` |
-| `scripts/fixtures/kube-e2e/` | `tests/e2e/topologies/kube/`; its packages join `tests/fixtures/packages/` in steps 9 and 10, its `gitssh.yaml` becomes the `gitssh` fixture's component in step 9 |
+| `tests/e2e/topologies/kube/` (from #447) | stays; its packages join `tests/fixtures/packages/` in steps 9 and 10, its `gitssh.yaml` becomes the `gitssh` fixture's component in step 9 |
 | `scripts/test-kernel.sh`, `test-frontend.sh` | `tests/{kernel,browser}/run.sh` |
 | `scripts/test-sandbox.sh`, `test-build-agent.sh` | `tests/build-isolation/{chroot,agent}/run.sh` |
 | `scripts/test-e2e*.sh` | replaced by `tests/e2e/run.sh` and scenarios |
@@ -534,11 +535,11 @@ file is deleted in the step that moves its last user, never earlier.
    manifests' own comments (`kubectl apply -k kubernetes/`),
    `kubernetes/README.md` and `kube-worker/README.md`, `README.md`'s link,
    `docs/docs/setup/kubernetes.md` and `docs/docs/workers/kubernetes.md`;
-   #447's `scripts/fixtures/kube-e2e/kustomization.yaml`, whose
-   `../../../kubernetes/server` and `../../../kubernetes/kube-worker` become
-   `../../../deploy/kubernetes/...`, and `test-e2e-kube.sh`, which applies
+   #447's `tests/e2e/topologies/kube/kustomization.yaml`, whose
+   `../../../../kubernetes/server` and `../../../../kubernetes/kube-worker`
+   become `../../../../deploy/kubernetes/...`, and its `run.sh`, which applies
    `kubernetes/kube-worker/networkpolicy.yaml` by path. `AGENTS.md`: the
-   `test-e2e-kube.sh` bullet of "Which end-to-end suite to run" names
+   `tests/e2e/topologies/kube/run.sh` bullet of "Which end-to-end suite to run" names
    `kubernetes/kube-worker/`. `compose/README.md` names nothing there.
    Verifies: `kubectl kustomize` renders identical output from each
    directory users apply (`.`, `server/`, `chroot-worker/`,
@@ -548,10 +549,9 @@ file is deleted in the step that moves its last user, never earlier.
 2. **Fixtures**, paths only. `docker/testpkg/` to
    `tests/fixtures/packages/`; `docker/git-ssh.Dockerfile` and its
    entrypoint to `tests/fixtures/images/gitssh/`; `scripts/fixtures/` split
-   three ways, as in the table above: `frontend-seed.sql` to
-   `tests/browser/seed.sql`, `build-agent/` to `tests/build-isolation/agent/`,
-   `kube-e2e/` to `tests/e2e/topologies/kube/` (its resources become
-   `../../../../deploy/kubernetes/...`). The scripts and compose `build:`
+   two ways, as in the table above: `frontend-seed.sql` to
+   `tests/browser/seed.sql`, `build-agent/` to `tests/build-isolation/agent/`
+   (#447's kube files are already under `tests/`). The scripts and compose `build:`
    blocks naming them follow. `AGENTS.md` and `compose/README.md` name none
    of these files. Verifies: the per-push jobs pass; one `run-e2e` and one
    `run-e2e-kube` run pass; `test-e2e-ssh.sh` passes locally, building the
@@ -645,13 +645,13 @@ file is deleted in the step that moves its last user, never earlier.
    #452's fix reverted; `generate.sh` builds its real package; `rg` finds no
    `docker-compose.e2e`.
 9. **Kube topology** (D9, D12). The kind driver behind the topology hooks
-   (`tests/e2e/topologies/kube/hooks.sh`); `test-e2e-kube.sh`'s legs become
+   (`tests/e2e/topologies/kube/hooks.sh`); the kube `run.sh`'s legs become
    scenarios, three of them shared, and the packages the shared ones use
    join `tests/fixtures/packages/`; `gitssh.yaml` becomes the `gitssh`
    fixture's Kustomize component. One e2e workflow with the image job, the
    `run-e2e` and `run-e2e:<topology>` labels; `e2e-kube.yml`,
-   `run-e2e-kube` and `test-e2e-kube.sh` go. `AGENTS.md`: the
-   `./scripts/test-e2e-kube.sh` lines of the command block (`E2E_BIG`,
+   `run-e2e-kube` and the kube `run.sh` go. `AGENTS.md`: the
+   `./tests/e2e/topologies/kube/run.sh` lines of the command block (`E2E_BIG`,
    `KEEP`, `REUSE`, `E2E_LEGS`) become their `run.sh --topology kube`
    equivalents; the kube bullet; the CI paragraph's workflows and labels.
    Verifies: every former leg reports pass or skip in the summary; the
