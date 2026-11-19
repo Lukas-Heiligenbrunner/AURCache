@@ -235,7 +235,9 @@ cluster protect itself, not as a guarantee.
 ## Architectures and scheduling
 
 The architectures a dispatcher advertises are configuration: `WORKER_ARCHES`,
-or its own architecture when unset. It does not discover them from the nodes.
+or its own architecture when unset. It does not discover them from the nodes,
+and it refuses to start with one it has no Kubernetes name for (anything but
+`x86_64`, `aarch64`, `armv7h` and `riscv64`).
 Each build pod is scheduled with `kubernetes.io/os: linux` and
 `kubernetes.io/arch` set for the package's architecture (`x86_64` is `amd64`,
 `aarch64` is `arm64`, `armv7h` is `arm`, `riscv64` is `riscv64`). A build for an
