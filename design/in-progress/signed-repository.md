@@ -243,6 +243,22 @@ unsigned and runs again, re-signing what the old subkey signed while clients
 still accept it. Clients need the new subkey, so adding or extending one means
 importing the key again on every client; the docs say so.
 
+A subkey signs only under a primary key that is in force (`primary_status`):
+GnuPG, and pacman through it, takes a subkey's signature under an expired
+primary key for an expired one, and under a revoked primary for a revoked
+one, whatever the subkey's own binding says. So a key whose primary key has
+expired or is revoked is refused like one in which nothing signs, saying
+which, and a subkey stops signing when its primary key expires if that comes
+first -- in the 30-day notice, which then names the primary key, and in the
+handover, which finds nothing that signs for longer. **Finding:** a primary
+key that had expired years before, over a signing subkey that never expires,
+was taken for a current signer, the whole repository was signed again with
+it, and pacman refused all of it; `gpg --quick-gen-key` gives a primary key
+three years by default, so supplied keys reach this on their own. Tested with
+GnuPG keys: an expired primary, a revoked one, and one that expires before its
+subkey, whose signature GnuPG accepts now and reports `EXPKEYSIG` for once
+the primary has expired.
+
 Only the key's own signatures are checked (`self_signed`): a certification
 by someone else, which `gpg --export-secret-keys` includes, would fail rPGP's
 `verify_bindings` for want of its issuer.
@@ -488,7 +504,8 @@ Built:
   refused, the generated key's shape, creation and reload with mode 0600,
   passphrase locking and wrong passphrases, passphrase files, garbage key
   files left alone, `Debug` without secrets, GnuPG verification and trust
-  (above), GnuPG-exported keys.
+  (above), GnuPG-exported keys, and GnuPG keys whose primary key has
+  expired, is revoked, or expires before its signing subkey.
 - `pacman-repo-utils`: `%PGPSIG%` round-trips from a sidecar through the
   databases and `listed_packages`; an unsigned package has none; signature
   links made and removed.
