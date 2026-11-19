@@ -37,7 +37,9 @@ builds fail at the source download.
 
 A name is a label, never a path: a lowercase letter or digit, then up to 63
 more of those, `_` or `-`. Only the name reaches the worker; the key itself
-never leaves it.
+never leaves it. The server refuses to store anything else, and a
+`BUILD_SSH_KEY` in its environment that is no name names no key, with a
+warning in its log.
 
 A build whose package names a key its worker does not hold goes ahead without
 one, and its log says so before anything else:
