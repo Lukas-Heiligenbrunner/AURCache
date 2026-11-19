@@ -120,9 +120,9 @@ impl KubeCluster {
 }
 
 impl Cluster for KubeCluster {
-    async fn create(&self, pod: &Pod) -> Result<(), CreateError> {
+    async fn create(&self, pod: &Pod) -> Result<Pod, CreateError> {
         let err = match self.pods.create(&PostParams::default(), pod).await {
-            Ok(_) => return Ok(()),
+            Ok(created) => return Ok(created),
             Err(err) => err,
         };
         Err(match rejection(&err) {
@@ -140,7 +140,7 @@ impl Cluster for KubeCluster {
             ..PostParams::default()
         };
         match self.pods.create(&params, pod).await {
-            Ok(_) => Admission::Admitted,
+            Ok(pod) => Admission::Admitted { pod: Box::new(pod) },
             Err(err) => admission(&err),
         }
     }
@@ -1313,7 +1313,10 @@ mod live {
         ));
 
         let plain = busybox(&dispatcher, &name, "true");
-        assert_eq!(cluster.admits(&plain).await, Admission::Admitted);
+        assert!(matches!(
+            cluster.admits(&plain).await,
+            Admission::Admitted { .. }
+        ));
         // The dry run created nothing: the name is still free.
         cluster.create(&plain).await.unwrap();
         cluster.delete(&name, PROMPT).await.unwrap();
@@ -1336,11 +1339,14 @@ mod live {
         let first = unique("first");
         let second = unique("second");
         // Checked, not consumed: two dry runs into room for one.
-        assert_eq!(cluster.admits(&deadline(&first)).await, Admission::Admitted);
-        assert_eq!(
+        assert!(matches!(
+            cluster.admits(&deadline(&first)).await,
+            Admission::Admitted { .. }
+        ));
+        assert!(matches!(
             cluster.admits(&deadline(&second)).await,
-            Admission::Admitted
-        );
+            Admission::Admitted { .. }
+        ));
         cluster.create(&deadline(&first)).await.unwrap();
         let answer = cluster.admits(&deadline(&second)).await;
         cluster.delete(&first, PROMPT).await.unwrap();

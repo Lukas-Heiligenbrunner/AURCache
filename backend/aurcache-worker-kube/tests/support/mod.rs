@@ -277,11 +277,23 @@ pub enum Sending {
     },
 }
 
+/// What the API server does with a pod's `spec.hostUsers`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostUsers {
+    Kept,
+    /// Left out of what it stores, as one with the `UserNamespacesSupport`
+    /// feature gate off does with a field it does not know.
+    Dropped,
+}
+
 /// How the pod of a build behaves.
 pub struct Script {
     /// What `create` answers, in order; it succeeds once these are used up.
     pub creations: VecDeque<CreateError>,
-    pub admission: Admission,
+    /// What a dry run answers instead of admitting the pod; `None` admits
+    /// it, as the API server would store it.
+    pub refusal: Option<Admission>,
+    pub host_users: HostUsers,
     pub start: Start,
     pub receive: Receive,
     /// The build log, whole.
@@ -321,7 +333,8 @@ impl Default for Script {
     fn default() -> Self {
         Self {
             creations: VecDeque::new(),
-            admission: Admission::Admitted,
+            refusal: None,
+            host_users: HostUsers::Kept,
             start: Start::Staged,
             receive: Receive::Accepts,
             log: b"==> Making package: hello\n==> Finished making: hello\n".to_vec(),
@@ -523,8 +536,14 @@ impl FakeCluster {
         self.shared.remove(name);
     }
 
-    pub fn set_admission(&self, admission: Admission) {
-        self.shared.state().script.admission = admission;
+    /// Have a dry run answer `refusal` instead of admitting the pod.
+    pub fn refuse(&self, refusal: Admission) {
+        self.shared.state().script.refusal = Some(refusal);
+    }
+
+    /// Have a dry run admit the pod again.
+    pub fn admit(&self) {
+        self.shared.state().script.refusal = None;
     }
 
     /// Resolves once the calls so far satisfy `met`.
@@ -706,10 +725,10 @@ impl FakeCluster {
 }
 
 impl Cluster for FakeCluster {
-    async fn create(&self, pod: &Pod) -> Result<(), CreateError> {
+    async fn create(&self, pod: &Pod) -> Result<Pod, CreateError> {
         let name = pod.metadata.name.clone().unwrap();
         self.shared.record(Call::Create(name.clone()));
-        {
+        let stored = {
             let mut state = self.shared.state();
             state.rendered.push(pod.clone());
             if let Some(refusal) = state.script.creations.pop_front() {
@@ -718,21 +737,28 @@ impl Cluster for FakeCluster {
             if state.pods.contains_key(&name) {
                 return Err(CreateError::Exists);
             }
-            let mut pod = pod.clone();
-            pod.status = Some(match &state.script.start {
+            let mut stored = stored(pod, state.script.host_users);
+            stored.status = Some(match &state.script.start {
                 Start::Staged => status::staged(),
                 Start::Status(status) => (**status).clone(),
             });
-            state.pods.insert(name, Arc::new(pod));
-        }
+            state.pods.insert(name, Arc::new(stored.clone()));
+            stored
+        };
         self.shared.bump();
-        Ok(())
+        Ok(stored)
     }
 
     async fn admits(&self, pod: &Pod) -> Admission {
         self.shared
             .record(Call::Admits(pod.metadata.name.clone().unwrap()));
-        self.shared.state().script.admission.clone()
+        let state = self.shared.state();
+        match &state.script.refusal {
+            Some(refusal) => refusal.clone(),
+            None => Admission::Admitted {
+                pod: Box::new(stored(pod, state.script.host_users)),
+            },
+        }
     }
 
     async fn delete(&self, name: &str, grace: Duration) -> Result<()> {
@@ -999,6 +1025,17 @@ impl Uploads for Sink {
     }
 }
 
+/// `pod` as the API server stores it.
+fn stored(pod: &Pod, host_users: HostUsers) -> Pod {
+    let mut stored = pod.clone();
+    if host_users == HostUsers::Dropped
+        && let Some(spec) = stored.spec.as_mut()
+    {
+        spec.host_users = None;
+    }
+    stored
+}
+
 pub fn config() -> Config {
     Config {
         namespace: "aurcache-builds".to_string(),
@@ -1076,9 +1113,14 @@ impl Rig {
     }
 
     pub fn with(script: Script, sink: Sink) -> Self {
+        Self::configured(script, sink, config())
+    }
+
+    /// A rig whose dispatcher has `cfg`.
+    pub fn configured(script: Script, sink: Sink, cfg: Config) -> Self {
         let cluster = FakeCluster::new(script);
         Self {
-            executor: KubeExecutor::new(config(), Arc::clone(&cluster), AGENT_IMAGE.to_string()),
+            executor: KubeExecutor::new(cfg, Arc::clone(&cluster), AGENT_IMAGE.to_string()),
             cluster,
             sink,
             ssh: None,

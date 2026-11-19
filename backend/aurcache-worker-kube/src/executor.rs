@@ -136,7 +136,41 @@ enum Readiness {
     NoKey {
         message: String,
     },
+    /// Build pods are to run in user namespaces of their own, and the API
+    /// server drops the field that asks for one.
+    NoUserNamespace,
 }
+
+/// What the API server did with a pod's request for a user namespace of
+/// its own (`spec.hostUsers: false`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserNamespace {
+    /// The pod did not ask for one.
+    NotAsked,
+    Kept,
+    /// The server stored the pod without it: one with the
+    /// `UserNamespacesSupport` feature gate off drops a field it does not
+    /// know, and the pod then shares its node's user namespace.
+    Dropped,
+}
+
+/// What became of `asked`'s request for a user namespace, in `stored`, the
+/// pod as the API server stored it or would.
+fn user_namespace(asked: &Pod, stored: &Pod) -> UserNamespace {
+    let own = |pod: &Pod| pod.spec.as_ref().and_then(|spec| spec.host_users) == Some(false);
+    match (own(asked), own(stored)) {
+        (false, _) => UserNamespace::NotAsked,
+        (true, true) => UserNamespace::Kept,
+        (true, false) => UserNamespace::Dropped,
+    }
+}
+
+/// Why no build pod is created while the API server drops `hostUsers`.
+const USER_NAMESPACE_DROPPED: &str = "WORKER_KUBE_USER_NAMESPACES=true asks for build pods in \
+     user namespaces of their own (spec.hostUsers: false), and the API server stores them \
+     without it, so root in a build would be root on its node. The API server's \
+     UserNamespacesSupport feature gate is off: turn it on, or set \
+     WORKER_KUBE_USER_NAMESPACES=false to build in the node's user namespace";
 
 /// How far a build got before something other than its end decided it.
 enum Reached {
@@ -433,7 +467,7 @@ impl<C: Cluster> KubeExecutor<C> {
     /// each request to create is seen to its answer.
     async fn create(&self, pod: &Pod, name: &str, watch: &StopWatch) -> Result<Created> {
         match self.cluster.create(pod).await {
-            Ok(()) => return Ok(Created::Yes),
+            Ok(stored) => return self.created(pod, &stored, name).await,
             Err(CreateError::Refused { message }) => return Ok(Created::Refused { message }),
             Err(CreateError::Other(error)) => return Err(error),
             Err(CreateError::Exists) => {}
@@ -455,10 +489,26 @@ impl<C: Cluster> KubeExecutor<C> {
             stop = watch.stopped() => return Ok(Created::Stopped(stop)),
         }
         match self.cluster.create(pod).await {
-            Ok(()) => Ok(Created::Yes),
+            Ok(stored) => self.created(pod, &stored, name).await,
             Err(CreateError::Refused { message }) => Ok(Created::Refused { message }),
             Err(CreateError::Exists) => bail!("a pod named {name} exists already"),
             Err(CreateError::Other(error)) => Err(error),
+        }
+    }
+
+    /// A pod the API server created as `stored`, from `asked`. One stored
+    /// without the user namespace it asked for is deleted before anything
+    /// of the build runs in it, and the build is refused.
+    async fn created(&self, asked: &Pod, stored: &Pod, name: &str) -> Result<Created> {
+        match user_namespace(asked, stored) {
+            UserNamespace::NotAsked | UserNamespace::Kept => Ok(Created::Yes),
+            UserNamespace::Dropped => {
+                tracing::error!("Deleting pod {name}: {USER_NAMESPACE_DROPPED}");
+                self.cluster.delete(name, PROMPT).await?;
+                Ok(Created::Refused {
+                    message: USER_NAMESPACE_DROPPED.to_string(),
+                })
+            }
         }
     }
 
@@ -608,7 +658,10 @@ impl<C: Cluster> KubeExecutor<C> {
             return Readiness::Ready;
         };
         match self.cluster.admits(&probe).await {
-            Admission::Admitted => Readiness::Ready,
+            Admission::Admitted { pod } => match user_namespace(&probe, &pod) {
+                UserNamespace::Dropped => Readiness::NoUserNamespace,
+                UserNamespace::NotAsked | UserNamespace::Kept => Readiness::Ready,
+            },
             Admission::Refused { message } => Readiness::Refused { message },
             Admission::Unjudged { message } => Readiness::Unsure { message },
             Admission::Unreached { message } => Readiness::Unreachable { message },
@@ -667,6 +720,9 @@ impl<C: Cluster> KubeExecutor<C> {
                 tracing::error!(
                     "Not claiming builds until the SSH key can be read again: {message}"
                 );
+            }
+            Readiness::NoUserNamespace => {
+                tracing::error!("Not claiming builds: {USER_NAMESPACE_DROPPED}");
             }
         }
         *last = found.clone();
@@ -1001,7 +1057,7 @@ mod tests {
     fn rendered(cfg: &Config) -> Pod {
         struct Unused;
         impl Cluster for Unused {
-            async fn create(&self, _: &Pod) -> Result<(), CreateError> {
+            async fn create(&self, _: &Pod) -> Result<Pod, CreateError> {
                 unreachable!()
             }
             async fn admits(&self, _: &Pod) -> Admission {
