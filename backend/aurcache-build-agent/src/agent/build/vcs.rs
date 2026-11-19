@@ -8,7 +8,7 @@
 use super::run::{self, Keep};
 use super::user::BuildUser;
 use aurcache_build_agent::layout::Scratch;
-use aurcache_common::source::ref_candidates;
+use aurcache_common::source::{is_object_name, ref_candidates};
 use aurcache_common::worker::JobVcsSource;
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -60,14 +60,9 @@ fn is_one_name(dir: &str) -> bool {
     matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none()
 }
 
-/// Whether git's answer is an object name: SHA-1 or SHA-256, in hexadecimal.
-fn is_object_name(answer: &str) -> bool {
-    matches!(answer.len(), 40 | 64) && answer.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{is_object_name, is_one_name};
+    use super::is_one_name;
 
     #[test]
     fn a_mirror_is_one_name_under_srcdest() {
@@ -79,17 +74,5 @@ mod tests {
         assert!(!is_one_name("a/b"));
         assert!(!is_one_name("../srcdest-other/repo"));
         assert!(!is_one_name("/etc"));
-    }
-
-    #[test]
-    fn only_an_object_name_is_reported() {
-        assert!(is_object_name("9fceb02d0ae598e95dc970b74767f19372d61af8"));
-        assert!(is_object_name(&"a".repeat(64)));
-        assert!(!is_object_name(""));
-        assert!(!is_object_name("9fceb02"));
-        assert!(!is_object_name(
-            "9fceb02d0ae598e95dc970b74767f19372d61af8\nand more"
-        ));
-        assert!(!is_object_name(&"g".repeat(40)));
     }
 }

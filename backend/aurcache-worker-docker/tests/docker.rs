@@ -1,6 +1,7 @@
 //! The rendered build container against the local Docker daemon, with a
-//! statically built agent: a package builds, and a build killed half-way
-//! leaves nothing behind.
+//! statically built agent: a package builds, a build killed half-way leaves
+//! nothing behind, and what root in the container leaves in the build
+//! directory does not lead the worker out of it.
 //!
 //! Ignored by default. Run with
 //!
@@ -274,5 +275,110 @@ async fn a_killed_build_leaves_nothing_behind() {
     );
 
     clear(&setup, &dirs, &name).await;
+    std::fs::remove_dir_all(&stage).unwrap();
+}
+
+/// Run `script` in the container as root, once the agent has taken `/work`:
+/// what a dependency's install scriptlet can do, with the container's own
+/// capabilities. What it printed.
+async fn as_root(docker: &Docker, id: &str, script: &str) -> String {
+    use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+    let exec = docker
+        .create_exec(
+            id,
+            CreateExecOptions {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                user: Some("0".to_string()),
+                cmd: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!(
+                        "while [ \"$(stat -c %u /work)\" != 0 ] || [ ! -d /work/out ]; do \
+                         sleep 0.1; done; {script}"
+                    ),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the exec is created");
+    let mut said = String::new();
+    if let StartExecResults::Attached { mut output, .. } = docker
+        .start_exec(&exec.id, None::<StartExecOptions>)
+        .await
+        .expect("the exec starts")
+    {
+        while let Some(Ok(chunk)) = output.next().await {
+            said.push_str(&chunk.to_string());
+        }
+    }
+    said
+}
+
+/// What root in a build container leaves in the build directory is read as
+/// what the build could have written: a pipe where the report goes and a
+/// `pkg/` that is a link to a directory of the worker's host. Neither holds
+/// the worker up, and nothing of the host's is taken for a package.
+#[tokio::test]
+#[ignore = "needs Docker and a static agent: AURCACHE_DOCKER_TESTS=1"]
+async fn what_root_leaves_in_the_build_directory_is_not_followed() {
+    use aurcache_worker_core::artifacts::discover_artifacts;
+    use workdir::Report;
+
+    let Some(setup) = setup() else { return };
+    let dirs = dirs("hostile");
+    let stage = dirs.local.with_extension("stage");
+    let _ = std::fs::remove_dir_all(&stage);
+    let source = hello_source(&stage);
+    let host_only = stage.join("host-only");
+    std::fs::create_dir_all(&host_only).unwrap();
+    std::fs::write(
+        host_only.join("secret-1-1-x86_64.pkg.tar.zst"),
+        b"a file of the worker's host, never in the container",
+    )
+    .unwrap();
+    workdir::prepare(&dirs.local, &setup.agent, &spec(), &source).unwrap();
+
+    let name = format!("{}-docker-hostile", setup.prefix);
+    let id = start(&setup, &name, &dirs).await;
+    let said = as_root(
+        &setup.docker,
+        &id,
+        &format!(
+            "mkfifo -m 666 /work/out/report.json && rm -rf /work/pkg && ln -s {} /work/pkg \
+             && echo planted",
+            host_only.display()
+        ),
+    )
+    .await;
+    assert!(said.contains("planted"), "{said}");
+    // As the worker stops a build it cancels.
+    setup
+        .docker
+        .kill_container(&id, None::<KillContainerOptions>)
+        .await
+        .unwrap();
+    let status = wait(&setup.docker, &id).await;
+    cleanup::remove_container(&setup.docker, &id).await;
+    assert_eq!(status, Some(137));
+
+    let local = dirs.local.clone();
+    let read = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || workdir::report(&local)),
+    )
+    .await
+    .expect("the report is refused at once, not waited on")
+    .unwrap();
+    let Report::Unreadable(why) = read else {
+        panic!("a pipe was read as a report: {read:?}");
+    };
+    assert!(why.contains("a pipe"), "{why}");
+    let refused = discover_artifacts(&Work::new(&dirs.local).pkg()).unwrap_err();
+    assert!(refused.to_string().contains("a link"), "{refused}");
+
+    clear(&setup, &dirs, &name).await;
+    assert!(host_only.join("secret-1-1-x86_64.pkg.tar.zst").exists());
     std::fs::remove_dir_all(&stage).unwrap();
 }

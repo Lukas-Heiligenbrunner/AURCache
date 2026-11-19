@@ -28,3 +28,6 @@ aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-worker-container = { path = "../aurcache-worker-container" }
 aurcache-build-agent = { path = "../aurcache-build-agent" }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+libc = "0.2"
