@@ -1935,6 +1935,68 @@ async fn an_operators_key_in_the_dump_is_not_copied_beside_itself() {
     );
 }
 
+/// A key file a rename cannot replace -- a symlink, or a Docker secret
+/// bind-mounted at the server's own key file -- refuses the restore before
+/// anything is written, rather than failing after the packages are in. A
+/// bind mount needs a mount namespace (`unshare -rm`); without one only the
+/// symlink is tried.
+#[tokio::test]
+async fn a_key_file_that_cannot_be_replaced_refuses_the_restore() {
+    let old_dir = tempfile::tempdir().unwrap();
+    let bytes = dump_with_ssh(&ssh_server(old_dir.path())).await;
+
+    for mounted in [false, true] {
+        let new_dir = tempfile::tempdir().unwrap();
+        let elsewhere = new_dir.path().join("elsewhere");
+        let other = ssh_server(&elsewhere);
+        drop(other);
+        let own_dir = new_dir.path().join("ssh");
+        std::fs::create_dir_all(&own_dir).unwrap();
+        let own = own_dir.join("id_ed25519");
+        if mounted {
+            std::fs::write(&own, "").unwrap();
+            let bound = std::process::Command::new("mount")
+                .arg("--bind")
+                .arg(elsewhere.join("id_ed25519"))
+                .arg(&own)
+                .stderr(std::process::Stdio::null())
+                .status();
+            if !bound.is_ok_and(|status| status.success()) {
+                eprintln!("skipped the bind mount: cannot mount here");
+                continue;
+            }
+        } else {
+            std::os::unix::fs::symlink(elsewhere.join("id_ed25519"), &own).unwrap();
+        }
+        let new = Arc::new(SshAccess::new(SshConfig {
+            dir: own_dir.clone(),
+            key: KeySource::Generated(own.clone()),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(own_dir.join("known_hosts")),
+        }));
+        let in_use = fingerprint(&new);
+        let restored = restore_with_ssh(&bytes, new, copying()).await;
+        if mounted {
+            let _ = std::process::Command::new("umount").arg(&own).status();
+        }
+        let expected = if mounted {
+            "is mounted where it is"
+        } else {
+            "is not a regular file"
+        };
+        assert!(
+            restored
+                .failures
+                .iter()
+                .any(|e| e.contains("nothing was imported") && e.contains(expected)),
+            "mounted: {mounted}: {:?}",
+            restored.failures
+        );
+        assert!(Packages::find().all(&restored.db).await.unwrap().is_empty());
+        assert_eq!(fingerprint(restored.store.ssh()), in_use);
+    }
+}
+
 /// `--clear` with a dump that carries no SSH state keeps this server's, as
 /// it keeps the CA: the key the remotes know, and the hosts it trusts.
 #[tokio::test]

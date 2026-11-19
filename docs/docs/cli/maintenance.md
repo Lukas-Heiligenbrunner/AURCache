@@ -37,7 +37,10 @@ What a restore does with them:
   server's `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` to hold its passphrase. If it
   does not open, or a file the restore would write cannot be written, the
   restore is refused whole, before any package is imported, and `--dry-run`
-  says so (and nothing else).
+  says so (and nothing else). A file that cannot be replaced counts: a symlink,
+  or a secret mounted at the server's own key file. Mount a key you supply
+  somewhere else and name it with `AURCACHE_GIT_SSH_KEY`; the restore then
+  leaves it alone.
 - **Without `--secrets copy` or `--clear`, the SSH key is left alone.**
 - **`--secrets copy`** puts the key in the server's own place,
   `AURCACHE_SSH_DIR/id_ed25519`, replacing the one a new server generated, and

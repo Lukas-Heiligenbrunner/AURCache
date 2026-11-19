@@ -364,6 +364,8 @@ pub struct SshPlan {
 
 enum KeyPlan {
     Keep,
+    /// The server's own key file holds the dump's key already.
+    AlreadyThere,
     /// The dump's key, checked to open, into the server's own key file.
     Install {
         own: PathBuf,
@@ -610,6 +612,7 @@ impl SshAccess {
         };
         Ok(match plan {
             KeyPlan::Keep => KeyRestored::Untouched,
+            KeyPlan::AlreadyThere => KeyRestored::Unchanged,
             KeyPlan::Install {
                 own,
                 private_key,
@@ -757,6 +760,11 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
             configured: configured.clone(),
         });
     }
+    // The server's own key file holds it already: there is nothing to write,
+    // and so nothing to demand of where it would go.
+    if read_key(&own).is_ok_and(|key| key.public_key.key_data() == file.public_key.key_data()) {
+        return Ok(KeyPlan::AlreadyThere);
+    }
     // Only a key in OpenSSH's format can be shown to be a key, and to open,
     // before it is written. One in an older format would be taken on its
     // `.pub`'s word, and could replace a working key with nothing usable.
@@ -796,6 +804,7 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
                 )?;
             }
             probe_writable(&own)?;
+            probe_writable(&public_key_path(&own))?;
             KeyPlan::Install {
                 own,
                 private_key,
@@ -815,6 +824,7 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
                 )?;
             }
             probe_writable(&own)?;
+            probe_writable(&public_key_path(&own))?;
             KeyPlan::Beside {
                 own,
                 private_key,
@@ -1102,9 +1112,14 @@ fn real_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Check that `file` can be written, before a restore writes anything: the
-/// nearest directory on its way that exists takes a file and gives it back.
+/// Check that `file` can be written, before a restore writes anything: that a
+/// rename can replace it -- it is no directory, no symlink and nothing mounted
+/// in place, as a Docker secret at the server's own key file would be -- and
+/// that the nearest directory on its way that exists takes a file and gives it
+/// back.
 fn probe_writable(file: &Path) -> anyhow::Result<()> {
+    aurcache_common::fs::check_replaceable(file)
+        .with_context(|| format!("{} could not be restored", file.display()))?;
     let dir = file
         .ancestors()
         .skip(1)
@@ -2409,7 +2424,8 @@ mod tests {
     }
 
     /// The public half is written before the private key, so one that cannot
-    /// be written leaves the key as it was -- and the report says so.
+    /// be written leaves the key as it was -- and the report says so. Found
+    /// beforehand, it refuses the plan.
     #[test]
     fn a_public_half_that_cannot_be_written_leaves_the_key_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -2417,12 +2433,23 @@ mod tests {
         let own = dir.path().join(KEY_FILE);
         let before = fs::read(&own).unwrap();
         let in_use = to.identity().unwrap().fingerprint();
+        let carried = carrying(&new_key());
         fs::remove_file(public_key_path(&own)).unwrap();
         fs::create_dir(public_key_path(&own)).unwrap();
+        let Err(refused) = to.plan_restore(Some(&carried), SshRestoreMode::Take) else {
+            panic!("a restore was planned over a .pub it cannot replace");
+        };
+        assert!(
+            format!("{refused:#}").contains("not a regular file"),
+            "{refused:#}"
+        );
 
+        // Made unwritable between the plan and its application.
+        fs::remove_dir(public_key_path(&own)).unwrap();
         let plan = to
-            .plan_restore(Some(&carrying(&new_key())), SshRestoreMode::Take)
+            .plan_restore(Some(&carried), SshRestoreMode::Take)
             .unwrap();
+        fs::create_dir(public_key_path(&own)).unwrap();
         let Err(partial) = to.apply_restore(plan) else {
             panic!("a key was installed without its public half");
         };

@@ -217,7 +217,12 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
 - **Restore** follows the policy shared with the signing key's restore:
   - *Validate first, and only what will be written.* `SshAccess::plan_restore`
     changes nothing (it writes only a probe file, which it removes). It checks
-    that the files it would write can be written (`probe_writable`), that the
+    that the files it would write can be written (`probe_writable`) and
+    replaced: a symlink, or a file mounted in place (a Docker secret at the
+    server's own key file, which a rename fails on with `EBUSY` after the rows
+    have committed), is refused here (`aurcache_common::fs::check_replaceable`,
+    the same check the signing key's restore makes). A key its own file holds
+    already plans no write at all. It also checks that the
     dump's trusted hosts do not contradict this server's, and that the dump's
     key is fit for where it goes:
     - as the key in use, it must open here (a protected key needs this
