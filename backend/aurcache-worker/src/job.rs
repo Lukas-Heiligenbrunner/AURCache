@@ -628,6 +628,11 @@ async fn stage_build_deps(
     job: &JobDescriptor,
     pkgdir: &Path,
 ) -> Result<PathBuf> {
+    let staging = workdir(ctx.cfg, job.build_id).join("config");
+    let checks = match build_deps::Install::of(&job.build_flags) {
+        build_deps::Install::Nothing => return build_deps::stage(&staging, &[]),
+        build_deps::Install::Dependencies(checks) => checks,
+    };
     let srcinfo = match build_deps::print_srcinfo(pkgdir, &ctx.cfg.build_user).await {
         Ok(srcinfo) => srcinfo,
         Err(e) => {
@@ -636,12 +641,8 @@ async fn stage_build_deps(
             anyhow::bail!(msg);
         }
     };
-    let deps = build_deps::from_srcinfo(
-        &srcinfo,
-        &job.arch,
-        build_deps::Checks::of(&job.build_flags),
-    );
-    build_deps::stage(&workdir(ctx.cfg, job.build_id).join("config"), &deps)
+    let deps = build_deps::from_srcinfo(&srcinfo, &job.arch, checks);
+    build_deps::stage(&staging, &deps)
 }
 
 /// Recursively open up the extracted source tree so the build user can write
