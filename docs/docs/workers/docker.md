@@ -33,6 +33,15 @@ AURCache. An upgrade that could see AURCache's repository would act on the
 `replaces=` of a package built there, and swap it in for any package in the
 image it names that the official repositories no longer carry.
 
+The agent writes the `pacman.conf` as root, and root's pacman reads it again
+after package code has run, to install the build's dependencies. So it
+refuses one that says where pacman keeps its own files (`CacheDir`, `DBPath`,
+`RootDir`, `GPGDir`, `HookDir`, `LogFile`), names an `XferCommand`, has a
+`file://` server, or includes a file from anywhere but `/etc/pacman.d`. Like any failure before
+makepkg (below), the build is then handed back and queued again while the
+package has attempts left, and is refused again at each. A configuration that includes its mirrorlists from
+`/etc/pacman.d`, as the default one does, is accepted.
+
 With `BUILD_ARTIFACT_DIR` set the worker builds against the mounted Docker
 socket: the directory must be a path the Docker daemon can bind, with the same
 directory visible to the worker. It must be on a filesystem that allows

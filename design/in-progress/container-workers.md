@@ -186,7 +186,11 @@ the runtime:
    repository appended, and `pacman_upgrade_conf`, the job's as the server
    sent it. Check both, and the mirrorlist, as `build-runner.md` checks a
    `pacman.conf` (no `CacheDir`, `DBPath`, `RootDir`, `GPGDir`, `HookDir`,
-   `LogFile`, no `file://` server), then write the first as
+   `LogFile`, no `file://` server), and further: no `XferCommand`, which
+   root's pacman would run, and no `Include` of a file outside
+   `/etc/pacman.d` -- root's pacman reads the configuration again after the
+   build user has run, for the dependencies, and an included file the build
+   could write would be configuration nothing checked. Then write the first as
    `/etc/pacman.conf`, the second as `/etc/aurcache/pacman-upgrade.conf`,
    and the mirrorlist. Root writes them, so nothing is bind-mounted over a
    packaged file any more, and the build user cannot change either.
