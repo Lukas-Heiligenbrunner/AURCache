@@ -76,11 +76,11 @@ A build that is not offered the key runs without it, and its log says why:
 
 ```
 [worker] no SSH key offered: hello is not in this worker's WORKER_GIT_SSH_PACKAGES
-[worker] no SSH key offered: the build_ssh_key setting names none for hello
 ```
 
 Its sources are still fetched, without SSH; a source that needs the key then
-fails there, after that line.
+fails there, after that line. A package whose **Build SSH key** names no key
+gets no such line: that is most packages, which fetch nothing over SSH.
 
 ### A key for a few packages only
 
