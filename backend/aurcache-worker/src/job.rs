@@ -14,7 +14,7 @@ use std::time::Duration;
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
-use aurcache_worker_core::protocol::{Stop, log, report_warning, upload_artifacts};
+use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, BindMount};
@@ -441,14 +441,12 @@ async fn execute_prepared_job(
     make_source_writable(&pkgdir)
         .await
         .context("making source writable")?;
-    let deps = stage_build_deps(ctx, client, job, &pkgdir).await?;
 
     let execution = execute_build_process(
         ctx,
         client,
         claimed,
         &pkgdir,
-        &deps,
         &prepared.caches,
         &prepared.binds,
     )
@@ -617,32 +615,67 @@ async fn finish_package_cache(
     }
 }
 
+/// What came of staging a build's dependencies.
+enum Staged {
+    /// The list, for the build script.
+    Dependencies(PathBuf),
+    /// The build had to stop while its PKGBUILD was read; the reading is
+    /// over, and ended this way.
+    Stopped {
+        stop: Stop,
+        status: std::process::ExitStatus,
+    },
+}
+
 /// Work out what the build installs before it starts and stage the list
 /// for the build script; see [`build_deps`].
 ///
-/// A PKGBUILD that cannot be read fails the build here, with makepkg's
-/// words in its log, as it would have a few steps later.
+/// Reading the list runs the PKGBUILD, so it runs as the build does: in the
+/// build's cgroup, under its limits, until the build has to stop. A
+/// PKGBUILD that cannot be read fails the build here, with makepkg's words
+/// in its log, as it would have a few steps later.
 async fn stage_build_deps(
     ctx: &WorkerContext<'_>,
     client: &WorkerClient,
     job: &JobDescriptor,
     pkgdir: &Path,
-) -> Result<PathBuf> {
+    cgroup: Option<&crate::cgroup::BuildCgroup>,
+    watch: &StopWatch,
+) -> Result<Staged> {
     let staging = workdir(ctx.cfg, job.build_id).join("config");
     let checks = match build_deps::Install::of(&job.build_flags) {
-        build_deps::Install::Nothing => return build_deps::stage(&staging, &[]),
+        build_deps::Install::Nothing => {
+            return Ok(Staged::Dependencies(build_deps::stage(&staging, &[])?));
+        }
         build_deps::Install::Dependencies(checks) => checks,
     };
-    let srcinfo = match build_deps::print_srcinfo(pkgdir, &ctx.cfg.build_user).await {
-        Ok(srcinfo) => srcinfo,
+    let mut cmd = build_deps::srcinfo_command(pkgdir, &ctx.cfg.build_user);
+    if let Some(cg) = cgroup {
+        let handle = cg.procs_handle()?;
+        // SAFETY: as for the build's own spawn: one write to a descriptor
+        // opened before the fork.
+        unsafe {
+            cmd.pre_exec(move || crate::cgroup::BuildCgroup::join_current_process(&handle));
+        }
+    }
+    let mut child = cmd.spawn().context("running makepkg --printsrcinfo")?;
+    let srcinfo = match build_deps::read_or_stop(&mut child, watch.stopped()).await {
+        Ok(build_deps::Printed::Srcinfo(srcinfo)) => srcinfo,
+        Ok(build_deps::Printed::Stopped(stop)) => {
+            kill_build(&mut child, cgroup, client, job.build_id).await;
+            let status = child.wait().await.context("awaiting killed makepkg")?;
+            return Ok(Staged::Stopped { stop, status });
+        }
         Err(e) => {
+            kill_build(&mut child, cgroup, client, job.build_id).await;
+            let _ = child.wait().await;
             let msg = format!("reading the build's dependencies failed: {e:#}");
             log(client, job.build_id, &format!("[worker] {msg}\n")).await;
             anyhow::bail!(msg);
         }
     };
     let deps = build_deps::from_srcinfo(&srcinfo, &job.arch, checks);
-    build_deps::stage(&staging, &deps)
+    Ok(Staged::Dependencies(build_deps::stage(&staging, &deps)?))
 }
 
 /// Recursively open up the extracted source tree so the build user can write
@@ -706,8 +739,10 @@ struct BuildExecution {
     total_ooms_before: Option<u64>,
 }
 
-/// Spawn `makechrootpkg`, stream its output as logs, and kill it if it has to
-/// stop: the worker cancelled it, or it reached its timeout.
+/// Run the build's processes in its cgroup -- the `.SRCINFO` read for its
+/// dependencies, then `makechrootpkg`, whose output is streamed as logs --
+/// and kill them if the build has to stop: the worker cancelled it, or it
+/// reached its timeout.
 ///
 /// The output really is streamed: stdout and stderr are piped and forwarded in
 /// batches. Letting the child inherit the worker's stdio instead sends the
@@ -718,7 +753,6 @@ async fn execute_build_process(
     client: &Arc<WorkerClient>,
     claimed: &ClaimedJob,
     pkgdir: &Path,
-    deps: &Path,
     caches: &JobCaches,
     binds: &[BindMount],
 ) -> Result<BuildExecution> {
@@ -761,6 +795,22 @@ async fn execute_build_process(
     // The total's OOM count is cumulative over every build; what this build
     // needs is whether it moved while it ran.
     let total_ooms_before = ctx.cgroups.and_then(Hierarchy::total_ooms);
+    // From the first PKGBUILD code the build runs, so its timeout covers
+    // the read below as well.
+    let watch = claimed.watch();
+    let deps =
+        match stage_build_deps(ctx, client, job, pkgdir, build_cgroup.as_ref(), &watch).await? {
+            Staged::Dependencies(deps) => deps,
+            Staged::Stopped { stop, status } => {
+                return Ok(BuildExecution {
+                    status,
+                    stopped: Some(stop),
+                    elapsed: watch.elapsed(),
+                    cgroup: build_cgroup,
+                    total_ooms_before,
+                });
+            }
+        };
     let spawn = |argv: &[String]| {
         let mut cmd = devtools::command_in(&argv[0], &ctx.lease.tmpdir());
         cmd.args(&argv[1..]).current_dir(pkgdir).kill_on_drop(true);
@@ -819,7 +869,7 @@ async fn execute_build_process(
         ctx.pacman.pass_to(&mut cmd);
         // What the script installs before the build, which then cannot
         // become root to install anything itself; see `build_deps`.
-        cmd.env("AURCACHE_BUILD_DEPS", deps);
+        cmd.env("AURCACHE_BUILD_DEPS", &deps);
         cmd.spawn()
     };
 
@@ -842,7 +892,6 @@ async fn execute_build_process(
 
     // Forward both streams to the build log. Held so they can be awaited after
     // the child exits, which is what guarantees the final lines are sent.
-    let watch = claimed.watch();
     let build_log = BuildLog::open(Arc::clone(client), build_id);
     let pumps: Vec<_> = [
         child.stdout.take().map(|out| build_log.pump(out)),
