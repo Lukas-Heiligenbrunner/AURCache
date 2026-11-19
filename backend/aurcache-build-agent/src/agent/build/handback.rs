@@ -34,14 +34,19 @@ enum Others {
 /// Write the report where the worker reads it.
 ///
 /// It appears whole or not at all: a worker that waits for the file never
-/// reads half of it.
+/// reads half of it. Root in the container (a dependency's scriptlet) could
+/// have left anything at either name, so the partial file is made anew,
+/// never opened: a pipe there would hold the open up for ever. The rename
+/// replaces whatever is at the report's place.
 pub fn write(work: &Work, report: &BuildReport) -> io::Result<()> {
     let partial = work.out().join(PARTIAL);
+    match std::fs::remove_file(&partial) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .create_new(true)
         .mode(0o644)
         .open(&partial)?;
     file.write_all(&serde_json::to_vec_pretty(report)?)?;
@@ -153,6 +158,40 @@ mod tests {
         assert_eq!(names, ["report.json"]);
         let mode = std::fs::metadata(work.report()).unwrap().mode();
         assert_eq!(mode & 0o444, 0o444, "{mode:o}");
+    }
+
+    /// What root in the container may have left at the two names, a pipe
+    /// at each, neither holds the report up nor stays.
+    #[test]
+    fn the_report_replaces_what_was_left_at_its_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = Work::new(tmp.path());
+        std::fs::create_dir(work.out()).unwrap();
+        for path in [work.out().join(super::PARTIAL), work.report()] {
+            let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+            // SAFETY: a valid, NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o666) }, 0);
+        }
+        let report = BuildReport {
+            interface: INTERFACE,
+            ended: Ended::Exited { code: 0 },
+            peak_memory_bytes: None,
+            oom_kills: None,
+            disk_bytes: None,
+            vcs_commits: BTreeMap::new(),
+        };
+        let (send, receive) = std::sync::mpsc::channel();
+        let writing = work.clone();
+        let written = report.clone();
+        std::thread::spawn(move || send.send(write(&writing, &written).is_ok()));
+        let wrote = receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the report is written without waiting");
+        assert!(wrote);
+        assert!(std::fs::symlink_metadata(work.report()).unwrap().is_file());
+        let read: BuildReport =
+            serde_json::from_slice(&std::fs::read(work.report()).unwrap()).unwrap();
+        assert_eq!(read, report);
     }
 
     /// A link in `pkg/` is never followed: what it points at keeps its mode,
