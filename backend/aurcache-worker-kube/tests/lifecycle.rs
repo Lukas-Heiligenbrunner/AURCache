@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::{
     AfterLog, Answer, Call, HostUsers, INPUT, Package, Receive, Rig, Script, Sending, Sink,
-    SshLinkScript, Start, claimed, config, pod_name, report, status,
+    SshLinkScript, Start, VCS_COMMIT, VCS_SOURCE, claimed, config, pod_name, report, status,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -50,7 +50,7 @@ async fn a_build_that_succeeds_streams_its_packages_and_reports_what_it_measured
     assert_eq!(built.report.exit_code, Some(0));
     assert_eq!(built.report.peak_memory_bytes, Some(3 << 30));
     assert_eq!(built.report.disk_usage.unwrap().workdir, Some(2 << 30));
-    assert_eq!(built.report.vcs_commits["git+https://x/y.git"], "abc123");
+    assert_eq!(built.report.vcs_commits[VCS_SOURCE], VCS_COMMIT);
 
     // The pod, then each exchange in its container, in order.
     let name = pod_name(7);
