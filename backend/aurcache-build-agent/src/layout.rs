@@ -58,12 +58,6 @@ impl Work {
         self.input().join(INPUT_SOURCE)
     }
 
-    /// `<root>/in/ready`: present once both inputs are complete.
-    #[must_use]
-    pub fn ready(&self) -> PathBuf {
-        self.input().join("ready")
-    }
-
     /// `<root>/pkg`: makepkg's `PKGDEST`, what the worker collects.
     #[must_use]
     pub fn pkg(&self) -> PathBuf {
@@ -153,7 +147,6 @@ mod tests {
         assert_eq!(work.input(), Path::new("/work/in"));
         assert_eq!(work.spec(), Path::new("/work/in/spec.json"));
         assert_eq!(work.source(), Path::new("/work/in/source.tar.gz"));
-        assert_eq!(work.ready(), Path::new("/work/in/ready"));
         assert_eq!(work.pkg(), Path::new("/work/pkg"));
         assert_eq!(work.log(), Path::new("/work/log/build.log"));
         assert_eq!(work.out(), Path::new("/work/out"));

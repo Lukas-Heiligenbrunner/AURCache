@@ -939,7 +939,6 @@ dependencies = [
  "aurcache-worker-core",
  "flate2",
  "serde_json",
- "tar",
  "tempfile",
  "tokio",
  "tracing",
