@@ -1,6 +1,7 @@
 # What the test changes on the shipped worker: the dispatcher's own crates log
-# at debug, and every image is taken from the node when it is there, which is
-# where the test loads them.
+# at debug, and so does the note that a job asked for a persistent build
+# directory, which the restart leg looks for; and every image is taken from
+# the node when it is there, which is where the test loads them.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,6 +15,6 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: RUST_LOG
-              value: info,aurcache_worker_kube=debug,aurcache_worker_core=debug
+              value: info,aurcache_worker_kube=debug,aurcache_worker_core=debug,aurcache_worker_container::unsupported=debug
             - name: WORKER_KUBE_IMAGE_PULL_POLICY
               value: IfNotPresent

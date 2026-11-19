@@ -27,10 +27,15 @@ build() {
   if echo payload | ssh-keygen -Y sign -f "$srcdir/agent.pub" -n file >/dev/null 2>&1; then
     sshsig=signed
   fi
-  echo "kube-e2e-ssh: build ssh=$reached" \
-    "keys=$(grep -rlsIF -e "$armour" /etc /var /tmp /work /aurcache /home /run /proc/self/environ \
-      2>/dev/null | grep -vc "^$thief/")" \
-    "sshsig=$sshsig"
+  # Every file but the thief's own report, and this process's environment,
+  # which is NUL-separated and so a binary file to grep -I.
+  local files environ=0
+  files=$(grep -rlsIF -e "$armour" /etc /var /tmp /work /aurcache /home /run 2>/dev/null \
+    | grep -vc "^$thief/" || true)
+  if tr '\0' '\n' </proc/self/environ | grep -qF -e "$armour"; then
+    environ=1
+  fi
+  echo "kube-e2e-ssh: build ssh=$reached keys=$((files + environ)) sshsig=$sshsig"
   echo "kube-e2e-ssh: thief ran=$(cat "$thief/ran" 2>/dev/null || echo no)" \
     "keys=$(wc -l <"$thief/keys")" \
     "agents=$(wc -l <"$thief/agents")" \

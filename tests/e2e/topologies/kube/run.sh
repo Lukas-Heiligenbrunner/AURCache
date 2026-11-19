@@ -186,6 +186,14 @@ dispatcher_log() {
 # Whether the worker logged a line matching `$1` since `$2`.
 dispatcher_said() { dispatcher_log "${2:-}" | grep -qE -- "$1"; }
 
+# Whether the worker logged no line matching `$1` since `$2`. A log that
+# cannot be read fails the run: it says nothing either way.
+dispatcher_silent() {
+    local text
+    text=$(dispatcher_log "${2:-}") || fail "the worker's log could not be read"
+    ! grep -qE -- "$1" <<<"$text"
+}
+
 # Wait for the worker to log `$1`, since `$2`, for `$3` seconds.
 expect_said() {
     local pattern=$1 since=${2:-} timeout=${3:-120}
@@ -234,13 +242,31 @@ build_status() { build_json "$1" | jq -r '.status'; }
 build_output() { aurcache_cli builds output "$1" 2>/dev/null; }
 build_said() { build_output "$1" | grep -qF -- "$2"; }
 
+# Whether the output of build `$1` has no `$2`. Output that cannot be read
+# fails the run.
+build_silent() {
+    local text
+    text=$(build_output "$1") || fail "the output of $1 could not be read"
+    ! grep -qF -- "$2" <<<"$text"
+}
+
 # The build pods, as `name uid build-id` lines.
 build_pods() {
     k -n aurcache-builds get pods -l aurcache.io/build-id -o json \
         | jq -r '.items[] | "\(.metadata.name) \(.metadata.uid) \(.metadata.labels["aurcache.io/build-id"])"'
 }
-no_build_pods() { [ -z "$(build_pods)" ]; }
-pod_uid_gone() { ! build_pods | grep -q " $1 "; }
+# Both false when the pods cannot be listed: a list nobody read holds no
+# answer, and waiting on one of these then waits until it can be read.
+no_build_pods() {
+    local pods
+    pods=$(build_pods) || return 1
+    [ -z "$pods" ]
+}
+pod_uid_gone() {
+    local pods
+    pods=$(build_pods) || return 1
+    ! grep -qF " $1 " <<<"$pods"
+}
 
 # Whether a build pod other than the one with uid `$1` exists.
 another_pod() { build_pods | awk -v uid="$1" '$2 != uid' | grep -q .; }
@@ -586,22 +612,20 @@ check_enrollment() {
     log "    worker: $(jq -r '"\(.name), \(.kind), \(.status), arches \(.arches | join(","))"' <<<"$worker")"
     result "enrolled through the Secret, approved, kind kubernetes"
 
-    # The agent image is the worker's own, as the manifests name it: the
-    # worker holds no permission to read its pod.
-    local line agent spec
+    # The worker is told its own image for the build agent (what build pods
+    # run is checked on one, in the SSH leg): it holds no permission to read
+    # its pod.
+    local line
     expect_said "Build pods go to namespace aurcache-builds and take the build agent from" "" 60
     line=$(dispatcher_log | grep -E "take the build agent from" | tail -n 1)
-    agent=${line##* from }
-    spec=$(k -n aurcache get pod "$(dispatcher_pod)" -o jsonpath='{.spec.containers[0].image}')
-    log "    agent image: $agent"
-    [ "$agent" = "$spec" ] || fail "the agent image is not the image the worker's pod runs ($spec)"
+    log "    agent image: ${line##* from }"
     # `can-i` prints its answer; an error asking is neither.
     local may
     may=$(k auth can-i get pods -n aurcache \
         --as=system:serviceaccount:aurcache:aurcache-kube-worker 2>&1 || true)
     [ "$may" = no ] \
         || fail "the worker's ServiceAccount should not read pods in its own namespace; can-i said: $may"
-    result "the build agent comes from the worker's own image, and the worker may read no pod beside the server"
+    result "the worker names its agent image, and may read no pod beside the server"
 
     # The worker loaded its SSH key into an ssh-agent of its own as it
     # started, in the pod as the manifests make it: an unprivileged user, a
@@ -629,7 +653,7 @@ check_enrollment() {
     result "warned that build pods share the node's user namespace"
     # In a cluster that ran before, the worker has been restarted under
     # builds on purpose.
-    if [ "${REUSE:-0}" != 1 ] && dispatcher_log | grep -qE "Deleted [0-9]+ build pod"; then
+    if [ "${REUSE:-0}" != 1 ] && ! dispatcher_silent "Deleted [0-9]+ build pod"; then
         fail "a first start found build pods to delete"
     fi
 }
@@ -667,6 +691,10 @@ check_network_policy() {
         || fail "a pod labelled like a build could not reach the repository"
     [ "$(reach "$control" "aurcache.aurcache.svc:8083")" = true ] \
         || fail "the control pod could not reach the worker port, so the check proves nothing"
+    [ "$(reach "$control" "$server_ip:8083")" = true ] \
+        || fail "the control pod could not reach the server pod's worker port, so the check proves nothing"
+    [ "$(reach "$control" "aurcache.aurcache.svc:8081")" = true ] \
+        || fail "the control pod could not reach the repository"
     result "by hand: a build pod reaches the repository and not the worker port; the control reaches both"
 }
 
@@ -734,9 +762,25 @@ check_ssh_key() {
     build_package kube-e2e-thief "$GIT_URL/kube-e2e-thief.git" --ref master \
         --wait --wait-timeout "$BUILD_TIMEOUT" \
         | sed 's/^/    /' || fail "kube-e2e-thief did not build"
-    build_package kube-e2e-ssh "$GIT_URL/kube-e2e-ssh.git" --ref master \
-        --wait --wait-timeout "$BUILD_TIMEOUT" \
-        | sed 's/^/    /' || { CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-ssh); fail "kube-e2e-ssh did not build"; }
+    # The build's pod goes with the build, so what it is made of is read while
+    # it is there: every build pod seen, the first time there is one.
+    local pid pods=''
+    build_in_background "$SCRATCH/add-kube-e2e-ssh.log" kube-e2e-ssh \
+        "$GIT_URL/kube-e2e-ssh.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT"
+    pid=$ADD_PID
+    while kill -0 "$pid" 2>/dev/null; do
+        [ -n "$pods" ] || pods=$(k -n aurcache-builds get pods -l aurcache.io/build-id -o json \
+            2>/dev/null | jq -c '.items | select(length > 0)' 2>/dev/null || true)
+        sleep 2
+    done
+    if ! wait "$pid"; then
+        ADD_PID=
+        sed 's/^/    /' "$SCRATCH/add-kube-e2e-ssh.log"
+        CURRENT_BUILD_REF=$(latest_build_ref kube-e2e-ssh)
+        fail "kube-e2e-ssh did not build"
+    fi
+    ADD_PID=
+    sed 's/^/    /' "$SCRATCH/add-kube-e2e-ssh.log"
     local ref output found
     ref=$(latest_build_ref kube-e2e-ssh)
     CURRENT_BUILD_REF=$ref
@@ -761,9 +805,26 @@ check_ssh_key() {
     found=$(grep -oE "kube-e2e-ssh: thief .*" <<<"$output" | tail -n 1)
     [[ $found =~ ^kube-e2e-ssh:\ thief\ ran=yes\ keys=0\ agents=[1-9][0-9]*\ sshsig=signed[[:space:]]*$ ]] \
         || fail "the thief's report in $ref is not 'ran, no key, reached the agent, an SSHSIG made': $found"
-    k -n aurcache-builds get pods -o json \
-        | jq -e '[.items[].spec.volumes[]? | select(.secret)] | length == 0' >/dev/null \
-        || fail "a build pod mounts a Secret"
+    # No Secret reaches the pod: not as a volume, not as a projected source
+    # (a service account token is one), not in an environment.
+    [ -n "$pods" ] || fail "no build pod of $ref was seen while it ran"
+    local secrets agents
+    secrets=$(jq '[.[].spec
+        | ((.volumes // [])[]
+            | select(.secret != null
+                or any((.projected.sources // [])[]; .secret != null or .serviceAccountToken != null))),
+          (((.containers // []) + (.initContainers // []))[]
+            | select(any((.envFrom // [])[]; .secretRef != null)
+                or any((.env // [])[]; .valueFrom.secretKeyRef != null)))]
+        | length' <<<"$pods")
+    [ "$secrets" = 0 ] || fail "a build pod of $ref is given a Secret: $(jq -c '[.[].spec.volumes]' <<<"$pods")"
+    # The agent the pod ran, in `stage` and `hold`, is the worker image this
+    # run built.
+    agents=$(jq -r '[.[].spec | ((.initContainers // []) + .containers)[]
+        | select(.name == "stage" or .name == "hold") | .image] | unique | join(" ")' <<<"$pods")
+    [ "$agents" = "$WORKER_IMAGE" ] \
+        || fail "the build pod of $ref took its agent from $agents, not from $WORKER_IMAGE"
+    result "the pod of $ref was given no Secret, and ran the agent of $WORKER_IMAGE"
     result "$ref fetched over git+ssh through the dispatcher, from build() too; no key in the pod, and the agent signs what it is asked to: $found"
 }
 
@@ -901,6 +962,7 @@ check_restart() {
         --body '{"value":"true"}' >/dev/null || fail "could not set persistent_builddir"
     local before ref pod uid since
     before=$(latest_build_ref kube-e2e-slow)
+    since=$(now)
     aurcache_cli builds retry "$before" | sed 's/^/    /'
     wait_for 60 "a new build of kube-e2e-slow" ref_moved kube-e2e-slow "$before" \
         || fail "the retry queued nothing"
@@ -908,15 +970,17 @@ check_restart() {
     CURRENT_BUILD_REF=$ref
     wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
         || fail "$ref never started building"
-    if build_said "$ref" "persistent build directory"; then
-        fail "the log of $ref talks about the persistent build directory"
-    fi
+    # That the job asked for one, as the worker's debug line says to whoever
+    # looks: without it, saying nothing about the setting would prove nothing.
+    expect_said "of kube-e2e-slow asks for a persistent build directory" "$since" 30
+    build_silent "$ref" "persistent build directory" \
+        || fail "the log of $ref talks about the persistent build directory"
     local warnings
     warnings=$(server_log warning) || fail "the server's log could not be read"
     if grep -qF -- "persistent build directory" <<<"$warnings"; then
         fail "the server's log has a warning about the persistent build directory"
     fi
-    result "$ref builds with persistent_builddir set, and neither its log nor the server's mentions it"
+    result "$ref builds with persistent_builddir set, which the worker noted at debug, and neither its log nor the server's mentions it"
     read -r pod uid _ <<<"$(build_pods | head -n 1)"
     log "    $ref runs in $pod ($uid)"
 
@@ -974,8 +1038,12 @@ check_stop() {
     wait "$follower" 2>/dev/null || true
     sed 's/\x1b\[[0-9;]*m//g' "$said" | grep -E "Received SIGTERM" | sed 's/^/    | /' \
         || fail "the stopped worker never logged that it received SIGTERM"
+    # The stopped worker deleted the pod itself, rather than leave it to its
+    # successor's sweep, which deletes by the same label.
+    sed 's/\x1b\[[0-9;]*m//g' "$said" | grep -E "deleted pod $pod\b" | sed 's/^/    | /' \
+        || fail "the stopped worker did not log deleting $pod"
     wait_for 30 "pod $uid to go" pod_uid_gone "$uid" || fail "the build pod outlived the worker that ran it"
-    result "worker pod deleted mid-build: it stopped in ${took}s, and $pod went with it"
+    result "worker pod deleted mid-build: it stopped in ${took}s, and deleted $pod itself"
 
     # The build is over on the server, by the stopped worker's own report or
     # by its successor's first heartbeat, whichever came first; a new build
@@ -986,6 +1054,10 @@ check_stop() {
     log "    $ref: $(build_output "$ref" | grep -v '^\s*$' | tail -n 1)"
     wait_for 180 "a new build of kube-e2e-slow in a new pod" another_pod "$uid" \
         || fail "the server did not queue kube-e2e-slow again, or the worker did not claim it"
+    # Claiming comes after the startup sweep, so by now the new worker would
+    # have said if it had found its predecessor's pod.
+    dispatcher_silent "Deleted [0-9]+ build pod\(s\) left by a previous run" \
+        || fail "the new worker found the build pod its stopped predecessor should have deleted"
     local again
     again=$(latest_build_ref kube-e2e-slow)
     [ "$again" != "$ref" ] || fail "no build of kube-e2e-slow newer than $ref"
@@ -1183,9 +1255,8 @@ EOF
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout="$ROLLOUT" \
         || fail "the worker did not start again with user namespaces"
     expect_said "take the build agent from" "$since" 120
-    if dispatcher_said "Build pods share their node's user namespace" "$since"; then
-        fail "the worker still warns about user namespaces with them on"
-    fi
+    dispatcher_silent "Build pods share their node's user namespace" "$since" \
+        || fail "the worker still warns about user namespaces with them on"
     wait_for 120 "the worker to be approved again" worker_approved || fail "the worker did not come back"
     local before
     before=$(latest_build_ref kube-e2e-dep)

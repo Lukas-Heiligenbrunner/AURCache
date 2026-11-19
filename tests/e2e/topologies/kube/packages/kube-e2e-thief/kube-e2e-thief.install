@@ -6,6 +6,14 @@ post_install() {
   local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
   grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
     2>/dev/null | grep -v "^$out/" >"$out/keys"
+  # And every process's environment, which grep -I skips: it is
+  # NUL-separated.
+  local environ
+  for environ in /proc/[0-9]*/environ; do
+    if tr '\0' '\n' <"$environ" 2>/dev/null | grep -qF -e "$armour"; then
+      echo "$environ" >>"$out/keys"
+    fi
+  done
   # Every socket that answers as an agent, asked for an SSHSIG: a signature
   # that is no login, which ssh-agent makes like any other.
   : >"$out/agents"
