@@ -110,12 +110,12 @@ pub async fn descriptor(
 ///
 /// Always sent, "no key" included: a job without the field is how a server
 /// that names no keys speaks, and a worker reads that as "the default key".
+/// A value that is no key name is sent as no key.
 async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<SshKeyRequest> {
     let name = settings::get(db, settings::key::BUILD_SSH_KEY, Some(pkg_id))
         .await?
         .value
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty());
+        .map(|name| name.0);
     Ok(SshKeyRequest { name })
 }
 
