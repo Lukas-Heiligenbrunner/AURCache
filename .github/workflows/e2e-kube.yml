@@ -2,10 +2,10 @@ name: E2E (Kubernetes)
 
 # The Kubernetes worker's end-to-end suite: a throwaway kind cluster, the
 # server and the worker built from this tree, and real builds in pods (see
-# tests/e2e/topologies/kube/run.sh). It builds two images and pulls the builder image
-# into the cluster, so it takes a while, and it reaches the AUR and the Arch
-# mirrors; like the other end-to-end suite it runs once a night, when something
-# landed, rather than on every push.
+# tests/e2e/topologies/kube/run.sh). It builds two images and pulls the
+# builder image into the cluster, so it takes a while, and it reaches the AUR
+# and the Arch mirrors; like the other end-to-end suite it runs once a night,
+# when something landed, rather than on every push.
 #
 # To run it on a pull request, add the `run-e2e-kube` label; the job removes it
 # when done, so adding it again runs the suite again.
@@ -18,9 +18,14 @@ on:
 
 permissions:
   contents: read
-  # Removing the trigger label once the run finishes: a pull request's labels
-  # are changed through the pull request.
-  pull-requests: write
+
+# One run at a time for a pull request, or for the branch (the nightly and a
+# manual run alike): a second waits. Keyed on the label too, so that adding
+# any other label to a pull request, which starts a run of this workflow that
+# does nothing, is not queued behind a real one or in place of it.
+concurrency:
+  group: e2e-kube-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name || 'run' }}
+  cancel-in-progress: false
 
 env:
   KIND_VERSION: v0.33.0
@@ -40,6 +45,9 @@ jobs:
           # The server image's build reads the PKGBUILDs from the AUR
           # submodules under packaging/.
           submodules: recursive
+          # The suite builds and runs code from the tree under test; nothing
+          # in it needs to push.
+          persist-credentials: false
 
       - name: Check for new commits
         id: changed
@@ -84,6 +92,13 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         uses: docker/setup-buildx-action@v4
 
+      # The image builds restore what they can from the Actions cache
+      # (E2E_IMAGE_CACHE below), which buildx in a `run:` step reaches only
+      # with the runtime's token, as in docker-worker-publish.yml.
+      - name: Expose the Actions cache to buildx
+        if: steps.changed.outputs.run == 'true'
+        uses: crazy-max/ghaction-github-runtime@v4
+
       - name: Run the Kubernetes E2E test
         if: steps.changed.outputs.run == 'true'
         env:
@@ -94,16 +109,26 @@ jobs:
           # namespace (its sysfs mount is refused), and left to find that out
           # the suite would skip the leg without anyone seeing.
           E2E_USER_NAMESPACES: '0'
+          # Restored from, never saved to: the repository's Actions cache is
+          # all but full with the publishing workflow's, which an amd64-only
+          # entry of this run's would evict.
+          E2E_IMAGE_CACHE: gha
         run: ./tests/e2e/topologies/kube/run.sh hello
 
-      # The label means "run requested". Taking it back off once the run is
-      # over, pass or fail, lets adding it again trigger a fresh run.
-      # Best-effort: fork PRs get a read-only token.
+  # The label means "run requested". Taking it back off once the run is over,
+  # pass or fail, lets adding it again trigger a fresh run. A job of its own,
+  # so that the token which may change the pull request is never in the job
+  # that runs the tree's code. Best-effort: fork PRs get a read-only token.
+  removeLabel:
+    needs: e2eKube
+    if: always() && github.event_name == 'pull_request' && github.event.label.name == 'run-e2e-kube'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
       - name: Remove the trigger label
-        if: always() && github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh pr edit ${{ github.event.pull_request.number }}
-          --remove-label run-e2e-kube
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --remove-label run-e2e-kube

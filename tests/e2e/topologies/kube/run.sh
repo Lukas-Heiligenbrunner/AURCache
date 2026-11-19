@@ -64,6 +64,10 @@
 #                         loaded from the local Docker when it is there, pulled
 #                         by the node otherwise
 #   E2E_SKIP_BUILD=1      use the images already built under the prefix
+#   E2E_IMAGE_CACHE=gha   restore the image builds' layers from GitHub
+#                         Actions' cache (build-images.sh --cache), and never
+#                         save to it: the publishing workflow's cache is what
+#                         the room is for
 #   E2E_BIG=0             skip the 2 GiB package
 #   E2E_USER_NAMESPACES   auto (default): run step 10 where the node can;
 #                         1: fail where it cannot; 0: skip it
@@ -388,8 +392,14 @@ build_images() {
         return
     fi
     log "=== Building the server and Kubernetes worker images ==="
+    local cache=()
+    case ${E2E_IMAGE_CACHE:-} in
+        "") ;;
+        gha) cache=(--cache gha:restore) ;;
+        *) fail "E2E_IMAGE_CACHE is '$E2E_IMAGE_CACHE'; expected gha, or nothing" ;;
+    esac
     "$PROJECT_DIR/scripts/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
-        --tag "$TAG" "$REGISTRY"
+        "${cache[@]}" --tag "$TAG" "$REGISTRY"
     docker build -q -t "$GITSSH_IMAGE" -f "$PROJECT_DIR/docker/git-ssh.Dockerfile" \
         "$PROJECT_DIR" >/dev/null
 }

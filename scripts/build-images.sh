@@ -75,6 +75,10 @@ Options:
                             cache backend, one scope per image. The step needs
                             the runtime's token in its environment (see
                             docker-worker-publish.yml).
+      --cache gha:restore   The same scopes, restored from and never saved to:
+                            for a job whose cache would take the room the
+                            publishing workflow's needs, which is the most of
+                            the repository's.
       --packages-dir DIR    Also write the AURCache packages the worker/hybrid
                             images built into DIR, for a native install. The
                             packager stage is replayed from the build cache, so
@@ -129,10 +133,16 @@ if [[ -z $registry ]]; then
     exit 2
 fi
 ((${#tags[@]})) || tags=(latest)
-if [[ -n $cache && $cache != gha ]]; then
-    echo "error: unknown cache backend '$cache' (expected gha)" >&2
-    exit 2
-fi
+# What the cache is read from, and whether it is written back.
+case $cache in
+    "") cache_save=0 ;;
+    gha) cache_save=1 ;;
+    gha:restore) cache=gha cache_save=0 ;;
+    *)
+        echo "error: unknown cache '$cache' (expected gha or gha:restore)" >&2
+        exit 2
+        ;;
+esac
 
 # The image each name publishes as. `aurcache` rather than `aurcache-hybrid`
 # because that is the name deployments predating the split already pull.
@@ -170,9 +180,9 @@ done
 
 # The default `docker` driver builds for one architecture only, and fails a
 # multi-platform build with a message that does not say so; it cannot write
-# `type=local` output (--packages-dir) or save a cache to GitHub's backend
-# either. Any of those uses a docker-container builder, created rather than
-# demanded, since one is as good as another.
+# `type=local` output (--packages-dir) or use GitHub's cache backend, to
+# restore or to save, either. Any of those uses a docker-container builder,
+# created rather than demanded, since one is as good as another.
 use_container_builder=0
 if [[ $platforms == *,* || -n $packages_dir || -n $cache ]]; then
     use_container_builder=1
@@ -282,8 +292,10 @@ for image in "${selected[@]}"; do
     # Scoped per image: several images build in one CI job and would
     # otherwise share a cache key, each overwriting the other's entry.
     if [[ -n $cache ]]; then
-        image_args+=(--cache-from "type=$cache,scope=$image" \
-            --cache-to "type=$cache,scope=$image,mode=max")
+        image_args+=(--cache-from "type=$cache,scope=$image")
+    fi
+    if ((cache_save)); then
+        image_args+=(--cache-to "type=$cache,scope=$image,mode=max")
     fi
 
     docker buildx build "${builder_args[@]}" \
