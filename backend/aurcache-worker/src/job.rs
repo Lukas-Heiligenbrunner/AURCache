@@ -15,7 +15,7 @@ use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
-use aurcache_worker_core::ssh_key::{self, SshKeys, SshOffer};
+use aurcache_worker_core::ssh_key::{self, SshKeys};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -88,16 +88,12 @@ async fn run_job_inner(
     shared: &Shared,
 ) -> Result<CompleteReport> {
     let job = &claimed.job;
-    // Decided before anything is prepared, so a job asking for a key this
-    // worker does not hold fails at once, saying so, rather than after its
-    // dependencies are installed, at a source fetch that names no key.
+    // Decided before anything is prepared and said first in the build log, so
+    // a fetch that fails for want of a key has the reason above it.
     let keys = ssh_keys();
     let ssh = ssh_key::offer(job, &keys, &cfg.ssh_packages);
     if let Some(notice) = ssh.notice(&job.pkgbase) {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
-        if let SshOffer::NotHeld { .. } = ssh {
-            return Ok(report::refused(notice));
-        }
     }
     let ssh_agent = ssh.key().map(PathBuf::as_path);
     let prepared = prepare_job(
@@ -1368,6 +1364,11 @@ mod tests {
         assert!(!reaches_agent(&socket, &ceiling, "unreal-engine", none));
         // Unset, every build the job allows is offered it.
         assert!(reaches_agent(&socket, &SshPackages::All, "hello", None));
+        // A key this worker does not hold: the build goes ahead without one.
+        let unheld = Some(SshKeyRequest {
+            name: Some("gitlab".to_string()),
+        });
+        assert!(!reaches_agent(&socket, &SshPackages::All, "hello", unheld));
     }
 
     /// The mount is the agent's directory, read-only at the same path, and only

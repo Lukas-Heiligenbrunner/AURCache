@@ -73,6 +73,11 @@ async fn main() -> Result<()> {
     }
 }
 
+/// What becomes of builds on a worker that holds no SSH key, for the startup
+/// lines that say it has none.
+const WITHOUT_KEY: &str =
+    "builds go ahead without an SSH key, and a source that needs one fails at its fetch";
+
 /// Prepare the SSH key used for authenticated sources and log its public half.
 ///
 /// Generation is a one-time, first-start event, but the public key is logged on
@@ -94,10 +99,7 @@ async fn announce_build_credential(cfg: &Config) {
             );
         }
         Ok(None) => tracing::info!("Using configured build SSH key {}", source.path().display()),
-        Err(e) => tracing::warn!(
-            "No build SSH credential available ({e:#}); packages with \
-             authenticated sources will fail"
-        ),
+        Err(e) => tracing::warn!("No build SSH key available ({e:#}); {WITHOUT_KEY}"),
     }
 }
 
@@ -141,10 +143,7 @@ fn announce_ssh_packages(packages: &SshPackages, has_key: bool) {
         return;
     };
     if !has_key {
-        tracing::warn!(
-            "{PACKAGES_VAR} is set, but this worker has no build SSH key; the packages \
-             it lists build without one"
-        );
+        tracing::warn!("{PACKAGES_VAR} is set, but this worker holds no SSH key: {WITHOUT_KEY}");
     } else if names.is_empty() {
         tracing::info!("{PACKAGES_VAR} is empty: no build is offered the SSH key");
     } else {
@@ -186,10 +185,7 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
         }
         Ok(None) => None,
         Err(e) => {
-            tracing::warn!(
-                "Could not start the build ssh-agent ({e:#}); packages with \
-                 authenticated sources will fail"
-            );
+            tracing::warn!("Could not start the build ssh-agent ({e:#}); {WITHOUT_KEY}");
             None
         }
     };
