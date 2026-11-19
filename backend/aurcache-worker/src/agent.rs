@@ -30,6 +30,7 @@
 //! nothing it captures outlives the build.
 
 use anyhow::{Context, Result};
+use aurcache_worker_core::ssh_key::SshPackages;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
@@ -323,6 +324,22 @@ pub fn host_side_gate(data_dir: &Path) -> HostSideGate {
     HostSideGate::Enforced
 }
 
+/// Whether the agent may run on a worker whose `WORKER_GIT_SSH_PACKAGES` is
+/// `packages`, on a machine that gives it `gate`.
+///
+/// A list of packages says that the builds it leaves out never reach the key.
+/// Where the gate is not enforced, every build reaches the agent from its
+/// PKGBUILD code outside the chroot, so a worker with a list holds no key at
+/// all rather than one any build can use. Without a list the agent runs
+/// whatever the gate, and the worker says what that leaves open.
+#[must_use]
+pub fn may_start(packages: &SshPackages, gate: HostSideGate) -> bool {
+    match packages {
+        SshPackages::All => true,
+        SshPackages::Only(_) => gate == HostSideGate::Enforced,
+    }
+}
+
 /// The kernel's Landlock ABI version, or a negative number without Landlock.
 fn landlock_abi() -> libc::c_long {
     // SAFETY: `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
@@ -382,6 +399,35 @@ mod tests {
             policy,
             &dir(Path::new("/var/lib/aurcache-worker"))
         ));
+    }
+
+    /// A `WORKER_GIT_SSH_PACKAGES` the gate cannot enforce, an empty one
+    /// included, keeps the agent from starting; one it can, or none at all,
+    /// lets it run.
+    #[test]
+    fn a_ceiling_the_gate_cannot_enforce_withholds_the_key() {
+        let gates = [
+            HostSideGate::Enforced,
+            HostSideGate::KernelCannot,
+            HostSideGate::PolicyMissesAgent,
+        ];
+        for packages in [
+            SshPackages::parse(Some("unreal-engine")),
+            SshPackages::parse(Some("")),
+        ] {
+            assert!(may_start(&packages, HostSideGate::Enforced), "{packages:?}");
+            assert!(
+                !may_start(&packages, HostSideGate::KernelCannot),
+                "{packages:?}"
+            );
+            assert!(
+                !may_start(&packages, HostSideGate::PolicyMissesAgent),
+                "{packages:?}"
+            );
+        }
+        for gate in gates {
+            assert!(may_start(&SshPackages::All, gate), "{gate:?}");
+        }
     }
 
     /// The bind mount is the directory, not the socket: the socket's inode is
