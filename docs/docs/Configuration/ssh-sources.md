@@ -130,9 +130,23 @@ WARN trusted the SSH host key of github.com on first contact, with nothing to
     github.com is refused from now on
 ```
 
-Compare the fingerprint with the one the host publishes (GitHub's are under
-*GitHub's SSH key fingerprints* in its documentation). From then on, a host
-that presents a different key is refused, with a message naming both keys.
+Nothing vouched for that key, so check it. Every host key the server trusts is
+listed with its fingerprint on the **Settings** page, under the server's own
+key, and by `aurcli ssh hosts`:
+
+```
+github.com              ecdsa-sha2-nistp256  SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM
+[git.example.com]:2222  ssh-ed25519          SHA256:...
+```
+
+Compare each fingerprint with the one its host publishes: GitHub's are under
+*GitHub's SSH key fingerprints* in its documentation, and GitLab.com's under
+*SSH host keys fingerprints* in GitLab's. On a server of your own,
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` (or the `.pub` of the type
+listed) prints its fingerprint. A fingerprint that does not match is an entry
+to remove, as below, before anything more is cloned from that host. From then
+on, a host that presents a different key is refused, with a message naming
+both keys.
 
 **To trust only hosts you list**, give the server a `known_hosts` file:
 

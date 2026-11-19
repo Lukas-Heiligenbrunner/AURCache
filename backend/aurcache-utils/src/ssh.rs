@@ -40,7 +40,9 @@ use std::sync::Mutex;
 use anyhow::{Context, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
-use aurcache_common::api::ssh::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
+use aurcache_common::api::ssh::{
+    DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey, TrustedHost, TrustedHosts,
+};
 use aurcache_common::server_env::{
     AURCACHE_GIT_SSH_KEY, AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE, AURCACHE_SSH_KNOWN_HOSTS,
 };
@@ -311,6 +313,7 @@ impl SshAccess {
                 key,
             }],
             host_keys: self.hosts.policy(),
+            trusted_hosts: self.hosts.trusted(),
         }
     }
 
@@ -537,6 +540,32 @@ impl HostKeys {
         }
     }
 
+    /// The keys the file vouches for, for people to check their
+    /// fingerprints. A line that does not parse is left out here; checking a
+    /// host is what reports it.
+    fn trusted(&self) -> TrustedHosts {
+        let file = self.source.path();
+        let _guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let text = match fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return TrustedHosts::Unreadable {
+                    reason: format!("reading {}: {e}", file.display()),
+                };
+            }
+        };
+        let hosts = KnownHosts::new(&text)
+            .filter_map(Result::ok)
+            .filter(|entry| entry.marker().is_none())
+            .map(|entry| trusted_host(&entry))
+            .collect();
+        TrustedHosts::Listed { hosts }
+    }
+
     /// Accept `presented` for `remote`, recording it if this is first contact
     /// and the policy allows that; otherwise say plainly why not and what to do.
     pub(crate) fn verify(&self, remote: &SshRemote, presented: &PublicKey) -> anyhow::Result<()> {
@@ -603,6 +632,18 @@ impl HostKeys {
                 }
             },
         }
+    }
+}
+
+/// What a `known_hosts` entry vouches for, as the API reports it.
+fn trusted_host(entry: &Entry) -> TrustedHost {
+    TrustedHost {
+        names: match entry.host_patterns() {
+            HostPatterns::Patterns(patterns) => Some(patterns.join(",")),
+            HostPatterns::HashedName { .. } => None,
+        },
+        key_type: entry.public_key().algorithm().to_string(),
+        fingerprint: entry.public_key().fingerprint(HashAlg::Sha256).to_string(),
     }
 }
 
@@ -1151,6 +1192,73 @@ mod tests {
             "the private key leaked: {body}"
         );
         assert!(!format!("{access:?}").contains(secret_line));
+    }
+
+    /// The report lists every key the file vouches for, to be checked
+    /// against what its host publishes: named as written, a hashed name as
+    /// unnamed, and lines that vouch for nothing left out.
+    #[test]
+    fn the_report_lists_the_trusted_host_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("known_hosts");
+        let hashed = "|1|NoOyftVVQA6XAgAPAGzQGMMavbE=|hmYAAbAWVHG7Ncq7bGbDQX1CRe8=";
+        fs::write(
+            &file,
+            format!(
+                "github.com {GITHUB_ED25519}\n{hashed} {GITHUB_ED25519}\n\
+                 *.example.com,!evil.example.com {GITHUB_ED25519}\n\
+                 @revoked old.example.com {GITHUB_ED25519}\nnot an entry\n"
+            ),
+        )
+        .unwrap();
+        let access = SshAccess::new(SshConfig {
+            key: KeySource::Generated(dir.path().join(KEY_FILE)),
+            passphrase_file: None,
+            hosts: HostKeySource::Pinned(file),
+        });
+        let TrustedHosts::Listed { hosts } = access.info().trusted_hosts else {
+            panic!("{:?}", access.info());
+        };
+        let names: Vec<Option<&str>> = hosts.iter().map(|h| h.names.as_deref()).collect();
+        assert_eq!(
+            names,
+            [
+                Some("github.com"),
+                None,
+                Some("*.example.com,!evil.example.com")
+            ]
+        );
+        for host in &hosts {
+            assert_eq!(host.key_type, "ssh-ed25519");
+            assert_eq!(
+                host.fingerprint,
+                "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+            );
+        }
+    }
+
+    /// Before the first host is recorded there is nothing to list; a file
+    /// that cannot be read is not mistaken for that.
+    #[test]
+    fn no_file_lists_nothing_and_an_unreadable_one_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = |hosts| SshConfig {
+            key: KeySource::Generated(dir.path().join(KEY_FILE)),
+            passphrase_file: None,
+            hosts,
+        };
+        let missing = SshAccess::new(config(HostKeySource::TrustOnFirstUse(
+            dir.path().join("ssh/known_hosts"),
+        )));
+        assert_eq!(
+            missing.info().trusted_hosts,
+            TrustedHosts::Listed { hosts: Vec::new() }
+        );
+        let unreadable = SshAccess::new(config(HostKeySource::Pinned(dir.path().to_path_buf())));
+        assert!(matches!(
+            unreadable.info().trusted_hosts,
+            TrustedHosts::Unreadable { reason } if reason.contains("reading")
+        ));
     }
 
     /// A key at `path` encrypted with `passphrase`, and a file holding

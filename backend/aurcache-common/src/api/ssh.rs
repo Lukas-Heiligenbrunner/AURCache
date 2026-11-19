@@ -18,6 +18,10 @@ pub struct SshInfo {
     /// without the shape changing.
     pub keys: Vec<NamedKey>,
     pub host_keys: HostKeyPolicy,
+    /// The host keys trusted, so a fingerprint can be checked against the
+    /// one its host publishes: what was recorded on first contact, or what
+    /// the operator's file pins.
+    pub trusted_hosts: TrustedHosts,
 }
 
 impl SshInfo {
@@ -76,4 +80,32 @@ pub enum HostKeyPolicy {
     /// A host's key is recorded the first time it is seen, and any other key
     /// it presents later is refused.
     TrustOnFirstUse,
+}
+
+/// The host keys the server trusts, as the file it judges them by lists
+/// them; or why that file could not be read.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TrustedHosts {
+    /// Every entry that vouches for a key, in the file's order. Empty before
+    /// the first host is recorded. `@revoked` and `@cert-authority` lines
+    /// vouch for none and are left out.
+    Listed { hosts: Vec<TrustedHost> },
+    /// The file could not be read, and every SSH source fails until it can.
+    Unreadable { reason: String },
+}
+
+/// One host key the server trusts.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TrustedHost {
+    /// The hosts it is trusted for, as the file writes them: `github.com`,
+    /// `[git.example.com]:2222`, or a list of patterns. `None` for a hashed
+    /// entry, which does not say.
+    pub names: Option<String>,
+    /// `ssh-ed25519`, `ecdsa-sha2-nistp256`, ...
+    pub key_type: String,
+    /// `SHA256:...`, as `ssh-keygen -l` prints it and forges publish it.
+    pub fingerprint: String,
 }

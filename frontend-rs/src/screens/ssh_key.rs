@@ -3,9 +3,11 @@
 //! Shown in two places: on the settings page, and in the add dialog as soon as
 //! the entry is an SSH remote -- which is the moment someone needs it, since a
 //! private repository refuses the clone until the key has been added to it.
+//! The settings page also lists the host keys the server trusts, so one
+//! trusted on first use can be checked against what its host publishes.
 
 use crate::screens::settings::Section;
-use aurcache_client::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, SshInfo, SshKey};
+use aurcache_client::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHosts};
 use dioxus::prelude::*;
 
 /// The server's SSH key, read once per mount.
@@ -64,7 +66,7 @@ pub fn SshSourceHint() -> Element {
     }
 }
 
-/// Every key the server holds, and how hosts are trusted.
+/// Every key the server holds, how hosts are trusted, and which are.
 ///
 /// A key is labelled with its name only when there is more than one: with a
 /// single key, `default` says nothing a reader needs.
@@ -87,6 +89,67 @@ pub fn SshKeyView(info: SshInfo) -> Element {
             }
         }
         p { class: "text-xs opacity-60", "{hosts}" }
+        TrustedHostsView { hosts: info.trusted_hosts, policy: info.host_keys }
+    }
+}
+
+/// The host keys the server trusts, each with the fingerprint to check it
+/// by.
+#[component]
+fn TrustedHostsView(hosts: TrustedHosts, policy: HostKeyPolicy) -> Element {
+    let hosts = match hosts {
+        TrustedHosts::Listed { hosts } => hosts,
+        TrustedHosts::Unreadable { reason } => {
+            return rsx! {
+                div { class: "alert alert-warning text-sm",
+                    span { "The trusted host keys cannot be read, so SSH sources fail: {reason}" }
+                }
+            };
+        }
+    };
+    if hosts.is_empty() {
+        let none = match policy {
+            HostKeyPolicy::Pinned => {
+                "AURCACHE_SSH_KNOWN_HOSTS lists no host key, so every SSH host is refused."
+            }
+            HostKeyPolicy::TrustOnFirstUse => "No host key recorded yet.",
+        };
+        return rsx! { p { class: "text-xs opacity-60", "{none}" } };
+    }
+    rsx! {
+        div { class: "space-y-1",
+            div { class: "text-sm font-medium", "Trusted host keys" }
+            if policy == HostKeyPolicy::TrustOnFirstUse {
+                p { class: "text-xs opacity-60",
+                    "Recorded on first contact, with nothing to check them against: compare each fingerprint with the one its host publishes."
+                }
+            }
+            div { class: "overflow-x-auto",
+                table { class: "table table-xs",
+                    thead {
+                        tr {
+                            th { "Host" }
+                            th { "Type" }
+                            th { "Fingerprint" }
+                        }
+                    }
+                    tbody {
+                        for (index, host) in hosts.into_iter().enumerate() {
+                            tr { key: "{index}",
+                                td { class: "font-mono",
+                                    match host.names {
+                                        Some(names) => rsx! { "{names}" },
+                                        None => rsx! { span { class: "opacity-60", "hashed name" } },
+                                    }
+                                }
+                                td { class: "font-mono", "{host.key_type}" }
+                                td { class: "font-mono break-all select-all", "{host.fingerprint}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -165,11 +228,25 @@ fn CopyButton(text: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::{SshKeyView, SshKeyViewProps};
-    use aurcache_client::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
+    use aurcache_client::{
+        DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey, TrustedHost, TrustedHosts,
+    };
     use dioxus::prelude::*;
 
     fn render(keys: Vec<NamedKey>, host_keys: HostKeyPolicy) -> String {
-        let info = SshInfo { keys, host_keys };
+        render_with_hosts(keys, host_keys, TrustedHosts::Listed { hosts: Vec::new() })
+    }
+
+    fn render_with_hosts(
+        keys: Vec<NamedKey>,
+        host_keys: HostKeyPolicy,
+        trusted_hosts: TrustedHosts,
+    ) -> String {
+        let info = SshInfo {
+            keys,
+            host_keys,
+            trusted_hosts,
+        };
         let mut dom = VirtualDom::new_with_props(SshKeyView, SshKeyViewProps { info });
         dom.rebuild_in_place();
         dioxus_ssr::render(&dom)
@@ -232,5 +309,42 @@ mod tests {
         );
         assert!(html.contains("points at /nope"), "{html}");
         assert!(!html.contains("Copy"), "{html}");
+    }
+
+    /// A host trusted on first use is listed with its fingerprint, and the
+    /// page says to check it; a hashed entry is shown as one.
+    #[test]
+    fn trusted_host_keys_are_listed_with_their_fingerprints() {
+        let host = |names: Option<&str>, fingerprint: &str| TrustedHost {
+            names: names.map(str::to_string),
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: fingerprint.to_string(),
+        };
+        let html = render_with_hosts(
+            vec![ready(DEFAULT_KEY, "ssh-ed25519 AAAAkey")],
+            HostKeyPolicy::TrustOnFirstUse,
+            TrustedHosts::Listed {
+                hosts: vec![
+                    host(Some("[git.example.com]:2222"), "SHA256:first"),
+                    host(None, "SHA256:second"),
+                ],
+            },
+        );
+        assert!(html.contains("[git.example.com]:2222"), "{html}");
+        assert!(html.contains("SHA256:first"), "{html}");
+        assert!(html.contains("hashed name"), "{html}");
+        assert!(html.contains("compare each fingerprint"), "{html}");
+    }
+
+    #[test]
+    fn unreadable_host_keys_say_why() {
+        let html = render_with_hosts(
+            vec![ready(DEFAULT_KEY, "ssh-ed25519 AAAAkey")],
+            HostKeyPolicy::Pinned,
+            TrustedHosts::Unreadable {
+                reason: "reading /etc/aurcache/known_hosts: permission denied".to_string(),
+            },
+        );
+        assert!(html.contains("permission denied"), "{html}");
     }
 }

@@ -132,7 +132,15 @@ Never trusted silently. Two policies (`HostKeyPolicy`):
   key in `AURCACHE_SSH_DIR/known_hosts`, and an `ssh.host_trusted` warning in
   the activity log with the name, key type and fingerprint: the one key nothing
   checked, recorded where someone will see it to check it. A different key
-  from that host later is refused. This is
+  from that host later is refused.
+
+  Every key the file in use vouches for is listed with its fingerprint in
+  `SshInfo::trusted_hosts` (`TrustedHosts`, a list or why the file cannot be
+  read), on the settings page and by `aurcli ssh hosts`, so a fingerprint can
+  be compared with the one its host publishes at any time, not only in the
+  log entry. A hashed entry is listed without a name, since it has none to
+  give; `@revoked` and `@cert-authority` lines vouch for nothing and are not
+  listed. This is
   OpenSSH's `StrictHostKeyChecking=accept-new`, which is also what workers do
   without a `known_hosts`, so the two behave alike.
 - **Pinned**: `AURCACHE_SSH_KNOWN_HOSTS` names an operator's file. Only its

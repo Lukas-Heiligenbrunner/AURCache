@@ -158,6 +158,9 @@ pub(crate) enum SshCommand {
         #[arg(default_value = aurcache_client::DEFAULT_KEY)]
         name: String,
     },
+    /// List the SSH host keys the server trusts, with their fingerprints, to
+    /// compare with the ones each host publishes.
+    Hosts,
 }
 
 #[derive(Subcommand, Debug, Clone)]

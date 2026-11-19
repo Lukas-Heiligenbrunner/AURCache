@@ -20,14 +20,14 @@ use crate::cli::{
 };
 use crate::dump::{dump_command, restore_command};
 use crate::output::{
-    format_ssh_key, option_text, print_graph, print_health, print_raw_response,
-    print_search_results, print_stats, print_user_info, render,
+    format_ssh_key, format_trusted_hosts, option_text, print_graph, print_health,
+    print_raw_response, print_search_results, print_stats, print_user_info, render,
 };
 use crate::packages::run_packages_command;
 use crate::setup::run_setup_command;
 use crate::workers::run_worker_command;
 use anyhow::{Context, Result};
-use aurcache_client::{AurCacheClient, Method, SshKey};
+use aurcache_client::{AurCacheClient, Method, SshKey, TrustedHosts};
 use clap::{CommandFactory, Parser};
 use config::{
     ClientConfig, load_config, resolve_runtime_config, save_config, set_token, set_url,
@@ -95,6 +95,9 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
         ApiCommand::Ssh {
             command: SshCommand::Key { name },
         } => render_ssh_key(client, format, &name).await,
+        ApiCommand::Ssh {
+            command: SshCommand::Hosts,
+        } => render_ssh_hosts(client, format).await,
         ApiCommand::Stats => render_stats(client, format).await,
         ApiCommand::Graph => render_graph(client, format).await,
         ApiCommand::Search { query } => render_search_results(client, format, &query).await,
@@ -227,6 +230,21 @@ async fn render_ssh_key(client: &AurCacheClient, format: OutputFormat, name: &st
         SshKey::Ready { .. } => Ok(()),
         SshKey::Unavailable { reason } => {
             anyhow::bail!("the server's SSH key '{name}' is not usable: {reason}")
+        }
+    }
+}
+
+/// The host keys the server trusts; a failure when it cannot read them, so
+/// a script notices.
+async fn render_ssh_hosts(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
+    let info = client.ssh_info().await?;
+    render(format, &info.trusted_hosts, |hosts| {
+        println!("{}", format_trusted_hosts(hosts, info.host_keys));
+    })?;
+    match &info.trusted_hosts {
+        TrustedHosts::Listed { .. } => Ok(()),
+        TrustedHosts::Unreadable { reason } => {
+            anyhow::bail!("the server cannot read its trusted host keys: {reason}")
         }
     }
 }
