@@ -292,10 +292,11 @@ impl<C: Cluster> KubeExecutor<C> {
         let attended = AssertUnwindSafe(self.attend(cfg, pod, &name, &build, input, &watch))
             .catch_unwind()
             .await;
-        if let Err(error) = self.cluster.delete(&name, GRACE).await {
+        match self.cluster.delete(&name, GRACE).await {
+            Ok(()) => tracing::debug!("build {build_id}: deleted pod {name}"),
             // Not a reason to change what the build is reported as: once the
             // build is no longer held, `reap` deletes its pod.
-            tracing::warn!("{error:#}");
+            Err(error) => tracing::warn!("{error:#}"),
         }
         lock(&self.held).remove(&build_id);
         attended.unwrap_or_else(|panic| resume_unwind(panic))
