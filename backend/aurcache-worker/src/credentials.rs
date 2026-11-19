@@ -287,6 +287,10 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
 /// be readable by the unprivileged build user. Read per job, so a replaced
 /// file takes effect on the next build. The destination is shared by every
 /// job (see [`known_hosts_dir`]) and replaced each time.
+///
+/// A configured `known_hosts` that cannot be read is an error, which fails the
+/// job: the operator asked for the hosts it names and no others, and staging
+/// none would leave ssh accepting any host on first use.
 pub fn stage_for_job(
     known_hosts: Option<&Path>,
     dir: &Path,
@@ -295,10 +299,9 @@ pub fn stage_for_job(
     let Some(agent_socket) = agent_socket else {
         return Ok(None);
     };
-    let known_hosts = match known_hosts {
-        Some(src) if src.exists() => Some(stage_known_hosts(src, dir)?),
-        _ => None,
-    };
+    let known_hosts = known_hosts
+        .map(|src| stage_known_hosts(src, dir))
+        .transpose()?;
 
     Ok(Some(StagedCredential {
         git_ssh_command: git_ssh_command(known_hosts.as_deref()),
@@ -327,7 +330,13 @@ pub fn stage_for_job(
 /// mount still stages as a file the build user can read.
 fn stage_known_hosts(src: &Path, dir: &Path) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let hosts = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    let hosts = std::fs::read(src).with_context(|| {
+        format!(
+            "WORKER_SSH_KNOWN_HOSTS names {}, which cannot be read; refusing to \
+             build without the host keys it pins",
+            src.display()
+        )
+    })?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
         .with_context(|| format!("setting the mode of {}", dir.display()))?;
@@ -576,6 +585,27 @@ mod tests {
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dest.join(KNOWN_HOSTS_FILE)), 0o644);
         assert_eq!(mode(&dest), 0o755);
+    }
+
+    /// A configured `known_hosts` that cannot be read refuses the job, naming
+    /// the setting and the file, rather than building with no pinned hosts --
+    /// which would accept any host on first use. Nothing is staged.
+    #[test]
+    fn a_configured_known_hosts_that_cannot_be_read_refuses_the_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-known_hosts");
+        let dest = known_hosts_dir(tmp.path());
+
+        let error = stage_for_job(Some(&missing), &dest, Some(&tmp.path().join("agent.sock")))
+            .expect_err("an unreadable known_hosts must refuse the job");
+
+        let message = format!("{error:#}");
+        assert!(message.contains("WORKER_SSH_KNOWN_HOSTS"), "{message}");
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+        assert!(!dest.join(KNOWN_HOSTS_FILE).exists());
     }
 
     /// A directory where the copy goes fails the job, naming it, and stays
