@@ -25,8 +25,19 @@
 //!    socket by path (v9). The filesystem is otherwise left alone: the
 //!    install writes wherever packages go.
 //!
-//! Either of the two network layers keeps the program offline on its own;
-//! with neither, the profile refuses. It says on stderr which applied.
+//! Either network layer alone leaves something the other covers:
+//!
+//! - the namespace alone, as on an emulated worker, leaves `AF_VSOCK`, which
+//!   no network namespace confines, and the kernel keyring, whose
+//!   `request_key` has the host resolve names: the build script's container
+//!   refuses the keyring calls, and where no filter can be installed at all,
+//!   qemu's user mode implements none of them, so there only `AF_VSOCK` is
+//!   left;
+//! - the filter alone leaves `AF_UNIX`, and with it the abstract UNIX
+//!   sockets of the network namespace the program started in, unless
+//!   Landlock scopes them (ABI 6, Linux 6.12).
+//!
+//! With neither, the profile refuses. It says on stderr which applied.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
