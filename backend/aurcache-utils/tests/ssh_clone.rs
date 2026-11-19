@@ -276,9 +276,19 @@ fn a_pinned_known_hosts_is_the_whole_list() {
         "{refused}"
     );
     assert_eq!(std::fs::read_to_string(&pinned).unwrap(), "");
+    // libgit2 reaches `SSH://` over SSH too, so it is judged the same way
+    // rather than connected to with libgit2's defaults.
+    let shouted = url.replacen("ssh://", "SSH://", 1);
+    let refused = ls_remote(&shouted, "HEAD", Access::Server(&access)).unwrap_err();
+    let refused = format!("{refused:#}");
+    assert!(
+        refused.contains("is not in AURCACHE_SSH_KNOWN_HOSTS"),
+        "{refused}"
+    );
 
     std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
     ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
+    ls_remote(&shouted, "HEAD", Access::Server(&access)).unwrap();
 }
 
 /// git's bracketed scp form, `[user@host:port]:path`, names a port, and

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use aurcache_common::source::{SshRemote, ssh_remote};
+use aurcache_common::source::{SshRemote, Transport, transport};
 use git2::{
     CertificateCheckStatus, Cred, CredentialType, Direction, FetchOptions, Oid, RemoteCallbacks,
     Repository,
@@ -37,9 +37,20 @@ enum Route<'a> {
 }
 
 /// Decide how `url` is reached with `access`, or why it cannot be.
+///
+/// Whatever libgit2 would reach over SSH gets the callbacks or is refused
+/// here: without them it would connect with no host-key check of ours.
 fn route<'a>(url: &str, access: Access<'a>) -> anyhow::Result<Route<'a>> {
-    let Some(remote) = ssh_remote(url) else {
-        return Ok(Route::Default);
+    let remote = match transport(url) {
+        Transport::Other => return Ok(Route::Default),
+        // The URL is not repeated: it can carry a password.
+        Transport::UnreadableSsh => bail!(
+            "this URL would be reached over SSH (libgit2 sends any URL with a colon and \
+             no scheme it knows over SSH), but no host can be read from it to check a \
+             host key against. Write it as `ssh://[user@]host[:port]/path` or \
+             `[user@]host:path`; a local path is `file:///path`"
+        ),
+        Transport::Ssh(remote) => remote,
     };
     // Named by host rather than by URL: a URL can carry a password.
     let host = remote.known_hosts_name();
@@ -506,6 +517,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("fetched by workers"), "{error}");
+        // libgit2 reads the scheme ignoring case, and so does the refusal.
+        let error = route("SSH://git@github.com/u/r", Access::Anonymous)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fetched by workers"), "{error}");
+    }
+
+    /// What libgit2 would reach over SSH with no host that can be named is
+    /// refused, whoever asks: connecting would check no host key of ours.
+    #[test]
+    fn an_ssh_url_with_no_host_to_name_is_refused_before_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = server_access(dir.path());
+        for url in ["./a:b", "nope://host/repo", "ssh://ho%73t/repo"] {
+            for access in [Access::Server(&access), Access::Anonymous] {
+                let error = route(url, access).unwrap_err().to_string();
+                assert!(error.contains("no host can be read"), "{url}: {error}");
+                assert!(!error.contains(url), "the URL is repeated: {error}");
+            }
+        }
     }
 
     /// Without a key, the reason it has none is what the clone reports.

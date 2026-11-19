@@ -85,17 +85,59 @@ impl SshRemote {
     }
 }
 
-/// The SSH remote `url` names, or `None` when it is reached some other way.
+/// How libgit2 reaches a remote, as far as SSH is concerned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Over SSH, to this host and port.
+    Ssh(SshRemote),
+    /// Over SSH, to no host that can be named as libgit2 will connect to it:
+    /// a "host" with a slash in it, a port that is not a number, a scheme
+    /// libgit2 has no transport for. Nothing can check that host's key.
+    UnreadableSsh,
+    /// Not over SSH: `https://`, `git://`, `file://`, a local path.
+    Other,
+}
+
+/// The schemes libgit2 reaches over SSH.
+const SSH_SCHEMES: [&str; 3] = ["ssh://", "ssh+git://", "git+ssh://"];
+/// libgit2's other transports.
+const OTHER_SCHEMES: [&str; 4] = ["git://", "http://", "https://", "file://"];
+
+/// How libgit2 reaches `url`, decided as libgit2 1.9 decides it.
 ///
-/// The forms git itself reads as SSH: a URL with an `ssh://` scheme (or
-/// `git+ssh://`, `ssh+git://`), and the scp-like `[user@]host:path`, read as
-/// libgit2 1.9 reads them, so that the host and port named here are the ones
-/// it connects to. A host with a slash in it is a path, not a host:
-/// `./a:b` and `/srv/a:b` name none.
+/// It picks a transport by the URL's prefix, ignoring case (`SSH://` is
+/// SSH), and sends anything else with a colon in it over SSH: the scp-like
+/// `[user@]host:path`, but also `./a:b`, which git would take for a local
+/// path, and a scheme it has no transport for. What it sends over SSH is
+/// [`Transport::Ssh`] when the host and port it connects to can be named --
+/// read as it reads them -- and [`Transport::UnreadableSsh`] otherwise.
 ///
 /// `url` is read exactly as given, untrimmed: libgit2 reads a leading space
 /// as part of the account or the host, and a host named here from a trimmed
 /// copy could be judged on another port than the one connected to.
+#[must_use]
+pub fn transport(url: &str) -> Transport {
+    let ssh = |remote: Option<SshRemote>| remote.map_or(Transport::UnreadableSsh, Transport::Ssh);
+    if let Some(rest) = SSH_SCHEMES
+        .iter()
+        .find_map(|scheme| strip_prefix_ignoring_case(url, scheme))
+    {
+        return ssh(url_remote(rest));
+    }
+    let other = OTHER_SCHEMES
+        .iter()
+        .any(|scheme| strip_prefix_ignoring_case(url, scheme).is_some());
+    if other || !url.contains(':') {
+        return Transport::Other;
+    }
+    if has_scheme(url) {
+        return Transport::UnreadableSsh;
+    }
+    ssh(scp_remote(url))
+}
+
+/// The SSH remote `url` names, or `None` when libgit2 reaches it some other
+/// way or to a host that cannot be named; see [`transport`].
 ///
 /// Shared because the server and the add dialog ask the same question of
 /// the same string -- the server to know whether to offer its key and check
@@ -103,24 +145,35 @@ impl SshRemote {
 /// would drift apart.
 #[must_use]
 pub fn ssh_remote(url: &str) -> Option<SshRemote> {
-    match url.split_once("://") {
-        Some((scheme, rest)) => {
-            // Case-sensitive, as libgit2 compares it: `SSH://` is not a URL
-            // it would reach over SSH.
-            if !matches!(scheme, "ssh" | "git+ssh" | "ssh+git") {
-                return None;
-            }
-            url_remote(rest)
-        }
-        None => scp_remote(url),
+    match transport(url) {
+        Transport::Ssh(remote) => Some(remote),
+        Transport::UnreadableSsh | Transport::Other => None,
     }
+}
+
+/// `text` without `prefix`, compared ignoring ASCII case.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+/// Whether `url` starts with a scheme and `://`, as libgit2's
+/// `git_net_str_is_url` decides it.
+fn has_scheme(url: &str) -> bool {
+    let scheme = url
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        .count();
+    url[scheme..].starts_with("://")
 }
 
 /// What follows an SSH scheme's `://`: `[user[:password]@]host[:port][/path]`.
 ///
 /// libgit2 reads the authority from its end -- the port after the last
 /// colon, the host after the last `@`, the account before the password's
-/// colon -- and so is it read here.
+/// colon -- and so is it read here. A host it would percent-decode is not
+/// named: the name checked would not be the one connected to.
 fn url_remote(rest: &str) -> Option<SshRemote> {
     let (authority, path) = match rest.find('/') {
         Some(slash) => rest.split_at(slash),
@@ -135,6 +188,9 @@ fn url_remote(rest: &str) -> Option<SshRemote> {
         None => (None, authority),
     };
     let HostPort { host, port } = split_host_port(host_port)?;
+    if host.contains('%') {
+        return None;
+    }
     remote(user, host, port, path)
 }
 
@@ -438,7 +494,7 @@ impl Display for SourceData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceData, SshRemote, looks_like_git_url, ssh_remote};
+    use super::{SourceData, SshRemote, Transport, looks_like_git_url, ssh_remote, transport};
 
     fn ssh(user: Option<&str>, host: &str, port: Option<u16>, path: &str) -> SshRemote {
         SshRemote {
@@ -468,6 +524,15 @@ mod tests {
         assert_eq!(
             ssh_remote("git+ssh://aur@aur.archlinux.org/paru.git"),
             Some(ssh(Some("aur"), "aur.archlinux.org", None, "/paru.git"))
+        );
+        // libgit2 picks the transport ignoring the scheme's case.
+        assert_eq!(
+            ssh_remote("SSH://git@Host/repo"),
+            Some(ssh(Some("git"), "Host", None, "/repo"))
+        );
+        assert_eq!(
+            ssh_remote("Git+SSH://host:2222/repo"),
+            Some(ssh(None, "host", Some(2222), "/repo"))
         );
         assert_eq!(
             ssh_remote("ssh+git://host/repo"),
@@ -581,6 +646,44 @@ mod tests {
         assert_eq!(path("ssh://host"), "");
     }
 
+    /// What libgit2 does not reach over SSH, and what it reaches over SSH
+    /// with no host to name, are told apart: the second is refused before
+    /// connecting rather than connected to without a host-key check.
+    #[test]
+    fn transports_are_picked_as_libgit2_picks_them() {
+        for url in [
+            "https://github.com/user/repo.git",
+            "HTTPS://github.com/user/repo.git",
+            "http://user@host:8080/repo.git",
+            "git://host/repo",
+            "file:///srv/git/repo.git",
+            "/srv/git/repo.git",
+            "paru-git",
+        ] {
+            assert_eq!(transport(url), Transport::Other, "{url}");
+        }
+        for url in [
+            // Any colon sends a URL over SSH: to libgit2 these are hosts
+            // called `./a`, `/srv/a` and `dir/a`.
+            "./a:b",
+            "/srv/a:b",
+            "dir/a:b",
+            // A scheme it has no transport for.
+            "nope://host/repo",
+            "git+https://host/repo",
+            // A host it would percent-decode.
+            "ssh://ho%73t/repo",
+            "ssh:///repo",
+            "host:",
+        ] {
+            assert_eq!(transport(url), Transport::UnreadableSsh, "{url}");
+        }
+        assert!(matches!(
+            transport("SSH://host/repo"),
+            Transport::Ssh(SshRemote { host, .. }) if host == "host"
+        ));
+    }
+
     #[test]
     fn other_remotes_are_not_ssh_remotes() {
         for url in [
@@ -589,15 +692,13 @@ mod tests {
             "git://host/repo",
             "file:///srv/git/repo.git",
             "/srv/git/repo.git",
-            // A colon after a slash is part of a path, as git reads it.
+            // A "host" with a slash in it is a path.
             "./a:b",
             "/srv/a:b",
             "dir/a:b",
             "paru-git",
             // Not a port: refused rather than guessed at.
             "ssh://host:ssh/repo",
-            // libgit2 reads the scheme case-sensitively, so neither does this.
-            "SSH://host/repo",
             "ssh:///repo",
             "ssh://host:+22/repo",
             "@:repo",

@@ -140,7 +140,16 @@ or a key could be judged under one port's name while another is connected to.
 copy of `git_net_url_parse_scp`'s state machine, brackets included
 (`[git@host:2222]:repo` connects to port 2222), and the URL untrimmed. The
 callback still refuses a host other than the one parsed, which catches what a
-divergence in the host alone would cause. The file is parsed with `ssh-key`;
+divergence in the host alone would cause.
+
+libgit2 also decides *whether* a URL is reached over SSH: by prefix, ignoring
+case, and for anything else with a colon in it, including `./a:b` and schemes
+it has no transport for. `source::transport` makes the same decision. What it
+would reach over SSH with no host this can name (`Transport::UnreadableSsh`)
+is refused before connecting, with either `Access`: without our callbacks,
+libgit2 would connect checking only its own idea of `~/.ssh/known_hosts`.
+
+The file is parsed with `ssh-key`;
 hashed names (`|1|salt|hash`, HMAC-SHA1), comma lists, `*`/`?` globs and `!`
 negations match as in OpenSSH. `@revoked` refuses the key wherever it appears;
 `@cert-authority` lines are ignored, since certificates are not checked. A line
