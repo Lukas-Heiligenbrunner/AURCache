@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Patch `makechrootpkg` for the worker: confinement, and one nspawn default.
 
-Mostly the first. The `arch-nspawn` wrapper patch is not about confinement
-and says so; it opts out of a systemd-nspawn default that is about to change.
-The three after it close the other direction: links the build leaves in its
-output directories, which `makechrootpkg` would otherwise `chown` through as
-root on the host. The upgrade patch keeps one build's output from reaching
-into the next, and installs the build's dependencies with no network; the
-two after it leave the build no way back to root: see their comments.
+Mostly the first. The `arch-nspawn` wrapper patch starts the containers after
+the dependency install itself; it also opts out of a systemd-nspawn default
+that is about to change. The three after it close the other direction: links
+left in the copy's output directories, which `makechrootpkg` would otherwise
+follow as root on the host. The upgrade patch keeps one build's output from
+reaching into the next; the dependency patch installs the build's
+dependencies with no network; the two after it leave the build no way back
+to root: see their comments.
 
 A PKGBUILD is bash. Sourcing one runs it. `makechrootpkg` does that twice
 *outside* the chroot, as the build user:
@@ -60,13 +61,14 @@ INTERFACE = "3"
 
 def _no_follow(description: str, var: str) -> tuple[str, str, str]:
     """Make one of the loops that hand outputs back skip anything that is not a
-    regular file, and `chown -h` the rest; `var` is the loop's variable. See
-    the comment above its uses in PATCHES."""
+    regular file directly in a directory of the copy's own, and `chown -h` the
+    rest; `var` is the loop's variable. See the comment above its uses in
+    PATCHES."""
     return (
         description,
         f'\t\tchown "$src_owner" "${var}"\n',
-        f"\t\tif [[ -L ${var} || ! -f ${var} ]]; then\n"
-        f"\t\t\twarning 'Skipping %s: not a regular file' \"${{{var}##*/}}\"\n"
+        f"\t\tif [[ -L ${{{var}%/*}} || -L ${var} || ! -f ${var} ]]; then\n"
+        f"\t\t\twarning 'Skipping %s: not a regular file in the copy' \"${var}\"\n"
         "\t\t\tcontinue\n"
         "\t\tfi\n"
         f'\t\tchown -h "$src_owner" "${var}"\n',
@@ -267,23 +269,6 @@ prepare_chroot
         #
         # Neither variable set (anyone running this copy by hand) skips the
         # sync, as `makechrootpkg` without `-u` does.
-        #
-        # Then the build's dependencies, which makepkg would install itself
-        # through `sudo pacman`: as root, with the build's network, running
-        # other packages' `.install` scriptlets and alpm hooks. The worker
-        # names them in `AURCACHE_BUILD_DEPS` (`aurcache_worker::build_deps`),
-        # one per line as makepkg would pass them, and they are installed
-        # here, against the databases just synced, in two steps: downloaded
-        # with network, which runs nothing from a package, then installed
-        # under `aurcache-sandbox offline`, which leaves the transaction and
-        # everything it starts no network: a namespace of its own, a filter
-        # allowing UNIX sockets only, or both. The sandbox is bound
-        # into the container read-only; it is the worker's own, of the same
-        # architecture as the chroot. Only what the copy does not already
-        # satisfy, as makepkg asks `pacman -T` -- otherwise a name an
-        # installed package provides could pull in a second provider. Unset,
-        # nothing is installed, and the build (which can no longer become
-        # root, below) fails on anything missing.
         "-u refused; the copy synced, then upgraded without AURCache's repository",
         '(( update_first )) && arch-nspawn "$copydir" \\\n'
         '\t\t--machine="$(machine_name upgrade-packages)" \\\n'
@@ -310,6 +295,49 @@ if [[ -n ${AURCACHE_PACMAN_CONF:-} || -n ${AURCACHE_UPGRADE_CONF:-} ]]; then
 \t\tpacman -Suu --noconfirm --config /etc/aurcache/pacman-upgrade.conf ||
 \t\tdie "Could not upgrade the chroot."
 fi
+""",
+    ),
+    (
+        # The build's dependencies, which makepkg would install itself through
+        # `sudo pacman`: as root, with the build's network, running other
+        # packages' `.install` scriptlets and alpm hooks. The worker names them
+        # in `AURCACHE_BUILD_DEPS` (`aurcache_worker::build_deps`), one per
+        # line as makepkg would pass them, and they are installed here,
+        # against the databases the upgrade synced, in two steps: downloaded
+        # with network, which runs nothing from a package, then installed
+        # under `aurcache-sandbox offline`, which leaves the transaction and
+        # everything it starts no network. The sandbox is bound into the
+        # container read-only; it is the worker's own, of the same
+        # architecture as the chroot. Only what the copy does not already
+        # satisfy, as makepkg asks `pacman -T` -- otherwise a name an
+        # installed package provides could pull in a second provider. Unset or
+        # empty, nothing is installed, and the build (which can no longer
+        # become root, below) fails on anything missing.
+        #
+        # Last of everything host root does in the copy. Once a scriptlet has
+        # run there as root, any path in it may be a link to the host
+        # (`/etc/gitconfig -> /etc/shadow`), and any file host root reads
+        # from it is the scriptlet's. So `prepare_chroot`, the drop-in and the
+        # source download, which all write or read the copy, come first, and
+        # nothing after this does either: the loops that hand the products
+        # back follow no link (below), and every container from here on is
+        # started without arch-nspawn (the wrapper below), which would read
+        # the copy's pacman.conf for what to bind and eval a line of its
+        # makepkg.conf. The one value it needs from the copy is read here,
+        # before the install, as arch-nspawn reads it.
+        "the build's dependencies installed with no network, after all else in the copy",
+        "\nprepare_chroot\n\nnspawn_build_args=(\n",
+        """
+prepare_chroot
+
+_aurcache_setarch=$(
+\teval "$(grep -a '^CARCH=' "$copydir/etc/makepkg.conf")"
+\tif [[ -f /usr/share/devtools/setarch-aliases.d/${CARCH:-} ]]; then
+\t\thead -n 1 "/usr/share/devtools/setarch-aliases.d/$CARCH"
+\telse
+\t\tprintf '%s' "${CARCH:-}"
+\tfi
+)
 
 if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \tmapfile -t _aurcache_deps <"$AURCACHE_BUILD_DEPS" ||
@@ -340,6 +368,9 @@ if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \t\t\tdie "Could not install the build's dependencies."
 \tfi
 fi
+_aurcache_direct=1
+
+nspawn_build_args=(
 """,
     ),
     (
@@ -347,9 +378,9 @@ fi
         # install the dependencies it finds missing -- and so lets the build
         # itself become root in its chroot whenever it likes
         # (`sudo pacman -U` of a package it made, with a scriptlet). The
-        # dependencies are installed before the build instead (the upgrade
-        # patch above), so the entry goes. The copy is made from a base that
-        # never had one, but one a copy was left holding goes with it.
+        # dependencies are installed before the build instead (the patch
+        # above), so the entry goes. The copy is made from a base that never
+        # had one, but one a copy was left holding goes with it.
         "no sudoers entry letting the build user run pacman as root",
         """\tcat > "$copydir/etc/sudoers.d/builduser-pacman" <<EOF
 builduser ALL = NOPASSWD: /usr/bin/pacman
@@ -375,7 +406,8 @@ EOF
         '} < <(sudo -u "$makepkg_user" aurcache-sandbox --allow-build-env -- bash -c \'',
     ),
     (
-        # Two nspawn options, neither a confinement patch, added by one wrapper.
+        # One wrapper for every container the script starts: what it adds to
+        # each, and how it starts those after the dependency install.
         #
         # `--restrict-address-families=`: systemd-nspawn currently permits
         # every socket address family and warns, in every build log, that a
@@ -408,12 +440,21 @@ EOF
         # nspawn refuses `--keep-unit` from a user session, which is where
         # someone running this copy by hand would be.
         #
+        # After the dependency install, a container is started with the
+        # arguments arch-nspawn gives one, and without what arch-nspawn does
+        # first as host root: it reads the copy's pacman.conf for the cache
+        # and repository directories to bind, evals the `CARCH=` line of its
+        # makepkg.conf, and writes its keyring and mirrorlist -- all of which
+        # a scriptlet may have replaced by then. The build needs none of it:
+        # it installs nothing. systemd-nspawn itself expects an untrusted
+        # tree, and resolves every path in it inside it.
+        #
         # A shell function rather than five edits: makechrootpkg calls
         # `arch-nspawn` unqualified in five places, and a function of that name
         # takes precedence over the PATH lookup in all of them. The flags have
         # to land straight after the working directory, since everything after
         # it is the command to run inside the container.
-        "arch-nspawn wrapper: address families, and the build's own cgroup",
+        "arch-nspawn wrapper: address families, the build's own cgroup",
         "bindmounts_ro=()",
         """_aurcache_nspawn_args=()
 _aurcache_nspawn_version=$(systemd-nspawn --version 2>/dev/null \\
@@ -424,27 +465,44 @@ fi
 if [[ ${AURCACHE_NSPAWN_KEEP_UNIT:-} == 1 ]]; then
 \t_aurcache_nspawn_args+=(--keep-unit)
 fi
-if (( ${#_aurcache_nspawn_args[@]} )); then
-\tarch-nspawn() {
-\t\tlocal _aurcache_dir=$1
-\t\tshift
+_aurcache_direct=0
+_aurcache_setarch=
+arch-nspawn() {
+\tlocal _aurcache_dir=$1
+\tshift
+\tif (( _aurcache_direct )); then
+\t\t${_aurcache_setarch:+setarch "$_aurcache_setarch"} systemd-nspawn \\
+\t\t\t--quiet \\
+\t\t\t--directory="$(readlink -f "$_aurcache_dir")" \\
+\t\t\t--setenv=PATH=/usr/local/sbin:/usr/local/bin:/usr/bin \\
+\t\t\t--register=no \\
+\t\t\t--slice="devtools-$(systemd-escape "${SUDO_USER:-$USER}")" \\
+\t\t\t--as-pid2 \\
+\t\t\t--console=autopipe \\
+\t\t\t--timezone=off \\
+\t\t\t"${_aurcache_nspawn_args[@]}" "$@"
+\telse
 \t\tcommand arch-nspawn "$_aurcache_dir" "${_aurcache_nspawn_args[@]}" "$@"
-\t}
-fi
+\tfi
+}
 
 bindmounts_ro=()""",
     ),
-    # The three loops that hand the build's outputs back run `chown` as host
-    # root on every entry of the copy's `pkgdest`, `srcpkgdest` and `logdest`.
-    # The build writes those directories, and `chown` follows symlinks: a
-    # PKGBUILD that leaves `/pkgdest/x -> /etc/shadow` has host root give
-    # /etc/shadow to the invoking user (`aurcache`), and clears the setuid bit
-    # of anything it points at. `move_logfiles` runs on a failed build too.
-    # Tested against devtools 1.5.1; see design/proposed/build-runner.md.
+    # The three loops that hand the build's outputs back run `chown` and `mv`
+    # as host root on every entry of the copy's `pkgdest`, `srcpkgdest` and
+    # `logdest`. The build writes those directories, and `chown` follows
+    # symlinks: a PKGBUILD that leaves `/pkgdest/x -> /etc/shadow` has host
+    # root give /etc/shadow to the invoking user (`aurcache`), and clears the
+    # setuid bit of anything it points at. Root in the build's container can
+    # replace the directories themselves: with `/pkgdest -> /etc`, the loop
+    # would move the host's /etc out and chown all of it. `move_logfiles`
+    # runs on a failed build too. Tested against devtools 1.5.1; see
+    # design/proposed/build-runner.md.
     #
-    # Skip anything that is not a regular file, and `chown -h` what is left so
-    # no link is ever followed. The container has exited by now, and its
-    # processes with it, so nothing can swap a file for a link in between.
+    # Skip anything that is not a regular file in a directory that is not a
+    # link, and `chown -h` what is left so no link is ever followed. The
+    # container has exited by now, and its processes with it, so nothing can
+    # swap a file for a link in between.
     # A skipped entry is not a product makepkg made; the worker refuses
     # symlinked artifacts anyway (aurcache-worker-core/src/artifacts.rs).
     _no_follow("move_logfiles: never follow a link the build left in logdest", "l"),
