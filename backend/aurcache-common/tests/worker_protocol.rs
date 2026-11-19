@@ -339,8 +339,7 @@ fn registration_messages_still_decode() {
 }
 
 /// A job from a server that sends no `ssh_key` reads as naming nothing --
-/// absent, not "no key" -- which is what tells a worker to offer its default
-/// key as it always did.
+/// absent, not "no key" -- which tells a worker to offer its default key.
 #[test]
 fn a_job_without_an_ssh_key_field_reads_as_absent() {
     let text = std::fs::read_to_string(fixtures("1").join("job_descriptor.json")).unwrap();
