@@ -281,6 +281,56 @@ fn a_pinned_known_hosts_is_the_whole_list() {
     ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
 }
 
+/// git's bracketed scp form, `[user@host:port]:path`, names a port, and
+/// libgit2 connects to it. The host key is judged as that port's: an entry
+/// for the host on port 22 does not vouch for it, and first use records it
+/// under `[host]:port`.
+#[test]
+fn a_port_in_the_bracketed_scp_form_is_the_one_judged() {
+    let Some(sshd) = Sshd::start() else { return };
+    let state = tempfile::tempdir().unwrap();
+    let key = state.path().join("ssh/id_ed25519");
+    let pinned = state.path().join("known_hosts");
+    let host_key = std::fs::read_to_string(sshd.dir.path().join("host_ed25519.pub")).unwrap();
+    // The right key, under the name of port 22 only.
+    std::fs::write(&pinned, format!("127.0.0.1 {}\n", host_key.trim())).unwrap();
+    let access = SshAccess::new(SshConfig {
+        key: KeySource::Generated(key.clone()),
+        passphrase_file: None,
+        hosts: HostKeySource::Pinned(pinned.clone()),
+    });
+    sshd.authorize(&public_key(&access));
+    let repo = bare_repo(state.path(), "1.0");
+    let url = format!("[{}@127.0.0.1:{}]:{}", sshd.user, sshd.port, repo.display());
+
+    let refused = ls_remote(&url, "HEAD", Access::Server(&access)).unwrap_err();
+    let refused = format!("{refused:#}");
+    assert!(
+        refused.contains(&format!(
+            "[127.0.0.1]:{} is not in AURCACHE_SSH_KNOWN_HOSTS",
+            sshd.port
+        )),
+        "{refused}"
+    );
+
+    // Listed under its port's name, it is trusted.
+    std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
+    ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
+
+    let first_use = state.path().join("first-use/known_hosts");
+    let access = SshAccess::new(SshConfig {
+        key: KeySource::Generated(key),
+        passphrase_file: None,
+        hosts: HostKeySource::TrustOnFirstUse(first_use.clone()),
+    });
+    ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
+    let recorded = std::fs::read_to_string(&first_use).unwrap();
+    assert!(
+        recorded.starts_with(&format!("[127.0.0.1]:{} ssh-ed25519 ", sshd.port)),
+        "{recorded}"
+    );
+}
+
 /// A supplied key protected by a passphrase is opened with the one in
 /// `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE`, by libssh2 itself.
 #[test]

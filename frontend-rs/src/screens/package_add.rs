@@ -635,7 +635,8 @@ fn AddPackageDialog(q: String) -> Element {
                             "Add to list"
                         }
                     }
-                    if ssh_remote(&entry()).is_some() {
+                    // Trimmed as `git_source` trims it: the URL the server gets.
+                    if ssh_remote(entry().trim()).is_some() {
                         crate::screens::ssh_key::SshSourceHint {}
                     }
                 } else {
