@@ -72,14 +72,25 @@ fn oom_kills(events: &str) -> Option<u64> {
     })
 }
 
+/// A file, whichever of its names it is reached by.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Inode {
+    dev: u64,
+    ino: u64,
+}
+
 /// The bytes allocated to a tree, links not followed, a file with several
 /// names counted once.
-fn under(root: &Path, seen: &mut HashSet<(u64, u64)>) -> Option<u64> {
+fn under(root: &Path, seen: &mut HashSet<Inode>) -> Option<u64> {
     let mut total = 0u64;
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
         let meta = std::fs::symlink_metadata(&path).ok()?;
-        if meta.nlink() > 1 && !meta.is_dir() && !seen.insert((meta.dev(), meta.ino())) {
+        let inode = Inode {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        };
+        if meta.nlink() > 1 && !meta.is_dir() && !seen.insert(inode) {
             continue;
         }
         total = total.checked_add(meta.blocks().checked_mul(512)?)?;
