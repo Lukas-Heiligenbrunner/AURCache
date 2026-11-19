@@ -42,6 +42,7 @@ use aurcache_common::api::ssh::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey,
 use aurcache_common::server_env::{
     AURCACHE_GIT_SSH_KEY, AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE, AURCACHE_SSH_KNOWN_HOSTS,
 };
+use aurcache_common::shell::quote_argument;
 use aurcache_common::source::SshRemote;
 use hmac::{KeyInit, Mac};
 use ssh_key::known_hosts::{Entry, HostPatterns, KnownHosts, Marker};
@@ -531,7 +532,7 @@ impl HostKeys {
             ),
             HostKeyCheck::Changed { recorded } => {
                 let renew = match self.source {
-                    HostKeySource::Pinned(_) => format!("then `{}`", keyscan(remote, file)),
+                    HostKeySource::Pinned(_) => format!("then `{}`", keyscan(remote, file, None)),
                     HostKeySource::TrustOnFirstUse(_) => {
                         "and the next attempt records the new one".to_string()
                     }
@@ -540,11 +541,11 @@ impl HostKeys {
                     "{name} presented the SSH host key {} {fingerprint}, but {} records \
                      another of that type for it: {}. Someone may be intercepting the \
                      connection. If the host's key really changed, remove the old entry \
-                     (`ssh-keygen -R '{name}' -f {}`), {renew}.",
+                     (`{}`), {renew}.",
                     presented.algorithm(),
                     file.display(),
                     recorded.join(", "),
-                    file.display(),
+                    forget(&name, file),
                 )
             }
             // Not a sign of interception: the host has several keys, and only
@@ -556,14 +557,14 @@ impl HostKeys {
                 recorded.join(", "),
                 file.display(),
                 presented.algorithm(),
-                keyscan_type(remote, file, presented),
+                keyscan(remote, file, Some(presented)),
             ),
             HostKeyCheck::Unknown => match &self.source {
                 HostKeySource::Pinned(_) => bail!(
                     "{name} is not in {AURCACHE_SSH_KNOWN_HOSTS} ({}), so its SSH host key \
                      {fingerprint} is not trusted. If that is the host's key, add it: `{}`",
                     file.display(),
-                    keyscan(remote, file)
+                    keyscan(remote, file, None)
                 ),
                 HostKeySource::TrustOnFirstUse(_) => {
                     record(file, &name, presented)?;
@@ -580,27 +581,42 @@ impl HostKeys {
     }
 }
 
-/// The command that appends a host's keys to `file`.
-fn keyscan(remote: &SshRemote, file: &Path) -> String {
-    let port = match remote.port {
-        Some(port) if port != 22 => format!("-p {port} "),
-        _ => String::new(),
-    };
-    format!("ssh-keyscan {port}{} >> {}", remote.host, file.display())
+/// The command, ready to paste into a shell, that appends a host's keys to
+/// `file`: all of them, or only those of `only`'s type.
+fn keyscan(remote: &SshRemote, file: &Path, only: Option<&PublicKey>) -> String {
+    let mut command = vec!["ssh-keyscan".to_string()];
+    if let Some(kind) = only.and_then(keyscan_type) {
+        command.extend(["-t".to_string(), kind.to_string()]);
+    }
+    if let Some(port) = remote.port.filter(|&port| port != 22) {
+        command.extend(["-p".to_string(), port.to_string()]);
+    }
+    command.push(quote_argument(&remote.host));
+    format!(
+        "{} >> {}",
+        command.join(" "),
+        quote_argument(&file.display().to_string())
+    )
 }
 
-/// The command that appends a host's key of `key`'s type to `file`.
-fn keyscan_type(remote: &SshRemote, file: &Path, key: &PublicKey) -> String {
-    let kind = match key.algorithm() {
-        ssh_key::Algorithm::Ed25519 => "ed25519",
-        ssh_key::Algorithm::Ecdsa { .. } => "ecdsa",
-        ssh_key::Algorithm::Rsa { .. } => "rsa",
-        _ => "",
-    };
-    if kind.is_empty() {
-        return keyscan(remote, file);
+/// What `ssh-keyscan -t` calls `key`'s type, for the types it can ask for.
+fn keyscan_type(key: &PublicKey) -> Option<&'static str> {
+    match key.algorithm() {
+        ssh_key::Algorithm::Ed25519 => Some("ed25519"),
+        ssh_key::Algorithm::Ecdsa { .. } => Some("ecdsa"),
+        ssh_key::Algorithm::Rsa { .. } => Some("rsa"),
+        _ => None,
     }
-    keyscan(remote, file).replacen("ssh-keyscan ", &format!("ssh-keyscan -t {kind} "), 1)
+}
+
+/// The command, ready to paste into a shell, that removes `name`'s entries
+/// from `file`.
+fn forget(name: &str, file: &Path) -> String {
+    format!(
+        "ssh-keygen -R {} -f {}",
+        quote_argument(name),
+        quote_argument(&file.display().to_string())
+    )
 }
 
 /// Every entry of the `known_hosts` file at `path`; none when it does not
@@ -803,12 +819,10 @@ mod tests {
         assert_eq!(check(&list, "gitlab.com", &github), HostKeyCheck::Unknown);
     }
 
-    /// `[host]:port` is a different host from `host`, as OpenSSH reads it.
     /// A host known by another key type is no interception: the refusal
     /// says which type to record.
     #[test]
     fn another_key_type_is_told_apart_from_a_changed_key() {
-        let github = PublicKey::from_openssh(GITHUB_ED25519).unwrap();
         let ecdsa = PublicKey::from_openssh(
             "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFJZp50VMW6Y\
              sDFDeExBTrPGujgyJ37OJSKFOTA8q5wJPYZI8m1WUR4NvKTKCl/qOPYx3QgAkqXqg0OyrbtEaQU=",
@@ -839,9 +853,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("intercepting"), "{error}");
-        let _ = github;
     }
 
+    /// `[host]:port` is a different host from `host`, as OpenSSH reads it.
     #[test]
     fn a_port_names_a_host_of_its_own() {
         let github = PublicKey::from_openssh(GITHUB_ED25519).unwrap();
@@ -981,6 +995,26 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             format!("github.com {GITHUB_ED25519}\n")
+        );
+    }
+
+    /// The commands a refusal gives are pasted into a shell: every word in
+    /// them reaches the command as it was meant, a port included.
+    #[test]
+    fn suggested_commands_are_quoted_for_a_shell() {
+        let file = Path::new("/srv/aurcache data/known_hosts");
+        let ed25519 = PublicKey::from_openssh(GITHUB_ED25519).unwrap();
+        assert_eq!(
+            keyscan(&remote("git.example.com", Some(2222)), file, Some(&ed25519)),
+            "ssh-keyscan -t ed25519 -p 2222 git.example.com >> '/srv/aurcache data/known_hosts'"
+        );
+        assert_eq!(
+            keyscan(&remote("git.example.com", Some(22)), file, None),
+            "ssh-keyscan git.example.com >> '/srv/aurcache data/known_hosts'"
+        );
+        assert_eq!(
+            forget("[git.example.com]:2222", file),
+            "ssh-keygen -R '[git.example.com]:2222' -f '/srv/aurcache data/known_hosts'"
         );
     }
 
