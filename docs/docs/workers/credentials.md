@@ -98,10 +98,23 @@ ssh-keyscan github.com > known_hosts
 ```
 
 A host that file does not name is then refused: the fetch fails with `Host key
-verification failed`. The worker copies the file before each build to
-`<WORKER_DATA_DIR>/ssh-known-hosts/`, readable by builds and changeable only by
-the worker, so the original only has to be readable by the worker; a `0600`
-secret is fine. A replaced file takes effect at the next build.
+verification failed`. Nothing else can admit one. ssh is told to ignore the
+system's `/etc/ssh/ssh_known_hosts`, any `KnownHostsCommand` and host keys
+published in DNS, and never to accept a host on first use, in options that win
+over any `ssh_config`.
+
+Before each build the worker copies the file to
+`<WORKER_DATA_DIR>/ssh-known-hosts/known_hosts`, so the original only has to be
+readable by the worker; a `0600` secret is fine. A replaced file takes effect at
+the next build. The copy is the worker's own file, which builds can read and the
+build user cannot change. It is bound read-only into the build's chroot, at the
+same path, for a PKGBUILD that clones in `prepare()`. Each build gets a fresh
+copy renamed over the last, so nothing a build leaves at that path reaches a
+later build.
+
+If the file cannot be read, every build fails until it can, with an error naming
+`WORKER_SSH_KNOWN_HOSTS`: the worker never falls back to accepting hosts on
+first use.
 
 ## The key is not visible to the package
 
