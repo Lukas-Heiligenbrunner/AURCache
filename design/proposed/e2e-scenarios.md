@@ -11,8 +11,9 @@ lines would be the same as the others', and they would drift apart.
 
 This design splits the three things those scripts mix together:
 
-- **Topology**: how AURCache is deployed (split server and worker, hybrid
-  image, legacy container builder). It is the harness's business.
+- **Topology**: how AURCache is deployed (the server beside chroot workers,
+  the hybrid image in its two modes, Kubernetes). It is the harness's
+  business.
 - **Scenario**: what a user does to it and what must follow. It is a short
   bash script of `aurcli` commands.
 - **Fixture**: an extra service a scenario needs (a git server behind SSH).
@@ -21,7 +22,11 @@ This design splits the three things those scripts mix together:
 Any scenario can run on any topology that has what it needs, and adding a
 scenario means adding one file.
 
-Status: **Proposed** · Last updated: 2026-09-28
+Status: **Proposed** · Last updated: 2026-11-19
+
+Where these files live, which topology × scenario pairs CI runs, and the
+order of the migration are in `test-architecture.md`; this design defines
+the contracts the harness, its topologies, scenarios and fixtures keep.
 
 ## Ground rules
 
@@ -64,21 +69,25 @@ Status: **Proposed** · Last updated: 2026-09-28
 ## Layout
 
 ```
-scripts/e2e/
+tests/e2e/
   run.sh                        # the harness
-  lib/                          # harness internals: stack.sh, diagnose.sh
+  up.sh                         # start a topology for development, run nothing
+  lib/                          # harness internals
   bin/                          # helpers put on a scenario's PATH
-    aurcli -> backend/target/debug/aurcli
+    aurcli -> the CLI Cargo built
     e2e-install                 # pacman -S from the repo, in a throwaway container
     e2e-worker-env              # set host-level worker env, recreate, wait for the fleet
+    e2e-worker-kill             # kill a worker, as a crash would
     e2e-expect-exit             # e2e-expect-exit <code> <cmd>...
   topologies/
-    split/     compose.yaml  topology.env
-    split-2/   compose.yaml  topology.env                 # two chroot workers
-    hybrid/    compose.yaml  topology.env
-    legacy/    compose.yaml  topology.env  setup.sh   # builds the builder image
+    lib/compose.sh              # the hooks, once, for every compose topology
+    chroot/    topology.env  overlay.yaml        # over deploy/compose/docker-compose.yaml
+    chroot-2/  topology.env  overlay.yaml        # two chroot workers
+    hybrid/    topology.env  compose.yaml
+    hybrid-host/ topology.env  compose.yaml  setup.sh   # builds the builder image
+    kube/      topology.env  hooks.sh  kustomize overlays
   fixtures/
-    gitssh/    compose.yaml  setup.sh                 # keypair into $E2E_SHARED
+    gitssh/    compose.yaml  kustomization.yaml  setup.sh   # keypair into $E2E_SHARED
   scenarios/
     basic.sh
     ssh-credentials.sh
@@ -88,22 +97,23 @@ scripts/e2e/
 
 The e2e compose files move out of `compose/` into their topology or fixture
 directories. They are test fixtures, not deployments, and each file should
-sit next to the metadata that describes it. `compose/README.md` loses its e2e
-table and points here instead.
+sit next to the metadata that describes it. The reference topology, `chroot`,
+is not a copy of a deployment but the user compose file itself under a test
+overlay, so what users run is what the nightly tests.
 
-`scripts/test-e2e.sh [package]` stays as a one-line wrapper,
-`PACKAGE=… run.sh --topology split basic`, so the nightly workflow,
-`AGENTS.md` and existing habits keep working. The two hybrid wrappers and
-`test-e2e-ssh.sh` are deleted.
+`scripts/test-e2e.sh` does not become a wrapper. It stays, unchanged, while
+the hybrid wrappers still `exec` it, and goes with them when the hybrid
+topologies replace them; `test-e2e-ssh.sh` goes when `ssh-credentials`
+replaces it. `just test-e2e` is the stable way in.
 
 ## Running
 
 ```bash
-scripts/e2e/run.sh                                   # split × basic
-scripts/e2e/run.sh rebuild-keeps-tree                # split × one scenario
-scripts/e2e/run.sh --topology hybrid,legacy basic    # a column of the matrix
-scripts/e2e/run.sh --topology all --all              # everything that applies
-REUSE=1 scripts/e2e/run.sh basic                     # against the running stack
+tests/e2e/run.sh                                     # chroot × basic
+tests/e2e/run.sh rebuild-keeps-tree                  # chroot × one scenario
+tests/e2e/run.sh --topology hybrid,hybrid-host basic # a column of the matrix
+tests/e2e/run.sh --topology all --all                # everything that applies
+REUSE=1 tests/e2e/run.sh basic                       # against the running stack
 ```
 
 The harness runs each (topology, scenario) pair in turn and ends with a
@@ -117,35 +127,53 @@ one to debug, and the next pair would tear it down.
 A topology is a directory. `topology.env` is sourced by the harness:
 
 ```bash
-# topologies/split/topology.env
-E2E_SERVICES="aurcache builder"   # must stay alive for the run to mean anything
-E2E_WORKERS="builder"             # worker services; each is also its WORKER_NAME
+# topologies/chroot/topology.env
+E2E_COMPOSE_FILES="../../../../deploy/compose/docker-compose.yaml overlay.yaml"
+E2E_SERVICES="aurcache repo builder"   # must stay alive for the run to mean anything
+E2E_WORKERS="builder"                  # worker services; each is also its WORKER_NAME
 E2E_CAPS="chroot disk-usage kept-tree"
+E2E_REPO_URL="http://repo"             # the repository, as the network sees it
+E2E_NETWORK="${E2E_PROJECT}_aurcache"  # the network e2e-install and fixtures join
 
-# topologies/split-2/topology.env
-E2E_SERVICES="aurcache builder-a builder-b"
+# topologies/chroot-2/topology.env -- the rest as in chroot, with its own overlay
+E2E_SERVICES="aurcache repo builder-a builder-b"
 E2E_WORKERS="builder-a builder-b"
 E2E_CAPS="chroot disk-usage kept-tree multi-worker"
 
 # topologies/hybrid/topology.env -- the worker runs inside the server container
 E2E_SERVICES="aurcache"
 E2E_WORKERS="aurcache"
-E2E_CAPS="chroot disk-usage kept-tree"
+E2E_CAPS="container disk-usage"
+E2E_REPO_URL="http://aurcache:8081"
+E2E_NETWORK="${E2E_PROJECT}_aurcache_network"
 ```
 
-`E2E_WORKERS` lists the compose services that run a worker. Its length is how
-many approved, online workers the harness waits for, and a service may be in
-both lists, as in `hybrid`.
+`E2E_WORKERS` lists the services (or, on `kube`, the pods) that run a
+worker. Its length is how many approved, online workers the harness waits
+for, and a service may be in both lists, as in `hybrid`. `E2E_REPO_URL` and
+`E2E_NETWORK` say where the repository is and which network reaches it, so
+nothing assumes a host name or a network name; `E2E_PROJECT` is the compose
+project name the harness gives the stack. `E2E_COMPOSE_FILES` is relative
+to the topology's directory.
+
+A topology provides five hooks: `up`, `down`, `logs <worker>`,
+`worker-env` and `worker-kill <worker>`. A compose topology lists its files
+in `E2E_COMPOSE_FILES` and takes the hooks from `topologies/lib/compose.sh`;
+a topology with a `hooks.sh` defines them itself, as `kube` does with `kind`,
+`kubectl` and kustomize. The harness, `up.sh` and the helpers act on a stack
+only through the hooks.
 
 `setup.sh`, if present, runs once per run before the images are built. For
-`legacy`, it builds `aurcache-legacy-builder:test` and creates the host
+`hybrid-host`, it builds `aurcache-legacy-builder:test` and creates the host
 directory that the Docker daemon binds.
 
-Every topology's `compose.yaml` must:
+Every compose topology's files must:
 
-- serve the API on `${AURCACHE_PORT}` and the repository as
-  `http://aurcache:8081` on the network `aurcache_network`. `e2e-install` and
-  the fixtures join that network by name;
+- serve the API on `${AURCACHE_PORT}`, and the repository at
+  `$E2E_REPO_URL` on `$E2E_NETWORK`;
+- build what they run from this tree under local tags, never under a
+  release image's name. An overlay that adds `build:` over the user file
+  also replaces its `image:`, which the harness checks before building;
 - have workers that enroll themselves with no manual step;
 - set each worker's `WORKER_NAME` to its service name. This is the only link
   between a compose service and the worker the API reports, and the harness
@@ -156,6 +184,10 @@ Every topology's `compose.yaml` must:
   `env_file: [${E2E_ENV_DIR}/all.env, ${E2E_ENV_DIR}/<service>.env]` and mount
   `${E2E_SHARED}:/e2e:ro`. These two hooks let a scenario change host-level
   worker settings without knowing which services are workers.
+
+`kube` meets the same requirements its own way: its overlays build nothing
+under a release name, name each worker pod as its `WORKER_NAME`, and its
+`worker-env` hook sets the worker's environment and waits for the rollout.
 
 Two workers mean two service blocks that differ only in name and volume.
 A YAML anchor keeps them from drifting. `docker compose --scale` does not
@@ -180,6 +212,11 @@ declares the capabilities it needs in its header, and the harness skips it,
 with the reason, on topologies that lack them. A scenario can also read
 `$E2E_CAPS` to make one assertion conditional. That is fine for a single
 line, but anything larger belongs in a separate scenario.
+
+`test-architecture.md` adds the capabilities of the container and
+Kubernetes workers: `container` (each build in a container of its own, on
+`hybrid`, `hybrid-host` and `kube`), and `network-policy`, `quota` and
+`pod-lifecycle` on `kube`. Its topology table lists each topology's set.
 
 ## The scenario contract
 
@@ -220,8 +257,8 @@ The helpers are executables on `PATH`, not shell functions. They work the same
 way whether a scenario is run by the harness or pasted into a terminal
 against a kept stack.
 
-- `e2e-install <pkg>... [-- <cmd>]` installs the packages, from the
-  repository, in a throwaway `archlinux` container on the stack's network,
+- `e2e-install <pkg>... [-- <cmd>]` installs the packages, from
+  `$E2E_REPO_URL`, in a throwaway `archlinux` container on `$E2E_NETWORK`,
   then runs `<cmd>` there if one is given. This is today's `validate`, plus
   the SSH test's marker check.
 - `e2e-pick-worker` prints the name of one approved worker, the first in
@@ -230,10 +267,14 @@ against a kept stack.
   by hand.
 - `e2e-worker-env [--worker NAME]... VAR=value...` sets **host-level**
   settings, the ones the server may not set (`WORKER_GIT_SSH_KEY`,
-  `WORKER_BIND_MOUNTS`, and so on). Without `--worker` it writes `all.env`
-  and recreates every worker; with it, it writes only those workers' files.
-  Then it waits for the whole fleet as in [Readiness](#readiness). This is
-  the only topology-aware thing a scenario can ask for.
+  `WORKER_BIND_MOUNTS`, and so on), through the topology's `worker-env`
+  hook. Without `--worker` it changes every worker (on compose, `all.env`)
+  and recreates them; with it, only those workers. Then it waits for the
+  whole fleet as in [Readiness](#readiness).
+- `e2e-worker-kill <worker>` kills a worker's process as a crash would,
+  through the `worker-kill` hook, and returns at once; the scenario then
+  waits for what follows through `aurcli`. With `e2e-worker-env`, these are
+  the only topology-aware things a scenario can ask for.
 
 Worker **policy** (affinity, concurrency, priority, limits) does not go
 through a helper. `aurcli worker config <worker> --set key=value` changes it
@@ -246,13 +287,16 @@ setting, it is a host setting.
   exact code. A "this must fail" phase needs it, because a bare `!` would also
   accept a timeout or a crash.
 
-`docker compose` is deliberately not exposed. If a scenario needs something
-the helpers do not offer, the helper set is what grows.
+`docker compose` and `kubectl` are deliberately not exposed. If a scenario
+needs something the helpers do not offer, the helper set is what grows.
 
 ## Fixtures
 
-A fixture is a compose overlay plus an optional `setup.sh`, applied when a
-scenario lists it. It may only add services on `aurcache_network`. It must not
+A fixture is an overlay plus an optional `setup.sh`, applied when a
+scenario lists it: a `compose.yaml` for the compose topologies, and a
+`kustomization.yaml` (a Kustomize component) where it supports `kube`. A
+scenario listing a fixture skips on a topology whose kind the fixture does
+not provide. It may only add services on `$E2E_NETWORK`. It must not
 modify topology services, because it would have to name them, and those names
 differ across topologies. Whatever a fixture has to give the worker goes
 through `$E2E_SHARED`, and the scenario decides whether the worker gets it.
@@ -283,7 +327,7 @@ stronger: no worker may have been able to fetch the source.
 ## Several workers
 
 Most scenarios do not care which worker builds what, and they run unchanged
-on `split-2`. Running `basic` and `dependency-chain` there is itself a test:
+on `chroot-2`. Running `basic` and `dependency-chain` there is itself a test:
 a chain whose links land on different workers has to fetch its dependencies
 from the repository, not from a local cache.
 
@@ -353,31 +397,35 @@ first, not to reach for `aurcli raw` or `docker exec`.
 
 ## Initial scenarios
 
-| Scenario | Requires | Topologies in CI |
+"In CI" follows from each scenario's `ci:` header and the matrix rules in
+`test-architecture.md`: every scenario runs nightly on `chroot` unless its
+requirements exclude it, `basic` also on `chroot-2` and `kube`, and the
+hybrid topologies weekly.
+
+| Scenario | Requires | In CI |
 |---|---|---|
-| `basic`: add, wait, install | — | split nightly; hybrid, legacy, split-2 with `run-e2e` |
-| `ssh-credentials` | chroot, fixture `gitssh` | split nightly |
-| `rebuild-keeps-tree`: build twice on a pinned worker, the second reuses the tree | kept-tree | split, split-2 nightly |
-| `base-refresh`: with `chroot_refresh_interval=0`, build twice on a pinned worker; the second refresh swaps a new base in and the build succeeds | chroot | split nightly |
-| `kept-failure`: with `keep_failed` set, a `--patch`ed PKGBUILD whose `build()` fails, `--persist-build-dir`; the build fails, `builds get` reports `.kept.path` and `.kept.tree`; the fixed PKGBUILD then builds cold | chroot, kept-tree | split nightly |
-| `dependency-chain`: a package with AUR deps, built leaf first | — | split-2 nightly |
-| `worker-restart`: restart between two builds; enrollment and cache survive | chroot | split nightly |
-| `affinity`: a pinned package only ever builds on its worker | multi-worker | split-2 nightly |
-| `pause-drains`: a paused worker gets no new builds; the others take them | multi-worker | split-2 nightly |
+| `basic`: add, wait, install | — | chroot, chroot-2, kube nightly; hybrid, hybrid-host weekly |
+| `ssh-credentials` | chroot, fixture `gitssh` | chroot nightly |
+| `rebuild-keeps-tree`: build twice on a pinned worker, the second reuses the tree | kept-tree | chroot, chroot-2 nightly |
+| `base-refresh`: with `chroot_refresh_interval=0`, build twice on a pinned worker; the second refresh swaps a new base in and the build succeeds | chroot | chroot nightly |
+| `kept-failure`: with `keep_failed` set, a `--patch`ed PKGBUILD whose `build()` fails, `--persist-build-dir`; the build fails, `builds get` reports `.kept.path` and `.kept.tree`; the fixed PKGBUILD then builds cold | chroot, kept-tree | chroot nightly |
+| `dependency-chain`: a package with AUR deps, built leaf first | — | chroot, chroot-2 nightly |
+| `repo-dependency`: a package whose dependency only AURCache's repository has | — | chroot, kube nightly |
+| `cancel`: a build cancelled mid-way stops, and its worker takes the next | — | chroot, kube nightly |
+| `worker-restart`: restart between two builds; enrollment survives, and on `chroot` so does the source cache (one conditional line) | — | chroot, kube nightly |
+| `affinity`: a pinned package only ever builds on its worker | multi-worker | chroot-2 nightly |
+| `pause-drains`: a paused worker gets no new builds; the others take them | multi-worker | chroot-2 nightly |
+
+The Kubernetes-only scenarios (policy, quota, stuck pod and the others from
+`test-e2e-kube.sh`) are listed in `test-architecture.md`.
 
 ## Migration
 
-1. Extract `lib/`, `run.sh`, the `split` topology and `basic`. Make
-   `test-e2e.sh` the wrapper. The nightly job must still pass unchanged.
-2. Add the `hybrid` and `legacy` topologies. Delete their wrapper scripts and
-   update `AGENTS.md`'s "Which end-to-end suite to run".
-3. Close the CLI gaps above, which are independent of the harness and can
-   land in any order. Add `e2e-worker-env` and the `gitssh` fixture, port the
-   SSH test, and delete `test-e2e-ssh.sh`.
-4. Add `split-2` and run the existing scenarios on it. Whatever turns out to
-   assume a single worker gets fixed there, before new scenarios copy the
-   assumption.
-5. Add the new scenarios.
+The order, with the rest of the repository's moves, is in
+`test-architecture.md`. The CLI gaps above are independent of it and can
+land in any order. Within it, `chroot-2` gets the existing scenarios before
+any new scenario is written, so whatever turns out to assume a single worker
+is fixed there before new scenarios copy the assumption.
 
 ## When this stops being bash
 
@@ -387,24 +435,23 @@ commands. Moving to a Rust harness (an `E2eStack` fixture using
 `aurcache-client`, with scenarios as opt-in `#[test]`s) becomes worth it when
 any of these happens:
 
-- a scenario needs concurrency or fault injection at a precise moment (kill
-  the worker mid-build, two builds racing for one package);
+- a scenario needs concurrency or fault injection at a precise moment (two
+  builds racing for one package). Killing a worker mid-build is not one:
+  `e2e-worker-kill` covers it, as long as "mid-build" means "once the build
+  is running" rather than a given point in it;
 - assertions need to compare state across builds beyond a `jq` one-liner;
 - we want to run pairs in parallel. That needs per-pair compose project names,
-  port allocation, and the legacy builder's fixed host directory solved first.
+  port allocation, and `hybrid-host`'s fixed host directory solved first.
 
 Scenarios written as `aurcli` commands port mechanically when that time comes.
 
 ## Open questions
 
-- **Heterogeneous fleets.** `split-2` has two identical x86_64 workers. A
+- **Heterogeneous fleets.** `chroot-2` has two identical x86_64 workers. A
   fleet with an emulated aarch64 worker would test arch routing, but a
   capability like `arch:aarch64` needs binfmt on the CI runner. Leave it out
   until a scenario needs it.
-- **Multiple topology files vs. parameters.** `split` and `legacy` are two
-  axes (layout and builder) presented as a single name. Three topologies do
-  not justify a matrix of axes yet, and a fourth might. Revisit then.
-- **Where the e2e compose files live.** Moving them breaks muscle memory for
-  anyone running `docker compose -f compose/docker-compose.e2e.yaml` by hand.
-  The alternative is keeping them in `compose/` and having `topology.env`
-  point at them.
+- **Multiple topology files vs. parameters.** `hybrid` and `hybrid-host`
+  differ on one axis (where the Docker daemon runs), `chroot` and `chroot-2`
+  on another (how many workers). Five topologies with two such pairs do not
+  justify a matrix of axes yet. Revisit when a third pair appears.
