@@ -15,7 +15,7 @@ use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
-use aurcache_worker_core::ssh_key::{self, SshKeys};
+use aurcache_worker_core::ssh_key;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -90,8 +90,7 @@ async fn run_job_inner(
     let job = &claimed.job;
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
-    let keys = ssh_keys();
-    let ssh = ssh_key::offer(job, &keys, &cfg.ssh_packages);
+    let ssh = ssh_key::offer(job, &shared.ssh_keys, &cfg.ssh_packages);
     if let Some(notice) = ssh.notice(&job.pkgbase) {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
     }
@@ -387,8 +386,8 @@ async fn prepare_bind_mounts(
     // of a build remains possible and accepted, as it already was for source
     // fetching on the worker.
     //
-    // Bound at the same path inside, because `SSH_AUTH_SOCK` is inherited from
-    // the worker and has to name something that exists in both.
+    // Bound at the same path inside, because the one `SSH_AUTH_SOCK` has to
+    // name something that exists in both.
     //
     // Read-only: connecting to a socket needs no write access to the mount it
     // is on, and the directory is shared by every build. The build user owns
@@ -799,22 +798,6 @@ async fn make_source_writable(pkgdir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The build ssh-agent's socket, if this worker started one.
-///
-/// Read from the environment because that is where the worker publishes it at
-/// startup, and it is the same value the bind mount and the chroot's
-/// `makepkg.conf` drop-in both have to name.
-fn agent_socket() -> Option<PathBuf> {
-    let sock = PathBuf::from(std::env::var_os("SSH_AUTH_SOCK")?);
-    sock.exists().then_some(sock)
-}
-
-/// The SSH keys this worker holds, by name: the build agent's, as the
-/// default -- the key `WORKER_GIT_SSH_KEY` names, or the one generated.
-fn ssh_keys() -> SshKeys<PathBuf> {
-    SshKeys::with_default(agent_socket())
-}
-
 /// What this worker brings to a build, as against what the job describes.
 ///
 /// Grouped because they travel together and are both "how this machine builds"
@@ -976,12 +959,13 @@ async fn execute_build_process(
         // What the script installs before the build, which then cannot
         // become root to install anything itself; see `build_deps`.
         cmd.env("AURCACHE_BUILD_DEPS", &deps);
-        // The worker's own environment names its agent, for the builds that
-        // are offered it (which reach it through `makepkg.conf`, above). One
-        // that is not offered it must not inherit it on the way.
-        if ctx.ssh_agent.is_none() {
-            cmd.env_remove("SSH_AUTH_SOCK");
-        }
+        // The agent, for a build offered it: `makechrootpkg` carries it to the
+        // source download, whose sandbox grants that one socket. Every other
+        // build has it removed, so none inherits one from the worker.
+        match ctx.ssh_agent {
+            Some(socket) => cmd.env("SSH_AUTH_SOCK", socket),
+            None => cmd.env_remove("SSH_AUTH_SOCK"),
+        };
         cmd.spawn()
     };
 
@@ -1327,7 +1311,7 @@ mod tests {
             expected_version: "1-1".to_string(),
             ssh_key,
         };
-        let keys = SshKeys::with_default(Some(socket.to_path_buf()));
+        let keys = ssh_key::SshKeys::with_default(Some(socket.to_path_buf()));
         let ssh = ssh_key::offer(&job, &keys, ceiling);
         let agent = ssh.key().map(PathBuf::as_path);
         let staged =
