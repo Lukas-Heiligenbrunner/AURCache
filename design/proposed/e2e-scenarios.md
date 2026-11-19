@@ -417,7 +417,7 @@ hybrid topologies weekly.
 | `pause-drains`: a paused worker gets no new builds; the others take them | multi-worker | chroot-2 nightly |
 
 The Kubernetes-only scenarios (policy, quota, stuck pod and the others from
-`test-e2e-kube.sh`) are listed in `test-architecture.md`.
+#447's `tests/e2e/topologies/kube/run.sh`) are listed in `test-architecture.md`.
 
 ## Migration
 
