@@ -15,7 +15,8 @@ How it works is in `container-workers.md` (the build agent, shared with the
 Docker worker), the module docs of `aurcache-build-agent`'s `agent/transfer`
 (what each `exec` into a build pod carries) and
 `docs/docs/workers/kubernetes.md` (manifests, variables, RBAC, the
-NetworkPolicy, troubleshooting).
+NetworkPolicy, troubleshooting). The kind suite,
+`tests/e2e/topologies/kube/run.sh`, runs it in a real cluster.
 
 Related:
 

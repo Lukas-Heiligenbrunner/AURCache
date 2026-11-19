@@ -3,8 +3,8 @@
 #
 # Builds the server and aurcache-worker-kube images from this tree, loads them
 # into a new kind cluster, deploys the server from kubernetes/server/ and the
-# worker from kubernetes/kube-worker/ as they ship (scripts/fixtures/kube-e2e/
-# adds what a test needs), and drives the server with the CLI:
+# worker from kubernetes/kube-worker/ as they ship (the kustomization beside
+# this script adds what a test needs), and drives the server with the CLI:
 #
 #   1. the worker enrolls through the `aurcache-enrollment` Secret, shows as
 #      `kubernetes`, and takes the build agent from the image it runs itself;
@@ -34,7 +34,7 @@
 #   8. with a RuntimeClass whose handler the node lacks, a build pod never
 #      starts: the build is handed back as the worker's once the schedule
 #      timeout has passed, and builds again once the worker is put right;
-#   9. a package of 2 GiB (docker/testpkg/big) builds and is published; the
+#   9. a package of 2 GiB (tests/fixtures/packages/big) builds and is published; the
 #      relay's throughput and the worker container's peak memory are printed,
 #      and the run fails if that memory reached 64 MiB;
 #  10. build pods in user namespaces, where the cluster's nodes run one;
@@ -42,7 +42,7 @@
 #  11. without the NetworkPolicy, the worker says it is not enforced, and the
 #      server hears it.
 #
-#   ./scripts/test-e2e-kube.sh [package] [timeout]
+#   tests/e2e/topologies/kube/run.sh [package] [timeout]
 #
 # package defaults to `hello` (from the AUR), timeout to 900 seconds a build.
 #
@@ -87,9 +87,10 @@ PACKAGE="${1:-hello}"
 BUILD_TIMEOUT="${2:-900}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 REPO_ROOT="$PROJECT_DIR"
-FIXTURE="$SCRIPT_DIR/fixtures/kube-e2e"
+# The kustomization the cluster is deployed from, beside this script.
+FIXTURE="$SCRIPT_DIR"
 
 PREFIX="${AURCACHE_TEST_PREFIX:-aurcache-test}"
 CLUSTER="$PREFIX-kube-e2e"
@@ -123,7 +124,7 @@ export AURCACHE_TOKEN="${AURCACHE_TOKEN:-}"
 COMPOSE_ARGS=()
 E2E_SERVICES=""
 # shellcheck source=scripts/lib/e2e.sh
-. "$SCRIPT_DIR/lib/e2e.sh"
+. "$PROJECT_DIR/scripts/lib/e2e.sh"
 
 FORWARD_PID=
 ADD_PID=
@@ -351,7 +352,7 @@ build_images() {
         return
     fi
     log "=== Building the server and Kubernetes worker images ==="
-    "$SCRIPT_DIR/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
+    "$PROJECT_DIR/scripts/build-images.sh" --images server,kube-worker --platforms linux/amd64 \
         --tag "$TAG" "$REGISTRY"
     docker build -q -t "$GITSSH_IMAGE" -f "$PROJECT_DIR/docker/git-ssh.Dockerfile" \
         "$PROJECT_DIR" >/dev/null
@@ -407,7 +408,7 @@ write_overlay() {
     cp "$FIXTURE/packages/kube-e2e-dep/PKGBUILD" "$dir/packages/kube-e2e-dep.PKGBUILD"
     cp "$FIXTURE/packages/kube-e2e-app/PKGBUILD" "$dir/packages/kube-e2e-app.PKGBUILD"
     cp "$FIXTURE/packages/kube-e2e-slow/PKGBUILD" "$dir/packages/kube-e2e-slow.PKGBUILD"
-    cp "$PROJECT_DIR/docker/testpkg/big/PKGBUILD" "$dir/packages/aurcache-big-test.PKGBUILD"
+    cp "$PROJECT_DIR/tests/fixtures/packages/big/PKGBUILD" "$dir/packages/aurcache-big-test.PKGBUILD"
     cp "$FIXTURE/packages/kube-e2e-thief/PKGBUILD" "$dir/packages/kube-e2e-thief.PKGBUILD"
     cp "$FIXTURE/packages/kube-e2e-thief/kube-e2e-thief.install" "$dir/packages/kube-e2e-thief.install"
     cp "$FIXTURE/packages/kube-e2e-ssh/PKGBUILD" "$dir/packages/kube-e2e-ssh.PKGBUILD"

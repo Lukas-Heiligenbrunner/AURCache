@@ -2,7 +2,7 @@ name: E2E (Kubernetes)
 
 # The Kubernetes worker's end-to-end suite: a throwaway kind cluster, the
 # server and the worker built from this tree, and real builds in pods (see
-# scripts/test-e2e-kube.sh). It builds two images and pulls the builder image
+# tests/e2e/topologies/kube/run.sh). It builds two images and pulls the builder image
 # into the cluster, so it takes a while, and it reaches the AUR and the Arch
 # mirrors; like the other end-to-end suite it runs once a night, when something
 # landed, rather than on every push.
@@ -94,7 +94,7 @@ jobs:
           # namespace (its sysfs mount is refused), and left to find that out
           # the suite would skip the leg without anyone seeing.
           E2E_USER_NAMESPACES: '0'
-        run: ./scripts/test-e2e-kube.sh hello
+        run: ./tests/e2e/topologies/kube/run.sh hello
 
       # The label means "run requested". Taking it back off once the run is
       # over, pass or fail, lets adding it again trigger a fresh run.

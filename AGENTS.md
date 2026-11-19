@@ -84,10 +84,10 @@ cd docs && yarn install --frozen-lockfile && yarn build
 # the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker,
 # ssh-keygen; ~20 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk
 # with room)
-./scripts/test-e2e-kube.sh hello
-E2E_BIG=0 ./scripts/test-e2e-kube.sh              # without the 2 GiB package
-KEEP=1 ./scripts/test-e2e-kube.sh                 # leave the cluster up, then:
-REUSE=1 E2E_LEGS="cancel stop" ./scripts/test-e2e-kube.sh   # rerun some legs against it
+./tests/e2e/topologies/kube/run.sh hello
+E2E_BIG=0 ./tests/e2e/topologies/kube/run.sh      # without the 2 GiB package
+KEEP=1 ./tests/e2e/topologies/kube/run.sh         # leave the cluster up, then:
+REUSE=1 E2E_LEGS="cancel stop" ./tests/e2e/topologies/kube/run.sh   # rerun some legs against it
 
 # build the Arch packages from this tree (and optionally install them)
 ./scripts/build-packages.sh --install
@@ -121,7 +121,8 @@ they cover, rather than running all of them as a matter of course:
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container. `E2E_BUILD_DIR` names that
   directory, which is under `/tmp` otherwise.
-- `test-e2e-kube.sh` — for changes to `aurcache-worker-kube`, the manifests in
+- `tests/e2e/topologies/kube/run.sh`, the kind suite — for changes to
+  `aurcache-worker-kube`, the manifests in
   `kubernetes/kube-worker/`, the kube-worker image, or the agent's transfer
   subcommands. It builds the server and worker images, starts a kind cluster
   from the shipped manifests, and builds in real pods: enrollment, the
@@ -143,7 +144,7 @@ they cover, rather than running all of them as a matter of course:
 
 CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
 `test-kernel.sh`, `test-sandbox.sh` and `test-build-agent.sh` on every push;
-`test-e2e.sh` and `test-e2e-kube.sh` run nightly instead, and only when
+`test-e2e.sh` and the kind suite run nightly instead, and only when
 something landed that day. The nightly cannot cover a pool on a block device or
 zvol, or an image on ZFS; the runner has neither. Add the `run-e2e` label to a
 pull request to run the e2e suite there on demand, and `run-e2e-kube` for the

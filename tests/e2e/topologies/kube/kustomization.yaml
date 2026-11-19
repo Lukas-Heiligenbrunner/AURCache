@@ -1,5 +1,5 @@
 # =============================================================================
-# The cluster scripts/test-e2e-kube.sh tests against
+# The cluster tests/e2e/topologies/kube/run.sh tests against
 # =============================================================================
 # The server and the Kubernetes worker exactly as kubernetes/server/ and
 # kubernetes/kube-worker/ ship them, plus what a test needs beside them:
@@ -26,8 +26,8 @@ resources:
   - namespace.yaml
   - git.yaml
   - gitssh.yaml
-  - ../../../kubernetes/server
-  - ../../../kubernetes/kube-worker
+  - ../../../../kubernetes/server
+  - ../../../../kubernetes/kube-worker
 
 patches:
   - path: server.yaml
