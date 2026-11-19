@@ -19,7 +19,9 @@
 #                  can be debugged.
 
 LOG_FILE="$(mktemp -t aurcache-e2e-XXXXXX.log)"
-CLI_BIN="$PROJECT_DIR/backend/target/debug/aurcli"
+# Set by build_cli, from wherever Cargo puts its target directory
+# (CARGO_TARGET_DIR, a config file, or backend/target).
+CLI_BIN=
 E2E_KEEP_HINTS=()
 E2E_CLEANUP_PATHS=()
 CURRENT_BUILD_REF=
@@ -70,6 +72,11 @@ preflight() {
 build_cli() {
     log "=== Building AURCache CLI ==="
     (cd "$PROJECT_DIR/backend" && cargo build -q -p aurcache-cli)
+    local target
+    target=$(cd "$PROJECT_DIR/backend" && cargo metadata -q --no-deps --format-version 1 |
+        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    [ -n "$target" ] || { echo "ERROR: cannot find Cargo's target directory"; exit 1; }
+    CLI_BIN="$target/debug/aurcli"
 }
 
 # True if a service container has exited. A dead container will never satisfy
