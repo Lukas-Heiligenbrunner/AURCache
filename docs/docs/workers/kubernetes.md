@@ -223,9 +223,11 @@ cluster protect itself, not as a guarantee.
   the tool for a ceiling on all builds together, and the dispatcher honours it:
   it does not claim a build the namespace has no room for. A quota on
   `requests.cpu`, `requests.memory`, `limits.cpu` or `limits.memory` needs the
-  per-build limits set, and one on `requests.ephemeral-storage` needs the disk
-  limit, because a quota makes the cluster refuse any pod with a container that
-  does not state the resource. A pod count needs nothing. Beside the build
+  per-build limits set, because such a quota makes the cluster refuse any pod
+  with a container that does not state the resource. One on
+  `requests.ephemeral-storage` refuses no pod, but counts a container that
+  does not state it as asking for none, so it needs the disk limit to limit
+  anything. A pod count needs nothing. Beside the build
   itself, each build pod asks for 10m of CPU and 16Mi of memory, with limits of
   one CPU and 64Mi, for the container that hands the packages back. Count them
   in.

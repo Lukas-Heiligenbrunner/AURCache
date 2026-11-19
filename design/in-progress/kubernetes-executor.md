@@ -513,24 +513,29 @@ kind: Pod
 metadata:
   name: aurcache-build-<dispatcher>-<build_id>
   namespace: aurcache-builds
-  labels:
+  labels:                                    # over the template's, which cannot change these
     app.kubernetes.io/managed-by: aurcache-worker-kube
     aurcache.io/dispatcher: <first 16 hex digits of the dispatcher's fingerprint>
     aurcache.io/build-id: "<build_id>"
     aurcache.io/arch: <arch>
+  annotations: <the template's>              # only when it has some
 spec:
   restartPolicy: Never
-  activeDeadlineSeconds: <timeout + 1 h>     # absent for a build with no timeout
+  activeDeadlineSeconds: <timeout + 5 min>   # absent for a build with no timeout
   serviceAccountName: aurcache-build         # bound to nothing
   automountServiceAccountToken: false
   enableServiceLinks: false
   hostUsers: false                           # only with WORKER_KUBE_USER_NAMESPACES=true
-  nodeSelector: {kubernetes.io/os: linux, kubernetes.io/arch: <arch>}
+  nodeSelector: {kubernetes.io/os: linux, kubernetes.io/arch: <arch>}  # over the operator's
   securityContext:
     seccompProfile: {type: RuntimeDefault}
+  # Each only as the operator's template (WORKER_KUBE_POD_TEMPLATE) sets it:
+  # tolerations, affinity, priorityClassName, runtimeClassName,
+  # imagePullSecrets, schedulerName, topologySpreadConstraints.
   initContainers:
   - name: stage                              # installs the agent, receives the job, exits
     image: <agent image>
+    imagePullPolicy: <WORKER_KUBE_IMAGE_PULL_POLICY, Always by default>
     command: [/usr/local/bin/aurcache-build-agent, stage, --work, /work, --tools, /aurcache/bin]
     securityContext: &unprivileged
       runAsUser: 65534
@@ -539,11 +544,12 @@ spec:
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
       capabilities: {drop: [ALL]}
+    resources: &helper {requests: {cpu: 10m, memory: 16Mi}, limits: {cpu: "1", memory: 64Mi}}
     volumeMounts: [{name: work, mountPath: /work}, {name: tools, mountPath: /aurcache/bin}]
   containers:
   - name: build
     image: <builder image>
-    imagePullPolicy: Always
+    imagePullPolicy: <WORKER_KUBE_IMAGE_PULL_POLICY, Always by default>
     command: [/aurcache/bin/aurcache-build-agent, build, --work, /work, --log-file, /work/log/build.log]
     securityContext:
       runAsUser: 0
@@ -551,7 +557,7 @@ spec:
       capabilities:
         drop: [ALL]
         add: [CHOWN, DAC_OVERRIDE, FOWNER, FSETID, SETUID, SETGID, KILL]
-    resources:                               # each line only when its limit is set
+    resources:                               # each line only when its limit is set, none without any
       requests: {cpu: <build_cpus>, memory: <build_memory_max>, ephemeral-storage: <build_disk_max>}
       limits:   {cpu: <build_cpus>, memory: <build_memory_max>, ephemeral-storage: <build_disk_max>}
     volumeMounts:
@@ -559,9 +565,10 @@ spec:
     - {name: tools, mountPath: /aurcache/bin, readOnly: true}
   - name: hold                               # keeps the pod up for the hand-back
     image: <agent image>
+    imagePullPolicy: <WORKER_KUBE_IMAGE_PULL_POLICY, Always by default>
     command: [/usr/local/bin/aurcache-build-agent, hold]
     securityContext: *unprivileged
-    resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+    resources: *helper
     volumeMounts: [{name: work, mountPath: /work, readOnly: true}]
   volumes:
   - name: work
@@ -857,7 +864,9 @@ that wrote them" (Volumes page), so it suits small builds only.
 
 The total (`disk_max` on the chroot worker) has no executor equivalent; a
 namespace `ResourceQuota` on `requests.ephemeral-storage` is the operator's
-tool, and `ready_for_work` honours it.
+tool, and `ready_for_work` honours it. It counts only what pods ask for,
+and unlike one on CPU or memory it refuses no pod that asks for none: it
+counts it as none. So it limits builds only with `build_disk_max` set.
 
 **Memory and CPU** (`build_memory_max`, `build_cpus`): `resources.limits`,
 with requests equal to them so a build gets what it is told it has. CPU
