@@ -576,6 +576,22 @@ fn send_refuses_what_is_not_a_regular_package_file() {
     }
 }
 
+/// A `pkg/` that root in the build container made a link to a directory
+/// elsewhere is not followed: what is there is not the build's.
+#[test]
+fn send_refuses_a_package_directory_that_is_a_link() {
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::write(elsewhere.path().join(package("a")), b"not the build's").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let work = Work::new(dir.path());
+    symlink(elsewhere.path(), work.pkg()).unwrap();
+
+    let ran = send_of(dir.path(), &package("a"));
+    assert_eq!(ran.status.code(), Some(1));
+    assert!(ran.stdout.is_empty(), "{:?}", ran.stdout);
+    assert!(ran.stderr.contains("is not a directory"), "{}", ran.stderr);
+}
+
 #[test]
 fn send_ends_with_an_error_when_its_reader_goes_away() {
     let dir = tempfile::tempdir().unwrap();
