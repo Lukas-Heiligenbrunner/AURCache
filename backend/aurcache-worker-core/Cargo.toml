@@ -28,6 +28,7 @@ aurcache-common = { path = "../aurcache-common" }
 aurcache-ca = { path = "../aurcache-ca" }
 # `O_NOFOLLOW`, for opening what a build produced.
 libc = "0.2"
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
 # Paused time, for the stop and log-batching timers.

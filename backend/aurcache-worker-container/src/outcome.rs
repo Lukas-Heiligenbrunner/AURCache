@@ -6,7 +6,8 @@
 
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
 use aurcache_common::api::builds::DiskUsage;
-use aurcache_common::worker::{BuildOutcome, CompleteReport};
+use aurcache_common::source::is_object_name;
+use aurcache_common::worker::{BuildOutcome, CompleteReport, JobVcsSource};
 use aurcache_worker_core::protocol::Stop;
 use aurcache_worker_core::report::{Exit, ended, interrupted, success};
 use std::time::Duration;
@@ -29,6 +30,35 @@ pub enum Ending {
     Unreported {
         detail: String,
     },
+}
+
+/// A report, as far as a worker passes it on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Vetted {
+    pub report: BuildReport,
+    /// The sources whose reported commits were left out.
+    pub refused: Vec<String>,
+}
+
+/// What of `report` a worker passes on, for a job with VCS `sources`.
+///
+/// The report is a file in the build's directory, which root in the build
+/// container could write. So its commits are held to the job: one per
+/// source the job named, each a git object name. Any other is left out, and
+/// the server keeps the commit it recorded when it queued the build.
+#[must_use]
+pub fn vetted(mut report: BuildReport, sources: &[JobVcsSource]) -> Vetted {
+    let reported = std::mem::take(&mut report.vcs_commits);
+    let mut refused = Vec::new();
+    for (source, commit) in reported {
+        let asked = sources.iter().any(|s| s.source_url == source);
+        if asked && is_object_name(&commit) {
+            report.vcs_commits.insert(source, commit);
+        } else {
+            refused.push(source);
+        }
+    }
+    Vetted { report, refused }
 }
 
 /// The exit code of a process the kernel ended with `SIGKILL`.
@@ -408,5 +438,37 @@ mod tests {
     #[test]
     fn steps_are_named_as_the_report_spells_them() {
         assert_eq!(step_name(SetupStep::Keys), "keys");
+    }
+
+    fn source(url: &str) -> JobVcsSource {
+        JobVcsSource {
+            source_url: url.to_string(),
+            dir: "repo".to_string(),
+            git_ref: "HEAD".to_string(),
+        }
+    }
+
+    /// Only the job's own sources, and only object names: a report the
+    /// build forged names what it likes.
+    #[test]
+    fn only_the_jobs_sources_and_object_names_are_passed_on() {
+        let commit = "9fceb02d0ae598e95dc970b74767f19372d61af8";
+        let mut written = report(Ended::Exited { code: 0 });
+        written.vcs_commits = BTreeMap::from([
+            ("git+https://x/y.git".to_string(), commit.to_string()),
+            ("git+https://x/z.git".to_string(), "main".to_string()),
+            ("anything".to_string(), commit.to_string()),
+        ]);
+        let sources = [source("git+https://x/y.git"), source("git+https://x/z.git")];
+
+        let vetted = vetted(written.clone(), &sources);
+
+        assert_eq!(
+            vetted.report.vcs_commits,
+            BTreeMap::from([("git+https://x/y.git".to_string(), commit.to_string())])
+        );
+        assert_eq!(vetted.refused, ["anything", "git+https://x/z.git"]);
+        assert_eq!(vetted.report.ended, written.ended);
+        assert_eq!(vetted.report.peak_memory_bytes, written.peak_memory_bytes);
     }
 }

@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_build_agent::layout::Work;
-use aurcache_common::worker::{BuildOutcome, CompleteReport};
+use aurcache_common::worker::{BuildOutcome, CompleteReport, JobVcsSource};
 use aurcache_worker_container::agent;
 use aurcache_worker_container::arch::{self, Platform};
 use aurcache_worker_container::outcome::{self, MemoryLimit};
@@ -28,7 +28,7 @@ use bollard::query_parameters::{
     KillContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use futures::StreamExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +37,7 @@ use crate::config::{BuildDirs, Config};
 use crate::container::{self, Build};
 use crate::ending::{Verdict, ending};
 use crate::network::{self, NetworkPlan};
-use crate::workdir;
+use crate::workdir::{self, Report};
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
@@ -188,15 +188,21 @@ impl DockerExecutor {
         };
 
         // This worker, had it died mid-build, could have left its container
-        // and its directory behind under this id.
+        // and its directory behind under this id. A build never goes into
+        // what is left of one: root in that build may have put links there
+        // for this worker to write through.
         self.remove_container(&target.name).await;
-        self.clear(cfg, &target).await;
+        self.clear(cfg, &target)
+            .await
+            .context("clearing what an earlier build left under this build's name")?;
 
         // Cleared on every path: any early return in `build_in` -- a failed
         // download, pull, container or upload -- would otherwise leave the
         // whole directory behind.
         let outcome = self.build_in(cfg, client, claimed, &target).await;
-        self.clear(cfg, &target).await;
+        if let Err(e) = self.clear(cfg, &target).await {
+            tracing::warn!("{e:#}");
+        }
         outcome
     }
 
@@ -235,11 +241,12 @@ impl DockerExecutor {
         self.remove_container(&id).await;
         let run = run?;
 
+        let left = read_report(&target.dirs.local, &claimed.job.vcs_sources).await;
         let report = outcome::complete(
             run.stop,
             run.elapsed,
             ending(
-                workdir::report(&target.dirs.local),
+                left,
                 Verdict {
                     status: run.status,
                     oom_killed,
@@ -370,20 +377,22 @@ impl DockerExecutor {
         cleanup::remove_container(&self.docker, name_or_id).await;
     }
 
-    /// Remove a build's directory, logging what could not be removed.
-    async fn clear(&self, cfg: &Config, target: &Target<'_>) {
+    /// Remove a build's directory.
+    async fn clear(&self, cfg: &Config, target: &Target<'_>) -> Result<()> {
         let leftover = Leftover {
             dirs: target.dirs,
             image: &cfg.builder_image,
             platform: target.platform,
             name: format!("{}_clean", target.name),
         };
-        if let Err(e) = cleanup::clear(&self.docker, &leftover).await {
-            tracing::warn!(
-                "could not remove the build directory {}: {e:#}",
-                target.dirs.local.display()
-            );
-        }
+        cleanup::clear(&self.docker, &leftover)
+            .await
+            .with_context(|| {
+                format!(
+                    "could not remove the build directory {}",
+                    target.dirs.local.display()
+                )
+            })
     }
 }
 
@@ -391,6 +400,27 @@ impl DockerExecutor {
 /// engine may be shared with a worker of another server, whose build ids are
 /// the same numbers, and a container found under a build's name is removed
 /// as a leftover.
+/// The report the agent left in `dir`, read off the runtime, with what of it
+/// the job did not ask for left out.
+async fn read_report(dir: &Path, sources: &[JobVcsSource]) -> Report {
+    let dir = dir.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || workdir::report(&dir))
+        .await
+        .unwrap_or_else(|e| Report::Unreadable(format!("reading it failed: {e}")));
+    let Report::Written(written) = read else {
+        return read;
+    };
+    let vetted = outcome::vetted(written, sources);
+    if !vetted.refused.is_empty() {
+        tracing::warn!(
+            "the build's report named commits for sources the job does not have, or that are \
+             not object names; they are left out: {:?}",
+            vetted.refused
+        );
+    }
+    Report::Written(vetted.report)
+}
+
 fn container_name(tag: &str, build_id: i32) -> String {
     format!("aurcache_build_{tag}_{build_id}")
 }

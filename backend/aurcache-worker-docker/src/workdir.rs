@@ -10,16 +10,20 @@
 //! ```
 
 use anyhow::{Context, Result};
-use aurcache_build_agent::layout::{BIN_NAME, Work};
+use aurcache_build_agent::layout::{BIN_NAME, OUT_DIR, REPORT_FILE, Work};
 use aurcache_build_agent::report::BuildReport;
 use aurcache_build_agent::spec::BuildSpec;
 use aurcache_worker_container::input;
+use aurcache_worker_core::beneath;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use crate::container::BIN_DIR;
+
+/// The most a report may be: a few lines, and a commit per VCS source.
+pub const REPORT_LIMIT: u64 = 1 << 20;
 
 /// What the agent left at `out/report.json`.
 #[derive(Debug, PartialEq)]
@@ -54,16 +58,24 @@ pub fn prepare(dir: &Path, agent: &Path, spec: &BuildSpec, source: &[u8]) -> Res
 }
 
 /// The report the agent left in `dir`.
+///
+/// Read as something the build could have written: root in the container
+/// can replace `out/` or the report with a link, a pipe or a file without
+/// end. [`beneath`] opens each name from its parent's handle without
+/// following or waiting on it, and the report must be a regular file of at
+/// most [`REPORT_LIMIT`] bytes. Blocking: call it off the async runtime.
 #[must_use]
 pub fn report(dir: &Path) -> Report {
-    let path = Work::new(dir).report();
-    match fs::read(&path) {
+    let read = beneath::Dir::open(dir)
+        .and_then(|work| work.dir(OUT_DIR))
+        .and_then(|out| out.read(REPORT_FILE, REPORT_LIMIT));
+    match read {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(report) => Report::Written(report),
-            Err(e) => Report::Unreadable(format!("{}: {e}", path.display())),
+            Err(e) => Report::Unreadable(format!("{}: {e}", Work::new(dir).report().display())),
         },
         Err(e) if e.kind() == ErrorKind::NotFound => Report::Absent,
-        Err(e) => Report::Unreadable(format!("{}: {e}", path.display())),
+        Err(e) => Report::Unreadable(e.to_string()),
     }
 }
 
@@ -292,6 +304,59 @@ mod tests {
 
         fs::write(out.join("report.json"), b"{\"interface\":").unwrap();
         assert!(matches!(report(&scratch.0), Report::Unreadable(_)));
+    }
+
+    /// `report` on a thread, failing rather than hanging when it does not
+    /// return.
+    fn report_promptly(dir: &Path) -> Report {
+        let (send, receive) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || send.send(report(&dir)));
+        receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the report is read, or refused, at once")
+    }
+
+    fn unreadable(found: Report) -> String {
+        match found {
+            Report::Unreadable(why) => why,
+            other => panic!("expected an unreadable report, found {other:?}"),
+        }
+    }
+
+    /// What root in the container can leave where the report goes: a pipe
+    /// nothing will write to, which a plain read waits on for ever; a link to
+    /// a device without end, or to a report the build did not write; an
+    /// `out/` that is a link; a file past the limit. Each is refused, at
+    /// once.
+    #[test]
+    fn a_report_that_is_not_a_file_of_its_own_is_refused_at_once() {
+        let scratch = Scratch::new("hostile-report");
+        let work = Work::new(&scratch.0);
+        fs::create_dir_all(work.out()).unwrap();
+        let fifo = std::ffi::CString::new(work.report().to_str().unwrap()).unwrap();
+        // SAFETY: a valid, NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o666) }, 0);
+        assert!(unreadable(report_promptly(&scratch.0)).contains("a pipe"));
+
+        fs::remove_file(work.report()).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", work.report()).unwrap();
+        assert!(unreadable(report_promptly(&scratch.0)).contains("a link"));
+
+        let elsewhere = Scratch::new("hostile-report-elsewhere");
+        let forged = Work::new(&elsewhere.0);
+        fs::create_dir_all(forged.out()).unwrap();
+        fs::write(forged.report(), b"{}").unwrap();
+        fs::remove_file(work.report()).unwrap();
+        fs::remove_dir(work.out()).unwrap();
+        std::os::unix::fs::symlink(forged.out(), work.out()).unwrap();
+        assert!(unreadable(report_promptly(&scratch.0)).contains("a link"));
+
+        fs::remove_file(work.out()).unwrap();
+        fs::create_dir_all(work.out()).unwrap();
+        let big = fs::File::create(work.report()).unwrap();
+        big.set_len(REPORT_LIMIT + 1).unwrap();
+        assert!(unreadable(report_promptly(&scratch.0)).contains("larger than"));
     }
 
     #[test]
