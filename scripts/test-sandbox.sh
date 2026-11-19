@@ -21,7 +21,8 @@
 # makechrootpkg has makepkg install it through `sudo pacman`, with network;
 # the patched script installs it before the build under
 # `aurcache-sandbox offline`, where the scriptlet reaches nothing -- and the
-# build that follows cannot use sudo at all.
+# build that follows cannot use sudo at all. The scriptlet, as root, also
+# plants links and settings for host root to follow out of the copy.
 #
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
@@ -82,8 +83,10 @@ mkdir -p /srv && cd /srv && rm -rf upstream.git && git init -q --bare upstream.g
 t=$(mktemp -d) && cd "$t" && git init -q . && git config user.email a@b && git config user.name a
 echo hi > f.txt && git add . && git commit -qm init && git push -q /srv/upstream.git HEAD:master
 
-rm -rf /shared /job && mkdir -p /shared/{gnupg,srcdest-other,work-other} /job/{srcdest,pkg} /chroot
+rm -rf /shared /job /srv/canary && mkdir -p /shared/{gnupg,srcdest-other,work-other} /job/{srcdest,pkg} /chroot
 echo legit > /shared/srcdest-other/victim-source
+# What the scriptlet's links and settings point host root at.
+mkdir -p /srv/canary && echo intact > /srv/canary/victim && touch /srv/canary/host-only
 
 # Secrets the worker actually holds, in the location the shipped protected-path
 # list names. Owned by the build user on purpose: the point is that Landlock
@@ -135,6 +138,17 @@ fi
 mkdir -p /job/netprobe && cd /job/netprobe
 cat > netprobe.install <<'INSTALL'
 post_install() {
+    # Links out of the copy, and settings that would have host root bind
+    # /srv/canary into the build or run a command: all resolve inside the
+    # container, and none may reach the host's /srv/canary.
+    mkdir -p /srv/canary
+    printf '[safe]\n\tdirectory = *\n' > /srv/canary/gitconfig
+    ln -sf /srv/canary/gitconfig /etc/gitconfig
+    cp /etc/pacman.d/mirrorlist /srv/canary/mirrorlist
+    ln -sf /srv/canary/mirrorlist /etc/pacman.d/mirrorlist
+    sed -i 's|^CacheDir *= *|CacheDir = /srv/canary/ |' /etc/pacman.conf
+    echo 'CARCH=x86_64$(touch /srv/canary/evaled 2>/dev/null; :)' >> /etc/makepkg.conf
+    rm -rf /srcpkgdest && ln -s /srv/canary /srcpkgdest
     mkdir -p /var/lib/aurcache-netprobe && cd /var/lib/aurcache-netprobe
     if (exec 3<>/dev/tcp/127.0.0.1/7777) 2>/dev/null; then echo reached; else echo blocked; fi > tcp
     if (exec 3>/dev/udp/127.0.0.1/7777 && echo udp >&3) 2>/dev/null; then echo sent; else echo blocked; fi > udp
@@ -176,6 +190,7 @@ cat >> /job/pkg/PKGBUILD <<'BUILD'
 makedepends=(aurcache-netprobe tree)
 build() {
     grep '^NoNewPrivs:' /proc/self/status | awk '{print $2}' > "$startdir/nnp"
+    if [ -e /srv/canary/host-only ]; then echo bound; else echo absent; fi > "$startdir/canary-bind"
     if sudo -n pacman -V >/dev/null 2>&1; then echo allowed; else echo refused; fi > "$startdir/sudo"
     if sudo -n pacman -S --asdeps --needed --noconfirm aurcache-netprobe >/dev/null 2>&1
     then echo allowed; else echo refused; fi > "$startdir/sudo-install"
@@ -216,6 +231,9 @@ echo "build_sudo=$(cat /job/pkg/sudo 2>/dev/null || echo missing)"
 echo "build_sudo_install=$(cat /job/pkg/sudo-install 2>/dev/null || echo missing)"
 echo "build_nnp=$(cat /job/pkg/nnp 2>/dev/null || echo missing)"
 echo "sudoers=$([ -e /chroot/job1/etc/sudoers.d/builduser-pacman ] && echo present || echo absent)"
+echo "canary=$(ls -A /srv/canary | paste -sd, -)"
+echo "canary_victim=$(cat /srv/canary/victim 2>/dev/null || echo missing)"
+echo "canary_bind=$(cat /job/pkg/canary-bind 2>/dev/null || echo missing)"
 [[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
 EOF
 
@@ -255,6 +273,7 @@ check "unconfined: scriptlet reaches TCP through nsenter" reached "$(get scriptl
 check "unconfined: scriptlet holds SYS_ADMIN, SYS_PTRACE" 11 "$(get scriptlet_admin_ptrace "$unconfined")"
 check "unconfined: build can sudo pacman"   allowed "$(get build_sudo "$unconfined")"
 check "unconfined: build can install"       allowed "$(get build_sudo_install "$unconfined")"
+check "unconfined: host root follows a planted srcpkgdest" "" "$(get canary "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -277,6 +296,10 @@ check "confined:   build cannot sudo pacman" refused "$(get build_sudo "$confine
 check "confined:   build cannot install"    refused "$(get build_sudo_install "$confined")"
 check "confined:   build has no_new_privs"  1       "$(get build_nnp "$confined")"
 check "confined:   no sudoers entry"        absent  "$(get sudoers "$confined")"
+# Nothing host root does after the install follows what it planted.
+check "confined:   host's /srv/canary untouched" host-only,victim "$(get canary "$confined")"
+check "confined:   host's /srv/canary/victim intact" intact "$(get canary_victim "$confined")"
+check "confined:   build binds nothing the copy names" absent "$(get canary_bind "$confined")"
 
 if (( fail )); then
     echo "==> FAILED"
