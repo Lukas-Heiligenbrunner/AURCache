@@ -2,15 +2,33 @@
 //!
 //! The agent writes the job's `pacman.conf` into `/etc` as root, so it refuses
 //! one that sets what the agent decides itself (`CacheDir`, `DBPath`,
-//! `RootDir`, `GPGDir`, `HookDir`, `LogFile`) or points a server at the
-//! container's own files (`file://`).
+//! `RootDir`, `GPGDir`, `HookDir`, `LogFile`), names a command for pacman to
+//! run as root (`XferCommand`), points a server at the container's own files
+//! (`file://`), or includes a file from anywhere but `/etc/pacman.d`.
+//!
+//! The include matters because root's pacman reads the configuration again
+//! while the build runs, to install its dependencies: a file the build could
+//! write, included, would be a configuration this check never saw.
+//! `/etc/pacman.d` is root's, in the image, and is where every repository's
+//! mirrorlist is.
 
 use std::fmt;
+use std::path::{Component, Path};
 
-/// The options that say where pacman keeps and finds its own files.
-const FORBIDDEN: [&str; 6] = [
-    "CacheDir", "DBPath", "RootDir", "GPGDir", "HookDir", "LogFile",
+/// The options that say where pacman keeps and finds its own files, or what
+/// it runs.
+const FORBIDDEN: [&str; 7] = [
+    "CacheDir",
+    "DBPath",
+    "RootDir",
+    "GPGDir",
+    "HookDir",
+    "LogFile",
+    "XferCommand",
 ];
+
+/// Where an included file must be.
+const INCLUDE_DIR: &str = "/etc/pacman.d";
 
 /// The longest line accepted. pacman reads its configuration into a fixed
 /// buffer and takes what does not fit as the next line, so a directive at the
@@ -25,6 +43,8 @@ pub enum ConfRefusal {
     Option { name: String },
     /// A server on the container's own filesystem.
     FileServer { url: String },
+    /// An included file outside [`INCLUDE_DIR`], as it was written.
+    Include { path: String },
     /// A line too long to be sure pacman reads it as one; numbered from 1.
     LongLine { number: usize },
 }
@@ -35,6 +55,9 @@ impl fmt::Display for ConfRefusal {
             Self::Option { name } => write!(f, "`{name}` is not a job's to set"),
             Self::FileServer { url } => {
                 write!(f, "`{url}` is a server on the container's own filesystem")
+            }
+            Self::Include { path } => {
+                write!(f, "`Include = {path}` is not a file in {INCLUDE_DIR}")
             }
             Self::LongLine { number } => {
                 write!(f, "line {number} is longer than {LINE_MAX} bytes")
@@ -74,8 +97,26 @@ pub fn check(text: &str) -> Result<(), ConfRefusal> {
                 url: value.to_string(),
             });
         }
+        if name.eq_ignore_ascii_case("Include") && !is_included_from_root(value) {
+            return Err(ConfRefusal::Include {
+                path: value.to_string(),
+            });
+        }
     }
     Ok(())
+}
+
+/// Whether an included path, a glob pacman expands, stays in
+/// [`INCLUDE_DIR`]: below it, by name, never climbing out.
+fn is_included_from_root(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix(INCLUDE_DIR) else {
+        return false;
+    };
+    rest.starts_with('/')
+        && Path::new(rest)
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && Path::new(rest).components().count() > 1
 }
 
 /// Whether a server's URL has the `file` scheme, however it is written.
@@ -180,7 +221,13 @@ Include = /etc/pacman.d/mirrorlist
     #[test]
     fn each_forbidden_option_is_refused_however_it_is_written() {
         for option in [
-            "CacheDir", "DBPath", "RootDir", "GPGDir", "HookDir", "LogFile",
+            "CacheDir",
+            "DBPath",
+            "RootDir",
+            "GPGDir",
+            "HookDir",
+            "LogFile",
+            "XferCommand",
         ] {
             let spellings = [
                 option.to_string(),
@@ -235,6 +282,48 @@ Include = /etc/pacman.d/mirrorlist
                 "{line:?}"
             );
         }
+    }
+
+    /// Every repository's mirrorlist is in `/etc/pacman.d`, which is root's;
+    /// anything else, the build could have written by the time root's
+    /// pacman reads it again to install a dependency.
+    #[test]
+    fn only_a_file_in_pacman_d_is_included() {
+        for path in [
+            "/etc/pacman.d/mirrorlist",
+            "/etc/pacman.d/chaotic-mirrorlist",
+            "/etc/pacman.d/conf.d/*.conf",
+            "/etc/pacman.d/./mirrorlist",
+        ] {
+            let conf = format!("[core]\nInclude = {path}\n");
+            assert_eq!(check(&conf), Ok(()), "{path}");
+        }
+        for path in [
+            "/var/lib/aurcache-build/home/x",
+            "/work/pkg/conf",
+            "/etc/pacman.d/../../tmp/x",
+            "/etc/pacman.d/*/../../../tmp/x",
+            "/etc/pacman.d",
+            "/etc/pacman.d/",
+            "/etc/pacman.dx/mirrorlist",
+            "/etc/pacman.d*/mirrorlist",
+            "etc/pacman.d/mirrorlist",
+            "mirrorlist",
+            "",
+        ] {
+            for line in [format!("Include = {path}"), format!("include={path}")] {
+                let conf = format!("[core]\n{line}\n");
+                assert_eq!(
+                    check(&conf),
+                    Err(ConfRefusal::Include {
+                        path: path.to_string()
+                    }),
+                    "{line:?}"
+                );
+            }
+        }
+        let said = check("Include = /tmp/x").unwrap_err().to_string();
+        assert!(said.contains("/etc/pacman.d"), "{said}");
     }
 
     /// A directive pacman would find after the part of a line that fills its
