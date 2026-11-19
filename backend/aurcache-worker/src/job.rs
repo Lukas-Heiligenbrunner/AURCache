@@ -91,6 +91,7 @@ async fn run_job_inner(
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
     let ssh = ssh_key::offer(job, &shared.ssh_keys, &cfg.ssh_packages);
+    tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
     if let Some(notice) = ssh.notice(&job.pkgbase) {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
     }

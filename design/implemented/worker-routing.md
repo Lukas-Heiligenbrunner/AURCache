@@ -364,7 +364,7 @@ The job carries the name in an optional field, `JobDescriptor::ssh_key`, as
 
 | On the wire | Means | The worker |
 |---|---|---|
-| no `ssh_key` | a server that names no key | offers `default`, as before names existed |
+| no `ssh_key` | a server that names no key | offers `default` |
 | `{"name": null}` | no key | offers none |
 | `{"name": "default"}` | that key | offers it, if it holds it |
 
@@ -399,10 +399,11 @@ that worker, and only they are offered its key.
 **The decision is shared by every executor.** `aurcache_worker_core::ssh_key`
 holds `SshPackages` (the ceiling), `SshKeys<K>` (the worker's keys by name,
 `K` being whatever the executor hands a build -- an agent's socket here) and
-`offer(job, &keys, &packages) -> SshOffer`. Each outcome has its own line in
-the build log, written before anything is prepared: not requested, no key by
-that name on this worker, or the package not in `WORKER_GIT_SSH_PACKAGES`. A
-worker with no key says nothing about keys to a build that did not name one.
+`offer(job, &keys, &packages) -> SshOffer`. An offer and each refusal have
+their own line in the build log, written before anything is prepared: no key
+by that name on this worker, or the package not in `WORKER_GIT_SSH_PACKAGES`.
+A build whose setting names no key gets no line, being most builds, and
+neither does any build on a worker with no key that did not name one.
 
 Every outcome but an offer builds without a key, a name the worker does not
 hold included. Most builds of a package never use the key it names, so failing

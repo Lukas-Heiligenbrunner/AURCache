@@ -118,7 +118,8 @@ impl<K> SshKeys<K> {
 pub enum SshOffer<'k, K> {
     /// The key `name`, which the build may use.
     Offered { name: String, key: &'k K },
-    /// The job names no key.
+    /// The job names no key: the ordinary case, for a package that fetches
+    /// nothing over SSH.
     NotRequested,
     /// The job names a key this worker does not hold. The build goes ahead
     /// without one: most never use it, and one that does fails at the fetch
@@ -142,14 +143,13 @@ impl<'k, K> SshOffer<'k, K> {
     }
 
     /// One line for `pkgbase`'s build log saying what the build was offered
-    /// and, when nothing, why; `None` when there is nothing to say.
+    /// and, when nothing, why; `None` when there is nothing to say: a worker
+    /// with no key, or a package whose setting names none, which would
+    /// otherwise put a line in nearly every build log.
     #[must_use]
     pub fn notice(&self, pkgbase: &str) -> Option<String> {
         match self {
             Self::Offered { name, .. } => Some(format!("SSH key {name:?} offered to this build")),
-            Self::NotRequested => Some(format!(
-                "no SSH key offered: the build_ssh_key setting names none for {pkgbase}"
-            )),
             Self::NotHeld { name } => Some(format!(
                 "this worker holds no SSH key named {name:?}, which the build_ssh_key \
                  setting names for {pkgbase}; building without one"
@@ -157,7 +157,7 @@ impl<'k, K> SshOffer<'k, K> {
             Self::NotAllowed => Some(format!(
                 "no SSH key offered: {pkgbase} is not in this worker's {PACKAGES_VAR}"
             )),
-            Self::NoKeys => None,
+            Self::NotRequested | Self::NoKeys => None,
         }
     }
 }
@@ -170,8 +170,8 @@ pub fn offer<'k, K>(
     packages: &SshPackages,
 ) -> SshOffer<'k, K> {
     let requested = match &job.ssh_key {
-        // From a server that names no key: the default, as before there were
-        // names, unless the worker holds none.
+        // From a server that names no key: the default, unless the worker
+        // holds none.
         None => None,
         Some(request) => match &request.name {
             None if keys.is_empty() => return SshOffer::NoKeys,
@@ -287,8 +287,8 @@ mod tests {
         assert!(!SshPackages::parse(Some("unreal-*")).offers("unreal-engine"));
     }
 
-    /// A job from a server that names no key gets the default, as before,
-    /// still under the worker's ceiling.
+    /// A job from a server that names no key gets the default, still under
+    /// the worker's ceiling.
     #[test]
     fn a_job_naming_nothing_gets_the_default_key() {
         assert_eq!(
@@ -318,11 +318,14 @@ mod tests {
         assert_eq!(offer, offered("default"));
     }
 
+    /// A job naming no key is offered none, and its log says nothing of it:
+    /// most packages fetch nothing over SSH.
     #[test]
     fn a_job_naming_no_key_is_offered_none() {
         let offer = offer(&job("hello", Some(none())), agent(), &SshPackages::All);
         assert_eq!(offer, SshOffer::NotRequested);
         assert_eq!(offer.key(), None);
+        assert_eq!(offer.notice("hello"), None);
     }
 
     /// The ceiling is checked after the job: a job that asks for a key on a
@@ -399,8 +402,7 @@ mod tests {
     #[test]
     fn every_refusal_explains_itself() {
         let notices: Vec<_> = [
-            SshOffer::<&str>::NotRequested,
-            SshOffer::NotHeld {
+            SshOffer::<&str>::NotHeld {
                 name: "gitlab".to_string(),
             },
             SshOffer::NotAllowed,
@@ -408,8 +410,7 @@ mod tests {
         .iter()
         .map(|offer| offer.notice("hello").unwrap())
         .collect();
-        assert!(notices[0].contains("build_ssh_key"), "{}", notices[0]);
-        assert!(notices[1].contains("\"gitlab\""), "{}", notices[1]);
-        assert!(notices[2].contains(PACKAGES_VAR), "{}", notices[2]);
+        assert!(notices[0].contains("\"gitlab\""), "{}", notices[0]);
+        assert!(notices[1].contains(PACKAGES_VAR), "{}", notices[1]);
     }
 }
