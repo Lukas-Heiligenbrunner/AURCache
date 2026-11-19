@@ -2,12 +2,13 @@
 # does not claim a build the namespace has no room for. Not part of the default
 # set; enable it in kustomization.yaml and change the numbers.
 #
-# A quota on a resource makes the cluster refuse any pod with a container
+# A quota on CPU or memory makes the cluster refuse any pod with a container
 # that does not state it, so list only what builds are given: `requests.cpu`
 # and `requests.memory` (and `limits.*`) need the per-build limits set on the
-# worker (WORKER_BUILD_CPUS, WORKER_BUILD_MEMORY_MAX), and
-# `requests.ephemeral-storage` its disk limit (WORKER_BUILD_DISK_MAX). A pod
-# count needs nothing.
+# worker (WORKER_BUILD_CPUS, WORKER_BUILD_MEMORY_MAX). One on
+# `requests.ephemeral-storage` refuses no pod, but counts a container that
+# does not state it as asking for none, so it limits nothing without the
+# worker's disk limit (WORKER_BUILD_DISK_MAX). A pod count needs nothing.
 #
 # Beside the build, each pod asks for 10m of CPU and 16Mi of memory (limits:
 # one CPU, 64Mi) for the container that hands the packages back.
