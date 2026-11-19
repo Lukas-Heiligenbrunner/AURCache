@@ -153,6 +153,51 @@ library?)`, its qemu/binfmt setup is misconfigured: `binfmt_misc` must be
 enabled in the kernel (`cat /proc/sys/fs/binfmt_misc/status`), enabling it with
 `mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc` if not.
 
+## What runs as root
+
+A build runs as the unprivileged build user (`builder` by default) in a copy
+of the base chroot, and never becomes root in it: the build user has no
+`sudo` entry in the chroot, and the build's container runs with
+`no_new_privs`, so no setuid program or file capability changes who it is.
+
+Everything a build needs installed is installed before it starts, by the
+worker, as root in the build's copy:
+
+| Step | Runs as | Network | Runs code from packages |
+|---|---|---|---|
+| Sync the package databases, upgrade the system | root | yes | official repositories only; AURCache's repository is left out of the upgrade |
+| Download the build's dependencies (`pacman -Sw`) | root | yes | no: nothing is installed |
+| Install the build's dependencies (`pacman -S --asdeps`) | root | **none** | yes: their `.install` scriptlets and alpm hooks |
+| The build (`makepkg`) | build user | as configured for builds | yes: the PKGBUILD and its tools |
+
+The dependencies are what makepkg would install: the PKGBUILD's `depends`,
+`makedepends` and, unless the build runs with `--nocheck`, `checkdepends`,
+including those for the build's architecture. The worker reads them with
+`makepkg --printsrcinfo`, confined the same way as the source download. The
+build itself still checks them, and fails on anything missing rather than
+installing it.
+
+The install runs under `aurcache-sandbox offline`, which needs no privilege
+of its own, so it holds the same on any kernel and in any container:
+
+- `no_new_privs`, and `CAP_NET_RAW` and `CAP_NET_ADMIN` dropped;
+- a seccomp filter: no socket but a UNIX one (IPv4 and IPv6 of every kind,
+  packet sockets and netlink all fail), and no io_uring;
+- Landlock where the kernel has it: no TCP (ABI 4, Linux 6.7), no abstract
+  UNIX sockets or signals outside the install (ABI 6, Linux 6.12), no
+  connecting to a UNIX socket by its path (ABI 9).
+
+Every process a scriptlet starts inherits all of it, and the container ends
+with the install.
+
+:::warning Emulated workers
+qemu's user-mode emulation refuses seccomp filters, so a worker run emulated
+(see [Building for another architecture](#building-for-another-architecture))
+cannot install a build's dependencies: such a build fails with `cannot
+install the seccomp filter`. A native worker for that architecture is not
+affected.
+:::
+
 ## Swarm and other runtimes
 
 In Docker Swarm the worker is an ordinary service with the same needs: the

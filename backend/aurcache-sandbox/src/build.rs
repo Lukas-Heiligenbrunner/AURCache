@@ -25,7 +25,9 @@
 //! to `makechrootpkg` as a whole; the patched copy the worker runs
 //! (`packaging/patch-makechrootpkg.py`) wraps exactly the two sites that
 //! execute PKGBUILD code without mounting, and the chroot build proceeds in a
-//! process this policy never touched.
+//! process this policy never touched. The worker's own `makepkg
+//! --printsrcinfo`, which reads the dependencies a build installs, runs under
+//! it too (`aurcache_worker::build_deps`).
 //!
 //! # Policy
 //!
@@ -69,7 +71,8 @@ const PROTECTED_PATHS_FILE: &str = "/etc/aurcache/sandbox-protected";
 
 const USAGE: &str = "usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...\n       \
                      aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] \
-                     -- PROGRAM [ARGS]...";
+                     -- PROGRAM [ARGS]...\n       \
+                     aurcache-sandbox offline -- PROGRAM [ARGS]...";
 
 struct Request {
     program: OsString,

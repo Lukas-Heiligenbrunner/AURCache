@@ -30,7 +30,8 @@ pub async fn run_capture(mut cmd: Command) -> Result<Captured> {
 
 /// The variables `sudo` must pass through to devtools; see [`command`].
 const DEVTOOLS_ENV: &str = "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,\
-                            AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF";
+                            AURCACHE_NSPAWN_KEEP_UNIT,AURCACHE_PACMAN_CONF,AURCACHE_UPGRADE_CONF,\
+                            AURCACHE_BUILD_DEPS";
 
 /// Build a `Command` that runs a privileged `devtools` program via `sudo`.
 ///
@@ -40,13 +41,14 @@ const DEVTOOLS_ENV: &str = "--preserve-env=GNUPGHOME,SRCDEST,AURCACHE_DROPIN,\
 /// `SUDO_USER` inference, so it is `builder` and never `aurcache` -- see
 /// `build::build_command`.
 ///
-/// Six variables are preserved, because sudo would otherwise drop all of
+/// Seven variables are preserved, because sudo would otherwise drop all of
 /// them: `GNUPGHOME` names this build's keyring replica (see
 /// [`prepare_job_keyring`]), `SRCDEST` the source cache `makechrootpkg` binds
 /// itself, `AURCACHE_DROPIN` the makepkg overrides it installs into this
 /// build's chroot copy, `AURCACHE_NSPAWN_KEEP_UNIT` whether the container
-/// stays in the build's cgroup, and the last two the [`PacmanConfs`] the copy
-/// is synced, upgraded and built with. `PKGDEST` reaches the build through
+/// stays in the build's cgroup, the next two the [`PacmanConfs`] the copy
+/// is synced, upgraded and built with, and `AURCACHE_BUILD_DEPS` the
+/// dependencies installed into it before the build (`crate::build_deps`). `PKGDEST` reaches the build through
 /// `makepkg.conf` instead, so preserving it here would be a no-op.
 pub fn command(program: &str) -> Command {
     let mut cmd = Command::new("sudo");
@@ -755,6 +757,7 @@ mod tests {
             "AURCACHE_DROPIN",
             "AURCACHE_PACMAN_CONF",
             "AURCACHE_UPGRADE_CONF",
+            "AURCACHE_BUILD_DEPS",
         ] {
             assert!(preserve.contains(var), "{preserve} must carry {var}");
         }

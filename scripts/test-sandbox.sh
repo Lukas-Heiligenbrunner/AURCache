@@ -16,6 +16,13 @@
 # would take effect. Stock `makechrootpkg -u` takes a bait from it; the
 # patched script, given the worker's two configurations, must not.
 #
+# And the build's dependencies: one from that repository has an `.install`
+# scriptlet that tries TCP and UDP to a listener beside the chroot. Stock
+# makechrootpkg has makepkg install it through `sudo pacman`, with network;
+# the patched script installs it before the build under
+# `aurcache-sandbox offline`, where the scriptlet reaches nothing -- and the
+# build that follows cannot use sudo at all.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -120,6 +127,54 @@ else
     build+=(-u)
 fi
 
+# The dependency, from the same repository: its scriptlet records whether
+# TCP and UDP reached the listener, and the listener what it heard.
+mkdir -p /job/netprobe && cd /job/netprobe
+cat > netprobe.install <<'INSTALL'
+post_install() {
+    mkdir -p /var/lib/aurcache-netprobe && cd /var/lib/aurcache-netprobe
+    if (exec 3<>/dev/tcp/127.0.0.1/7777) 2>/dev/null; then echo reached; else echo blocked; fi > tcp
+    if (exec 3>/dev/udp/127.0.0.1/7777 && echo udp >&3) 2>/dev/null; then echo sent; else echo blocked; fi > udp
+    awk '/^NoNewPrivs:/ {print $2}' /proc/self/status > nnp
+}
+INSTALL
+printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { :; }\n' > PKGBUILD
+chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
+cp /job/netprobe/*.pkg.tar.zst /srv/aurcache/
+repo-add -q /srv/aurcache/aurcache.db.tar.gz /srv/aurcache/aurcache-netprobe-*.pkg.tar.zst
+python3 - <<'LISTEN' &
+import socket, threading
+heard = open("/tmp/heard", "a", buffering=1)
+def tcp():
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 7777)); s.listen()
+    while True:
+        s.accept()[0].close(); heard.write("tcp\n")
+def udp():
+    s = socket.socket(type=socket.SOCK_DGRAM); s.bind(("127.0.0.1", 7777))
+    while True:
+        s.recv(64); heard.write("udp\n")
+threading.Thread(target=udp, daemon=True).start()
+tcp()
+LISTEN
+touch /tmp/heard
+# The build depends on it, and on an official package, whose signature is
+# checked by the confined install; and it tries to become root once it runs.
+cat >> /job/pkg/PKGBUILD <<'BUILD'
+makedepends=(aurcache-netprobe tree)
+build() {
+    grep '^NoNewPrivs:' /proc/self/status | awk '{print $2}' > "$startdir/nnp"
+    if sudo -n pacman -V >/dev/null 2>&1; then echo allowed; else echo refused; fi > "$startdir/sudo"
+    if sudo -n pacman -S --asdeps --needed --noconfirm aurcache-netprobe >/dev/null 2>&1
+    then echo allowed; else echo refused; fi > "$startdir/sudo-install"
+}
+BUILD
+if [[ $mode == confined ]]; then
+    # As the worker hands them over (aurcache_worker::build_deps).
+    printf 'aurcache-netprobe\ntree\n' > /srv/build-deps
+    confs+=(AURCACHE_BUILD_DEPS=/srv/build-deps)
+fi
+
 cd /job/pkg
 sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
@@ -135,6 +190,17 @@ echo "sshkey=$([ -s /job/pkg/stolen-ssh ] && echo read || echo blocked)"
 echo "mtlskey=$([ -s /job/pkg/stolen-mtls ] && echo read || echo blocked)"
 # What the build's copy has installed under the stale package's name.
 echo "upgrade=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-stale 2>&1)"
+echo "dep=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-netprobe 2>&1)"
+echo "scriptlet_tcp=$(cat /chroot/job1/var/lib/aurcache-netprobe/tcp 2>/dev/null || echo missing)"
+echo "scriptlet_udp=$(cat /chroot/job1/var/lib/aurcache-netprobe/udp 2>/dev/null || echo missing)"
+echo "scriptlet_nnp=$(cat /chroot/job1/var/lib/aurcache-netprobe/nnp 2>/dev/null || echo missing)"
+echo "official=$(pacman -b /chroot/job1/var/lib/pacman -Qq tree 2>&1)"
+echo "heard=$(sort -u /tmp/heard | paste -sd, -)"
+echo "build_sudo=$(cat /job/pkg/sudo 2>/dev/null || echo missing)"
+echo "build_sudo_install=$(cat /job/pkg/sudo-install 2>/dev/null || echo missing)"
+echo "build_nnp=$(cat /job/pkg/nnp 2>/dev/null || echo missing)"
+echo "sudoers=$([ -e /chroot/job1/etc/sudoers.d/builduser-pacman ] && echo present || echo absent)"
+[[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
 EOF
 
 docker build -q -t "$IMAGE" "$WORKDIR" >/dev/null
@@ -164,6 +230,13 @@ check "unconfined: writes other workdir"    written "$(get workdir  "$unconfined
 check "unconfined: reads ssh key"          read    "$(get sshkey   "$unconfined")"
 check "unconfined: reads mTLS identity"    read    "$(get mtlskey  "$unconfined")"
 check "unconfined: upgrade takes the bait" aurcache-bait "$(get upgrade "$unconfined")"
+check "unconfined: dependency installed"    aurcache-netprobe "$(get dep "$unconfined")"
+check "unconfined: scriptlet reaches TCP"   reached "$(get scriptlet_tcp "$unconfined")"
+check "unconfined: scriptlet sends UDP"     sent    "$(get scriptlet_udp "$unconfined")"
+check "unconfined: listener hears both"     tcp,udp "$(get heard "$unconfined")"
+check "unconfined: scriptlet may gain privileges" 0 "$(get scriptlet_nnp "$unconfined")"
+check "unconfined: build can sudo pacman"   allowed "$(get build_sudo "$unconfined")"
+check "unconfined: build can install"       allowed "$(get build_sudo_install "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -173,6 +246,16 @@ check "confined:   mTLS identity unreadable" blocked "$(get mtlskey "$confined")
 check "confined:   mktemp still works"     works   "$(get mktemp    "$confined")"
 check "confined:   build still succeeds"    0       "$(get build_exit "$confined")"
 check "confined:   upgrade never sees AURCache's repository" aurcache-stale "$(get upgrade "$confined")"
+check "confined:   dependency installed"    aurcache-netprobe "$(get dep "$confined")"
+check "confined:   scriptlet has no TCP"    blocked "$(get scriptlet_tcp "$confined")"
+check "confined:   scriptlet has no UDP"    blocked "$(get scriptlet_udp "$confined")"
+check "confined:   listener hears nothing"  ""      "$(get heard "$confined")"
+check "confined:   scriptlet has no_new_privs" 1    "$(get scriptlet_nnp "$confined")"
+check "confined:   signed official dep installed" tree "$(get official "$confined")"
+check "confined:   build cannot sudo pacman" refused "$(get build_sudo "$confined")"
+check "confined:   build cannot install"    refused "$(get build_sudo_install "$confined")"
+check "confined:   build has no_new_privs"  1       "$(get build_nnp "$confined")"
+check "confined:   no sudoers entry"        absent  "$(get sudoers "$confined")"
 
 if (( fail )); then
     echo "==> FAILED"

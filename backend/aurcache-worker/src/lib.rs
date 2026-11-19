@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod build;
+pub mod build_deps;
 pub mod build_firewall;
 pub mod built_sources;
 pub mod cache;
