@@ -400,11 +400,14 @@ that worker, and only they are offered its key.
 holds `SshPackages` (the ceiling), `SshKeys<K>` (the worker's keys by name,
 `K` being whatever the executor hands a build -- an agent's socket here) and
 `offer(job, &keys, &packages) -> SshOffer`. Each outcome has its own line in
-the build log: not requested, no key by that name on this worker (which fails
-the build before anything is prepared, since it would otherwise fail at a
-source fetch that names no key), or the package not in
-`WORKER_GIT_SSH_PACKAGES`. A worker with no key says nothing about keys to a
-build that did not name one.
+the build log, written before anything is prepared: not requested, no key by
+that name on this worker, or the package not in `WORKER_GIT_SSH_PACKAGES`. A
+worker with no key says nothing about keys to a build that did not name one.
+
+Every outcome but an offer builds without a key, a name the worker does not
+hold included. Most builds of a package never use the key it names, so failing
+them for its absence would fail builds that need nothing; the one that does
+need it fails at its fetch, with the line saying why above the failure.
 
 The chroot worker withholds the whole credential from a build that is not
 offered it: no `SSH_AUTH_SOCK` export in its `makepkg.conf`, no mount of the
