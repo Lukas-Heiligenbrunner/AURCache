@@ -15,11 +15,15 @@ use crate::pod::{self, BUILD, PodInputs};
 use crate::transfer::{Agent, Lines, Uploads};
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_build_agent::layout::Scratch;
-use aurcache_build_agent::report::Artifact;
+use aurcache_build_agent::report::{Artifact, BuildReport};
 use aurcache_build_agent::spec::SshAccess;
 use aurcache_common::artifact::is_artifact;
-use aurcache_common::worker::{BuildOutcome, CompleteReport, JobDescriptor, MirrorlistOffer};
-use aurcache_worker_container::outcome::{Ending, MemoryLimit, complete};
+use aurcache_common::worker::{
+    BuildOutcome, CompleteReport, JobDescriptor, JobVcsSource, MirrorlistOffer,
+};
+use aurcache_worker_container::outcome::{
+    self as container_outcome, Ending, MemoryLimit, complete,
+};
 use aurcache_worker_container::spec::SpecOptions;
 use aurcache_worker_container::ssh::link::Served;
 use aurcache_worker_container::ssh::{Credential, CredentialFiles};
@@ -163,6 +167,20 @@ fn user_namespace(asked: &Pod, stored: &Pod) -> UserNamespace {
         (true, true) => UserNamespace::Kept,
         (true, false) => UserNamespace::Dropped,
     }
+}
+
+/// What of a report the server is told: root in the build container could
+/// write the file, so its VCS commits are held to the job's sources.
+fn vetted(report: BuildReport, sources: &[JobVcsSource]) -> BuildReport {
+    let vetted = container_outcome::vetted(report, sources);
+    if !vetted.refused.is_empty() {
+        tracing::warn!(
+            "the build's report named commits for sources the job does not have, or that are \
+             not object names; they are left out: {:?}",
+            vetted.refused
+        );
+    }
+    vetted.report
 }
 
 /// Why no build pod is created while the API server drops `hostUsers`.
@@ -590,6 +608,7 @@ impl<C: Cluster> KubeExecutor<C> {
             Some(handback) => (handback.report, handback.artifacts),
             None => (None, Vec::new()),
         };
+        let reported = reported.map(|report| vetted(report, &build.claimed.job.vcs_sources));
         if reported.is_none() {
             self.last_words(agent.pod, end, &build.log).await;
         }

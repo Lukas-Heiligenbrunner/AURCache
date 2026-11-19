@@ -16,7 +16,7 @@ pub mod server;
 use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_build_agent::spec::INTERFACE;
-use aurcache_common::worker::{JobDescriptor, MirrorlistOffer};
+use aurcache_common::worker::{JobDescriptor, JobVcsSource, MirrorlistOffer};
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
 use aurcache_worker_kube::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin};
@@ -375,6 +375,10 @@ impl Script {
     }
 }
 
+/// The VCS source every test job has, and the commit a report gives it.
+pub const VCS_SOURCE: &str = "git+https://x/y.git";
+pub const VCS_COMMIT: &str = "9fceb02d0ae598e95dc970b74767f19372d61af8";
+
 /// A report with every measurement filled in.
 pub fn report(ended: Ended) -> BuildReport {
     BuildReport {
@@ -383,7 +387,7 @@ pub fn report(ended: Ended) -> BuildReport {
         peak_memory_bytes: Some(3 << 30),
         oom_kills: Some(0),
         disk_bytes: Some(2 << 30),
-        vcs_commits: BTreeMap::from([("git+https://x/y.git".to_string(), "abc123".to_string())]),
+        vcs_commits: BTreeMap::from([(VCS_SOURCE.to_string(), VCS_COMMIT.to_string())]),
     }
 }
 
@@ -1076,7 +1080,11 @@ pub fn job(build_id: i32) -> JobDescriptor {
         pacman_conf: String::new(),
         mirrorlist: MirrorlistOffer::Nothing,
         pgp_keys: Vec::new(),
-        vcs_sources: Vec::new(),
+        vcs_sources: vec![JobVcsSource {
+            source_url: VCS_SOURCE.to_string(),
+            dir: "y".to_string(),
+            git_ref: "HEAD".to_string(),
+        }],
         expected_packages: vec!["hello".to_string()],
         timeout_secs: None,
         expected_version: "1.0-1".to_string(),
