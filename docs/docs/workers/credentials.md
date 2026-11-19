@@ -100,6 +100,24 @@ services:
 here that are offered the key. Set **Build SSH key** to `default` on those
 packages too.
 
+:::warning
+`WORKER_GIT_SSH_PACKAGES` takes a kernel whose Landlock can restrict UNIX
+sockets: Linux 7.1 or later (Landlock ABI 9). On an older kernel nothing keeps
+the packages it leaves out from the key's agent while their PKGBUILD code runs
+outside the chroot (see [What a build can do with the
+key](#what-a-build-can-do-with-the-key)), so a worker with the variable set
+holds no key there at all, and says why when it starts:
+
+```
+ERROR WORKER_GIT_SSH_PACKAGES is set, but builds could not be kept from the SSH agent outside their chroot, because this kernel's Landlock cannot restrict UNIX sockets (that takes Landlock ABI 9, Linux 7.1 or later): this worker holds no SSH key, so builds go ahead without an SSH key, and a source that needs one fails at its fetch
+```
+
+It does the same when `/etc/aurcache/sandbox-protected` does not list its
+agent's directory. To use a key on an older kernel, leave
+`WORKER_GIT_SSH_PACKAGES` unset, and keep that worker to the packages you
+would trust with the key: any build it runs can reach it.
+:::
+
 ## The default: a key per worker
 
 On first start a worker generates an ed25519 keypair and logs the public half:
@@ -232,9 +250,12 @@ What this guarantees:
 
 The last point takes Landlock's `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (Landlock
 ABI 9, Linux 7.1 and later). On an older kernel the sandbox cannot restrict
-sockets: the key still stays out of every chroot that is not offered it, but
-PKGBUILD code running outside the chroot can reach the agent by its path. The
-worker says which applies when it starts:
+sockets, so **any build on a worker holding a key can reach it**: the key still
+stays out of every chroot that is not offered it, but PKGBUILD code running
+outside the chroot reaches the agent by its path, whatever **Build SSH key**
+says for its package. A worker with `WORKER_GIT_SSH_PACKAGES` set therefore
+holds no key on such a kernel, since it could not keep that list. The worker
+says which applies when it starts:
 
 ```
 INFO Builds not offered the SSH key are refused its agent outside their chroot as well (Landlock)
@@ -242,8 +263,9 @@ INFO Builds not offered the SSH key are refused its agent outside their chroot a
 
 The sandbox reads the paths it keeps private from
 `/etc/aurcache/sandbox-protected`, which names the agent's directory under the
-default `WORKER_DATA_DIR`. A worker whose data directory is elsewhere warns at
-startup until its `agent` directory is added to that file.
+default `WORKER_DATA_DIR`. A worker whose data directory is elsewhere is in the
+older kernel's position until its `agent` directory is added to that file: it
+warns at startup, and with `WORKER_GIT_SSH_PACKAGES` set it holds no key.
 
 What it does not:
 

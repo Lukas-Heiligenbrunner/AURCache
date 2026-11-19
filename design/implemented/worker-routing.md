@@ -441,11 +441,22 @@ rule holds for the processes the sandbox starts (git, ssh), and while other
 builds use the agent: the refusal is per Landlock domain, not per path.
 
 On an older kernel the sandbox does not handle the right, so its ruleset stays
-fully enforced and sockets stay unrestricted there. The gate then holds inside
-the chroot only, and the worker says so at startup, as it does when the policy
-file does not name its agent's directory (a custom `WORKER_DATA_DIR`). That is
-the project's stance on limits a machine cannot enforce: build, and say what is
-left open.
+fully enforced and sockets stay unrestricted there; a policy file that does not
+name the agent's directory (a custom `WORKER_DATA_DIR`) leaves the same gap.
+The gate then holds inside the chroot only, and any build on a worker holding a
+key can reach it from its PKGBUILD code. What the worker does then turns on
+`WORKER_GIT_SSH_PACKAGES` (`agent::may_start`):
+
+- **Unset**, it holds its key and says at startup what is left open.
+  `build_ssh_key` still keeps the key out of the chroot of every build it does
+  not name one for.
+- **Set**, it starts no agent and holds no key, and says why at startup. The
+  list is the worker's operator saying that the builds it leaves out never
+  reach the key, and on such a machine the worker could not keep it: a list in
+  name only would be worse than none. This follows how a build limit the
+  machine's own environment sets is treated when the machine cannot enforce
+  it, where builds are refused rather than run without it; here only the key
+  is refused, and builds go ahead without one.
 
 `scripts/test-sandbox.sh` holds it to that: under the shipped policy, the
 hostile fixture reaches the agent by its fixed path when unconfined, is refused

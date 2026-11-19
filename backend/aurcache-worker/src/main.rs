@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aurcache_worker::agent;
 use aurcache_worker::config::Config;
@@ -103,30 +103,42 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
-/// Say whether a build that is not offered the SSH key -- by `build_ssh_key`
-/// or `WORKER_GIT_SSH_PACKAGES` -- is kept from it outside its chroot too.
+/// Why builds cannot be kept from the agent outside their chroot on this
+/// machine, as a clause for the startup log; `None` when they can.
+fn gate_gap(data_dir: &Path, gate: agent::HostSideGate) -> Option<String> {
+    match gate {
+        agent::HostSideGate::Enforced => None,
+        agent::HostSideGate::KernelCannot => Some(
+            "this kernel's Landlock cannot restrict UNIX sockets (that takes Landlock ABI 9, \
+             Linux 7.1 or later)"
+                .to_string(),
+        ),
+        agent::HostSideGate::PolicyMissesAgent => Some(format!(
+            "{} does not list the agent's directory, {} (add it to that file)",
+            agent::SANDBOX_POLICY,
+            agent::dir(data_dir).display()
+        )),
+    }
+}
+
+/// Say whether a build that `build_ssh_key` names no key for is kept from the
+/// agent outside its chroot too, as well as inside it.
 ///
 /// Inside the chroot it always is. Outside, it takes the sandbox, and so a
-/// kernel and a policy that can: where either cannot, the worker still builds,
-/// and says what that leaves open.
-fn announce_host_side_gate(data_dir: &std::path::Path) {
-    let agent = agent::dir(data_dir);
-    match agent::host_side_gate(data_dir) {
-        agent::HostSideGate::Enforced => tracing::info!(
+/// kernel and a policy that can: where either cannot, a worker without
+/// `WORKER_GIT_SSH_PACKAGES` still builds with its key, and says what that
+/// leaves open.
+fn announce_host_side_gate(data_dir: &Path, gate: agent::HostSideGate) {
+    match gate_gap(data_dir, gate) {
+        None => tracing::info!(
             "Builds not offered the SSH key are refused its agent outside their chroot \
              as well (Landlock)"
         ),
-        agent::HostSideGate::KernelCannot => tracing::warn!(
-            "This kernel's Landlock cannot restrict UNIX sockets (it needs ABI 9, Linux \
-             7.1): build_ssh_key and {PACKAGES_VAR} keep the SSH key out of a build's \
-             chroot, but not from its PKGBUILD code running outside the chroot"
-        ),
-        agent::HostSideGate::PolicyMissesAgent => tracing::warn!(
-            "{} does not list {}: build_ssh_key and {PACKAGES_VAR} keep the SSH key out \
-             of a build's chroot, but not from its PKGBUILD code running outside the \
-             chroot. Add that directory to the file",
-            agent::SANDBOX_POLICY,
-            agent.display()
+        Some(gap) => tracing::warn!(
+            "Builds are not kept from the SSH agent outside their chroot, because {gap}: \
+             build_ssh_key keeps the key out of the chroot of a build it names none for, \
+             but any build on this worker can reach it from its PKGBUILD code outside \
+             the chroot"
         ),
     }
 }
@@ -154,6 +166,47 @@ fn announce_ssh_packages(packages: &SshPackages, has_key: bool) {
     }
 }
 
+/// Start the build ssh-agent holding the key, unless this machine cannot keep
+/// the builds `WORKER_GIT_SSH_PACKAGES` leaves out away from it, and say what
+/// builds are offered.
+///
+/// `None` is a worker that holds no key: every build goes ahead without one.
+async fn start_agent(core: &CoreConfig, cfg: &Config) -> Option<agent::BuildAgent> {
+    let gate = agent::host_side_gate(&core.data_dir);
+    if !agent::may_start(&cfg.ssh_packages, gate) {
+        let gap = gate_gap(&core.data_dir, gate).unwrap_or_default();
+        tracing::error!(
+            "{PACKAGES_VAR} is set, but builds could not be kept from the SSH agent \
+             outside their chroot, because {gap}: this worker holds no SSH key, so \
+             {WITHOUT_KEY}"
+        );
+        return None;
+    }
+    let agent = match agent::start(
+        &core.data_dir,
+        credentials::resolve(cfg).path(),
+        &cfg.build_user,
+    )
+    .await
+    {
+        Ok(Some(a)) => {
+            tracing::info!(
+                "Build credential available through {}",
+                a.socket().display()
+            );
+            announce_host_side_gate(&core.data_dir, gate);
+            Some(a)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("Could not start the build ssh-agent ({e:#}); {WITHOUT_KEY}");
+            None
+        }
+    };
+    announce_ssh_packages(&cfg.ssh_packages, agent.is_some());
+    agent
+}
+
 async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // What a previous run left in the storage pool is swept when the
     // executor opens it, before anything can claim work.
@@ -165,29 +218,7 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // needing a restart. Held for the worker's lifetime: dropping it kills the
     // agent, so no stray agent outlives us holding a credential. The key is
     // read once, here: replacing it takes effect at the next restart.
-    let agent = match agent::start(
-        &core.data_dir,
-        credentials::resolve(&cfg).path(),
-        &cfg.build_user,
-    )
-    .await
-    {
-        Ok(Some(a)) => {
-            tracing::info!(
-                "Build credential available through {}",
-                a.socket().display()
-            );
-            announce_host_side_gate(&core.data_dir);
-            Some(a)
-        }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!("Could not start the build ssh-agent ({e:#}); {WITHOUT_KEY}");
-            None
-        }
-    };
-
-    announce_ssh_packages(&cfg.ssh_packages, agent.is_some());
+    let agent = start_agent(&core, &cfg).await;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;

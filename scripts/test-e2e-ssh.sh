@@ -37,6 +37,11 @@ set -euo pipefail
 #   5. not listed — the same key, but `WORKER_GIT_SSH_PACKAGES` names another
 #      package. The build MUST fail, and its log must say why.
 #
+# On a kernel whose Landlock cannot restrict UNIX sockets, a worker with
+# `WORKER_GIT_SSH_PACKAGES` set holds no key at all. Phase 2 then MUST fail,
+# and is run again without the list to prove the fetch; phase 5 fails for want
+# of a key, and its log says that instead.
+#
 #   ./scripts/test-e2e-ssh.sh [timeout]
 
 BUILD_TIMEOUT="${1:-900}"
@@ -143,7 +148,19 @@ fi
 log "    build failed as required"
 
 # ---- Phase 2: with the authorised key it must build ------------------------
+host_gate=enforced
 run_phase "authorised and listed (expect success)" "/keys/id_ed25519" "" "$FIXTURE"
+if dc logs builder 2>&1 | grep -q "is set, but builds could not be kept from the SSH agent"; then
+    # This machine cannot keep the list, so the worker must hold no key.
+    host_gate=unenforced
+    if [ "$phase_result" != "failed" ]; then
+        log "ERROR: build was '$phase_result' on a worker that says it holds no key"
+        dump_logs_on_failure
+        exit 1
+    fi
+    log "    WORKER_GIT_SSH_PACKAGES cannot be kept here: no key held, build failed as required"
+    run_phase "authorised, no WORKER_GIT_SSH_PACKAGES (expect success)" "/keys/id_ed25519"
+fi
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the authorised key"
     dump_logs_on_failure
@@ -163,7 +180,7 @@ fi
 # The image's sandbox must refuse the agent to builds outside their chroot
 # that were not offered it, which takes this kernel's Landlock and the shipped
 # policy. On a kernel without the right the worker says so instead, and this
-# only reports it: the in-chroot gate is what phase 3 checks.
+# only reports it: the in-chroot gate is what phase 5 checks.
 if dc logs builder 2>&1 | grep -q "refused its agent outside their chroot as well"; then
     log "    host-side gate enforced (Landlock)"
 elif dc logs builder 2>&1 | grep -q "Landlock cannot restrict UNIX sockets"; then
@@ -221,7 +238,11 @@ if [ "$phase_result" != "failed" ]; then
     dump_logs_on_failure
     exit 1
 fi
-expected="no SSH key offered: $FIXTURE is not in this worker's WORKER_GIT_SSH_PACKAGES"
+if [ "$host_gate" = enforced ]; then
+    expected="no SSH key offered: $FIXTURE is not in this worker's WORKER_GIT_SSH_PACKAGES"
+else
+    expected="this worker holds no SSH key named \"default\""
+fi
 if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "$expected"; then
     log "ERROR: the build log of $CURRENT_BUILD_REF does not say why it had no key"
     log "       (expected: $expected)"
