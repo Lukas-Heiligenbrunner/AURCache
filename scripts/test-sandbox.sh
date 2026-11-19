@@ -22,7 +22,10 @@
 # the patched script installs it before the build under
 # `aurcache-sandbox offline`, where the scriptlet reaches nothing -- and the
 # build that follows cannot use sudo at all. The scriptlet, as root, also
-# plants links and settings for host root to follow out of the copy.
+# tries the ways around a network policy matched on the build's cgroup (raw
+# packets, mounting, the kernel keyring), plants links and settings for host
+# root to follow out of the copy, and leaves an /etc/profile.d script that
+# tries the same ways around from the build's container, where root runs it.
 #
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
@@ -136,8 +139,28 @@ fi
 # records whether it still holds CAP_SYS_ADMIN and CAP_SYS_PTRACE, which
 # such an escape takes.
 mkdir -p /job/netprobe && cd /job/netprobe
+# What root in a container could use: the ways around a network policy on
+# the build's cgroup, and a device node, which opens the host's device where
+# the container has no device policy. Each is recorded in $1 as allowed or
+# refused; the keyring's refusal is recorded by its reason, which says whose
+# filter refused it.
+cat > escapes <<'ESCAPES'
+#!/bin/bash
+mkdir -p "$1" && cd "$1" || exit 1
+try() {
+    local name=$1
+    shift
+    if "$@" >/dev/null 2>&1; then echo allowed; else echo refused; fi > "$name"
+}
+try raw perl -MSocket -e 'socket(my $s, 17, SOCK_RAW, 0) or exit 1'
+try mount mount -t tmpfs aurcache-netprobe /mnt
+try userns-mount unshare -rm mount -t tmpfs aurcache-netprobe /mnt
+try mknod mknod /dev/aurcache-netprobe c 1 3
+if out=$(keyctl add user aurcache-netprobe 1 @s 2>&1); then echo allowed; else echo "${out##*: }"; fi > keyring
+ESCAPES
 cat > netprobe.install <<'INSTALL'
 post_install() {
+    aurcache-netprobe-escapes /var/lib/aurcache-netprobe/escapes
     # Links out of the copy, and settings that would have host root bind
     # /srv/canary into the build or run a command: all resolve inside the
     # container, and none may reach the host's /srv/canary.
@@ -149,6 +172,9 @@ post_install() {
     sed -i 's|^CacheDir *= *|CacheDir = /srv/canary/ |' /etc/pacman.conf
     echo 'CARCH=x86_64$(touch /srv/canary/evaled 2>/dev/null; :)' >> /etc/makepkg.conf
     rm -rf /srcpkgdest && ln -s /srv/canary /srcpkgdest
+    # Root sources this as the build's container starts.
+    echo 'if [ "$(id -u)" = 0 ]; then aurcache-netprobe-escapes /startdir/root-escapes; fi' \
+        > /etc/profile.d/aurcache-netprobe.sh
     mkdir -p /var/lib/aurcache-netprobe && cd /var/lib/aurcache-netprobe
     if (exec 3<>/dev/tcp/127.0.0.1/7777) 2>/dev/null; then echo reached; else echo blocked; fi > tcp
     if (exec 3>/dev/udp/127.0.0.1/7777 && echo udp >&3) 2>/dev/null; then echo sent; else echo blocked; fi > udp
@@ -164,7 +190,7 @@ post_install() {
     echo "$(( 0x$bnd >> 21 & 1 ))$(( 0x$bnd >> 19 & 1 ))" > admin-ptrace
 }
 INSTALL
-printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { :; }\n' > PKGBUILD
+printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { install -Dm755 "$startdir/escapes" "$pkgdir/usr/bin/aurcache-netprobe-escapes"; }\n' > PKGBUILD
 chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
 cp /job/netprobe/*.pkg.tar.zst /srv/aurcache/
 repo-add -q /srv/aurcache/aurcache.db.tar.gz /srv/aurcache/aurcache-netprobe-*.pkg.tar.zst
@@ -234,6 +260,10 @@ echo "sudoers=$([ -e /chroot/job1/etc/sudoers.d/builduser-pacman ] && echo prese
 echo "canary=$(ls -A /srv/canary | paste -sd, -)"
 echo "canary_victim=$(cat /srv/canary/victim 2>/dev/null || echo missing)"
 echo "canary_bind=$(cat /job/pkg/canary-bind 2>/dev/null || echo missing)"
+for e in raw mount userns-mount mknod keyring; do
+    echo "install_$e=$(cat "/chroot/job1/var/lib/aurcache-netprobe/escapes/$e" 2>/dev/null || echo missing)"
+    echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
+done
 [[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
 EOF
 
@@ -274,6 +304,11 @@ check "unconfined: scriptlet holds SYS_ADMIN, SYS_PTRACE" 11 "$(get scriptlet_ad
 check "unconfined: build can sudo pacman"   allowed "$(get build_sudo "$unconfined")"
 check "unconfined: build can install"       allowed "$(get build_sudo_install "$unconfined")"
 check "unconfined: host root follows a planted srcpkgdest" "" "$(get canary "$unconfined")"
+check "unconfined: root may open a packet socket" allowed "$(get install_raw "$unconfined")"
+check "unconfined: root may mount"           allowed "$(get install_mount "$unconfined")"
+check "unconfined: root may mount in a user namespace" allowed "$(get install_userns-mount "$unconfined")"
+check "unconfined: root may make a device node" allowed "$(get install_mknod "$unconfined")"
+check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -300,6 +335,17 @@ check "confined:   no sudoers entry"        absent  "$(get sudoers "$confined")"
 check "confined:   host's /srv/canary untouched" host-only,victim "$(get canary "$confined")"
 check "confined:   host's /srv/canary/victim intact" intact "$(get canary_victim "$confined")"
 check "confined:   build binds nothing the copy names" absent "$(get canary_bind "$confined")"
+# Neither the install nor root in the build's container gets around a
+# network policy on the build's cgroup. The install's keyring is refused by
+# the sandbox's own filter, the build's by nspawn's.
+for where in install build_root; do
+    check "confined:   $where: no packet socket" refused "$(get "${where}_raw" "$confined")"
+    check "confined:   $where: no mount"         refused "$(get "${where}_mount" "$confined")"
+    check "confined:   $where: no mount in a user namespace" refused "$(get "${where}_userns-mount" "$confined")"
+    check "confined:   $where: no device node"   refused "$(get "${where}_mknod" "$confined")"
+done
+check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
+check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
 
 if (( fail )); then
     echo "==> FAILED"
