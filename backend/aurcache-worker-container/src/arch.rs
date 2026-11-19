@@ -21,9 +21,50 @@ pub fn platform(arch: &str) -> Option<Platform> {
     Some(Platform { arch, variant })
 }
 
+/// Refuse the architectures a worker advertises (`WORKER_ARCHES`, or the
+/// machine's own) when one has no platform. A worker that runs each build in an image pulled for its
+/// platform would advertise it, claim its builds and refuse every one.
+///
+/// # Errors
+///
+/// Naming each architecture that has none.
+pub fn check(arches: &[String]) -> anyhow::Result<()> {
+    let unknown: Vec<&str> = arches
+        .iter()
+        .map(String::as_str)
+        .filter(|arch| platform(arch).is_none())
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "this worker has no container platform for {} (WORKER_ARCHES, or the machine's own \
+         when that is unset); it builds for {}",
+        unknown.join(", "),
+        KNOWN.join(", ")
+    )
+}
+
+/// Every architecture with a platform.
+const KNOWN: [&str; 4] = ["x86_64", "aarch64", "armv7h", "riscv64"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_known_architecture_has_a_platform() {
+        assert!(KNOWN.iter().all(|arch| platform(arch).is_some()));
+        assert!(check(&KNOWN.map(String::from)).is_ok());
+    }
+
+    #[test]
+    fn a_list_with_an_unknown_architecture_is_refused_naming_it() {
+        let arches = ["x86_64", "i686", "amd64"].map(String::from);
+        let refused = check(&arches).unwrap_err().to_string();
+        assert!(refused.contains("platform for i686, amd64 ("), "{refused}");
+        assert!(check(&[]).is_ok());
+    }
 
     fn named(arch: &'static str, variant: Option<&'static str>) -> Platform {
         Platform { arch, variant }
