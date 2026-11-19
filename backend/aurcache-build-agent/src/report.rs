@@ -1,6 +1,4 @@
-//! What the agent hands back: how the build ended and what it measured, and,
-//! for a worker that reaches the container only through `exec`, the packages
-//! it left and what a reachability probe found.
+//! What the agent hands back: how the build ended and what it measured.
 //!
 //! Within one [`INTERFACE`](crate::spec::INTERFACE) these types only gain
 //! optional fields; anything else is the next interface.
