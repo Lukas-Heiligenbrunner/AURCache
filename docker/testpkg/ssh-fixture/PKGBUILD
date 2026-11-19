@@ -1,9 +1,11 @@
 # Fixture for the SSH-credential end-to-end test.
 #
-# The source is fetched over git+ssh *during the build*, so it only succeeds if
-# the worker's credential reached makepkg inside the chroot — which is the one
-# part of the credential path that unit tests cannot cover, because it depends
-# on makechrootpkg's uid mapping.
+# The payload is fetched over git+ssh twice: through `source=`, which makepkg
+# fetches on the worker before the chroot is entered, and by `prepare()`,
+# inside the chroot, as a package that clones for itself does. Each succeeds
+# only if the worker's credential reached where it ran -- the part of the
+# credential path that unit tests cannot cover, because it depends on
+# makechrootpkg's uid mapping and on what the chroot has bound in.
 pkgname=aurcache-ssh-test
 pkgver=1.0.0
 pkgrel=1
@@ -15,7 +17,13 @@ makedepends=('git' 'openssh')
 source=('payload::git+ssh://git@gitssh/srv/git/payload.git')
 sha256sums=('SKIP')
 
+prepare() {
+  git clone -q ssh://git@gitssh/srv/git/payload.git "$srcdir/cloned"
+}
+
 package() {
   install -Dm644 "$srcdir/payload/marker.txt" \
     "${pkgdir}/usr/share/aurcache-ssh-test/marker.txt"
+  install -Dm644 "$srcdir/cloned/marker.txt" \
+    "${pkgdir}/usr/share/aurcache-ssh-test/cloned-marker.txt"
 }
