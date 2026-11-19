@@ -6,23 +6,27 @@
 //!
 //! For installing a build's dependencies, which runs other packages'
 //! `.install` scriptlets and alpm hooks as root: whatever they do, they reach
-//! no other machine. Root here is not trusted with less than that, and no
-//! privilege is needed to apply any of it, so it holds the same in a
-//! container whose root has no `CAP_SYS_ADMIN`:
+//! no other machine. Every layer that can be applied is, in this order:
 //!
-//! - `no_new_privs`, so no setuid binary or file capability undoes the rest;
-//! - `CAP_NET_RAW` and `CAP_NET_ADMIN` dropped from every capability set;
-//! - a seccomp filter allowing only `AF_UNIX` sockets and no io_uring
-//!   (`seccomp.rs`): IP of any kind, packet sockets and netlink fail with
-//!   `EAFNOSUPPORT`, on any kernel;
-//! - Landlock as far as the kernel goes: no TCP (ABI v4), no abstract UNIX
-//!   socket or signal outside the sandbox (v6), and no connecting to a
-//!   socket by path (v9). The filesystem is otherwise left alone: the
-//!   install writes wherever packages go.
+//! 1. `no_new_privs`, so no setuid binary or file capability undoes the rest;
+//! 2. a network namespace of its own, with nothing in it (its loopback is
+//!    left down), where creating one is permitted: root with
+//!    `CAP_SYS_ADMIN`, as in a chroot worker's container;
+//! 3. a seccomp filter allowing only `AF_UNIX` sockets and no io_uring
+//!    (`seccomp.rs`): IP of any kind, packet sockets and netlink fail with
+//!    `EAFNOSUPPORT`. It needs no privilege, but an emulated process cannot
+//!    install one;
+//! 4. `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE`
+//!    dropped from every capability set, the bounding set included: without
+//!    the last two, root could `setns` back into a namespace with network
+//!    through any process still in one, or ptrace such a process;
+//! 5. Landlock as far as the kernel goes: no TCP (ABI v4), no abstract UNIX
+//!    socket or signal outside the sandbox (v6), and no connecting to a
+//!    socket by path (v9). The filesystem is otherwise left alone: the
+//!    install writes wherever packages go.
 //!
-//! The seccomp filter is the boundary and is required; on an architecture
-//! it has not been written for, the profile refuses rather than running
-//! with less. The Landlock layer is best effort.
+//! Either of the two network layers keeps the program offline on its own;
+//! with neither, the profile refuses. It says on stderr which applied.
 
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -30,26 +34,83 @@ use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, Scope,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus,
+    Scope,
 };
 
 use crate::seccomp;
 
 /// The newest Landlock ABI this knows the rights of.
 const LANDLOCK_ABI: ABI = ABI::V9;
+const LANDLOCK_ABI_NUMBER: i64 = 9;
 
 /// `linux/capability.h`.
 const CAP_SETPCAP: u32 = 8;
 const CAP_NET_ADMIN: u32 = 12;
 const CAP_NET_RAW: u32 = 13;
+const CAP_SYS_PTRACE: u32 = 19;
+const CAP_SYS_ADMIN: u32 = 21;
 const CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 
-/// The capabilities a program without network has no use for.
-const DROPPED: [u32; 2] = [CAP_NET_ADMIN, CAP_NET_RAW];
+/// The capabilities taken away: the two a program without network has no
+/// use for, and the two that would let root leave its namespace again.
+const DROPPED: [u32; 4] = [CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN, CAP_SYS_PTRACE];
 
 struct Request {
     program: OsString,
     args: Vec<OsString>,
+}
+
+/// Whether one layer took, and why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Layer {
+    Applied,
+    Unavailable(String),
+}
+
+/// How much of Landlock this kernel enforced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Landlock {
+    /// The rights of this ABI, which is the kernel's or this binary's
+    /// newest, whichever is older.
+    Abi(i64),
+    Unavailable,
+}
+
+/// What the profile managed to apply.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Layers {
+    netns: Layer,
+    seccomp: Layer,
+    landlock: Landlock,
+}
+
+impl Layers {
+    /// Refuse unless at least one of the two network layers applied.
+    fn check(&self) -> Result<(), String> {
+        match (&self.netns, &self.seccomp) {
+            (Layer::Unavailable(netns), Layer::Unavailable(seccomp)) => Err(format!(
+                "no network layer applied: no network namespace ({netns}), \
+                 and no seccomp filter ({seccomp})"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The layers that applied, as the log line names them.
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.netns == Layer::Applied {
+            parts.push("netns".to_string());
+        }
+        if self.seccomp == Layer::Applied {
+            parts.push("seccomp".to_string());
+        }
+        if let Landlock::Abi(abi) = self.landlock {
+            parts.push(format!("landlock(abi {abi})"));
+        }
+        parts.join("+")
+    }
 }
 
 pub fn main(args: impl Iterator<Item = OsString>) -> ExitCode {
@@ -83,10 +144,6 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Request, Strin
 
 /// Confine this process and exec the program; returns only on failure.
 fn run(request: &Request) -> Result<Infallible, String> {
-    let arch = seccomp::native()
-        .ok_or("no seccomp filter is written for this architecture, and it is the boundary")?;
-    let filter = seccomp::program(&arch);
-
     // SAFETY: a plain prctl; it cannot be undone, which is the point.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(format!(
@@ -94,22 +151,19 @@ fn run(request: &Request) -> Result<Infallible, String> {
             std::io::Error::last_os_error()
         ));
     }
+    // The namespace before the capabilities go: creating one takes
+    // CAP_SYS_ADMIN.
+    let netns = enter_netns();
+    let seccomp = install_seccomp();
     drop_capabilities()?;
-    layer_landlock()?;
-    // Last: everything above makes system calls the filter does not concern
-    // itself with, but nothing after it but the exec should run confined by
-    // only part of the profile.
-    seccomp::install(&filter).map_err(|e| {
-        // qemu's user-mode emulation refuses every filter, so an emulated
-        // worker lands here: there is no filter it could install that would
-        // describe the system calls the host actually sees.
-        let emulated = if e.raw_os_error() == Some(libc::EINVAL) {
-            " (an emulated process cannot install one)"
-        } else {
-            ""
-        };
-        format!("cannot install the seccomp filter: {e}{emulated}")
-    })?;
+    let landlock = layer_landlock()?;
+    let layers = Layers {
+        netns,
+        seccomp,
+        landlock,
+    };
+    layers.check()?;
+    eprintln!("aurcache-sandbox offline: {}", layers.summary());
 
     let err = std::process::Command::new(&request.program)
         .args(&request.args)
@@ -118,6 +172,33 @@ fn run(request: &Request) -> Result<Infallible, String> {
         "cannot execute {}: {err}",
         request.program.to_string_lossy()
     ))
+}
+
+/// Leave the network namespace this was started in for a new, empty one.
+fn enter_netns() -> Layer {
+    // SAFETY: a plain system call on this single-threaded process.
+    if unsafe { libc::unshare(libc::CLONE_NEWNET) } == 0 {
+        Layer::Applied
+    } else {
+        Layer::Unavailable(std::io::Error::last_os_error().to_string())
+    }
+}
+
+/// The socket-family filter, where this architecture has one and this
+/// process can install it.
+fn install_seccomp() -> Layer {
+    let Some(arch) = seccomp::native() else {
+        return Layer::Unavailable("none is written for this architecture".into());
+    };
+    match seccomp::install(&seccomp::program(&arch)) {
+        Ok(()) => Layer::Applied,
+        // qemu's user-mode emulation refuses every filter: none it could
+        // install would describe the system calls the host actually sees.
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+            Layer::Unavailable(format!("{e}; an emulated process cannot install one"))
+        }
+        Err(e) => Layer::Unavailable(e.to_string()),
+    }
 }
 
 #[repr(C)]
@@ -138,9 +219,9 @@ struct CapData {
 /// inheritable sets.
 ///
 /// Dropping from the bounding set takes `CAP_SETPCAP`, which root has and
-/// an unprivileged caller does not; such a caller holds neither capability
-/// and, under `no_new_privs`, cannot gain one by exec, so for it the
-/// bounding set is left as it is.
+/// an unprivileged caller does not; such a caller holds none of them and,
+/// under `no_new_privs`, cannot gain one by exec, so for it the bounding set
+/// is left as it is.
 fn drop_capabilities() -> Result<(), String> {
     let mut header = CapHeader {
         version: CAPABILITY_VERSION_3,
@@ -183,8 +264,8 @@ fn drop_capabilities() -> Result<(), String> {
 /// Of the filesystem rights only connecting to a socket by path is handled,
 /// with no rule granting it anywhere: the install reaches no daemon through
 /// the chroot, and every other right stays the permissions' business.
-fn layer_landlock() -> Result<(), String> {
-    Ruleset::default()
+fn layer_landlock() -> Result<Landlock, String> {
+    let status = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessNet::from_all(LANDLOCK_ABI))
         .and_then(|r| r.handle_access(AccessFs::ResolveUnix))
@@ -192,7 +273,29 @@ fn layer_landlock() -> Result<(), String> {
         .and_then(Ruleset::create)
         .and_then(landlock::RulesetCreated::restrict_self)
         .map_err(|e| format!("cannot apply the Landlock layer: {e}"))?;
-    Ok(())
+    if status.ruleset == RulesetStatus::NotEnforced {
+        return Ok(Landlock::Unavailable);
+    }
+    Ok(kernel_landlock_abi().map_or(Landlock::Unavailable, |abi| {
+        Landlock::Abi(abi.min(LANDLOCK_ABI_NUMBER))
+    }))
+}
+
+/// The Landlock ABI the running kernel speaks.
+fn kernel_landlock_abi() -> Option<i64> {
+    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+    // SAFETY: the version query takes no ruleset and returns a number.
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    // `c_long` is 32 bits wide on armv7.
+    #[allow(clippy::useless_conversion)]
+    (abi > 0).then(|| i64::from(abi))
 }
 
 #[cfg(test)]
@@ -204,6 +307,10 @@ mod tests {
             .map(OsString::from)
             .collect::<Vec<_>>()
             .into_iter()
+    }
+
+    fn unavailable(why: &str) -> Layer {
+        Layer::Unavailable(why.to_string())
     }
 
     #[test]
@@ -220,10 +327,58 @@ mod tests {
         assert!(parse_args(args(&[])).is_err());
     }
 
-    /// The filter is the boundary, so every target the worker is built for
-    /// must have one.
+    /// Every target the worker is built for has a filter.
     #[test]
     fn this_target_has_a_filter() {
         assert!(seccomp::native().is_some());
+    }
+
+    #[test]
+    fn every_layer_is_named() {
+        let layers = Layers {
+            netns: Layer::Applied,
+            seccomp: Layer::Applied,
+            landlock: Landlock::Abi(9),
+        };
+        assert!(layers.check().is_ok());
+        assert_eq!(layers.summary(), "netns+seccomp+landlock(abi 9)");
+    }
+
+    /// In a container whose root cannot unshare, the filter alone holds.
+    #[test]
+    fn seccomp_alone_is_enough() {
+        let layers = Layers {
+            netns: unavailable("Operation not permitted"),
+            seccomp: Layer::Applied,
+            landlock: Landlock::Abi(6),
+        };
+        assert!(layers.check().is_ok());
+        assert_eq!(layers.summary(), "seccomp+landlock(abi 6)");
+    }
+
+    /// Emulated, the filter cannot be installed, and the namespace holds.
+    #[test]
+    fn a_namespace_alone_is_enough() {
+        let layers = Layers {
+            netns: Layer::Applied,
+            seccomp: unavailable("Invalid argument; an emulated process cannot install one"),
+            landlock: Landlock::Unavailable,
+        };
+        assert!(layers.check().is_ok());
+        assert_eq!(layers.summary(), "netns");
+    }
+
+    /// Landlock is no network layer of its own: its UDP rights are newer
+    /// than this binary knows, so it alone would leave UDP open.
+    #[test]
+    fn neither_network_layer_is_a_refusal() {
+        let layers = Layers {
+            netns: unavailable("Operation not permitted"),
+            seccomp: unavailable("Invalid argument; an emulated process cannot install one"),
+            landlock: Landlock::Abi(9),
+        };
+        let err = layers.check().unwrap_err();
+        assert!(err.contains("Operation not permitted"), "{err}");
+        assert!(err.contains("emulated"), "{err}");
     }
 }

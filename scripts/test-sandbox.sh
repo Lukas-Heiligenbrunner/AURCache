@@ -128,7 +128,10 @@ else
 fi
 
 # The dependency, from the same repository: its scriptlet records whether
-# TCP and UDP reached the listener, and the listener what it heard.
+# TCP and UDP reached the listener, and the listener what it heard. It also
+# tries to leave its network namespace for any other one it can see, and
+# records whether it still holds CAP_SYS_ADMIN and CAP_SYS_PTRACE, which
+# such an escape takes.
 mkdir -p /job/netprobe && cd /job/netprobe
 cat > netprobe.install <<'INSTALL'
 post_install() {
@@ -136,6 +139,15 @@ post_install() {
     if (exec 3<>/dev/tcp/127.0.0.1/7777) 2>/dev/null; then echo reached; else echo blocked; fi > tcp
     if (exec 3>/dev/udp/127.0.0.1/7777 && echo udp >&3) 2>/dev/null; then echo sent; else echo blocked; fi > udp
     awk '/^NoNewPrivs:/ {print $2}' /proc/self/status > nnp
+    for ns in /proc/[0-9]*/ns/net; do
+        if nsenter --net="$ns" bash -c 'exec 3<>/dev/tcp/127.0.0.1/7777' 2>/dev/null; then
+            echo reached
+            break
+        fi
+    done > escape
+    [ -s escape ] || echo blocked > escape
+    bnd=$(awk '/^CapBnd:/ {print $2}' /proc/self/status)
+    echo "$(( 0x$bnd >> 21 & 1 ))$(( 0x$bnd >> 19 & 1 ))" > admin-ptrace
 }
 INSTALL
 printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { :; }\n' > PKGBUILD
@@ -194,6 +206,10 @@ echo "dep=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-netprobe 2>&1)"
 echo "scriptlet_tcp=$(cat /chroot/job1/var/lib/aurcache-netprobe/tcp 2>/dev/null || echo missing)"
 echo "scriptlet_udp=$(cat /chroot/job1/var/lib/aurcache-netprobe/udp 2>/dev/null || echo missing)"
 echo "scriptlet_nnp=$(cat /chroot/job1/var/lib/aurcache-netprobe/nnp 2>/dev/null || echo missing)"
+echo "scriptlet_escape=$(cat /chroot/job1/var/lib/aurcache-netprobe/escape 2>/dev/null || echo missing)"
+echo "scriptlet_admin_ptrace=$(cat /chroot/job1/var/lib/aurcache-netprobe/admin-ptrace 2>/dev/null || echo missing)"
+# The sandbox names the layers it applied; both network ones must have.
+echo "offline_layers=$(grep -o 'aurcache-sandbox offline: netns+seccomp' /tmp/build.log | head -n 1 | cut -d' ' -f3)"
 echo "official=$(pacman -b /chroot/job1/var/lib/pacman -Qq tree 2>&1)"
 echo "heard=$(sort -u /tmp/heard | paste -sd, -)"
 echo "build_sudo=$(cat /job/pkg/sudo 2>/dev/null || echo missing)"
@@ -235,6 +251,8 @@ check "unconfined: scriptlet reaches TCP"   reached "$(get scriptlet_tcp "$uncon
 check "unconfined: scriptlet sends UDP"     sent    "$(get scriptlet_udp "$unconfined")"
 check "unconfined: listener hears both"     tcp,udp "$(get heard "$unconfined")"
 check "unconfined: scriptlet may gain privileges" 0 "$(get scriptlet_nnp "$unconfined")"
+check "unconfined: scriptlet reaches TCP through nsenter" reached "$(get scriptlet_escape "$unconfined")"
+check "unconfined: scriptlet holds SYS_ADMIN, SYS_PTRACE" 11 "$(get scriptlet_admin_ptrace "$unconfined")"
 check "unconfined: build can sudo pacman"   allowed "$(get build_sudo "$unconfined")"
 check "unconfined: build can install"       allowed "$(get build_sudo_install "$unconfined")"
 # With it, every write is denied and the build still succeeds.
@@ -251,6 +269,9 @@ check "confined:   scriptlet has no TCP"    blocked "$(get scriptlet_tcp "$confi
 check "confined:   scriptlet has no UDP"    blocked "$(get scriptlet_udp "$confined")"
 check "confined:   listener hears nothing"  ""      "$(get heard "$confined")"
 check "confined:   scriptlet has no_new_privs" 1    "$(get scriptlet_nnp "$confined")"
+check "confined:   scriptlet cannot nsenter out" blocked "$(get scriptlet_escape "$confined")"
+check "confined:   SYS_ADMIN, SYS_PTRACE dropped" 00  "$(get scriptlet_admin_ptrace "$confined")"
+check "confined:   install in netns and seccomp" netns+seccomp "$(get offline_layers "$confined")"
 check "confined:   signed official dep installed" tree "$(get official "$confined")"
 check "confined:   build cannot sudo pacman" refused "$(get build_sudo "$confined")"
 check "confined:   build cannot install"    refused "$(get build_sudo_install "$confined")"
