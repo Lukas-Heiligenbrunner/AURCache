@@ -31,7 +31,7 @@ use aurcache_common::api::dump::{
     DumpSecrets, DumpSettings, DumpSsh, DumpSshKey, DumpToken, DumpWorker, ExistingPackagePolicy,
     MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome,
     SETTINGS_FILE, SSH_KEY_FILE, SSH_KNOWN_HOSTS_FILE, SSH_PUBLIC_KEY_FILE, SecretsPolicy,
-    TOKENS_FILE, WORKERS_FILE,
+    SshKeyChange, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -47,7 +47,7 @@ use crate::repository::Repository;
 use crate::services::Services;
 use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
-use crate::ssh::{HostsRestored, KeyRestored, SshAccess, SshPlan, SshRestoreMode};
+use crate::ssh::{SshAccess, SshPlan, SshRestoreMode, SshRestored};
 use aurcache_activitylog::events::{Event, RestoreStep};
 use std::sync::Arc;
 
@@ -258,15 +258,18 @@ pub async fn preview(
     let mut entries = Vec::new();
     // The secrets a real restore would refuse on, said up front -- and then
     // nothing else, since a refused restore imports no package either.
-    if let Err(e) = plan_ssh(ssh, dump, options).await {
-        entries.push(RestoreEntry {
-            pkgbase: String::new(),
-            outcome: RestoreOutcome::Failed {
-                error: format!("nothing would be imported: {e:#}"),
-            },
-        });
-        return Ok(entries);
-    }
+    let ssh_plan = match plan_ssh(ssh, dump, options).await {
+        Ok(plan) => plan,
+        Err(e) => {
+            entries.push(RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::Failed {
+                    error: format!("nothing would be imported: {e:#}"),
+                },
+            });
+            return Ok(entries);
+        }
+    };
     for pkgbase in dump.packages.keys() {
         let existing = package_row(db, pkgbase).await?;
         let dump_patch = dump.patches.get(pkgbase);
@@ -288,6 +291,9 @@ pub async fn preview(
             },
         });
     }
+    // What the SSH key and the trusted host keys would come to, after the
+    // packages: they are about the server, not one of them.
+    entries.extend(ssh_entries(ssh_plan.expected()));
     Ok(entries)
 }
 
@@ -408,7 +414,7 @@ pub async fn apply(
             .await;
         }
     }
-    if let Err(e) = apply_ssh(services, ssh_plan).await {
+    if let Err(e) = apply_ssh(services, ssh_plan, &progress).await {
         report_failure(
             &progress,
             "",
@@ -581,105 +587,89 @@ pub async fn plan_ssh(
 /// rolled-back transaction takes back. What happened is logged, and what an
 /// operator has to act on -- a key the remotes may not know -- is in the
 /// activity log too.
-async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
+async fn apply_ssh(
+    services: &Services,
+    plan: SshPlan,
+    progress: &Sender<RestoreEntry>,
+) -> anyhow::Result<()> {
     let ssh = Arc::clone(services.store.ssh());
-    match tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await? {
-        Ok(restored) => {
-            report_key(services, restored.key);
-            report_hosts(&restored.known_hosts);
-            Ok(())
-        }
-        Err(partial) => {
-            // What did change is said as it would be on success, so the
-            // failure is not taken to mean nothing did.
-            report_key(services, partial.key);
-            report_hosts(&partial.known_hosts);
-            Err(partial.error)
-        }
+    let applied = tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await?;
+    // What did change is said as it would be on success, so the failure is
+    // not taken to mean nothing did.
+    let restored = match &applied {
+        Ok(restored) => restored.clone(),
+        Err(partial) => SshRestored {
+            key: partial.key.clone(),
+            known_hosts: partial.known_hosts.clone(),
+        },
+    };
+    report_key(services, &restored.key);
+    tracing::info!(
+        "Restore: SSH host keys: {}",
+        restored.known_hosts.sentence()
+    );
+    for entry in ssh_entries(restored) {
+        let _ = progress.send(entry).await;
     }
+    applied.map(drop).map_err(|partial| partial.error)
+}
+
+/// The report lines for what the SSH key and the trusted host keys come to.
+fn ssh_entries(restored: SshRestored) -> Vec<RestoreEntry> {
+    vec![
+        RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::SshKey {
+                change: restored.key,
+            },
+        },
+        RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::SshKnownHosts {
+                change: restored.known_hosts,
+            },
+        },
+    ]
 }
 
 /// Log what a restore did with the SSH key, and put in the activity log what
 /// an operator has to act on: a key the remotes may not know.
-fn report_key(services: &Services, key: KeyRestored) {
+fn report_key(services: &Services, key: &SshKeyChange) {
+    tracing::info!("Restore: SSH key: {}", key.sentence());
+    let superseded = |fingerprint: &str, configured: &str| {
+        tracing::warn!(
+            "The dump's SSH key ({fingerprint}) is not the one this server clones with: \
+             AURCACHE_GIT_SSH_KEY names {configured}, a different key, which the restore leaves \
+             alone"
+        );
+        services.activity.emit(Event::RestoreSshKeySuperseded {
+            fingerprint: fingerprint.to_string(),
+            configured: configured.to_string(),
+        });
+    };
     match key {
-        KeyRestored::Untouched | KeyRestored::Unchanged => {}
-        KeyRestored::Installed {
+        SshKeyChange::Kept
+        | SshKeyChange::AlreadyHere { .. }
+        | SshKeyChange::LeftToOperator { same_key: true, .. } => {}
+        SshKeyChange::Installed {
             fingerprint,
             previous,
-        } => {
-            match &previous {
-                Some(previous) => tracing::info!(
-                    "Restored the dump's SSH key ({fingerprint}); cloning with it. The key it \
-                     replaced is kept at {}",
-                    previous.display()
-                ),
-                None => {
-                    tracing::info!("Restored the dump's SSH key ({fingerprint}); cloning with it");
-                }
-            }
-            services.activity.emit(Event::RestoreSshKeyReplaced {
-                fingerprint,
-                previous: previous.map(|p| p.display().to_string()),
-            });
-        }
-        KeyRestored::Beside {
-            fingerprint,
-            configured,
-            same_key: true,
-            ..
-        }
-        | KeyRestored::Skipped {
-            fingerprint,
-            configured,
-            same_key: true,
-        } => tracing::info!(
-            "The dump's SSH key ({fingerprint}) is the one AURCACHE_GIT_SSH_KEY ({}) names, \
-             which stays in use",
-            configured.display()
-        ),
-        KeyRestored::Beside {
+        } => services.activity.emit(Event::RestoreSshKeyReplaced {
+            fingerprint: fingerprint.clone(),
+            previous: previous.clone(),
+        }),
+        SshKeyChange::Beside {
             fingerprint,
             configured,
             ..
-        }
-        | KeyRestored::Skipped {
+        } => superseded(fingerprint, configured),
+        SshKeyChange::LeftToOperator {
             fingerprint,
             configured,
-            ..
-        } => {
-            tracing::warn!(
-                "The dump's SSH key ({fingerprint}) is not the one this server clones with: \
-                 AURCACHE_GIT_SSH_KEY names {}, a different key, which the restore leaves alone",
-                configured.display()
-            );
-            services.activity.emit(Event::RestoreSshKeySuperseded {
-                fingerprint,
-                configured: configured.display().to_string(),
-            });
-        }
-    }
-}
-
-/// Log what a restore did with the trusted host keys.
-fn report_hosts(known_hosts: &HostsRestored) {
-    match known_hosts {
-        HostsRestored::Untouched => {}
-        HostsRestored::Merged { file, added } => tracing::info!(
-            "Added {added} of the dump's trusted SSH host keys to {}",
-            file.display()
-        ),
-        HostsRestored::Replaced { file, previous } => tracing::info!(
-            "Replaced {} with the dump's trusted SSH host keys, as a cleared server starts{}",
-            file.display(),
-            previous.as_ref().map_or_else(String::new, |p| format!(
-                "; the previous ones are kept at {}",
-                p.display()
-            ))
-        ),
-        HostsRestored::Pinned { file } => tracing::info!(
-            "Kept AURCACHE_SSH_KNOWN_HOSTS ({}) rather than the dump's trusted SSH host keys",
-            file.display()
+            same_key: false,
+        } => superseded(
+            fingerprint.as_deref().unwrap_or("an unreadable key"),
+            configured,
         ),
     }
 }

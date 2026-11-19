@@ -1,7 +1,9 @@
 //! What a dump carries, and what it deliberately leaves behind.
 
 use aurcache_activitylog::activity_utils::ActivityLog;
-use aurcache_common::api::dump::{DUMP_SCHEMA_VERSION, MANIFEST_FILE, PACKAGES_FILE};
+use aurcache_common::api::dump::{
+    DUMP_SCHEMA_VERSION, KnownHostsChange, MANIFEST_FILE, PACKAGES_FILE, SshKeyChange,
+};
 use aurcache_common::build_state::BuildState;
 use aurcache_common::source::GitSourceSpec;
 use aurcache_db::packages::SourceData;
@@ -1669,6 +1671,9 @@ struct Restored {
     db: DatabaseConnection,
     store: Arc<aurcache_utils::snapshot::SnapshotStore>,
     failures: Vec<String>,
+    /// What the restore said of the SSH key, and of the trusted host keys.
+    key: Option<SshKeyChange>,
+    known_hosts: Option<KnownHostsChange>,
 }
 
 /// Restore `bytes` into a fresh database with `ssh` as the server's SSH.
@@ -1700,15 +1705,22 @@ async fn restore_with_ssh(bytes: &[u8], ssh: Arc<SshAccess>, options: RestoreOpt
     )
     .await;
     let mut failures = Vec::new();
+    let mut key = None;
+    let mut known_hosts = None;
     while let Ok(entry) = progress_rx.try_recv() {
-        if let RestoreOutcome::Failed { error } = entry.outcome {
-            failures.push(error);
+        match entry.outcome {
+            RestoreOutcome::Failed { error } => failures.push(error),
+            RestoreOutcome::SshKey { change } => key = Some(change),
+            RestoreOutcome::SshKnownHosts { change } => known_hosts = Some(change),
+            _ => {}
         }
     }
     Restored {
         db: target,
         store,
         failures,
+        key,
+        known_hosts,
     }
 }
 
@@ -1752,8 +1764,36 @@ async fn restoring_secrets_replaces_a_freshly_generated_key() {
             .replace('+', "-")
     ));
 
+    // The dry run says what will happen, and the restore what did: the same.
+    let expected = SshKeyChange::Installed {
+        fingerprint: fingerprint(&old),
+        previous: Some(kept.display().to_string()),
+    };
+    let target = aurcache_db::testing::memory_db().await;
+    let previewed = preview(&target, &new, &load_dump(&bytes).unwrap(), &copying())
+        .await
+        .unwrap();
+    assert!(
+        previewed.iter().any(|e| e.pkgbase.is_empty()
+            && e.outcome
+                == RestoreOutcome::SshKey {
+                    change: expected.clone()
+                }),
+        "{previewed:?}"
+    );
+    assert!(
+        previewed.iter().any(|e| matches!(
+            &e.outcome,
+            RestoreOutcome::SshKnownHosts {
+                change: KnownHostsChange::Merged { .. }
+            }
+        )),
+        "{previewed:?}"
+    );
+
     let restored = restore_with_ssh(&bytes, new, copying()).await;
     assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    assert_eq!(restored.key, Some(expected));
     assert_eq!(
         fingerprint(restored.store.ssh()),
         fingerprint(&old),
@@ -2012,6 +2052,8 @@ async fn clearing_without_secrets_keeps_the_ssh_state() {
     let hosts = std::fs::read_to_string(dir.path().join("known_hosts")).unwrap();
     let restored = restore_with_ssh(&bytes, ssh, clearing()).await;
     assert!(restored.failures.is_empty(), "{:?}", restored.failures);
+    assert_eq!(restored.key, Some(SshKeyChange::Kept));
+    assert_eq!(restored.known_hosts, Some(KnownHostsChange::Kept));
     assert_eq!(fingerprint(restored.store.ssh()), before);
     assert_eq!(std::fs::read(dir.path().join("id_ed25519")).unwrap(), key);
     assert_eq!(

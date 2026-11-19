@@ -258,11 +258,19 @@ struct RestoreRecorder {
 
 impl Recorder<RestoreEntry> for RestoreRecorder {
     fn record(&mut self, entry: &RestoreEntry) -> Counts {
-        if let RestoreOutcome::Failed { .. } = entry.outcome {
-            self.succeeded.remove(&entry.pkgbase);
-            self.failed.insert(entry.pkgbase.clone());
-        } else {
-            self.succeeded.insert(entry.pkgbase.clone());
+        match entry.outcome {
+            RestoreOutcome::Failed { .. } => {
+                self.succeeded.remove(&entry.pkgbase);
+                self.failed.insert(entry.pkgbase.clone());
+            }
+            // About the server, not a package: counted as neither.
+            RestoreOutcome::SshKey { .. } | RestoreOutcome::SshKnownHosts { .. } => {}
+            RestoreOutcome::Imported
+            | RestoreOutcome::Skipped
+            | RestoreOutcome::Overwritten
+            | RestoreOutcome::PatchAdopted => {
+                self.succeeded.insert(entry.pkgbase.clone());
+            }
         }
         Counts {
             completed: i32::try_from(self.succeeded.len()).unwrap_or(i32::MAX),

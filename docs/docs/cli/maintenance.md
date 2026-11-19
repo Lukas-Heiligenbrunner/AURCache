@@ -53,9 +53,10 @@ What a restore does with them:
   dump key with that passphrase before writing it.
 - **A key the restore replaces is kept**, beside it and readable by the server's
   user only, named for its fingerprint: `id_ed25519.replaced-SHA256-…`, with
-  the fingerprint's `/` and `+` written `_` and `-`. To go back to it, move it
-  over `id_ed25519` and restart the server. The same key is never written
-  twice: one already in place, however it is protected, is left as it is.
+  the fingerprint's `/` and `+` written `_` and `-`. The same key is never written
+  twice: one already in place, however it is protected, is left as it is. To
+  go back to a kept key, move it over `id_ed25519`, write its public half with
+  `ssh-keygen -y -f id_ed25519 > id_ed25519.pub`, and restart the server.
 - **`--clear` takes what the dump carries.** The key and the trusted host keys
   are the dump's when it carries them; the host keys this server had are kept
   beside the file, as `known_hosts.replaced-sha256-…`, as a replaced key is. A
@@ -66,6 +67,19 @@ What a restore does with them:
   key file, and the activity log says so when it differs from the dump's. A
   dump whose key is that key, as one taken on the same server is, writes no
   copy of it anywhere. A pinned `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
+
+The dry run says beforehand, and the restore after, what happens to the key and
+to the trusted host keys, below the packages and whether secrets are taken or
+not:
+
+```
+  imported   hello
+  ssh key    the dump's (SHA256:…) is installed, and sources are cloned with it; the key it replaces is kept at /app/data/ssh/id_ed25519.replaced-SHA256-…
+  ssh hosts  2 of the dump's trusted host keys added to /app/data/ssh/known_hosts
+```
+
+The same lines are on the restore's card in the web UI, and in its JSON as
+entries with an empty `pkgbase` and an `ssh_key` or `ssh_known_hosts` outcome.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.

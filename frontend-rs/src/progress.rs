@@ -142,6 +142,9 @@ pub struct Job {
     /// the card can summarise in the kind's own vocabulary.
     pub succeeded: Vec<Succeeded>,
     pub failed: Vec<Failed>,
+    /// What the job says about the server rather than about an item, such
+    /// as what a restore did to its SSH key. Not counted as done.
+    pub notes: Vec<String>,
     /// The source being worked on, when the job reports one.
     pub current: Option<String>,
     pub finished: bool,
@@ -258,6 +261,7 @@ pub fn start_add(mut jobs: Signal<Vec<Job>>, request: AddRequest) {
         total: request.sources.len(),
         succeeded: Vec::new(),
         failed: Vec::new(),
+        notes: Vec::new(),
         current: None,
         finished: false,
         started: false,
@@ -297,6 +301,7 @@ fn watch_operation(mut jobs: Signal<Vec<Job>>, total: i32, work: Work) {
         total: usize::try_from(total).unwrap_or(0),
         succeeded: Vec::new(),
         failed: Vec::new(),
+        notes: Vec::new(),
         current: None,
         finished: false,
         started: false,
@@ -447,6 +452,15 @@ async fn poll_restore(jobs: Signal<Vec<Job>>, id: u64, operation: i32) {
             RestoreOutcome::PatchAdopted => landed_as("patch adopted"),
             RestoreOutcome::Failed { error } => {
                 job.failed.push(Failed::of(entry.pkgbase, error));
+                return false;
+            }
+            RestoreOutcome::SshKey { change } => {
+                job.notes.push(format!("SSH key: {}", change.sentence()));
+                return false;
+            }
+            RestoreOutcome::SshKnownHosts { change } => {
+                job.notes
+                    .push(format!("SSH host keys: {}", change.sentence()));
                 return false;
             }
         };
@@ -714,6 +728,16 @@ fn JobCard(id: u64) -> Element {
                     }
                 }
 
+                // What a restore did to the server's SSH key: a key the
+                // remotes may not know is something to act on too.
+                if !job.notes.is_empty() {
+                    div { class: "text-xs space-y-1 opacity-70",
+                        for note in &job.notes {
+                            div { class: "break-words", "{note}" }
+                        }
+                    }
+                }
+
                 // Failures are the one thing worth taking space for: a package
                 // that did not add is something to act on.
                 if failed {
@@ -767,6 +791,7 @@ mod tests {
             total: sources.len(),
             succeeded: Vec::new(),
             failed: Vec::new(),
+            notes: Vec::new(),
             current: None,
             finished: false,
             started: false,
@@ -819,6 +844,7 @@ mod tests {
             total: 4,
             succeeded: Vec::new(),
             failed: Vec::new(),
+            notes: Vec::new(),
             current: None,
             finished: false,
             started: false,

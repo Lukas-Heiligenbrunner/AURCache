@@ -67,11 +67,21 @@ pub(crate) async fn restore_command(
     restore_result(run.failed)
 }
 
-/// One package of a restore, or of the preview of one.
+/// One line of a restore, or of the preview of one: a package, or what
+/// happens to the server's SSH key and trusted host keys.
 pub(crate) fn print_restore_entry(entry: &RestoreEntry) {
-    println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
-    if let RestoreOutcome::Failed { error } = &entry.outcome {
-        println!("             {error}");
+    println!("{}", format_restore_entry(entry));
+}
+
+fn format_restore_entry(entry: &RestoreEntry) -> String {
+    let label = entry.outcome.label();
+    if let Some(change) = entry.outcome.server_change() {
+        return format!("  {label:<10} {change}");
+    }
+    let line = format!("  {label:<10} {}", entry.pkgbase);
+    match &entry.outcome {
+        RestoreOutcome::Failed { error } => format!("{line}\n             {error}"),
+        _ => line,
     }
 }
 
@@ -148,4 +158,33 @@ pub(crate) fn write_dump_file(path: &Path, bytes: &[u8], private: bool) -> Resul
         std::fs::write(path, bytes)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_restore_entry;
+    use aurcache_client::{RestoreEntry, RestoreOutcome, SshKeyChange};
+
+    /// A line about the server says what happens to it, on the line itself.
+    #[test]
+    fn an_ssh_line_says_what_happens_to_the_key() {
+        let line = format_restore_entry(&RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::SshKey {
+                change: SshKeyChange::Installed {
+                    fingerprint: "SHA256:abc".to_string(),
+                    previous: Some("/app/data/ssh/id_ed25519.replaced-SHA256-def".to_string()),
+                },
+            },
+        });
+        assert!(
+            line.starts_with("  ssh key    the dump's (SHA256:abc)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("kept at /app/data/ssh/id_ed25519.replaced-SHA256-def"),
+            "{line}"
+        );
+        assert_eq!(line.lines().count(), 1, "{line}");
+    }
 }

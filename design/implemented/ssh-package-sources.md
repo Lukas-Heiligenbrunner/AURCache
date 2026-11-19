@@ -253,6 +253,15 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     pattern entries of its own, which could cover the host it names. A pattern entry
     (`*`, `?`) is compared under each plain name it matches, and left out when
     this server has hashed or pattern entries it could not list.
+  - *Said before and after:* `SshPlan::expected` is what a plan will leave,
+    and `apply_restore` returns what it left, both as the shared
+    `SshKeyChange` and `KnownHostsChange` (kept, already here, installed with
+    where the replaced key goes, beside the operator's key, left to the
+    operator; kept, merged, replaced, pinned). They are two report lines,
+    `RestoreOutcome::SshKey` and `SshKnownHosts` with an empty `pkgbase`, at
+    the end of a dry run and after a restore's rows, which the restore's
+    counts leave out. A partial failure reports what had changed, then the
+    failure.
   - *Order:* the host keys are applied before the key, since their merge is
     checked again under the lock and may still refuse. The key's public half
     is written before the private key, each replaced whole: a failure up to

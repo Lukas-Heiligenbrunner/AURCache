@@ -40,7 +40,7 @@ use std::sync::{Mutex, RwLock};
 use anyhow::{Context, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
-use aurcache_common::api::dump::{DumpSsh, DumpSshKey};
+use aurcache_common::api::dump::{DumpSsh, DumpSshKey, KnownHostsChange, SshKeyChange};
 use aurcache_common::api::ssh::{
     HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
@@ -365,27 +365,35 @@ pub struct SshPlan {
 enum KeyPlan {
     Keep,
     /// The server's own key file holds the dump's key already.
-    AlreadyThere,
-    /// The dump's key, checked to open, into the server's own key file.
+    AlreadyThere {
+        public_key: PublicKey,
+    },
+    /// The dump's key, checked to open, into the server's own key file. The
+    /// key there is to be kept at `replaces`, when there is one.
     Install {
         own: PathBuf,
         private_key: Zeroizing<String>,
         public_key: PublicKey,
+        replaces: Option<PathBuf>,
     },
     /// The dump's key into the server's own key file, while the key in use
-    /// stays the one the operator supplied.
+    /// stays the one the operator supplied. The key that file holds is to be
+    /// kept at `replaces`, when there is one.
     Beside {
         own: PathBuf,
         private_key: Zeroizing<String>,
         public_key: PublicKey,
         configured: PathBuf,
+        replaces: Option<PathBuf>,
     },
     /// Nothing is written: the operator's key file is where the dump's key
-    /// would go, or the dump's key is the operator's, already in use. The
-    /// dump's public half is known only if its key could be read.
+    /// would go, or the dump's key is the operator's, already in use
+    /// (`same_key`). The dump's public half is known only if its key could
+    /// be read.
     Skip {
         public_key: Option<PublicKey>,
         configured: PathBuf,
+        same_key: bool,
     },
 }
 
@@ -395,89 +403,118 @@ enum HostsPlan {
     Pinned {
         file: PathBuf,
     },
-    /// Add the dump's entries to the server's own file.
+    /// Add the dump's entries to the server's own file: `added` of them, as
+    /// the file stood when planned.
     Merge {
         file: PathBuf,
         text: String,
+        added: usize,
     },
-    /// Make the server's own file the dump's, as a cleared server's.
+    /// Make the server's own file the dump's, as a cleared server's; the one
+    /// there is to be kept at `replaces`, when there is one.
     Replace {
         file: PathBuf,
         text: String,
+        replaces: Option<PathBuf>,
     },
 }
 
-/// What a restore did with the key a dump carried.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum KeyRestored {
-    /// Nothing to do: secrets not taken, or none carried.
-    Untouched,
-    /// The server's own key file already held it.
-    Unchanged,
-    /// Now the server's own key, and the one it clones with. The key it
-    /// replaced is kept at `previous`, when there was one.
-    Installed {
-        fingerprint: String,
-        previous: Option<PathBuf>,
-    },
-    /// In the server's own key file, while the key it clones with is the one
-    /// `AURCACHE_GIT_SSH_KEY` names. The key that file held is kept at
-    /// `previous`, when there was one.
-    Beside {
-        fingerprint: String,
-        configured: PathBuf,
-        same_key: bool,
-        previous: Option<PathBuf>,
-    },
-    /// Not written: the server's own key file is the operator's, or the
-    /// dump's key is the operator's (`same_key`).
-    Skipped {
-        fingerprint: String,
-        configured: PathBuf,
-        same_key: bool,
-    },
+impl SshPlan {
+    /// What carrying out this plan will leave, as a dry run reports it.
+    #[must_use]
+    pub fn expected(&self) -> SshRestored {
+        SshRestored {
+            key: self.key.expected(),
+            known_hosts: self.known_hosts.expected(),
+        }
+    }
 }
 
-/// What a restore did with the host keys a dump carried.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HostsRestored {
-    Untouched,
-    /// The dump's entries this server lacked were added.
-    Merged {
-        file: PathBuf,
-        added: usize,
-    },
-    /// The server's own file is now the dump's, as a cleared server's. The
-    /// one it replaced is kept at `previous`, when there was one.
-    Replaced {
-        file: PathBuf,
-        previous: Option<PathBuf>,
-    },
-    /// Left alone: the operator pins host keys in a file of their own.
-    Pinned {
-        file: PathBuf,
-    },
+impl KeyPlan {
+    fn expected(&self) -> SshKeyChange {
+        match self {
+            Self::Keep => SshKeyChange::Kept,
+            Self::AlreadyThere { public_key } => SshKeyChange::AlreadyHere {
+                fingerprint: fingerprint(public_key),
+            },
+            Self::Install {
+                public_key,
+                replaces,
+                ..
+            } => SshKeyChange::Installed {
+                fingerprint: fingerprint(public_key),
+                previous: replaces.as_deref().map(shown),
+            },
+            Self::Beside {
+                public_key,
+                configured,
+                replaces,
+                ..
+            } => SshKeyChange::Beside {
+                fingerprint: fingerprint(public_key),
+                configured: shown(configured),
+                previous: replaces.as_deref().map(shown),
+            },
+            Self::Skip {
+                public_key,
+                configured,
+                same_key,
+            } => SshKeyChange::LeftToOperator {
+                fingerprint: public_key.as_ref().map(fingerprint),
+                configured: shown(configured),
+                same_key: *same_key,
+            },
+        }
+    }
 }
 
-/// What a restore did with a dump's SSH state.
+impl HostsPlan {
+    fn expected(&self) -> KnownHostsChange {
+        match self {
+            Self::Keep => KnownHostsChange::Kept,
+            Self::Pinned { file } => KnownHostsChange::Pinned { file: shown(file) },
+            Self::Merge { file, added, .. } => KnownHostsChange::Merged {
+                file: shown(file),
+                added: *added,
+            },
+            Self::Replace { file, replaces, .. } => KnownHostsChange::Replaced {
+                file: shown(file),
+                previous: replaces.as_deref().map(shown),
+            },
+        }
+    }
+}
+
+/// `SHA256:...`, as `ssh-keygen -l` prints it.
+fn fingerprint(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
+}
+
+/// A path as a report shows it.
+fn shown(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// What a restore did with a dump's SSH state, or, from
+/// [`SshPlan::expected`], what it will.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshRestored {
-    pub key: KeyRestored,
-    pub known_hosts: HostsRestored,
+    pub key: SshKeyChange,
+    pub known_hosts: KnownHostsChange,
 }
 
 /// A restore that failed part of the way: what it had changed already, and
 /// why it stopped.
 #[derive(Debug)]
 pub struct PartialRestore {
-    pub known_hosts: HostsRestored,
-    pub key: KeyRestored,
+    pub known_hosts: KnownHostsChange,
+    pub key: SshKeyChange,
     pub error: anyhow::Error,
 }
 
 /// A key restore that stopped: what it had changed already, and why.
 struct KeyFailure {
-    key: KeyRestored,
+    key: SshKeyChange,
     error: anyhow::Error,
 }
 
@@ -570,15 +607,13 @@ impl SshAccess {
     /// and may still refuse, and refusing then must leave the key as it was.
     /// A failure after that says what had changed already.
     pub fn apply_restore(&self, plan: SshPlan) -> Result<SshRestored, Box<PartialRestore>> {
-        let known_hosts = self
-            .apply_hosts(plan.known_hosts)
-            .map_err(|error| {
-                Box::new(PartialRestore {
-                    known_hosts: HostsRestored::Untouched,
-                    key: KeyRestored::Untouched,
-                    error,
-                })
-            })?;
+        let known_hosts = self.apply_hosts(plan.known_hosts).map_err(|error| {
+            Box::new(PartialRestore {
+                known_hosts: KnownHostsChange::Kept,
+                key: SshKeyChange::Kept,
+                error,
+            })
+        })?;
         match self.apply_key(plan.key) {
             Ok(key) => Ok(SshRestored { key, known_hosts }),
             Err(KeyFailure { key, error }) => Err(Box::new(PartialRestore {
@@ -589,105 +624,96 @@ impl SshAccess {
         }
     }
 
-    fn apply_hosts(&self, plan: HostsPlan) -> anyhow::Result<HostsRestored> {
+    fn apply_hosts(&self, plan: HostsPlan) -> anyhow::Result<KnownHostsChange> {
         Ok(match plan {
-            HostsPlan::Keep => HostsRestored::Untouched,
-            HostsPlan::Pinned { file } => HostsRestored::Pinned { file },
-            HostsPlan::Merge { file, text } => HostsRestored::Merged {
+            HostsPlan::Keep => KnownHostsChange::Kept,
+            HostsPlan::Pinned { file } => KnownHostsChange::Pinned { file: shown(&file) },
+            HostsPlan::Merge { file, text, .. } => KnownHostsChange::Merged {
                 added: self.hosts.merge(&file, &text)?,
-                file,
+                file: shown(&file),
             },
-            HostsPlan::Replace { file, text } => HostsRestored::Replaced {
-                previous: self.hosts.replace(&file, &text)?,
-                file,
+            HostsPlan::Replace { file, text, .. } => KnownHostsChange::Replaced {
+                previous: self.hosts.replace(&file, &text)?.as_deref().map(shown),
+                file: shown(&file),
             },
         })
     }
 
-    fn apply_key(&self, plan: KeyPlan) -> Result<KeyRestored, KeyFailure> {
+    fn apply_key(&self, plan: KeyPlan) -> Result<SshKeyChange, KeyFailure> {
         // Before the key file changes, a failure has changed nothing.
         let untouched = |error| KeyFailure {
-            key: KeyRestored::Untouched,
+            key: SshKeyChange::Kept,
             error,
         };
         Ok(match plan {
-            KeyPlan::Keep => KeyRestored::Untouched,
-            KeyPlan::AlreadyThere => KeyRestored::Unchanged,
+            KeyPlan::Keep => SshKeyChange::Kept,
+            KeyPlan::AlreadyThere { public_key } => SshKeyChange::AlreadyHere {
+                fingerprint: fingerprint(&public_key),
+            },
             KeyPlan::Install {
                 own,
                 private_key,
                 public_key,
+                ..
             } => {
                 let previous =
                     match install_key(&own, &private_key, &public_key).map_err(untouched)? {
-                        Written::Unchanged => return Ok(KeyRestored::Unchanged),
+                        Written::Unchanged => {
+                            return Ok(SshKeyChange::AlreadyHere {
+                                fingerprint: fingerprint(&public_key),
+                            });
+                        }
                         Written::New => None,
-                        Written::Replaced { kept } => Some(kept),
+                        Written::Replaced { kept } => Some(shown(&kept)),
                     };
                 // The file is the dump's key from here on, whatever follows:
                 // what is reported has to say so.
                 self.reload();
-                let installed = KeyRestored::Installed {
-                    fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+                let installed = SshKeyChange::Installed {
+                    fingerprint: fingerprint(&public_key),
                     previous,
                 };
                 // Checked to open before it was written; said so only once
                 // the server has loaded it as the key it clones with.
-                match self.identity() {
+                let error = match self.identity() {
                     Ok(identity) if identity.public_key.key_data() == public_key.key_data() => {
-                        installed
+                        return Ok(installed);
                     }
-                    Ok(_) => {
-                        return Err(KeyFailure {
-                            key: installed,
-                            error: anyhow::anyhow!(
-                                "the dump's SSH key was written to {}, but the server loaded \
-                                 another key from it",
-                                own.display()
-                            ),
-                        });
-                    }
-                    Err(reason) => {
-                        return Err(KeyFailure {
-                            key: installed,
-                            error: anyhow::anyhow!(
-                                "the dump's SSH key was written to {}, but the server cannot \
-                                 use it: {reason}",
-                                own.display()
-                            ),
-                        });
-                    }
-                }
+                    Ok(_) => anyhow::anyhow!(
+                        "the dump's SSH key was written to {}, but the server loaded another \
+                         key from it",
+                        own.display()
+                    ),
+                    Err(reason) => anyhow::anyhow!(
+                        "the dump's SSH key was written to {}, but the server cannot use it: \
+                         {reason}",
+                        own.display()
+                    ),
+                };
+                return Err(KeyFailure {
+                    key: installed,
+                    error,
+                });
             }
             KeyPlan::Beside {
                 own,
                 private_key,
                 public_key,
                 configured,
+                ..
             } => {
                 let previous =
                     match install_key(&own, &private_key, &public_key).map_err(untouched)? {
                         Written::Unchanged | Written::New => None,
-                        Written::Replaced { kept } => Some(kept),
+                        Written::Replaced { kept } => Some(shown(&kept)),
                     };
-                KeyRestored::Beside {
-                    fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
-                    same_key: self.uses(&public_key),
-                    configured,
+                SshKeyChange::Beside {
+                    fingerprint: fingerprint(&public_key),
+                    configured: shown(&configured),
                     previous,
                 }
             }
-            KeyPlan::Skip {
-                public_key,
-                configured,
-            } => KeyRestored::Skipped {
-                fingerprint: public_key.as_ref().map_or_else(
-                    || "an unreadable key".to_string(),
-                    |k| k.fingerprint(HashAlg::Sha256).to_string(),
-                ),
-                same_key: public_key.as_ref().is_some_and(|k| self.uses(k)),
-                configured,
-            },
+            plan @ KeyPlan::Skip { .. } => plan.expected(),
         })
     }
 
@@ -699,12 +725,6 @@ impl SshAccess {
             .key
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = reloaded;
-    }
-
-    /// Whether the key this server clones with is `public`.
-    fn uses(&self, public: &PublicKey) -> bool {
-        self.identity()
-            .is_ok_and(|identity| identity.public_key.key_data() == public.key_data())
     }
 }
 
@@ -742,8 +762,11 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
     // The operator's key file is where the dump's key would go: nothing is
     // written, so nothing about the dump's key is demanded either.
     if let Some(configured) = configured.as_ref().filter(|c| same_file(&own, c)) {
+        let public_key = file.ok().map(|f| f.public_key);
+        let in_use = read_key(configured).ok().map(|f| f.public_key);
         return Ok(KeyPlan::Skip {
-            public_key: file.ok().map(|f| f.public_key),
+            same_key: matches!((&public_key, &in_use), (Some(a), Some(b)) if a.key_data() == b.key_data()),
+            public_key,
             configured: configured.clone(),
         });
     }
@@ -758,12 +781,15 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
         return Ok(KeyPlan::Skip {
             public_key: Some(file.public_key),
             configured: configured.clone(),
+            same_key: true,
         });
     }
     // The server's own key file holds it already: there is nothing to write,
     // and so nothing to demand of where it would go.
     if read_key(&own).is_ok_and(|key| key.public_key.key_data() == file.public_key.key_data()) {
-        return Ok(KeyPlan::AlreadyThere);
+        return Ok(KeyPlan::AlreadyThere {
+            public_key: file.public_key,
+        });
     }
     // Only a key in OpenSSH's format can be shown to be a key, and to open,
     // before it is written. One in an older format would be taken on its
@@ -806,6 +832,7 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
             probe_writable(&own)?;
             probe_writable(&public_key_path(&own))?;
             KeyPlan::Install {
+                replaces: replaced_copy(&own)?,
                 own,
                 private_key,
                 public_key,
@@ -826,6 +853,7 @@ fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<
             probe_writable(&own)?;
             probe_writable(&public_key_path(&own))?;
             KeyPlan::Beside {
+                replaces: replaced_copy(&own)?,
                 own,
                 private_key,
                 public_key,
@@ -866,18 +894,26 @@ fn plan_hosts(
         (_, None) => Ok(HostsPlan::Keep),
         (SshRestoreMode::Fresh, Some(text)) => {
             probe_writable(&file)?;
+            let replaces = match read_optional(&file)? {
+                Some(current) if current != text => {
+                    Some(replaced_path(&file, &digest_tag(current.as_bytes()))?)
+                }
+                _ => None,
+            };
             Ok(HostsPlan::Replace {
                 file,
                 text: text.to_string(),
+                replaces,
             })
         }
         (_, Some(text)) => {
             let ours = read_optional(&file)?.unwrap_or_default();
-            mergeable(&read_entries(&file)?, &ours, text)?;
+            let added = mergeable(&read_entries(&file)?, &ours, text)?.len();
             probe_writable(&file)?;
             Ok(HostsPlan::Merge {
                 file,
                 text: text.to_string(),
+                added,
             })
         }
     }
@@ -1031,16 +1067,15 @@ fn install_key(own: &Path, private_key: &str, public_key: &PublicKey) -> anyhow:
         return Ok(Written::Unchanged);
     }
     create_private_dir(own)?;
-    let tag = match &current {
-        Some(key) => fingerprint_tag(key),
-        None => fs::read(own).map_or_else(|_| String::new(), |bytes| digest_tag(&bytes)),
+    let tag = replaced_tag(own);
+    let kept_before = match &tag {
+        Some(tag) => replaced_path(own, tag)?.exists(),
+        None => false,
     };
-    let kept_before = !tag.is_empty() && replaced_path(own, &tag)?.exists();
-    let kept = if tag.is_empty() {
-        None
-    } else {
-        aurcache_common::fs::keep_replaced(own, &tag)
-            .with_context(|| format!("keeping {} before replacing it", own.display()))?
+    let kept = match &tag {
+        Some(tag) => aurcache_common::fs::keep_replaced(own, tag)
+            .with_context(|| format!("keeping {} before replacing it", own.display()))?,
+        None => None,
     };
     // A copy this call made of a key that stays in place is not kept.
     let forget_copy = || {
@@ -1069,7 +1104,25 @@ fn install_key(own: &Path, private_key: &str, public_key: &PublicKey) -> anyhow:
     })
 }
 
-/// Where a replaced key is kept, as [`aurcache_common::fs::keep_replaced`]
+/// Where the key file `own` is to be kept when a restore replaces it, or
+/// `None` when there is none to keep.
+fn replaced_copy(own: &Path) -> anyhow::Result<Option<PathBuf>> {
+    replaced_tag(own)
+        .map(|tag| replaced_path(own, &tag))
+        .transpose()
+}
+
+/// What a key file is kept as when it is replaced: its key's fingerprint, or
+/// a digest of a file that is no key this can read; `None` when there is no
+/// file.
+fn replaced_tag(path: &Path) -> Option<String> {
+    match read_key(path) {
+        Ok(file) => Some(fingerprint_tag(&file.public_key)),
+        Err(_) => fs::read(path).ok().map(|bytes| digest_tag(&bytes)),
+    }
+}
+
+/// Where a replaced file is kept, as [`aurcache_common::fs::keep_replaced`]
 /// names it.
 fn replaced_path(own: &Path, tag: &str) -> anyhow::Result<PathBuf> {
     aurcache_common::fs::replaced_path(own, tag).context("naming the copy of a replaced key")
@@ -2403,7 +2456,7 @@ mod tests {
         let Err(partial) = to.apply_restore(plan) else {
             panic!("a conflicting merge was applied");
         };
-        assert_eq!(partial.known_hosts, HostsRestored::Untouched);
+        assert_eq!(partial.known_hosts, KnownHostsChange::Kept);
         assert!(format!("{:#}", partial.error).contains("github.com"));
         assert_eq!(fs::read(new.path().join(KEY_FILE)).unwrap(), before);
     }
@@ -2453,7 +2506,7 @@ mod tests {
         let Err(partial) = to.apply_restore(plan) else {
             panic!("a key was installed without its public half");
         };
-        assert_eq!(partial.key, KeyRestored::Untouched);
+        assert_eq!(partial.key, SshKeyChange::Kept);
         assert_eq!(fs::read(&own).unwrap(), before);
         assert_eq!(to.identity().unwrap().fingerprint(), in_use);
         let names: Vec<String> = fs::read_dir(dir.path())
@@ -2496,7 +2549,7 @@ mod tests {
         let Err(partial) = to.apply_restore(plan) else {
             panic!("a key that does not open was reported usable");
         };
-        let KeyRestored::Installed {
+        let SshKeyChange::Installed {
             previous: Some(previous),
             ..
         } = &partial.key
@@ -2504,15 +2557,11 @@ mod tests {
             panic!("{:?}", partial.key);
         };
         assert_eq!(
-            read_key(previous).unwrap().public_key.key_data(),
+            read_key(Path::new(previous)).unwrap().public_key.key_data(),
             in_use.key_data(),
             "the replaced key was not kept"
         );
-        assert!(
-            previous
-                .to_string_lossy()
-                .ends_with(&fingerprint_tag(&in_use))
-        );
+        assert!(previous.ends_with(&fingerprint_tag(&in_use)), "{previous}");
         let SshKey::Unavailable { reason } = to.info().key else {
             panic!("{:?}", to.info());
         };
