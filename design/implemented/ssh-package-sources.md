@@ -249,8 +249,20 @@ them; the state is `DumpSecrets::ssh` (`DumpSsh`).
     (`*`, `?`) is compared under each plain name it matches, and left out when
     this server has hashed or pattern entries it could not list.
   - *Order:* the host keys are applied before the key, since their merge is
-    checked again under the lock and may still refuse; a failure after that
-    reports what had changed (`PartialRestore`).
+    checked again under the lock and may still refuse. The key's public half
+    is written before the private key, each replaced whole: a failure up to
+    and including the private key leaves the key as it was (the `.pub` is put
+    back), and the private key is the last file written. A failure after that
+    -- the installed key does not load -- reports the key as installed, since
+    it is, and the reason. `PartialRestore` carries both what the host keys and
+    what the key came to.
+  - *The replaced key is kept:* `aurcache_common::fs::keep_replaced` copies it
+    beside itself, `0600`, as `<file>.replaced-<tag>` -- the key's SHA256
+    fingerprint in URL-safe base64, or a digest of a file that is no key it
+    can read -- and the report and the activity entry say where. The helper
+    is shared so the signing key's restore can keep its own the same way. A key
+    is compared by its public half, not its bytes, so the same key protected
+    again with a new salt is not written, nor kept as replaced.
   - *Only checkable keys:* a key in an older (PEM) format, encrypted or not,
     cannot be shown to be a key that opens before it is written -- its `.pub`
     would be taken on its word -- so a restore refuses it, suggesting

@@ -522,6 +522,9 @@ events! {
     /// knew the previous key do not know this one.
     RestoreSshKeyReplaced => ("restore.ssh_key_replaced", "Backups", "SSH key replaced") {
         fingerprint: String,
+        /// Where the key it replaced is kept, when there was one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<String>,
     },
 
     /// A restore carried an SSH key, but the server clones with the different
@@ -1249,10 +1252,19 @@ impl Event {
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
-            Self::RestoreSshKeyReplaced { fingerprint } => vec![text(format!(
-                "a restore replaced the SSH key package sources are cloned with, which is \
-                 now {fingerprint}; a remote that knew only the previous key needs this one"
-            ))],
+            Self::RestoreSshKeyReplaced {
+                fingerprint,
+                previous,
+            } => {
+                let kept = previous
+                    .as_ref()
+                    .map_or_else(String::new, |p| format!(" (the previous key is kept at {p})"));
+                vec![text(format!(
+                    "a restore replaced the SSH key package sources are cloned with, which is \
+                     now {fingerprint}; a remote that knew only the previous key needs this \
+                     one{kept}"
+                ))]
+            }
             Self::RestoreSshKeySuperseded {
                 fingerprint,
                 configured,
@@ -1549,6 +1561,7 @@ mod tests {
             Event::RestoreCaReplaced {},
             Event::RestoreSshKeyReplaced {
                 fingerprint: "SHA256:abc".to_string(),
+                previous: Some("/app/data/ssh/id_ed25519.replaced-SHA256-def".to_string()),
             },
             Event::RestoreSshKeySuperseded {
                 fingerprint: "SHA256:abc".to_string(),

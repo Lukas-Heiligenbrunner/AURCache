@@ -417,19 +417,25 @@ pub enum KeyRestored {
     Untouched,
     /// The server's own key file already held it.
     Unchanged,
-    /// Now the server's own key, and the one it clones with.
-    Installed { fingerprint: String },
+    /// Now the server's own key, and the one it clones with. The key it
+    /// replaced is kept at `previous`, when there was one.
+    Installed {
+        fingerprint: String,
+        previous: Option<PathBuf>,
+    },
     /// A fresh install's own key, generated in place of the old one.
     Regenerated { fingerprint: String },
     /// The server's own key file is gone, as on a fresh install; the key in
     /// use is the operator's.
     Removed,
     /// In the server's own key file, while the key it clones with is the one
-    /// `AURCACHE_GIT_SSH_KEY` names.
+    /// `AURCACHE_GIT_SSH_KEY` names. The key that file held is kept at
+    /// `previous`, when there was one.
     Beside {
         fingerprint: String,
         configured: PathBuf,
         same_key: bool,
+        previous: Option<PathBuf>,
     },
     /// Not written: the server's own key file is the operator's.
     Skipped {
@@ -470,7 +476,24 @@ pub struct SshRestored {
 #[derive(Debug)]
 pub struct PartialRestore {
     pub known_hosts: HostsRestored,
+    pub key: KeyRestored,
     pub error: anyhow::Error,
+}
+
+/// A key restore that stopped: what it had changed already, and why.
+struct KeyFailure {
+    key: KeyRestored,
+    error: anyhow::Error,
+}
+
+/// What putting a key in the server's own key file did.
+enum Written {
+    /// The file held that key already.
+    Unchanged,
+    /// There was no key file.
+    New,
+    /// The file held another key, now kept at `kept`.
+    Replaced { kept: PathBuf },
 }
 
 impl SshAccess {
@@ -550,16 +573,23 @@ impl SshAccess {
     /// The host keys go first: their merge is checked again under the lock
     /// and may still refuse, and refusing then must leave the key as it was.
     /// A failure after that says what had changed already.
-    pub fn apply_restore(&self, plan: SshPlan) -> Result<SshRestored, PartialRestore> {
+    pub fn apply_restore(&self, plan: SshPlan) -> Result<SshRestored, Box<PartialRestore>> {
         let known_hosts = self
             .apply_hosts(plan.known_hosts)
-            .map_err(|error| PartialRestore {
-                known_hosts: HostsRestored::Untouched,
-                error,
+            .map_err(|error| {
+                Box::new(PartialRestore {
+                    known_hosts: HostsRestored::Untouched,
+                    key: KeyRestored::Untouched,
+                    error,
+                })
             })?;
         match self.apply_key(plan.key) {
             Ok(key) => Ok(SshRestored { key, known_hosts }),
-            Err(error) => Err(PartialRestore { known_hosts, error }),
+            Err(KeyFailure { key, error }) => Err(Box::new(PartialRestore {
+                known_hosts,
+                key,
+                error,
+            })),
         }
     }
 
@@ -578,7 +608,12 @@ impl SshAccess {
         })
     }
 
-    fn apply_key(&self, plan: KeyPlan) -> anyhow::Result<KeyRestored> {
+    fn apply_key(&self, plan: KeyPlan) -> Result<KeyRestored, KeyFailure> {
+        // Before the key file changes, a failure has changed nothing.
+        let untouched = |error| KeyFailure {
+            key: KeyRestored::Untouched,
+            error,
+        };
         Ok(match plan {
             KeyPlan::Keep => KeyRestored::Untouched,
             KeyPlan::Install {
@@ -586,28 +621,45 @@ impl SshAccess {
                 private_key,
                 public_key,
             } => {
-                if !install_key(&own, &private_key, &public_key)? {
-                    KeyRestored::Unchanged
-                } else {
-                    self.reload();
-                    // Checked to open before it was written; said so only once
-                    // the server has loaded it as the key it clones with.
-                    match self.identity() {
-                        Ok(identity) if identity.public_key.key_data() == public_key.key_data() => {
-                            KeyRestored::Installed {
-                                fingerprint: identity.fingerprint(),
-                            }
-                        }
-                        Ok(_) => bail!(
-                            "the dump's SSH key was written to {}, but the server loaded \
-                             another key from it",
-                            own.display()
-                        ),
-                        Err(reason) => bail!(
-                            "the dump's SSH key was written to {}, replacing the key there, \
-                             but the server cannot use it: {reason}",
-                            own.display()
-                        ),
+                let previous = match install_key(&own, &private_key, &public_key)
+                    .map_err(untouched)?
+                {
+                    Written::Unchanged => return Ok(KeyRestored::Unchanged),
+                    Written::New => None,
+                    Written::Replaced { kept } => Some(kept),
+                };
+                // The file is the dump's key from here on, whatever follows:
+                // what is reported has to say so.
+                self.reload();
+                let installed = KeyRestored::Installed {
+                    fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+                    previous,
+                };
+                // Checked to open before it was written; said so only once
+                // the server has loaded it as the key it clones with.
+                match self.identity() {
+                    Ok(identity) if identity.public_key.key_data() == public_key.key_data() => {
+                        installed
+                    }
+                    Ok(_) => {
+                        return Err(KeyFailure {
+                            key: installed,
+                            error: anyhow::anyhow!(
+                                "the dump's SSH key was written to {}, but the server loaded \
+                                 another key from it",
+                                own.display()
+                            ),
+                        });
+                    }
+                    Err(reason) => {
+                        return Err(KeyFailure {
+                            key: installed,
+                            error: anyhow::anyhow!(
+                                "the dump's SSH key was written to {}, but the server cannot \
+                                 use it: {reason}",
+                                own.display()
+                            ),
+                        });
                     }
                 }
             }
@@ -617,11 +669,17 @@ impl SshAccess {
                 public_key,
                 configured,
             } => {
-                install_key(&own, &private_key, &public_key)?;
+                let previous = match install_key(&own, &private_key, &public_key)
+                    .map_err(untouched)?
+                {
+                    Written::Unchanged | Written::New => None,
+                    Written::Replaced { kept } => Some(kept),
+                };
                 KeyRestored::Beside {
                     fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
                     same_key: self.uses(&public_key),
                     configured,
+                    previous,
                 }
             }
             KeyPlan::Skip {
@@ -636,18 +694,26 @@ impl SshAccess {
                 configured,
             },
             KeyPlan::Reset { own, regenerate } => {
-                remove_optional(&own)?;
-                remove_optional(&public_key_path(&own))?;
+                remove_optional(&own).map_err(untouched)?;
+                remove_optional(&public_key_path(&own)).map_err(|error| KeyFailure {
+                    key: KeyRestored::Removed,
+                    error,
+                })?;
                 if regenerate {
                     self.reload();
                     match self.identity() {
                         Ok(identity) => KeyRestored::Regenerated {
                             fingerprint: identity.fingerprint(),
                         },
-                        Err(reason) => bail!(
-                            "the server's own SSH key was removed, but a fresh one could not \
-                             be generated: {reason}"
-                        ),
+                        Err(reason) => {
+                            return Err(KeyFailure {
+                                key: KeyRestored::Removed,
+                                error: anyhow::anyhow!(
+                                    "the server's own SSH key was removed, but a fresh one \
+                                     could not be generated: {reason}"
+                                ),
+                            });
+                        }
                     }
                 } else {
                     KeyRestored::Removed
@@ -979,19 +1045,81 @@ fn same_type_conflict(ours: &[Entry], name: &str, presented: &PublicKey) -> anyh
     )
 }
 
-/// Write `private_key` to `own` and its public half beside it; `false` when
-/// `own` already held exactly that key.
-fn install_key(own: &Path, private_key: &str, public_key: &PublicKey) -> anyhow::Result<bool> {
-    if fs::read(own).ok().as_deref() == Some(private_key.as_bytes()) {
-        return Ok(false);
+/// Make `private_key` the key in `own`, with its public half beside it.
+///
+/// Nothing is written when `own` holds that key already, however it is
+/// protected: a key is the same key re-encrypted. A key it held before is
+/// kept beside it first ([`aurcache_common::fs::keep_replaced`]). The public
+/// half goes in before the private key, each replaced whole, so a failure
+/// leaves `own` the key it was: the private key is the last thing written,
+/// and the public half is put back if writing it fails.
+fn install_key(own: &Path, private_key: &str, public_key: &PublicKey) -> anyhow::Result<Written> {
+    let current = read_key(own).ok().map(|file| file.public_key);
+    if current
+        .as_ref()
+        .is_some_and(|key| key.key_data() == public_key.key_data())
+    {
+        return Ok(Written::Unchanged);
     }
     create_private_dir(own)?;
-    aurcache_common::fs::write_private(own, private_key.as_bytes())
-        .with_context(|| format!("writing {}", own.display()))?;
+    let tag = match &current {
+        Some(key) => fingerprint_tag(key),
+        None => fs::read(own).map_or_else(|_| String::new(), |bytes| digest_tag(&bytes)),
+    };
+    let kept_before = !tag.is_empty() && replaced_path(own, &tag)?.exists();
+    let kept = if tag.is_empty() {
+        None
+    } else {
+        aurcache_common::fs::keep_replaced(own, &tag)
+            .with_context(|| format!("keeping {} before replacing it", own.display()))?
+    };
+    // A copy this call made of a key that stays in place is not kept.
+    let forget_copy = || {
+        if let Some(kept) = kept.as_ref().filter(|_| !kept_before) {
+            let _ = fs::remove_file(kept);
+        }
+    };
     let pub_path = public_key_path(own);
-    fs::write(&pub_path, format!("{}\n", public_key.to_openssh()?))
-        .with_context(|| format!("writing {}", pub_path.display()))?;
-    Ok(true)
+    let old_public = fs::read(&pub_path).ok();
+    let public = format!("{}\n", public_key.to_openssh()?);
+    if let Err(e) = aurcache_common::fs::write_private(&pub_path, public.as_bytes()) {
+        forget_copy();
+        return Err(e).with_context(|| format!("writing {}", pub_path.display()));
+    }
+    if let Err(e) = aurcache_common::fs::write_private(own, private_key.as_bytes()) {
+        let _ = match old_public {
+            Some(old) => aurcache_common::fs::write_private(&pub_path, &old),
+            None => fs::remove_file(&pub_path),
+        };
+        forget_copy();
+        return Err(e).with_context(|| format!("writing {}", own.display()));
+    }
+    Ok(match kept {
+        Some(kept) => Written::Replaced { kept },
+        None => Written::New,
+    })
+}
+
+/// Where a replaced key is kept, as [`aurcache_common::fs::keep_replaced`]
+/// names it.
+fn replaced_path(own: &Path, tag: &str) -> anyhow::Result<PathBuf> {
+    aurcache_common::fs::replaced_path(own, tag).context("naming the copy of a replaced key")
+}
+
+/// A key's SHA256 fingerprint as a file name can carry it: `SHA256-` and
+/// the digest in URL-safe base64, `/` and `+` written `_` and `-`.
+fn fingerprint_tag(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256)
+        .to_string()
+        .replacen("SHA256:", "SHA256-", 1)
+        .replace('/', "_")
+        .replace('+', "-")
+}
+
+/// A tag for a file that is not a key it can read: its content's digest.
+fn digest_tag(bytes: &[u8]) -> String {
+    let digest = aurcache_common::digest::sha256_hex(bytes);
+    format!("sha256-{}", &digest[..16])
 }
 
 /// Whether `a` and `b` are one file, through any symlinks; for a path that
@@ -2301,6 +2429,130 @@ mod tests {
         assert_eq!(partial.known_hosts, HostsRestored::Untouched);
         assert!(format!("{:#}", partial.error).contains("github.com"));
         assert_eq!(fs::read(new.path().join(KEY_FILE)).unwrap(), before);
+    }
+
+    /// A dump carrying `key`, and its public half.
+    fn carrying(key: &PrivateKey) -> DumpSsh {
+        DumpSsh {
+            key: Some(DumpSshKey {
+                private_key: key.to_openssh(LineEnding::LF).unwrap().to_string(),
+                public_key: Some(key.public_key().to_openssh().unwrap()),
+            }),
+            known_hosts: None,
+        }
+    }
+
+    fn new_key() -> PrivateKey {
+        PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519).unwrap()
+    }
+
+    /// The public half is written before the private key, so one that cannot
+    /// be written leaves the key as it was -- and the report says so.
+    #[test]
+    fn a_public_half_that_cannot_be_written_leaves_the_key_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let to = server(dir.path());
+        let own = dir.path().join(KEY_FILE);
+        let before = fs::read(&own).unwrap();
+        let in_use = to.identity().unwrap().fingerprint();
+        fs::remove_file(public_key_path(&own)).unwrap();
+        fs::create_dir(public_key_path(&own)).unwrap();
+
+        let plan = to
+            .plan_restore(Some(&carrying(&new_key())), SshRestoreMode::Take)
+            .unwrap();
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a key was installed without its public half");
+        };
+        assert_eq!(partial.key, KeyRestored::Untouched);
+        assert_eq!(fs::read(&own).unwrap(), before);
+        assert_eq!(to.identity().unwrap().fingerprint(), in_use);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains(".replaced-")),
+            "a copy of a key still in place was kept: {names:?}"
+        );
+    }
+
+    /// Once the private key is in place the old one is gone from it: a key
+    /// that then cannot be loaded is reported installed, with where the one
+    /// it replaced is kept, and the settings say why it cannot be used.
+    #[test]
+    fn a_key_that_will_not_load_once_installed_is_reported_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join(KEY_FILE);
+        let passphrase = dir.path().join("passphrase");
+        fs::write(&passphrase, "correct horse\n").unwrap();
+        let mine = new_key()
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap();
+        fs::write(&own, mine.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let to = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
+            key: KeySource::Generated(own),
+            passphrase_file: Some(passphrase.clone()),
+            hosts: HostKeySource::TrustOnFirstUse(dir.path().join(KNOWN_HOSTS_FILE)),
+        });
+        let in_use = to.identity().unwrap().public_key;
+
+        // Locked with this server's passphrase as it is planned...
+        let plan = to
+            .plan_restore(Some(&carrying(&new_key())), SshRestoreMode::Take)
+            .unwrap();
+        // ...which has changed by the time the key is loaded.
+        fs::write(&passphrase, "battery staple\n").unwrap();
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a key that does not open was reported usable");
+        };
+        let KeyRestored::Installed {
+            previous: Some(previous),
+            ..
+        } = &partial.key
+        else {
+            panic!("{:?}", partial.key);
+        };
+        assert_eq!(
+            read_key(previous).unwrap().public_key.key_data(),
+            in_use.key_data(),
+            "the replaced key was not kept"
+        );
+        assert!(
+            previous
+                .to_string_lossy()
+                .ends_with(&fingerprint_tag(&in_use))
+        );
+        let SshKey::Unavailable { reason } = to.info().key else {
+            panic!("{:?}", to.info());
+        };
+        assert!(reason.contains("does not open"), "{reason}");
+    }
+
+    /// A key is compared by what it is, not by its bytes: the same key
+    /// encrypted again is not written again, nor kept as a replaced one.
+    #[test]
+    fn the_same_key_encrypted_again_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join(KEY_FILE);
+        let key = new_key();
+        let first = key
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap();
+        fs::write(&own, first.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let before = fs::read(&own).unwrap();
+        let again = key
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap()
+            .to_openssh(LineEnding::LF)
+            .unwrap();
+        assert_ne!(again.as_bytes(), before.as_slice(), "the salt did not change");
+        assert!(matches!(
+            install_key(&own, &again, key.public_key()).unwrap(),
+            Written::Unchanged
+        ));
+        assert_eq!(fs::read(&own).unwrap(), before);
     }
 
     /// A key encrypted in an older format cannot be shown to open, so a

@@ -1727,7 +1727,8 @@ fn clearing() -> RestoreOptions {
 }
 
 /// A migration onto a new instance keeps the key the remotes know: the one
-/// the new server generated is replaced, and used at once.
+/// the new server generated is replaced, and used at once. The key it
+/// replaced is kept beside it, private, named for its fingerprint.
 #[tokio::test]
 async fn restoring_secrets_replaces_a_freshly_generated_key() {
     let old_dir = tempfile::tempdir().unwrap();
@@ -1742,6 +1743,14 @@ async fn restoring_secrets_replaces_a_freshly_generated_key() {
         hosts: HostKeySource::TrustOnFirstUse(new_dir.path().join("known_hosts")),
     }));
     assert_ne!(fingerprint(&old), fingerprint(&new));
+    let generated = std::fs::read(new_dir.path().join("id_ed25519")).unwrap();
+    let kept = new_dir.path().join(format!(
+        "id_ed25519.replaced-{}",
+        fingerprint(&new)
+            .replacen("SHA256:", "SHA256-", 1)
+            .replace('/', "_")
+            .replace('+', "-")
+    ));
 
     let restored = restore_with_ssh(&bytes, new, copying()).await;
     assert!(restored.failures.is_empty(), "{:?}", restored.failures);
@@ -1766,7 +1775,10 @@ async fn restoring_secrets_replaces_a_freshly_generated_key() {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0, "the restored key is readable by others");
+        let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the replaced key is not private");
     }
+    assert_eq!(std::fs::read(&kept).unwrap(), generated, "the replaced key is lost");
 }
 
 /// A default restore leaves secrets alone, the SSH key with them.

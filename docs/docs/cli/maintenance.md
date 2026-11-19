@@ -48,6 +48,11 @@ What a restore does with them:
   is written: convert it with `ssh-keygen -p` and take the dump again. A
   server with `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` protects an unprotected
   dump key with that passphrase before writing it.
+- **A key the restore replaces is kept**, beside it and readable by the server's
+  user only, named for its fingerprint: `id_ed25519.replaced-SHA256-…`, with
+  the fingerprint's `/` and `+` written `_` and `-`. To go back to it, move it
+  over `id_ed25519` and restart the server. The same key is never written
+  twice: one already in place, however it is protected, is left as it is.
 - **`--clear` is a fresh install plus what the dump carries.** The key and the
   trusted host keys are the dump's. A dump without them leaves the server as a
   new one starts: a freshly generated key, which every repository has to be

@@ -583,31 +583,55 @@ pub async fn plan_ssh(
 /// activity log too.
 async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
     let ssh = Arc::clone(services.store.ssh());
-    let restored = match tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await? {
-        Ok(restored) => restored,
+    match tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await? {
+        Ok(restored) => {
+            report_key(services, restored.key);
+            report_hosts(&restored.known_hosts);
+            Ok(())
+        }
         Err(partial) => {
             // What did change is said as it would be on success, so the
             // failure is not taken to mean nothing did.
+            report_key(services, partial.key);
             report_hosts(&partial.known_hosts);
-            return Err(partial.error);
+            Err(partial.error)
         }
-    };
-    match restored.key {
+    }
+}
+
+/// Log what a restore did with the SSH key, and put in the activity log what
+/// an operator has to act on: a key the remotes may not know.
+fn report_key(services: &Services, key: KeyRestored) {
+    match key {
         KeyRestored::Untouched | KeyRestored::Unchanged => {}
-        KeyRestored::Installed { fingerprint } => {
-            tracing::info!("Restored the dump's SSH key ({fingerprint}); cloning with it");
-            services
-                .activity
-                .emit(Event::RestoreSshKeyReplaced { fingerprint });
+        KeyRestored::Installed {
+            fingerprint,
+            previous,
+        } => {
+            match &previous {
+                Some(previous) => tracing::info!(
+                    "Restored the dump's SSH key ({fingerprint}); cloning with it. The key it \
+                     replaced is kept at {}",
+                    previous.display()
+                ),
+                None => {
+                    tracing::info!("Restored the dump's SSH key ({fingerprint}); cloning with it");
+                }
+            }
+            services.activity.emit(Event::RestoreSshKeyReplaced {
+                fingerprint,
+                previous: previous.map(|p| p.display().to_string()),
+            });
         }
         KeyRestored::Regenerated { fingerprint } => {
             tracing::info!(
                 "Generated a fresh SSH key ({fingerprint}) in place of the old one, as a new \
                  server would"
             );
-            services
-                .activity
-                .emit(Event::RestoreSshKeyReplaced { fingerprint });
+            services.activity.emit(Event::RestoreSshKeyReplaced {
+                fingerprint,
+                previous: None,
+            });
         }
         KeyRestored::Removed => tracing::info!(
             "Removed the server's own SSH key file, as a new server has none; \
@@ -616,13 +640,14 @@ async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
         KeyRestored::Beside {
             fingerprint,
             configured,
-            same_key,
+            same_key: true,
+            ..
         }
         | KeyRestored::Skipped {
             fingerprint,
             configured,
-            same_key,
-        } if same_key => tracing::info!(
+            same_key: true,
+        } => tracing::info!(
             "The dump's SSH key ({fingerprint}) is the one AURCACHE_GIT_SSH_KEY ({}) names, \
              which stays in use",
             configured.display()
@@ -648,8 +673,6 @@ async fn apply_ssh(services: &Services, plan: SshPlan) -> anyhow::Result<()> {
             });
         }
     }
-    report_hosts(&restored.known_hosts);
-    Ok(())
 }
 
 /// Log what a restore did with the trusted host keys.
