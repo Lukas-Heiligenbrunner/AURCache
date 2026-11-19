@@ -37,9 +37,9 @@ use crate::config::Config;
 /// ssh reads it as the build user in two places: outside the chroot, where
 /// `makechrootpkg`'s `download_sources()` runs `makepkg --verifysource`, and
 /// inside it, for a PKGBUILD that clones in `prepare()` -- it is bound there,
-/// read-only, at the same path (see `job::prepare_bind_mounts`). So it is
-/// readable by the build user and writable only by the worker:
-/// [`stage_for_job`] makes it so.
+/// read-only, at the same path (see `job::prepare_bind_mounts`). So
+/// [`stage_for_job`] gives it modes that let the build user read it and only
+/// the worker write it.
 ///
 /// Not a secret, and so not under the paths `aurcache-sandbox` keeps from the
 /// code outside the chroot (`packaging/sandbox-protected`): a `known_hosts`
@@ -336,9 +336,10 @@ pub fn stage_for_job(
 ///
 /// Written beside the previous copy and renamed over it, never written
 /// through it ([`write_public`]):
-/// - whatever is at the path is replaced, not followed: a symlink planted
-///   there -- to the worker's mTLS key, say -- gives way to the copy, and what
-///   it pointed at is left as it was;
+/// - whatever is at the path is replaced, not followed, whatever the bind
+///   keeps out (see `job::known_hosts_bind`): a symlink planted there -- to
+///   the worker's mTLS key, say -- gives way to the copy, and what it pointed
+///   at is left as it was;
 /// - every job reads this one file, and another job's ssh may have it open:
 ///   that ssh reads the previous copy whole, and one starting after the
 ///   rename reads this copy whole. Neither ever sees a file being truncated

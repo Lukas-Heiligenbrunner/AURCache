@@ -14,16 +14,20 @@ set -euo pipefail
 # server that authorises it — so this runs in CI wherever Docker does, with no
 # secret committed or configured.
 #
-# Two phases, in order:
+# Four phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
 #      agent key picked up).
 #   2. authorised — the worker is pointed at the key the server accepts. The
 #      build must succeed AND the payload's marker must appear in the installed
-#      package, proving the fetch really happened.
+#      package twice, proving both fetches really happened: the `source=` one
+#      on the worker, and the `prepare()` clone inside the chroot, through the
+#      agent's socket bound in there.
 #   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
-#      server's host key. The build must succeed.
+#      server's host key. The build must succeed, both fetches checking the
+#      server against the staged copy: on the worker, and inside the chroot,
+#      where it is bound.
 #   4. unknown host — `WORKER_SSH_KNOWN_HOSTS` names another host only. The
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
@@ -153,12 +157,12 @@ found="$(docker run --rm -i --network "$(e2e_network)" -e FIXTURE="$FIXTURE" \
 printf '[repo]\nSigLevel = Never\nServer = http://aurcache:8081/$arch\n' >> /etc/pacman.conf
 pacman -Sy --noconfirm >/dev/null 2>&1
 pacman -S --noconfirm "$FIXTURE" >/dev/null 2>&1
-cat "/usr/share/$FIXTURE/marker.txt"
+cat "/usr/share/$FIXTURE/marker.txt" "/usr/share/$FIXTURE/cloned-marker.txt"
 EOF
 )"
 
-if [ "$found" != "$SSH_TEST_MARKER" ]; then
-    log "ERROR: marker missing from the built package (got: '${found:-<nothing>}')"
+if [ "$found" != "$SSH_TEST_MARKER"$'\n'"$SSH_TEST_MARKER" ]; then
+    log "ERROR: a marker is missing from the built package (got: '${found:-<nothing>}')"
     exit 1
 fi
 
@@ -186,4 +190,4 @@ fi
 log "    build refused the unknown host at host-key verification"
 
 log "=== SSH credential test complete ==="
-log "    marker: $found"
+log "    markers: ${found//$'\n'/, }"

@@ -400,6 +400,12 @@ async fn prepare_bind_mounts(
     // Bound at the same path inside, because `SSH_AUTH_SOCK` is inherited from
     // the worker and has to name something that exists in both.
     //
+    // Read-only: connecting to a socket needs no write access to the mount it
+    // is on, and the directory is shared by every build. The build user owns
+    // the socket and can write the directory, so bound read-write a build
+    // could remove or replace the socket the next build connects to. Root in
+    // the build's container cannot either (see `known_hosts_bind`).
+    //
     // The clone `unreal-engine` needs is in `prepare()`, not `source=`: makepkg
     // has no shallow-clone support and the engine's history is enormous, so
     // packages of that shape do their own clone inside the chroot. Assuming
@@ -409,7 +415,7 @@ async fn prepare_bind_mounts(
         binds.push(BindMount {
             host: dir.to_path_buf(),
             chroot: dir.to_path_buf(),
-            access: Access::ReadWrite,
+            access: Access::ReadOnly,
         });
     }
     binds.extend(credential.and_then(known_hosts_bind));
@@ -421,9 +427,11 @@ async fn prepare_bind_mounts(
 /// same path inside the chroot, which is the path the build's
 /// `GIT_SSH_COMMAND` names; none when none was staged.
 ///
-/// Read-only, so no write from inside the chroot reaches it -- whoever the
-/// build runs as -- and the worker's directory and file there (`0755`,
-/// `0644`) keep the build user from changing them outside it.
+/// Read-only, on top of the worker's modes (`0755`, `0644`) that already keep
+/// the build user from changing it: root in the build's container cannot write
+/// there either, and runs without `CAP_SYS_ADMIN`, so it cannot remount the
+/// bind read-write. Staging still never writes through what it finds at the
+/// path, but renames a fresh copy over it (see `credentials::stage_known_hosts`).
 fn known_hosts_bind(credential: &StagedCredential) -> Option<BindMount> {
     let dir = credential.known_hosts.as_deref()?.parent()?;
     Some(BindMount {
