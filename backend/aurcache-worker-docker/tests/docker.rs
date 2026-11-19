@@ -317,6 +317,49 @@ async fn as_root(docker: &Docker, id: &str, script: &str) -> String {
     said
 }
 
+/// Root in the container cannot stop the agent: the stop it asks for is
+/// ignored, and so is every signal the kernel would deliver to PID 1 from
+/// inside, and it cannot read the agent's memory. The build goes on to its
+/// report.
+#[tokio::test]
+#[ignore = "needs Docker and a static agent: AURCACHE_DOCKER_TESTS=1"]
+async fn root_in_the_container_cannot_stop_the_agent() {
+    let Some(setup) = setup() else { return };
+    let dirs = dirs("pid1");
+    let stage = dirs.local.with_extension("stage");
+    let _ = std::fs::remove_dir_all(&stage);
+    let source = hello_source(&stage);
+    workdir::prepare(&dirs.local, &setup.agent, &spec(), &source).unwrap();
+
+    let name = format!("{}-docker-pid1", setup.prefix);
+    let id = start(&setup, &name, &dirs).await;
+    let said = as_root(
+        &setup.docker,
+        &id,
+        "for signal in TERM INT KILL; do kill -s $signal 1 && echo \"sent $signal\"; done; \
+         sleep 1; kill -0 1 && echo 'pid 1 lives'; \
+         head -c1 /proc/1/mem >/dev/null 2>&1 || echo 'memory: refused'; \
+         cat /proc/1/environ >/dev/null 2>&1 || echo 'environ: refused'",
+    )
+    .await;
+    let status = wait(&setup.docker, &id).await;
+    let verdict = verdict(&setup.docker, &id, status).await;
+    cleanup::remove_container(&setup.docker, &id).await;
+
+    assert!(said.contains("sent TERM"), "{said}");
+    assert!(said.contains("pid 1 lives"), "{said}");
+    assert!(said.contains("memory: refused"), "{said}");
+    assert!(said.contains("environ: refused"), "{said}");
+    assert_eq!(status, Some(0), "the agent wrote a report: {said}");
+    let Ending::Reported(report) = ending(workdir::report(&dirs.local), verdict) else {
+        panic!("expected a report");
+    };
+    assert_eq!(report.ended, Ended::Exited { code: 0 });
+
+    clear(&setup, &dirs, &name).await;
+    std::fs::remove_dir_all(&stage).unwrap();
+}
+
 /// What root in a build container leaves in the build directory is read as
 /// what the build could have written: a pipe where the report goes and a
 /// `pkg/` that is a link to a directory of the worker's host. Neither holds
