@@ -46,8 +46,8 @@
 #
 # package defaults to `hello` (from the AUR), timeout to 900 seconds a build.
 #
-# Needs kind, kubectl, docker, jq, curl, cargo, python3 and ssh-keygen, and
-# the packaging submodules (`git submodule update --init`) for the image
+# Needs kind, kubectl, docker, jq, curl, cargo, python3, ssh-keygen and pkill,
+# and the packaging submodules (`git submodule update --init`) for the image
 # builds.
 #
 # Environment:
@@ -308,6 +308,16 @@ build_in_background() {
     ADD_PID=$!
 }
 
+# Stop what `build_in_background` started. ADD_PID is the subshell `&` made;
+# the CLI waiting on the build is a child of it, which killing the subshell
+# alone leaves running.
+stop_background() {
+    [ -n "$ADD_PID" ] || return 0
+    pkill -TERM -P "$ADD_PID" 2>/dev/null || true
+    kill "$ADD_PID" 2>/dev/null || true
+    ADD_PID=
+}
+
 # The newest build of package `$1` once it is not `$2`, the newest there was
 # before a build was asked for (empty for a package with none).
 new_build_ref() {
@@ -343,7 +353,7 @@ run_pod() {
 
 preflight() {
     local lacking=0 tool
-    for tool in "$KIND" "$KUBECTL" docker jq curl cargo python3 ssh-keygen; do
+    for tool in "$KIND" "$KUBECTL" docker jq curl cargo python3 ssh-keygen pkill; do
         command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' is required but not found"; lacking=1; }
     done
     docker info >/dev/null 2>&1 || { echo "ERROR: cannot talk to the Docker daemon"; lacking=1; }
@@ -790,10 +800,6 @@ check_ssh_key() {
         || fail "$ref did not fetch its git+ssh source"
     grep -qE "\[worker\] the SSH link closed: [1-9][0-9]* signature" <<<"$output" \
         || fail "the log of $ref says no SSH link closed having signed"
-    # The thief's `ssh-add -L` on every socket reaches the pacman helper's
-    # too, which says so in the log: a request that is no list of words is
-    # the thief's, not makepkg's.
-    #
     # The build has the agent for as long as it runs, and its dependency's
     # root script reaches it too. Neither finds the key. Both can have it
     # sign what is no login: ssh-agent signs what it is asked to, which is
@@ -920,7 +926,7 @@ spec:
         - kube-e2e-app
 EOF
     ) || { echo "$out" | tail -n 20; fail "installing from the repository failed"; }
-    echo "$out" | sed 's/^/    | /'
+    printf '%s\n' "$out" | sed 's/^/    | /'
     grep -q "kube-e2e-app marker" <<<"$out" || fail "kube-e2e-app installed without its files"
     result "$PACKAGE, kube-e2e-app and kube-e2e-dep installed with pacman from the repository"
 }
@@ -1155,22 +1161,10 @@ check_big() {
     local pid finished='' restarts json ref size end seconds peak
     restarts=$(dispatcher_restarts)
     CURRENT_BUILD_REF=
-    local before
-    before=$(latest_build_ref aurcache-big-test)
-    if [ -n "$before" ]; then
-        # A cluster this ran in before (REUSE=1), where adding it again
-        # would queue nothing.
-        ensure_forward
-        "$CLI_BIN" builds retry "$before" --wait --wait-timeout 3600 --wait-stall-after 600 \
-            >"$SCRATCH/add-big.log" 2>&1 &
-        pid=$!
-        ADD_PID=$pid
-    else
-        build_in_background "$SCRATCH/add-big.log" aurcache-big-test \
-            "$GIT_URL/aurcache-big-test.git" --ref master \
-            --wait --wait-timeout 3600 --wait-stall-after 600
-        pid=$ADD_PID
-    fi
+    build_in_background "$SCRATCH/add-big.log" aurcache-big-test \
+        "$GIT_URL/aurcache-big-test.git" --ref master \
+        --wait --wait-timeout 3600 --wait-stall-after 600
+    pid=$ADD_PID
     # When the build container ended: from there on it is the relay.
     while kill -0 "$pid" 2>/dev/null; do
         if [ -z "$finished" ]; then
@@ -1373,7 +1367,7 @@ cleanup() {
     fi
     if [ -n "$FORWARD_PID" ]; then kill "$FORWARD_PID" 2>/dev/null || true; fi
     # An add still waiting for a build that the run gave up on.
-    if [ -n "$ADD_PID" ]; then kill "$ADD_PID" 2>/dev/null || true; fi
+    stop_background
 
     if [ "$do_cleanup" = 0 ]; then
         echo "=== Leaving the cluster up (exit $exit_code) ==="
@@ -1407,8 +1401,9 @@ cleanup() {
 # Main
 # =============================================================================
 
-# Every leg, in order. Some build on what an earlier one left: `restart` and
-# `stop` on `cancel`'s package, `stuck` and `userns` on `repository`'s.
+# Every leg, in order. Some build on what an earlier one left: `repository`
+# installs the package `quota` builds, `restart` and `stop` build `cancel`'s,
+# `stuck` and `userns` `repository`'s.
 LEGS=(enrollment policy quota repository ssh cancel restart stop stuck big userns open-policy)
 if [ -n "${E2E_LEGS:-}" ]; then read -r -a LEGS <<<"$E2E_LEGS"; fi
 

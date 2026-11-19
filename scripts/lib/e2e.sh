@@ -114,8 +114,11 @@ filter_noise() {
 }
 
 # The newest build of package `$1`, as `<pkgbase>/<number>`; empty if none.
+# Asked of that package's builds alone, so the newest is among them however
+# many builds of other packages came since: a cluster or a stack reused for
+# many runs holds a long list.
 latest_build_ref() {
-    aurcache_cli --format json builds list --limit 20 2>/dev/null \
+    aurcache_cli --format json builds list --package "$1" --limit 20 2>/dev/null \
         | jq -r --arg pkg "$1" \
             '[.[] | select(.pkg_name == $pkg)] | max_by(.number) // empty | "\(.pkg_name)/\(.number)"' \
             2>/dev/null || true
