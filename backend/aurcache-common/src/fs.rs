@@ -243,6 +243,39 @@ fn replace(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Keep what `path` holds beside it, before something replaces it: copied to
+/// [`replaced_path`]`(path, tag)`, owner-only on Unix as [`write_private`]
+/// writes it. A key or a certificate a restore replaces is then still there to
+/// go back to. Where the copy went, or `None` when there is nothing at `path`.
+///
+/// `tag` says what is kept -- a fingerprint, a digest -- so that keeping the
+/// same thing twice writes one file, and a reader can tell copies apart.
+pub fn keep_replaced(path: &Path, tag: &str) -> std::io::Result<Option<PathBuf>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let kept = replaced_path(path, tag)?;
+    write_private(&kept, &contents)?;
+    Ok(Some(kept))
+}
+
+/// Where [`keep_replaced`] keeps `path` under `tag`: beside it, as
+/// `<name>.replaced-<tag>`. Refused for a tag that would lead out of the
+/// directory, or is empty.
+pub fn replaced_path(path: &Path, tag: &str) -> std::io::Result<PathBuf> {
+    if tag.is_empty() || tag.contains(['/', '\\', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{tag:?} cannot name a file"),
+        ));
+    }
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".replaced-{tag}"));
+    Ok(PathBuf::from(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +441,34 @@ mod private_file_tests {
             0o644
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// What is replaced is kept beside it, private, under the tag it is
+    /// given; nothing is kept of nothing, and a tag cannot leave the
+    /// directory.
+    #[test]
+    fn a_replaced_file_is_kept_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519");
+        fs::write(&path, "old key").unwrap();
+        let kept = keep_replaced(&path, "abc").unwrap().unwrap();
+        assert_eq!(kept, dir.path().join("id_ed25519.replaced-abc"));
+        assert_eq!(fs::read(&kept).unwrap(), b"old key");
+        assert_eq!(fs::read(&path).unwrap(), b"old key", "the original moved");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            keep_replaced(&dir.path().join("none"), "abc").unwrap(),
+            None
+        );
+        for tag in ["", "../x", "a/b"] {
+            assert!(keep_replaced(&path, tag).is_err(), "{tag:?}");
+        }
     }
 }
