@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Patch `makechrootpkg` for the worker: confinement, and one nspawn default.
 
-Mostly the first. The `arch-nspawn` wrapper patch starts the containers after
-the dependency install itself; it also opts out of a systemd-nspawn default
-that is about to change. The three after it close the other direction: links
-left in the copy's output directories, which `makechrootpkg` would otherwise
-follow as root on the host. The upgrade patch keeps one build's output from
-reaching into the next; the dependency patch installs the build's
-dependencies with no network; the two after it leave the build no way back
-to root: see their comments.
+Mostly the first. The `arch-nspawn` wrapper patch hardens every container
+and starts those after the dependency install itself; it also opts out of a
+systemd-nspawn default that is about to change. The three after it close the
+other direction: links left in the copy's output directories, which
+`makechrootpkg` would otherwise follow as root on the host. The upgrade patch
+keeps one build's output from reaching into the next; the dependency patch
+installs the build's dependencies with no network; the two after it leave the
+build no way back to root: see their comments.
 
 A PKGBUILD is bash. Sourcing one runs it. `makechrootpkg` does that twice
 *outside* the chroot, as the build user:
@@ -316,7 +316,10 @@ fi
         #
         # Both containers are given the binds over the copy's package cache,
         # and none of the build's others: not its ssh-agent socket, not the
-        # operator's mounts.
+        # operator's mounts. The install's also drops CAP_MKNOD, which the
+        # sandbox leaves the scriptlets: a container kept in the build's
+        # cgroup has no device policy, so a device node root makes there opens
+        # the host's device.
         #
         # Last of everything host root does in the copy. Once a scriptlet has
         # run there as root, any path in it may be a link to the host
@@ -372,6 +375,7 @@ if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \t\t\tdie "Could not download the build's dependencies."
 \t\tarch-nspawn "$copydir" \\
 \t\t\t--machine="$(machine_name install-dependencies)" \\
+\t\t\t--drop-capability=CAP_MKNOD \\
 \t\t\t--bind-ro="${_aurcache_sandbox//:/\\\\:}:/run/aurcache-sandbox" \\
 \t\t\t"${_aurcache_cache_binds[@]}" \\
 \t\t\t/run/aurcache-sandbox offline -- \\
@@ -407,9 +411,27 @@ EOF
         # capability are inert for the build user. Root dropping to that
         # user, which is how `/chrootbuild` starts makepkg, is a `setuid()`
         # rather than a setuid exec, and is unaffected.
-        "the build runs with no_new_privs",
+        #
+        # Root does run in the build's container, before that: `/chrootbuild`
+        # sources `/etc/profile` and runs the copy's sudo, with PAM and NSS,
+        # and the dependencies installed above may have rewritten any of
+        # them. So root there runs a dependency's code, with the build's
+        # network, and what holds it is the build's network policy, matched on
+        # the build's cgroup, which nspawn keeps the container in. Raw packets
+        # and a kernel NFS mount would not be the cgroup's: every container
+        # drops CAP_NET_RAW and may not mount (the wrapper below), and the
+        # build's also drops CAP_SYS_ADMIN, with the rest root has no use for
+        # there. Becoming the build user takes CAP_SETUID and CAP_SETGID,
+        # sudo's terminal CAP_CHOWN and CAP_FOWNER, passing it signals
+        # CAP_KILL and pam_limits CAP_SYS_RESOURCE, and those stay.
+        # CAP_LINUX_IMMUTABLE goes because an immutable file in the copy is
+        # one the worker can neither move out nor delete, CAP_MKNOD because
+        # the container has no device policy (see the install's).
+        "the build runs with no_new_privs and without the capabilities root has no use for",
         "nspawn_build_args=(\n",
-        "nspawn_build_args=(\n\t--no-new-privileges=yes\n",
+        "nspawn_build_args=(\n\t--no-new-privileges=yes\n"
+        "\t--drop-capability=CAP_SYS_ADMIN,CAP_SYS_BOOT,CAP_SYS_MODULE,CAP_SYS_RAWIO,"
+        "CAP_SYS_PTRACE,CAP_MKNOD,CAP_AUDIT_CONTROL,CAP_LINUX_IMMUTABLE\n",
     ),
     (
         "direct `source PKGBUILD` for pkgbase/pkgname",
@@ -419,6 +441,17 @@ EOF
     (
         # One wrapper for every container the script starts: what it adds to
         # each, and how it starts those after the dependency install.
+        #
+        # Every container drops CAP_NET_RAW and may not mount or use the
+        # kernel keyring. Root runs in each: pacman, scriptlets, and in the
+        # build's, whatever a dependency left for `/chrootbuild` (see the
+        # build's own arguments above). What holds its network is the build's
+        # policy, matched on the cgroup the container is kept in, and each of
+        # these is a way around it whose sockets are not the cgroup's: raw
+        # packets, a kernel NFS mount, and `request_key`, which has the host
+        # resolve a name. The filter is nspawn's, applied wherever nspawn can
+        # install one: not under qemu's user-mode emulation, which installs
+        # none and implements none of the keyring calls itself.
         #
         # `--restrict-address-families=`: systemd-nspawn currently permits
         # every socket address family and warns, in every build log, that a
@@ -465,9 +498,12 @@ EOF
         # takes precedence over the PATH lookup in all of them. The flags have
         # to land straight after the working directory, since everything after
         # it is the command to run inside the container.
-        "arch-nspawn wrapper: address families, the build's own cgroup",
+        "arch-nspawn wrapper: hardening, address families, the build's own cgroup",
         "bindmounts_ro=()",
-        """_aurcache_nspawn_args=()
+        """_aurcache_nspawn_args=(
+\t--drop-capability=CAP_NET_RAW
+\t'--system-call-filter=~@mount add_key keyctl request_key'
+)
 _aurcache_nspawn_version=$(systemd-nspawn --version 2>/dev/null \\
 \t| awk 'NR==1 {print $2 + 0; exit}')
 if [[ -n ${_aurcache_nspawn_version:-} ]] && (( _aurcache_nspawn_version >= 261 )); then
