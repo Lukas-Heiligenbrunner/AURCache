@@ -12,7 +12,9 @@ use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
 use aurcache_worker_core::settings::WorkerSettings;
+use aurcache_worker_core::ssh_key::SshKeys;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cache::{Cache, CacheLimits};
@@ -58,12 +60,16 @@ pub struct Shared {
     cache: Cache,
     /// The repository databases fetched so far, for conditional fetches.
     pub repo_dbs: RepoDbs,
+    /// The SSH keys this worker holds for builds, by name: the socket of the
+    /// agent it started, as the default key, or none.
+    pub ssh_keys: SshKeys<PathBuf>,
 }
 
 impl Shared {
-    /// Set up, with nothing open yet: see [`Chroots::open`].
+    /// Set up, with nothing open yet (see [`Chroots::open`]), holding
+    /// `ssh_keys` for builds.
     #[must_use]
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(cfg: &Config, ssh_keys: SshKeys<PathBuf>) -> Self {
         let tunables = &cfg.tunables;
         Self {
             srcdest: SrcdestLocks::new(),
@@ -75,6 +81,7 @@ impl Shared {
             ),
             cache: Cache::new(&cfg.cache_dir, tunables.cache),
             repo_dbs: RepoDbs::default(),
+            ssh_keys,
         }
     }
 
@@ -107,10 +114,13 @@ impl ChrootExecutor {
     /// Async because it settles how chroots are made before any job arrives:
     /// the answer needs a real mount to be sure of, and finding out per build
     /// would mean a warning per build on a filesystem that cannot do it.
-    pub async fn new(cfg: Config) -> Self {
+    ///
+    /// Builds are offered only `ssh_keys`, never an agent this process's
+    /// environment names.
+    pub async fn new(cfg: Config, ssh_keys: SshKeys<PathBuf>) -> Self {
         let cgroups = prepare_cgroups(&cfg.tunables);
         log_limits(&cfg.tunables, cgroups.is_some());
-        let shared = Arc::new(Shared::new(&cfg));
+        let shared = Arc::new(Shared::new(&cfg, ssh_keys));
         // Before anything can claim work: no build of ours is running yet, so
         // whatever a build left in the pool belongs to a run that is over.
         if shared.chroots.open().await.is_ok() {
