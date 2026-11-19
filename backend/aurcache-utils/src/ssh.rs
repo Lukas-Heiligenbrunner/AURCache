@@ -49,6 +49,8 @@ use ssh_key::known_hosts::{Entry, HostPatterns, KnownHosts, Marker};
 use ssh_key::{HashAlg, LineEnding, PrivateKey, PublicKey};
 use zeroize::Zeroizing;
 
+use crate::git::SshBackend;
+
 /// Filename of the key the server generates.
 const KEY_FILE: &str = "id_ed25519";
 /// Filename of the host keys trusted on first use.
@@ -237,11 +239,18 @@ impl SshAccess {
 
     /// What `config` describes, generating the key first if it is ours to
     /// generate and missing.
+    ///
+    /// No key at all when the linked libgit2 cannot use one: SSH sources
+    /// then fail saying so, rather than connecting without the server's key
+    /// or its host-key checks.
     #[must_use]
     pub fn new(config: SshConfig) -> Self {
-        let key = match ensure(&config.key, config.passphrase_file.as_deref()) {
-            Ok(identity) => Key::Ready(identity),
-            Err(e) => Key::Unavailable(format!("{e:#}")),
+        let key = match SshBackend::linked().unusable() {
+            Some(reason) => Key::Unavailable(reason),
+            None => match ensure(&config.key, config.passphrase_file.as_deref()) {
+                Ok(identity) => Key::Ready(identity),
+                Err(e) => Key::Unavailable(format!("{e:#}")),
+            },
         };
         Self {
             key,

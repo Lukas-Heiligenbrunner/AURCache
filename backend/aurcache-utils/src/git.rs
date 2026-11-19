@@ -10,6 +10,80 @@ use std::rc::Rc;
 
 use crate::ssh::{Identity, SshAccess};
 
+/// How the libgit2 this server is linked with reaches SSH remotes.
+///
+/// It matters because only libssh2 calls the callbacks the server's key and
+/// host-key checks live in. The images link a vendored libgit2 built with
+/// it; a native install links the system's, which may have been built
+/// otherwise.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SshBackend {
+    /// libssh2, which calls the credential and certificate callbacks.
+    Libssh2,
+    /// libgit2's `exec` backend, which runs `ssh` and calls neither: the
+    /// server's key would not be offered, nor a host key checked by it.
+    Exec,
+    /// None: libgit2 was built without SSH.
+    Missing,
+    /// One this code does not know, by the name libgit2 gives it.
+    Other(String),
+}
+
+/// `GIT_FEATURE_SSH`, from libgit2's `git2/common.h`.
+const GIT_FEATURE_SSH: std::ffi::c_int = 1 << 2;
+
+unsafe extern "C" {
+    /// In libgit2 since 1.9, which is the oldest `libgit2-sys` 0.18 links.
+    fn git_libgit2_feature_backend(feature: std::ffi::c_int) -> *const std::ffi::c_char;
+}
+
+impl SshBackend {
+    /// The backend of the libgit2 this process is linked with.
+    #[must_use]
+    pub fn linked() -> Self {
+        // SAFETY: the function reads how libgit2 was built and returns a
+        // static string, or null for a feature it was built without; it
+        // needs no initialisation and takes no pointer.
+        let name = unsafe { git_libgit2_feature_backend(GIT_FEATURE_SSH) };
+        if name.is_null() {
+            return Self::from_name(None);
+        }
+        // SAFETY: non-null, it is a NUL-terminated static string.
+        let name = unsafe { std::ffi::CStr::from_ptr(name) };
+        Self::from_name(Some(&name.to_string_lossy()))
+    }
+
+    fn from_name(name: Option<&str>) -> Self {
+        match name {
+            None => Self::Missing,
+            Some("libssh2") => Self::Libssh2,
+            Some("exec") => Self::Exec,
+            Some(other) => Self::Other(other.to_string()),
+        }
+    }
+
+    /// Why SSH sources cannot be cloned with this backend, or `None` when
+    /// they can.
+    #[must_use]
+    pub fn unusable(&self) -> Option<String> {
+        let what = match self {
+            Self::Libssh2 => return None,
+            Self::Exec => "reaches SSH remotes by running `ssh` (its `exec` backend), which \
+                           would neither offer the server's key nor let it check host keys"
+                .to_string(),
+            Self::Missing => "was built without SSH".to_string(),
+            Self::Other(name) => format!(
+                "reaches SSH remotes through `{name}`, which is not known to call the \
+                 server's key and host-key checks"
+            ),
+        };
+        Some(format!(
+            "the libgit2 this server is linked with {what}. SSH sources need a libgit2 \
+             built with libssh2 (`-DUSE_SSH=libssh2`), as the container images' is"
+        ))
+    }
+}
+
 /// What a git operation may reach its remote with.
 #[derive(Clone, Copy, Debug)]
 pub enum Access<'a> {
@@ -501,6 +575,29 @@ mod tests {
         assert_eq!(user("ssh://deploy@git.example.com:2222/r.git"), "deploy");
         assert_eq!(user("ssh://git.example.com/r.git"), "git");
         assert_eq!(user("github.com:user/repo.git"), "git");
+    }
+
+    /// What this is built with -- the system libgit2, or the vendored one
+    /// the images build -- has to be libssh2, or every SSH test here would
+    /// pass against a server that cannot clone over SSH at all.
+    #[test]
+    fn the_linked_libgit2_reaches_ssh_through_libssh2() {
+        assert_eq!(SshBackend::linked(), SshBackend::Libssh2);
+        assert_eq!(SshBackend::linked().unusable(), None);
+    }
+
+    #[test]
+    fn a_libgit2_without_libssh2_is_refused_saying_why() {
+        assert_eq!(SshBackend::from_name(Some("libssh2")), SshBackend::Libssh2);
+        for (name, says) in [
+            (Some("exec"), "running `ssh`"),
+            (None, "built without SSH"),
+            (Some("libssh3"), "`libssh3`"),
+        ] {
+            let reason = SshBackend::from_name(name).unusable().unwrap();
+            assert!(reason.contains(says), "{reason}");
+            assert!(reason.contains("built with libssh2"), "{reason}");
+        }
     }
 
     #[test]

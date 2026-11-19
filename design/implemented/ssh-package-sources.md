@@ -35,7 +35,12 @@ unresolved, as it was before (it then failed for want of a transport).
 - **No new runtime dependency.** The server image is `debian:bookworm-slim`
   with neither `git` nor `openssh-client`; libssh2 is vendored and linked
   statically like the vendored OpenSSL already is. The Arch package links the
-  system `libgit2`, which Arch builds against libssh2 already.
+  system `libgit2`, which Arch builds against libssh2 already. A libgit2 built
+  otherwise -- without SSH, or with its `exec` backend, which runs `ssh` and
+  calls none of the callbacks -- is found at start
+  (`git_libgit2_feature_backend`, `git::SshBackend`), and SSH sources are then
+  refused with that reason in place of the key, rather than cloned past the
+  server's key and host-key checks.
 - **One code path.** Clone, fetch and `ls-remote` stay `git2` calls for every
   remote; the only difference for SSH is the callbacks. Shelling out would have
   meant a second implementation of the network half for one scheme, with its

@@ -169,6 +169,12 @@ With your own file, replace the entry with the host's new key.
   loaded at start; the rest of the message, and the server log, say why.
 - **"is not in AURCACHE_SSH_KNOWN_HOSTS"**: add the host to your file, with the
   `ssh-keyscan` command the message gives.
-- **"records another for it"**: the host presented a key other than the one
-  recorded. This is what someone intercepting the connection looks like, so
-  check with the host's owner before replacing the entry.
+- **"records another of that type for it"**: the host presented a key other
+  than the one recorded. This is what someone intercepting the connection looks
+  like, so check with the host's owner before replacing the entry.
+- **"SSH sources need a libgit2 built with libssh2"**: a native install links
+  the system's libgit2, and this one was built without SSH, or with its `exec`
+  backend, which runs `ssh` and would bypass the server's key and its host-key
+  checks. SSH sources are refused until the server links one built with
+  libssh2; Arch's `libgit2` package is, and the container images carry their
+  own.
