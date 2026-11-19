@@ -165,6 +165,20 @@ async fn generate(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What ssh is told beside a configured `known_hosts`, so that no other source
+/// of host keys can admit a host the file does not name: no other
+/// `known_hosts` (the system's `/etc/ssh/ssh_known_hosts` included), no
+/// `KnownHostsCommand`, no key from DNS, and no host accepted on first use.
+///
+/// Options on ssh's command line win over every `ssh_config`, the system's and
+/// the build user's, so none of them can turn any of this back on.
+const PINNED: [&str; 4] = [
+    "GlobalKnownHostsFile=/dev/null",
+    "KnownHostsCommand=none",
+    "VerifyHostKeyDNS=no",
+    "StrictHostKeyChecking=yes",
+];
+
 /// The `GIT_SSH_COMMAND` a build should use.
 ///
 /// The key is **not** named here, and `IdentitiesOnly` is deliberately absent:
@@ -178,6 +192,9 @@ async fn generate(path: &Path) -> Result<()> {
 /// can still ask the agent to authenticate during its own build (agent
 /// hijacking is inherent and accepted), but it cannot obtain the key material,
 /// so nothing it steals outlives the build.
+///
+/// With a `known_hosts`, that file is the only say in which hosts are trusted
+/// ([`PINNED`]).
 #[must_use]
 pub fn git_ssh_command(known_hosts: Option<&Path>) -> String {
     let mut cmd = String::from("ssh");
@@ -187,6 +204,10 @@ pub fn git_ssh_command(known_hosts: Option<&Path>) -> String {
             // with a space would split into two ssh arguments.
             cmd.push_str(" -o UserKnownHostsFile=");
             cmd.push_str(&quote_argument(&path.display().to_string()));
+            for option in PINNED {
+                cmd.push_str(" -o ");
+                cmd.push_str(option);
+            }
         }
         // Without a known_hosts file ssh would prompt, which hangs a
         // non-interactive build forever; accept-new records on first contact
@@ -414,9 +435,71 @@ mod tests {
         assert!(!with_hosts.contains("-i "), "must not name a key file");
         assert!(!with_hosts.contains("IdentitiesOnly"));
         assert!(with_hosts.contains("UserKnownHostsFile=/staged/known_hosts"));
+        // The configured file is the only one trusted, and a host it does not
+        // name is refused rather than accepted.
+        for option in [
+            "-o GlobalKnownHostsFile=/dev/null",
+            "-o KnownHostsCommand=none",
+            "-o VerifyHostKeyDNS=no",
+            "-o StrictHostKeyChecking=yes",
+        ] {
+            assert!(with_hosts.contains(option), "{with_hosts}");
+        }
+        assert!(!with_hosts.contains("accept-new"), "{with_hosts}");
         // No known_hosts must not leave ssh prompting, which would hang a build.
         let without = git_ssh_command(None);
         assert!(without.contains("StrictHostKeyChecking=accept-new"));
+    }
+
+    /// The pin holds against an `ssh_config` that trusts more: another
+    /// `known_hosts`, a `KnownHostsCommand`, DNS, or any host on first use.
+    /// Asked by `ssh -G`, which prints the configuration ssh would connect
+    /// with and connects to nothing.
+    #[test]
+    fn a_pinned_known_hosts_wins_over_any_ssh_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("ssh_config");
+        std::fs::write(
+            &config,
+            "Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /elsewhere\n  \
+             GlobalKnownHostsFile /etc/ssh/ssh_known_hosts\n  \
+             KnownHostsCommand /bin/cat /elsewhere\n  VerifyHostKeyDNS yes\n",
+        )
+        .unwrap();
+        let pinned = tmp.path().join(KNOWN_HOSTS_FILE);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{} -F {} -G example.invalid",
+                git_ssh_command(Some(&pinned)),
+                quote_argument(&config.display().to_string())
+            ))
+            .output()
+            .expect("sh should run");
+        assert!(
+            out.status.success(),
+            "ssh -G failed (is openssh installed?): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let effective = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = effective.lines().collect();
+        for expected in [
+            format!("userknownhostsfile {}", pinned.display()),
+            "globalknownhostsfile /dev/null".to_string(),
+            "stricthostkeychecking true".to_string(),
+            "verifyhostkeydns false".to_string(),
+        ] {
+            assert!(
+                lines.contains(&expected.as_str()),
+                "{expected}: {effective}"
+            );
+        }
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("knownhostscommand")),
+            "{effective}"
+        );
     }
 
     #[test]
@@ -496,11 +579,13 @@ mod tests {
             .output()
             .expect("sh should run");
         assert!(out.status.success());
-        // Three words, path intact: the shell consumed the quotes while
+        // The path one word, intact: the shell consumed the quotes while
         // splitting, which is exactly what protects the spaces.
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "<ssh><-o><UserKnownHostsFile=/my dir/known hosts>"
+            "<ssh><-o><UserKnownHostsFile=/my dir/known hosts>\
+             <-o><GlobalKnownHostsFile=/dev/null><-o><KnownHostsCommand=none>\
+             <-o><VerifyHostKeyDNS=no><-o><StrictHostKeyChecking=yes>"
         );
     }
 
