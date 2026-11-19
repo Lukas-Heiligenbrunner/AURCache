@@ -61,10 +61,18 @@ worker's own. Build pods get no token for the Kubernetes API at all.
 
 Never raise `replicas` above 1: a worker is known by its key, and two pods with
 one key each report only their own builds. For more builds at once, raise
-`WORKER_CONCURRENCY_DEFAULT`. For a second worker, for another set of
-architectures or its own credentials, copy `worker.yaml` and the
-ServiceAccount, Roles and RoleBindings in `rbac.yaml` under other names; it
-enrolls as a worker of its own and can share `aurcache-builds`.
+`WORKER_CONCURRENCY_DEFAULT`.
+
+For a second worker, for another set of architectures or its own credentials,
+copy `worker.yaml` under other names: the Deployment, and its volume claim,
+which holds the worker's own key. It enrolls as a worker of its own. Give it a
+builds namespace of its own too, with `WORKER_KUBE_NAMESPACE` naming it: copy
+`namespace.yaml`, `networkpolicy.yaml`, the builds' ServiceAccount and the
+dispatcher's ServiceAccount, Role and RoleBinding in `rbac.yaml` (one of each),
+and the quota if you use one, for that namespace. Never let two dispatchers
+share one: a Role cannot be limited to pods carrying a label, so each could
+exec into the other's build pods, and use the SSH key the other's builds are
+given while one of them runs.
 
 ## Checking a change
 
