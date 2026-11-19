@@ -121,6 +121,12 @@ secret then stops every parse, with a message saying which file. That is the
 sandbox doing its job (the parse user *could* read it), and the docs say to keep
 the key `0600`.
 
+The parse sandbox keeps a private path unreadable as it is written and grants
+what is beside it, following symlinks. So every private path is also named by
+its real path (`pkgbuild::with_real_paths`): a supplied key behind a link (a
+Kubernetes secret is `key -> ..data/key`), or a data directory linked
+elsewhere, would otherwise stay readable where it really is.
+
 Nothing returns or logs the private key: the API type has no field for it, and
 a test asserts neither the JSON nor `Debug` of `SshAccess` contains it.
 
