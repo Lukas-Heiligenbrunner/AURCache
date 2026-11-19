@@ -486,6 +486,20 @@ events! {
     /// now needs the new one.
     TokenRegenerated => ("auth.token_regenerated", "Settings and access", "API token replaced") {},
 
+    /// The server connected to an SSH host it had no key for, and trusted
+    /// the one it was shown: nothing vouched for it. The fingerprint is what
+    /// to compare with the one the host publishes; any other key from that
+    /// host is refused from now on.
+    SshHostTrusted => ("ssh.host_trusted", "Settings and access", "SSH host trusted on first use") {
+        /// As `known_hosts` names it: `github.com`, or `[host]:port` off
+        /// port 22.
+        host: String,
+        /// `ssh-ed25519`, `ecdsa-sha2-nistp256`, ...
+        key_type: String,
+        /// `SHA256:...`, as `ssh-keygen -l` prints it.
+        fingerprint: String,
+    },
+
     /// Somebody exported a dump -- with the secrets in it, when `secrets`.
     DumpExported => ("dump.exported", "Backups", "Dump exported") { secrets: bool },
 
@@ -776,6 +790,7 @@ impl Event {
             | Self::ScheduleInvalid { .. }
             | Self::ScheduleOutdated { .. }
             | Self::SignInRefused { .. }
+            | Self::SshHostTrusted { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
             | Self::WorkersUntrusted { .. }
@@ -1188,6 +1203,15 @@ impl Event {
                 ))]
             }
             Self::TokenRegenerated {} => vec![text("replaced the API token")],
+            Self::SshHostTrusted {
+                host,
+                key_type,
+                fingerprint,
+            } => vec![text(format!(
+                "trusted the SSH host key of {host} on first contact, with nothing to check \
+                 it against: {key_type} {fingerprint}. Compare it with the fingerprint the \
+                 host publishes; any other key from {host} is refused from now on"
+            ))],
             Self::DumpExported { secrets } => vec![text(if *secrets {
                 "exported a dump, with the CA key and credentials in it"
             } else {
@@ -1482,6 +1506,11 @@ mod tests {
                 user: "mallory@example.com".to_string(),
             },
             Event::TokenRegenerated {},
+            Event::SshHostTrusted {
+                host: "[git.example.com]:2222".to_string(),
+                key_type: "ssh-ed25519".to_string(),
+                fingerprint: "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU".to_string(),
+            },
             Event::DumpExported { secrets: true },
             Event::RestoreApplied { packages: 3 },
             Event::RestorePackageFailed {
@@ -1574,6 +1603,9 @@ mod tests {
                 !message.contains("{"),
                 "{message} looks like an unsubstituted template"
             );
+            // A line continuation lost from a long literal leaves its
+            // indentation in the sentence.
+            assert!(!message.contains("  "), "{message:?} has a run of spaces");
         }
     }
 

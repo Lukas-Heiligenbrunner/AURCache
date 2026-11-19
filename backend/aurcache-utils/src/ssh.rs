@@ -38,6 +38,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, bail};
+use aurcache_activitylog::activity_utils::ActivityLog;
+use aurcache_activitylog::events::Event;
 use aurcache_common::api::ssh::{DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey};
 use aurcache_common::server_env::{
     AURCACHE_GIT_SSH_KEY, AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE, AURCACHE_SSH_KNOWN_HOSTS,
@@ -230,9 +232,10 @@ impl SshAccess {
     ///
     /// Never fails: a server without a usable key still serves everything
     /// that does not need one, and each SSH source then fails saying why.
+    /// A host trusted on first use is recorded in `log`.
     #[must_use]
-    pub fn load() -> Self {
-        let access = Self::new(SshConfig::configured());
+    pub fn load(log: ActivityLog) -> Self {
+        let access = Self::new(SshConfig::configured()).with_log(log);
         access.log();
         access
     }
@@ -256,6 +259,14 @@ impl SshAccess {
             key,
             hosts: HostKeys::new(config.hosts),
         }
+    }
+
+    /// Record each host trusted on first use in `log`. Without one it is
+    /// written to the journal only.
+    #[must_use]
+    pub fn with_log(mut self, log: ActivityLog) -> Self {
+        self.hosts.log = log;
+        self
     }
 
     /// Access with no key at all, for a store that is never meant to reach an
@@ -506,6 +517,8 @@ pub(crate) struct HostKeys {
     /// Held while a host is looked up and recorded, so two first contacts
     /// with one host write one line between them.
     record: Mutex<()>,
+    /// Where a host trusted on first use is recorded for people to check.
+    log: ActivityLog,
 }
 
 impl HostKeys {
@@ -513,6 +526,7 @@ impl HostKeys {
         Self {
             source,
             record: Mutex::new(()),
+            log: ActivityLog::discarding(),
         }
     }
 
@@ -577,12 +591,14 @@ impl HostKeys {
                 ),
                 HostKeySource::TrustOnFirstUse(_) => {
                     record(file, &name, presented)?;
-                    tracing::warn!(
-                        "Trusting the SSH host key of {name} on first contact: {} {fingerprint}, \
-                         recorded in {}. Any other key from {name} will be refused.",
-                        presented.algorithm(),
-                        file.display()
-                    );
+                    // In the activity log rather than the journal alone: it
+                    // is the one fingerprint nothing checked, and someone
+                    // should.
+                    self.log.emit(Event::SshHostTrusted {
+                        host: name,
+                        key_type: presented.algorithm().to_string(),
+                        fingerprint: fingerprint.to_string(),
+                    });
                     Ok(())
                 }
             },
@@ -972,6 +988,44 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o077, 0);
         }
+    }
+
+    /// A host trusted on first use is in the activity log, once, with what
+    /// to check: the name, the key type and the fingerprint.
+    #[tokio::test]
+    async fn first_use_is_recorded_in_the_activity_log() {
+        use aurcache_activitylog::activity_utils::{Writer, spawn};
+        use aurcache_activitylog::log_store::{LogFilter, LogStore};
+
+        let db = aurcache_db::testing::memory_db().await;
+        let Writer { log, task } = spawn(db.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let access = SshAccess::new(SshConfig {
+            key: KeySource::Generated(dir.path().join(KEY_FILE)),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(dir.path().join(KNOWN_HOSTS_FILE)),
+        })
+        .with_log(log);
+        let host = remote("git.example.com", Some(2222));
+        let key = random_key();
+        access.hosts().verify(&host, &key).unwrap();
+        // Known now: nothing more to record.
+        access.hosts().verify(&host, &key).unwrap();
+        drop(access);
+        task.await.unwrap();
+
+        let page = LogStore::new(db)
+            .page(50, 0, &LogFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1, "{:?}", page.entries);
+        let entry = &page.entries[0];
+        assert_eq!(entry.kind, "ssh.host_trusted");
+        assert_eq!(entry.data["host"], "[git.example.com]:2222");
+        assert_eq!(entry.data["key_type"], "ssh-ed25519");
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        assert_eq!(entry.data["fingerprint"], fingerprint.as_str());
+        assert!(entry.message.contains(&fingerprint), "{}", entry.message);
     }
 
     /// An operator's file is the whole list: nothing is added to it, and the

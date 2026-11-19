@@ -120,12 +120,14 @@ the parse at its real path too.
 The server never trusts an SSH host without saying so.
 
 **By default**, the first time it connects to a host it records the host's key
-in `AURCACHE_SSH_DIR/known_hosts` and logs it:
+in `AURCACHE_SSH_DIR/known_hosts`, and says so in the activity log (the **Logs**
+page, *SSH host trusted on first use*) and the server log:
 
 ```
-WARN Trusting the SSH host key of github.com on first contact:
-    ecdsa-sha2-nistp256 SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM, recorded in ./data/ssh/known_hosts.
-    Any other key from github.com will be refused.
+WARN trusted the SSH host key of github.com on first contact, with nothing to
+    check it against: ecdsa-sha2-nistp256 SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM.
+    Compare it with the fingerprint the host publishes; any other key from
+    github.com is refused from now on
 ```
 
 Compare the fingerprint with the one the host publishes (GitHub's are under

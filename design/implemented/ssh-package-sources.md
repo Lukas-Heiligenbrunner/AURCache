@@ -129,8 +129,10 @@ a test asserts neither the JSON nor `Debug` of `SshAccess` contains it.
 Never trusted silently. Two policies (`HostKeyPolicy`):
 
 - **Trust on first use** (default). The first connection to a host records its
-  key in `AURCACHE_SSH_DIR/known_hosts` and logs a warning with the fingerprint
-  and the file; a different key from that host later is refused. This is
+  key in `AURCACHE_SSH_DIR/known_hosts`, and an `ssh.host_trusted` warning in
+  the activity log with the name, key type and fingerprint: the one key nothing
+  checked, recorded where someone will see it to check it. A different key
+  from that host later is refused. This is
   OpenSSH's `StrictHostKeyChecking=accept-new`, which is also what workers do
   without a `known_hosts`, so the two behave alike.
 - **Pinned**: `AURCACHE_SSH_KNOWN_HOSTS` names an operator's file. Only its
@@ -173,5 +175,4 @@ deployment until it is upgraded. An operator who wants pinning has
 - A dump with secrets carries the worker CA, not the SSH key. Restoring onto a
   new machine therefore generates a new key, which has to be added to the
   remotes again (or `AURCACHE_GIT_SSH_KEY` points at the old one).
-- First-use trust is logged, not written to the activity log.
 - The VCS check does not resolve SSH sources a PKGBUILD names (see Roles).
