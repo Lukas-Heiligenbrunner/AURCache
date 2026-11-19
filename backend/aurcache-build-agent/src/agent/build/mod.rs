@@ -359,9 +359,32 @@ fn init_keyring(output: &Output) -> Result<(), String> {
 /// not get itself installed that way. Either step failing fails the build:
 /// an upgrade that stopped over fresh databases is a partial one.
 fn upgrade(output: &Output) -> Result<(), String> {
-    pacman(output, &["-Sy"], "pacman -Sy")?;
-    pacman(output, &["-Su", "--config", UPGRADE_CONF], "pacman -Su")
+    for step in UPGRADE {
+        pacman(output, step.args, step.what)?;
+    }
+    Ok(())
 }
+
+/// One pacman run of the upgrade.
+struct Step {
+    args: &'static [&'static str],
+    /// How the run is named when it fails.
+    what: &'static str,
+}
+
+/// The upgrade, in order: every database synced with `/etc/pacman.conf`,
+/// then the system upgraded with the configuration that does not list
+/// AURCache's repository.
+const UPGRADE: [Step; 2] = [
+    Step {
+        args: &["-Sy"],
+        what: "pacman -Sy",
+    },
+    Step {
+        args: &["-Su", "--config", UPGRADE_CONF],
+        what: "pacman -Su",
+    },
+];
 
 /// Run pacman as root with what every run here has, then `args`, which may
 /// end in `--` and targets.
@@ -381,7 +404,7 @@ fn pacman(output: &Output, args: &[&str], what: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Confs, checked_confs, is_one_name, read_spec};
+    use super::{Confs, UPGRADE, UPGRADE_CONF, checked_confs, is_one_name, read_spec};
     use aurcache_build_agent::layout::Work;
 
     const SPEC: &str = include_str!("../../../tests/fixtures/interface-1/spec.json");
@@ -470,5 +493,29 @@ mod tests {
         let bad = self::job(&bad);
         let refused = checked_confs(&read_spec(&bad.work).unwrap()).unwrap_err();
         assert!(refused.contains("for the upgrade"), "{refused}");
+    }
+
+    /// Every database is synced first, AURCache's included, and the system
+    /// is then upgraded from the configuration without it. No run both
+    /// syncs and upgrades: one that did would upgrade with the repository in
+    /// view, and act on a `replaces=` in it.
+    #[test]
+    fn the_upgrade_never_sees_the_repository() {
+        let runs: Vec<&[&str]> = UPGRADE.iter().map(|step| step.args).collect();
+        assert_eq!(runs, [&["-Sy"][..], &["-Su", "--config", UPGRADE_CONF][..]]);
+        for args in runs {
+            let upgrades = args.iter().any(|word| {
+                word.strip_prefix('-')
+                    .filter(|letters| !letters.starts_with('-'))
+                    .is_some_and(|letters| letters.contains('S') && letters.contains('u'))
+            });
+            let config = args
+                .windows(2)
+                .any(|pair| pair == ["--config", UPGRADE_CONF]);
+            assert!(
+                !upgrades || config,
+                "an upgrade with the build's configuration: {args:?}"
+            );
+        }
     }
 }
