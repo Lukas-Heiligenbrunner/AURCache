@@ -870,6 +870,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aurcache-common",
+ "jiff 1.0.1",
  "pgp",
  "rand 0.8.8",
  "tempfile",

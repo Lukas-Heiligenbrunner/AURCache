@@ -353,7 +353,7 @@ impl InstanceKey {
         key.verify_bindings()
             .context("the key's self-signatures do not verify")?;
         let now = now();
-        let choice = choose(&key, now).ok_or_else(|| anyhow!(NOTHING_SIGNS))?;
+        let choice = choose(&key, now).map_err(|why| refusal(&key, why))?;
         if let Some(notice) = expiry_notice(&key, choice, now) {
             tracing::warn!("{notice}");
         }
@@ -436,22 +436,24 @@ impl InstanceKey {
     }
 
     /// What to tell the operator now about the key that signs: when it
-    /// expires and what signs after it, from [`EXPIRY_NOTICE_SECS`] before;
-    /// `None` until then, and for a key that does not expire.
+    /// stops signing -- it expires, or its primary key does -- and what signs
+    /// after it, from [`EXPIRY_NOTICE_SECS`] before; `None` until then, and
+    /// for a key that does not expire.
     #[must_use]
     pub fn expiry_notice(&self) -> Option<String> {
         let now = now();
-        expiry_notice(&self.key, choose(&self.key, now)?, now)
+        expiry_notice(&self.key, choose(&self.key, now).ok()?, now)
     }
 
     /// When the component key that signs now stops being the one that signs
-    /// -- [`HANDOVER_SECS`] before it expires, or when it expires -- as a
-    /// time from now; `None` when it never does. What it signed until then
+    /// -- [`HANDOVER_SECS`] before it stops signing, or when it does, which
+    /// is when it expires or its primary key does, whichever is sooner -- as
+    /// a time from now; `None` when it never does. What it signed until then
     /// is signed again by a backfill once it has changed.
     #[must_use]
     pub fn signer_changes_in(&self) -> Option<std::time::Duration> {
         let now = now();
-        let expires = choose(&self.key, now)?.expires?;
+        let expires = choose(&self.key, now).ok()?.expires?;
         let at = if expires.saturating_sub(HANDOVER_SECS) > now {
             expires - HANDOVER_SECS
         } else {
@@ -567,14 +569,59 @@ impl InstanceKey {
     fn signer(&self) -> anyhow::Result<Signer> {
         choose(&self.key, now())
             .map(|choice| choice.signer)
-            .ok_or_else(|| anyhow!(NOTHING_SIGNS))
+            .map_err(|why| refusal(&self.key, why))
     }
 }
 
-/// Why a key is refused, or stops signing, when no component key of it signs.
+/// Why a key is refused, or stops signing, when its primary key is current
+/// but no component key of it signs.
 const NOTHING_SIGNS: &str = "nothing in the signing key signs now: no subkey that signs \
      is current (neither expired nor revoked) with its secret in the file, and the primary \
      key does not sign either";
+
+/// Why nothing in a key signs at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NothingSigns {
+    /// Its primary key has expired, at this time in seconds since the epoch,
+    /// and every subkey's signatures with it.
+    PrimaryExpired { at: u64 },
+    /// Its primary key is revoked, and every subkey's signatures with it.
+    PrimaryRevoked,
+    /// Its primary key is current, but no subkey signs and is current with
+    /// its secret in the file, and the primary key does not sign either.
+    NoSigner,
+}
+
+/// The error a key in which nothing signs, for `why`, is refused with.
+fn refusal(key: &SignedSecretKey, why: NothingSigns) -> anyhow::Error {
+    let primary = key.primary_key.fingerprint();
+    match why {
+        NothingSigns::PrimaryExpired { at } => anyhow!(
+            "the signing key's primary key {primary:X} expired on {}, and pacman refuses every \
+             signature under an expired primary key, its subkeys' included: extend it \
+             (`gpg --quick-set-expire {primary:X} <expiry>`), then give the server the key \
+             again and have every client import it again",
+            date(at)
+        ),
+        NothingSigns::PrimaryRevoked => anyhow!(
+            "the signing key's primary key {primary:X} is revoked, and pacman refuses every \
+             signature under a revoked primary key, its subkeys' included: the server needs \
+             another key"
+        ),
+        NothingSigns::NoSigner => anyhow!(NOTHING_SIGNS),
+    }
+}
+
+/// A time in seconds since the epoch, as a UTC date.
+fn date(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|secs| jiff::Timestamp::from_second(secs).ok())
+        .map_or_else(
+            || secs.to_string(),
+            |at| at.strftime("%Y-%m-%d").to_string(),
+        )
+}
 
 /// The current time, in seconds since the epoch, as key times are kept.
 fn now() -> u64 {
@@ -591,7 +638,8 @@ struct Issuer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Choice {
     signer: Signer,
-    /// When it expires, in seconds since the epoch; `None` for never.
+    /// When it stops signing, in seconds since the epoch: when it expires, or
+    /// when its primary key does if that is sooner. `None` for never.
     expires: Option<u64>,
 }
 
@@ -602,13 +650,46 @@ struct Validity {
     expires: Option<u64>,
 }
 
+impl Validity {
+    /// How long a subkey valid for `self` signs under a primary key valid
+    /// for `primary`: until the sooner of the two expires.
+    fn under(self, primary: Self) -> Self {
+        let expires = match (self.expires, primary.expires) {
+            (Some(own), Some(primary)) => Some(own.min(primary)),
+            (own, primary) => own.or(primary),
+        };
+        Self { expires }
+    }
+}
+
+/// Whether a key's primary key is in force at a time, which everything
+/// under it depends on: GnuPG, and pacman through it, takes a subkey's
+/// signature under an expired primary key for an expired signature, and
+/// under a revoked one for a revoked one, whatever the subkey's own binding
+/// says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimaryStatus {
+    /// Neither expired nor revoked, until it expires.
+    Current(Validity),
+    /// Expired, at this time in seconds since the epoch.
+    Expired {
+        at: u64,
+    },
+    Revoked,
+}
+
 /// The newest subkey that signs at `now`, else the primary key if it does, as
 /// GnuPG picks: a key this server generated signs with its one subkey, and
 /// one an operator supplies -- whose old subkeys may have expired -- with its
-/// newest valid one. Within [`HANDOVER_SECS`] of its expiry, a subkey gives
-/// way to one that signs for longer, if there is one. `None` when nothing in
-/// it signs.
-fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
+/// newest valid one. A subkey signs only while its primary key is in force
+/// ([`primary_status`]), and within [`HANDOVER_SECS`] of when it stops
+/// signing, it gives way to one that signs for longer, if there is one.
+fn choose(key: &SignedSecretKey, now: u64) -> Result<Choice, NothingSigns> {
+    let primary = match primary_status(key, now) {
+        PrimaryStatus::Current(validity) => validity,
+        PrimaryStatus::Expired { at } => return Err(NothingSigns::PrimaryExpired { at }),
+        PrimaryStatus::Revoked => return Err(NothingSigns::PrimaryRevoked),
+    };
     let candidates: Vec<Candidate> = key
         .secret_subkeys
         .iter()
@@ -617,7 +698,7 @@ fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
             subkey_signs(subkey, now).map(|validity| Candidate {
                 index,
                 created: subkey.key.created_at().as_secs(),
-                validity,
+                validity: validity.under(primary),
             })
         })
         .collect();
@@ -631,14 +712,15 @@ fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
         .max_by_key(|candidate| candidate.created)
         .or_else(|| candidates.iter().max_by_key(|candidate| candidate.created));
     match subkey {
-        Some(candidate) => Some(Choice {
+        Some(candidate) => Ok(Choice {
             signer: Signer::Subkey(candidate.index),
             expires: candidate.validity.expires,
         }),
-        None => primary_signs(key, now).map(|validity| Choice {
+        None if primary_signs(key) => Ok(Choice {
             signer: Signer::Primary,
-            expires: validity.expires,
+            expires: primary.expires,
         }),
+        None => Err(NothingSigns::NoSigner),
     }
 }
 
@@ -646,12 +728,14 @@ fn choose(key: &SignedSecretKey, now: u64) -> Option<Choice> {
 struct Candidate {
     index: usize,
     created: u32,
+    /// How long it signs under its primary key.
     validity: Validity,
 }
 
-/// Whether `subkey` signs at `now` (seconds): its latest binding says it
-/// signs and has not expired, nothing revokes it, and its secret is in the
-/// file.
+/// How long `subkey` signs after `now` (seconds), by its own signatures:
+/// its latest binding says it signs and it has not expired, nothing revokes
+/// it, and its secret is in the file; `None` when it does not. Its primary
+/// key can end that sooner ([`primary_status`]).
 fn subkey_signs(subkey: &SignedSecretSubKey, now: u64) -> Option<Validity> {
     let revoked = subkey
         .signatures
@@ -665,52 +749,66 @@ fn subkey_signs(subkey: &SignedSecretSubKey, now: u64) -> Option<Validity> {
     if revoked || !binding.key_flags().sign() || !holds_secret(subkey.key.secret_params()) {
         return None;
     }
-    current(u64::from(subkey.key.created_at().as_secs()), binding, now)
+    let created = u64::from(subkey.key.created_at().as_secs());
+    match expiry(created, binding) {
+        Some(at) if at <= now => None,
+        expires => Some(Validity { expires }),
+    }
 }
 
-/// Whether the primary key signs at `now`, as [`subkey_signs`] says of a
-/// subkey: by its newest self-signature, a direct one or a user ID's.
-fn primary_signs(key: &SignedSecretKey, now: u64) -> Option<Validity> {
-    let primary = &key.primary_key;
+/// The status of `key`'s primary key at `now`: revoked by a revocation it
+/// made, else expired or not by its newest self-signature.
+fn primary_status(key: &SignedSecretKey, now: u64) -> PrimaryStatus {
     let revoked = key
         .details
         .revocation_signatures
         .iter()
         .any(|sig| sig.typ() == Some(SignatureType::KeyRevocation));
-    if revoked || !holds_secret(primary.secret_params()) {
-        return None;
+    if revoked {
+        return PrimaryStatus::Revoked;
     }
-    let fingerprint = primary.fingerprint();
-    let id = primary.legacy_key_id();
-    let newest = key
-        .details
+    let created = u64::from(key.primary_key.created_at().as_secs());
+    match newest_self_signature(key).and_then(|sig| expiry(created, sig)) {
+        Some(at) if at <= now => PrimaryStatus::Expired { at },
+        expires => PrimaryStatus::Current(Validity { expires }),
+    }
+}
+
+/// Whether the primary key signs itself, as [`subkey_signs`] says of a
+/// subkey, once [`primary_status`] says it is current: its secret is in the
+/// file, and its newest self-signature lets it sign.
+fn primary_signs(key: &SignedSecretKey) -> bool {
+    if !holds_secret(key.primary_key.secret_params()) {
+        return false;
+    }
+    // Without key flags, what the key does is its algorithm's to say; the
+    // probe signature at load tells a key that cannot sign.
+    newest_self_signature(key)
+        .is_some_and(|newest| !states_key_flags(newest) || newest.key_flags().sign())
+}
+
+/// The primary key's newest self-signature, a direct one or a user ID's:
+/// what says what it does, and until when.
+fn newest_self_signature(key: &SignedSecretKey) -> Option<&Signature> {
+    let fingerprint = key.primary_key.fingerprint();
+    let id = key.primary_key.legacy_key_id();
+    key.details
         .direct_signatures
         .iter()
         .chain(key.details.users.iter().flat_map(|user| &user.signatures))
         .filter(|sig| {
             sig.issuer_fingerprint().contains(&&fingerprint) || sig.issuer_key_id().contains(&&id)
         })
-        .max_by_key(|sig| sig.created().map_or(0, Timestamp::as_secs))?;
-    // Without key flags, what the key does is its algorithm's to say; the
-    // probe signature at load tells a key that cannot sign.
-    if states_key_flags(newest) && !newest.key_flags().sign() {
-        return None;
-    }
-    current(u64::from(primary.created_at().as_secs()), newest, now)
+        .max_by_key(|sig| sig.created().map_or(0, Timestamp::as_secs))
 }
 
-/// How long a key created at `created`, with `sig` its self-signature, signs
-/// after `now`; `None` once it has expired.
-fn current(created: u64, sig: &Signature, now: u64) -> Option<Validity> {
-    let expires = sig
-        .key_expiration_time()
+/// When a key created at `created` expires by its self-signature `sig`, in
+/// seconds since the epoch; `None` for never.
+fn expiry(created: u64, sig: &Signature) -> Option<u64> {
+    sig.key_expiration_time()
         .map(|lifetime| u64::from(lifetime.as_secs()))
         .filter(|lifetime| *lifetime > 0)
-        .map(|lifetime| created + lifetime);
-    match expires {
-        Some(at) if at <= now => None,
-        _ => Some(Validity { expires }),
-    }
+        .map(|lifetime| created + lifetime)
 }
 
 /// `key` with only the signatures its own primary key made, which is what
@@ -785,24 +883,42 @@ fn holds_secret(params: &SecretParams) -> bool {
     !matches!(s2k, StringToKey::Private { typ: 101, .. })
 }
 
-/// What to tell the operator when the key that signs at `now` expires
-/// within [`EXPIRY_NOTICE_SECS`]: when, and what signs after it.
+/// What to tell the operator when the key that signs at `now` stops signing
+/// within [`EXPIRY_NOTICE_SECS`], because it expires or its primary key
+/// does: when, and what signs after it.
 fn expiry_notice(key: &SignedSecretKey, choice: Choice, now: u64) -> Option<String> {
     let expires = choice.expires?;
     if expires > now + EXPIRY_NOTICE_SECS {
         return None;
     }
     let days = (expires - now) / (24 * 60 * 60);
+    let signer = describe(key, choice.signer);
+    let primary_ends_it = choice.signer != Signer::Primary
+        && primary_status(key, now)
+            == PrimaryStatus::Current(Validity {
+                expires: Some(expires),
+            });
+    let what = if primary_ends_it {
+        format!(
+            "the repository's signing {signer} stops signing in {days} days, when its primary \
+             key {:X} expires",
+            key.primary_key.fingerprint()
+        )
+    } else {
+        format!("the repository's signing {signer} expires in {days} days")
+    };
     let then = match choose(key, expires) {
-        Some(next) => format!("then its {} signs", describe(key, next.signer)),
-        None => "then nothing in it signs, and publishing fails until the server has a key \
-                 with a current signing subkey"
+        Ok(next) => format!("then its {} signs", describe(key, next.signer)),
+        Err(NothingSigns::PrimaryExpired { .. }) => "then nothing in it signs, and publishing \
+             fails until the primary key's expiry is extended (`gpg --quick-set-expire`), the \
+             server has the key again and every client has imported it again"
+            .to_string(),
+        Err(NothingSigns::PrimaryRevoked | NothingSigns::NoSigner) => "then nothing in it \
+             signs, and publishing fails until the server has a key with a current signing \
+             subkey"
             .to_string(),
     };
-    Some(format!(
-        "the repository's signing {} expires in {days} days; {then}",
-        describe(key, choice.signer)
-    ))
+    Some(format!("{what}; {then}"))
 }
 
 /// A component key as an operator finds it in `gpg --list-keys`.
@@ -1262,6 +1378,189 @@ mod tests {
         assert_eq!(expiry_notice(&key.key, after, now), None);
     }
 
+    /// A key whose primary key has expired is refused, though its signing
+    /// subkey never expires: GnuPG, and pacman through it, takes every
+    /// signature under an expired primary key for an expired one.
+    #[test]
+    fn a_key_whose_primary_key_expired_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped: gpg is not installed");
+            return;
+        };
+        // Made in 2019, its primary key for a year.
+        let made = gpg.unattended(&[
+            "--faked-system-time",
+            "20190101T000000",
+            "--quick-gen-key",
+            "Expired <ops@localhost>",
+            "ed25519",
+            "cert",
+            "1y",
+        ]);
+        let Some(primary) = made.created() else {
+            eprintln!("skipped: gpg could not make a key ({})", made.stderr);
+            return;
+        };
+        let added = gpg.unattended(&[
+            "--faked-system-time",
+            "20190102T000000",
+            "--quick-add-key",
+            &primary,
+            "ed25519",
+            "sign",
+            "never",
+        ]);
+        assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
+        let exported = gpg.export("--export-secret-keys", &primary, "");
+        let parsed = parse_secret(&exported).unwrap();
+        assert_eq!(
+            subkey_signs(&parsed.secret_subkeys[0], now()),
+            Some(Validity { expires: None }),
+            "by itself, the subkey signs for good"
+        );
+        let path = tmp.path().join("expired.gpg");
+        std::fs::write(&path, &exported).unwrap();
+
+        let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
+        assert!(
+            error.contains(&format!("primary key {primary} expired on 2020-01-01")),
+            "{error}"
+        );
+    }
+
+    /// A key whose primary key is revoked is refused, though its signing
+    /// subkey is not revoked itself.
+    #[test]
+    fn a_key_whose_primary_key_is_revoked_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped: gpg is not installed");
+            return;
+        };
+        let Some(primary) = gpg.make("Revoked <ops@localhost>", "cert", "") else {
+            return;
+        };
+        let added = gpg.unattended(&["--quick-add-key", &primary, "ed25519", "sign", "never"]);
+        assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
+        // The revocation certificate GnuPG made with the key, without the
+        // colon that keeps it from being imported by accident.
+        let made = std::fs::read_to_string(
+            gpg.home
+                .join("openpgp-revocs.d")
+                .join(format!("{primary}.rev")),
+        )
+        .unwrap();
+        let certificate = tmp.path().join("revocation.asc");
+        std::fs::write(
+            &certificate,
+            made.replace(":-----BEGIN PGP", "-----BEGIN PGP"),
+        )
+        .unwrap();
+        let imported = gpg.unattended(&["--import", certificate.to_str().unwrap()]);
+        assert!(imported.success, "gpg --import: {}", imported.stderr);
+        let exported = gpg.export("--export-secret-keys", &primary, "");
+        let parsed = parse_secret(&exported).unwrap();
+        assert!(
+            subkey_signs(&parsed.secret_subkeys[0], now()).is_some(),
+            "by itself, the subkey signs"
+        );
+        let path = tmp.path().join("revoked.gpg");
+        std::fs::write(&path, &exported).unwrap();
+
+        let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
+        assert!(
+            error.contains(&format!("primary key {primary} is revoked")),
+            "{error}"
+        );
+    }
+
+    /// A subkey that never expires under a primary key that does stops
+    /// signing when the primary key expires -- as GnuPG says of what it
+    /// signed -- so that is what is announced, and nothing signs after it.
+    #[test]
+    fn a_primary_key_expiring_first_ends_its_subkeys_signing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(gpg) = Gpg::new(tmp.path()) else {
+            eprintln!("skipped: gpg is not installed");
+            return;
+        };
+        let made = gpg.unattended(&[
+            "--quick-gen-key",
+            "Short-lived <ops@localhost>",
+            "ed25519",
+            "cert",
+            "10d",
+        ]);
+        let Some(primary) = made.created() else {
+            eprintln!("skipped: gpg could not make a key ({})", made.stderr);
+            return;
+        };
+        let added = gpg.unattended(&["--quick-add-key", &primary, "ed25519", "sign", "never"]);
+        assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
+        let path = tmp.path().join("short-lived.gpg");
+        std::fs::write(&path, gpg.export("--export-secret-keys", &primary, "")).unwrap();
+        let key = InstanceKey::load(&path, None).unwrap();
+
+        let now = now();
+        let PrimaryStatus::Current(Validity {
+            expires: Some(expires),
+        }) = primary_status(&key.key, now)
+        else {
+            panic!("the primary key expires in ten days");
+        };
+        let choice = choose(&key.key, now).unwrap();
+        assert_eq!(
+            choice,
+            Choice {
+                signer: Signer::Subkey(0),
+                expires: Some(expires),
+            }
+        );
+        let notice = expiry_notice(&key.key, choice, now).unwrap();
+        assert!(notice.contains("stops signing in 9 days"), "{notice}");
+        assert!(
+            notice.contains(&format!("when its primary key {primary} expires")),
+            "{notice}"
+        );
+        assert!(notice.contains("then nothing in it signs"), "{notice}");
+        let changes_in = key.signer_changes_in().unwrap().as_secs();
+        assert!(
+            (expires - HANDOVER_SECS - now).abs_diff(changes_in) <= 5,
+            "{changes_in}"
+        );
+        assert_eq!(
+            choose(&key.key, expires),
+            Err(NothingSigns::PrimaryExpired { at: expires })
+        );
+
+        // GnuPG accepts the subkey's signature now, and takes it for an
+        // expired one once the primary key has expired.
+        let content = tmp.path().join("content");
+        std::fs::write(&content, CONTENT).unwrap();
+        let signature = tmp.path().join("content.sig");
+        std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
+        let verify = [signature.to_str().unwrap(), content.to_str().unwrap()];
+        let verified = gpg.verify(verify);
+        assert!(
+            verified.status.contains("[GNUPG:] GOODSIG"),
+            "{}",
+            verified.status
+        );
+        let later = gpg.run(&[
+            "--faked-system-time",
+            &(expires + 60).to_string(),
+            "--verify",
+            verify[0],
+            verify[1],
+        ]);
+        assert!(
+            later.status.contains("[GNUPG:] EXPKEYSIG"),
+            "{}",
+            later.status
+        );
+    }
+
     /// A supplied key someone else certified -- a colleague's signature on
     /// its user ID, which `gpg --export-secret-keys` includes -- loads: only
     /// its own signatures are checked, and it signs what GnuPG verifies.
@@ -1480,16 +1779,11 @@ mod tests {
                 passphrase,
                 &["--quick-gen-key", user, "ed25519", usage, "never"],
             );
-            if !made.success {
+            let primary = made.created();
+            if primary.is_none() {
                 eprintln!("skipped: gpg could not make a key ({})", made.stderr);
-                return None;
             }
-            let primary = made
-                .status
-                .lines()
-                .find_map(|line| line.strip_prefix("[GNUPG:] KEY_CREATED P "))
-                .expect("gpg names the key it made");
-            Some(primary.trim().to_string())
+            primary
         }
 
         /// What `gpg <how> <key>` exports, binary.
@@ -1532,5 +1826,21 @@ mod tests {
         success: bool,
         status: String,
         stderr: String,
+    }
+
+    impl Output {
+        /// The fingerprint of the primary key a successful `--quick-gen-key`
+        /// made, or `None` when it made none.
+        fn created(&self) -> Option<String> {
+            if !self.success {
+                return None;
+            }
+            let primary = self
+                .status
+                .lines()
+                .find_map(|line| line.strip_prefix("[GNUPG:] KEY_CREATED P "))
+                .expect("gpg names the key it made");
+            Some(primary.trim().to_string())
+        }
     }
 }

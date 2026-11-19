@@ -169,17 +169,23 @@ the CA: losing it means a new key, which every client has to trust again.
   RSA implementation with a known timing side channel
   ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)),
   and the server warns about one.
-- **Subkeys expire.** From 30 days before the signing subkey expires, the
-  server says so at start and once a day after. A day before it expires, the
-  server moves on to the next valid signing subkey, if the key has one, and
-  signs everything again with it; without one, nothing signs once it has
-  expired, and publishing fails until the server has a key that does. Adding
-  a subkey or extending one (`gpg --quick-set-expire`) changes the public
-  key: give the server the new key file and restart it, and have every
-  client import the key again before the old subkey expires
-  (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`) — pacman checks a
-  signature against the key as it imported it, and refuses one by a subkey it
-  has never seen.
+- **Subkeys expire, and so does the primary key.** A signing subkey stops
+  signing when it expires or when its primary key does, whichever comes
+  first: pacman takes every signature under an expired primary key for an
+  expired one, the subkeys' included, and `gpg --quick-gen-key` gives a
+  primary key three years by default. The server refuses to start with a key
+  whose primary key has expired or is revoked. From 30 days before the
+  signing subkey stops signing, the server says so at start and once a day
+  after. A day before, the server moves on to the next valid signing subkey,
+  if the key has one that signs for longer, and signs everything again with
+  it; without one — and there is none when it is the primary key that
+  expires — nothing signs once it has, and publishing fails until the server
+  has a key that does. Adding a subkey or extending one or the primary key
+  (`gpg --quick-set-expire`) changes the public key: give the server the new
+  key file and restart it, and have every client import the key again before
+  the old expiry (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`) —
+  pacman checks a signature against the key as it imported it, and refuses
+  one by a subkey it has never seen.
 - `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names a file holding a passphrase:
   a key the server creates is locked with it, and a supplied one unlocked
   with it. It protects a copy of the key file — a backup, a volume snapshot —

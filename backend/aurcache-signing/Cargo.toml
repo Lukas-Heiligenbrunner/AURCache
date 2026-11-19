@@ -12,6 +12,7 @@ workspace = true
 anyhow = { workspace = true }
 tracing = { workspace = true }
 aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
+jiff = { workspace = true }
 # Without its default `bzip2`: nothing here reads or writes compressed
 # messages, and it would be the only C library the server links for OpenPGP.
 pgp = { version = "0.21.1", default-features = false }
