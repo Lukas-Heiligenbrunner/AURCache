@@ -202,15 +202,15 @@ impl Cache {
         })
     }
 
-    /// Persistent build tree root for one architecture, bound over `/build`
-    /// when a package asks to keep its tree between builds.
+    /// Persistent build trees' root for one architecture: one tree per
+    /// pkgbase, laid out as makepkg lays out `$BUILDDIR` (`$pkgbase/src`,
+    /// `$pkgbase/pkg`). A build that keeps its tree is given only its own, at
+    /// `/build/<pkgbase>` ([`Self::builddir_tree`]).
     ///
-    /// Keyed by platform and *not* by package: makepkg already namespaces the
-    /// tree as `$BUILDDIR/$pkgbase/src`, so keying by package here would nest
-    /// the name twice. Platform must be in the key though -- a build tree holds
-    /// compiled objects, unlike `srcdest`, whose downloads are architecture
-    /// independent -- and it also keeps a native and an emulated build of one
-    /// package from sharing a tree on the same worker.
+    /// Keyed by platform as well as pkgbase: a build tree holds compiled
+    /// objects, unlike `srcdest`, whose downloads are architecture
+    /// independent, and the platform also keeps a native and an emulated
+    /// build of one package from sharing a tree on the same worker.
     ///
     /// Only ever populated for packages that opted in, because the bind only
     /// happens for those; see `design/implemented/persistent-build-directory.md`.
@@ -285,6 +285,11 @@ impl Cache {
     /// mtime only moves when an entry directly under it changes, so an
     /// hours-long compile can leave its tree looking like the oldest here.
     ///
+    /// Run before every build of `platform`, whether or not its package keeps
+    /// a tree: every build needs disk, and the trees left by packages that are
+    /// gone, routed elsewhere or no longer keeping one would otherwise wait
+    /// for a build that keeps a tree.
+    ///
     /// **Nothing is evicted while the cache is within its limits.** Disk that
     /// nothing else needs is not worth reclaiming, and a tree kept is a rebuild
     /// avoided, so eviction is only ever a response to pressure -- never a
@@ -317,7 +322,7 @@ impl Cache {
     /// Whole trees, never partial contents: half a tree is worse than none,
     /// because makepkg would treat it as resumable.
     ///
-    /// Best-effort. Failing to reclaim is worth reporting and carrying on;
+    /// Best-effort. Failing to reclaim is logged and the build carries on;
     /// refusing to build over it would turn a full disk into an idle worker.
     /// Blocking, and a tree can take minutes to delete: run it off the async
     /// runtime.

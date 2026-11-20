@@ -179,21 +179,27 @@ impl Setting {
                 default: "true",
                 scope: Scope::Global,
             },
-            // On by default. This is what an AUR helper on a workstation
-            // already does -- paru and yay keep their build trees between
-            // builds and trouble is rare -- and the failure that was assumed
-            // to make it risky does not exist: `extract_sources` unpacks over
-            // the tree and bsdtar overwrites, so `prepare()` always patches
-            // pristine sources. The chroot is still rebuilt from a fresh
-            // snapshot every time; only the tree survives.
+            // Off by default; turn it on for a package whose own build tree
+            // holds expensive state: a `prepare()` that clones or downloads
+            // into `$srcdir`, or a compile long enough to be worth keeping
+            // incremental. The chroot is still a fresh snapshot every time;
+            // only the tree survives.
             //
-            // Kept as a setting rather than made unconditional so a package
-            // that does turn out to mind has a remedy that is not "delete a
-            // directory on the worker by hand".
+            // Opt-in because the tree is reused as is between successful
+            // builds: archives are extracted over it, which overwrites but
+            // never deletes, and untracked files survive a VCS update, so an
+            // older archive's files and earlier build output are still there
+            // for the build to find.
+            //
+            // A package keeps one tree on each worker for each architecture
+            // it builds there. Turning the setting off leaves those trees
+            // unused: no build binds them, and each stays until the reclaim
+            // before a later build of its architecture on that worker takes
+            // it, oldest first.
             Self::PersistentBuilddir => SettingsMeta {
                 key: "persistent_builddir",
                 env_name: Some("PERSISTENT_BUILDDIR"),
-                default: "true",
+                default: "false",
                 scope: Scope::Package,
             },
             // Per package, as 0.5.0 had it: one package's build can be

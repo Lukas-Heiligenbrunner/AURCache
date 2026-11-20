@@ -306,8 +306,9 @@ async fn prepare_job(
     })
 }
 
-/// Plan operator and per-job mounts, reclaiming persistent trees before use.
-/// `credential` is what [`credentials::stage_for_job`] staged for this job.
+/// Plan operator and per-job mounts, with the build tree
+/// [`prepare_build_tree`] gives the job, if any. `credential` is what
+/// [`credentials::stage_for_job`] staged for this job.
 async fn prepare_bind_mounts(
     cfg: &Config,
     client: &Arc<WorkerClient>,
@@ -337,46 +338,9 @@ async fn prepare_bind_mounts(
     // PKGBUILD chooses to run there.
     let mut binds = cfg.bind_mounts.clone();
     binds.extend(pkg_cache_bind);
-    // A build tree that outlives the chroot, for packages that asked for one.
-    //
-    // Bound over `/build`, which is where `makechrootpkg` points `BUILDDIR`, so
-    // makepkg lays out `$BUILDDIR/$pkgbase/src` inside it exactly as it would
-    // otherwise -- the tree simply survives the copy being deleted. makepkg
-    // only clears `$srcdir` under `--cleanbuild`, which nothing here passes, so
-    // an existing tree is kept and sources are re-extracted over it.
-    //
-    // Only when the package opted in: reuse trades away the clean tree a chroot
-    // build otherwise guarantees. See `design/implemented/persistent-build-directory.md`.
-    if job.persistent_builddir {
-        // Before the build, so the reserve is what bounds usage going in
-        // rather than a post-hoc tidy. Never drops a tree a build is using:
-        // this one's, or a sibling's still running (the set includes both).
-        let in_use = shared.srcdest.in_use();
-        // On the blocking pool: deleting a tree of millions of files takes
-        // minutes, and this build waits for it anyway.
-        let (reclaim_cache, arch) = (cache.clone(), job.arch.clone());
-        let (max_bytes, min_free) = (
-            cfg.tunables.builddir_max_bytes,
-            cfg.tunables.builddir_min_free,
-        );
-        let _ = join_cache_task(
-            tokio::task::spawn_blocking(move || {
-                reclaim_cache.reclaim_builddirs(&arch, &in_use, max_bytes, min_free);
-            }),
-            "builddir reclaim",
-        )
-        .await;
-        // Only this package's tree, at the path makepkg uses for it
-        // (`$BUILDDIR/$pkgbase`). Binding the whole per-arch directory, as
-        // this did, handed every build every other package's tree to read
-        // and rewrite.
-        if let Some(tree) = cache.builddir_tree(&job.arch, &job.pkgbase) {
-            binds.push(BindMount {
-                host: tree,
-                chroot: Path::new(devtools::BUILDDIR_MOUNT).join(&job.pkgbase),
-                access: Access::ReadWrite,
-            });
-        } else {
+    match prepare_build_tree(cfg, job, cache, &shared.srcdest.in_use()).await {
+        Some(bind) => binds.push(bind),
+        None if job.persistent_builddir => {
             let msg = format!(
                 "{} asked for a persistent build directory but one could not be \
                  prepared; building in the chroot's own /build instead",
@@ -385,6 +349,7 @@ async fn prepare_bind_mounts(
             tracing::warn!("{msg}");
             report_warning(client, Some(build_id), &msg).await;
         }
+        None => {}
     }
     // The ssh-agent socket, so a PKGBUILD that fetches from a private
     // repository can authenticate *inside* the chroot.
@@ -421,6 +386,63 @@ async fn prepare_bind_mounts(
     binds.extend(credential.and_then(known_hosts_bind));
 
     binds
+}
+
+/// Reclaim kept trees, then give a package that keeps its tree that tree:
+/// the bind for it, or `None` when the package keeps none or one could not
+/// be prepared.
+///
+/// Reclaim runs for every build, over its platform's trees, whatever its
+/// package's setting: every build needs disk, and the trees of packages no
+/// build here keeps any more -- deleted, routed to another worker, turned
+/// the setting off -- would otherwise wait for a build that keeps one.
+/// Before the build, so the reserve is what bounds usage going in rather
+/// than a post-hoc tidy. It never drops a tree a build is using: `in_use`
+/// holds this build's pkgbase and every running sibling's, taken by the
+/// caller just before.
+async fn prepare_build_tree(
+    cfg: &Config,
+    job: &JobDescriptor,
+    cache: &Cache,
+    in_use: &[String],
+) -> Option<BindMount> {
+    // On the blocking pool: deleting a tree of millions of files takes
+    // minutes, and this build waits for it anyway.
+    let (reclaim_cache, arch, in_use) = (cache.clone(), job.arch.clone(), in_use.to_vec());
+    let (max_bytes, min_free) = (
+        cfg.tunables.builddir_max_bytes,
+        cfg.tunables.builddir_min_free,
+    );
+    let _ = join_cache_task(
+        tokio::task::spawn_blocking(move || {
+            reclaim_cache.reclaim_builddirs(&arch, &in_use, max_bytes, min_free);
+        }),
+        "builddir reclaim",
+    )
+    .await;
+
+    // Only when the package opted in: reuse trades away the clean tree a
+    // chroot build otherwise guarantees. See
+    // `design/implemented/persistent-build-directory.md`.
+    if !job.persistent_builddir {
+        return None;
+    }
+    // A build tree that outlives the chroot. Bound over `/build/<pkgbase>`:
+    // `makechrootpkg` points `BUILDDIR` at `/build`, so makepkg lays out
+    // `$BUILDDIR/$pkgbase/src` inside it exactly as it would otherwise -- the
+    // tree simply survives the copy being deleted. makepkg only clears
+    // `$srcdir` under `--cleanbuild`, which nothing here passes, so an
+    // existing tree is kept and sources are re-extracted over it.
+    //
+    // Only this package's tree, rather than the whole per-arch directory,
+    // which would hand every build every other package's tree to read and
+    // rewrite.
+    let tree = cache.builddir_tree(&job.arch, &job.pkgbase)?;
+    Some(BindMount {
+        host: tree,
+        chroot: Path::new(devtools::BUILDDIR_MOUNT).join(&job.pkgbase),
+        access: Access::ReadWrite,
+    })
 }
 
 /// The directory of the `known_hosts` staged for this job, read-only at the
@@ -571,7 +593,7 @@ async fn discard_failed_tree(
     // An unsuccessful build never leaves its tree for the next one: whatever
     // the keep did not take -- no keep, a keep that failed, a tree that could
     // not move -- goes here. See `Cache::discard_builddir` for why.
-    if !succeeded && job.persistent_builddir {
+    if discards_tree(job, succeeded) {
         let (cache, arch, pkgbase) = (cache.clone(), job.arch.clone(), job.pkgbase.clone());
         let discarded = join_cache_task(
             tokio::task::spawn_blocking(move || cache.discard_builddir(&arch, &pkgbase)),
@@ -588,6 +610,14 @@ async fn discard_failed_tree(
             .await;
         }
     }
+}
+
+/// Whether a build's end discards its package's kept tree: only when the
+/// build was unsuccessful and its package keeps a tree. With the setting off
+/// the build never bound the tree, so whatever is there was kept while the
+/// setting was on, and a failure leaves it alone as a success does.
+fn discards_tree(job: &JobDescriptor, succeeded: bool) -> bool {
+    !succeeded && job.persistent_builddir
 }
 
 /// Promote completed downloads and remove this job's private cache replicas.
@@ -1268,6 +1298,98 @@ mod tests {
                 access: Access::ReadOnly,
             })
         );
+    }
+
+    fn job(pkgbase: &str, persistent_builddir: bool) -> JobDescriptor {
+        JobDescriptor {
+            build_id: 1,
+            pkgbase: pkgbase.to_string(),
+            arch: "x86_64".to_string(),
+            build_flags: Vec::new(),
+            persistent_builddir,
+            makepkg_conf: String::new(),
+            pacman_conf: String::new(),
+            mirrorlist: aurcache_common::worker::MirrorlistOffer::Nothing,
+            pgp_keys: Vec::new(),
+            vcs_sources: Vec::new(),
+            expected_packages: vec![pkgbase.to_string()],
+            timeout_secs: None,
+            expected_version: "1-1".to_string(),
+        }
+    }
+
+    /// The cache, and a configuration whose tree budget is `max_bytes`, with
+    /// no free-space floor.
+    fn tree_budget(tmp: &Path, max_bytes: u64) -> (Cache, Config) {
+        let cache = Cache::new(tmp, crate::cache::CacheLimits::default());
+        let mut cfg = Config::from_process_env();
+        cfg.tunables.builddir_max_bytes = max_bytes;
+        cfg.tunables.builddir_min_free = 0;
+        (cache, cfg)
+    }
+
+    /// A build of a package that keeps no tree still reclaims the trees
+    /// others left: here, over a one-byte budget, an idle tree goes while a
+    /// running sibling's stays. The tree the package kept while it had the
+    /// setting on is not bound, and stays for reclaim to weigh like any other.
+    #[tokio::test]
+    async fn a_build_that_keeps_no_tree_still_reclaims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cache, cfg) = tree_budget(tmp.path(), 1);
+        let kept = cache.builddir_tree("x86_64", "off").unwrap();
+        let idle = cache.builddir_tree("x86_64", "idle").unwrap();
+        let sibling = cache.builddir_tree("x86_64", "sibling").unwrap();
+        for tree in [&kept, &idle, &sibling] {
+            std::fs::write(tree.join("object.o"), b"compiled").unwrap();
+        }
+        let in_use = ["off".to_string(), "sibling".to_string()];
+
+        let tree = prepare_build_tree(&cfg, &job("off", false), &cache, &in_use).await;
+        assert_eq!(tree, None);
+        assert!(!idle.exists(), "reclaim ran for a build that keeps no tree");
+        assert!(sibling.exists(), "a running build's tree stays");
+        assert!(kept.exists(), "the tree it kept went with the setting");
+    }
+
+    /// A package that keeps its tree is given it at `/build/<pkgbase>`, with
+    /// what its last build left there, even over budget: its own build has it
+    /// in use.
+    #[tokio::test]
+    async fn a_kept_tree_survives_preparation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cache, cfg) = tree_budget(tmp.path(), 1);
+        let marker = cache
+            .builddir_tree("x86_64", "kept")
+            .unwrap()
+            .join("src/object.o");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"compiled").unwrap();
+        cache.record_builddir_size("x86_64", "kept");
+
+        let tree = prepare_build_tree(&cfg, &job("kept", true), &cache, &["kept".into()]).await;
+        assert_eq!(
+            tree,
+            Some(BindMount {
+                host: cache.builddir_tree_path("x86_64", "kept"),
+                chroot: Path::new(devtools::BUILDDIR_MOUNT).join("kept"),
+                access: Access::ReadWrite,
+            })
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"compiled");
+    }
+
+    /// Only a failed build that kept its tree discards it. A package with the
+    /// setting off keeps the tree it kept while it was on through a failure
+    /// too, for reclaim to weigh like any other unused tree.
+    #[test]
+    fn only_a_failed_build_that_keeps_its_tree_discards_it() {
+        assert!(discards_tree(&job("kept", true), false));
+        assert!(!discards_tree(&job("kept", true), true));
+        assert!(
+            !discards_tree(&job("off", false), false),
+            "a failure discarded the tree of a package that keeps none"
+        );
+        assert!(!discards_tree(&job("off", false), true));
     }
 
     fn with_limits(build: Option<u64>, total: Option<u64>) -> Config {

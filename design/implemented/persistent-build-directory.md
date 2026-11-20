@@ -90,7 +90,7 @@ Neither `makechrootpkg` nor AURCache passes it -- our makepkg arguments are
 `--noconfirm --noprogressbar --nocolor`, and `makechrootpkg`'s own `-C` is
 *checkpkg*, an unrelated flag. So an existing tree is kept and sources are
 re-extracted over it. Persistence requires no makepkg change; it requires only
-that `/build` outlive the chroot.
+that the package's tree under `/build` outlive the chroot.
 
 ## Layout
 
@@ -108,15 +108,17 @@ fi
 Under `makechrootpkg`, `BUILDDIR=/build` and `startdir=/startdir`, so the second
 branch applies and the tree is `/build/<pkgbase>/src`.
 
-**makepkg therefore namespaces by pkgbase already.** A per-package host
-directory would nest the name twice for no gain. The host side needs to key by
-*platform* only:
+**makepkg therefore namespaces by pkgbase already.** The host side keeps the
+same layout under a directory per *platform*, and binds only the building
+package's tree, at the path makepkg already uses for it:
 
 ```
-<cache>/builddir/<platform>   →  bound at /build
-                                 └── <pkgbase>/src
-                                 └── <pkgbase>/pkg
+<cache>/builddir/<platform>/<pkgbase>   →  bound at /build/<pkgbase>
+                                           ├── src
+                                           └── pkg
 ```
+
+So the name is not nested twice, and no build sees another package's tree.
 
 Platform, because a build tree holds compiled objects. `SRCDEST` can be
 pkgbase-only since downloads are architecture-independent; an x86_64 and an
@@ -126,39 +128,40 @@ emulated architecture.
 
 `pkg/` persists too. It is staging output, recreated per run, and harmless.
 
-## On by default
+## Off by default
 
-On by default, and the reason it can be is that the risk assumed at first
-does not exist.
+Off by default: a package opts in. The chroot is still built from a fresh
+snapshot every time -- only the tree survives -- so the toolchain stays clean
+either way; what the setting trades away is a clean *source* tree.
 
-This is what an AUR helper on a workstation already does: `paru` and `yay` keep
-their build trees between builds, across a very large number of users, and
-trouble is rare. The chroot is still built from a fresh snapshot every time --
-only the tree survives -- so the guarantee that actually matters, a clean
-toolchain, is untouched.
+Re-applied patches are not the problem. Tested with `libpng12`, whose
+`prepare()` does `patch -Np1` against a tarball source: three consecutive
+`makepkg -o` runs against one persistent `BUILDDIR` all exited 0 with no
+"reversed (or previously applied)" anywhere. `extract_sources` unpacks over
+the existing tree and bsdtar overwrites, so a file the new sources contain is
+restored even if the previous run scribbled on it.
 
-Re-applied patches were the worry, and they are **not** a problem. Tested with
-`libpng12`, whose `prepare()` does `patch -Np1` against a tarball source: three
-consecutive `makepkg -o` runs against one persistent `BUILDDIR` all exited 0
-with no "reversed (or previously applied)" anywhere. `extract_sources` unpacks
-over the existing tree and bsdtar overwrites, so `prepare()` always sees
-pristine sources. A file the tarball contains is restored even if the previous
-run scribbled on it.
+Overwriting is not cleaning, though. bsdtar never deletes, so everything a
+new archive does *not* contain survives -- confirmed in the same test: a planted
+`config.cache` and `png.o` were both still there afterwards. That includes
+files an older version of the sources had and the new one dropped or moved.
+A VCS source is updated with `git checkout --force` instead, which does remove
+the tracked files the new commit dropped, but untracked output in the checkout
+survives it just the same.
 
-What survives re-extraction is everything the tarball does *not* contain --
-confirmed in the same test: a planted `config.cache` and `png.o` were both
-still there afterwards. That is the actual risk, and it is inseparable from the
-benefit: leftover object files are what make an incremental rebuild fast, and
-also what makes it wrong when compiler flags changed underneath them. A killed
-build used to be the other half of that risk, leaving something half-written;
-it no longer is, since a failed build discards its tree. What remains produces
-a package that is quietly incorrect rather than one that fails loudly, which is
-the expensive kind.
+Rust's module lookup shows how that breaks a build: a tree that once had
+`src/parser.rs` and now gets `src/parser/mod.rs` from the new sources holds
+both, and rustc refuses with `E0761`. Leftover object files are the same
+mechanism -- what makes an incremental rebuild fast, and also what makes it
+wrong when compiler flags changed underneath them, which produces a package
+that is quietly incorrect rather than one that fails loudly.
 
-That residual risk is real but rare, and it is the same mechanism as the
-benefit -- so it is a reason to keep an escape hatch, not a reason to default to
-throwing four hours of work away. The setting stays so a package that does turn
-out to mind can be excluded without deleting directories on a worker by hand.
+Tracking what each archive unpacked, to delete exactly what the new one
+lacks, would cover the first case and not the second, and no list rules out
+every kind of stale state. Few packages gain enough to accept that: the ones
+whose own tree holds expensive state, such as a `prepare()` that clones or
+downloads into `$srcdir` (`unreal-engine` above), or a compile long enough
+to be worth keeping incremental. Those turn it on.
 
 Resolved through `ApplicationSettings` like every other package setting, with
 the established precedence `Package -> Env -> Global -> Default`. The packages
@@ -166,8 +169,17 @@ that want it are the ones where a rebuild costs hours, and there are few.
 
 The setting decides whether the bind happens at all. When it is off the build
 gets the ordinary `/build` inside the ephemeral chroot copy and nothing survives
-it; when on, the host directory is bound over `/build` and makepkg's own
-`<pkgbase>/` namespacing keeps packages apart inside it.
+it. When on, the package's host tree, `builddir/<platform>/<pkgbase>`, is bound
+at `/build/<pkgbase>`, and the rest of `/build` stays the chroot copy's.
+
+A package keeps one tree on each worker for each architecture it builds there.
+Turning the setting off leaves those trees unused: no build binds them, they
+stop being touched, and each ages to the front of the reclaim that runs before
+every build of its architecture on that worker, oldest first, like any other
+tree no build uses. Nothing removes them sooner, so a tree kept stays a rebuild
+avoided until the space is wanted; a package that turns the setting back on
+before then builds over its tree as it was left. A failed build of the package
+discards no tree while the setting is off, since that build had none bound.
 
 ## Reclaiming space
 
@@ -182,6 +194,15 @@ floor never triggers on a large pool, so the cap is what bounds the cache
 whatever the storage underneath it, while a cap cannot see the rest of the
 machine, so the floor still covers a small disk or one shared with something
 that grew.
+
+Reclaim runs before every build, whatever the building package's own setting,
+over the trees kept for the platform that build is for. Trees no build asks for
+any more -- a deleted package's, one now routed to another worker, one whose
+package turned the setting off -- are removed by nothing else: a failed build's
+discard only reaches its own tree, and the pool's room-making leaves cache
+trees to the cache. Run only before builds that keep a tree, reclaim would
+leave them in place on a worker that mostly builds packages that do not, with
+the free-space floor unenforced.
 
 **Nothing is evicted while the cache is within both limits.** Disk that nothing
 else needs is not worth reclaiming, and a tree kept is a rebuild avoided. It
@@ -216,8 +237,9 @@ Sizes still come from a `.aurcache-size` stamp each build leaves behind, since
 the cap needs a total; a tree without one is walked once and stamped. Whole
 trees only, never partial contents -- half a tree is worse than none, because
 makepkg would treat it as resumable. Never the tree the current build is about
-to use. Best-effort: failing to reclaim is reported and the build proceeds,
-since refusing to build over it would turn a full disk into an idle worker.
+to use. Best-effort: failing to reclaim is logged on the worker and the build
+proceeds, since refusing to build over it would turn a full disk into an idle
+worker.
 
 Neither limit bounds a *single* build: `unreal-engine` can grow by ~130 GB after
 the check passes. Nothing short of a filesystem quota would.
