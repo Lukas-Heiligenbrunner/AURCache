@@ -318,7 +318,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     let repo = listen("127.0.0.1:0");
     let nas = listen("127.0.0.2:0");
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
-    let network = BuildNetwork::install(Table::default(), Some(&hierarchy));
+    let network = BuildNetwork::install(Table::for_worker("c9a0"), Some(&hierarchy));
     assert_eq!(
         network.mode(),
         Some(&Mode::Cgroup),
@@ -424,7 +424,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
 #[ignore = "restructures the caller's cgroup and adds nftables tables; run in a privileged container"]
 async fn the_rules_of_a_build_cancelled_while_they_load_are_removed() {
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
-    let table = Table::default();
+    let table = Table::for_worker("ca9ce1");
     let network = BuildNetwork::install(table.clone(), Some(&hierarchy));
     assert_eq!(network.mode(), Some(&Mode::Cgroup));
     let repo = listen("127.0.0.1:0");
@@ -486,7 +486,7 @@ async fn the_rules_of_a_build_cancelled_while_they_load_are_removed() {
 #[ignore = "restructures the caller's cgroup, adds nftables tables and a network namespace; run in a privileged container"]
 async fn a_routed_repositorys_host_is_reached_only_at_the_repository() {
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
-    let network = BuildNetwork::install(Table::default(), Some(&hierarchy));
+    let network = BuildNetwork::install(Table::for_worker("4e90"), Some(&hierarchy));
     assert_eq!(network.mode(), Some(&Mode::Cgroup));
     let lan = Lan::up();
     let [api, repo, internet] = lan.listen_on(["198.51.100.7", "198.51.100.7", "2001:db8:100::7"]);
@@ -537,4 +537,26 @@ async fn a_routed_repositorys_host_is_reached_only_at_the_repository() {
         api.addr
     );
     drop(lan);
+}
+
+/// Workers sharing a network namespace each keep a table of their own: one
+/// starting leaves the other's in place.
+#[tokio::test]
+#[ignore = "restructures the caller's cgroup and adds nftables tables; run in a privileged container"]
+async fn a_worker_starting_leaves_anothers_table_alone() {
+    let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
+    let first = Table::for_worker("f125");
+    let second = Table::for_worker("5ec0d");
+    let install = |table: &Table| {
+        let network = BuildNetwork::install(table.clone(), Some(&hierarchy));
+        assert_eq!(network.mode(), Some(&Mode::Cgroup));
+        network
+    };
+    let _first = install(&first);
+    let _second = install(&second);
+    assert!(nft_lists(&["table", "inet", first.name()]));
+    assert!(nft_lists(&["table", "inet", second.name()]));
+    // A restart makes its own table afresh, and only its own.
+    let _first = install(&first);
+    assert!(nft_lists(&["table", "inet", second.name()]));
 }

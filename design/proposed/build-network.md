@@ -217,12 +217,11 @@ runs outside the chroot.
 
 ### Layout
 
-One table, `inet aurcache_worker`. *(Follows, in a later PR of this chain: one
-table per worker, `inet aurcache_worker_<id>`, named after the first 16 hex
-digits of its identity's fingerprint. Workers sharing a network namespace
-(containers on the host's network, several units on one machine) then each
-make, fill and remove only their own: a fixed name has each worker's startup
-delete the others' rules.)* The table holds:
+One table per worker, `inet aurcache_worker_<id>`, named after the first 16
+hex digits of its identity's fingerprint. Workers sharing a network namespace
+(containers on the host's network, several units on one machine) each make,
+fill and remove only their own: a fixed name had each worker's startup delete
+the others' rules. The table holds:
 
 - **Static, at startup**, on `builds/`: rules 1, 4 and 5, which need no DNS.
   This is the baseline every build gets, even before its own rules load.
@@ -282,13 +281,11 @@ On the way out, nothing says whose socket a local connection will reach. On
 the way in it does: in the input hook, `socket cgroupv2` looks up the socket the
 packet is for. So a build's packet to a local address is not refused at once;
 it leaves with a mark naming the build (`0x41` in the top byte, and the build
-id below it, set only on packets to
+id mixed with a number of the worker's below it, set only on packets to
 `fib daddr type local`), and the input hook accepts a marked packet only if
 the socket it reaches is in that build's cgroup, and refuses it otherwise.
 
-*(Follows, with per-worker tables, in a later PR of this chain: the build id
-is mixed with a number of the worker's.)* Each table claims only its own
-builds' marks, and lets any other marked
+Each table claims only its own builds' marks, and lets any other marked
 packet through: with several workers in one network namespace, every table's
 input hook sees every worker's builds' packets, and a table that refused the
 marks it did not know refused the other workers' builds their own listeners.
@@ -350,7 +347,14 @@ process itself reaches all of them. A repository beyond that host, on a routed a
 its port while another port of its address is refused and reported, and
 another routed address stays reachable. Further tests check that a build
 cancelled while its rules load has them loaded and then removed (as `nft
-monitor` reports).
+monitor` reports), and that two workers' tables coexist in one network
+namespace.
+
+Not tested against the kernel: that two workers matched by cgroup leave each
+other's builds' own listeners alone. It needs a second worker's `builds/`
+cgroup, and the test process can prepare only its own hierarchy. The rules
+that make it so are unit tested: each table's input hook claims only the marks
+of its own builds, mixed with its own number.
 
 `scripts/test-e2e.sh` checks the worker image itself: while the test build
 runs, a probe joins that build's cgroup and checks that root and the build user

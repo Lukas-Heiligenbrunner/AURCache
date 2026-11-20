@@ -143,6 +143,6 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
 
     // Builds' network rules go in place as the executor opens, once the
     // cgroups they match on are prepared; see `build_firewall`.
-    let executor = ChrootExecutor::new(cfg).await;
+    let executor = ChrootExecutor::new(cfg, &identity.fingerprint).await;
     Runner::new(core, client, executor).run().await
 }

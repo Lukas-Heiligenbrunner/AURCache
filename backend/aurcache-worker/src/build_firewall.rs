@@ -53,8 +53,8 @@
 //!
 //! ## Layout
 //!
-//! The worker owns one table ([`Table`]), `inet aurcache_worker`, made afresh
-//! at startup:
+//! Each worker owns one table ([`Table`]), named after it so that workers
+//! sharing a network namespace keep to their own, and made afresh at startup:
 //! the baseline (rules 1, 4 and 5) on every build, the sets of the
 //! repository's addresses, and an empty chain each build's own rules (2 to 4)
 //! are hooked into. Those are loaded in one transaction, with the
@@ -65,7 +65,8 @@
 //! A listener of the build itself is told apart on the way in: a build's
 //! packet to a local address leaves with a mark naming the build, and the
 //! input hook accepts it only when the socket it reaches is in that same
-//! build's cgroup. A marked packet no build names is left alone.
+//! build's cgroup. A marked packet no build of a table names is left alone by
+//! that table: it is another worker's, whose table decides.
 //!
 //! Set `WORKER_BUILD_FIREWALL=0` to install none of this.
 
@@ -110,33 +111,49 @@ pub fn disabled() -> bool {
     )
 }
 
-/// The nftables table the worker owns, `inet aurcache_worker`.
+/// The nftables table one worker owns.
+///
+/// Named after the worker, so that workers sharing a network namespace each
+/// make, fill and remove only their own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
     name: String,
-}
-
-impl Default for Table {
-    fn default() -> Self {
-        Self {
-            name: "aurcache_worker".to_string(),
-        }
-    }
+    /// What this worker mixes into its builds' marks; see [`Self::mark`].
+    salt: u32,
 }
 
 impl Table {
+    /// The table of the worker known by `id`, its identity's fingerprint.
+    #[must_use]
+    pub fn for_worker(id: &str) -> Self {
+        let id: String = id
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(16)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let name = format!("aurcache_worker_{id}");
+        // FNV-1a: a stable number of the name's, the same at every start.
+        let salt = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+        Self { name, salt }
+    }
+
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
     /// The mark a build's packets to a local address carry: the tag, and the
-    /// build's id below it.
+    /// build's id mixed with this worker's own number. Builds of different
+    /// servers can have the same id, and their workers can share a network
+    /// namespace; each table claims only the marks of its own builds.
     #[must_use]
     pub const fn mark(&self, build_id: i32) -> u32 {
         #[allow(clippy::cast_sign_loss)]
         let id = build_id as u32;
-        MARK_TAG | (id & !MARK_MASK)
+        MARK_TAG | ((id ^ self.salt) & !MARK_MASK)
     }
 }
 
@@ -1268,8 +1285,9 @@ mod tests {
         })
     }
 
+    /// A worker's table, named after its fingerprint.
     fn table() -> Table {
-        Table::default()
+        Table::for_worker("5e1f0a2b3c4d5e6f7a8b9c0d1e2f3a4b")
     }
 
     fn ip(addr: &str) -> IpAddr {
@@ -1305,8 +1323,8 @@ mod tests {
             &cgroup("system.slice/aurcache-worker.service/builds"),
         );
         assert!(script.starts_with(
-            "add table inet aurcache_worker\n\
-             delete table inet aurcache_worker\n"
+            "add table inet aurcache_worker_5e1f0a2b3c4d5e6f\n\
+             delete table inet aurcache_worker_5e1f0a2b3c4d5e6f\n"
         ));
         assert!(script.contains(
             "socket cgroupv2 level 3 \"system.slice/aurcache-worker.service/builds\" jump builds"
@@ -1418,7 +1436,7 @@ mod tests {
     fn refusals_are_recorded_apart_from_the_refusal() {
         let script = build_script(&table(), 42, &cgroup("builds/build-42"), &compose());
         assert!(script.contains(
-            "add set inet aurcache_worker build-42-refused4 \
+            "add set inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refused4 \
              { type ipv4_addr . inet_proto . inet_service; flags dynamic; size 1024; }"
         ));
         let refuse = rules(&script, "build-42-refuse");
@@ -1448,6 +1466,28 @@ mod tests {
         );
     }
 
+    /// Workers sharing a network namespace each make and remove their own
+    /// table, and only it.
+    #[test]
+    fn a_workers_table_is_named_after_it() {
+        assert_eq!(table().name(), "aurcache_worker_5e1f0a2b3c4d5e6f");
+        assert_eq!(
+            Table::for_worker("AB:CD-ef01").name(),
+            "aurcache_worker_abcdef01"
+        );
+        let other = Table::for_worker("0000ffff0000ffff");
+        let script = baseline_script(&other, &cgroup("builds"));
+        assert!(script.contains("delete table inet aurcache_worker_0000ffff0000ffff\n"));
+        assert!(!script.contains(table().name()));
+        let build = build_script(&other, 1, &cgroup("builds/build-1"), &compose());
+        assert!(
+            build
+                .lines()
+                .all(|l| l.contains(" inet aurcache_worker_0000ffff0000ffff ")),
+            "{build}"
+        );
+    }
+
     /// The repository's host is local wherever it is: its addresses are
     /// replaced whole, and an empty family is only emptied, since nftables
     /// refuses an element list with nothing in it.
@@ -1455,15 +1495,15 @@ mod tests {
     fn the_repositorys_sets_hold_its_hosts_addresses() {
         assert_eq!(
             repo_script(&table(), &[ip("198.51.100.7"), ip("2001:db8:56:2::10")]),
-            "flush set inet aurcache_worker repo4\n\
-             add element inet aurcache_worker repo4 { 198.51.100.7 }\n\
-             flush set inet aurcache_worker repo6\n\
-             add element inet aurcache_worker repo6 { 2001:db8:56:2::10 }\n"
+            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f repo4\n\
+             add element inet aurcache_worker_5e1f0a2b3c4d5e6f repo4 { 198.51.100.7 }\n\
+             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f repo6\n\
+             add element inet aurcache_worker_5e1f0a2b3c4d5e6f repo6 { 2001:db8:56:2::10 }\n"
         );
         assert_eq!(
             repo_script(&table(), &[]),
-            "flush set inet aurcache_worker repo4\n\
-             flush set inet aurcache_worker repo6\n"
+            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f repo4\n\
+             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f repo6\n"
         );
     }
 
@@ -1488,15 +1528,23 @@ mod tests {
     /// worker's builds with the same ids.
     #[test]
     fn the_mark_carries_the_build_under_the_tag() {
+        let other = Table::for_worker("0000ffff0000ffff");
         for build_id in [1, 42, 0x0123_4567] {
-            assert_eq!(table().mark(build_id) & MARK_MASK, MARK_TAG);
+            for table in [table(), other.clone()] {
+                assert_eq!(table.mark(build_id) & MARK_MASK, MARK_TAG);
+            }
+            assert_ne!(table().mark(build_id), other.mark(build_id));
             assert_ne!(table().mark(build_id), table().mark(build_id + 1));
         }
-        assert_eq!(table().mark(42), MARK_TAG | 42);
+        // The same worker marks the same build the same way at every start.
+        assert_eq!(
+            Table::for_worker("5e1f0a2b3c4d5e6f7a8b9c0d1e2f3a4b").mark(42),
+            table().mark(42)
+        );
     }
 
-    /// A marked packet that no build names is left alone: the input hook
-    /// only refuses what a build's own rules say is its.
+    /// A marked packet that no build of this table names goes on to the next
+    /// table: another worker's build's, which that worker's rules decide.
     #[test]
     fn the_input_hook_claims_only_its_own_builds_marks() {
         let script = baseline_script(&table(), &cgroup("builds"));
@@ -1513,19 +1561,19 @@ mod tests {
     fn listing_json() -> serde_json::Value {
         serde_json::json!({"nftables": [
             {"metainfo": {"version": "1.1.7"}},
-            {"table": {"family": "inet", "name": "aurcache_worker", "handle": 1}},
-            {"chain": {"family": "inet", "table": "aurcache_worker", "name": "each_build", "handle": 3}},
-            {"chain": {"family": "inet", "table": "aurcache_worker", "name": "build-42-refuse", "handle": 18}},
-            {"chain": {"family": "inet", "table": "aurcache_worker", "name": "build-42", "handle": 25}},
-            {"chain": {"family": "inet", "table": "aurcache_worker", "name": "build-420", "handle": 26}},
-            {"set": {"family": "inet", "name": "build-42-refused4", "table": "aurcache_worker",
+            {"table": {"family": "inet", "name": "aurcache_worker_5e1f0a2b3c4d5e6f", "handle": 1}},
+            {"chain": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "name": "each_build", "handle": 3}},
+            {"chain": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "name": "build-42-refuse", "handle": 18}},
+            {"chain": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "name": "build-42", "handle": 25}},
+            {"chain": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "name": "build-420", "handle": 26}},
+            {"set": {"family": "inet", "name": "build-42-refused4", "table": "aurcache_worker_5e1f0a2b3c4d5e6f",
                 "type": ["ipv4_addr", "inet_proto", "inet_service"], "handle": 16, "flags": ["dynamic"],
                 "elem": [{"concat": ["10.0.0.2", "tcp", 8080]}, {"elem": {"val": {"concat": ["10.0.0.2", "tcp", 8083]}}}]}},
-            {"set": {"family": "inet", "name": "build-42-refused6", "table": "aurcache_worker",
+            {"set": {"family": "inet", "name": "build-42-refused6", "table": "aurcache_worker_5e1f0a2b3c4d5e6f",
                 "type": ["ipv6_addr", "inet_proto", "inet_service"], "handle": 17, "flags": ["dynamic"]}},
-            {"rule": {"family": "inet", "table": "aurcache_worker", "chain": "each_build", "handle": 35, "comment": "build-42", "expr": []}},
-            {"rule": {"family": "inet", "table": "aurcache_worker", "chain": "each_build", "handle": 36, "comment": "build-420", "expr": []}},
-            {"rule": {"family": "inet", "table": "aurcache_worker", "chain": "each_build_in", "handle": 37, "comment": "build-42", "expr": []}},
+            {"rule": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "chain": "each_build", "handle": 35, "comment": "build-42", "expr": []}},
+            {"rule": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "chain": "each_build", "handle": 36, "comment": "build-420", "expr": []}},
+            {"rule": {"family": "inet", "table": "aurcache_worker_5e1f0a2b3c4d5e6f", "chain": "each_build_in", "handle": 37, "comment": "build-42", "expr": []}},
         ]})
     }
 
@@ -1562,14 +1610,14 @@ mod tests {
         let script = removal_script(&table(), &installed(&listing_json(), 42));
         assert_eq!(
             script,
-            "delete rule inet aurcache_worker each_build handle 35\n\
-             delete rule inet aurcache_worker each_build_in handle 37\n\
-             flush chain inet aurcache_worker build-42\n\
-             flush chain inet aurcache_worker build-42-refuse\n\
-             delete chain inet aurcache_worker build-42\n\
-             delete chain inet aurcache_worker build-42-refuse\n\
-             delete set inet aurcache_worker build-42-refused4\n\
-             delete set inet aurcache_worker build-42-refused6\n"
+            "delete rule inet aurcache_worker_5e1f0a2b3c4d5e6f each_build handle 35\n\
+             delete rule inet aurcache_worker_5e1f0a2b3c4d5e6f each_build_in handle 37\n\
+             flush chain inet aurcache_worker_5e1f0a2b3c4d5e6f build-42\n\
+             flush chain inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refuse\n\
+             delete chain inet aurcache_worker_5e1f0a2b3c4d5e6f build-42\n\
+             delete chain inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refuse\n\
+             delete set inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refused4\n\
+             delete set inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refused6\n"
         );
         assert_eq!(removal_script(&table(), &installed(&listing_json(), 7)), "");
     }

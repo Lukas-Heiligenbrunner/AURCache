@@ -147,12 +147,15 @@ impl ChrootExecutor {
     /// Async because it settles how chroots are made before any job arrives:
     /// the answer needs a real mount to be sure of, and finding out per build
     /// would mean a warning per build on a filesystem that cannot do it.
-    pub async fn new(cfg: Config) -> Self {
+    ///
+    /// `worker_id` is this worker's identity fingerprint, which names what it
+    /// owns on a host other workers may share: its nftables table.
+    pub async fn new(cfg: Config, worker_id: &str) -> Self {
         let cgroups = prepare_cgroups(&cfg.tunables);
         log_limits(&cfg.tunables, cgroups.is_some());
         // After the hierarchy, whose `builds/` the rules match, and before any
         // job can be claimed.
-        let network = BuildNetwork::install(Table::default(), cgroups.as_ref());
+        let network = BuildNetwork::install(Table::for_worker(worker_id), cgroups.as_ref());
         let shared = Arc::new(Shared::new(&cfg));
         // Before anything can claim work: no build of ours is running yet, so
         // whatever a build left in the pool belongs to a run that is over.

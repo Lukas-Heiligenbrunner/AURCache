@@ -104,7 +104,8 @@ request_package() {
 # refused like any other), and reach the repository (allowed by the build's
 # pacman.conf). The rules exist only while a build runs, so the probe starts
 # before the package is added, waits for them, and joins that build's cgroup
-# in a cgroup of its own below it. The worker's table is aurcache_worker. Off
+# in a cgroup of its own below it. The worker's table is named after it
+# (aurcache_worker_<fingerprint>), and is the only one in its container. Off
 # for the Docker worker, which has no such rules.
 PROBE_OUT=
 PROBE_PID=
@@ -133,7 +134,7 @@ probe() {
     done
 }
 while ((SECONDS < deadline)); do
-    table=$(nft list tables inet 2>/dev/null | awk '$3 == "aurcache_worker" { print $3; exit }')
+    table=$(nft list tables inet 2>/dev/null | awk '$3 ~ /^aurcache_worker_/ { print $3; exit }')
     for cg in /sys/fs/cgroup/builds/build-*/; do
         [ -n "$table" ] && [ -d "$cg" ] || continue
         build=$(basename "$cg")

@@ -543,7 +543,8 @@ kinds of destination must stay out of its reach:
   whatever listens on the worker's own machine.
 
 So the worker puts a network policy on every build, in an `nftables` table of
-its own, `inet aurcache_worker`. For each
+its own, `inet aurcache_worker_<id>`, named after the worker's fingerprint so
+that workers sharing a network namespace each keep theirs. For each
 connection a build makes, in this order:
 
 1. DNS to the resolvers in the worker's `/etc/resolv.conf` is allowed.
@@ -604,9 +605,9 @@ mount a network filesystem; the others keep it, and their filter denies
 mounts too. That rules both out. [What runs as root](#what-runs-as-root) says
 what is left of this on an emulated worker, where qemu refuses the filter.
 
-Run one worker per network namespace for now. Workers sharing one, as
-containers on the host's network or as units on one machine, would each make
-the same table afresh at startup, removing the others' rules.
+Several workers can share a network namespace, as containers on the host's
+network or as units on one machine: each makes and removes only its own
+table.
 
 A build whose rules cannot be put in place does not run. A worker that cannot
 put the policy in place at all takes no builds: one that cannot match builds
