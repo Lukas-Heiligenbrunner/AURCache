@@ -16,6 +16,19 @@ categories = ["command-line-utilities"]
 name = "aurcli"
 path = "src/main.rs"
 
+# Prebuilt binaries for cargo-binstall, from the CLI's GitHub release of the
+# same version (tagged `aurcache-cli-v<version>`). Each archive holds `aurcli`
+# at its top level, beside the LICENSE and README. binstall fetches it over
+# HTTPS and verifies it only against a minisign signature declared in
+# `[package.metadata.binstall.signing]`, which is not set up, so nothing beyond
+# the transport vouches for the archive.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/aurcache-cli-v{ version }/aurcli-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+# Only this release's own archives: never a third party's build of the crate.
+disabled-strategies = ["quick-install"]
+
 [lints]
 workspace = true
 
