@@ -1012,6 +1012,27 @@ mod tests {
         );
     }
 
+    /// `--no-build-flags` names no flag, yet on its own it is a change to
+    /// make, not a `pkg patch` with nothing to do.
+    #[test]
+    fn clearing_the_build_flags_is_a_change() {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: PatchPackageArgs,
+        }
+        let changes = |argv: &[&str]| {
+            let parsed = Wrapper::parse_from(["test", "hello"].iter().chain(argv));
+            crate::packages::changes_metadata(&parsed.args)
+        };
+
+        assert!(changes(&["--no-build-flags"]));
+        assert!(changes(&["--build-flag=--nocheck"]));
+        assert!(changes(&["--platform", "x86_64"]));
+        assert!(!changes(&[]));
+        assert!(!changes(&["--patch", "PKGBUILD=./PKGBUILD"]));
+    }
+
     /// `--from-installed` supplies the list, so requiring a positional one too
     /// would make the flag impossible to use on its own.
     #[test]
