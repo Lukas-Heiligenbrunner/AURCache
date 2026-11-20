@@ -12,7 +12,7 @@
 //!   PKGBUILD outside the chroot, may write only that build's own directories,
 //!   and opens no vsock socket;
 //! - `parse` (`parse.rs`): the server's PKGBUILD parsing, which may write
-//!   nothing and read nothing private;
+//!   nothing, read nothing private, and open no vsock socket;
 //! - `offline` (`offline.rs`): a build's dependency install, which runs other
 //!   packages' scriptlets as root inside the chroot, reaches no network;
 //! - `container` (`container.rs`): a build's containers, which run the
