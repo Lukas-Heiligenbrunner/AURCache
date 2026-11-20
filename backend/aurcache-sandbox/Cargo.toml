@@ -2,6 +2,7 @@
 name = "aurcache-sandbox"
 version = "0.6.0"
 edition = "2024"
+license.workspace = true
 
 # Deliberately standalone: the patched makechrootpkg and the server exec it
 # rather than linking it, so it stays auditable on its own and has no

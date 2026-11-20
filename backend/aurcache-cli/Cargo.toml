@@ -2,6 +2,7 @@
 name = "aurcache-cli"
 version = "0.6.0"
 edition = "2024"
+license.workspace = true
 
 # Short binary name: the package keeps its name (so `cargo install` and
 # `-p aurcache-cli` are unchanged), but the installed binary is `aurcli`.

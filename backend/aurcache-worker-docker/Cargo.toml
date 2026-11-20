@@ -2,6 +2,7 @@
 name = "aurcache-worker-docker"
 version = "0.6.0"
 edition = "2024"
+license.workspace = true
 
 # The Docker worker: a container per build. Its own crate, so the chroot
 # worker never links a Docker client.

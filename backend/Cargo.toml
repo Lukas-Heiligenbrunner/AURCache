@@ -21,6 +21,11 @@ members = [
     "aurcache-sandbox",
     "aurcache-chroot"]
 
+# The repository's LICENSE. Every crate inherits it, so a new one cannot
+# forget it.
+[workspace.package]
+license = "MIT"
+
 # Idioms enforced across the workspace. Every lint here is at zero warnings, so
 # these guard against regression rather than demanding a cleanup.
 #
