@@ -334,19 +334,23 @@ pub struct Upgraded {
 
 /// Translate the flags 0.5.0 stored, which were paru's, for makepkg.
 ///
-/// Its defaults were `--pgpfetch;-B;--noconfirm;--noprogressbar;--color never`
-/// and, before that, `-Syu;…` (which its own migration rewrote to `-Byu`).
-/// Both come out empty: the worker fetches `validpgpkeys`, refreshes the
-/// system and passes the non-interactive flags itself, and always builds. A bundle holding a letter
-/// no build can take keeps its other letters.
+/// `-Syu`, `-Byu`, `-B`, `--pgpfetch` and `--color never` are paru's spelling
+/// of what every build already gets: the worker refreshes the system, always
+/// builds, fetches `validpgpkeys` and passes `--nocolor` itself. They are
+/// dropped and not reported, so 0.5.0's defaults,
+/// `--pgpfetch;-B;--noconfirm;--noprogressbar;--color never` and
+/// `-Byu;--noconfirm;--noprogressbar;--color never`, come out empty. A bundle
+/// holding a letter no build can take keeps its other letters.
 #[must_use]
 pub fn upgrade_from_paru(flags: &[impl AsRef<str>]) -> Upgraded {
     let translated: Vec<&str> = flags
         .iter()
-        .filter_map(|flag| match flag.as_ref().trim() {
-            "" | "-Syu" | "-Byu" | "-B" | "--pgpfetch" => None,
-            "--color never" | "--color=never" => Some("--nocolor"),
-            other => Some(other),
+        .map(|flag| flag.as_ref().trim())
+        .filter(|flag| {
+            !matches!(
+                *flag,
+                "" | "-Syu" | "-Byu" | "-B" | "--pgpfetch" | "--color never" | "--color=never"
+            )
         })
         .collect();
     let options = classify(&translated);

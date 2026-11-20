@@ -19,9 +19,10 @@ with none set builds as `makepkg` does by default.
 | `--skipchecksums` | Do not verify the sources against their checksums                    |
 | `--skippgpcheck`  | Do not verify the sources' PGP signatures                            |
 
-The server also takes a flag in any spelling `makepkg` takes it in (`-d`,
-`-dA`) and stores the long name, and `--skipinteg` as the two checks it
-skips, `--skipchecksums` and `--skippgpcheck`.
+The server also takes a flag by its short form, alone or in a bundle (`-d`,
+`-dA`), and stores the long form, and `--skipinteg` as the two checks it
+skips, `--skipchecksums` and `--skippgpcheck`. A shortened long form such as
+`--nodep`, which `makepkg` would take, is refused: write it out in full.
 
 Every build is given `--noconfirm --noprogressbar --nocolor` by its worker,
 so these need not be set. Other options a package does not choose --

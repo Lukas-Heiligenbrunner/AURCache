@@ -674,16 +674,22 @@ fn entity(entity: &(impl Clone + Into<EntityRef>)) -> Segment {
 /// `a`, `a and b`, `a, b and c`: a list reads as a sentence, and each item
 /// still links.
 fn list<T: Clone + Into<EntityRef>>(items: &[T]) -> Vec<Segment> {
+    joined(items.iter().map(entity))
+}
+
+/// [`list`] for items that name no page, such as makepkg options.
+fn words(items: &[String]) -> Vec<Segment> {
+    joined(items.iter().map(text))
+}
+
+fn joined(items: impl ExactSizeIterator<Item = Segment>) -> Vec<Segment> {
+    let len = items.len();
     let mut out = Vec::new();
-    for (index, item) in items.iter().enumerate() {
+    for (index, item) in items.enumerate() {
         if index > 0 {
-            out.push(text(if index + 1 == items.len() {
-                " and "
-            } else {
-                ", "
-            }));
+            out.push(text(if index + 1 == len { " and " } else { ", " }));
         }
-        out.push(entity(item));
+        out.push(item);
     }
     out
 }
@@ -1112,18 +1118,18 @@ impl Event {
                 text(format!("changed the {} of ", fields.join(" and "))),
                 entity(pkg),
             ],
-            Self::BuildFlagsDropped { pkg, dropped } => vec![
-                text(format!(
-                    "dropped {} from the build flags of ",
-                    dropped.join(" ")
-                )),
-                entity(pkg),
-                text(if dropped.len() == 1 {
+            Self::BuildFlagsDropped { pkg, dropped } => {
+                let mut out = vec![text("dropped ")];
+                out.extend(words(dropped));
+                out.push(text(" from the build flags of "));
+                out.push(entity(pkg));
+                out.push(text(if dropped.len() == 1 {
                     ": a build does not take it as a choice"
                 } else {
                     ": a build does not take them as a choice"
-                }),
-            ],
+                }));
+                out
+            }
             Self::SourceEdited { pkg, path } => {
                 vec![text(format!("edited {path} of ")), entity(pkg)]
             }
@@ -1764,7 +1770,11 @@ mod tests {
         );
         assert_eq!(
             message(&["--clean", "--force"]),
-            "dropped --clean --force from the build flags of hello: a build does not take them as a choice"
+            "dropped --clean and --force from the build flags of hello: a build does not take them as a choice"
+        );
+        assert_eq!(
+            message(&["--clean", "--force", "--install"]),
+            "dropped --clean, --force and --install from the build flags of hello: a build does not take them as a choice"
         );
     }
 
