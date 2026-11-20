@@ -15,6 +15,7 @@ aurcli pkg add https://github.com/you/pkg.git --ref v1.2 --platform x86_64
 aurcli pkg add --from-installed         # bulk-add what `pacman -Qm` reports, behind a confirmation
 aurcli pkg update hello
 aurcli pkg patch hello --platform x86_64
+aurcli pkg patch hello --build-flag=--nocheck   # the whole list; see Build flags
 aurcli pkg rm hello                     # stop requesting it; delete what nothing needs
 ```
 
