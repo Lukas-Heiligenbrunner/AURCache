@@ -284,8 +284,8 @@ mod tests {
         assert!(joined.ends_with("-- --noconfirm --noprogressbar --nocolor --nocheck"));
     }
 
-    /// A server still sends the flags every build takes; makepkg gets each
-    /// once.
+    /// A server on protocol 1 sends the flags every build takes as well;
+    /// makepkg gets each once.
     #[test]
     fn build_command_gives_every_build_flag_once() {
         let flags = ["--noconfirm", "--noprogressbar", "--nocolor", "--nodeps"].map(String::from);
