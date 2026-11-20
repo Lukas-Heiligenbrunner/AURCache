@@ -59,6 +59,16 @@ $([ -d /var/lib/aurcache-worker ] &&
     SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/other/agent.sock ssh-add -l >/dev/null 2>&1 &&
     echo reached >> ./other-agent-reached)
 
+# A vsock socket, which no network namespace confines: connected to the test's
+# listener on the loopback CID where the kernel has one. Recorded as reached,
+# unreachable (a socket, but no listener to reach) or refused (no socket).
+# Host-only, as above.
+$([ -d /var/lib/aurcache-worker ] && {
+    perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit 2;
+        connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 1'
+    case $? in 0) echo reached ;; 1) echo unreachable ;; *) echo refused ;; esac
+} >> ./host-vsock 2>/dev/null)
+
 package() {
     install -Dm644 /dev/null "$pkgdir/usr/share/hostile-fixture/marker"
 }
