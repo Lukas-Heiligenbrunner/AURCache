@@ -26,6 +26,8 @@
 # packets, mounting, the kernel keyring), plants links and settings for host
 # root to follow out of the copy, and leaves an /etc/profile.d script that
 # tries the same ways around from the build's container, where root runs it.
+# There, root may mount only in a user namespace of its own, and neither it
+# nor such a mount may make a read-only bind writable.
 #
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
@@ -86,8 +88,10 @@ mkdir -p /srv && cd /srv && rm -rf upstream.git && git init -q --bare upstream.g
 t=$(mktemp -d) && cd "$t" && git init -q . && git config user.email a@b && git config user.name a
 echo hi > f.txt && git add . && git commit -qm init && git push -q /srv/upstream.git HEAD:master
 
-rm -rf /shared /job /srv/canary && mkdir -p /shared/{gnupg,srcdest-other,work-other} /job/{srcdest,pkg} /chroot
+rm -rf /shared /job /srv/canary /srv/ro-bind && mkdir -p /shared/{gnupg,srcdest-other,work-other} /job/{srcdest,pkg} /chroot
 echo legit > /shared/srcdest-other/victim-source
+# Bound read-only into the build (-D), as an operator's mount would be.
+mkdir -p /srv/ro-bind && touch /srv/ro-bind/intact
 # What the scriptlet's links and settings point host root at.
 mkdir -p /srv/canary && echo intact > /srv/canary/victim && touch /srv/canary/host-only
 
@@ -155,6 +159,16 @@ try() {
 try raw perl -MSocket -e 'socket(my $s, 17, SOCK_RAW, 0) or exit 1'
 try mount mount -t tmpfs aurcache-netprobe /mnt
 try userns-mount unshare -rm mount -t tmpfs aurcache-netprobe /mnt
+# The build's read-only bind (-D), where the container has one: made
+# writable from a user namespace, where its flags are locked, then by root,
+# which would leave it writable for the first.
+if mountpoint -q /aurcache-ro; then
+    try userns-remount-ro unshare -rm sh -c \
+        'mount -o remount,bind,rw /aurcache-ro && touch /aurcache-ro/by-userns'
+    try remount-ro sh -c 'mount -o remount,bind,rw /aurcache-ro && touch /aurcache-ro/by-root'
+else
+    echo absent | tee remount-ro > userns-remount-ro
+fi
 try mknod mknod /dev/aurcache-netprobe c 1 3
 if out=$(keyctl add user aurcache-netprobe 1 @s 2>&1); then echo allowed; else echo "${out##*: }"; fi > keyring
 ESCAPES
@@ -229,7 +243,8 @@ if [[ $mode == confined ]]; then
 fi
 
 cd /job/pkg
-sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 -- --nocheck >/tmp/build.log 2>&1
+sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 \
+    -D /srv/ro-bind:/aurcache-ro -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"
@@ -260,7 +275,8 @@ echo "sudoers=$([ -e /chroot/job1/etc/sudoers.d/builduser-pacman ] && echo prese
 echo "canary=$(ls -A /srv/canary | paste -sd, -)"
 echo "canary_victim=$(cat /srv/canary/victim 2>/dev/null || echo missing)"
 echo "canary_bind=$(cat /job/pkg/canary-bind 2>/dev/null || echo missing)"
-for e in raw mount userns-mount mknod keyring; do
+echo "ro_bind=$(ls -A /srv/ro-bind | paste -sd, -)"
+for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
     echo "install_$e=$(cat "/chroot/job1/var/lib/aurcache-netprobe/escapes/$e" 2>/dev/null || echo missing)"
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
 done
@@ -308,6 +324,9 @@ check "unconfined: root may open a packet socket" allowed "$(get install_raw "$u
 check "unconfined: root may mount"           allowed "$(get install_mount "$unconfined")"
 check "unconfined: root may mount in a user namespace" allowed "$(get install_userns-mount "$unconfined")"
 check "unconfined: root may make a device node" allowed "$(get install_mknod "$unconfined")"
+check "unconfined: root may make a read-only bind writable" allowed "$(get install_remount-ro "$unconfined")"
+check "unconfined: a user namespace may not" refused "$(get install_userns-remount-ro "$unconfined")"
+check "unconfined: root writes through the read-only bind" by-root,intact "$(get ro_bind "$unconfined")"
 check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
@@ -341,9 +360,16 @@ check "confined:   build binds nothing the copy names" absent "$(get canary_bind
 for where in install build_root; do
     check "confined:   $where: no packet socket" refused "$(get "${where}_raw" "$confined")"
     check "confined:   $where: no mount"         refused "$(get "${where}_mount" "$confined")"
-    check "confined:   $where: no mount in a user namespace" refused "$(get "${where}_userns-mount" "$confined")"
     check "confined:   $where: no device node"   refused "$(get "${where}_mknod" "$confined")"
 done
+# The install's container refuses every mount call; the build's, without
+# CAP_SYS_ADMIN, is left them for a user namespace of its own, where the
+# read-only bind stays read-only.
+check "confined:   install: no mount in a user namespace" refused "$(get install_userns-mount "$confined")"
+check "confined:   build_root: mounts in a user namespace" allowed "$(get build_root_userns-mount "$confined")"
+check "confined:   build_root: read-only bind stays so" refused "$(get build_root_remount-ro "$confined")"
+check "confined:   build_root: even from a user namespace" refused "$(get build_root_userns-remount-ro "$confined")"
+check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
 

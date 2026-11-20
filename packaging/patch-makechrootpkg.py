@@ -419,11 +419,11 @@ EOF
         # network, and what holds it is the build's network policy, matched on
         # the build's cgroup, which nspawn keeps the container in. Raw packets
         # and a kernel NFS mount would not be the cgroup's: every container
-        # drops CAP_NET_RAW and may not mount (the wrapper below), and the
-        # build's also drops CAP_SYS_ADMIN, with the rest root has no use for
-        # there. Becoming the build user takes CAP_SETUID and CAP_SETGID,
-        # sudo's terminal CAP_CHOWN and CAP_FOWNER, passing it signals
-        # CAP_KILL and pam_limits CAP_SYS_RESOURCE, and those stay.
+        # drops CAP_NET_RAW (the wrapper below), and the build's also drops
+        # CAP_SYS_ADMIN, so root there cannot mount, with the rest root has
+        # no use for there. Becoming the build user takes CAP_SETUID and
+        # CAP_SETGID, sudo's terminal CAP_CHOWN and CAP_FOWNER, passing it
+        # signals CAP_KILL and pam_limits CAP_SYS_RESOURCE, and those stay.
         # CAP_LINUX_IMMUTABLE goes because an immutable file in the copy is
         # one the worker can neither move out nor delete, CAP_MKNOD because
         # the container has no device policy (see the install's).
@@ -442,16 +442,29 @@ EOF
         # One wrapper for every container the script starts: what it adds to
         # each, and how it starts those after the dependency install.
         #
-        # Every container drops CAP_NET_RAW and may not mount or use the
-        # kernel keyring. Root runs in each: pacman, scriptlets, and in the
-        # build's, whatever a dependency left for `/chrootbuild` (see the
-        # build's own arguments above). What holds its network is the build's
-        # policy, matched on the cgroup the container is kept in, and each of
-        # these is a way around it whose sockets are not the cgroup's: raw
-        # packets, a kernel NFS mount, and `request_key`, which has the host
-        # resolve a name. The filter is nspawn's, applied wherever nspawn can
-        # install one: not under qemu's user-mode emulation, which installs
-        # none and implements none of the keyring calls itself.
+        # Every container drops CAP_NET_RAW and may not use the kernel
+        # keyring, and every one whose root keeps CAP_SYS_ADMIN may not mount
+        # either. Root runs in each: pacman, scriptlets, and in the build's,
+        # whatever a dependency left for `/chrootbuild` (see the build's own
+        # arguments above). What holds its network is the build's policy,
+        # matched on the cgroup the container is kept in, and each of these is
+        # a way around it whose sockets are not the cgroup's: raw packets, a
+        # kernel NFS mount, and `request_key`, which has the host resolve a
+        # name. The filter is nspawn's, applied wherever nspawn can install
+        # one: not under qemu's user-mode emulation, which installs none and
+        # implements none of the keyring calls itself.
+        #
+        # The build's container drops CAP_SYS_ADMIN, so root there cannot
+        # mount anything in the container's namespace, and it is left the
+        # mount calls: `bwrap` and `unshare -rm`, which a `check()` may run,
+        # mount in a user namespace of their own. No mount made there is NFS,
+        # which the kernel mounts in the initial user namespace only, and none
+        # makes a read-only bind writable, since the kernel locks the flags of
+        # every mount a user namespace inherits. The other containers keep
+        # CAP_SYS_ADMIN -- the install's sandbox drops it only for what it
+        # runs -- and refuse every mount call. The wrapper reads which from
+        # the container's own `--drop-capability=`: one started without
+        # CAP_SYS_ADMIN is left the mount calls, and every other refuses them.
         #
         # `--restrict-address-families=`: systemd-nspawn currently permits
         # every socket address family and warns, in every build log, that a
@@ -502,7 +515,7 @@ EOF
         "bindmounts_ro=()",
         """_aurcache_nspawn_args=(
 \t--drop-capability=CAP_NET_RAW
-\t'--system-call-filter=~@mount add_key keyctl request_key'
+\t'--system-call-filter=~add_key keyctl request_key'
 )
 _aurcache_nspawn_version=$(systemd-nspawn --version 2>/dev/null \\
 \t| awk 'NR==1 {print $2 + 0; exit}')
@@ -515,8 +528,17 @@ fi
 _aurcache_direct=0
 _aurcache_setarch=
 arch-nspawn() {
-\tlocal _aurcache_dir=$1
+\tlocal _aurcache_dir=$1 _aurcache_arg _aurcache_mount=('--system-call-filter=~@mount')
 \tshift
+\t# nspawn's own options come first; the command to run starts at the
+\t# first argument that is not one.
+\tfor _aurcache_arg; do
+\t\t[[ $_aurcache_arg == -* ]] || break
+\t\tif [[ $_aurcache_arg == --drop-capability=* &&
+\t\t\t,${_aurcache_arg#*=}, == *,CAP_SYS_ADMIN,* ]]; then
+\t\t\t_aurcache_mount=()
+\t\tfi
+\tdone
 \tif (( _aurcache_direct )); then
 \t\t${_aurcache_setarch:+setarch "$_aurcache_setarch"} systemd-nspawn \\
 \t\t\t--quiet \\
@@ -527,9 +549,9 @@ arch-nspawn() {
 \t\t\t--as-pid2 \\
 \t\t\t--console=autopipe \\
 \t\t\t--timezone=off \\
-\t\t\t"${_aurcache_nspawn_args[@]}" "$@"
+\t\t\t"${_aurcache_nspawn_args[@]}" "${_aurcache_mount[@]}" "$@"
 \telse
-\t\tcommand arch-nspawn "$_aurcache_dir" "${_aurcache_nspawn_args[@]}" "$@"
+\t\tcommand arch-nspawn "$_aurcache_dir" "${_aurcache_nspawn_args[@]}" "${_aurcache_mount[@]}" "$@"
 \tfi
 }
 

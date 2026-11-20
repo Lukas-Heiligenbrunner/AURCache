@@ -221,22 +221,26 @@ the build's network, and runs whatever the dependencies left for it. Only a
 network policy matched on the build's cgroup holds it, since nspawn keeps
 the container in that cgroup; one matched on the build user does not. What
 every container takes away is what would get around such a policy: raw
-packets (`CAP_NET_RAW`), mounting, since a kernel NFS mount's sockets are not
-the cgroup's, and the kernel keyring. The build's container also drops
-`CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_BOOT`, `CAP_SYS_MODULE`,
-`CAP_SYS_RAWIO`, `CAP_MKNOD`, `CAP_AUDIT_CONTROL` and `CAP_LINUX_IMMUTABLE`,
-none of which root needs to become the build user. Once a dependency has run
-in the copy, the build script reads none of the copy's configuration as root,
-and follows no link in it.
+packets (`CAP_NET_RAW`), a kernel NFS mount, whose sockets are not the
+cgroup's, and the kernel keyring. Every container whose root keeps
+`CAP_SYS_ADMIN`, which is every one but the build's, may not mount at all.
+The build's container drops `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`,
+`CAP_SYS_BOOT`, `CAP_SYS_MODULE`, `CAP_SYS_RAWIO`, `CAP_MKNOD`,
+`CAP_AUDIT_CONTROL` and `CAP_LINUX_IMMUTABLE`, none of which root needs to
+become the build user, so root there cannot mount either. What the build's
+container is left is mounting in a user namespace of its own, where the kernel
+mounts no NFS and keeps every read-only bind read-only. Once a dependency has
+run in the copy, the build script reads none of the copy's configuration as
+root, and follows no link in it.
 
 :::note What a build cannot do
 No setuid program works in the build, so neither do the setuid helpers some
 `check()` steps use: `newuidmap` and `newgidmap` for a user namespace with
-more than one user, or `fusermount3` for a FUSE mount. Nothing in the build
-can mount either, not even in a user namespace of its own, so a `check()`
-that runs `bwrap` or `unshare` to mount something fails, and so does one
-that uses the kernel keyring. Packages whose tests need these build with
-`--nocheck`.
+more than one user, or `fusermount3` for a FUSE mount. A `check()` that uses
+the kernel keyring fails too. Packages whose tests need these build with
+`--nocheck`. Mounting in a user namespace of the build's own does work, so a
+`check()` that runs `bwrap` or `unshare -rm` to mount something passes, as
+long as one user mapped is enough for it.
 :::
 
 :::note Emulated workers
@@ -245,7 +249,11 @@ nspawn's alike, so on a worker run emulated (see
 [Building for another architecture](#building-for-another-architecture)) the
 install falls back to the network namespace alone, with the capabilities
 above dropped (`aurcache-sandbox offline: netns`), and no container is
-refused mounts by a filter: only by the capabilities it lacks.
+refused mounts by a filter: the install's scriptlets and root in the build's
+container are kept from mounting by the capabilities they lack, as on any
+worker, while the other containers, which run no code but the official
+packages', may mount. The keyring stays
+closed there because qemu implements none of its calls.
 :::
 
 ## Swarm and other runtimes
