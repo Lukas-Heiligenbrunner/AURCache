@@ -79,9 +79,8 @@ Do **not** pass the key through an environment variable. It would be visible in
 `docker inspect` and `/proc/<pid>/environ`, and would end up in the compose file
 you commit. A mount is both safer and less trouble.
 
-Ownership and permissions do not matter: the worker copies the key to a private
-location with the right mode before each build, so a root-owned `0400` Docker
-secret is fine.
+The file only has to be readable by the worker: the worker reads the key and
+loads it into an ssh-agent, and no build is ever given the file.
 
 ## Host keys
 
@@ -118,20 +117,20 @@ first use.
 
 ## The key is not visible to the package
 
-`makepkg` downloads sources **before** the build chroot is entered, so the
-credential is only ever available on the worker itself. It is never mounted into
-the chroot, where `prepare()`, `build()` and `package()` run — those are
-arbitrary scripts from a PKGBUILD, and anything they can reach they can send
-somewhere else.
+The key file is never mounted into the chroot, where `prepare()`, `build()`
+and `package()` run — those are arbitrary scripts from a PKGBUILD, and anything
+they can reach they can send somewhere else. What the build gets is the
+agent's socket, so package code can have the agent sign with the key while the
+build runs, but can never read the key itself.
 
 Two consequences:
 
-- Ordinary git operations inside a build work normally, they simply have no
-  access to the key.
-- A PKGBUILD that fetches from an authenticated remote inside `build()` rather
-  than declaring it in `source=()` will fail. Declared sources are the supported
-  path — they are what gets checksummed, and what gets fetched before any
-  package code runs.
+- A PKGBUILD that clones from an authenticated remote in `prepare()`, rather
+  than declaring it in `source=()`, works: ssh authenticates through the agent.
+  Declared sources are still the better path — they are what gets checksummed,
+  and what gets fetched before any package code runs.
+- Package code can authenticate with the key, to any host, for as long as its
+  build runs. Nothing it captures outlives the build.
 
 ## Other credentials
 
