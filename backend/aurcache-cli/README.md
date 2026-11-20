@@ -4,8 +4,13 @@ A typed CLI for the AURCache HTTP API. The package is `aurcache-cli`; the
 binary it installs is `aurcli`:
 
 ```bash
-cargo install --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
+cargo install --locked --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
 ```
+
+Releases tagged `aurcache-cli-v<version>` carry prebuilt binaries for Linux
+and macOS; the
+[CLI documentation](https://lukas-heiligenbrunner.github.io/AURCache/docs/cli#installing)
+says how to install one.
 
 ## Configuration
 

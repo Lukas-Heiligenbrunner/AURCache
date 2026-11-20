@@ -51,10 +51,12 @@ compatibility image; new setups use the split images, see
 
 ## CLI client
 
-Install it from the git repo:
+The [CLI documentation](https://lukas-heiligenbrunner.github.io/AURCache/docs/cli#installing)
+covers the AUR package and prebuilt binaries. With a Rust toolchain, build it
+from the git repo:
 
 ```bash
-cargo install --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
+cargo install --locked --git https://github.com/Lukas-Heiligenbrunner/AURCache aurcache-cli
 ```
 
 A typed CLI for the HTTP API (installed as `aurcli`). It authenticates with an API token via `Authorization: Bearer <token>`; generate one on the settings page of the web UI.
