@@ -107,8 +107,8 @@ impl Access {
 ///
 /// `makechrootpkg` copies the built packages into its **current working
 /// directory**, so the caller sets `cwd` to the desired destination (there is
-/// no `--pkgdest` flag on `makepkg`). Any `build_flags` are forwarded to
-/// `makepkg` after the `--` separator.
+/// no `--pkgdest` flag on `makepkg`). After the `--` separator come the flags
+/// every build takes and then the job's `build_flags`, for `makepkg`.
 ///
 /// Builds run as `build_user`, which must not be the user the worker itself
 /// runs as: file ownership is what keeps the worker's identity and credentials
@@ -174,11 +174,10 @@ pub fn build_command(
         argv.push(access.flag().to_string());
         argv.push(format!("{}:{}", host.display(), chroot.display()));
     }
-    // Separator, then makepkg args (if any).
-    if !build_flags.is_empty() {
-        argv.push("--".to_string());
-        argv.extend(build_flags.iter().cloned());
-    }
+    // Separator, then makepkg's arguments: the ones every build takes, then
+    // the job's.
+    argv.push("--".to_string());
+    argv.extend(aurcache_common::build_flags::for_makepkg(build_flags));
     argv
 }
 
@@ -282,7 +281,25 @@ mod tests {
         )));
         // Builds must never inherit the worker's user via SUDO_USER.
         assert!(joined.contains("-U builder"));
-        assert!(joined.contains("-- --nocheck"));
+        assert!(joined.ends_with("-- --noconfirm --noprogressbar --nocolor --nocheck"));
+    }
+
+    /// A server still sends the flags every build takes; makepkg gets each
+    /// once.
+    #[test]
+    fn build_command_gives_every_build_flag_once() {
+        let flags = ["--noconfirm", "--noprogressbar", "--nocolor", "--nodeps"].map(String::from);
+        let cmd = build_command(Path::new("/chroot"), "job-42", &[], &flags, "builder");
+        let separator = cmd.iter().position(|a| a == "--").expect("a separator");
+        assert_eq!(
+            cmd[separator + 1..],
+            ["--noconfirm", "--noprogressbar", "--nocolor", "--nodeps"]
+        );
+        let bare = build_command(Path::new("/chroot"), "job-42", &[], &[], "builder");
+        assert!(
+            bare.join(" ")
+                .ends_with("-- --noconfirm --noprogressbar --nocolor")
+        );
     }
 
     /// `-u` upgrades with every repository the copy lists, AURCache's
@@ -325,7 +342,6 @@ mod tests {
         let cmd = build_command(Path::new("/chroot"), "job-1", &[], &[], "builder");
         assert!(!cmd.join(" ").contains("/srcdest"));
         assert!(!cmd.iter().any(|a| a == "-d" || a == "-D"));
-        assert!(!cmd.iter().any(|a| a == "--"));
     }
 
     /// Each bind is passed with the option for its access: `-d` binds
@@ -348,7 +364,13 @@ mod tests {
         let joined = cmd.join(" ");
         assert!(joined.contains("-d /job/cache:/var/cache/job"), "{joined}");
         assert!(joined.contains("-D /host/netrc:/etc/netrc"), "{joined}");
-        // Bind mounts are not makepkg flags; no separator should appear.
-        assert!(!cmd.iter().any(|a| a == "--"));
+        // Bind mounts are makechrootpkg's, so they come before makepkg's.
+        let separator = cmd.iter().position(|a| a == "--").expect("a separator");
+        assert!(
+            cmd[..separator]
+                .iter()
+                .any(|a| a == "/host/netrc:/etc/netrc"),
+            "{joined}"
+        );
     }
 }

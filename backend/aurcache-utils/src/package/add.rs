@@ -43,17 +43,14 @@ impl AddContext {
     }
 
     /// The context a caller asked for, with the defaults for what it left out:
-    /// x86_64, and makepkg's non-interactive flags.
+    /// x86_64, and no build flags, so makepkg builds as it would by default.
     pub(crate) fn new(platforms: Option<Vec<Platform>>, build_flags: Option<Vec<String>>) -> Self {
         // Platform names are validated where they enter as strings (the API's
         // `Platform::from_str`); by the time they are `Platform` values there is
         // nothing left to check.
         Self {
             platforms: Platforms::new(platforms.unwrap_or_else(|| vec![Platform::X86_64])),
-            build_flags: build_flags.map_or_else(
-                || BuildFlags::new(["--noconfirm", "--noprogressbar", "--nocolor"]),
-                BuildFlags::new,
-            ),
+            build_flags: BuildFlags::new(build_flags.unwrap_or_default()),
         }
     }
 }

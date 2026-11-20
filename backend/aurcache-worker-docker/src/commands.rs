@@ -73,7 +73,8 @@ pub fn build_build_command(
     let build_dir = quote_argument(&build_dir.display().to_string());
     let conf = quote_argument(makepkg_conf);
     let quoted_pkgbase = quote_argument(pkgbase);
-    let quoted_build_flags = shell_join_args(build_flags);
+    let quoted_build_flags =
+        shell_join_args(&aurcache_common::build_flags::for_makepkg(build_flags));
 
     let pacman = "sudo pacman --noconfirm --noprogressbar --color never";
     let self_update = format!(
@@ -165,6 +166,26 @@ mod tests {
         assert!(cmd.contains("cd /output/src/hello"));
         assert!(cmd.contains("sudo chmod -R a+w ."));
         assert!(cmd.contains("BUILDDIR=$(mktemp -d)"));
+    }
+
+    /// makepkg takes the flags every build needs whether or not the server
+    /// sent them, and once each.
+    #[test]
+    fn makepkg_gets_every_build_flag_once() {
+        let build = |flags: &[&str]| {
+            build_build_command(
+                "hello",
+                &flags.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                Path::new("/output/src"),
+                "/output/makepkg.conf",
+                "/output/pacman-upgrade.conf",
+            )
+        };
+        let expected =
+            "makepkg --config /output/makepkg.conf -s --noconfirm --noprogressbar --nocolor";
+        assert!(build(&[]).ends_with(expected), "{}", build(&[]));
+        let sent = build(&["--noconfirm", "--noprogressbar", "--nocolor", "--nocheck"]);
+        assert!(sent.ends_with(&format!("{expected} --nocheck")), "{sent}");
     }
 
     /// The container syncs every database, then upgrades from the
