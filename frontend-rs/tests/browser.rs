@@ -39,6 +39,14 @@ fn ui_base() -> String {
     std::env::var("AURCACHE_UI").unwrap_or_else(|_| "http://localhost:8080".to_string())
 }
 
+/// Where screenshots go, if the run was asked for them. The script exports
+/// this with `--shots`.
+fn shots_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("AURCACHE_SHOTS")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// A value as a JavaScript literal, so page scripts can be built by hand
 /// without worrying about quoting.
 fn json(value: &str) -> String {
@@ -275,6 +283,89 @@ impl Session {
         .await
     }
 
+    /// Save what the window shows as `<name>-light.png` and `<name>-dark.png`,
+    /// when the run was asked for screenshots.
+    ///
+    /// The theme is put back afterwards, so the rest of the run sees the page
+    /// as it was.
+    async fn shoot(&self, name: &str) {
+        let Some(dir) = shots_dir() else {
+            return;
+        };
+        let before: String = self
+            .eval("return document.documentElement.getAttribute('data-theme') ?? '';".to_string())
+            .await;
+        for theme in ["light", "dark"] {
+            self.theme(theme).await;
+            self.settle().await;
+            self.driver
+                .screenshot(&dir.join(format!("{name}-{theme}.png")))
+                .await
+                .expect("screenshot");
+        }
+        self.theme(&before).await;
+    }
+
+    /// [`Self::shoot`] at a desktop window's size, then back to the size the
+    /// session had: the other scenarios run at that one.
+    async fn shoot_wide(&self, name: &str) {
+        if shots_dir().is_none() {
+            return;
+        }
+        let before = self.driver.get_window_rect().await.expect("window rect");
+        self.driver
+            .set_window_rect(0, 0, 1280, 900)
+            .await
+            .expect("resize the window");
+        self.shoot(name).await;
+        self.driver
+            .set_window_rect(
+                before.x,
+                before.y,
+                u32::try_from(before.width).unwrap_or(800),
+                u32::try_from(before.height).unwrap_or(600),
+            )
+            .await
+            .expect("restore the window");
+    }
+
+    /// Scroll the element matching `selector` to the middle of the window.
+    async fn scroll_to(&self, selector: &str) {
+        self.wait_for_script(
+            &format!("{selector:?} to scroll to"),
+            format!(
+                "const el = document.querySelector({}); if (!el) return false; \
+                  el.scrollIntoView({{ block: 'center' }}); return true;",
+                json(selector)
+            ),
+        )
+        .await;
+    }
+
+    /// Wait for the page's transitions to end: a dialog fades in, colours
+    /// ease into a new theme, and the sidebar slides when the window widens.
+    /// A spinner turns forever, so it is not waited for.
+    async fn settle(&self) {
+        self.wait_for_script(
+            "the page to stop moving",
+            "return document.getAnimations() \
+               .filter(a => a.effect?.getComputedTiming().iterations !== Infinity) \
+               .every(a => a.playState !== 'running');"
+                .to_string(),
+        )
+        .await;
+    }
+
+    /// Put `theme` on the page, as the theme picker does.
+    async fn theme(&self, theme: &str) {
+        let _: bool = self
+            .eval(format!(
+                "document.documentElement.setAttribute('data-theme', {}); return true;",
+                json(theme)
+            ))
+            .await;
+    }
+
     async fn url(&self) -> String {
         self.driver
             .current_url()
@@ -339,6 +430,13 @@ struct Screen {
     width: u32,
     height: u32,
     pixel_ratio: f64,
+}
+
+impl Screen {
+    /// The screen's name as part of a file name.
+    fn slug(&self) -> String {
+        self.name.replace(' ', "-")
+    }
 }
 
 /// A Galaxy Z Fold 7's two screens, as measured on the device less the
@@ -507,6 +605,27 @@ async fn every_page_fits_a_phone_screen() {
                 too_wide.push(format!("{} on the {}:\n{report}", page.path, screen.name));
             }
         }
+        // A dialog is not a page of its own, and the widest one here lists a
+        // line of explanation per flag.
+        session.open("/package/hello").await;
+        session
+            .wait_until("/package/hello to load", |t| t.contains("Remove package"))
+            .await;
+        session.scroll_to(EDIT_FLAGS).await;
+        session
+            .shoot(&format!("build-flags-summary-{}", screen.slug()))
+            .await;
+        open_build_flags(&session).await;
+        let report: String = session.eval(TOO_WIDE.to_string()).await;
+        if report != "ok" {
+            too_wide.push(format!(
+                "the build flags dialog on the {}:\n{report}",
+                screen.name
+            ));
+        }
+        session
+            .shoot(&format!("build-flags-dialog-{}", screen.slug()))
+            .await;
         session.stop().await;
     }
     assert!(
@@ -1481,8 +1600,15 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
     session
         .wait_until("the empty flag list", |t| t.contains("makepkg defaults"))
         .await;
+    session.scroll_to(EDIT_FLAGS).await;
+    session.shoot_wide("build-flags-summary-none").await;
 
     open_build_flags(session).await;
+    // Focused, so the shot shows what a keyboard user sees.
+    let _: bool = session
+        .eval("document.querySelector('#build-flag-nocheck').focus(); return true;".to_string())
+        .await;
+    session.shoot_wide("build-flags-dialog").await;
     // A click on the summary, not on the box: the whole row is its label.
     session.click(&format!("{BOX}-summary")).await;
     assert!(
@@ -1500,6 +1626,8 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
     session
         .wait_until("the flag to have persisted", |t| t.contains(FLAG))
         .await;
+    session.scroll_to(EDIT_FLAGS).await;
+    session.shoot_wide("build-flags-summary").await;
 
     // Ticking another and dismissing the dialog leaves nothing behind it.
     open_build_flags(session).await;
