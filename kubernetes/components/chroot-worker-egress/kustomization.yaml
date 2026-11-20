@@ -1,12 +1,14 @@
 # Keep the chroot workers' builds off the cluster's private network.
 #
 # A build runs in its worker pod's network namespace, so package code reaches
-# whatever the worker reaches. The worker's own firewall rule keeps builds off
-# the server's worker port and nothing else. Without a policy, a PKGBUILD can
-# connect to the server's web API on port 8080 -- which, without OAuth
-# configured, anyone reaching it can use without logging in -- and to other
-# Services, the Kubernetes API, the nodes, and the cloud metadata endpoint
-# (169.254.169.254), which on some clouds hands out the node's credentials.
+# whatever the worker reaches. The worker's own network policy keeps each
+# build -- root in its chroot included -- off private and link-local
+# addresses but for the repository; it is enforced in the pod, by the worker. This policy is enforced outside it,
+# on the worker process too. Without either, a PKGBUILD can connect to the server's web API on port
+# 8080 -- which, without OAuth configured, anyone reaching it can use without
+# logging in -- and to other Services, the Kubernetes API, the nodes, and the
+# cloud metadata endpoint (169.254.169.254), which on some clouds hands out the
+# node's credentials.
 #
 # This policy lets worker pods reach DNS, the server's repository and worker
 # ports (not 8080), and public addresses, and nothing else. "Public

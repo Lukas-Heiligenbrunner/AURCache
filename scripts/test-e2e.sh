@@ -97,6 +97,87 @@ request_package() {
     fi
 }
 
+# The chroot worker's network policy, checked against a real build's rules:
+# from inside the build's cgroup, which is what the rules match, both root --
+# what pacman and a dependency's install script run as -- and the build user
+# must be refused the server's worker protocol and API (local addresses here,
+# refused like any other), and reach the repository (allowed by the build's
+# pacman.conf). The rules exist only while a build runs, so the probe starts
+# before the package is added, waits for them, and joins that build's cgroup
+# in a cgroup of its own below it. The worker's table is aurcache_worker. Off
+# for the Docker worker, which has no such rules.
+PROBE_OUT=
+PROBE_PID=
+start_build_network_probe() {
+    [ "${E2E_CHECK_BUILD_FIREWALL:-1}" = 1 ] || return 0
+    PROBE_OUT=$(mktemp)
+    dc exec -T -u root builder bash -s "$BUILD_TIMEOUT" >"$PROBE_OUT" 2>&1 <<'PROBE' &
+set -u
+deadline=$((SECONDS + $1))
+probe() {
+    local who=$1 port want got status
+    for port in 8080:refused 8083:refused 8081:open; do
+        want=${port#*:}
+        port=${port%:*}
+        status=0
+        if [ "$who" = root ]; then
+            curl -s -o /dev/null --max-time 5 "http://aurcache:$port/" || status=$?
+        else
+            runuser -u builder -- curl -s -o /dev/null --max-time 5 "http://aurcache:$port/" || status=$?
+        fi
+        # 7 is a refused connection, which is what the policy's reset gives.
+        # Anything else means something answered, if only the worker port's
+        # TLS refusing plain HTTP.
+        if [ "$status" = 7 ]; then got=refused; else got=open; fi
+        echo "check $who aurcache:$port $got want $want"
+    done
+}
+while ((SECONDS < deadline)); do
+    table=$(nft list tables inet 2>/dev/null | awk '$3 == "aurcache_worker" { print $3; exit }')
+    for cg in /sys/fs/cgroup/builds/build-*/; do
+        [ -n "$table" ] && [ -d "$cg" ] || continue
+        build=$(basename "$cg")
+        nft list chain inet "$table" "$build" >/dev/null 2>&1 || continue
+        mkdir -p "$cg/e2e-probe" && echo $$ >"$cg/e2e-probe/cgroup.procs" || continue
+        echo "joined $build, in table $table"
+        probe root
+        probe builder
+        exit 0
+    done
+    sleep 0.2
+done
+echo "no build's network rules were ever in place"
+exit 1
+PROBE
+    PROBE_PID=$!
+}
+
+check_build_network() {
+    [ "${E2E_CHECK_BUILD_FIREWALL:-1}" = 1 ] || return 0
+    log "=== Checking what a build can reach on the server ==="
+    local failed=0 tag who target got want ref
+    wait "$PROBE_PID" || failed=1
+    while read -r tag who target got _ want; do
+        [ "$tag" = check ] || continue
+        log "    $target is $got to $who in the build's cgroup (want $want)"
+        [ "$got" = "$want" ] || failed=1
+    done <"$PROBE_OUT"
+    grep -q '^check ' "$PROBE_OUT" || failed=1
+    # The build's log says what the policy refused it: here, the probe.
+    ref=$(latest_build_ref "$PACKAGE")
+    if ! aurcache_cli builds output "$ref" 2>/dev/null | grep -q ':8080/tcp'; then
+        log "    the build's log does not report the refused connections"
+        failed=1
+    fi
+    if [ "$failed" = 1 ]; then
+        log "ERROR: the build network policy does not hold"
+        cat "$PROBE_OUT"
+        dc exec -T -u root builder nft list ruleset inet 2>&1 || true
+        exit 1
+    fi
+    rm -f "$PROBE_OUT"
+}
+
 validate() {
     log "=== Validating built package by installing it from the repo ==="
     local net
@@ -137,7 +218,9 @@ preflight
 build_and_start
 wait_for_service || { dump_logs_on_failure; exit 1; }
 wait_for_worker || { dump_logs_on_failure; exit 1; }
+start_build_network_probe
 request_package
+check_build_network
 validate
 
 log "=== Total runtime: $(($(date +%s) - RUN_STARTED))s ==="

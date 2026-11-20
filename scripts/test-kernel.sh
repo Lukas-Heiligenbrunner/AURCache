@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Tests that need a real kernel and root: the storage pool (loop devices,
-# btrfs, simple quotas) and the build cgroups.
+# btrfs, simple quotas), the build cgroups, and the build network policy
+# (nftables matching a build's cgroup, root inside its systemd-nspawn
+# container included, against a host on a link of the container's own).
 #
 # They are opt-in under `cargo test` -- the pool tests behind
 # AURCACHE_POOL_TESTS, the cgroup tests `#[ignore]`d -- because they mount
@@ -31,6 +33,7 @@ TARGETS=(
     "aurcache-worker pool_drain"
     "aurcache-worker cache_volumes"
     "aurcache-worker cgroup_peak --ignored"
+    "aurcache-worker build_network --ignored"
 )
 
 kernel=$(uname -r)
@@ -63,7 +66,9 @@ script='set -euo pipefail
 # Upgrade the base image with the refreshed databases: installing against newer
 # repositories alone can break dependencies on libraries already in the image.
 # Keep the pacman output so dependency conflicts are visible in CI.
-pacman -Syu --noconfirm --needed btrfs-progs sudo util-linux e2fsprogs
+pacman -Syu --noconfirm --needed btrfs-progs sudo util-linux e2fsprogs nftables python
+# systemd-nspawn wants a machine ID, as the worker image has one.
+systemd-machine-id-setup
 # The tests make and mount their own images; `sudo -n` as root needs no grant.
 export AURCACHE_POOL_TESTS=1
 status=0
@@ -78,7 +83,7 @@ exit $status'
 run=()
 for i in "${!TARGETS[@]}"; do
     read -r _ test args <<<"${TARGETS[$i]}"
-    if [[ $test != cgroup_peak ]] && (( ! pool )); then continue; fi
+    if [[ $test != cgroup_peak && $test != build_network ]] && (( ! pool )); then continue; fi
     run+=("${binaries[$i]}" "${args:-}")
 done
 

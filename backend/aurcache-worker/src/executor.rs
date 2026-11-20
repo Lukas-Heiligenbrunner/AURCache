@@ -13,8 +13,10 @@ use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
 use aurcache_worker_core::settings::WorkerSettings;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use crate::build_firewall::{BuildNetwork, Table};
 use crate::cache::{Cache, CacheLimits};
 use crate::cgroup::{BuildLimits, Hierarchy};
 use crate::chroots::Chroots;
@@ -101,6 +103,44 @@ pub struct ChrootExecutor {
     /// `None` where the subtree could not be prepared. Builds still run; they
     /// report no memory figure, which the page shows as unknown.
     cgroups: Option<Hierarchy>,
+    /// What builds may connect to, matched on their cgroups under
+    /// [`Self::cgroups`].
+    network: BuildNetwork,
+    /// When to say again why this worker takes no builds.
+    declining: Reminder,
+}
+
+/// How often a worker that takes no builds says why, beyond its startup
+/// log: it stays online, and only its log tells why builds go elsewhere.
+const DECLINING_EVERY: Duration = Duration::from_secs(600);
+
+/// Something to say at most once per `every`.
+struct Reminder {
+    every: Duration,
+    last: Mutex<Option<Instant>>,
+}
+
+impl Reminder {
+    const fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: Mutex::new(None),
+        }
+    }
+
+    /// Whether it is time to say it, as of `now`. When it is, the next time
+    /// counts from `now`.
+    fn due(&self, now: Instant) -> bool {
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_some_and(|said| now.saturating_duration_since(said) < self.every) {
+            return false;
+        }
+        *last = Some(now);
+        true
+    }
 }
 
 impl ChrootExecutor {
@@ -110,6 +150,9 @@ impl ChrootExecutor {
     pub async fn new(cfg: Config) -> Self {
         let cgroups = prepare_cgroups(&cfg.tunables);
         log_limits(&cfg.tunables, cgroups.is_some());
+        // After the hierarchy, whose `builds/` the rules match, and before any
+        // job can be claimed.
+        let network = BuildNetwork::install(Table::default(), cgroups.as_ref());
         let shared = Arc::new(Shared::new(&cfg));
         // Before anything can claim work: no build of ours is running yet, so
         // whatever a build left in the pool belongs to a run that is over.
@@ -126,6 +169,8 @@ impl ChrootExecutor {
             cfg: Live::new(cfg),
             shared,
             cgroups,
+            network,
+            declining: Reminder::new(DECLINING_EVERY),
         }
     }
 
@@ -281,10 +326,22 @@ impl Executor for ChrootExecutor {
 
         // Once, here: everything this build does reads this copy.
         let cfg = self.cfg.current();
-        job::run_job(&cfg, self.cgroups.as_ref(), &client, &claimed, &self.shared).await
+        let machine = job::Machine {
+            cgroups: self.cgroups.as_ref(),
+            network: &self.network,
+        };
+        job::run_job(&cfg, machine, &client, &claimed, &self.shared).await
     }
 
     async fn ready_for_work(&self, claimed: usize) -> bool {
+        // Every build would be refused: claiming one only fails it, and keeps
+        // it from a worker that could build it.
+        if let Some(reason) = self.network.unavailable_reason() {
+            if self.declining.due(Instant::now()) {
+                tracing::error!("not taking builds: {reason}");
+            }
+            return false;
+        }
         let build_limit = self.cfg.current().tunables.build_disk_max;
         self.shared
             .chroots
@@ -350,5 +407,28 @@ impl Executor for ChrootExecutor {
         self.shared.chroots.set_keep_failed(tunables.keep_failed);
         self.cfg.replace(next);
         settings
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reminder_is_due_at_first_then_once_per_interval() {
+        let reminder = Reminder::new(Duration::from_secs(600));
+        let start = Instant::now();
+        assert!(reminder.due(start));
+        assert!(!reminder.due(start + Duration::from_secs(1)));
+        assert!(!reminder.due(start + Duration::from_secs(599)));
+        assert!(reminder.due(start + Duration::from_secs(600)));
+        assert!(!reminder.due(start + Duration::from_secs(601)));
+    }
+
+    #[test]
+    fn only_a_policy_that_could_not_be_put_in_place_declines_builds() {
+        let unavailable = BuildNetwork::Unavailable("no nft".to_string());
+        assert_eq!(unavailable.unavailable_reason(), Some("no nft"));
+        assert_eq!(BuildNetwork::Unrestricted.unavailable_reason(), None);
     }
 }

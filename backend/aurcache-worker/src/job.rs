@@ -19,6 +19,7 @@ use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
 use crate::build_deps;
+use crate::build_firewall::{self, BuildNetwork};
 use crate::cache::Cache;
 use crate::cgroup::Hierarchy;
 use crate::chroots::Lease;
@@ -52,13 +53,13 @@ async fn join_cache_task<T>(handle: tokio::task::JoinHandle<T>, task: &'static s
 /// later retry and `WORKER_DATA_DIR/work/` would grow without bound.
 pub async fn run_job(
     cfg: &Config,
-    cgroups: Option<&Hierarchy>,
+    machine: Machine<'_>,
     client: &Arc<WorkerClient>,
     claimed: &ClaimedJob,
     shared: &Shared,
 ) -> Result<CompleteReport> {
     let workdir = workdir(cfg, claimed.job.build_id);
-    let report = run_job_inner(cfg, cgroups, client, claimed, shared).await;
+    let report = run_job_inner(cfg, machine, client, claimed, shared).await;
 
     // Keep the shared caches and base chroot; only this job's tree goes.
     if let Err(e) = tokio::fs::remove_dir_all(&workdir).await
@@ -81,7 +82,7 @@ fn job_label(build_id: i32) -> String {
 
 async fn run_job_inner(
     cfg: &Config,
-    cgroups: Option<&Hierarchy>,
+    machine: Machine<'_>,
     client: &Arc<WorkerClient>,
     claimed: &ClaimedJob,
     shared: &Shared,
@@ -98,7 +99,8 @@ async fn run_job_inner(
     log(client, job.build_id, "[worker] starting build\n").await;
     let context = WorkerContext {
         cfg,
-        cgroups,
+        cgroups: machine.cgroups,
+        network: machine.network,
         dropin: &prepared.dropin,
         pacman: &prepared.pacman,
         lease: &lease,
@@ -740,6 +742,14 @@ fn agent_socket() -> Option<PathBuf> {
     sock.exists().then_some(sock)
 }
 
+/// What the executor set up on this machine for every build: the cgroup
+/// hierarchy builds run under, and what they may connect to.
+#[derive(Clone, Copy)]
+pub struct Machine<'a> {
+    pub cgroups: Option<&'a Hierarchy>,
+    pub network: &'a BuildNetwork,
+}
+
 /// What this worker brings to a build, as against what the job describes.
 ///
 /// Grouped because they travel together and are both "how this machine builds"
@@ -747,6 +757,7 @@ fn agent_socket() -> Option<PathBuf> {
 struct WorkerContext<'a> {
     cfg: &'a Config,
     cgroups: Option<&'a Hierarchy>,
+    network: &'a BuildNetwork,
     /// This build's chroot, which names itself to `makechrootpkg`.
     lease: &'a Lease,
     /// Where the lease came from, to tell whether a failed build ran out of
@@ -768,15 +779,9 @@ struct BuildExecution {
     total_ooms_before: Option<u64>,
 }
 
-/// Run the build's processes in its cgroup -- the `.SRCINFO` read for its
-/// dependencies, then `makechrootpkg`, whose output is streamed as logs --
-/// and kill them if the build has to stop: the worker cancelled it, or it
-/// reached its timeout.
-///
-/// The output really is streamed: stdout and stderr are piped and forwarded in
-/// batches. Letting the child inherit the worker's stdio instead sends the
-/// build's output to the worker's own container logs, where the user reading
-/// the build page cannot see it.
+/// Give the build its cgroup and network rules, run its processes there
+/// ([`run_in_cgroup`]), and say in its log what the rules refused it, however
+/// the run ended.
 async fn execute_build_process(
     ctx: &WorkerContext<'_>,
     client: &Arc<WorkerClient>,
@@ -785,20 +790,7 @@ async fn execute_build_process(
     caches: &JobCaches,
     binds: &[BindMount],
 ) -> Result<BuildExecution> {
-    let job = &claimed.job;
-    let build_id = job.build_id;
-    let cache = &caches.cache;
-    let srcdest = cache.srcdest(&job.pkgbase);
-    let gnupg = cache.gnupg_job(&caches.label);
-    let argv = build::build_command(
-        ctx.lease.chroot_dir(),
-        ctx.lease.label(),
-        binds,
-        &job.build_flags,
-        &ctx.cfg.build_user,
-    );
-
-    tracing::debug!("$ sudo {}", argv.join(" "));
+    let build_id = claimed.job.build_id;
     // One cgroup for this build. The child places itself into it between fork
     // and exec, so every descendant -- nspawn, makepkg, each compiler -- is
     // accounted to it, and `memory.peak` is the whole tree's high-water mark.
@@ -824,22 +816,121 @@ async fn execute_build_process(
     // The total's OOM count is cumulative over every build; what this build
     // needs is whether it moved while it ran.
     let total_ooms_before = ctx.cgroups.and_then(Hierarchy::total_ooms);
+    // After the cgroup the rules match, before anything runs in it: the
+    // PKGBUILD's first code runs in it below, reading its dependencies. A
+    // build whose rules cannot be loaded does not run.
+    let network = ctx
+        .network
+        .open(
+            build_id,
+            build_cgroup.as_ref(),
+            build_firewall::Inputs {
+                repo: client.repo(),
+                pacman_conf: &ctx.pacman.build,
+                mirrorlist: claimed.mirrorlist.as_deref(),
+            },
+        )
+        .await
+        .context("putting the build's network rules in place")?;
+    if let Some(rules) = &network {
+        for skipped in rules.skipped() {
+            log(
+                client,
+                build_id,
+                &format!("[worker] network: not allowing {skipped}\n"),
+            )
+            .await;
+        }
+    }
     // From the first PKGBUILD code the build runs, so its timeout covers
-    // the read below as well.
+    // the read of its dependencies as well.
     let watch = claimed.watch();
-    let deps =
-        match stage_build_deps(ctx, client, job, pkgdir, build_cgroup.as_ref(), &watch).await? {
-            Staged::Dependencies(deps) => deps,
-            Staged::Stopped { stop, status } => {
-                return Ok(BuildExecution {
-                    status,
-                    stopped: Some(stop),
-                    elapsed: watch.elapsed(),
-                    cgroup: build_cgroup,
-                    total_ooms_before,
-                });
-            }
-        };
+    let run = CgroupRun {
+        claimed,
+        pkgdir,
+        caches,
+        binds,
+        cgroup: build_cgroup.as_ref(),
+        watch: &watch,
+    };
+    let ran = run_in_cgroup(ctx, client, run).await;
+    // Whatever came of it: a build that failed to start was refused
+    // connections all the same, and they are often why.
+    if let Some(rules) = network {
+        log_refusals(client, build_id, &rules.close().await).await;
+    }
+    let ran = ran?;
+
+    Ok(BuildExecution {
+        status: ran.status,
+        stopped: ran.stopped,
+        elapsed: watch.elapsed(),
+        cgroup: build_cgroup,
+        total_ooms_before,
+    })
+}
+
+/// How the build's processes ended.
+struct Ran {
+    status: std::process::ExitStatus,
+    stopped: Option<Stop>,
+}
+
+/// What one build runs with in its cgroup.
+struct CgroupRun<'a> {
+    claimed: &'a ClaimedJob,
+    pkgdir: &'a Path,
+    caches: &'a JobCaches,
+    binds: &'a [BindMount],
+    cgroup: Option<&'a crate::cgroup::BuildCgroup>,
+    /// Since the build's first PKGBUILD code: its timeout and its stop.
+    watch: &'a StopWatch,
+}
+
+/// Run the build's processes in its cgroup, under its network rules -- the
+/// `.SRCINFO` read for its dependencies, then `makechrootpkg`, whose output is
+/// streamed as logs -- and kill them if the build has to stop: the worker
+/// cancelled it, or it reached its timeout.
+///
+/// The output really is streamed: stdout and stderr are piped and forwarded in
+/// batches. Letting the child inherit the worker's stdio instead sends the
+/// build's output to the worker's own container logs, where the user reading
+/// the build page cannot see it.
+async fn run_in_cgroup(
+    ctx: &WorkerContext<'_>,
+    client: &Arc<WorkerClient>,
+    run: CgroupRun<'_>,
+) -> Result<Ran> {
+    let CgroupRun {
+        claimed,
+        pkgdir,
+        caches,
+        binds,
+        cgroup: build_cgroup,
+        watch,
+    } = run;
+    let job = &claimed.job;
+    let build_id = job.build_id;
+    let cache = &caches.cache;
+    let srcdest = cache.srcdest(&job.pkgbase);
+    let gnupg = cache.gnupg_job(&caches.label);
+    let argv = build::build_command(
+        ctx.lease.chroot_dir(),
+        ctx.lease.label(),
+        binds,
+        &job.build_flags,
+        &ctx.cfg.build_user,
+    );
+    tracing::debug!("$ sudo {}", argv.join(" "));
+    let deps = match stage_build_deps(ctx, client, job, pkgdir, build_cgroup, watch).await? {
+        Staged::Dependencies(deps) => deps,
+        Staged::Stopped { stop, status } => {
+            return Ok(Ran {
+                status,
+                stopped: Some(stop),
+            });
+        }
+    };
     let spawn = |argv: &[String]| {
         let mut cmd = devtools::command_in(&argv[0], &ctx.lease.tmpdir());
         cmd.args(&argv[1..]).current_dir(pkgdir).kill_on_drop(true);
@@ -847,7 +938,7 @@ async fn execute_build_process(
         // SIGKILL fallback below, which takes makechrootpkg's whole tree even
         // where no cgroup was prepared.
         cmd.process_group(0);
-        if let Some(cg) = &build_cgroup {
+        if let Some(cg) = build_cgroup {
             // Opened per spawn: the retry below runs this closure again, and a
             // descriptor consumed by the first attempt is gone by then.
             let handle = cg.procs_handle().map_err(std::io::Error::other)?;
@@ -935,19 +1026,32 @@ async fn execute_build_process(
         status = child.wait() => status.context("awaiting build")?,
         stop = watch.stopped() => {
             stopped = Some(stop);
-            kill_build(&mut child, build_cgroup.as_ref(), client, build_id).await;
+            kill_build(&mut child, build_cgroup, client, build_id).await;
             child.wait().await.context("awaiting killed build")?
         }
     };
     build_log.close(pumps, stopped).await;
+    Ok(Ran { status, stopped })
+}
 
-    Ok(BuildExecution {
-        status,
-        stopped,
-        elapsed: watch.elapsed(),
-        cgroup: build_cgroup,
-        total_ooms_before,
-    })
+/// Say in the build's log what the network policy refused it, which is
+/// otherwise only an error somewhere above.
+async fn log_refusals(client: &WorkerClient, build_id: i32, refused: &[String]) {
+    /// Enough to see the pattern; a build retrying one host does not need
+    /// every attempt listed.
+    const SHOWN: usize = 20;
+    if refused.is_empty() {
+        return;
+    }
+    let mut msg = String::from("\n[worker] the build network policy refused connections to:\n");
+    for line in refused.iter().take(SHOWN) {
+        msg.push_str(&format!("[worker]   {line}\n"));
+    }
+    if refused.len() > SHOWN {
+        msg.push_str(&format!("[worker]   and {} more\n", refused.len() - SHOWN));
+    }
+    tracing::info!("build {build_id}: {} destination(s) refused", refused.len());
+    log(client, build_id, &msg).await;
 }
 
 /// Classify the process outcome and collect its final resource measurements.

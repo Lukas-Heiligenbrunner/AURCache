@@ -365,20 +365,27 @@ its claims end in `-aurcache-worker-arm64-N`, and its pods carry
 ## What builds can reach on the network
 
 A chroot build runs in its worker pod's network namespace, so package code can
-connect wherever the worker can. The worker installs one firewall rule for its
-builds, which keeps them off the server's worker port, and nothing else. Without
-a NetworkPolicy, a PKGBUILD can reach:
+connect wherever the worker can. The worker puts
+[a network policy](../workers/split-chroot.md#what-builds-can-reach-on-the-network)
+on each build: nothing on a local address -- private, link-local or
+carrier-grade NAT -- unless allowed (the repository is), so the
+server's other ports are refused, and the internet open. It matches the
+build's cgroup, so it holds root's connections in the build's container as
+well as the build user's, and leaves the worker process alone. Without it, or
+for what it leaves open, a PKGBUILD could reach:
 
 - **the server's web API**, `aurcache:8080`. Without
   [OAuth](../Configuration/authentication.md) configured, anyone who reaches it
   can use it without logging in: list, add and delete packages, change
-  settings. A build can do the same;
-- other Services in the cluster, the Kubernetes API and the nodes;
+  settings;
+- other Services in the cluster, the Kubernetes API and the nodes, including
+  those on public addresses, which the worker's policy allows;
 - the cloud metadata endpoint (`169.254.169.254`), which on some clouds hands
   out the node's credentials.
 
-Configure OAuth, enable the policy below, or both. The policy keeps builds off
-port 8080 whether or not OAuth is on.
+Configure OAuth, enable the NetworkPolicy below, or both. The NetworkPolicy is
+enforced outside the pod, on the worker process as much as on its builds, and
+keeps both off port 8080 whether or not OAuth is on.
 
 `components/chroot-worker-egress` is a NetworkPolicy for the worker pods that
 allows DNS, the server's repository and worker ports, and public addresses, and
