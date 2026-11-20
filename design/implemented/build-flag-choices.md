@@ -171,11 +171,12 @@ starts from the saved flags. *Save* sends the whole list in one `PATCH` (the
 endpoint takes the whole list, as it does now), in the order of `OFFERED`, and
 is disabled while that list is the one already saved; *Cancel*, Escape and
 clicking outside discard the draft. The dialog is locked while the request is
-in flight, and a refusal is shown inside it. It shows only while the package
-it was opened for is the one on the page, so moving to another package takes
-it away, draft and all, in the same render. Building the list from the ticked
-boxes and deciding whether it is a change are plain functions (`Draft`),
-tested on their own.
+in flight, and a refusal is shown inside it, where focus then goes. Opening it
+puts focus on the first box, and closing it, however it closes, puts focus
+back on *Edit*. It shows only while the package it was opened for is the one
+on the page, so moving to another package takes it away, draft and all, in the
+same render. Building the list from the ticked boxes and deciding whether it
+is a change are plain functions (`Draft`), tested on their own.
 
 There is no tri-state check option: the only choice is `--nocheck` or nothing.
 

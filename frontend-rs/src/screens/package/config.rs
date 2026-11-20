@@ -10,6 +10,7 @@ use aurcache_client::{ExtendedPackage, PackagePatch, Setting, SettingSource, Set
 use aurcache_common::build_flags::OFFERED;
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 #[component]
 pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>) -> Element {
@@ -456,6 +457,16 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
     // that is still the package on screen: never with one package's draft
     // under another's name.
     let mut editing = use_signal(|| None::<String>);
+    let mut edit_button = use_signal(|| None::<Rc<MountedData>>);
+    // However the dialog closes, focus goes back to the button that opened it.
+    let mut close = move || {
+        editing.set(None);
+        if let Some(button) = edit_button() {
+            spawn(async move {
+                let _ = button.set_focus(true).await;
+            });
+        }
+    };
     let open = editing.read().as_deref() == Some(pkgbase.as_str());
     let opening = pkgbase.clone();
 
@@ -473,6 +484,7 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
                 button {
                     class: "btn btn-ghost btn-xs",
                     aria_label: "Edit build flags",
+                    onmounted: move |e: MountedEvent| edit_button.set(Some(e.data())),
                     onclick: move |_| editing.set(Some(opening.clone())),
                     "Edit"
                 }
@@ -484,9 +496,9 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
             BuildFlagsDialog {
                 pkgbase,
                 saved: flags,
-                on_close: move |()| editing.set(None),
+                on_close: move |()| close(),
                 on_saved: move |()| {
-                    editing.set(None);
+                    close();
                     on_changed.call(());
                 },
             }
@@ -548,7 +560,16 @@ fn BuildFlagsDialog(
             }
             {flag_list(&draft.read(), busy, EventHandler::new(move |tick: Tick| draft.with_mut(|d| d.set(tick.flag, tick.on))))}
             if let Some(message) = action.error() {
-                div { class: "alert alert-error text-sm mt-3", role: "alert",
+                div {
+                    class: "alert alert-error text-sm mt-3",
+                    role: "alert",
+                    tabindex: "-1",
+                    // Save is disabled while its request runs, which takes
+                    // focus out of the dialog; back inside, Escape closes it
+                    // again, and the error is what a screen reader reads next.
+                    onmounted: move |e| async move {
+                        let _ = e.set_focus(true).await;
+                    },
                     span { "{message}" }
                 }
             }
@@ -584,10 +605,12 @@ struct Tick {
 /// the flag on one line, what it does under it.
 ///
 /// Each row is the checkbox's label, so a click anywhere on it toggles the box.
+/// The first box takes focus when the list mounts, which puts focus inside the
+/// dialog as it opens.
 fn flag_list(draft: &Draft, locked: bool, on_tick: EventHandler<Tick>) -> Element {
     rsx! {
         ul { class: "menu menu-sm p-0 max-h-[60vh] overflow-y-auto border border-base-300 rounded-box flex-nowrap",
-            for offered in OFFERED {
+            for (index, offered) in OFFERED.iter().enumerate() {
                 {
                     let id = checkbox_id(offered.flag);
                     rsx! {
@@ -602,6 +625,11 @@ fn flag_list(draft: &Draft, locked: bool, on_tick: EventHandler<Tick>) -> Elemen
                                     aria_describedby: "{id}-summary",
                                     checked: draft.has(offered.flag),
                                     disabled: locked,
+                                    onmounted: move |e: MountedEvent| async move {
+                                        if index == 0 {
+                                            let _ = e.set_focus(true).await;
+                                        }
+                                    },
                                     onchange: move |e: FormEvent| {
                                         on_tick.call(Tick { flag: offered.flag, on: e.checked() });
                                     },
