@@ -16,14 +16,18 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 aurcache-client = { path = "../aurcache-client" }
-aurcache-common = { path = "../aurcache-common" }
+# Only the filesystem helpers on top of the types: the default `db` feature
+# would link sea-orm, sqlx and a bundled SQLite the CLI never touches.
+aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
 jiff = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 clap_complete = "4.6"
-dialoguer = "0.12.0"
+# Without the default `editor` prompt, which the CLI does not use and which
+# brings tempfile along.
+dialoguer = { version = "0.12.0", default-features = false, features = ["password"] }
 dirs = "7.0"
 getrandom = "0.4"
 unicode-width = "0.2"
