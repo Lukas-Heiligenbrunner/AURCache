@@ -15,8 +15,9 @@
 //! 2. DNS to the resolvers in the worker's `resolv.conf`: accepted;
 //! 3. the allowlist, exact `host:port` pairs (the `Server =` lines of the
 //!    build's `pacman.conf`): accepted;
-//! 4. local destinations ([`local`]) -- loopback, the private, link-local
-//!    and shared ranges, multicast, every address of the worker host itself,
+//! 4. local destinations ([`local`]) -- the private, link-local, shared and
+//!    reserved ranges, multicast, their NAT64 forms, every address of the
+//!    worker host itself, the prefixes and default gateways of its links,
 //!    and every address of the server's hosts (the repository's, and the one
 //!    the worker dials for its protocol) -- refused, except a listener of the
 //!    same build on this host, such as a test suite's;
@@ -26,8 +27,9 @@
 //! are, is refused on every port but what the allowlist names: its
 //! repository, and the other servers of the build's `pacman.conf`.
 //!
-//! Names are resolved when each build starts; a build whose server's hosts do
-//! not resolve is refused, since nothing would be refused there. A refusal is
+//! Names are resolved, and the host's links read, when each build starts; a
+//! build whose server's hosts do not resolve is refused, since nothing would
+//! be refused there. A refusal is
 //! a TCP reset or an ICMP error, never a silent drop, and is recorded so the
 //! build's log can say what was refused.
 //!
@@ -59,12 +61,12 @@
 //!
 //! Each worker owns one table ([`Table`]), named after it so that workers
 //! sharing a network namespace keep to their own, and made afresh at startup:
-//! the baseline (rules 1, 4 and 5) on every build, the sets of the server's
-//! hosts' addresses, and an empty chain each build's own rules (2 to 4) are
-//! hooked into. Those are loaded in one transaction, with the server's sets
-//! filled afresh, after the build's cgroup exists and before the build
-//! starts, and removed when it ends; a build whose rules cannot be loaded is
-//! refused.
+//! the baseline (rules 1, 4 and 5) on every build, the sets of the local
+//! destinations the host's links and the server's hosts make, and an empty
+//! chain each build's own rules (2 to 4) are hooked into. Those are loaded in
+//! one transaction, with the local sets filled afresh, after the build's
+//! cgroup exists and before the build starts, and removed when it ends; a
+//! build whose rules cannot be loaded is refused.
 //!
 //! A listener of the build itself is told apart on the way in: a build's
 //! packet to a local address leaves with a mark naming the build, and the
@@ -87,7 +89,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::cgroup::{BuildCgroup, CgroupName, Hierarchy};
-use local::Prefix;
+use local::{Links, Prefix};
 
 /// Environment switch that disables the policy; see the module docs.
 const DISABLE_ENV: &str = "WORKER_BUILD_FIREWALL";
@@ -219,11 +221,12 @@ impl Family {
         }
     }
 
-    /// The table's set of the addresses the server's hosts resolve to.
-    const fn server_set(self) -> &'static str {
+    /// The table's set of the local destinations the host's links and the
+    /// server's hosts make.
+    const fn local_set(self) -> &'static str {
         match self {
-            Self::V4 => "server4",
-            Self::V6 => "server6",
+            Self::V4 => "local4",
+            Self::V6 => "local6",
         }
     }
 }
@@ -253,23 +256,23 @@ pub struct Policy {
 }
 
 /// The table, made afresh: the baseline every build gets, on the builds'
-/// cgroup, and the server's sets, empty.
+/// cgroup, and the local sets, empty.
 #[must_use]
 pub fn baseline_script(table: &Table, builds: &CgroupName) -> String {
     let builds = matching(builds);
     let mut sets = String::new();
     let mut refusals = String::new();
     for family in Family::ALL {
-        let server = family.server_set();
+        let set = family.local_set();
         let _ = writeln!(
             sets,
-            "\tset {server} {{\n\t\ttype {}; flags interval;\n\t}}",
+            "\tset {set} {{\n\t\ttype {}; flags interval;\n\t}}",
             family.addr_type()
         );
         let ip = family.keyword();
         let _ = writeln!(
             refusals,
-            "\t\t{ip} daddr {{ {} }} goto refuse\n\t\t{ip} daddr @{server} goto refuse",
+            "\t\t{ip} daddr {{ {} }} goto refuse\n\t\t{ip} daddr @{set} goto refuse",
             joined(&local::fixed(family))
         );
     }
@@ -304,21 +307,25 @@ pub fn baseline_script(table: &Table, builds: &CgroupName) -> String {
     )
 }
 
-/// Fill the server's sets afresh: the addresses its hosts resolve to now.
+/// Fill the local sets afresh: what the host's `links` make local now, and
+/// the addresses the `server`'s hosts resolve to, with the NAT64 forms of
+/// the IPv4 ones. For every build, running ones included.
 ///
-/// They are local to every build: past the repository's own `address:port`,
-/// which the allowlist lets through first, the server's other ports are
-/// there, whether or not the address is on a local range.
-fn server_script(table: &Table, addrs: &[IpAddr]) -> String {
-    let hosts: Vec<Prefix> = addrs.iter().copied().map(Prefix::host).collect();
+/// The server's hosts are local wherever they are: past the repository's own
+/// `address:port`, which the allowlist lets through first, the server's
+/// other ports are there, whether or not the address is on a local range.
+fn local_script(table: &Table, links: &Links, server: &[IpAddr]) -> String {
+    let hosts: Vec<Prefix> = server.iter().copied().map(Prefix::host).collect();
+    let translated: Vec<Prefix> = hosts.iter().filter_map(Prefix::nat64).collect();
     let mut s = String::new();
     for family in Family::ALL {
-        let set = family.server_set();
+        let set = family.local_set();
         let _ = writeln!(s, "flush set inet {table} {set}");
         let local = local::disjoint(
-            hosts
-                .iter()
-                .copied()
+            links
+                .local(family)
+                .into_iter()
+                .chain(hosts.iter().chain(&translated).copied())
                 .filter(|p| p.family() == family)
                 .collect(),
         );
@@ -479,7 +486,7 @@ pub fn build_script(table: &Table, build_id: i32, cgroup: &CgroupName, policy: &
         rule(
             &mut s,
             &n.chain,
-            &format!("{ip} daddr @{} goto {}", family.server_set(), n.refuse),
+            &format!("{ip} daddr @{} goto {}", family.local_set(), n.refuse),
         );
     }
     rule(
@@ -947,8 +954,8 @@ impl BuildNetwork {
     }
 }
 
-/// Resolve one build's policy and load its rules, with the server's sets
-/// filled afresh. Blocking.
+/// Resolve one build's policy and load its rules, with the local sets filled
+/// afresh. Blocking.
 ///
 /// The rules come back in the guard that removes them, made as soon as they
 /// are loaded. Should the build's future be dropped while this runs, this
@@ -961,9 +968,10 @@ fn load_build(
     inputs: &Inputs,
 ) -> Result<BuildRules> {
     let resolved = resolve(inputs)?;
+    let links = Links::read()?;
     // A chain left by an earlier attempt under the same id.
     let _ = remove(&table, build_id);
-    let script = server_script(&table, &resolved.server)
+    let script = local_script(&table, &links, &resolved.server)
         + &build_script(&table, build_id, cgroup, &resolved.policy);
     load(&script).context("loading the build's network rules")?;
     Ok(BuildRules {
@@ -992,7 +1000,9 @@ fn put_in_place(table: &Table, cgroups: Option<&Hierarchy>) -> Result<()> {
             hierarchy.builds_dir().display()
         )
     })?;
-    load(&baseline_script(table, &builds)).context(
+    let links = Links::read()?;
+    let script = baseline_script(table, &builds) + &local_script(table, &links, &[]);
+    load(&script).context(
         "nftables refused rules on the builds' cgroup; `socket cgroupv2` needs Linux 5.13 \
          or later",
     )?;
@@ -1275,17 +1285,25 @@ mod tests {
             "jump each_build",
             "fib daddr type local goto refuse",
             "ip daddr {",
-            "ip daddr @server4 goto refuse",
+            "ip daddr @local4 goto refuse",
             "ip6 daddr {",
-            "ip6 daddr @server6 goto refuse",
+            "ip6 daddr @local6 goto refuse",
         ];
         let positions: Vec<_> = order.iter().map(|r| builds.find(r).unwrap()).collect();
         assert!(positions.is_sorted(), "{builds}");
-        for range in ["192.168.0.0/16", "100.64.0.0/10", "fc00::/7", "fe80::/10"] {
+        for range in [
+            "192.168.0.0/16",
+            "198.18.0.0/15",
+            "240.0.0.0/4",
+            "fc00::/7",
+            "64:ff9b::a00:0/104",
+            "64:ff9b::c0a8:0/112",
+            "64:ff9b:1::/48",
+        ] {
             assert!(builds.contains(range), "{range} is missing: {builds}");
         }
-        assert!(script.contains("set server4 {\n\t\ttype ipv4_addr; flags interval;\n\t}"));
-        assert!(script.contains("set server6 {\n\t\ttype ipv6_addr; flags interval;\n\t}"));
+        assert!(script.contains("set local4 {\n\t\ttype ipv4_addr; flags interval;\n\t}"));
+        assert!(script.contains("set local6 {\n\t\ttype ipv6_addr; flags interval;\n\t}"));
         assert!(script.contains("reject with tcp reset"));
     }
 
@@ -1342,11 +1360,11 @@ mod tests {
             .position(|r| r.starts_with("ip daddr {") && r.ends_with("goto build-42-refuse"))
             .unwrap();
         assert!(local < ranges);
-        // The server's other ports are refused, and recorded, as the build's
-        // own.
+        // The host's links and the server's other ports are refused, and
+        // recorded, as the build's own.
         for links in [
-            "ip daddr @server4 goto build-42-refuse",
-            "ip6 daddr @server6 goto build-42-refuse",
+            "ip daddr @local4 goto build-42-refuse",
+            "ip6 daddr @local6 goto build-42-refuse",
         ] {
             let at = chain.iter().position(|r| r == links).unwrap();
             assert!(local < at, "{chain:#?}");
@@ -1423,22 +1441,37 @@ mod tests {
         );
     }
 
-    /// The server's hosts are local wherever they are: their addresses are
-    /// replaced whole, and an empty family is only emptied, since nftables
-    /// refuses an element list with nothing in it.
+    /// The local sets hold the host's links and the server's hosts, wherever
+    /// those are, with the NAT64 forms of the IPv4 ones. They are replaced
+    /// whole, and an empty family is only emptied, since nftables refuses an
+    /// element list with nothing in it.
     #[test]
-    fn the_servers_sets_hold_its_hosts_addresses() {
+    fn the_local_sets_hold_the_links_and_the_servers_hosts() {
+        let links = Links {
+            on_link: vec![
+                Prefix::parse("203.0.113.0/24").unwrap(),
+                Prefix::parse("10.9.0.0/22").unwrap(),
+            ],
+            gateways: vec![ip("203.0.113.1")],
+        };
         assert_eq!(
-            server_script(&table(), &[ip("198.51.100.7"), ip("2001:db8:56:2::10")]),
-            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f server4\n\
-             add element inet aurcache_worker_5e1f0a2b3c4d5e6f server4 { 198.51.100.7 }\n\
-             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f server6\n\
-             add element inet aurcache_worker_5e1f0a2b3c4d5e6f server6 { 2001:db8:56:2::10 }\n"
+            local_script(
+                &table(),
+                &links,
+                &[ip("198.51.100.7"), ip("10.9.2.4"), ip("2001:db8:56:2::10")]
+            ),
+            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f local4\n\
+             add element inet aurcache_worker_5e1f0a2b3c4d5e6f local4 \
+             { 10.9.0.0/22, 198.51.100.7, 203.0.113.0/24 }\n\
+             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f local6\n\
+             add element inet aurcache_worker_5e1f0a2b3c4d5e6f local6 \
+             { 64:ff9b::a09:0/118, 64:ff9b::c633:6407, 64:ff9b::cb00:7100/120, \
+             2001:db8:56:2::10 }\n"
         );
         assert_eq!(
-            server_script(&table(), &[]),
-            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f server4\n\
-             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f server6\n"
+            local_script(&table(), &Links::default(), &[]),
+            "flush set inet aurcache_worker_5e1f0a2b3c4d5e6f local4\n\
+             flush set inet aurcache_worker_5e1f0a2b3c4d5e6f local6\n"
         );
     }
 
@@ -1518,7 +1551,7 @@ mod tests {
             .unwrap();
         let repo = chain
             .iter()
-            .position(|r| r == "ip daddr @server4 goto build-42-refuse")
+            .position(|r| r == "ip daddr @local4 goto build-42-refuse")
             .unwrap();
         assert!(allowed < repo, "{chain:#?}");
     }

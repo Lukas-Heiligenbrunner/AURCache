@@ -142,13 +142,25 @@ const LAN_LINK: &str = "aurcache-lan0";
 /// A host on the worker's link, in a network namespace of its own.
 ///
 /// The link's prefixes are a public IPv4 one and a global IPv6 one, which no
-/// fixed range calls local. Behind the host, routed through it, are an IPv4
-/// and an IPv6 address that stand for the internet. Removed when dropped.
+/// fixed range calls local, and another public IPv4 one whose address has no
+/// prefix route of the kernel's, as dhcpcd sets one up (`noprefixroute`, and
+/// a route of protocol `dhcp`). Behind the host, routed through it, are an
+/// IPv4 and an IPv6 address that stand for the internet. The worker's default
+/// gateway is yet another address, which no prefix of the link holds.
+/// Removed when dropped.
 struct Lan;
 
-/// Listeners on [`Lan`]'s host: beyond the link, through the host as a
-/// router.
+/// Listeners on [`Lan`]'s host.
 struct LanListeners {
+    /// On its address on the link, IPv4.
+    public_v4: Listener,
+    /// On its address on the link, IPv6.
+    global_v6: Listener,
+    /// On its address in the prefix that has no kernel route.
+    dhcp_v4: Listener,
+    /// On the worker's default gateway, which the host answers for.
+    gateway: Listener,
+    /// Beyond the link, through the host as a router.
     beyond_v4: Listener,
     beyond_v6: Listener,
 }
@@ -161,15 +173,23 @@ impl Lan {
             "ip link add aurcache-lan0 type veth peer name lan1 netns aurcache-lan",
             "ip addr add 203.0.113.1/24 dev aurcache-lan0",
             "ip -6 addr add 2001:db8:113::1/64 dev aurcache-lan0 nodad",
+            "ip addr add 203.0.114.1/24 dev aurcache-lan0 noprefixroute",
             "ip link set aurcache-lan0 up",
             "ip -n aurcache-lan link set lo up",
             "ip -n aurcache-lan addr add 203.0.113.5/24 dev lan1",
             "ip -n aurcache-lan -6 addr add 2001:db8:113::5/64 dev lan1 nodad",
+            "ip -n aurcache-lan addr add 203.0.114.5/24 dev lan1",
+            "ip -n aurcache-lan addr add 192.0.2.1/32 dev lan1",
             "ip -n aurcache-lan addr add 198.51.100.7/32 dev lo",
             "ip -n aurcache-lan -6 addr add 2001:db8:100::7/128 dev lo",
             "ip -n aurcache-lan link set lan1 up",
             "ip route add 198.51.100.0/24 via 203.0.113.5",
             "ip -6 route add 2001:db8:100::/64 via 2001:db8:113::5",
+            "ip route add 203.0.114.0/24 dev aurcache-lan0 proto dhcp src 203.0.114.1",
+            // Routes of the operator's own, which make nothing local by
+            // themselves: the gateway is local as the gateway.
+            "ip route add 192.0.2.1/32 dev aurcache-lan0",
+            "ip route add default via 192.0.2.1 dev aurcache-lan0 metric 4242",
         ] {
             let argv: Vec<&str> = command.split_whitespace().collect();
             let status = Command::new(argv[0])
@@ -182,8 +202,19 @@ impl Lan {
     }
 
     fn listen(&self) -> LanListeners {
-        let [beyond_v4, beyond_v6] = self.listen_on(["198.51.100.7", "2001:db8:100::7"]);
+        let [public_v4, global_v6, dhcp_v4, gateway, beyond_v4, beyond_v6] = self.listen_on([
+            "203.0.113.5",
+            "2001:db8:113::5",
+            "203.0.114.5",
+            "192.0.2.1",
+            "198.51.100.7",
+            "2001:db8:100::7",
+        ]);
         LanListeners {
+            public_v4,
+            global_v6,
+            dhcp_v4,
+            gateway,
             beyond_v4,
             beyond_v6,
         }
@@ -328,7 +359,8 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
     let network = enforced(Table::for_worker("c9a0"), &hierarchy);
 
-    // A router on a link of the worker's, and addresses beyond it.
+    // After the worker started: a build's rules read the host's links as it
+    // starts.
     let lan = Lan::up();
     let on_lan = lan.listen();
 
@@ -347,6 +379,10 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         protocol.target("worker-protocol"),
         repo.target("repository"),
         nas.target("local-network"),
+        on_lan.public_v4.target("lan-public-v4"),
+        on_lan.global_v6.target("lan-global-v6"),
+        on_lan.dhcp_v4.target("lan-dhcp-v4"),
+        on_lan.gateway.target("default-gateway"),
         on_lan.beyond_v4.target("beyond-gateway-v4"),
         on_lan.beyond_v6.target("beyond-gateway-v6"),
     ];
@@ -370,6 +406,22 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         },
         Want {
             check: "local-network",
+            got: "refused",
+        },
+        Want {
+            check: "lan-public-v4",
+            got: "refused",
+        },
+        Want {
+            check: "lan-global-v6",
+            got: "refused",
+        },
+        Want {
+            check: "lan-dhcp-v4",
+            got: "refused",
+        },
+        Want {
+            check: "default-gateway",
             got: "refused",
         },
         Want {
@@ -402,7 +454,15 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         let needle = format!("{}/tcp", listener.addr);
         refused.iter().any(|r| r.contains(&needle))
     };
-    for listener in [&protocol, &api, &nas] {
+    for listener in [
+        &protocol,
+        &api,
+        &nas,
+        &on_lan.public_v4,
+        &on_lan.global_v6,
+        &on_lan.dhcp_v4,
+        &on_lan.gateway,
+    ] {
         assert!(
             reported(listener),
             "the refusal of {} is not reported: {refused:#?}",
@@ -414,7 +474,16 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     }
 
     // The worker itself is not a build: it still reaches all of them.
-    for listener in [&protocol, &api, &repo, &nas] {
+    for listener in [
+        &protocol,
+        &api,
+        &repo,
+        &nas,
+        &on_lan.public_v4,
+        &on_lan.global_v6,
+        &on_lan.dhcp_v4,
+        &on_lan.gateway,
+    ] {
         TcpStream::connect(listener.addr)
             .unwrap_or_else(|e| panic!("the worker cannot reach {}: {e}", listener.addr));
     }
