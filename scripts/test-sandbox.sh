@@ -32,6 +32,11 @@
 # CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
 # filter keeps from mounting.
 #
+# The build is given binds like the worker's: an operator's mount, an
+# ssh-agent-like directory and a private package cache. The containers that
+# sync and upgrade the copy must be given the cache alone, over arch-nspawn's
+# own bind of that directory; stock makechrootpkg gives its upgrade all three.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -258,11 +263,49 @@ if [[ $mode == confined ]]; then
     confs+=(AURCACHE_BUILD_DEPS=/srv/build-deps)
 fi
 
+# Binds as the worker passes them: an operator's mount (WORKER_BIND_MOUNTS),
+# the agent socket's directory at its own path, and the job's package cache
+# over the copy's CacheDir.
+mkdir -p /srv/operator /srv/agent /job/pkgcache
+echo licence > /srv/operator/licence
+binds=(-d /srv/operator:/opt/operator -d /srv/agent:/srv/agent -d /job/pkgcache:/var/cache/pacman/pkg)
+# Each container's binds, recorded under the name the script gives it.
+mv /usr/local/bin/systemd-nspawn /usr/local/bin/systemd-nspawn.recorded
+cat > /usr/local/bin/systemd-nspawn <<'RECORD'
+#!/bin/bash
+name=
+given=()
+for a; do
+    case $a in
+        --machine=*) name=${a#--machine=} ;;
+        --bind=*|--bind-ro=*|--tmpfs=*) given+=("$a") ;;
+    esac
+done
+[[ -z $name ]] || printf '%s\n' "${given[@]}" > "/tmp/nspawn-binds/$name"
+exec /usr/local/bin/systemd-nspawn.recorded "$@"
+RECORD
+chmod +x /usr/local/bin/systemd-nspawn
+rm -rf /tmp/nspawn-binds && mkdir /tmp/nspawn-binds
+
 cd /job/pkg
 sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 \
     -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
-    -- --nocheck >/tmp/build.log 2>&1
+    "${binds[@]}" -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
+# What the containers that sync and upgrade the copy were given: whether the
+# operator's mount and the agent's directory, and the sources bound over the
+# package cache, in order (arch-nspawn's own first, then the job's).
+for c in sync-databases upgrade-packages; do
+    given=$(cat /tmp/nspawn-binds/*-"$c".* 2>/dev/null)
+    echo "${c}_ran=$([[ -n $given ]] && echo yes || echo no)"
+    echo "${c}_operator=$(grep -q ':/opt/operator$' <<<"$given" && echo bound || echo absent)"
+    echo "${c}_agent=$(grep -q '/srv/agent' <<<"$given" && echo bound || echo absent)"
+    echo "${c}_cache=$(grep '^--bind' <<<"$given" | awk '{
+        sub(/^--bind(-ro)?=/, ""); n = split($0, p, ":")
+        t = n > 1 ? p[2] : p[1]; s = p[1]; sub(/\/$/, "", t); sub(/\/$/, "", s)
+        if (t == "/var/cache/pacman/pkg") print s
+    }' | paste -sd, -)"
+done
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"
 echo "workdir=$([ -e /shared/work-other/EVIL_pkgbuild ] && echo written || echo blocked)"
@@ -356,6 +399,9 @@ check "unconfined: -I's root may mount"      allowed "$(get admin_mount "$unconf
 check "unconfined: -I's root may mount in a user namespace" allowed "$(get admin_userns-mount "$unconfined")"
 check "unconfined: root writes through the read-only bind" by-root,intact "$(get ro_bind "$unconfined")"
 check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
+# Stock makechrootpkg gives its upgrade every bind, so the record sees them.
+check "unconfined: upgrade given the operator's mount" bound "$(get upgrade-packages_operator "$unconfined")"
+check "unconfined: upgrade given the agent's directory" bound "$(get upgrade-packages_agent "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -382,6 +428,14 @@ check "confined:   no sudoers entry"        absent  "$(get sudoers "$confined")"
 check "confined:   host's /srv/canary untouched" host-only,victim "$(get canary "$confined")"
 check "confined:   host's /srv/canary/victim intact" intact "$(get canary_victim "$confined")"
 check "confined:   build binds nothing the copy names" absent "$(get canary_bind "$confined")"
+# The sync and the upgrade are given the package cache and nothing else of
+# the build's.
+for c in sync-databases upgrade-packages; do
+    check "confined:   $c ran"                      yes    "$(get "${c}_ran" "$confined")"
+    check "confined:   $c: no operator mount"       absent "$(get "${c}_operator" "$confined")"
+    check "confined:   $c: no agent directory"      absent "$(get "${c}_agent" "$confined")"
+    check "confined:   $c: job cache over arch-nspawn's" /var/cache/pacman/pkg,/job/pkgcache "$(get "${c}_cache" "$confined")"
+done
 # Neither the install nor root in the build's container gets around a
 # network policy on the build's cgroup. The install's keyring is refused by
 # the sandbox's own filter, the build's by nspawn's.

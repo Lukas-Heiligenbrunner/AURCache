@@ -144,3 +144,8 @@ WORKER_BIND_MOUNTS=/etc/aurcache-worker/licence:/opt/licence
 Unlike the SSH key these **are** mounted into the chroot and are therefore
 readable by package code. Use them only for credentials you are willing to
 expose to the packages you build.
+
+They are mounted into the build's container only, not into the ones that
+sync the chroot's package databases, upgrade it and install the build's
+dependencies before it. So a mount here cannot serve those steps: a local
+`file://` repository for the chroot's upgrade cannot be provided through it.

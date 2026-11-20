@@ -269,6 +269,21 @@ prepare_chroot
         #
         # Neither variable set (anyone running this copy by hand) skips the
         # sync, as `makechrootpkg` without `-u` does.
+        #
+        # Of the build's binds, the sync and the upgrade are given only those
+        # over the copy's package cache, as the dependency install is (below):
+        # not the operator's mounts, a persistent build tree or the ssh-agent
+        # socket, which root running pacman, and the scriptlets and hooks of
+        # whatever the upgrade installs, have no use for. A bind is the
+        # cache's when its target is a `CacheDir` of the build's
+        # configuration; the upgrade's lists the same ones, since the worker
+        # writes both with one cache layout
+        # (`aurcache_worker::devtools::write_configs`). Read once, here, after
+        # the configurations are installed and before any container has run
+        # in the copy. Nothing from `-D` or `-t`, which the worker does not
+        # pass and pacman does not need. arch-nspawn still binds the cache
+        # directories it reads from the copy's pacman.conf itself; a cache
+        # bind, which comes after them, overrides its bind of the same target.
         "-u refused; the copy synced, then upgraded without AURCache's repository",
         '(( update_first )) && arch-nspawn "$copydir" \\\n'
         '\t\t--machine="$(machine_name upgrade-packages)" \\\n'
@@ -284,14 +299,27 @@ if [[ -n ${AURCACHE_PACMAN_CONF:-} || -n ${AURCACHE_UPGRADE_CONF:-} ]]; then
 \t\tdie "Unable to install %s" "$AURCACHE_PACMAN_CONF"
 \tinstall -Dm644 "$AURCACHE_UPGRADE_CONF" "$copydir/etc/aurcache/pacman-upgrade.conf" ||
 \t\tdie "Unable to install %s" "$AURCACHE_UPGRADE_CONF"
+fi
+
+_aurcache_out=$(pacman-conf --config "$copydir/etc/pacman.conf" CacheDir) ||
+\tdie "Could not read the cache directories of %s" "$copydir/etc/pacman.conf"
+mapfile -t _aurcache_cache_dirs <<<"$_aurcache_out"
+_aurcache_cache_binds=()
+for _aurcache_bind in "${bindmounts_rw[@]}"; do
+\t_aurcache_target=${_aurcache_bind##*:}
+\tin_array "${_aurcache_target%/}" "${_aurcache_cache_dirs[@]%/}" &&
+\t\t_aurcache_cache_binds+=("$_aurcache_bind")
+done
+
+if [[ -n ${AURCACHE_PACMAN_CONF:-} ]]; then
 \tarch-nspawn "$copydir" \\
 \t\t--machine="$(machine_name sync-databases)" \\
-\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t"${_aurcache_cache_binds[@]}" \\
 \t\tpacman -Sy --noconfirm ||
 \t\tdie "Could not sync the package databases."
 \tarch-nspawn "$copydir" \\
 \t\t--machine="$(machine_name upgrade-packages)" \\
-\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t"${_aurcache_cache_binds[@]}" \\
 \t\tpacman -Suu --noconfirm --config /etc/aurcache/pacman-upgrade.conf ||
 \t\tdie "Could not upgrade the chroot."
 fi
@@ -315,8 +343,8 @@ fi
         # become root, below) fails on anything missing.
         #
         # Both containers are given the binds over the copy's package cache,
-        # and none of the build's others: not its ssh-agent socket, not the
-        # operator's mounts. The install's also drops CAP_MKNOD, which the
+        # the ones the sync and the upgrade are (above), and none of the
+        # build's others. The install's also drops CAP_MKNOD, which the
         # sandbox leaves the scriptlets: a container kept in the build's
         # cgroup has no device policy, so a device node root makes there opens
         # the host's device.
@@ -361,13 +389,6 @@ if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \tif (( ${#_aurcache_missing[@]} )); then
 \t\t_aurcache_sandbox=$(command -v aurcache-sandbox) ||
 \t\t\tdie "aurcache-sandbox is needed to install the build's dependencies"
-\t\tmapfile -t _aurcache_cache_dirs < <(pacman-conf --config "$copydir/etc/pacman.conf" CacheDir)
-\t\t_aurcache_cache_binds=()
-\t\tfor _aurcache_bind in "${bindmounts_rw[@]}"; do
-\t\t\t_aurcache_target=${_aurcache_bind##*:}
-\t\t\tin_array "${_aurcache_target%/}" "${_aurcache_cache_dirs[@]%/}" &&
-\t\t\t\t_aurcache_cache_binds+=("$_aurcache_bind")
-\t\tdone
 \t\tarch-nspawn "$copydir" \\
 \t\t\t--machine="$(machine_name download-dependencies)" \\
 \t\t\t"${_aurcache_cache_binds[@]}" \\
