@@ -1,17 +1,21 @@
-//! Confine code from packages under one of three fixed profiles:
+//! Confine code from packages under one of four fixed profiles:
 //!
 //! ```text
 //! aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...
 //! aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] -- PROGRAM [ARGS]...
 //! aurcache-sandbox offline -- PROGRAM [ARGS]...
+//! aurcache-sandbox container -- PROGRAM [ARGS]...
 //! ```
 //!
 //! - the build profile (`build.rs`): a worker's source download, which runs a
-//!   PKGBUILD outside the chroot, may write only that build's own directories;
+//!   PKGBUILD outside the chroot, may write only that build's own directories,
+//!   and opens no vsock socket;
 //! - `parse` (`parse.rs`): the server's PKGBUILD parsing, which may write
 //!   nothing and read nothing private;
 //! - `offline` (`offline.rs`): a build's dependency install, which runs other
-//!   packages' scriptlets as root inside the chroot, reaches no network.
+//!   packages' scriptlets as root inside the chroot, reaches no network;
+//! - `container` (`container.rs`): a build's containers, which run the
+//!   PKGBUILD and its dependencies' code, open no vsock socket.
 //!
 //! Each profile owns its whole policy, stated by purpose rather than by
 //! mechanism, so a caller cannot assemble a weaker one. What they share is
@@ -21,6 +25,7 @@ use landlock::{AccessFs, BitFlags, PathBeneath, PathFd, RulesetCreated, RulesetC
 use std::path::{Path, PathBuf};
 
 mod build;
+mod container;
 mod offline;
 mod parse;
 mod seccomp;
@@ -32,6 +37,9 @@ fn main() -> std::process::ExitCode {
     }
     if args.next_if(|arg| arg == "offline").is_some() {
         return offline::main(args);
+    }
+    if args.next_if(|arg| arg == "container").is_some() {
+        return container::main(args);
     }
     build::main(args)
 }
