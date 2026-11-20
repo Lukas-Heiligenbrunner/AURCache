@@ -18,7 +18,7 @@ Two different keys answer to two different remotes, and stay apart:
 | Key | Held by | Used for |
 |---|---|---|
 | The server's (this design) | the server | the package's **own** repository: clone, fetch, `ls-remote` |
-| A worker's (`WORKER_GIT_SSH_KEY`, `docs/workers/credentials.md`) | each worker | the sources a PKGBUILD's `source=()` downloads while building |
+| A worker's (`WORKER_GIT_SSH_KEY`, `docs/workers/credentials.md`) | each worker | the sources a PKGBUILD's `source=()` downloads, or its `prepare()` clones, while building |
 
 The server offers its key only through `SnapshotStore`, which is what clones a
 package's own source. The VCS check (`vcs_check.rs`), which asks the remotes a
@@ -148,7 +148,7 @@ Never trusted silently. Two policies (`HostKeyPolicy`):
   give; `@revoked` and `@cert-authority` lines vouch for nothing and are not
   listed. This is
   OpenSSH's `StrictHostKeyChecking=accept-new`, which is also what workers do
-  without a `known_hosts`, so the two behave alike.
+  without `WORKER_SSH_KNOWN_HOSTS`, so the two behave alike.
 - **Pinned**: `AURCACHE_SSH_KNOWN_HOSTS` names an operator's file. Only its
   hosts are trusted, it is never written to, and an unknown host is refused
   with the `ssh-keyscan` line that would add it.

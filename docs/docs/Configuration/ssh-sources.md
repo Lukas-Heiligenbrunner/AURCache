@@ -53,10 +53,10 @@ images), which must be persisted: a server that loses it generates a new one,
 and every remote you added the old one to then refuses it.
 
 This key is the server's, for a package's own repository. The sources a
-PKGBUILD downloads while building (its `source=()` array) are fetched by the
-workers, with keys of their own: see [Build credentials](../workers/credentials.md).
-The server never offers its key to those, not even to check them for new
-commits.
+PKGBUILD downloads while building (its `source=()` array, or a clone in
+`prepare()`) are fetched by the workers, with keys of their own: see
+[Build credentials](../workers/credentials.md). The server never offers its key
+to those, not even to check them for new commits.
 
 ### Supplying your own key
 
@@ -118,6 +118,10 @@ the parse at its real path too.
 ## Host keys
 
 The server never trusts an SSH host without saying so.
+
+This is about the hosts the server clones from. The hosts a build fetches from
+are checked by the worker, against its own `known_hosts`: see
+[Build credentials](../workers/credentials.md#host-keys).
 
 **By default**, the first time it connects to a host it records the host's key
 in `AURCACHE_SSH_DIR/known_hosts`, and says so in the activity log (the **Logs**
