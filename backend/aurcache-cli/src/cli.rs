@@ -623,7 +623,10 @@ pub(crate) struct AddPackageArgs {
     #[arg(long = "platform")]
     pub(crate) platforms: Vec<String>,
 
-    /// Build flag. Repeat for multiple flags.
+    /// Build flag, a makepkg option such as `--nocheck`. Repeat for multiple
+    /// flags. Options that change nothing in a build (`--noconfirm`,
+    /// `--clean`, ...) are dropped, and ones a build cannot take are refused.
+    /// Without any, makepkg builds as it does by default.
     #[arg(long = "build-flag")]
     pub(crate) build_flags: Vec<String>,
 
@@ -661,7 +664,10 @@ pub(crate) struct PatchPackageArgs {
     #[arg(long = "platform")]
     pub(crate) platforms: Vec<String>,
 
-    /// Build flag selection. Repeat to replace with multiple values.
+    /// Build flag selection, makepkg options such as `--nocheck`. Repeat to
+    /// replace the list with multiple values. Options that change nothing in a
+    /// build (`--noconfirm`, `--clean`, ...) are dropped, and ones a build
+    /// cannot take are refused.
     #[arg(long = "build-flag")]
     pub(crate) build_flags: Vec<String>,
 
@@ -962,12 +968,12 @@ mod tests {
             "yay",
             "--platform",
             "x86_64",
-            "--build-flag=--noconfirm",
+            "--build-flag=--nocheck",
         ]);
 
         assert_eq!(parsed.args.packages, vec!["paru", "yay"]);
         assert_eq!(parsed.args.platforms, vec!["x86_64"]);
-        assert_eq!(parsed.args.build_flags, vec!["--noconfirm"]);
+        assert_eq!(parsed.args.build_flags, vec!["--nocheck"]);
     }
 
     /// `--from-installed` supplies the list, so requiring a positional one too

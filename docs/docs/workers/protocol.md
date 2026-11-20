@@ -142,6 +142,11 @@ what they receive:
      the databases a configuration lists), then build with the section:
      makepkg's `pacman -S` ignores `replaces=`.
    - `build_flags`: arguments added to makepkg's command line, as given.
+     A worker adds `--noconfirm --noprogressbar --nocolor` itself, which
+     every build needs; a server on protocol 1 sends them at the front of
+     `build_flags` as well, for workers that add nothing of their own. A
+     repeated flag is the same to makepkg as one, and AURCache's workers
+     give each once.
    - `pgp_keys` to import, and `vcs_sources`: the `git+` sources whose commit
      to report back.
    - `expected_packages` and `expected_version`: what the build should
