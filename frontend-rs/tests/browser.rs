@@ -406,6 +406,7 @@ async fn interactions() {
     the_log_filters_narrow_what_it_shows(&session).await;
     a_per_package_file_leaves_the_server_wide_one_alone(&session).await;
     a_build_flag_survives_a_reload_and_can_be_taken_off(&session).await;
+    moving_to_another_package_takes_the_build_flags_dialog_away(&session).await;
     dependencies_stay_out_of_the_list_until_asked_for(&session).await;
     following_a_dependency_loads_that_package(&session).await;
     a_second_page_holds_different_builds(&session).await;
@@ -1651,6 +1652,42 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
             t.contains("makepkg defaults") && !t.contains(FLAG)
         })
         .await;
+}
+
+/// A dialog open when the page moves to another package is gone with the
+/// package it was opened for.
+///
+/// The page keeps its components when the route moves between packages, so
+/// nothing unmounts the dialog by itself: left alone it would show the next
+/// package's name over the last one's draft, and Save would send that draft
+/// to the wrong package. Going back is a move the dialog cannot block, since
+/// it is the browser's own button.
+async fn moving_to_another_package_takes_the_build_flags_dialog_away(session: &Session) {
+    // `yay` depends on `hello`, so its page links there.
+    session.open("/package/yay").await;
+    session
+        .wait_until("yay's page", |t| t.contains("Packages/yay"))
+        .await;
+    session.click_labelled("a", "hello").await;
+    session
+        .wait_until("hello's page", |t| t.contains("Packages/hello"))
+        .await;
+    session
+        .wait_until("hello's page to load", |t| t.contains("Remove package"))
+        .await;
+    open_build_flags(session).await;
+    session
+        .wait_until("hello's dialog", |t| t.contains("every build of hello"))
+        .await;
+    session.click("#build-flag-nocheck").await;
+
+    let _: bool = session
+        .eval("history.back(); return true;".to_string())
+        .await;
+    session
+        .wait_until("yay's page again", |t| t.contains("Packages/yay"))
+        .await;
+    session.wait_gone(".modal-open").await;
 }
 
 /// The package page's button that opens the build flags dialog.
