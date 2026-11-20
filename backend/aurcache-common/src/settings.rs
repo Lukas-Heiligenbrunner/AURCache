@@ -193,9 +193,8 @@ impl Setting {
             //
             // A package keeps one tree on each worker for each architecture
             // it builds there. Turning the setting off leaves those trees
-            // unused: no build binds them, and each stays until the reclaim
-            // before a later build of its architecture on that worker takes
-            // it, oldest first.
+            // unused: no build binds them, and each stays until its worker's
+            // reclaim takes it, oldest first.
             Self::PersistentBuilddir => SettingsMeta {
                 key: "persistent_builddir",
                 env_name: Some("PERSISTENT_BUILDDIR"),

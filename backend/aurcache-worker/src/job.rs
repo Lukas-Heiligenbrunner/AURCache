@@ -338,7 +338,8 @@ async fn prepare_bind_mounts(
     // PKGBUILD chooses to run there.
     let mut binds = cfg.bind_mounts.clone();
     binds.extend(pkg_cache_bind);
-    match prepare_build_tree(cfg, job, cache, &shared.srcdest.in_use()).await {
+    let srcdest = Arc::clone(&shared.srcdest);
+    match prepare_build_tree(cfg, job, cache, move || srcdest.in_use()).await {
         Some(bind) => binds.push(bind),
         None if job.persistent_builddir => {
             let msg = format!(
@@ -392,30 +393,35 @@ async fn prepare_bind_mounts(
 /// the bind for it, or `None` when the package keeps none or one could not
 /// be prepared.
 ///
-/// Reclaim runs for every build, over its platform's trees, whatever its
-/// package's setting: every build needs disk, and the trees of packages no
-/// build here keeps any more -- deleted, routed to another worker, turned
-/// the setting off -- would otherwise wait for a build that keeps one.
-/// Before the build, so the reserve is what bounds usage going in rather
-/// than a post-hoc tidy. It never drops a tree a build is using: `in_use`
-/// holds this build's pkgbase and every running sibling's, taken by the
-/// caller just before.
+/// Reclaim runs for every build, whatever its package's setting: every build
+/// needs disk, and the trees of packages no build here keeps any more --
+/// deleted, routed to another worker, turned the setting off, an
+/// architecture no longer built -- would otherwise wait for a build that
+/// keeps one. Before the build, so the reserve is what bounds usage going in
+/// rather than a post-hoc tidy; a build that finds a pass running waits for
+/// it and then runs its own. It never drops a tree a build is using: `in_use`
+/// answers, whenever reclaim asks, this build's pkgbase -- held since before
+/// this is called -- and every running sibling's, and the tree is bound only
+/// once this build's pass is over: the order that keeps any pass from
+/// removing a tree once bound (see [`Cache::reclaim_builddirs`]).
 async fn prepare_build_tree(
     cfg: &Config,
     job: &JobDescriptor,
     cache: &Cache,
-    in_use: &[String],
+    in_use: impl Fn() -> Vec<String> + Send + 'static,
 ) -> Option<BindMount> {
     // On the blocking pool: deleting a tree of millions of files takes
-    // minutes, and this build waits for it anyway.
-    let (reclaim_cache, arch, in_use) = (cache.clone(), job.arch.clone(), in_use.to_vec());
+    // minutes, and waiting for a pass already running blocks too; this build
+    // waits for both anyway. The pass takes no SRCDEST guard, so holding this
+    // job's while it waits cannot deadlock.
+    let reclaim_cache = cache.clone();
     let (max_bytes, min_free) = (
         cfg.tunables.builddir_max_bytes,
         cfg.tunables.builddir_min_free,
     );
     let _ = join_cache_task(
         tokio::task::spawn_blocking(move || {
-            reclaim_cache.reclaim_builddirs(&arch, &in_use, max_bytes, min_free);
+            reclaim_cache.reclaim_builddirs(in_use, max_bytes, min_free);
         }),
         "builddir reclaim",
     )
@@ -1246,6 +1252,7 @@ async fn kill_process_group(child: &mut tokio::process::Child) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::held;
 
     #[tokio::test]
     async fn an_aborted_job_wipes_its_private_caches() {
@@ -1329,24 +1336,25 @@ mod tests {
     }
 
     /// A build of a package that keeps no tree still reclaims the trees
-    /// others left: here, over a one-byte budget, an idle tree goes while a
-    /// running sibling's stays. The tree the package kept while it had the
-    /// setting on is not bound, and stays for reclaim to weigh like any other.
+    /// others left: here, over a one-byte budget, an idle tree on another
+    /// platform goes while a running sibling's stays. The tree the package
+    /// kept while it had the setting on is not bound, and stays for reclaim
+    /// to weigh like any other.
     #[tokio::test]
     async fn a_build_that_keeps_no_tree_still_reclaims() {
         let tmp = tempfile::tempdir().unwrap();
         let (cache, cfg) = tree_budget(tmp.path(), 1);
         let kept = cache.builddir_tree("x86_64", "off").unwrap();
-        let idle = cache.builddir_tree("x86_64", "idle").unwrap();
-        let sibling = cache.builddir_tree("x86_64", "sibling").unwrap();
+        let idle = cache.builddir_tree("aarch64", "idle").unwrap();
+        let sibling = cache.builddir_tree("aarch64", "sibling").unwrap();
         for tree in [&kept, &idle, &sibling] {
             std::fs::write(tree.join("object.o"), b"compiled").unwrap();
         }
-        let in_use = ["off".to_string(), "sibling".to_string()];
 
-        let tree = prepare_build_tree(&cfg, &job("off", false), &cache, &in_use).await;
+        let in_use = held(&["off", "sibling"]);
+        let tree = prepare_build_tree(&cfg, &job("off", false), &cache, in_use).await;
         assert_eq!(tree, None);
-        assert!(!idle.exists(), "reclaim ran for a build that keeps no tree");
+        assert!(!idle.exists(), "reclaim ran, on every platform");
         assert!(sibling.exists(), "a running build's tree stays");
         assert!(kept.exists(), "the tree it kept went with the setting");
     }
@@ -1366,7 +1374,7 @@ mod tests {
         std::fs::write(&marker, b"compiled").unwrap();
         cache.record_builddir_size("x86_64", "kept");
 
-        let tree = prepare_build_tree(&cfg, &job("kept", true), &cache, &["kept".into()]).await;
+        let tree = prepare_build_tree(&cfg, &job("kept", true), &cache, held(&["kept"])).await;
         assert_eq!(
             tree,
             Some(BindMount {

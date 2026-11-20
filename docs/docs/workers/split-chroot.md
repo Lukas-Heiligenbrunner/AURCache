@@ -331,8 +331,8 @@ leaving each build to re-download its dependencies.
 | `WORKER_PKGCACHE_MAX_SIZE` | Size | Package budget; overrides half the total | half of total |
 | `WORKER_CACHE_TTL` | Duration | Evict sources unused for this long (`0` disables) | `30d` |
 | `WORKER_PKGCACHE_TTL` | Duration | Evict packages older than this (`0` disables) | `0` |
-| `WORKER_BUILDDIR_MAX_BYTES` | Size | Budget for kept build trees, for packages with a persistent build directory | `200G` |
-| `WORKER_BUILDDIR_MIN_FREE` | Size | Free space to keep in the storage pool when deciding whether to drop kept build trees | `50G` |
+| `WORKER_BUILDDIR_MAX_BYTES` | Size | Budget for kept build trees, for packages with a persistent build directory, across every platform; checked before every build | `200G` |
+| `WORKER_BUILDDIR_MIN_FREE` | Size | Free space to keep in the storage pool when deciding whether to drop kept build trees; checked before every build | `50G` |
 
 The caches live in the worker's [storage pool](./storage-pool.md),
 in a `cache` subvolume beside the chroots, so they count against

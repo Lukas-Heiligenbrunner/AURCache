@@ -100,7 +100,7 @@ async fn cache_entries_are_subvolumes_that_eviction_deletes() {
         assert!(!srcdest.exists());
 
         // Over a 1-byte tree budget: the tree not in use goes.
-        c.reclaim_builddirs("x86_64", &["hello".to_string()], 1, 0);
+        c.reclaim_builddirs(|| vec!["hello".to_string()], 1, 0);
         assert!(tree.exists(), "a tree in use is kept");
         assert!(!other.exists(), "the idle tree is reclaimed");
     })

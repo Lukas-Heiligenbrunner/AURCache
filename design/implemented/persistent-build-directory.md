@@ -174,12 +174,12 @@ at `/build/<pkgbase>`, and the rest of `/build` stays the chroot copy's.
 
 A package keeps one tree on each worker for each architecture it builds there.
 Turning the setting off leaves those trees unused: no build binds them, they
-stop being touched, and each ages to the front of the reclaim that runs before
-every build of its architecture on that worker, oldest first, like any other
-tree no build uses. Nothing removes them sooner, so a tree kept stays a rebuild
-avoided until the space is wanted; a package that turns the setting back on
-before then builds over its tree as it was left. A failed build of the package
-discards no tree while the setting is off, since that build had none bound.
+stop being touched, and each ages to the front of its worker's reclaim, oldest
+first, like any other tree no build uses. Nothing removes them sooner, so a
+tree kept stays a rebuild avoided until the space is wanted; a package that
+turns the setting back on before then builds over its tree as it was left. A
+failed build of the package discards no tree while the setting is off, since
+that build had none bound.
 
 ## Reclaiming space
 
@@ -195,14 +195,47 @@ whatever the storage underneath it, while a cap cannot see the rest of the
 machine, so the floor still covers a small disk or one shared with something
 that grew.
 
-Reclaim runs before every build, whatever the building package's own setting,
-over the trees kept for the platform that build is for. Trees no build asks for
-any more -- a deleted package's, one now routed to another worker, one whose
-package turned the setting off -- are removed by nothing else: a failed build's
-discard only reaches its own tree, and the pool's room-making leaves cache
-trees to the cache. Run only before builds that keep a tree, reclaim would
-leave them in place on a worker that mostly builds packages that do not, with
-the free-space floor unenforced.
+Reclaim runs before every build on the worker, whatever the building
+package's own setting, and ranks and counts every platform's trees together
+against the one budget. Most trees it reaches are ones no build asks for any
+more -- a deleted package's, one now routed to another worker, one whose
+package turned the setting off, an architecture no longer built -- and nothing
+else removes those: a failed build's discard only reaches its own tree, and the
+pool's room-making leaves cache trees to the cache. Run only before builds that
+keep a tree, it would leave them in place on a worker that mostly builds
+packages that do not, with the free-space floor unenforced. Within the limits a
+pass costs, on every platform, a listing and the removal of whatever an earlier
+removal left set aside; then a size lookup for every tree on every platform, in
+use or not -- a read of its stamp or, for a subvolume of the pool, a `btrfs
+inspect-internal rootid` process and a read of its quota group -- and, when
+`WORKER_BUILDDIR_MIN_FREE` is set, one `statvfs`, all before every build. A
+tree not in use with no size recorded is walked once and stamped.
+
+One pass runs at a time, since two at once would each evict for space the
+other's deletion had not freed yet. A build that finds one running waits for it
+and then runs its own, rather than skipping: each build carries the limits in
+force when it started, so the running pass may enforce older ones, and a build
+that skipped could start while the disk was still short of its floor.
+
+Waiting is also what keeps a pass from removing a tree a build has bound. A
+build holds its pkgbase -- its `SRCDEST` guard -- from before its own pass
+until after it is done with the tree, and binds the tree only once that pass is
+over. So any build that binds, discards or keeps a tree while a pass runs held
+its pkgbase before that pass started, and the pass, asking once at its start
+which pkgbases are in use, already leaves it alone. A build that skipped a
+running pass instead could bind its tree while that pass was deleting it. Age
+alone could not tell those trees apart: a tree's mtime only moves when an entry
+directly under it changes, so an hours-long compile can leave its tree looking
+like the oldest there is.
+
+A pass asks again just before each removal, for a build that took its pkgbase
+since the pass began. That build cannot have bound its tree yet, so removing it
+would not break the build; asking only spares it a cold start. A tree in use
+when the pass starts is not walked: it cannot go, and one never stamped may be
+enormous. Nor is what a pkgbase in use has set aside swept: a failed build
+discards its tree while it still holds its pkgbase, and may be deleting it at
+that moment, so a pass that swept it too would only make the next build wait on
+deleting it twice.
 
 **Nothing is evicted while the cache is within both limits.** Disk that nothing
 else needs is not worth reclaiming, and a tree kept is a rebuild avoided. It
@@ -233,13 +266,16 @@ An age threshold for "abandoned" trees was removed with it. Age is the primary
 key now, so a deleted package's tree reaches the front unaided, and expiring it
 on a timer would have broken the rule above by reclaiming space nothing wanted.
 
-Sizes still come from a `.aurcache-size` stamp each build leaves behind, since
-the cap needs a total; a tree without one is walked once and stamped. Whole
-trees only, never partial contents -- half a tree is worse than none, because
-makepkg would treat it as resumable. Never the tree the current build is about
-to use. Best-effort: failing to reclaim is logged on the worker and the build
-proceeds, since refusing to build over it would turn a full disk into an idle
-worker.
+Sizes still come from a stamp each build leaves behind, at
+`builddir/.sizes/<platform>/<pkgbase>` -- beside the trees rather than in them,
+since a tree belongs to the build user and the worker cannot write into it --
+because the cap needs a total; a tree without one is walked once and stamped.
+A tree that is a subvolume of the storage pool is measured by its quota group
+instead. Whole trees only, never partial contents -- half a tree is worse than
+none, because makepkg would treat it as resumable. Never a tree of a pkgbase a
+build on the worker is using, on any platform. Best-effort: failing to reclaim
+is logged on the worker and the build proceeds, since refusing to build over it
+would turn a full disk into an idle worker.
 
 Neither limit bounds a *single* build: `unreal-engine` can grow by ~130 GB after
 the check passes. Nothing short of a filesystem quota would.

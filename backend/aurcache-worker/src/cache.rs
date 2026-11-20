@@ -69,6 +69,9 @@ pub struct Cache {
     /// its quota group and removed by deleting it. Entries from before that --
     /// plain directories -- are measured and removed the old way.
     volumes: Option<aurcache_chroot::CacheVolumes>,
+    /// Held for a whole [`Cache::reclaim_builddirs`] pass, so one runs at a
+    /// time across every clone and the next waits for it.
+    reclaiming: Arc<Mutex<()>>,
 }
 
 /// What [`Cache::discard_builddir`] did with a package's build tree.
@@ -82,6 +85,17 @@ pub enum Discard {
     Absent,
     /// The tree was there and could not be removed.
     Failed,
+}
+
+/// A kept build tree, as [`Cache::reclaim_builddirs`] weighs it.
+struct KeptTree {
+    /// Its root's mtime, which serves as when it was last used.
+    modified: SystemTime,
+    platform: String,
+    /// Its directory's name: the sanitized pkgbase.
+    pkgbase: String,
+    path: PathBuf,
+    size: Option<u64>,
 }
 
 /// A per-pkgbase source cache entry considered for eviction.
@@ -100,6 +114,7 @@ impl Cache {
             limits,
             verified: Verified::default(),
             volumes: None,
+            reclaiming: Arc::default(),
         }
     }
 
@@ -191,15 +206,7 @@ impl Cache {
     /// when there is neither. Never walks or creates anything.
     #[must_use]
     pub fn build_tree_size(&self, platform: &str, pkgbase: &str) -> Option<u64> {
-        let tree = self.builddir_tree_path(platform, pkgbase);
-        self.entry_size(&tree).or_else(|| {
-            std::fs::read_to_string(self.size_stamp(platform, pkgbase))
-                .ok()?
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()
-        })
+        self.recorded_size(platform, &self.builddir_tree_path(platform, pkgbase))
     }
 
     /// Persistent build trees' root for one architecture: one tree per
@@ -237,7 +244,7 @@ impl Cache {
     fn size_stamp(&self, platform: &str, pkgbase: &str) -> PathBuf {
         self.root
             .join("builddir")
-            .join(".sizes")
+            .join(SIZE_STAMPS)
             .join(sanitize(platform))
             .join(sanitize(pkgbase))
     }
@@ -280,155 +287,186 @@ impl Cache {
 
     /// Drop persistent build trees, least recently used first, until the cache
     /// is within `max_bytes` *and* the filesystem has `min_free` bytes spare.
-    /// Never touches the tree of a package in `in_use`: this build's own, and
-    /// every sibling's still running. Age cannot tell those apart -- a tree's
-    /// mtime only moves when an entry directly under it changes, so an
-    /// hours-long compile can leave its tree looking like the oldest here.
+    /// Every platform's trees are ranked and counted together against the one
+    /// budget. Nothing goes while the cache is within both limits, and only
+    /// whole trees go. Also finishes the removals an earlier pass or discard
+    /// left set aside, except those of a pkgbase in use.
     ///
-    /// Run before every build of `platform`, whether or not its package keeps
-    /// a tree: every build needs disk, and the trees left by packages that are
-    /// gone, routed elsewhere or no longer keeping one would otherwise wait
-    /// for a build that keeps a tree.
+    /// Never removes a tree a build has bound. `in_use` answers which
+    /// pkgbases are spoken for, and a build holds its pkgbase from before its
+    /// own pass until after it is done with the tree, binding it only once
+    /// that pass is over. A tree in use is not walked to measure it; a size
+    /// already recorded for it still counts against the budget.
     ///
-    /// **Nothing is evicted while the cache is within its limits.** Disk that
-    /// nothing else needs is not worth reclaiming, and a tree kept is a rebuild
-    /// avoided, so eviction is only ever a response to pressure -- never a
-    /// tidy-up. It follows that a tree belonging to a deleted package is left
-    /// alone until the space is actually wanted, which is the right time to
-    /// notice: a worker is never told that a package went away, and being
-    /// unused is the only evidence available.
+    /// One pass at a time, across every clone: a build that finds one running
+    /// waits for it, then runs its own.
     ///
-    /// Least recently used, and deliberately nothing cleverer. Ranking by what
-    /// a rebuild costs was tried and removed: the time a tree saves is roughly
-    /// proportional to what it holds -- most of it is download the tree spares
-    /// you -- so cost per byte comes out near constant and sorts nothing.
-    /// Measured, it spans about 5x across packages as different as `libpng12`
-    /// (17.9 MB, saves 8 s) and `unreal-engine` (130 GB, saves hours), against
-    /// the 500x spread that *build duration* suggested. Duration was the wrong
-    /// number: a warm `libpng12` build still took 11 s of the cold 19 s, so the
-    /// tree saved 8 s and not 19.
+    /// Within the limits a pass costs a listing of every platform, a size
+    /// lookup for every tree on it -- its stamp, or for a subvolume of the pool
+    /// a `btrfs inspect-internal rootid` process and a read of its quota group
+    /// -- and, when `min_free` is set, one `statvfs`. A tree not in use with no
+    /// size recorded is walked once, and stamped.
     ///
-    /// Two limits, because each is useless alone. A free-space floor does
-    /// nothing on a large pool -- trees would grow into the terabytes before it
-    /// triggered -- so `max_bytes` is what bounds the cache whatever the
-    /// storage underneath it. A cap alone cannot see the rest of the machine,
-    /// so the floor still covers a small disk, or one shared with something
-    /// else that grew.
-    ///
-    /// Sizes come from the stamp each build leaves behind; a tree without one
-    /// is walked once and stamped. So the usual case totals the cache by
-    /// reading a handful of small files.
-    ///
-    /// Whole trees, never partial contents: half a tree is worse than none,
-    /// because makepkg would treat it as resumable.
-    ///
-    /// Best-effort. Failing to reclaim is logged and the build carries on;
-    /// refusing to build over it would turn a full disk into an idle worker.
-    /// Blocking, and a tree can take minutes to delete: run it off the async
-    /// runtime.
+    /// Best-effort: a failure is logged and the build carries on. Blocking,
+    /// and a tree can take minutes to delete: run it off the async runtime.
+    /// `design/implemented/persistent-build-directory.md` has the reasoning:
+    /// why these two limits, why age alone, and why a build waits.
     pub fn reclaim_builddirs(
         &self,
-        platform: &str,
-        in_use: &[String],
+        in_use: impl Fn() -> Vec<String>,
         max_bytes: u64,
         min_free: u64,
     ) {
-        let Some(root) = self.builddir(platform) else {
+        // Waited for, never skipped: see the check before each removal. A
+        // pass that panicked left nothing a new one cannot redo.
+        let _pass = self
+            .reclaiming
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = self.root.join("builddir");
+        // Never made, so nothing was ever kept.
+        if !root.is_dir() {
             return;
-        };
-        // Finish any removal an earlier pass started and could not complete.
-        sweep_set_aside(&root);
+        }
 
-        // Oldest first. `mtime` on the tree root moves whenever a build writes
-        // into it, which makes it a serviceable "last used" -- and a tree whose
-        // package was deleted simply stops being touched, so it drifts to the
-        // front on its own.
-        let mut trees: Vec<(std::time::SystemTime, PathBuf, Option<u64>)> =
-            std::fs::read_dir(&root)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter(|e| !is_set_aside(&e.file_name()))
-                .filter_map(|e| {
-                    let modified = e.metadata().ok()?.modified().ok()?;
-                    let path = e.path();
-                    let size = self.stamped_size(platform, &path);
-                    Some((modified, path, size))
-                })
-                .collect();
-        trees.sort_by_key(|(modified, _, _)| *modified);
+        // Sanitized, as the trees' names are. Asked once, for the sweep and
+        // the listing: a build touches its tree -- binds, discards or keeps
+        // it -- only after its own pass, and holds its pkgbase from before that
+        // pass began, so a build touching one while this pass runs held its
+        // pkgbase before this pass started, and is in this answer.
+        let busy: std::collections::HashSet<String> =
+            in_use().iter().map(|pkgbase| sanitize(pkgbase)).collect();
+        let mut trees: Vec<KeptTree> = Vec::new();
+        // What the trees in use are known to hold: they still count against
+        // the budget, though none of them can go.
+        let mut pinned = 0_u64;
+        for platform in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let name = platform.file_name();
+            if name == SIZE_STAMPS
+                || is_set_aside(&name)
+                || !platform.file_type().is_ok_and(|t| t.is_dir())
+            {
+                continue;
+            }
+            let platform_name = name.to_string_lossy().into_owned();
+            let dir = platform.path();
+            // Finish any removal an earlier pass started and could not complete,
+            // except that of a tree in use: a failed build holding its name
+            // discards its tree before letting go, and may be removing it right
+            // now, and every build starting meanwhile would otherwise wait on
+            // deleting it a second time.
+            sweep_set_aside(&dir, &busy);
+            // `mtime` on the tree root moves whenever a build writes into it,
+            // which makes it a serviceable "last used" -- and a tree whose
+            // package was deleted simply stops being touched, so it drifts to
+            // the front on its own.
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if is_set_aside(&entry.file_name()) {
+                    continue;
+                }
+                let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+                    continue;
+                };
+                let pkgbase = entry.file_name().to_string_lossy().into_owned();
+                let path = entry.path();
+                // Age cannot tell a tree in use from an idle one: its mtime
+                // only moves when an entry directly under it changes, so an
+                // hours-long compile can leave it looking like the oldest here.
+                if busy.contains(&pkgbase) {
+                    if let Some(size) = self.recorded_size(&platform_name, &path) {
+                        pinned = pinned.saturating_add(size);
+                    }
+                    continue;
+                }
+                trees.push(KeptTree {
+                    modified,
+                    size: self.stamped_size(&platform_name, &path),
+                    platform: platform_name.clone(),
+                    pkgbase,
+                    path,
+                });
+            }
+        }
+        // Oldest first.
+        trees.sort_by_key(|tree| tree.modified);
 
         let mut total = trees
             .iter()
-            .filter_map(|(_, _, size)| *size)
-            .fold(0_u64, u64::saturating_add);
-        let mut unknown = trees.iter().filter(|(_, _, size)| size.is_none()).count();
+            .filter_map(|tree| tree.size)
+            .fold(pinned, u64::saturating_add);
+        let mut unknown = trees.iter().filter(|tree| tree.size.is_none()).count();
 
-        // A set: tested per tree below, which is quadratic over the slice.
-        let in_use: std::collections::HashSet<&str> = in_use.iter().map(String::as_str).collect();
         // `statvfs` once up front, then only after a removal freed something:
         // free space cannot change while this loop merely looks.
         let mut short_of_free = min_free > 0 && free_bytes(&root).is_some_and(|f| f < min_free);
-        for (_, path, size) in trees {
+        for tree in trees {
             let over_budget = max_bytes > 0 && total > max_bytes;
             if !over_budget && !short_of_free && (max_bytes == 0 || unknown == 0) {
-                return;
+                break;
             }
             // A tree that could not be measured cannot be counted against the
             // budget, so it is reclaimed on its own account -- the only way to
             // bring the cache back to one that can be counted. It is no reason
             // to reclaim the trees that can: they go only when over budget.
-            let unmeasured = max_bytes > 0 && size.is_none();
+            let unmeasured = max_bytes > 0 && tree.size.is_none();
             if !over_budget && !short_of_free && !unmeasured {
                 continue;
             }
-            // A tree a build is using is worth keeping even when it is itself
-            // what breaches the budget: deleting it fails that build.
-            if path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| in_use.contains(n))
+            // Asked again, for a build that took its pkgbase since the pass
+            // began. That build cannot have bound its tree yet -- it binds
+            // only after its own pass, which waits for this one -- so removing
+            // the tree would not break it, only make it start cold. Waiting
+            // for a running pass, rather than skipping it, is what keeps a
+            // bound tree from ever being removed: a build that skipped -- a
+            // `try_lock` on `reclaiming` -- could bind its tree while this
+            // loop deletes it.
+            if in_use()
+                .iter()
+                .any(|pkgbase| sanitize(pkgbase) == tree.pkgbase)
             {
                 continue;
             }
-            match self.remove_entry(&path) {
+            match self.remove_entry(&tree.path) {
                 Ok(()) => {
-                    if let Some(size) = size {
+                    if let Some(size) = tree.size {
                         total = total.saturating_sub(size);
                     } else {
                         unknown -= 1;
                     }
                     short_of_free = min_free > 0 && free_bytes(&root).is_some_and(|f| f < min_free);
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        let _ = std::fs::remove_file(self.size_stamp(platform, name));
-                    }
+                    let stamp = self.size_stamp(&tree.platform, &tree.pkgbase);
+                    let _ = std::fs::remove_file(stamp);
                     tracing::info!(
-                        "reclaimed persistent build tree {} ({size:?} bytes)",
-                        path.display()
+                        "reclaimed persistent build tree {} ({:?} bytes)",
+                        tree.path.display(),
+                        tree.size
                     );
                 }
-                Err(e) => tracing::warn!("could not reclaim {}: {e}", path.display()),
+                Err(e) => tracing::warn!("could not reclaim {}: {e}", tree.path.display()),
             }
         }
     }
 
-    /// A tree's recorded size, measuring and stamping it if no stamp is there.
-    /// Tolerates a stamp carrying more than one field, from the brief time a
-    /// rebuild cost was recorded alongside.
-    fn stamped_size(&self, platform: &str, tree: &Path) -> Option<u64> {
+    /// A tree's size as [`Self::build_tree_size`] gives it, for the tree at
+    /// `tree` under `platform`'s root. Never walks it. Tolerates a stamp
+    /// carrying more than one field, from the brief time a rebuild cost was
+    /// recorded alongside.
+    fn recorded_size(&self, platform: &str, tree: &Path) -> Option<u64> {
         if let Some(size) = self.entry_size(tree) {
             return Some(size);
         }
-        let Some(name) = tree.file_name().and_then(|n| n.to_str()) else {
-            return measure_tree(tree);
-        };
-        if let Ok(text) = std::fs::read_to_string(self.size_stamp(platform, name))
-            && let Some(Ok(size)) = text.split_whitespace().next().map(str::parse)
-        {
+        let name = tree.file_name()?.to_str()?;
+        let text = std::fs::read_to_string(self.size_stamp(platform, name)).ok()?;
+        text.split_whitespace().next()?.parse().ok()
+    }
+
+    /// A tree's recorded size, measuring and stamping it if none is recorded.
+    fn stamped_size(&self, platform: &str, tree: &Path) -> Option<u64> {
+        if let Some(size) = self.recorded_size(platform, tree) {
             return Some(size);
         }
         let size = measure_tree(tree);
-        if let Some(size) = size {
+        if let (Some(size), Some(name)) = (size, tree.file_name().and_then(|n| n.to_str())) {
             self.write_size_stamp(platform, name, size);
         }
         size
@@ -903,7 +941,10 @@ impl Cache {
     /// Evict LRU source-cache entries above the size/TTL budget, skipping any
     /// pkgbase currently in use. Returns the pkgbases evicted.
     pub fn evict(&self, in_use: &[String]) -> Vec<String> {
-        sweep_set_aside(&self.root.join("srcdest"));
+        sweep_set_aside(
+            &self.root.join("srcdest"),
+            &std::collections::HashSet::new(),
+        );
         let entries = self.scan_srcdest();
         let plan = plan_eviction(
             &entries,
@@ -1266,6 +1307,15 @@ fn privileged_du(path: &Path) -> Option<u64> {
 /// What a tree is renamed to while it is being removed.
 const SET_ASIDE_SUFFIX: &str = ".aurcache-removing";
 
+/// The directory under `builddir/` holding the trees' size stamps, beside the
+/// platforms' tree roots.
+const SIZE_STAMPS: &str = ".sizes";
+
+/// What [`remove_tree`] renames an entry called `name` to while it removes it.
+fn set_aside_name(name: &str) -> String {
+    format!(".{name}{SET_ASIDE_SUFFIX}")
+}
+
 /// Whether a directory entry is a tree set aside for removal, rather than a
 /// cache entry of its own.
 fn is_set_aside(name: &std::ffi::OsStr) -> bool {
@@ -1316,7 +1366,7 @@ fn remove_tree(path: &Path) -> std::io::Result<()> {
     let Some(name) = path.file_name() else {
         return Err(std::io::Error::other("no file name to set aside"));
     };
-    let aside = path.with_file_name(format!(".{}{SET_ASIDE_SUFFIX}", name.to_string_lossy()));
+    let aside = path.with_file_name(set_aside_name(&name.to_string_lossy()));
     // An earlier removal of the same name that did not finish would make the
     // rename fail on a non-empty target.
     if aside.exists() {
@@ -1368,10 +1418,15 @@ fn privileged_rm(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Finish removing whatever an earlier pass set aside and could not delete.
-fn sweep_set_aside(dir: &Path) {
+/// Finish removing whatever an earlier pass set aside and could not delete,
+/// leaving what was set aside of an entry named in `in_use`: the build holding
+/// that name may be removing it right now, as a failed build discards its tree.
+fn sweep_set_aside(dir: &Path, in_use: &std::collections::HashSet<String>) {
+    let busy: std::collections::HashSet<String> =
+        in_use.iter().map(|name| set_aside_name(name)).collect();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if !is_set_aside(&entry.file_name()) {
+        let name = entry.file_name();
+        if !is_set_aside(&name) || busy.contains(name.to_string_lossy().as_ref()) {
             continue;
         }
         let path = entry.path();
@@ -1379,6 +1434,13 @@ fn sweep_set_aside(dir: &Path) {
             tracing::warn!("could not remove {}: {e}", path.display());
         }
     }
+}
+
+/// An `in_use` for [`Cache::reclaim_builddirs`] that always answers `names`.
+#[cfg(test)]
+pub(crate) fn held(names: &[&str]) -> impl Fn() -> Vec<String> + Send + 'static + use<> {
+    let names: Vec<String> = names.iter().map(ToString::to_string).collect();
+    move || names.clone()
 }
 
 #[cfg(test)]
@@ -1765,13 +1827,190 @@ mod pkgcache_tests {
         }
 
         // Room for one tree, so two must go -- but "wanted" is in use.
-        c.reclaim_builddirs("x86_64", &["wanted".to_string()], 150, 0);
+        c.reclaim_builddirs(held(&["wanted"]), 150, 0);
 
         assert!(!root.join("old").exists(), "oldest goes first");
         assert!(!root.join("mid").exists(), "then the next oldest");
         assert!(
             root.join("wanted").exists(),
             "the tree this build needs must survive"
+        );
+    }
+
+    /// Every platform's trees share the budget and are ranked together, so a
+    /// platform no build asks for any more still gives up its trees. Ranked
+    /// per platform instead, whichever platform is listed first would lose
+    /// both its trees here. A package in use keeps its tree on every platform.
+    #[test]
+    fn reclaim_covers_every_platform() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+
+        for (platform, name, age) in [
+            ("aarch64", "busy", 600),
+            ("x86_64", "busy", 600),
+            ("aarch64", "a1", 500),
+            ("x86_64", "b1", 400),
+            ("x86_64", "b2", 200),
+            ("aarch64", "a3", 100),
+        ] {
+            let tree = c.builddir(platform).unwrap().join(name);
+            std::fs::create_dir_all(&tree).unwrap();
+            c.write_size_stamp(platform, name, 100);
+            let when = SystemTime::now() - Duration::from_secs(age);
+            std::fs::File::open(&tree)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        let stuck = c
+            .builddir("aarch64")
+            .unwrap()
+            .join(".old.aurcache-removing");
+        std::fs::create_dir_all(stuck.join("src")).unwrap();
+
+        // Six trees of 100 against room for four, counted across platforms:
+        // two must go, and neither can be "busy".
+        c.reclaim_builddirs(held(&["busy"]), 400, 0);
+
+        let tree = |platform, name| c.builddir_tree_path(platform, name);
+        assert!(!tree("aarch64", "a1").exists(), "the oldest goes");
+        assert!(!tree("x86_64", "b1").exists(), "then the next oldest");
+        assert!(!c.size_stamp("aarch64", "a1").exists());
+        assert!(tree("x86_64", "b2").exists());
+        assert!(tree("aarch64", "a3").exists());
+        assert!(tree("aarch64", "busy").exists(), "in use, though oldest");
+        assert!(tree("x86_64", "busy").exists(), "in use, though oldest");
+        assert!(!stuck.exists(), "every platform's leftovers are swept");
+    }
+
+    /// A worker that never kept a tree has nothing to reclaim, and reclaiming
+    /// makes nothing.
+    #[test]
+    fn reclaim_without_kept_trees_makes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        c.reclaim_builddirs(held(&[]), 1, u64::MAX);
+        assert!(!tmp.path().join("builddir").exists());
+    }
+
+    /// A tree is named by its sanitized pkgbase, and a pkgbase in use is
+    /// matched by that name.
+    #[test]
+    fn a_tree_in_use_is_matched_by_its_sanitized_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        let tree = c.builddir_tree("x86_64", "foo@bar").unwrap();
+        assert_eq!(tree.file_name().unwrap(), sanitize("foo@bar").as_str());
+        c.write_size_stamp("x86_64", "foo@bar", 100);
+
+        c.reclaim_builddirs(held(&["foo@bar"]), 1, 0);
+
+        assert!(tree.exists(), "a tree in use went for want of a match");
+    }
+
+    /// Whether a tree is in use is asked again when it is about to go, not
+    /// only when the pass starts: a build that took its pkgbase meanwhile
+    /// keeps its tree, rather than starting cold.
+    #[test]
+    fn a_tree_taken_during_the_pass_is_kept() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        let root = c.builddir("x86_64").unwrap();
+        for (name, age) in [("old", 200), ("late", 100)] {
+            let tree = root.join(name);
+            std::fs::create_dir_all(&tree).unwrap();
+            c.write_size_stamp("x86_64", name, 100);
+            std::fs::File::open(&tree)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(age))
+                .unwrap();
+        }
+
+        // "late" is taken once the pass has removed "old".
+        let old = root.join("old");
+        let in_use = || {
+            if old.exists() {
+                Vec::new()
+            } else {
+                vec!["late".to_string()]
+            }
+        };
+        c.reclaim_builddirs(in_use, 1, 0);
+
+        assert!(!old.exists());
+        assert!(
+            root.join("late").exists(),
+            "removed under the build using it"
+        );
+    }
+
+    /// A build that finds a pass running waits for it, then runs its own
+    /// under its own limits: the running pass may enforce older ones. Clones
+    /// share the one pass.
+    #[test]
+    fn a_second_reclaim_pass_waits_then_enforces_its_own_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        let tree = c.builddir_tree("x86_64", "idle").unwrap();
+        c.write_size_stamp("x86_64", "idle", 100);
+
+        // A first pass under limits that keep everything, held mid-pass by
+        // its `in_use` until told to carry on.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let first_cache = c.clone();
+        let first = std::thread::spawn(move || {
+            let in_use = move || {
+                let _ = started_tx.send(());
+                let _ = resume_rx.recv();
+                Vec::new()
+            };
+            first_cache.reclaim_builddirs(in_use, u64::MAX, 0);
+        });
+        started_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            c.reclaim_builddirs(held(&[]), 1, 0);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a second pass ran beside the first"
+        );
+        assert!(tree.exists(), "a second pass ran beside the first");
+
+        drop(resume_tx);
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(
+            !tree.exists(),
+            "the waiting pass did not enforce its own budget once the first ended"
+        );
+    }
+
+    /// A tree in use is never walked: it cannot go, and one never stamped
+    /// may be enormous. A size already recorded for it still counts against
+    /// the budget.
+    #[test]
+    fn a_tree_in_use_is_not_measured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        let busy = c.builddir_tree("x86_64", "busy").unwrap();
+        std::fs::create_dir_all(busy.join("src")).unwrap();
+        write(&busy.join("src/object.o"), 1000);
+
+        c.reclaim_builddirs(held(&["busy"]), 1, 0);
+
+        assert!(busy.exists());
+        assert!(
+            !c.size_stamp("x86_64", "busy").exists(),
+            "a tree in use was walked"
         );
     }
 
@@ -1797,12 +2036,7 @@ mod pkgcache_tests {
                 .unwrap();
         }
 
-        c.reclaim_builddirs(
-            "x86_64",
-            &["mine".to_string(), "sibling".to_string()],
-            150,
-            0,
-        );
+        c.reclaim_builddirs(held(&["mine", "sibling"]), 150, 0);
 
         assert!(root.join("sibling").exists(), "a running build's tree went");
         assert!(root.join("mine").exists());
@@ -1831,7 +2065,7 @@ mod pkgcache_tests {
             .unwrap();
 
         // A cap nothing comes close to.
-        c.reclaim_builddirs("x86_64", &[], u64::MAX, 0);
+        c.reclaim_builddirs(held(&[]), u64::MAX, 0);
 
         assert!(
             tree.exists(),
@@ -1900,12 +2134,36 @@ mod pkgcache_tests {
         write(&tree.join("src/deep/blob"), 10);
         c.write_size_stamp("x86_64", "gone", 1000);
 
-        c.reclaim_builddirs("x86_64", &[], 1, 0);
+        c.reclaim_builddirs(held(&[]), 1, 0);
 
         assert!(!tree.exists());
         assert!(!c.size_stamp("x86_64", "gone").exists());
         let left: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().collect();
         assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    /// What a removal set aside under the name of a tree in use is left to
+    /// that removal: the build holding the name may be deleting it right now,
+    /// as a failed build discards its tree before letting go of its name.
+    /// Everything else set aside is swept.
+    #[test]
+    fn the_sweep_leaves_the_set_aside_tree_of_a_build_in_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cache(tmp.path(), 0);
+        let root = c.builddir("x86_64").unwrap();
+        let busy = root.join(".busy.aurcache-removing");
+        let old = root.join(".old.aurcache-removing");
+        // A name that only ends like a set-aside one is not the busy tree's.
+        let lookalike = root.join(".not-busy.aurcache-removing");
+        for aside in [&busy, &old, &lookalike] {
+            std::fs::create_dir_all(aside.join("src")).unwrap();
+        }
+
+        c.reclaim_builddirs(held(&["busy"]), u64::MAX, 0);
+
+        assert!(busy.exists(), "swept while its build may be removing it");
+        assert!(!old.exists());
+        assert!(!lookalike.exists());
     }
 
     /// Something an earlier pass set aside and could not delete is neither a
@@ -1919,7 +2177,7 @@ mod pkgcache_tests {
         let aside = root.join(".old.aurcache-removing");
         std::fs::create_dir_all(aside.join("src")).unwrap();
         // Would breach any budget if it were counted as a tree.
-        c.reclaim_builddirs("x86_64", &[], 1, 0);
+        c.reclaim_builddirs(held(&[]), 1, 0);
         assert!(!aside.exists());
 
         let srcdest = c.srcdest("pkg").unwrap();
