@@ -388,12 +388,16 @@ mod tests {
     /// claimed about them.
     #[test]
     fn the_agent_socket_is_granted_only_to_a_build_offered_it() {
-        let offered =
-            lookup_from(&[("SSH_AUTH_SOCK", "/var/lib/aurcache-worker/agent/agent.sock")]);
+        let offered = lookup_from(&[(
+            "SSH_AUTH_SOCK",
+            "/var/lib/aurcache-worker/agent/default/agent.sock",
+        )]);
         assert_eq!(
             unix_sockets(true, &offered),
             UnixSockets::Granted {
-                agent: Some(PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock"))
+                agent: Some(PathBuf::from(
+                    "/var/lib/aurcache-worker/agent/default/agent.sock"
+                ))
             }
         );
         assert_eq!(

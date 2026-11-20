@@ -114,59 +114,81 @@ fn gate_gap(data_dir: &Path, gate: agent::HostSideGate) -> Option<String> {
                 .to_string(),
         ),
         agent::HostSideGate::PolicyMissesAgent => Some(format!(
-            "{} does not list the agent's directory, {} (add it to that file)",
+            "{} does not list the agents' directory, {} (add it to that file)",
             agent::SANDBOX_POLICY,
             agent::dir(data_dir).display()
         )),
     }
 }
 
-/// Say whether a build that `build_ssh_key` names no key for is kept from the
-/// agent outside its chroot too, as well as inside it.
+/// Start an agent for each key this worker holds, and say what each is for.
 ///
-/// Inside the chroot it always is. Outside, it takes the sandbox, and so a
-/// kernel and a policy that can: where either cannot, a worker without
-/// `WORKER_GIT_SSH_PACKAGES` still builds with its key, and says what that
-/// leaves open.
-fn announce_host_side_gate(data_dir: &Path, gate: agent::HostSideGate) {
-    match gate_gap(data_dir, gate) {
-        None => tracing::info!(
-            "Builds not offered the SSH key are refused its agent outside their chroot \
-             as well (Landlock)"
-        ),
-        Some(gap) => tracing::warn!(
-            "Builds are not kept from the SSH agent outside their chroot, because {gap}: \
-             build_ssh_key keeps the key out of the chroot of a build it names none for, \
-             but any build on this worker can reach it from its PKGBUILD code outside \
-             the chroot"
+/// The default key's always, when there is one: every build may have it
+/// anyway. The named ones only where builds are kept from them outside their
+/// chroot as well, which takes the sandbox, and so a kernel and a policy that
+/// can: where either cannot, a build could reach every agent by its path, and
+/// a key only some packages may use would be within reach of all of them. The
+/// worker then holds none of them, and says why.
+///
+/// Held for the worker's lifetime: dropping one kills its agent, so no stray
+/// agent outlives the worker holding a credential.
+async fn start_agents(core: &CoreConfig, cfg: &Config) -> Vec<agent::BuildAgent> {
+    let mut agents = Vec::new();
+    let default = credentials::resolve(cfg);
+    agents.extend(start_agent(core, cfg, aurcache_common::ssh_key::DEFAULT, default.path()).await);
+    if cfg.named_ssh_keys.is_empty() {
+        return agents;
+    }
+    let gate = agent::host_side_gate(&core.data_dir);
+    match gate_gap(&core.data_dir, gate) {
+        None => {
+            for key in &cfg.named_ssh_keys {
+                agents.extend(start_agent(core, cfg, &key.name, &key.path).await);
+            }
+            tracing::info!(
+                "Builds are refused the agents of the SSH keys they are not offered outside \
+                 their chroot as well (Landlock)"
+            );
+        }
+        Some(gap) => tracing::error!(
+            "WORKER_GIT_SSH_KEYS names SSH keys, but builds could not be kept from their agents \
+             outside their chroot, because {gap}: this worker holds none of them, only its \
+             default key, and a build whose package names one goes ahead without it"
         ),
     }
+    agents
 }
 
-/// Start the build ssh-agent holding the key, and say what builds are
-/// offered.
-///
-/// `None` is a worker that holds no key: every build goes ahead without one.
-async fn start_agent(core: &CoreConfig, cfg: &Config) -> Option<agent::BuildAgent> {
-    let gate = agent::host_side_gate(&core.data_dir);
-    match agent::start(
-        &core.data_dir,
-        credentials::resolve(cfg).path(),
-        &cfg.build_user,
-    )
-    .await
-    {
+/// Start the agent holding the key `name`, from `path`; `None` when it does
+/// not start, which the log says.
+async fn start_agent(
+    core: &CoreConfig,
+    cfg: &Config,
+    name: &str,
+    path: &Path,
+) -> Option<agent::BuildAgent> {
+    match agent::start(&core.data_dir, name, path, &cfg.build_user).await {
         Ok(Some(a)) => {
             tracing::info!(
-                "Build credential available through {}",
+                "SSH key {name:?} available to builds through {}",
                 a.socket().display()
             );
-            announce_host_side_gate(&core.data_dir, gate);
             Some(a)
         }
-        Ok(None) => None,
+        Ok(None) if name == aurcache_common::ssh_key::DEFAULT => None,
+        Ok(None) => {
+            tracing::warn!(
+                "SSH key {name:?}: {} does not exist; a build whose package names it goes \
+                 ahead without it",
+                path.display()
+            );
+            None
+        }
         Err(e) => {
-            tracing::warn!("Could not start the build ssh-agent ({e:#}); {WITHOUT_KEY}");
+            tracing::warn!(
+                "Could not start the ssh-agent for SSH key {name:?} ({e:#}); a build offered \
+                 it goes ahead without an SSH key"
+            );
             None
         }
     }
@@ -180,10 +202,9 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     announce_build_credential(&cfg).await;
 
     // After the key is ensured, so a first start has one to load rather than
-    // needing a restart. Held for the worker's lifetime: dropping it kills the
-    // agent, so no stray agent outlives us holding a credential. The key is
-    // read once, here: replacing it takes effect at the next restart.
-    let agent = start_agent(&core, &cfg).await;
+    // needing a restart. The keys are read once, here: replacing one takes
+    // effect at the next restart.
+    let agents = start_agents(&core, &cfg).await;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
@@ -206,10 +227,13 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
         ),
     }
 
-    // The agent's socket goes to the executor, never into this process's
-    // environment: builds are offered the agent this worker started, and
+    // The agents' sockets go to the executor, never into this process's
+    // environment: builds are offered the agents this worker started, and
     // never one an inherited `SSH_AUTH_SOCK` names.
-    let ssh_keys = SshKeys::with_default(agent.as_ref().map(|a| a.socket().to_path_buf()));
+    let mut ssh_keys = SshKeys::default();
+    for agent in &agents {
+        ssh_keys.insert(agent.name(), agent.socket().to_path_buf());
+    }
     let executor = ChrootExecutor::new(cfg, ssh_keys).await;
     Runner::new(core, client, executor).run().await
 }

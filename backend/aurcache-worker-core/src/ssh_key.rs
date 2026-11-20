@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 /// The SSH keys a worker holds, by name.
 ///
 /// `K` is whatever the executor hands a build to use one: an agent's socket,
-/// a mounted secret.
+/// a mounted secret. One per key, so a build handed one can use no other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshKeys<K> {
     by_name: BTreeMap<String, K>,
@@ -43,6 +43,11 @@ impl<K> SshKeys<K> {
             keys.by_name.insert(ssh_key::DEFAULT.to_string(), key);
         }
         keys
+    }
+
+    /// Hold `key` as `name`, in place of any key held by that name already.
+    pub fn insert(&mut self, name: &str, key: K) {
+        self.by_name.insert(name.to_string(), key);
     }
 
     /// The key named `name`, if it is a name at all and this worker holds it.

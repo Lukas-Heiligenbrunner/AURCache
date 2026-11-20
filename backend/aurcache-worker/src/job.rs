@@ -425,9 +425,10 @@ async fn prepare_bind_mounts(
     // name something that exists in both.
     //
     // Read-only: connecting to a socket needs no write access to the mount it
-    // is on, and the directory is shared by every build. The build user owns
-    // the socket and can write the directory, so bound read-write a build
-    // could remove or replace the socket the next build connects to. Root in
+    // is on, and the directory is shared by every build offered that key. The
+    // build user owns the socket and can write the directory, so bound
+    // read-write a build could remove or replace the socket the next build
+    // offered the key connects to. Root in
     // the build's container cannot either (see `known_hosts_bind`).
     //
     // The clone `unreal-engine` needs is in `prepare()`, not `source=`: makepkg
@@ -1249,14 +1250,9 @@ async fn kill_process_group(child: &mut tokio::process::Child) -> std::io::Resul
 mod tests {
     use super::*;
 
-    /// Whether a build from a job of `ssh_key`, on a worker whose default
-    /// agent is at `socket`, reaches the agent: through its `makepkg.conf` and
-    /// through a mount into its chroot. Both or neither; asserted here.
-    fn reaches_agent(
-        socket: &Path,
-        ssh_key: Option<aurcache_common::worker::SshKeyRequest>,
-    ) -> bool {
-        let job = JobDescriptor {
+    /// A job of `hello` asking for `ssh_key`.
+    fn job_asking_for(ssh_key: Option<aurcache_common::worker::SshKeyRequest>) -> JobDescriptor {
+        JobDescriptor {
             build_id: 1,
             pkgbase: "hello".to_string(),
             arch: "x86_64".to_string(),
@@ -1271,7 +1267,17 @@ mod tests {
             timeout_secs: None,
             expected_version: "1-1".to_string(),
             ssh_key,
-        };
+        }
+    }
+
+    /// Whether a build from a job of `ssh_key`, on a worker whose default
+    /// agent is at `socket`, reaches the agent: through its `makepkg.conf` and
+    /// through a mount into its chroot. Both or neither; asserted here.
+    fn reaches_agent(
+        socket: &Path,
+        ssh_key: Option<aurcache_common::worker::SshKeyRequest>,
+    ) -> bool {
+        let job = job_asking_for(ssh_key);
         let keys = ssh_key::SshKeys::with_default(Some(socket.to_path_buf()));
         let ssh = ssh_key::offer(&job, &keys);
         let agent = ssh.key().map(PathBuf::as_path);
@@ -1304,16 +1310,38 @@ mod tests {
         assert!(!reaches_agent(&socket, Some(SshKeyRequest { name: None })));
     }
 
+    /// A build offered a named key has that key's agent bound into its chroot,
+    /// and not the default's beside it; one naming nothing has the default's.
+    #[test]
+    fn a_named_key_binds_its_own_agent_only() {
+        use aurcache_common::worker::SshKeyRequest;
+        let data = Path::new("/var/lib/aurcache-worker");
+        let mut keys = ssh_key::SshKeys::default();
+        for name in ["default", "gitlab"] {
+            keys.insert(name, crate::agent::key_dir(data, name).join("agent.sock"));
+        }
+        let bound = |ssh_key| {
+            let job = job_asking_for(ssh_key);
+            let ssh = ssh_key::offer(&job, &keys);
+            agent_bind(ssh.key().map(PathBuf::as_path)).map(|bind| bind.host)
+        };
+        let gitlab = bound(Some(SshKeyRequest {
+            name: Some("gitlab".to_string()),
+        }));
+        assert_eq!(gitlab, Some(crate::agent::key_dir(data, "gitlab")));
+        assert_eq!(bound(None), Some(crate::agent::key_dir(data, "default")));
+    }
+
     /// The mount is the agent's directory, read-only at the same path, and only
     /// that.
     #[test]
     fn the_agent_is_mounted_where_it_is() {
-        let socket = Path::new("/var/lib/aurcache-worker/agent/agent.sock");
+        let socket = Path::new("/var/lib/aurcache-worker/agent/default/agent.sock");
         assert_eq!(
             agent_bind(Some(socket)),
             Some(BindMount {
-                host: PathBuf::from("/var/lib/aurcache-worker/agent"),
-                chroot: PathBuf::from("/var/lib/aurcache-worker/agent"),
+                host: PathBuf::from("/var/lib/aurcache-worker/agent/default"),
+                chroot: PathBuf::from("/var/lib/aurcache-worker/agent/default"),
                 access: Access::ReadOnly,
             })
         );
@@ -1357,7 +1385,7 @@ mod tests {
         let dir = credentials::known_hosts_dir(Path::new("/var/lib/aurcache-worker"));
         let mut credential = StagedCredential {
             git_ssh_command: credentials::git_ssh_command(None),
-            agent_socket: PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock"),
+            agent_socket: PathBuf::from("/var/lib/aurcache-worker/agent/default/agent.sock"),
             known_hosts: None,
         };
         assert_eq!(known_hosts_bind(&credential), None);
