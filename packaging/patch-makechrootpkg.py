@@ -482,11 +482,9 @@ EOF
         # `socket(2)`. vsock is no network namespace's and no firewall sees it,
         # so on a worker in a virtual machine it would reach the hypervisor's
         # vsock services and the machine's own vsock listeners, past the
-        # build's network policy. nspawn's `--restrict-address-families=
-        # ~AF_VSOCK` does not hold it: it filters the native `socket(2)` alone,
-        # and leaves both the i386 ABI and io_uring open. Unlike nspawn's
-        # option, the sandbox's filter also holds whatever nspawn's version.
-        # An emulated worker, whose qemu installs no filter, starts the
+        # build's network policy. Why not nspawn's own
+        # `--restrict-address-families=~AF_VSOCK`: see "The container" in
+        # design/proposed/build-runner.md. An emulated worker, whose qemu installs no filter, starts the
         # container anyway, with a warning in the build's log.
         #
         # `--restrict-address-families=`: systemd-nspawn currently permits

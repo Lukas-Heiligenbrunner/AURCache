@@ -9,8 +9,9 @@
 //! no `AF_VSOCK` socket, which no network namespace confines and no network
 //! policy sees, and no io_uring, which would create one without `socket`.
 //! The filter is installed here, on the host, and `systemd-nspawn` and the
-//! container inherit it, whatever nspawn's version and whatever ABI the
-//! container's programs call through (see `seccomp.rs`).
+//! container inherit it, whatever ABI the container's programs call through
+//! (see `seccomp.rs`). Why not nspawn's own address-family option: see "The
+//! container" in `design/proposed/build-runner.md`.
 //!
 //! Run as root, as the build script is, it needs nothing else. Where no
 //! filter can be installed -- an emulated worker, whose qemu refuses one --

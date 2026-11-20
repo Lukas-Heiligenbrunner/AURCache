@@ -44,7 +44,7 @@
 //! a server in a virtual machine a parse could otherwise reach the
 //! hypervisor's vsock services and the machine's own vsock listeners. An
 //! emulated process cannot install it; the parse then runs anyway, after a
-//! warning on stderr, and the server says so once at startup.
+//! warning on stderr.
 //!
 //! `AURCACHE_SANDBOX_DISABLE=landlock` drops the Landlock layer, so the
 //! permissions alone can be tested on a host that has it.
