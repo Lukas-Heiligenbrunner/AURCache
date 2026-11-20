@@ -147,6 +147,11 @@ what they receive:
    - `expected_packages` and `expected_version`: what the build should
      produce. A real build's packages are whatever makepkg makes; these are
      for a worker that fabricates them.
+   - `build_hosts`, optional: the local `host:port` destinations the server
+     allows the build, which a worker with a
+     [network policy](./split-chroot.md#what-builds-can-reach-on-the-network)
+     lets it reach. The server sends it with every job, `[]` when it allows
+     none; a server that predates it leaves it out, which means none as well.
 3. **Stream the log.** `POST /api/worker/jobs/{build_id}/logs` appends UTF-8
    text to the build's log, as the build prints it.
 4. **Upload the packages.** `POST

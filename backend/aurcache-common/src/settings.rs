@@ -44,6 +44,25 @@ pub struct ApplicationSettings {
     /// Let a PKGBUILD reach the network while the server parses it.
     /// See [`Setting::ParseNetwork`].
     pub parse_network: SettingsEntry<bool>,
+    /// Local `host:port`s builds may reach. See [`BuildHostsEntry`].
+    pub build_hosts: BuildHostsEntry,
+}
+
+/// [`Setting::BuildHosts`] for the server or for one package, each list as
+/// it is typed: `host:port` separated by commas.
+///
+/// A package's hosts are added to the server's rather than replacing them,
+/// so this carries both: a build gets the package's followed by the
+/// server's.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BuildHostsEntry {
+    /// The package's own hosts, what its page edits; `None` for the server,
+    /// and for a package without a list of its own.
+    pub package: Option<String>,
+    /// The server's hosts, and where they come from: `Env`, `Global` or
+    /// `Default`. What a package inherits.
+    pub server: SettingsEntry<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +78,8 @@ pub struct SettingsMeta {
 pub enum Scope {
     /// One value for the whole server.
     Global,
-    /// A server-wide value that a package may override.
+    /// A server-wide value that a package may set for itself: in place of
+    /// the server's, or for [`Setting::BuildHosts`] added to it.
     Package,
 }
 
@@ -75,6 +95,7 @@ pub enum Setting {
     MakepkgConf,
     PacmanConf,
     ParseNetwork,
+    BuildHosts,
 }
 
 /// Keys of settings that no longer exist, which may still be stored or dumped.
@@ -121,7 +142,7 @@ impl Setting {
     /// separately: two lists drift, and a setting served by `GET /settings`
     /// but unknown to `PATCH /settings/<key>` cannot be changed through the
     /// API at all.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::VersionCheckInterval,
         Self::AutoUpdateSchedule,
         Self::BuildOnNewVersion,
@@ -132,6 +153,7 @@ impl Setting {
         Self::MakepkgConf,
         Self::PacmanConf,
         Self::ParseNetwork,
+        Self::BuildHosts,
     ];
 
     /// This setting's stable key, environment variable, built-in default and
@@ -241,6 +263,19 @@ impl Setting {
                 default: "false",
                 scope: Scope::Global,
             },
+            // Destinations on the local network builds may reach, which the
+            // worker's network policy refuses otherwise: a distcc helper, a
+            // git server, a cache. Per package and for the server, and unlike
+            // every other setting a package's list is added to the server's
+            // rather than replacing it, so one package that needs one more
+            // host does not have to repeat the rest. Each entry opens exactly
+            // that host and port, the server's own host included.
+            Self::BuildHosts => SettingsMeta {
+                key: "build_hosts",
+                env_name: Some("BUILD_HOSTS"),
+                default: "",
+                scope: Scope::Package,
+            },
         }
     }
 
@@ -286,6 +321,19 @@ impl Setting {
             Self::AutoUpdateSchedule => crate::schedule::Schedule::parse(value, 0)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
+            Self::BuildHosts => {
+                let list = crate::host_port::HostPort::parse_list(value);
+                if list.invalid.is_empty() {
+                    Ok(())
+                } else {
+                    Err(list
+                        .invalid
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "))
+                }
+            }
             Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
     }
@@ -320,6 +368,18 @@ mod tests {
                 assert!(setting.validate(invalid).is_err());
             }
         }
+    }
+
+    /// Every entry has to be a `host:port`, and the message names the ones
+    /// that are not; empty is none.
+    #[test]
+    fn build_hosts_are_host_port_lists() {
+        let setting = Setting::BuildHosts;
+        assert_eq!(setting.validate(""), Ok(()));
+        assert_eq!(setting.validate("distcc.lan:3632, [fd00::5]:22"), Ok(()));
+        let err = setting.validate("distcc.lan:3632, gitlab.lan").unwrap_err();
+        assert!(err.contains("gitlab.lan"), "{err}");
+        assert!(!err.contains("distcc"), "{err}");
     }
 
     /// A duration is checked before it is stored, and zero is refused: it
@@ -366,6 +426,7 @@ mod tests {
                 Setting::MakepkgConf => 7,
                 Setting::PacmanConf => 8,
                 Setting::ParseNetwork => 9,
+                Setting::BuildHosts => 10,
             }
         }
 

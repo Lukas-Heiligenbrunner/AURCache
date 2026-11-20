@@ -150,11 +150,9 @@ dotted decimal, since the C library reads `127.1` or `0x7f.1` as 127.0.0.1,
 and a name made of numbers alone is refused rather than resolved). An entry
 opens its port to TCP and UDP alike.
 
-The worker's policy takes the derived entries and `WORKER_BUILD_ALLOW`. The
-server's `build_hosts` setting, with the `JobDescriptor` field below that
-carries it, is implemented separately, by #456, which follows it; until then
-the two `build_hosts` rows above, the resolution rule and the protocol change
-below are design only.
+The worker takes the derived entries and its own `WORKER_BUILD_ALLOW`; the
+server's `build_hosts` setting adds the rest, carried to the worker by the
+`JobDescriptor` field below.
 
 **Server-side lists are fine.** Workers and the server share a local network in
 nearly every deployment, especially for private services. The server already
@@ -167,9 +165,10 @@ so a package that needs one more host does not have to repeat the global list.
 
 **Protocol.** `JobDescriptor` gains an optional `build_hosts: Option<Vec<String>>`,
 the resolved server-side union. It is an optional field, so worker protocol 1 is
-unchanged. A worker that predates the field ignores it: one without this policy
-(0.6.0's) lets its builds reach those hosts anyway, as it lets them reach the
-whole local network, and one with the policy refuses them.
+unchanged. The server sends it with every job, `[]` when it allows none. A
+worker that predates the field ignores it: one without this policy (0.6.0's)
+lets its builds reach those hosts anyway, as it lets them reach the whole
+local network, and one with the policy refuses them.
 
 ## Name resolution
 

@@ -1,3 +1,4 @@
+use aurcache_common::host_port::{HostPort, HostPortList};
 use std::str::FromStr;
 
 pub trait ParseSetting: Sized + Clone {
@@ -31,6 +32,21 @@ impl ParseSetting for ByteSize {
         aurcache_common::units::parse_size(s)
             .map(ByteSize)
             .ok_or_else(|| format!("expected a size such as 20G, got {s:?}"))
+    }
+}
+
+/// A list of `host:port` destinations, written comma separated.
+///
+/// An entry that does not parse fails the whole value, as a size that does
+/// not parse does. The API refuses such a value before it is stored
+/// (`Setting::validate`).
+impl ParseSetting for HostPortList {
+    fn parse_setting(s: &str) -> Result<Self, String> {
+        let list = HostPort::parse_list(s);
+        match list.invalid.first() {
+            None => Ok(list),
+            Some(invalid) => Err(format!("not a host:port list: {invalid}")),
+        }
     }
 }
 

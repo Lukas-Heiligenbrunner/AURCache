@@ -186,6 +186,8 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
         // Protocol 1's fixture predates it; absent, it is what it was then.
         timeout_secs: None,
         expected_version: "2.12.1-2".to_string(),
+        // Likewise.
+        build_hosts: None,
     }
 }
 
@@ -279,6 +281,26 @@ fn protocol_1_messages_still_decode() {
             severity: Severity::Warning,
             build_id: Some(42),
             message: "the chroot needed a fallback".to_string(),
+        }],
+    );
+}
+
+/// A job naming the local hosts its build may reach: `build_hosts` keeps the
+/// name and shape this sample holds, so the field cannot change under a
+/// worker that reads it. It decodes with today's types, so it says nothing of
+/// a worker without the field, which skips it as it skips any field it does
+/// not know.
+#[test]
+fn a_job_naming_build_hosts_still_decodes() {
+    check(
+        "1",
+        "job_descriptor_build_hosts",
+        &[JobDescriptor {
+            build_hosts: Some(vec![
+                "distcc.lan:3632".to_string(),
+                "[fd00::5]:22".to_string(),
+            ]),
+            ..job_descriptor(MirrorlistOffer::Nothing)
         }],
     );
 }
