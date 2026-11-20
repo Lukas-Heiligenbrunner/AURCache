@@ -529,10 +529,7 @@ fn BuildFlagsDialog(
         move |_| {
             let pkgbase = pkgbase.clone();
             async move {
-                let patch = PackagePatch {
-                    build_flags: Some(draft.read().flags()),
-                    ..Default::default()
-                };
+                let patch = draft.read().patch();
                 let saved = action
                     .run(async {
                         client()?
@@ -690,6 +687,14 @@ impl Draft {
             .collect()
     }
 
+    /// The request that saves the draft.
+    fn patch(&self) -> PackagePatch {
+        PackagePatch {
+            build_flags: Some(self.flags()),
+            ..Default::default()
+        }
+    }
+
     /// Whether saving would store something other than `saved`.
     fn differs(&self, saved: &[String]) -> bool {
         self.flags() != saved
@@ -714,6 +719,18 @@ mod tests {
         assert_eq!(
             draft.flags(),
             flags(&["--nocheck", "--holdver", "--skippgpcheck"])
+        );
+    }
+
+    /// What Save sends is the list in that order too, not the draft's own.
+    #[test]
+    fn saving_sends_the_flags_in_offered_order() {
+        let mut draft = Draft::default();
+        draft.set("--holdver", true);
+        draft.set("--nocheck", true);
+        assert_eq!(
+            draft.patch().build_flags,
+            Some(flags(&["--nocheck", "--holdver"]))
         );
     }
 
@@ -815,6 +832,42 @@ mod tests {
             html.contains("aria-label=\"Build flags for hello\""),
             "{html}"
         );
+    }
+
+    /// The text of the element whose id is `id`, up to its first child.
+    fn text_of<'a>(html: &'a str, id: &str) -> Option<&'a str> {
+        let (_, rest) = html.split_once(&format!("id=\"{id}\""))?;
+        let (_, rest) = rest.split_once('>')?;
+        rest.split('<').next()
+    }
+
+    /// A box is named by its flag and described by what the flag does, so a
+    /// screen reader says both rather than just "checkbox".
+    #[test]
+    fn each_box_is_named_by_its_flag_and_described_by_its_summary() {
+        let html = render_dialog(&[]);
+        for offered in OFFERED {
+            let id = super::checkbox_id(offered.flag);
+            let input = html
+                .split("<input")
+                .skip(1)
+                .find(|input| input.contains(&format!("id=\"{id}\"")))
+                .unwrap_or_else(|| panic!("no box for {}:\n{html}", offered.flag));
+            let input = input.split('>').next().unwrap_or("");
+            assert!(
+                input.contains(&format!("aria-labelledby=\"{id}-flag\"")),
+                "{input}"
+            );
+            assert!(
+                input.contains(&format!("aria-describedby=\"{id}-summary\"")),
+                "{input}"
+            );
+            assert_eq!(text_of(&html, &format!("{id}-flag")), Some(offered.flag));
+            assert_eq!(
+                text_of(&html, &format!("{id}-summary")),
+                Some(escaped(offered.summary).as_str())
+            );
+        }
     }
 
     #[test]
