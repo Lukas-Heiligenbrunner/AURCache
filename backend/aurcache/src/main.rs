@@ -89,6 +89,8 @@ async fn main() {
         tracing::info!("Worker CA fingerprint (pin this on workers): {fp}");
     }
     startup::report_untrusted_workers(&db, &ca, &activity).await;
+    // Before anything can claim a build or edit a package.
+    startup::settle_build_flags(&db, &activity).await;
 
     // A single, long-lived `SnapshotStore` shared by every path that resolves
     // package sources: the version-check loop, the auto-update job, the API/UI
