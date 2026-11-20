@@ -2,7 +2,7 @@
 //!
 //! - [`OFFLINE`], for the `offline` profile: no socket but a UNIX one, and no
 //!   kernel keyring;
-//! - [`NO_VSOCK`], for the build profile and the `container` profile: every
+//! - [`NO_VSOCK`], for the build, `container` and `parse` profiles: every
 //!   socket but an `AF_VSOCK` one.
 //!
 //! Classic BPF, written out by hand: the filters are a few dozen
@@ -385,16 +385,16 @@ pub enum Vsock {
 }
 
 impl Vsock {
-    /// What to say on stderr, which lands in the build's log: nothing when
-    /// it is refused.
+    /// What to say on stderr, which lands in the build's log on a worker:
+    /// nothing when it is refused.
     #[must_use]
     pub fn warning(&self) -> Option<String> {
         match self {
             Self::Refused => None,
             Self::Open(why) => Some(format!(
-                "aurcache-sandbox: WARNING: AF_VSOCK is not refused ({why}). On a \
-                 worker in a virtual machine, this build can reach the hypervisor's \
-                 vsock services and the machine's own vsock listeners."
+                "aurcache-sandbox: WARNING: AF_VSOCK is not refused ({why}). In a \
+                 virtual machine, the PKGBUILD's code can reach the hypervisor's vsock \
+                 services and the machine's own vsock listeners."
             )),
         }
     }
