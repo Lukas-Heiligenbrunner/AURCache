@@ -223,6 +223,58 @@ impl Session {
         .await;
     }
 
+    /// Click `selector` as a person does, through the driver rather than the
+    /// page: the browser then moves focus to what was clicked, which a page
+    /// script's `el.click()` does not.
+    async fn press(&self, selector: &str) {
+        self.wait_for(selector).await;
+        let element = self
+            .driver
+            .find(By::Css(selector))
+            .await
+            .unwrap_or_else(|e| panic!("could not find {selector:?}: {e}"));
+        element
+            .click()
+            .await
+            .unwrap_or_else(|e| panic!("could not click {selector:?}: {e}"));
+    }
+
+    /// Click a point of the window, in CSS pixels from its top left corner,
+    /// through the driver: whatever is on top there gets the click.
+    async fn click_at(&self, x: i64, y: i64) {
+        self.driver
+            .action_chain()
+            .move_to(x, y)
+            .click()
+            .perform()
+            .await
+            .unwrap_or_else(|e| panic!("could not click at {x},{y}: {e}"));
+    }
+
+    /// Press `key` through the driver, so the browser delivers it to whatever
+    /// has focus. An event a page script dispatches goes wherever it is aimed
+    /// instead, which would hide a dialog that never took focus.
+    async fn press_key(&self, key: Key) {
+        self.driver
+            .action_chain()
+            .send_keys(key)
+            .perform()
+            .await
+            .expect("press a key");
+    }
+
+    /// Wait until focus is on, or inside, the element matching `selector`.
+    async fn wait_for_focus(&self, selector: &str) {
+        self.wait_for_script(
+            &format!("focus to be in {selector:?}"),
+            format!(
+                "return document.activeElement?.closest({}) != null;",
+                json(selector)
+            ),
+        )
+        .await;
+    }
+
     /// Pick an option in a `<select>` by its value, firing the change event the
     /// way a person choosing one would.
     ///
@@ -406,6 +458,8 @@ async fn interactions() {
     the_log_filters_narrow_what_it_shows(&session).await;
     a_per_package_file_leaves_the_server_wide_one_alone(&session).await;
     a_build_flag_survives_a_reload_and_can_be_taken_off(&session).await;
+    escape_and_clicking_away_discard_a_build_flag_draft(&session).await;
+    a_refused_build_flag_save_keeps_the_dialog_and_its_draft(&session).await;
     moving_to_another_package_takes_the_build_flags_dialog_away(&session).await;
     dependencies_stay_out_of_the_list_until_asked_for(&session).await;
     following_a_dependency_loads_that_package(&session).await;
@@ -1605,10 +1659,9 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
     session.shoot_wide("build-flags-summary-none").await;
 
     open_build_flags(session).await;
-    // Focused, so the shot shows what a keyboard user sees.
-    let _: bool = session
-        .eval("document.querySelector('#build-flag-nocheck').focus(); return true;".to_string())
-        .await;
+    // The first box takes focus on opening, so the shot shows the dialog as a
+    // keyboard user meets it.
+    session.wait_for_focus("#build-flag-nocheck").await;
     session.shoot_wide("build-flags-dialog").await;
     // A click on the summary, not on the box: the whole row is its label.
     session.click(&format!("{BOX}-summary")).await;
@@ -1622,6 +1675,7 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
             t.contains(FLAG) && !t.contains("makepkg defaults")
         })
         .await;
+    session.wait_for_focus(EDIT_FLAGS).await;
 
     session.open("/package/hello").await;
     session
@@ -1650,6 +1704,156 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
     session
         .wait_until("the flag to be gone", |t| {
             t.contains("makepkg defaults") && !t.contains(FLAG)
+        })
+        .await;
+}
+
+/// Escape and a click beside the dialog each close it, leaving the draft
+/// behind, and focus goes back to the Edit button that opened it.
+///
+/// Both need focus to have moved into the dialog: Escape is heard by the
+/// dialog's box, so a key pressed while focus is still on Edit goes nowhere.
+/// A real click and a real key press are what show it; a script's `el.click()`
+/// moves no focus, and an event it dispatches lands wherever it is aimed.
+async fn escape_and_clicking_away_discard_a_build_flag_draft(session: &Session) {
+    const BOX: &str = "#build-flag-nocheck";
+
+    session.open("/package/hello").await;
+    session
+        .wait_until("/package/hello to load", |t| t.contains("Remove package"))
+        .await;
+    session.press(EDIT_FLAGS).await;
+    session.wait_for(&format!(".modal-open {BOX}")).await;
+    session.wait_for_focus(".modal-open .modal-box").await;
+    let saved = session.checked(BOX).await;
+
+    session.click(BOX).await;
+    assert_ne!(session.checked(BOX).await, saved, "the click did not tick");
+    session.press_key(Key::Escape).await;
+    session.wait_gone(".modal-open").await;
+    session.wait_for_focus(EDIT_FLAGS).await;
+    open_build_flags(session).await;
+    assert_eq!(
+        session.checked(BOX).await,
+        saved,
+        "the draft outlived Escape"
+    );
+
+    session.click(BOX).await;
+    // Wait for the dialog to fade in, so the click lands on a backdrop that is
+    // all there.
+    session.settle().await;
+    session.click_at(5, 5).await;
+    session.wait_gone(".modal-open").await;
+    session.wait_for_focus(EDIT_FLAGS).await;
+    open_build_flags(session).await;
+    assert_eq!(
+        session.checked(BOX).await,
+        saved,
+        "the draft outlived a click beside the dialog"
+    );
+    session.click_labelled(".modal-open button", "Cancel").await;
+    session.wait_gone(".modal-open").await;
+}
+
+/// Holds the page's next PATCH unanswered, keeping its body in
+/// `window.heldPatch`, until `window.refuseHeldPatch()` lets it go -- to a
+/// package that does not exist, so the server refuses it.
+///
+/// The server takes any offered flag, so the refusal has to be arranged: this
+/// one is still the server's own answer, read by the page as any other.
+const HOLD_NEXT_PATCH: &str = r#"
+    const fetch = window.fetch;
+    window.fetch = function (input, init) {
+        if (!(input instanceof Request) || input.method !== "PATCH") {
+            return fetch.apply(this, arguments);
+        }
+        window.fetch = fetch;
+        const body = input.text();
+        body.then(text => { window.heldPatch = text; });
+        const missing = input.url.replace(/\/package\/[^/]+$/, "/package/no-such-package");
+        return new Promise(release => { window.refuseHeldPatch = release; })
+            .then(() => body)
+            .then(text => fetch(missing, { method: "PATCH", headers: input.headers, body: text }));
+    };
+    return true;
+"#;
+
+/// A refused save leaves the dialog open on the same draft, says why, and
+/// still closes on Escape. While the request is in flight, nothing dismisses
+/// the dialog out from under it.
+///
+/// Save sends the ticked flags in the order the dialog offers them, whatever
+/// order they were ticked in: the request itself is checked, since the server
+/// stores them in that order either way and the page could not tell.
+async fn a_refused_build_flag_save_keeps_the_dialog_and_its_draft(session: &Session) {
+    session.open("/package/hello").await;
+    session
+        .wait_until("/package/hello to load", |t| t.contains("Remove package"))
+        .await;
+    assert!(
+        session.eval::<bool>(HOLD_NEXT_PATCH.to_string()).await,
+        "could not hold the PATCH"
+    );
+    open_build_flags(session).await;
+    assert!(
+        !session.checked("#build-flag-holdver").await
+            && !session.checked("#build-flag-nocheck").await,
+        "the fixture gives hello no flags"
+    );
+    // Ticked against the offered order, which lists --nocheck first.
+    session.click("#build-flag-holdver").await;
+    session.click("#build-flag-nocheck").await;
+    session.press(".modal-open button.btn-primary").await;
+    session.wait_for(".modal-open .loading").await;
+
+    session
+        .wait_for_script(
+            "the PATCH to be sent",
+            "return typeof window.heldPatch === 'string';".to_string(),
+        )
+        .await;
+    let body: String = session.eval("return window.heldPatch;".to_string()).await;
+    let body: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+    assert_eq!(
+        body["build_flags"],
+        serde_json::json!(["--nocheck", "--holdver"]),
+        "{body}"
+    );
+
+    session.press_key(Key::Escape).await;
+    session.settle().await;
+    session.click_at(5, 5).await;
+    // Closing takes a render; give it time to happen before saying it did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        session.count(".modal-open").await,
+        1,
+        "the dialog was dismissed while saving"
+    );
+
+    let _: bool = session
+        .eval("window.refuseHeldPatch(); return true;".to_string())
+        .await;
+    session.wait_for(".modal-open [role=alert]").await;
+    let said: String = session
+        .eval("return document.querySelector('.modal-open [role=alert]').innerText;".to_string())
+        .await;
+    assert!(
+        said.contains("no-such-package"),
+        "the refusal said {said:?}"
+    );
+    assert!(
+        session.checked("#build-flag-holdver").await
+            && session.checked("#build-flag-nocheck").await,
+        "the refusal lost the draft"
+    );
+    session.wait_for_focus(".modal-open .modal-box").await;
+    session.press_key(Key::Escape).await;
+    session.wait_gone(".modal-open").await;
+    session
+        .wait_until("the flags to be as they were", |t| {
+            t.contains("makepkg defaults")
         })
         .await;
 }
