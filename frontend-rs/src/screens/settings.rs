@@ -168,10 +168,10 @@ fn SettingsSections(
             SettingRow {
                 setting: Setting::BuildSshKey,
                 label: "Build SSH key",
-                description: "Which of a worker's SSH keys builds may use: default is the key the worker holds. Empty gives builds none. A package's own setting overrides it.",
-                value: settings.build_ssh_key.value.clone().unwrap_or_default(),
+                description: "Which of a worker's SSH keys builds use. default is the worker's own key, which every build gets unless its package names another; name one the worker holds in WORKER_GIT_SSH_KEYS to give it instead. A package's own setting overrides this.",
+                value: settings.build_ssh_key.value.clone(),
                 source: settings.build_ssh_key.source,
-                editor: Editor::Text { placeholder: "none".to_string(), wide: false },
+                editor: Editor::Text { placeholder: "default".to_string(), wide: false },
                 save,
             }
         }

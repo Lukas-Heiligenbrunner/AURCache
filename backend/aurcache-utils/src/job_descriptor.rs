@@ -101,22 +101,24 @@ pub async fn descriptor(
         mirrorlist,
         pgp_keys,
         vcs_sources,
-        ssh_key: Some(ssh_key),
+        ssh_key,
     })
 }
 
 /// The worker-held SSH key `pkg_id`'s builds may use, by name: its
 /// `build_ssh_key` setting.
 ///
-/// Always sent, "no key" included: a job without the field is how a server
-/// that names no keys speaks, and a worker reads that as "the default key".
-/// A value that is no key name is sent as no key.
-async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<SshKeyRequest> {
+/// Left out for the default key, which is what a job without the field
+/// asks for: a worker holding no key by that name then builds without one
+/// quietly, as it does for every job of a server that names no keys. Any
+/// other name is sent, and a worker that does not hold it says so in the
+/// build log.
+async fn ssh_key(db: &DatabaseConnection, pkg_id: i32) -> anyhow::Result<Option<SshKeyRequest>> {
     let name = settings::get(db, settings::key::BUILD_SSH_KEY, Some(pkg_id))
         .await?
         .value
-        .map(|name| name.0);
-    Ok(SshKeyRequest { name })
+        .0;
+    Ok((name != aurcache_common::ssh_key::DEFAULT).then_some(SshKeyRequest { name: Some(name) }))
 }
 
 /// Decide what to put in a job descriptor for the mirrorlist.
@@ -159,8 +161,8 @@ mod tests {
     use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference, SshKeyRequest};
     use std::collections::BTreeMap;
 
-    /// The job names the key the package's setting names, and says "none"
-    /// outright when the setting names none -- never leaves it out.
+    /// The job names the key the package's setting names, and leaves the
+    /// field out for the default key.
     #[tokio::test]
     async fn the_job_carries_the_packages_ssh_key_setting() {
         use sea_orm_migration::MigratorTrait;
@@ -169,8 +171,27 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ssh_key(&db, 1).await.unwrap(), SshKeyRequest { name: None });
+        assert_eq!(ssh_key(&db, 1).await.unwrap(), None);
 
+        write(
+            &db,
+            [Change {
+                setting: Setting::BuildSshKey,
+                pkg_id: Some(1),
+                value: Some("gitlab".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ssh_key(&db, 1).await.unwrap(),
+            Some(SshKeyRequest {
+                name: Some("gitlab".to_string())
+            })
+        );
+        assert_eq!(ssh_key(&db, 2).await.unwrap(), None);
+
+        // Named outright, the default is still left out.
         write(
             &db,
             [Change {
@@ -181,13 +202,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            ssh_key(&db, 1).await.unwrap(),
-            SshKeyRequest {
-                name: Some("default".to_string())
-            }
-        );
-        assert_eq!(ssh_key(&db, 2).await.unwrap(), SshKeyRequest { name: None });
+        assert_eq!(ssh_key(&db, 1).await.unwrap(), None);
     }
 
     fn holding(arch: &str, checksum: &str) -> MirrorlistPreference {
