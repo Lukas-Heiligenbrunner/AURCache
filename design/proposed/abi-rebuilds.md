@@ -1,6 +1,6 @@
 # Rebuilding packages when what they were built against changes
 
-Status: **Proposed** · Last updated: 2026-10-15
+Status: **Proposed** · Last updated: 2026-11-20
 
 `eternalterminal` links `libprotobuf.so.36.1.0`. When `protobuf` moves to 37
 in `extra`, that file is gone and the published `eternalterminal` stops
@@ -20,6 +20,49 @@ Two constraints shape it:
 
 ---
 
+## Cases to support
+
+Each of these is a real break, and each becomes a test of the
+decision logic with the versions given here.
+
+| Package | What changed underneath it | Caught by |
+|---|---|---|
+| `eternalterminal` | `protobuf` 36 → 37 in `extra`: `libprotobuf.so.36.1.0` is gone | §1, from `protobuf`'s soname provides |
+| `icinga2` | `protobuf` rebuilt against a new `abseil-cpp`, its soname unchanged | `rebuild_on` only (§3) |
+| `lib32-libarchive` | `lib32-openssl` 3 → 4 in `multilib`: `libcrypto.so.3` is gone from `/usr/lib32` | §1, from `lib32-openssl`'s `-32` provides |
+| an AUR package linking `libcrypto.so.3` | `openssl` 3 → 4 in `extra`; `openssl-3` keeps the library, as a different package | §1, by owner |
+
+**`lib32-libarchive` and OpenSSL 4 (2026-11).** `lib32-libarchive` is an AUR
+package, built at 3.8.11-1 against `lib32-openssl` 3. `multilib` then moved
+`lib32-openssl` to `1:4.1.0-2`, which provides `libcrypto.so=4-32` and nothing
+else, so `/usr/lib32/libarchive.so.13` needs a library no 32-bit package ships
+any more. The AUR package's version did not move, so nothing rebuilt it. The
+break surfaced two levels up: `lib32-ghostscript` 10.08.0-1, which depends on
+`lib32-tesseract`, which depends on `lib32-libarchive`, failed in `package()`
+at the link of `sobin/gsc`, on two attempts days apart:
+
+```
+/usr/bin/ld: warning: libcrypto.so.3, needed by /usr/lib32/libarchive.so.13, not found
+/usr/bin/ld: /usr/lib32/libarchive.so.13: undefined reference to `EVP_MAC_final@OPENSSL_3.0.0'
+```
+
+It asks three things of the design that `protobuf` does not:
+
+- **The ELF class is part of the soname's identity.** `extra` kept a
+  compatibility package, `openssl-3`, providing `libcrypto.so=3-64`. A check
+  that asked whether `libcrypto.so.3` is provided at all would find it there
+  and miss the 32-bit break. See §1.
+- **A compatibility package is not the owner.** On 64-bit, an AUR package built
+  against `openssl` 3 still runs, but only because something else on the system
+  (`python` depends on `openssl-3`) pulls in the old library. Its own
+  `depends=(openssl)` no longer guarantees it, and the compatibility package is
+  there to be dropped later. That package is stale too. See §1.
+- **The failure people see is a dependent's.** The package whose build failed
+  is not the stale one, and since its last build failed, nothing retries it
+  once the stale one is fixed. See §4.
+
+---
+
 ## Where things stand
 
 - Rebuilds have two triggers today, neither of which sees this:
@@ -31,7 +74,8 @@ Two constraints shape it:
   resolves through `OfficialRepos::holds` (`aurcache-deps/src/repo.rs:100`),
   which answers yes or no from a set of names. `names_in_desc` (`:365`) keeps
   `%NAME%` and `%PROVIDES%` and drops every version. The databases are
-  refreshed hourly, `x86_64` only (`:23`).
+  refreshed hourly, for `core`, `extra` and `multilib` (`:14`), `x86_64`
+  only (`:23`).
 - A rebuild at an unchanged version republishes **the same filename** with
   new contents (`aurcache-utils/src/publish.rs:484`). pacman does not upgrade
   a package whose version has not moved, so such a rebuild never reaches a
@@ -51,7 +95,9 @@ Two constraints shape it:
   `lib:<soname>`. Arch's packages provide sonames without that prefix
   (`protobuf`: `libprotobuf.so=36.1.0-64`), so the check never matches.
 - Most official libraries do provide their sonames, unprefixed:
-  `openssl` (`libssl.so=3-64`), `icu`, `boost-libs`, `libxml2`, `protobuf`.
+  `openssl` (`libssl.so=4-64`), `icu`, `boost-libs`, `libxml2`, `protobuf`.
+  The suffix is the library's ELF class: `lib32-openssl` provides
+  `libssl.so=4-32`.
   Some do not: `glibc`, `qt6-base`, `abseil-cpp` — and `abseil-cpp`'s
   date-versioned sonames are exactly what a `protobuf` user also links.
 - `rebuild-detector` (`checkrebuild`, in `extra`) is a 150-line script that
@@ -103,6 +149,10 @@ dependencies the binaries link are installed) and as the build user:
    binary missing an optional library, not a break this check can repair —
    `rebuild-detector` would flag it forever.
 4. Map each resolved path to its owner with one `pacman -Qqo` over the set.
+5. Read the owners' `Provides` with one `pacman -Qi`, and keep, for each
+   soname, the entry that names it (`libcrypto.so.3` ↔ `libcrypto.so=3-32`),
+   if the owner has one. The class comes from what the owner declares, so
+   nothing here decides whether a library is 32- or 64-bit.
 
 The worker reports the result in `CompleteReport`, per produced package:
 
@@ -113,6 +163,8 @@ pub struct LinkedLibrary {
     pub soname: String,   // libprotobuf.so.36.1.0
     pub path: String,     // /usr/lib/libprotobuf.so.36.1.0
     pub owner: String,    // protobuf
+    /// The owner's provides entry for this soname, when it declares one.
+    pub provide: Option<String>, // libprotobuf.so=36.1.0-64
 }
 ```
 
@@ -126,15 +178,24 @@ table keyed by `build_id`, in the same transaction as the build's files.
 something, and after each publish of our own:
 
 - An `owner` whose version is unchanged is not looked at.
-- For an `owner` whose version changed, the soname is still provided if a
-  package in the current repositories provides `<name>.so=<version>-64` for
-  it (`libprotobuf.so.36.1.0` ↔ `libprotobuf.so=36.1.0-64`). That needs
-  `OfficialRepos` to keep `%VERSION%` and versioned `%PROVIDES%`, not just
-  names. Almost every soname bump is decided here, from `extra.db`.
-- An owner that provides no sonames (`glibc`, `qt6-base`, `abseil-cpp`) is
-  decided by the path: does any current package still contain it? The
-  official `.files` databases answer that. They are fetched only when such an
-  owner changes, with the same TTL as the `.db` files.
+- For an `owner` whose version changed and a recorded `provide`, the library
+  is still there if the owner's current version declares that exact entry,
+  class included: `libprotobuf.so=36.1.0-64`, `libcrypto.so=3-32`. That needs
+  `OfficialRepos` to keep `%VERSION%`, `%DEPENDS%` and versioned
+  `%PROVIDES%`, not just names. Almost every soname bump is decided here,
+  from the `.db` files.
+- An owner that declares no entry for the soname (`glibc`, `qt6-base`,
+  `abseil-cpp`) is decided by the path: does the owner's current version
+  (or a package it depends on, as below) still contain it? The official `.files` databases answer that. They are
+  fetched only when such an owner changes, with the same TTL as the `.db`
+  files.
+- **The owner, not any package.** A library that only another package
+  provides now is not provided for this artifact: `openssl-3` still ships
+  `libcrypto.so=3-64`, but it is not `openssl`, and `openssl` does not depend
+  on it. The one exception is a package the owner itself depends on, which is how a
+  library split out of its package looks (`foo` moving `libfoo.so.1` into
+  `foo-libs` and depending on it). When the library survives only elsewhere,
+  the reason names where (`libcrypto.so.3 now only in openssl-3`).
 - An owner that is one of our own packages is decided against `repo.files`,
   which `Repository` already writes. This covers an AUR library of ours
   bumping its soname, which `trigger_dependents` misses because the version
@@ -226,6 +287,19 @@ A stale package is queued like any rebuild, with a recorded reason
 - **Gated** on a global `rebuild_on_abi_break` (default on, as
   `build_on_new_version` is) and, like `build_on_new_version`, only for
   packages whose last build succeeded. A failing package waits for a person.
+- **Dependents that failed meanwhile are retried, once.** A dependent build
+  queued while a rebuild is pending already waits for it: a transitive
+  dependency with a pending build holds the dependent in `WAITING_FOR_DEPS`
+  (`package_update_does_not_queue_non_leaf_dependency_builds`). A dependent
+  that built before the stale package was found, and failed against it, is
+  not covered by that. So when a rebuild queued here publishes, every package
+  that depends on it, directly or not, and whose latest build failed after
+  the build being replaced was published, is queued again. That window
+  starts before the refresh that found the break, because the official
+  update can land up to a refresh interval before it is seen. Nothing reads
+  the failed log to check the cause: a wrong guess costs one build, and the
+  trigger dedupe below keeps it to one per trigger. In the
+  `lib32-libarchive` case this is `lib32-ghostscript`.
 - **In one pass.** Every stale package found by one check is queued
   together, so a Python bump that breaks thirty interdependent packages goes
   through the existing dependency-first ordering (`WAITING_FOR_DEPS`)
@@ -414,6 +488,22 @@ The facts above still hold; only line numbers have drifted. Five changes:
    the one change that protects a client *before* the rebuild lands, and
    should be the next design after this one.
 
+## Review (2026-11-20)
+
+Prompted by `lib32-libarchive` (see [Cases to support](#cases-to-support)):
+
+1. **Match the owner's own provides entry, class included.** The worker
+   records it (`LinkedLibrary::provide`), so the server does not derive
+   `-32`/`-64` from a path, and a 64-bit compatibility package cannot hide a
+   32-bit break.
+2. **Decide against the owner, not against any package.** A library kept
+   alive only by a compatibility package the artifact does not depend on is
+   stale. A package the owner depends on still counts, which covers a
+   library split out of its package.
+3. **Retry dependents that failed against the stale package**, once, after
+   its rebuild publishes. The "last build succeeded" gate applies to the
+   stale package, not to these.
+
 ## Open questions
 
 1. ~~Should `rebuild_on` compare **pkgver** only, or also pkgrel?~~
@@ -430,7 +520,8 @@ The facts above still hold; only line numbers have drifted. Five changes:
    the part that matters to AURCache.
 4. ~~`ldd` in the legacy Docker builder?~~ **The chroot worker only.** The
    field is optional, so the legacy builder can add it later without a
-   protocol change, and point 3 above keeps its packages honest meanwhile.
+   protocol change, and point 3 of the 2026-10-15 review keeps its packages
+   honest meanwhile.
 
 ## Implementation order
 
@@ -441,13 +532,14 @@ The facts above still hold; only line numbers have drifted. Five changes:
 1. The `rebuild` counter and the textual pkgrel bump, for **every** rebuild
    at an unchanged version, with version comparison stripping the suffix.
    This fixes manual rebuilds on its own.
-2. `OfficialRepos` keeps versions and versioned provides (the data model
-   change everything else reads), and `BuildTrigger::Rebuild` with its
+2. `OfficialRepos` keeps versions, depends and versioned provides (the data
+   model change everything else reads), and `BuildTrigger::Rebuild` with its
    reason.
 3. Interpreter rules. These are stateless, with no worker change, and show
    the queueing and reason path end to end.
 4. The ldd step on the worker (upstream's `--ldd` once it exists, the same
    output format until then), `LinkedLibrary` in `CompleteReport`, the
-   `linked_libraries` table and migration, and the provides/`.files`
-   decision.
+   `linked_libraries` table and migration, the provides/`.files` decision
+   by owner, and the retry of failed dependents. The four
+   [cases](#cases-to-support) are its tests.
 5. `rebuild_on`, reading `.BUILDINFO` from the published artifact.
