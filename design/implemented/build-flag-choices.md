@@ -174,7 +174,7 @@ in flight, and a refusal is shown inside it, where focus then goes. Opening it
 puts focus on the first box, and closing it, however it closes, puts focus
 back on *Edit*. It shows only while the package it was opened for is the one
 on the page, so moving to another package takes it away, draft and all, in the
-same render. Building the list from the ticked boxes and deciding whether it
+same render, and coming back to the first finds it closed. Building the list from the ticked boxes and deciding whether it
 is a change are plain functions (`Draft`), tested on their own.
 
 There is no tri-state check option: the only choice is `--nocheck` or nothing.

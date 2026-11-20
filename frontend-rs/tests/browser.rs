@@ -1859,7 +1859,7 @@ async fn a_refused_build_flag_save_keeps_the_dialog_and_its_draft(session: &Sess
 }
 
 /// A dialog open when the page moves to another package is gone with the
-/// package it was opened for.
+/// package it was opened for, and stays gone on coming back to it.
 ///
 /// The page keeps its components when the route moves between packages, so
 /// nothing unmounts the dialog by itself: left alone it would show the next
@@ -1892,6 +1892,31 @@ async fn moving_to_another_package_takes_the_build_flags_dialog_away(session: &S
         .wait_until("yay's page again", |t| t.contains("Packages/yay"))
         .await;
     session.wait_gone(".modal-open").await;
+
+    // Coming back to hello finds the dialog closed: it was left, not
+    // dismissed, and only Edit opens it again.
+    let _: bool = session
+        .eval("history.forward(); return true;".to_string())
+        .await;
+    session
+        .wait_until("hello's page again", |t| {
+            t.contains("Packages/hello") && t.contains("Remove package")
+        })
+        .await;
+    session.settle().await;
+    // Opening takes a render; give it time to happen before saying it did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        session.count(".modal-open").await,
+        0,
+        "the dialog came back by itself"
+    );
+    assert!(
+        session
+            .eval::<bool>("return document.activeElement?.closest('.modal') == null;".to_string())
+            .await,
+        "focus went into a dialog nobody opened"
+    );
 }
 
 /// The package page's button that opens the build flags dialog.
