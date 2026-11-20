@@ -55,9 +55,9 @@ pub mod key {
     pub const MAKEPKG_CONF: Key<String> = Key::of(Setting::MakepkgConf);
     pub const PACMAN_CONF: Key<String> = Key::of(Setting::PacmanConf);
     pub const PARSE_NETWORK: Key<bool> = Key::of(Setting::ParseNetwork);
-    /// The name of a worker-held SSH key; empty is none, and so is a value
-    /// that is no name.
-    pub const BUILD_SSH_KEY: Key<Option<SshKeyName>> = Key::of(Setting::BuildSshKey);
+    /// The name of a worker-held SSH key. A value that is no name reads as
+    /// the default, `default`, with a warning.
+    pub const BUILD_SSH_KEY: Key<SshKeyName> = Key::of(Setting::BuildSshKey);
 }
 
 /// One setting's value for `pkg_id` (`None` for the whole server), and where it
@@ -86,10 +86,21 @@ pub async fn get<T: ParseSetting>(
 fn env_decides(setting: Setting, pkg_id: Option<i32>) -> bool {
     let meta = setting.meta();
     let package_may_override = pkg_id.is_some() && meta.scope == Scope::Package;
-    !package_may_override
-        && meta
-            .env_name
-            .is_some_and(|name| std::env::var(name).is_ok())
+    !package_may_override && env_value(setting).is_some()
+}
+
+/// `setting`'s value in the environment, if it has one there; an empty one is
+/// none for a setting whose empty value inherits.
+fn env_value(setting: Setting) -> Option<String> {
+    let value = std::env::var(setting.meta().env_name?).ok()?;
+    says_something(setting, &value).then_some(value)
+}
+
+/// Whether `value`, stored or in the environment, sets `setting` at all: an
+/// empty value does not, for a setting whose empty value inherits (see
+/// [`Setting::empty_inherits`]).
+fn says_something(setting: Setting, value: &str) -> bool {
+    !(value.is_empty() && setting.empty_inherits())
 }
 
 /// The values stored for the server and for one package, as one read saw
@@ -140,6 +151,9 @@ impl Stored {
         let mut stored = Self::nothing(pkg_id);
         for row in query.all(db).await? {
             let Some(value) = row.value else { continue };
+            if Setting::from_key(&row.key).is_some_and(|setting| !says_something(setting, &value)) {
+                continue;
+            }
             match settings::package_of(row.pkg_id) {
                 Some(_) => stored.package.insert(row.key, value),
                 None => stored.global.insert(row.key, value),
@@ -179,7 +193,7 @@ fn resolve<T: ParseSetting>(stored: &Stored, key: Key<T>) -> SettingsEntry<T> {
 
     // 2. The environment: the deployment's override of the server-wide value.
     if let Some(env_name) = setting.env_name
-        && let Ok(env_value) = std::env::var(env_name)
+        && let Some(env_value) = env_value(key.setting)
     {
         return SettingsEntry {
             value: parse_or_default(&env_value, &format!("ENV {env_name}")),
@@ -252,7 +266,7 @@ pub async fn all(
         build_ssh_key: {
             let entry = resolve(&stored, key::BUILD_SSH_KEY);
             SettingsEntry {
-                value: entry.value.map(|name| name.0),
+                value: entry.value.0,
                 source: entry.source,
             }
         },
@@ -481,13 +495,13 @@ mod tests {
         assert_eq!(other.max_artifact_size.source, SettingSource::Global);
     }
 
-    /// No SSH key by default; a server-wide name reaches every package, and a
-    /// package's own value -- an empty one included -- outranks it.
+    /// The worker's own key by default; a server-wide name reaches every
+    /// package, and a package's own name outranks it.
     #[tokio::test]
-    async fn the_ssh_key_is_off_until_named_and_a_package_can_opt_out() {
+    async fn the_ssh_key_is_the_default_until_another_is_named() {
         let db = db().await;
         let unset = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
-        assert_eq!(unset.value, None);
+        assert_eq!(unset.value.0, "default");
         assert_eq!(unset.source, SettingSource::Default);
 
         write(
@@ -496,32 +510,62 @@ mod tests {
                 Change {
                     setting: Setting::BuildSshKey,
                     pkg_id: None,
-                    value: Some("default".to_string()),
+                    value: Some("gitlab".to_string()),
                 },
                 Change {
                     setting: Setting::BuildSshKey,
                     pkg_id: Some(2),
-                    value: Some(String::new()),
+                    value: Some("epic".to_string()),
                 },
             ],
         )
         .await
         .unwrap();
         let global = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
-        assert_eq!(global.value.map(|name| name.0).as_deref(), Some("default"));
+        assert_eq!(global.value.0, "gitlab");
         assert_eq!(global.source, SettingSource::Global);
-        let opted_out = get(&db, key::BUILD_SSH_KEY, Some(2)).await.unwrap();
-        assert_eq!(opted_out.value, None);
-        assert_eq!(opted_out.source, SettingSource::Package);
+        let own = get(&db, key::BUILD_SSH_KEY, Some(2)).await.unwrap();
+        assert_eq!(own.value.0, "epic");
+        assert_eq!(own.source, SettingSource::Package);
         let all = super::all(&db, Some(2)).await.unwrap().build_ssh_key;
-        assert_eq!(all.value, None);
+        assert_eq!(all.value, "epic");
         assert_eq!(all.source, SettingSource::Package);
     }
 
-    /// A value that is no key name -- in the environment, or stored before
-    /// the API checked it -- names no key, rather than reaching a worker.
+    /// An empty value sets nothing: a package's inherits the server's, and
+    /// the server's the default, whether read alone or with every setting.
     #[tokio::test]
-    async fn an_ssh_key_setting_that_is_no_name_names_no_key() {
+    async fn an_empty_ssh_key_inherits_at_each_level() {
+        let db = db().await;
+        let set = |pkg_id, value: &str| Change {
+            setting: Setting::BuildSshKey,
+            pkg_id,
+            value: Some(value.to_string()),
+        };
+
+        write(&db, [set(None, ""), set(Some(1), "")]).await.unwrap();
+        for entry in [
+            get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap(),
+            get(&db, key::BUILD_SSH_KEY, None).await.unwrap(),
+        ] {
+            assert_eq!(entry.value.0, "default");
+            assert_eq!(entry.source, SettingSource::Default);
+        }
+
+        write(&db, [set(None, "gitlab")]).await.unwrap();
+        let inherited = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
+        assert_eq!(inherited.value.0, "gitlab");
+        assert_eq!(inherited.source, SettingSource::Global);
+        let all = super::all(&db, Some(1)).await.unwrap().build_ssh_key;
+        assert_eq!(all.value, "gitlab");
+        assert_eq!(all.source, SettingSource::Global);
+    }
+
+    /// A value that is no key name -- in the environment, or stored before
+    /// the API checked it -- reads as the default, rather than reaching a
+    /// worker.
+    #[tokio::test]
+    async fn an_ssh_key_setting_that_is_no_name_reads_as_the_default() {
         let db = db().await;
         write(
             &db,
@@ -534,11 +578,11 @@ mod tests {
         .await
         .unwrap();
         let entry = get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap();
-        assert_eq!(entry.value, None);
+        assert_eq!(entry.value.0, "default");
         assert_eq!(entry.source, SettingSource::Global);
         assert_eq!(
             super::all(&db, Some(1)).await.unwrap().build_ssh_key.value,
-            None
+            "default"
         );
     }
 }
