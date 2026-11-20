@@ -1336,14 +1336,23 @@ mod tests {
 
     /// The repository's own compose file gives nginx the same server block as
     /// a generated file, so a fix to one reaches both.
+    ///
+    /// The comparison with the repository's file is skipped only when the
+    /// crate is built outside the repository (from its packaged tarball), told
+    /// apart by the workspace manifest: in a checkout, a missing compose file
+    /// fails.
     #[test]
     fn every_compose_file_serves_the_repository_alike() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let ours = parsed(&params(ComposeRole::Bundle));
         assert_eq!(
             ours["configs"]["repo_nginx"]["content"].as_str(),
             Some(NGINX_CONF)
         );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        if !root.join("backend/Cargo.toml").is_file() {
+            eprintln!("skipped: not built inside the AURCache repository");
+            return;
+        }
         let text = std::fs::read_to_string(root.join("compose/docker-compose.yaml")).unwrap();
         let indented: String = NGINX_CONF.lines().map(|l| format!("      {l}\n")).collect();
         assert!(

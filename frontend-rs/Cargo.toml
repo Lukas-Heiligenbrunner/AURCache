@@ -3,6 +3,7 @@ name = "aurcache-frontend"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+publish = false
 
 # Its own workspace on purpose: this crate only builds for
 # wasm32-unknown-unknown, so including it in the backend workspace would break

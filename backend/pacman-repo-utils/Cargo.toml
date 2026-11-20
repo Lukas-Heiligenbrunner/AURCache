@@ -2,6 +2,7 @@
 name = "pacman-repo-utils"
 edition = "2024"
 license.workspace = true
+publish = false
 
 [lints]
 workspace = true

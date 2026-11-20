@@ -286,7 +286,13 @@ chroot's whole `OPTIONS` array, so every package was built without `strip`,
 
 Each released binary owns its version. Library crates don't carry a
 meaningful version: they get `publish = false` and keep whatever number they
-have, since nothing reads it.
+have, since nothing reads it. `aurcache-common` and `aurcache-client` are the
+exception: they are published to crates.io with `aurcache-cli`. The two are
+versioned together, and every release of them is a breaking bump of both
+(0.6 → 0.7 → 0.8). The CLI requires both, and the client `aurcache-common`,
+with a caret requirement on the current version (`0.6`), which only ever
+matches the release it was built with. The CLI keeps its own version, bumped
+by what changed for its users: CLI 0.6.1 may require `aurcache-client` 0.7.
 
 | Component (AUR package) | Crate whose version it reports | Image |
 |---|---|---|
@@ -363,7 +369,10 @@ version. A container-worker-only release rebuilds it under the same tag.
 
 `scripts/release.sh <package> <version>` bumps that crate's `version`,
 refreshes `Cargo.lock`, commits, then tags `<package>-v<version>` and pushes
-the tag. CI does the rest.
+the tag. CI does the rest. When `aurcache-common` or `aurcache-client`
+changed since they were last published, a CLI release also publishes both at
+their next breaking version: it bumps their two `version` lines and the two
+requirements on them in `[workspace.dependencies]`.
 
 - **Images:** built by the workflows above.
 - **AUR:** a workflow on the same tag patterns runs in an `archlinux`

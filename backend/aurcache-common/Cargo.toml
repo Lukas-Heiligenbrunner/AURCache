@@ -1,8 +1,14 @@
 [package]
 name = "aurcache-common"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2024"
+description = "Types shared by AURCache's own crates (server, workers, CLI, web UI); internal, not a stable public API"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# This test reads the docs site and the server crates' sources, none of which
+# a packaged crate holds, so it is left out of the package.
+exclude = ["tests/server_env.rs"]
 
 [lints]
 workspace = true
