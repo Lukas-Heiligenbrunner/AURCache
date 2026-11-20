@@ -201,7 +201,7 @@ fn install_seccomp() -> Layer {
     let Some(arch) = seccomp::native() else {
         return Layer::Unavailable("none is written for this architecture".into());
     };
-    match seccomp::install(&seccomp::program(&arch)) {
+    match seccomp::install(&seccomp::program(&arch, &seccomp::OFFLINE)) {
         Ok(()) => Layer::Applied,
         // qemu's user-mode emulation refuses every filter: none it could
         // install would describe the system calls the host actually sees.

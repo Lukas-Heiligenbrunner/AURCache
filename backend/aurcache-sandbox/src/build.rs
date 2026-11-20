@@ -46,6 +46,12 @@
 //!   agent is told so by `SSH_AUTH_SOCK`, and may connect to that one socket
 //!   as well. Older kernels cannot say, and leave sockets unrestricted.
 //!
+//! - **Socket families**: every family but `AF_VSOCK`, and no io_uring (the
+//!   `NO_VSOCK` filter of `seccomp.rs`). A download needs the network, which
+//!   is the build's network policy to limit; vsock is outside it, since no
+//!   network namespace confines it and no firewall sees it. An emulated
+//!   process cannot install the filter, and runs after a warning instead.
+//!
 //! `--capabilities --agent-dir DIR` builds nothing: it says whether that
 //! socket rule would hold for the sockets beneath `DIR`, for a build started
 //! now as the user it runs as -- whether this kernel has the right, and the
@@ -93,6 +99,7 @@ const USAGE: &str = "usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]
                      aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] \
                      -- PROGRAM [ARGS]...\n       \
                      aurcache-sandbox offline -- PROGRAM [ARGS]...\n       \
+                     aurcache-sandbox container -- PROGRAM [ARGS]...\n       \
                      aurcache-sandbox --capabilities --agent-dir DIR";
 
 struct Request {
@@ -295,6 +302,10 @@ fn run(request: &Request) -> Result<Infallible, Failure> {
         std::env::var_os(key).map(PathBuf::from)
     });
     restrict(&writable_dirs(), &read, &sockets).map_err(|e| Failure::Unconfined(e.to_string()))?;
+    let vsock = crate::seccomp::refuse_vsock().map_err(Failure::Unconfined)?;
+    if let Some(warning) = vsock.warning() {
+        eprintln!("{warning}");
+    }
 
     let err = std::process::Command::new(&request.program)
         .args(&request.args)

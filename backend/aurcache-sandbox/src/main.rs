@@ -1,18 +1,22 @@
-//! Confine code from packages under one of three fixed profiles:
+//! Confine code from packages under one of four fixed profiles:
 //!
 //! ```text
 //! aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...
 //! aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] -- PROGRAM [ARGS]...
 //! aurcache-sandbox offline -- PROGRAM [ARGS]...
+//! aurcache-sandbox container -- PROGRAM [ARGS]...
 //! aurcache-sandbox --capabilities --agent-dir DIR
 //! ```
 //!
 //! - the build profile (`build.rs`): a worker's source download, which runs a
-//!   PKGBUILD outside the chroot, may write only that build's own directories;
+//!   PKGBUILD outside the chroot, may write only that build's own directories,
+//!   and opens no vsock socket;
 //! - `parse` (`parse.rs`): the server's PKGBUILD parsing, which may write
 //!   nothing and read nothing private;
 //! - `offline` (`offline.rs`): a build's dependency install, which runs other
 //!   packages' scriptlets as root inside the chroot, reaches no network;
+//! - `container` (`container.rs`): a build's containers, which run the
+//!   PKGBUILD and its dependencies' code, open no vsock socket;
 //! - `--capabilities` runs nothing: it says what the build profile would
 //!   enforce beyond what every version has, if a build started now, as the
 //!   user it runs as -- for a caller that relies on it to ask first.
@@ -26,6 +30,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 mod build;
+mod container;
 mod offline;
 mod parse;
 mod seccomp;
@@ -37,6 +42,9 @@ fn main() -> std::process::ExitCode {
     }
     if args.next_if(|arg| arg == "offline").is_some() {
         return offline::main(args);
+    }
+    if args.next_if(|arg| arg == "container").is_some() {
+        return container::main(args);
     }
     if args.next_if(|arg| arg == CAPABILITIES_ARG).is_some() {
         return build::capabilities(args);
