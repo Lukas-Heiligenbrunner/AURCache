@@ -398,6 +398,16 @@ events! {
         fields: Vec<String>,
     },
 
+    /// A package's stored build flags named options that change nothing in a
+    /// build, and they were taken off its list. Checked at startup.
+    ///
+    /// Only worth a look where one did something after all: `--cleanbuild`
+    /// on a package that keeps its build tree, which from now on is reused.
+    BuildFlagsDropped => ("package.build_flags_dropped", "Packages", "Build flags dropped") {
+        pkg: PackageRef,
+        dropped: Vec<String>,
+    },
+
     /// Somebody edited one of a package's source files, which is stored as a
     /// patch against upstream.
     SourceEdited => ("source.edited", "Sources and versions", "Source edited") { pkg: PackageRef, path: String },
@@ -744,6 +754,7 @@ impl Event {
             | Self::BuildCancelled { .. }
             | Self::BuildDeleted { .. }
             | Self::PackageChanged { .. }
+            | Self::BuildFlagsDropped { .. }
             | Self::SourceEdited { .. }
             | Self::DepsReplaced { .. }
             | Self::DepsDropped { .. }
@@ -1100,6 +1111,18 @@ impl Event {
                 text(format!("changed the {} of ", fields.join(" and "))),
                 entity(pkg),
             ],
+            Self::BuildFlagsDropped { pkg, dropped } => vec![
+                text(format!(
+                    "dropped {} from the build flags of ",
+                    dropped.join(" ")
+                )),
+                entity(pkg),
+                text(if dropped.len() == 1 {
+                    ": it changes nothing in a build"
+                } else {
+                    ": they change nothing in a build"
+                }),
+            ],
             Self::SourceEdited { pkg, path } => {
                 vec![text(format!("edited {path} of ")), entity(pkg)]
             }
@@ -1427,6 +1450,10 @@ mod tests {
                 pkg: pkg(),
                 fields: vec!["platforms".to_string()],
             },
+            Event::BuildFlagsDropped {
+                pkg: pkg(),
+                dropped: vec!["--cleanbuild".to_string()],
+            },
             Event::SourceEdited {
                 pkg: pkg(),
                 path: "PKGBUILD".to_string(),
@@ -1719,6 +1746,25 @@ mod tests {
         let bare =
             Event::decode("build.queued", &serde_json::json!({"pkg": "pkg:foo"})).expect("decodes");
         assert_eq!(bare.message(), "queued a build of foo (update)");
+    }
+
+    #[test]
+    fn dropped_build_flags_say_why() {
+        let message = |dropped: &[&str]| {
+            Event::BuildFlagsDropped {
+                pkg: "hello".into(),
+                dropped: dropped.iter().map(ToString::to_string).collect(),
+            }
+            .message()
+        };
+        assert_eq!(
+            message(&["--cleanbuild"]),
+            "dropped --cleanbuild from the build flags of hello: it changes nothing in a build"
+        );
+        assert_eq!(
+            message(&["--clean", "--force"]),
+            "dropped --clean --force from the build flags of hello: they change nothing in a build"
+        );
     }
 
     /// Lists read as a sentence: `a`, `a and b`, `a, b and c`.
