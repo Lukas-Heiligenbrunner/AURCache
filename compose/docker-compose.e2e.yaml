@@ -63,6 +63,10 @@ services:
       # (scripts/lib/e2e.sh, fresh_worker_data).
       - ${E2E_WORKER_DATA:-worker_data}:/var/lib/aurcache-worker
     privileged: true
+    # The host's cgroup namespace, so the worker's network policy can match its
+    # builds' cgroups on a kernel older than 6.11 (or a stable one without the
+    # fix). It gives this privileged container nothing it could not take.
+    cgroup: host
     tmpfs:
       - /run
     networks:

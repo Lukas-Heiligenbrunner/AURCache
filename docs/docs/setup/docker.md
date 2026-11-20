@@ -86,6 +86,16 @@ root](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/design/propo
 a proposal not yet implemented. The [hybrid image](../workers/hybrid.md#without-privileged)'s
 container builder can run without `privileged`, with the same caveat.
 
+The worker also runs in the host's cgroup namespace (`cgroup: host`,
+`docker run --cgroupns=host`). Its [network
+policy](../workers/split-chroot.md#what-builds-can-reach-on-the-network)
+matches each build by its cgroup, and a kernel older than 6.11, or a stable
+kernel without the fix, cannot match from a container's own cgroup namespace;
+the worker then takes no builds. A privileged container gains nothing from it
+that it could not take anyway; the build user reading a package's
+`.SRCINFO` can see the host's whole cgroup tree, its services' names and
+memory figures, as it can on a native install.
+
 Only the **worker** needs this. The server handles no build payloads and runs
 unprivileged.
 

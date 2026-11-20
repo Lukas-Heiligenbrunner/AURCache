@@ -97,7 +97,7 @@ tidiness:
 | | |
 |---|---|
 | `aurcache` | runs the worker process; owns the mTLS identity and build credentials, and is the only user that can read them |
-| `builder` | runs each package build, named explicitly by `makechrootpkg -U`, so a build never inherits the worker's user and cannot reach its secrets by file permissions |
+| `builder` | runs each package build, named explicitly by `makechrootpkg -U`, so a build never inherits the worker's user and cannot reach its secrets by file permissions. What a build may connect to is decided by [the network policy](../workers/split-chroot.md#what-builds-can-reach-on-the-network), which matches the build's cgroup and so holds root's connections inside its container as well |
 
 `builder`'s **primary** group is `aurbuild`. That is load-bearing, not
 incidental: `makechrootpkg` carries only the build user's primary uid/gid into

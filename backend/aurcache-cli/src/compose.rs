@@ -787,6 +787,10 @@ fn worker_service(params: &ComposeParams) -> String {
          \x20   # namespaces and mounts a plain container forbids. `privileged` plus a tmpfs\n\
          \x20   # `/run` is the tightest configuration that works out of the box.\n\
          \x20   privileged: true\n\
+         \x20   # The host's cgroup namespace, so the worker's network policy can match its\n\
+         \x20   # builds' cgroups on a kernel older than 6.11 (or a stable one without the\n\
+         \x20   # fix). It gives this privileged container nothing it could not take.\n\
+         \x20   cgroup: host\n\
          \x20   tmpfs:\n\
          \x20     - /run\n",
     );
@@ -1278,6 +1282,7 @@ mod tests {
         );
         assert!(rendered.contains("- enroll:/enroll  "), "{rendered}");
         assert!(rendered.contains("privileged: true"), "{rendered}");
+        assert!(rendered.contains("cgroup: host"), "{rendered}");
     }
 
     /// Pinning a CA against a server in the same compose project is
