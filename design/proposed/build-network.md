@@ -37,17 +37,15 @@ explicitly. For each address family, in order:
 4. **Local destinations: reject.** That covers:
    - fixed ranges: loopback, 0/8, 10/8, 172.16/12, 192.168/16, 169.254/16,
      100.64/10, 198.18/15 (benchmarking), 240/4 (reserved, with the limited
-     broadcast address), fc00::/7, fe80::/10 and multicast. 198.18/15 and
-     240/4 follow, in a later PR of this chain; until then the limited
-     broadcast address is refused on its own;
-   - *(Follows, in a later PR of this chain.)* the NAT64 forms of those IPv4 ranges in the well-known prefix
+     broadcast address), fc00::/7, fe80::/10 and multicast;
+   - the NAT64 forms of those IPv4 ranges in the well-known prefix
      `64:ff9b::/96`, and all of the local-use prefix `64:ff9b:1::/48`. Which
      IPv4 address an address in the latter embeds depends on a prefix length
      the network picks (RFC 6052 allows /48 to /96 in it), so it is refused
      whole rather than guessed at;
    - every address of the worker host itself (`fib daddr type local`, which
      also catches the host's public addresses);
-   - *(Follows, in a later PR of this chain.)* **the host's links**, read from its main routing table when each build
+   - **the host's links**, read from its main routing table when each build
      starts (`ip -j route`): the prefix of every address on an interface
      (routes of protocol `kernel`), what routers advertise as on-link (`ra`),
      with no gateway; the gateways of its default routes; and the NAT64 forms
@@ -55,8 +53,7 @@ explicitly. For each address family, in order:
      the global IPv6 addresses of a dual-stack LAN (the router, a NAS, the
      server's 2000::/3 address), local;
    - **the repository's host**: every address the name in its URL resolves to
-     when the build starts, and the NAT64 forms of the IPv4 ones (with the
-     other NAT64 forms, in a later PR of this chain). Rule 3 lets
+     when the build starts, and the NAT64 forms of the IPv4 ones. Rule 3 lets
      the repository's own `address:port` through first, so what this refuses
      is that host's other ports, the server's API and worker protocol among
      them, wherever the host is. Without it a server one router away, on
@@ -70,7 +67,7 @@ explicitly. For each address family, in order:
    refusing them would fail their builds (see *Telling a build's own listeners
    apart*).
 
-   *(Follows, in a later PR of this chain.)* Rule 4 matches the destination, so the internet stays reachable through
+   Rule 4 matches the destination, so the internet stays reachable through
    the gateway: an internet destination is not on a link, and a default route
    names no prefix. Routes of other protocols, a VPN's or the operator's own
    (`boot`, `static`), are left out, because a tunnel that carries the
@@ -225,7 +222,7 @@ the others' rules. The table holds:
 
 - **Static, at startup**, on `builds/`: rules 1, 4 and 5, which need no DNS.
   This is the baseline every build gets, even before its own rules load.
-- *(Follows, in a later PR of this chain.)* **The links' sets**, `links4` and `links6` (interval sets), with the local
+- **The links' sets**, `links4` and `links6` (interval sets), with the local
   destinations the host's links make. Shared by every build, and filled afresh
   in each build's transaction.
 - **The repository's sets**, `repo4` and `repo6`, with the addresses of the
@@ -312,8 +309,7 @@ the rules, and appends to the build's log what was refused. No kernel log is inv
 
 ### Failure
 
-A build whose rules cannot be loaded, or (with the links' sets, in a later PR
-of this chain) whose host's routes cannot be read,
+A build whose rules cannot be loaded, or whose host's routes cannot be read,
 is refused. A worker that cannot put the baseline in place at all (no `nft`,
 no permission, no `ip`) claims no builds, rather than running them without the
 policy: one it claimed would only fail, and be retried until its attempts ran
@@ -338,12 +334,12 @@ root run as, is refused the server's worker protocol and API and another local
 address, reaches the repository, an allowlisted service on the server's host
 and a listener of its own on loopback, and is still refused after moving itself to
 the root of its cgroup namespace and of a freshly mounted cgroup2 hierarchy
-(both moves are reported, and must succeed). Addresses routed through a host
-on a veth link of the worker's, in a network namespace of its own, stay
-reachable. (That the host itself is refused on its public IPv4 and global IPv6
-addresses, as is the worker's default gateway, follows with the links' sets,
-in a later PR of this chain.) The refusals are reported, and the worker
-process itself reaches all of them. A repository beyond that host, on a routed address, is reached on
+(both moves are reported, and must succeed). A host on a veth link of the
+worker's, in a network namespace of its own, is refused on its public IPv4
+address and its global IPv6 address, as is the worker's default gateway on an
+address no link prefix holds, while addresses routed through that host stay
+reachable. The refusals are reported, and the worker process itself reaches
+all of them. A repository beyond that host, on a routed address, is reached on
 its port while another port of its address is refused and reported, and
 another routed address stays reachable. Further tests check that a build
 cancelled while its rules load has them loaded and then removed (as `nft

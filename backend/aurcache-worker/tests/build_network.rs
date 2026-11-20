@@ -149,9 +149,15 @@ const LAN_LINK: &str = "aurcache-lan0";
 /// Removed when dropped.
 struct Lan;
 
-/// Listeners on [`Lan`]'s host: beyond the link, through the host as a
-/// router.
+/// Listeners on [`Lan`]'s host.
 struct LanListeners {
+    /// On its address on the link, IPv4.
+    public_v4: Listener,
+    /// On its address on the link, IPv6.
+    global_v6: Listener,
+    /// On the worker's default gateway, which the host answers for.
+    gateway: Listener,
+    /// Beyond the link, through the host as a router.
     beyond_v4: Listener,
     beyond_v6: Listener,
 }
@@ -190,8 +196,17 @@ impl Lan {
     }
 
     fn listen(&self) -> LanListeners {
-        let [beyond_v4, beyond_v6] = self.listen_on(["198.51.100.7", "2001:db8:100::7"]);
+        let [public_v4, global_v6, gateway, beyond_v4, beyond_v6] = self.listen_on([
+            "203.0.113.5",
+            "2001:db8:113::5",
+            "192.0.2.1",
+            "198.51.100.7",
+            "2001:db8:100::7",
+        ]);
         LanListeners {
+            public_v4,
+            global_v6,
+            gateway,
             beyond_v4,
             beyond_v6,
         }
@@ -325,7 +340,8 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         "`socket cgroupv2` should match builds here (see the warning above)"
     );
 
-    // A router on a link of the worker's, and addresses beyond it.
+    // After the worker started: a build's rules read the host's links as it
+    // starts.
     let lan = Lan::up();
     let on_lan = lan.listen();
 
@@ -344,6 +360,9 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         protocol.target("worker-protocol"),
         repo.target("repository"),
         nas.target("local-network"),
+        on_lan.public_v4.target("lan-public-v4"),
+        on_lan.global_v6.target("lan-global-v6"),
+        on_lan.gateway.target("default-gateway"),
         on_lan.beyond_v4.target("beyond-gateway-v4"),
         on_lan.beyond_v6.target("beyond-gateway-v6"),
     ];
@@ -367,6 +386,18 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         },
         Want {
             check: "local-network",
+            got: "refused",
+        },
+        Want {
+            check: "lan-public-v4",
+            got: "refused",
+        },
+        Want {
+            check: "lan-global-v6",
+            got: "refused",
+        },
+        Want {
+            check: "default-gateway",
             got: "refused",
         },
         Want {
@@ -399,7 +430,14 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         let needle = format!("{}/tcp", listener.addr);
         refused.iter().any(|r| r.contains(&needle))
     };
-    for listener in [&protocol, &api, &nas] {
+    for listener in [
+        &protocol,
+        &api,
+        &nas,
+        &on_lan.public_v4,
+        &on_lan.global_v6,
+        &on_lan.gateway,
+    ] {
         assert!(
             reported(listener),
             "the refusal of {} is not reported: {refused:#?}",
@@ -411,7 +449,15 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     }
 
     // The worker itself is not a build: it still reaches all of them.
-    for listener in [&protocol, &api, &repo, &nas] {
+    for listener in [
+        &protocol,
+        &api,
+        &repo,
+        &nas,
+        &on_lan.public_v4,
+        &on_lan.global_v6,
+        &on_lan.gateway,
+    ] {
         TcpStream::connect(listener.addr)
             .unwrap_or_else(|e| panic!("the worker cannot reach {}: {e}", listener.addr));
     }

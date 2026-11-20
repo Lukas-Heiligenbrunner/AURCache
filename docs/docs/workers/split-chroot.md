@@ -553,9 +553,15 @@ connection a build makes, in this order:
    repository, a LAN mirror, the mirrorlist AURCache sends).
 3. **Local destinations are refused**:
    - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
-     `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10` and
-     multicast;
+     `169.254.0.0/16`, `100.64.0.0/10`, `198.18.0.0/15`, `240.0.0.0/4`,
+     `fc00::/7`, `fe80::/10` and multicast;
+   - the NAT64 forms of those IPv4 ranges in `64:ff9b::/96`, and all of
+     `64:ff9b:1::/48`;
    - every address of the worker's own machine, its public ones included;
+   - the worker's links: the prefix of every address on its interfaces, what
+     routers advertise as on-link, and its default gateways. A LAN on public
+     IPv4 addresses, or the global IPv6 addresses of a dual-stack one, is
+     local by this rule;
    - every address the repository's host resolves to, wherever it is: on your
      LAN, on another VLAN of a routed network, or on the internet. Past the
      repository itself, which 2. allows, that host's other ports -- the
@@ -584,9 +590,12 @@ refused and why:
 [worker]   192.168.1.20:3632/tcp: a local address
 ```
 
-Names are resolved when each build starts, so a host whose address changed
-is picked up by the next build without a restart. A name in the allowlist
-that does not resolve is left out, and the build's log says so.
+Names are resolved, and the worker's links read from its routing table, when
+each build starts, so a host whose address changed, or a prefix the network
+added, is picked up by the next build without a restart. A destination
+beyond a router -- the internet, through the default route -- is not on a
+link, and stays reachable. A name in the allowlist that does not resolve is
+left out, and the build's log says so.
 
 The rules match the build's cgroup, which holds everything the build runs:
 the reading of its dependencies, `makechrootpkg`, the containers, pacman, the
@@ -614,7 +623,8 @@ put the policy in place at all takes no builds: one that cannot match builds
 by their cgroup (a container that is not privileged, a unit without
 `Delegate=yes`, a kernel that takes no `socket cgroupv2` rule, before Linux
 5.13, or one that cannot match it from the worker container's own cgroup
-namespace, before Linux 6.11), or that has no `nft` or no permission. It stays online but claims none, so they go to
+namespace, before Linux 6.11), or that has no `nft`, no `ip` to read its
+routes, or no permission. It stays online but claims none, so they go to
 other workers, and its log says why at startup and every ten minutes. Set
 `WORKER_BUILD_FIREWALL=0` to build without the policy.
 
@@ -644,16 +654,19 @@ What the policy does not cover:
   the workers' addresses to it does not tell builds from workers, since builds
   connect from those same addresses.
 - **Anything else on a public address**: only local addresses, and the
-  repository's host, are refused. That includes a LAN on public IPv4
-  addresses, and the global IPv6 addresses of a dual-stack one, which no
-  fixed range calls local.
+  repository's host, are refused.
 - **`AF_VSOCK`**: no network namespace confines it and nftables cannot filter
   it, so where nothing else refuses it, a build on a worker in a virtual
   machine can reach the hypervisor's vsock services and vsock listeners in the
   machine itself. [What runs as root](#what-runs-as-root) says where the
   sandbox refuses it.
-- **A NAT64 translator** translates to whatever IPv4 address a build names,
-  local ones included, unless it refuses them itself.
+- **A destination reached through a route you added**, a VPN's or a static
+  one, unless it is local otherwise: the worker's links are the prefixes of
+  its own addresses and what routers advertise as on-link, and a tunnel that
+  carries the internet is routed the same way as one that carries a LAN.
+- **A NAT64 translator on a prefix of your own** translates to whatever IPv4
+  address a build names, local ones included. Have it refuse those, or use
+  `64:ff9b::/96`, where the forms of local addresses are refused.
 
 A [distcc](https://www.distcc.org/) helper, a git server or a cache a build
 needs on your network is refused for now: nothing but the build's
