@@ -37,7 +37,8 @@ needs no AUR account and only a maintainer can publish.
 just serve         # run a server with the UI embedded, as the container ships it
 just format        # cargo fmt, both workspaces
 just lint          # what CI lints: fmt --check, clippy (also `static`, and the frontend
-                   # for wasm *and* host), and the driver-free aurcache-common check
+                   # for wasm *and* host), the driver-free aurcache-common check, and
+                   # the check that aurcli's dependency tree links no database driver
 just test          # cargo test, both workspaces (no browser)
 just test-browser  # scripts/test-frontend.sh
 just test-kernel   # scripts/test-kernel.sh (docker, privileged)

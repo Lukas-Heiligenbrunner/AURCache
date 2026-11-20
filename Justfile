@@ -28,6 +28,9 @@ lint:
   # and the client can still take the shared types without a database driver.
   cd backend && cargo check -p aurcache-common --no-default-features
   cd backend && cargo check -p aurcache-client
+  # The CLI and its client are installed on their own, where nothing turns `db`
+  # on for them: neither may link a database driver.
+  cd backend && tree=$(cargo tree -p aurcache-cli -p aurcache-client -e normal --target all --prefix none) && if printf '%s\n' "$tree" | grep -E '^(sea-orm|sqlx|libsqlite3-sys) '; then echo "error: aurcache-cli or aurcache-client links a database driver" >&2; exit 1; fi
   cd frontend-rs && cargo fmt -- --check
   # The crate ships as wasm; its browser tests are host-only. Both are linted.
   cd frontend-rs && cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings

@@ -112,6 +112,14 @@ jobs:
         run: |
           cargo check -p aurcache-common --no-default-features
           cargo check -p aurcache-client
+          # The CLI and its client are installed on their own, where no server
+          # crate turns `db` on for them, so neither may link a database driver.
+          tree=$(cargo tree -p aurcache-cli -p aurcache-client -e normal --target all --prefix none)
+          if grep -E '^(sea-orm|sqlx|libsqlite3-sys) ' <<<"$tree"; then
+            echo "::error::aurcache-cli or aurcache-client links a database driver"
+            exit 1
+          fi
+
   # The frontend is its own workspace, built only for wasm32, so the backend
   # job above never lints or tests it. Both targets are linted, as `just lint`
   # does: the crate ships as wasm and its tests run on the host.
