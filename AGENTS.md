@@ -270,6 +270,15 @@ defect this frontend has had was of that kind.
 - The schema's foreign keys are enforced, on SQLite too — sqlx opens connections with `foreign_keys` on
   and `init.rs` sets it explicitly. `files.package_id` and both of `dependencies`' package columns
   cascade. A test that inserts a child row has to insert its package first.
+- `aurcache-common`, `aurcache-client` and `aurcache-cli` are the only crates published to crates.io;
+  every other crate is `publish = false`. `aurcache-client` and `aurcache-common` are versioned
+  together, and every release of them is a breaking bump of both (0.6 -> 0.7 -> 0.8); their two
+  entries at the top of `[workspace.dependencies]` are caret requirements on the current version.
+  `aurcache-cli` is versioned on its own, by what changed for its users, so a CLI 0.6.1 may require
+  `aurcache-client` 0.7. A CLI release publishes the libraries with it when they changed since
+  their last release, bumping their two `version` lines and the two requirements. Nothing they
+  build or test may depend on a file outside their crate directory; CI's `publishDryRun` job
+  packages each and builds it from the tarball. The CLI links no database driver.
 - The repo includes multiple containerized workflows (all under `compose/`): `compose/docker-compose.hostmode.dev.yaml` mounts the host
   Docker socket for builds, `compose/docker-compose.dindmode.dev.yaml` is the simpler dev setup, and
   `scripts/test-e2e.sh` exercises `compose/docker-compose.e2e.yaml` end to end.

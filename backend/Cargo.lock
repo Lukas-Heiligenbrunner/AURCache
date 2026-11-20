@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-client"
-version = "0.0.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "aurcache-common",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "aurcache-common"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "hex",
  "jiff 1.0.0",

@@ -25,6 +25,9 @@ members = [
 # forget it.
 [workspace.package]
 license = "MIT"
+# Where the crates published to crates.io point back to.
+repository = "https://github.com/Lukas-Heiligenbrunner/AURCache"
+homepage = "https://lukas-heiligenbrunner.github.io/AURCache/"
 
 # Idioms enforced across the workspace. Every lint here is at zero warnings, so
 # these guard against regression rather than demanding a cleanup.
@@ -60,6 +63,15 @@ inefficient_to_string = "warn"
 cloned_instead_of_copied = "warn"
 
 [workspace.dependencies]
+# Only aurcache-cli and aurcache-client take these; every other crate names its
+# path. aurcache-common comes without its default features, so neither links a
+# database driver. The two libraries share one version, and every release of
+# them is a breaking bump (0.6 -> 0.7), so a requirement on the current version
+# only ever matches the release it was built with. Releasing them bumps both
+# `version` lines and these two requirements; aurcache-cli has its own version.
+aurcache-common = { version = "0.6", path = "aurcache-common", default-features = false }
+aurcache-client = { version = "0.6", path = "aurcache-client" }
+
 tokio = "1.53.2"
 anyhow = "1.0.104"
 reqwest = "0.13.5"

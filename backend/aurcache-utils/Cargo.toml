@@ -2,6 +2,7 @@
 name = "aurcache-utils"
 edition = "2024"
 license.workspace = true
+publish = false
 
 [lints]
 workspace = true

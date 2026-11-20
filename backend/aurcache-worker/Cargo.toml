@@ -3,6 +3,7 @@ name = "aurcache-worker"
 version = "0.6.0"
 edition = "2024"
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "aurcache-worker"

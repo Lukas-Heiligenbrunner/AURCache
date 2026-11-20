@@ -120,6 +120,25 @@ jobs:
             exit 1
           fi
 
+  # aurcache-common, aurcache-client and aurcache-cli are the crates meant for
+  # crates.io (every other crate is `publish = false`). Packaging them and
+  # building each from its own tarball, against the other two as packaged,
+  # catches a file the build needs outside a crate directory or a path
+  # dependency without a version. Nothing is uploaded.
+  publishDryRun:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update local toolchain
+        run: rustup update
+
+      - name: Package and verify the publishable crates
+        run: cargo publish --dry-run --locked -p aurcache-common -p aurcache-client -p aurcache-cli
+
   # The frontend is its own workspace, built only for wasm32, so the backend
   # job above never lints or tests it. Both targets are linted, as `just lint`
   # does: the crate ships as wasm and its tests run on the host.

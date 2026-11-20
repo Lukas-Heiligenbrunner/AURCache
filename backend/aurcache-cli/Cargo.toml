@@ -2,7 +2,13 @@
 name = "aurcache-cli"
 version = "0.6.0"
 edition = "2024"
+description = "aurcli: command-line client for AURCache, the Arch Linux AUR build server and package repository"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["aur", "archlinux", "pacman", "build-server", "cli"]
+categories = ["command-line-utilities"]
 
 # Short binary name: the package keeps its name (so `cargo install` and
 # `-p aurcache-cli` are unchanged), but the installed binary is `aurcli`.
@@ -15,10 +21,10 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-aurcache-client = { path = "../aurcache-client" }
+aurcache-client = { workspace = true }
 # Only the filesystem helpers on top of the types: the default `db` feature
 # would link sea-orm, sqlx and a bundled SQLite the CLI never touches.
-aurcache-common = { path = "../aurcache-common", default-features = false, features = ["fs"] }
+aurcache-common = { workspace = true, features = ["fs"] }
 jiff = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
