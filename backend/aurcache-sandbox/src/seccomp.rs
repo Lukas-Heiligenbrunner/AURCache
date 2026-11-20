@@ -29,11 +29,16 @@
 //!   process is killed for a foreign architecture. Under [`NO_VSOCK`], which
 //!   holds whole builds, the 32-bit ABI the kernel also runs (i386 on
 //!   x86-64, 32-bit ARM on aarch64) is filtered by its own numbers, so a
-//!   build's 32-bit programs keep working, and any other is killed. On
-//!   x86-64 the x32 range fails with `ENOSYS` under both. The `socketcall`
-//!   multiplexer passes its arguments behind a pointer the filter cannot
-//!   read, so it may not create a socket at all; glibc, built for Linux 4.4
-//!   and later as Arch Linux builds it, calls `socket` directly.
+//!   build's 32-bit glibc programs keep working, and any other ABI is
+//!   killed. On x86-64 the x32 range fails with `ENOSYS` under both. The
+//!   `socketcall` multiplexer passes its arguments behind a pointer the
+//!   filter cannot read, so it may not create a socket at all: glibc, built
+//!   for Linux 4.4 and later as Arch Linux builds it, calls `socket`
+//!   directly, but a 32-bit program that creates its sockets through
+//!   `socketcall` -- a Go `linux/386` binary, some i386 musl and old glibc
+//!   builds -- gets `ENOSYS` for every socket, of any family. nspawn's own
+//!   address-family option leaves this ABI open: see "The container" in
+//!   `design/proposed/build-runner.md`.
 //!
 //! A filter is inherited across `fork` and `execve` and cannot be removed,
 //! so everything the confined program starts is held to it. It is the
@@ -404,8 +409,8 @@ impl Vsock {
 ///
 /// Root installs it as it is: nothing it runs loses a privilege. Anyone
 /// else needs `no_new_privs` for it, and is given it. A process that cannot
-/// install a filter at all, which an emulated one cannot, is told so as
-/// [`Vsock::Open`]; anything else that goes wrong is an error.
+/// install a filter at all is told so as [`Vsock::Open`]; anything else that
+/// goes wrong is an error.
 pub fn refuse_vsock() -> Result<Vsock, String> {
     let Some(arch) = native() else {
         return Ok(Vsock::Open(
@@ -430,11 +435,13 @@ pub fn refuse_vsock() -> Result<Vsock, String> {
         }
         Err(e) => e,
     };
+    // The kernel checks a filter's shape, never the numbers in it, and the
+    // tests install every shape `program` builds: `EINVAL` here is no filter
+    // at all being accepted, not this one being malformed.
     if err.raw_os_error() == Some(libc::EINVAL) {
-        // qemu's user-mode emulation refuses every filter: none it could
-        // install would describe the system calls the host actually sees.
         return Ok(Vsock::Open(format!(
-            "no seccomp filter: {err}; an emulated process cannot install one"
+            "no seccomp filter can be installed here ({err}): qemu's user-mode \
+             emulation refuses one, and so does a kernel without CONFIG_SECCOMP_FILTER"
         )));
     }
     Err(format!("cannot install the seccomp filter: {err}"))
@@ -456,14 +463,19 @@ mod tests {
         }
     }
 
+    /// The filter for this architecture under `policy`.
+    fn filter(policy: &Policy) -> Vec<Instruction> {
+        program(&native().expect("a filter for the test target"), policy)
+    }
+
     /// Run `probe` in a child under [`OFFLINE`] and return its exit code.
     fn confined(probe: fn() -> libc::c_int) -> libc::c_int {
-        exit_code(in_child(probe, Some(&OFFLINE)))
+        exit_code(in_child(probe, Some(filter(&OFFLINE))))
     }
 
     /// The same under [`NO_VSOCK`].
     fn without_vsock(probe: fn() -> libc::c_int) -> libc::c_int {
-        exit_code(in_child(probe, Some(&NO_VSOCK)))
+        exit_code(in_child(probe, Some(filter(&NO_VSOCK))))
     }
 
     /// The same with no filter at all: the control.
@@ -476,12 +488,11 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
-    /// Run `probe` in a child, under `policy` if one is given, and return
-    /// its wait status. A fork rather than a thread: the filter cannot be
-    /// removed, and the test harness's other threads must not inherit it.
-    fn in_child(probe: fn() -> libc::c_int, policy: Option<&Policy>) -> libc::c_int {
-        let arch = native().expect("a filter for the test target");
-        let filter = policy.map(|policy| program(&arch, policy));
+    /// Run `probe` in a child, under `filter` if one is given, and return
+    /// its wait status; 254 if the filter could not be installed. A fork
+    /// rather than a thread: the filter cannot be removed, and the test
+    /// harness's other threads must not inherit it.
+    fn in_child(probe: fn() -> libc::c_int, filter: Option<Vec<Instruction>>) -> libc::c_int {
         // SAFETY: the child only makes system calls and exits; it never
         // returns into the test harness or touches its locks.
         unsafe {
@@ -598,18 +609,30 @@ mod tests {
         );
     }
 
+    fn io_uring_setup() -> libc::c_int {
+        let mut params = [0u8; 120];
+        // SAFETY: `params` is large enough for `io_uring_params`.
+        let rc = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) };
+        #[allow(clippy::cast_possible_truncation)]
+        errno_of(rc as libc::c_int)
+    }
+
+    /// Whether this kernel has io_uring at all, so that an `ENOSYS` below is
+    /// the filter's. Where io_uring is disabled by sysctl the kernel answers
+    /// `EPERM`, which still tells the two apart.
+    fn kernel_has_io_uring() -> bool {
+        let has = unfiltered(io_uring_setup) != libc::ENOSYS;
+        if !has {
+            eprintln!("this kernel has no io_uring; skipped");
+        }
+        has
+    }
+
     #[test]
     fn io_uring_is_refused() {
-        assert_eq!(
-            confined(|| {
-                let mut params = [0u8; 120];
-                // SAFETY: `params` is large enough for `io_uring_params`.
-                let rc = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) };
-                #[allow(clippy::cast_possible_truncation)]
-                errno_of(rc as libc::c_int)
-            }),
-            libc::ENOSYS
-        );
+        if kernel_has_io_uring() {
+            assert_eq!(confined(io_uring_setup), libc::ENOSYS);
+        }
     }
 
     /// The numbers as the kernel's tables give them
@@ -710,26 +733,34 @@ mod tests {
         );
     }
 
+    /// An x32 `socket` of `family`.
+    #[cfg(target_arch = "x86_64")]
+    fn x32_socket(family: libc::c_int) -> libc::c_int {
+        // SAFETY: a plain system call with integer arguments.
+        #[allow(clippy::cast_possible_truncation)]
+        let rc =
+            unsafe { libc::syscall(0x4000_0000 | libc::SYS_socket, family, libc::SOCK_STREAM, 0) }
+                as libc::c_int;
+        errno_of(rc)
+    }
+
+    /// Whether this kernel runs x32 calls (`CONFIG_X86_X32_ABI`). Without
+    /// it, it answers `ENOSYS` itself, and the x32 tests check nothing.
+    #[cfg(target_arch = "x86_64")]
+    fn kernel_runs_x32() -> bool {
+        let runs = unfiltered(|| x32_socket(libc::AF_INET)) != libc::ENOSYS;
+        if !runs {
+            eprintln!("this kernel runs no x32 system calls; skipped");
+        }
+        runs
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn the_x32_range_is_refused() {
-        assert_eq!(
-            confined(|| {
-                // SAFETY: an x32 `socket`, which this filter must refuse
-                // before the kernel decides whether it supports x32 at all.
-                #[allow(clippy::cast_possible_truncation)]
-                let rc = unsafe {
-                    libc::syscall(
-                        0x4000_0000 | libc::SYS_socket,
-                        libc::AF_INET,
-                        libc::SOCK_STREAM,
-                        0,
-                    )
-                } as libc::c_int;
-                errno_of(rc)
-            }),
-            libc::ENOSYS
-        );
+        if kernel_runs_x32() {
+            assert_eq!(confined(|| x32_socket(libc::AF_INET)), libc::ENOSYS);
+        }
     }
 
     fn socketpair(domain: libc::c_int) -> libc::c_int {
@@ -805,16 +836,9 @@ mod tests {
     /// A ring could create a vsock socket without `socket`.
     #[test]
     fn without_vsock_io_uring_is_refused() {
-        assert_eq!(
-            without_vsock(|| {
-                let mut params = [0u8; 120];
-                // SAFETY: `params` is large enough for `io_uring_params`.
-                let rc = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1, params.as_mut_ptr()) };
-                #[allow(clippy::cast_possible_truncation)]
-                errno_of(rc as libc::c_int)
-            }),
-            libc::ENOSYS
-        );
+        if kernel_has_io_uring() {
+            assert_eq!(without_vsock(io_uring_setup), libc::ENOSYS);
+        }
     }
 
     #[test]
@@ -825,22 +849,42 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn without_vsock_the_x32_range_is_refused() {
-        assert_eq!(
-            without_vsock(|| {
-                // SAFETY: an x32 `socket` of a vsock.
-                #[allow(clippy::cast_possible_truncation)]
-                let rc = unsafe {
-                    libc::syscall(
-                        0x4000_0000 | libc::SYS_socket,
-                        libc::AF_VSOCK,
-                        libc::SOCK_STREAM,
+        if kernel_runs_x32() {
+            assert_eq!(without_vsock(|| x32_socket(libc::AF_VSOCK)), libc::ENOSYS);
+        }
+    }
+
+    /// The kernel checks a filter's shape, never the numbers in it. So every
+    /// shape `program` builds, for any architecture, is installed here: an
+    /// ABI with or without an x32 range or `socketcall`, with or without a
+    /// 32-bit one beside it, under each policy.
+    #[test]
+    fn every_shape_of_filter_installs() {
+        let abi = |foreign_from, socketcall| Abi {
+            foreign_from,
+            socketcall,
+            ..native().expect("a filter for the test target").native
+        };
+        let shapes = [(None, None), (Some(0x4000_0000), None), (None, Some(102))];
+        for policy in [&OFFLINE, &NO_VSOCK] {
+            for (foreign_from, socketcall) in shapes {
+                for compat in [false, true] {
+                    let arch = Arch {
+                        native: abi(foreign_from, socketcall),
+                        compat: compat.then(|| Abi {
+                            audit: 0x4000_0003,
+                            ..abi(None, Some(102))
+                        }),
+                    };
+                    let status = in_child(|| 0, Some(program(&arch, policy)));
+                    assert_eq!(
+                        exit_code(status),
                         0,
-                    )
-                } as libc::c_int;
-                errno_of(rc)
-            }),
-            libc::ENOSYS
-        );
+                        "{policy:?} {foreign_from:?} {socketcall:?} {compat}"
+                    );
+                }
+            }
+        }
     }
 
     /// The i386 ABI, which a 64-bit process reaches through `int 0x80`, as a
@@ -972,15 +1016,22 @@ mod tests {
             );
         }
 
+        /// With no parameters, so the kernel answers `EFAULT` where it has
+        /// io_uring at all.
+        fn io_uring_setup() -> libc::c_int {
+            outcome(call(I386.io_uring_setup, 1, 0, 0))
+        }
+
         #[test]
         fn io_uring_is_refused() {
             if !kernel_runs_i386() {
                 return;
             }
-            assert_eq!(
-                without_vsock(|| outcome(call(I386.io_uring_setup, 1, 0, 0))),
-                libc::ENOSYS
-            );
+            if unfiltered(io_uring_setup) == libc::ENOSYS {
+                eprintln!("this kernel has no i386 io_uring; skipped");
+                return;
+            }
+            assert_eq!(without_vsock(io_uring_setup), libc::ENOSYS);
         }
 
         /// The offline install has no 32-bit programs to keep working.
@@ -989,7 +1040,7 @@ mod tests {
             if !kernel_runs_i386() {
                 return;
             }
-            let status = in_child(inet, Some(&OFFLINE));
+            let status = in_child(inet, Some(filter(&OFFLINE)));
             assert!(
                 libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS,
                 "status {status:#x}"
