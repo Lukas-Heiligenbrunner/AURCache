@@ -1451,8 +1451,9 @@ async fn a_per_package_file_leaves_the_server_wide_one_alone(session: &Session) 
 /// at all.
 async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) {
     // Deliberately not the placeholder's own text: a field that reported its
-    // placeholder as its value would pass if the two matched.
-    const FLAG: &str = "--skipinteg";
+    // placeholder as its value would pass if the two matched. An offered flag,
+    // so the server stores it as it is given.
+    const FLAG: &str = "--holdver";
 
     session.open("/package/hello").await;
     session

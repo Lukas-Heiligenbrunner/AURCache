@@ -800,7 +800,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "top-level".into(),
@@ -818,7 +818,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "transitive-dependency".into(),
