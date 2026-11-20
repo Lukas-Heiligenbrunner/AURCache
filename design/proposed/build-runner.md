@@ -50,6 +50,7 @@ hook:
 | `AURCACHE_*` and `--interface` across `check_root`'s re-exec | sudo drops the rest; the argument was shifted |
 | Landlock around `source PKGBUILD` | the PKGBUILD runs on the host there too |
 | `arch-nspawn` wrapper: `--keep-unit`, `--restrict-address-families=` | the container escaped the build's cgroup; a systemd default is changing |
+| `arch-nspawn` wrapper: every container under `aurcache-sandbox container` | a seccomp filter refusing `AF_VSOCK` and io_uring, which no network namespace or policy holds |
 | skip non-regular files in `pkgdest`, `srcpkgdest`, `logdest`; `chown -h` (three patches) | a build could make host root `chown` any host file, see below |
 
 Each patch must apply exactly once, or the image build fails. That is the
@@ -226,6 +227,13 @@ One `systemd-nspawn` invocation per container step, from a fixed list:
 cgroup the runner is started in, so the container stays inside it, and
 Stop and `memory.peak` cover it. That retires both the patch and
 `docker/nspawn-wrapper.sh`.
+
+nspawn is started with the sandbox's `NO_VSOCK` seccomp filter already
+installed, as `aurcache-sandbox container` does for the patched script: no
+`AF_VSOCK` socket through any ABI the kernel runs, and no io_uring.
+`--restrict-address-families=~AF_VSOCK` is no substitute: systemd filters
+the native `socket` call only, so the i386 ABI and io_uring's
+`IORING_OP_SOCKET` both still open one (checked with systemd 262).
 
 ### Sources are fetched inside the container
 

@@ -32,6 +32,10 @@
 # CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
 # filter keeps from mounting.
 #
+# And vsock, which no network namespace confines: a listener on the loopback
+# CID, where the kernel has one, which the PKGBUILD on the host, the
+# scriptlet, root at the build's start and the build itself try to reach.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -173,8 +177,16 @@ else
     echo absent | tee remount-ro > userns-remount-ro
 fi
 try mknod mknod /dev/aurcache-netprobe c 1 3
+aurcache-netprobe-vsock > vsock
 if out=$(keyctl add user aurcache-netprobe 1 @s 2>&1); then echo allowed; else echo "${out##*: }"; fi > keyring
 ESCAPES
+# reached, unreachable (a socket, but no listener) or refused (no socket).
+cat > vsock <<'VSOCK'
+#!/bin/bash
+perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit 2;
+    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 1'
+case $? in 0) echo reached ;; 1) echo unreachable ;; *) echo refused ;; esac
+VSOCK
 cat > netprobe.install <<'INSTALL'
 post_install() {
     aurcache-netprobe-escapes /var/lib/aurcache-netprobe/escapes
@@ -207,7 +219,7 @@ post_install() {
     echo "$(( 0x$bnd >> 21 & 1 ))$(( 0x$bnd >> 19 & 1 ))" > admin-ptrace
 }
 INSTALL
-printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { install -Dm755 "$startdir/escapes" "$pkgdir/usr/bin/aurcache-netprobe-escapes"; }\n' > PKGBUILD
+printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netprobe.install\npackage() { install -Dm755 "$startdir/escapes" "$pkgdir/usr/bin/aurcache-netprobe-escapes"; install -Dm755 "$startdir/vsock" "$pkgdir/usr/bin/aurcache-netprobe-vsock"; }\n' > PKGBUILD
 chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
 cp /job/netprobe/*.pkg.tar.zst /srv/aurcache/
 repo-add -q /srv/aurcache/aurcache.db.tar.gz /srv/aurcache/aurcache-netprobe-*.pkg.tar.zst
@@ -239,7 +251,26 @@ def udp():
 threading.Thread(target=udp, daemon=True).start()
 tcp()
 LISTEN
-touch /tmp/heard
+# vsock on the loopback CID, where the kernel has a loopback transport. What
+# this kernel offers decides what the open legs can show.
+python3 - <<'LISTEN' &
+import socket
+status = open("/tmp/vsock-kernel", "w", buffering=1)
+try:
+    s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+except OSError:
+    status.write("none\n"); raise SystemExit
+try:
+    s.bind((1, 7778)); s.listen()  # VMADDR_CID_LOCAL
+except OSError:
+    status.write("no-loopback\n"); raise SystemExit
+status.write("loopback\n")
+heard = open("/tmp/heard-vsock", "a", buffering=1)
+while True:
+    s.accept()[0].close(); heard.write("vsock\n")
+LISTEN
+touch /tmp/heard /tmp/heard-vsock
+for _ in {1..50}; do [[ -s /tmp/vsock-kernel ]] && break; sleep 0.1; done
 # The build depends on it, and on an official package, whose signature is
 # checked by the confined install; and it tries to become root once it runs.
 cat >> /job/pkg/PKGBUILD <<'BUILD'
@@ -250,6 +281,7 @@ build() {
     if sudo -n pacman -V >/dev/null 2>&1; then echo allowed; else echo refused; fi > "$startdir/sudo"
     if sudo -n pacman -S --asdeps --needed --noconfirm aurcache-netprobe >/dev/null 2>&1
     then echo allowed; else echo refused; fi > "$startdir/sudo-install"
+    aurcache-netprobe-vsock > "$startdir/vsock"
 }
 BUILD
 if [[ $mode == confined ]]; then
@@ -302,7 +334,11 @@ done
 # a namespace away, and user.max_user_namespaces=0 refuses one at all.
 if sudo -u builder unshare -rm mount -t tmpfs aurcache-host /mnt >/dev/null 2>&1
 then echo host_userns_mount=allowed; else echo host_userns_mount=refused; fi
-for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
+echo "vsock_kernel=$(cat /tmp/vsock-kernel 2>/dev/null || echo missing)"
+echo "heard_vsock=$(sort -u /tmp/heard-vsock | paste -sd, -)"
+echo "host_vsock=$([[ -s /job/pkg/host-vsock ]] && sort -u /job/pkg/host-vsock | paste -sd, - || echo missing)"
+echo "build_vsock=$(cat /job/pkg/vsock 2>/dev/null || echo missing)"
+for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring vsock; do
     echo "install_$e=$(cat "/chroot/job1/var/lib/aurcache-netprobe/escapes/$e" 2>/dev/null || echo missing)"
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
 done
@@ -412,6 +448,31 @@ fi
 check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
+
+# vsock: the open leg shows what this kernel lets a socket do, and the
+# confined leg refuses the socket itself, everywhere a PKGBUILD's code runs.
+# The host-side runs and the build are held by the sandbox's filters; root
+# in the build's container too, by the one every container is started under;
+# the install by the offline profile's own.
+case $(get vsock_kernel "$unconfined") in
+    loopback) open=reached ;;
+    no-loopback) open=unreachable ;;
+    *) open= ;;
+esac
+if [[ -n $open ]]; then
+    check "unconfined: host-side PKGBUILD opens vsock" "$open" "$(get host_vsock "$unconfined")"
+    check "unconfined: scriptlet opens vsock"      "$open" "$(get install_vsock "$unconfined")"
+    check "unconfined: build opens vsock"          "$open" "$(get build_vsock "$unconfined")"
+    [[ $open == reached ]] &&
+        check "unconfined: vsock listener hears it" vsock "$(get heard_vsock "$unconfined")"
+    check "confined:   host-side PKGBUILD: no vsock" refused "$(get host_vsock "$confined")"
+    check "confined:   install: no vsock"            refused "$(get install_vsock "$confined")"
+    check "confined:   build_root: no vsock"         refused "$(get build_root_vsock "$confined")"
+    check "confined:   build: no vsock"              refused "$(get build_vsock "$confined")"
+    check "confined:   vsock listener hears nothing" ""     "$(get heard_vsock "$confined")"
+else
+    echo "    skip vsock: this kernel has no AF_VSOCK ($(get vsock_kernel "$unconfined"))"
+fi
 
 if (( fail )); then
     echo "==> FAILED"
