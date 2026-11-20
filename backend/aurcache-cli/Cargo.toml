@@ -31,4 +31,7 @@ unicode-width = "0.2"
 [dev-dependencies]
 wiremock = "0.6"
 tempfile.workspace = true
-yaml-rust2 = "0.13.0"
+# Only `YamlLoader` on UTF-8 text: the default `encoding` feature pins
+# encoding_rs to one exact release, holding back the copy reqwest and multer
+# share.
+yaml-rust2 = { version = "0.13.1", default-features = false }
