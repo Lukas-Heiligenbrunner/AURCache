@@ -181,12 +181,14 @@ try mknod mknod /dev/aurcache-netprobe c 1 3
 aurcache-netprobe-vsock > vsock
 if out=$(keyctl add user aurcache-netprobe 1 @s 2>&1); then echo allowed; else echo "${out##*: }"; fi > keyring
 ESCAPES
-# reached, unreachable (a socket, but no listener) or refused (no socket).
+# reached, unreachable (a socket, but no listener), refused (no socket:
+# EAFNOSUPPORT, as the filters answer) or failed(N) for anything else; the
+# codes are not perl's own (2, 255).
 cat > vsock <<'VSOCK'
 #!/bin/bash
-perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit 2;
-    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 1'
-case $? in 0) echo reached ;; 1) echo unreachable ;; *) echo refused ;; esac
+perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit($!{EAFNOSUPPORT} ? 10 : 11);
+    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 12'
+case $? in 0) echo reached ;; 12) echo unreachable ;; 10) echo refused ;; *) echo "failed($?)" ;; esac
 VSOCK
 cat > netprobe.install <<'INSTALL'
 post_install() {
@@ -345,9 +347,9 @@ echo "heard_vsock=$(sort -u /tmp/heard-vsock | paste -sd, -)"
 # control reaches it.
 id aurcache-parse >/dev/null 2>&1 || useradd -r -M -s /usr/bin/nologin aurcache-parse
 mkdir -p /srv/parse && cat > /srv/parse/PKGBUILD <<'PARSE'
-perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit 2;
-    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 1'
-case $? in 0) echo reached ;; 1) echo unreachable ;; *) echo refused ;; esac
+perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit($!{EAFNOSUPPORT} ? 10 : 11);
+    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 12'
+case $? in 0) echo reached ;; 12) echo unreachable ;; 10) echo refused ;; *) echo "failed($?)" ;; esac
 PARSE
 source_it=(bash -c 'source "$1"' parse)
 parse_bare=$("${source_it[@]}" /srv/parse/PKGBUILD)
@@ -490,6 +492,8 @@ if [[ -n $open ]]; then
     check "confined:   install: no vsock"            refused "$(get install_vsock "$confined")"
     check "confined:   build_root: no vsock"         refused "$(get build_root_vsock "$confined")"
     check "confined:   build: no vsock"              refused "$(get build_vsock "$confined")"
+    # Not a listener that died: the unsandboxed parse below reaches it after
+    # this count is taken.
     check "confined:   vsock listener hears nothing" ""     "$(get heard_vsock "$confined")"
     # The parse profile, as both kinds of server run it, beside the control.
     check "unsandboxed parse opens vsock"          "$open"  "$(get parse_bare_vsock "$confined")"

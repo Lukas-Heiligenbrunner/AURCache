@@ -44,8 +44,10 @@ How that is enforced depends on the install, and only the sandbox knows:
 
 Either way, vsock and io_uring are refused by a seccomp filter, installed
 last. A server run emulated (an image for another architecture, through
-qemu) cannot install one: it parses anyway, and logs a warning saying so at
-startup.
+qemu) cannot install one, and parses with vsock open: the sandbox warns on
+each parse's stderr, which the server shows only when a parse fails, so
+nothing in the server's log says so. In a virtual machine with a vsock
+device, run the image built for the machine's own architecture.
 
 Denying TCP is hardening rather than a boundary: Landlock covers TCP only, and
 only from Linux 6.7, so on Synology, whose kernels predate Landlock, a parse

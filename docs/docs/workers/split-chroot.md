@@ -250,17 +250,20 @@ io_uring with them, which can create a socket without the `socket` call:
 - every container of a build, the build's and the install's included: the
   build script starts each one under `aurcache-sandbox container`, which
   installs the filter on the worker before `systemd-nspawn` starts, so it
-  holds whatever nspawn's version. nspawn's own
-  `--restrict-address-families=~AF_VSOCK` would not do: it filters only the
-  native `socket` call, so a 32-bit program, or io_uring, still opens one;
+  holds whatever nspawn's version (nspawn's own address-family option
+  leaves 32-bit programs and io_uring open);
 - the PKGBUILD's runs outside the chroot (the source download, and reading
   the dependencies), under `aurcache-sandbox --allow-build-env`;
 - the install, under `aurcache-sandbox offline`, whose filter allows no
   socket but a UNIX one.
 
-32-bit programs in a build keep working: the filter reads their calls by
-their own numbers. Every other family stays open: what a build may connect
-to over the network is the network policy's to say.
+32-bit glibc programs in a build keep working: the filter reads their
+calls by their own numbers. A 32-bit program that creates its sockets
+through `socketcall` instead, such as a Go `linux/386` binary or some i386
+musl and old glibc builds, gets `ENOSYS` for every socket, since the filter
+cannot see the family `socketcall` is asked for. Every other family stays
+open: what a build may connect to over the network is the network policy's
+to say.
 
 :::note What a build cannot do
 No setuid program works in the build, so neither do the setuid helpers some
