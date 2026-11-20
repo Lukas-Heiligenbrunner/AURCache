@@ -6,9 +6,9 @@
 //! Checked where flags come in rather than discovered there.
 //!
 //! Of the options a build can take, only those in [`OFFERED`] are a choice a
-//! package makes, and only those are stored. The rest change nothing on a
-//! worker, and are accepted and forgotten so that a list naming one is not
-//! refused.
+//! package makes, and only those are stored. The rest are accepted and
+//! forgotten, so that a list naming one is not refused: they change nothing
+//! on a worker, or undo what a package sets elsewhere.
 
 /// What a build does with a makepkg option.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,8 +17,8 @@ enum Use {
     Offered,
     /// The same as giving these offered options.
     Expands(&'static [&'static str]),
-    /// Accepted, and not stored: a worker gives every build this already, or
-    /// it changes nothing in a build.
+    /// Accepted, and not stored: a worker gives every build this already, it
+    /// changes nothing in a build, or it undoes what a package sets elsewhere.
     Dropped,
     /// Refused, and why.
     Refused(&'static str),
@@ -203,10 +203,57 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// What a build does with one option a flag names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Kept, as these offered flags: the option itself, or the ones it stands
+    /// for.
+    Kept(&'static [&'static str]),
+    /// Accepted, and not stored.
+    Dropped,
+    /// A build cannot take it, and why.
+    Refused(&'static str),
+}
+
+/// One option a list of flags names, and what a build does with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Classified {
+    /// The option's long form, or, where makepkg has no such option, what was
+    /// given: `-X` for a letter of a bundle, the whole flag otherwise.
+    pub option: String,
+    pub kind: Kind,
+}
+
+const NO_SUCH_OPTION: &str = "makepkg has no such option";
+
+/// Every option `flags` name, in order: a short bundle such as `-cd` is one
+/// option per letter.
+#[must_use]
+pub fn classify(flags: &[impl AsRef<str>]) -> Vec<Classified> {
+    flags
+        .iter()
+        .flat_map(|flag| options_of(flag.as_ref().trim()))
+        .collect()
+}
+
+/// The offered flags `options` keep, each once, in the order of [`OFFERED`].
+#[must_use]
+pub fn kept(options: &[Classified]) -> Vec<String> {
+    OFFERED
+        .iter()
+        .filter(|offered| {
+            options.iter().any(
+                |option| matches!(option.kind, Kind::Kept(flags) if flags.contains(&offered.flag)),
+            )
+        })
+        .map(|offered| offered.flag.to_string())
+        .collect()
+}
+
 /// The flags in their canonical form: the offered options they amount to,
 /// each once, in the order of [`OFFERED`]. Short bundles such as `-dA` are
-/// split, `--skipinteg` stands for the two checks it skips, and an option
-/// that changes nothing in a build is left out.
+/// split, `--skipinteg` stands for the two checks it skips, and an option a
+/// package does not choose is left out.
 ///
 /// # Errors
 ///
@@ -214,55 +261,64 @@ impl std::error::Error for Refused {}
 /// knows that would stop the build producing a package or take over what the
 /// worker sets.
 pub fn canonical(flags: &[impl AsRef<str>]) -> Result<Vec<String>, Refused> {
-    let mut given: Vec<&'static str> = Vec::new();
+    let mut options = Vec::new();
     for flag in flags {
         let flag = flag.as_ref().trim();
-        if flag.is_empty() {
-            continue;
+        let named = options_of(flag);
+        let refusal = named.iter().find_map(|option| match option.kind {
+            Kind::Refused(reason) => Some(reason),
+            Kind::Kept(_) | Kind::Dropped => None,
+        });
+        if let Some(reason) = refusal {
+            return Err(Refused {
+                flag: flag.to_string(),
+                reason,
+            });
         }
-        given.extend(expand(flag)?);
+        options.extend(named);
     }
-    Ok(OFFERED
-        .iter()
-        .filter(|offered| given.contains(&offered.flag))
-        .map(|offered| offered.flag.to_string())
-        .collect())
+    Ok(kept(&options))
 }
 
-/// One flag as the offered options it stands for.
-fn expand(flag: &str) -> Result<Vec<&'static str>, Refused> {
-    let refuse = |reason| Refused {
-        flag: flag.to_string(),
-        reason,
-    };
-    let unknown = || refuse("makepkg has no such option");
-    let resolve = |option: &MakepkgOption| match option.usage {
-        Use::Offered => Ok(vec![option.long]),
-        Use::Expands(into) => Ok(into.to_vec()),
-        Use::Dropped => Ok(Vec::new()),
-        Use::Refused(reason) => Err(refuse(reason)),
-    };
-
+/// The options one flag names: one for a long option, one per letter of a
+/// short bundle, none for an empty flag.
+fn options_of(flag: &str) -> Vec<Classified> {
+    if flag.is_empty() {
+        return Vec::new();
+    }
     if flag.starts_with("--") || flag == "-p" {
-        let option = OPTIONS
-            .iter()
-            .find(|o| o.long == flag)
-            .ok_or_else(unknown)?;
-        return resolve(option);
+        let option = OPTIONS.iter().find(|o| o.long == flag);
+        return vec![option.map_or_else(|| unknown(flag.to_string()), classified)];
     }
-    let letters = flag
-        .strip_prefix('-')
-        .filter(|l| !l.is_empty())
-        .ok_or_else(unknown)?;
-    let mut out = Vec::new();
-    for letter in letters.chars() {
-        let option = OPTIONS
-            .iter()
-            .find(|o| o.short == Some(letter))
-            .ok_or_else(unknown)?;
-        out.extend(resolve(option)?);
+    let Some(letters) = flag.strip_prefix('-').filter(|l| !l.is_empty()) else {
+        return vec![unknown(flag.to_string())];
+    };
+    letters
+        .chars()
+        .map(|letter| {
+            let option = OPTIONS.iter().find(|o| o.short == Some(letter));
+            option.map_or_else(|| unknown(format!("-{letter}")), classified)
+        })
+        .collect()
+}
+
+fn classified(option: &'static MakepkgOption) -> Classified {
+    Classified {
+        option: option.long.to_string(),
+        kind: match option.usage {
+            Use::Offered => Kind::Kept(std::slice::from_ref(&option.long)),
+            Use::Expands(into) => Kind::Kept(into),
+            Use::Dropped => Kind::Dropped,
+            Use::Refused(reason) => Kind::Refused(reason),
+        },
     }
-    Ok(out)
+}
+
+fn unknown(given: String) -> Classified {
+    Classified {
+        option: given,
+        kind: Kind::Refused(NO_SUCH_OPTION),
+    }
 }
 
 /// A 0.5.0 package's flags, as a makepkg build takes them.
@@ -270,8 +326,9 @@ fn expand(flag: &str) -> Result<Vec<&'static str>, Refused> {
 pub struct Upgraded {
     /// The flags kept, canonical.
     pub flags: Vec<String>,
-    /// The flags dropped because no build can take them -- beyond the paru
-    /// ones every 0.5.0 package carried, which are not worth reporting.
+    /// The options dropped because no build can take them, each once and by
+    /// its [`Classified::option`] -- beyond the paru ones every 0.5.0 package
+    /// carried, which are not worth reporting.
     pub dropped: Vec<String>,
 }
 
@@ -280,26 +337,27 @@ pub struct Upgraded {
 /// Its defaults were `--pgpfetch;-B;--noconfirm;--noprogressbar;--color never`
 /// and, before that, `-Syu;…` (which its own migration rewrote to `-Byu`).
 /// Both come out empty: the worker fetches `validpgpkeys`, refreshes the
-/// system and passes the non-interactive flags itself, and always builds.
+/// system and passes the non-interactive flags itself, and always builds. A bundle holding a letter
+/// no build can take keeps its other letters.
 #[must_use]
 pub fn upgrade_from_paru(flags: &[impl AsRef<str>]) -> Upgraded {
-    let mut kept: Vec<&str> = Vec::new();
-    let mut dropped = Vec::new();
-    for flag in flags {
-        let flag = flag.as_ref().trim();
-        let translated = match flag {
-            "" | "-Syu" | "-Byu" | "-B" | "--pgpfetch" => continue,
-            "--color never" | "--color=never" => "--nocolor",
-            other => other,
-        };
-        match canonical(&[translated]) {
-            Ok(_) => kept.push(translated),
-            Err(_) => dropped.push(flag.to_string()),
+    let translated: Vec<&str> = flags
+        .iter()
+        .filter_map(|flag| match flag.as_ref().trim() {
+            "" | "-Syu" | "-Byu" | "-B" | "--pgpfetch" => None,
+            "--color never" | "--color=never" => Some("--nocolor"),
+            other => Some(other),
+        })
+        .collect();
+    let options = classify(&translated);
+    let mut dropped: Vec<String> = Vec::new();
+    for option in &options {
+        if matches!(option.kind, Kind::Refused(_)) && !dropped.contains(&option.option) {
+            dropped.push(option.option.clone());
         }
     }
     Upgraded {
-        // Every flag in `kept` was accepted on its own, so together they are.
-        flags: canonical(&kept).unwrap_or_default(),
+        flags: kept(&options),
         dropped,
     }
 }
@@ -352,10 +410,10 @@ mod tests {
         );
     }
 
-    /// Everything a list could hold before options came in kinds is still
-    /// accepted: a dump naming one is refused whole otherwise.
+    /// Every option a build can take is accepted, offered or not: a dump
+    /// naming a refused one is refused whole.
     #[test]
-    fn every_option_once_accepted_still_is() {
+    fn every_option_a_build_can_take_is_accepted() {
         for flag in [
             "--noconfirm",
             "--noprogressbar",
@@ -508,6 +566,37 @@ mod tests {
         let upgraded =
             upgrade_from_paru(&["--noconfirm", "--skipreview", "-i", "-cdA", "--nocheck"]);
         assert_eq!(upgraded.flags, ["--nocheck", "--ignorearch", "--nodeps"]);
-        assert_eq!(upgraded.dropped, ["--skipreview", "-i"]);
+        assert_eq!(upgraded.dropped, ["--skipreview", "--install"]);
+    }
+
+    /// A bundle holding a letter no build can take keeps its other letters.
+    #[test]
+    fn an_upgraded_bundle_loses_only_its_refused_letters() {
+        let upgraded = upgrade_from_paru(&["-dXo", "-o"]);
+        assert_eq!(upgraded.flags, ["--nodeps"]);
+        assert_eq!(upgraded.dropped, ["-X", "--nobuild"]);
+    }
+
+    /// A bundle is one option per letter, each by its long form.
+    #[test]
+    fn a_bundle_is_classified_letter_by_letter() {
+        let option = |option: &str, kind| Classified {
+            option: option.to_string(),
+            kind,
+        };
+        assert_eq!(
+            classify(&["-cdo", " --skipinteg ", "", "-X", "x"]),
+            [
+                option("--clean", Kind::Dropped),
+                option("--nodeps", Kind::Kept(&["--nodeps"])),
+                option("--nobuild", Kind::Refused(NO_PACKAGE)),
+                option(
+                    "--skipinteg",
+                    Kind::Kept(&["--skipchecksums", "--skippgpcheck"])
+                ),
+                option("-X", Kind::Refused(NO_SUCH_OPTION)),
+                option("x", Kind::Refused(NO_SUCH_OPTION)),
+            ]
+        );
     }
 }
