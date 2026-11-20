@@ -386,3 +386,6 @@ WORKER_BIND_MOUNTS=/etc/aurcache-worker/licence:/opt/licence
 Unlike the SSH keys these **are** readable by package code, and by every build on
 the worker. Use them only for credentials you are willing to expose to all the
 packages that worker builds.
+
+They reach the build's container only, not the containers that prepare the
+chroot before it.
