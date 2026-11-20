@@ -158,6 +158,7 @@ impl ChrootExecutor {
         let network = BuildNetwork::install(
             Table::for_worker(worker_id),
             cgroups.as_ref(),
+            &cfg.build_user,
             cfg.build_allow.clone(),
         );
         let shared = Arc::new(Shared::new(&cfg));

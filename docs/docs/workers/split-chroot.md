@@ -618,17 +618,25 @@ mount a network filesystem; the others keep it, and their filter denies
 mounts too. That rules both out. [What runs as root](#what-runs-as-root) says
 what is left of this on an emulated worker, where qemu refuses the filter.
 
+A worker that cannot match builds by cgroup matches the build user
+(`WORKER_BUILD_USER`) instead, and says why at startup. That is a container
+that is not privileged, a unit without `Delegate=yes`, a kernel that takes no
+`socket cgroupv2` rule (before Linux 5.13), or one that cannot match it from
+the worker container's own cgroup namespace (before Linux 6.11). That mode
+does not hold a hostile build: root inside the build's container is not
+matched, and a build's dependencies can leave code for root to run there. In
+it, a build that runs a local server for its tests is refused it too, and the
+build's log does not list what was refused: the refusals are shared by every
+build of that user, and cannot be told apart.
+
 Several workers can share a network namespace, as containers on the host's
 network or as units on one machine: each makes and removes only its own
-table.
+table. Matched by uid, they need build users of their own, since each one's
+rules hold every build of the user they name.
 
 A build whose rules cannot be put in place does not run. A worker that cannot
-put the policy in place at all takes no builds: one that cannot match builds
-by their cgroup (a container that is not privileged, a unit without
-`Delegate=yes`, a kernel that takes no `socket cgroupv2` rule, before Linux
-5.13, or one that cannot match it from the worker container's own cgroup
-namespace, before Linux 6.11), or that has no `nft`, no `ip` to read its
-routes, or no permission. It stays online but claims none, so they go to
+put the policy in place at all (no `nft`, no `ip` to read its routes, no
+permission) takes no builds: it stays online but claims none, so they go to
 other workers, and its log says why at startup and every ten minutes. Set
 `WORKER_BUILD_FIREWALL=0` to build without the policy.
 

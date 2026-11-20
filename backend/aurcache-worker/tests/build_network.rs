@@ -339,6 +339,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     let network = BuildNetwork::install(
         Table::for_worker("c9a0"),
         Some(&hierarchy),
+        "nobody",
         vec![HostPort {
             host: "127.0.0.1".to_string(),
             port: git.port(),
@@ -487,7 +488,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
 async fn the_rules_of_a_build_cancelled_while_they_load_are_removed() {
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
     let table = Table::for_worker("ca9ce1");
-    let network = BuildNetwork::install(table.clone(), Some(&hierarchy), Vec::new());
+    let network = BuildNetwork::install(table.clone(), Some(&hierarchy), "nobody", Vec::new());
     assert_eq!(network.mode(), Some(&Mode::Cgroup));
     let repo = listen("127.0.0.1:0");
     let conf = pacman_conf(repo.port());
@@ -548,7 +549,12 @@ async fn the_rules_of_a_build_cancelled_while_they_load_are_removed() {
 #[ignore = "restructures the caller's cgroup, adds nftables tables and a network namespace; run in a privileged container"]
 async fn a_routed_repositorys_host_is_reached_only_at_the_repository() {
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
-    let network = BuildNetwork::install(Table::for_worker("4e90"), Some(&hierarchy), Vec::new());
+    let network = BuildNetwork::install(
+        Table::for_worker("4e90"),
+        Some(&hierarchy),
+        "nobody",
+        Vec::new(),
+    );
     assert_eq!(network.mode(), Some(&Mode::Cgroup));
     let lan = Lan::up();
     let [api, repo, internet] = lan.listen_on(["198.51.100.7", "198.51.100.7", "2001:db8:100::7"]);
@@ -601,6 +607,29 @@ async fn a_routed_repositorys_host_is_reached_only_at_the_repository() {
     drop(lan);
 }
 
+/// Without a cgroup per build the rules hold the build user, and leave every
+/// other user alone.
+#[tokio::test]
+#[ignore = "adds nftables tables to the network namespace; run in a privileged container"]
+async fn without_cgroups_the_build_user_is_held() {
+    let network = BuildNetwork::install(Table::for_worker("41d"), None, "nobody", Vec::new());
+    let Some(Mode::Uid(uid)) = network.mode().cloned() else {
+        panic!("expected the build user's uid to be matched");
+    };
+    let nas = listen("127.0.0.2:0");
+    let reach = |as_build_user: bool| {
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", &format!("exec 3<>/dev/tcp/127.0.0.2/{}", nas.port())])
+            .stderr(std::process::Stdio::null());
+        if as_build_user {
+            cmd.uid(uid);
+        }
+        cmd.status().expect("running bash").success()
+    };
+    assert!(!reach(true), "the build user reached a local address");
+    assert!(reach(false), "root, which is not the build user, was held");
+}
+
 /// Workers sharing a network namespace each keep a table of their own: one
 /// starting leaves the other's in place.
 #[tokio::test]
@@ -610,7 +639,7 @@ async fn a_worker_starting_leaves_anothers_table_alone() {
     let first = Table::for_worker("f125");
     let second = Table::for_worker("5ec0d");
     let install = |table: &Table| {
-        let network = BuildNetwork::install(table.clone(), Some(&hierarchy), Vec::new());
+        let network = BuildNetwork::install(table.clone(), Some(&hierarchy), "nobody", Vec::new());
         assert_eq!(network.mode(), Some(&Mode::Cgroup));
         network
     };

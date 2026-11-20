@@ -49,8 +49,9 @@
 //!
 //! Where builds cannot be matched by cgroup -- no hierarchy, a kernel that
 //! takes no `socket cgroupv2` rule or does not match one from the worker's
-//! cgroup namespace -- the policy cannot be put in place, and the worker
-//! takes no builds.
+//! cgroup namespace -- the rules match the build user's uid instead. Root in
+//! the container is then not matched, so that mode does not hold a hostile
+//! build; the worker warns.
 //!
 //! ## Layout
 //!
@@ -247,6 +248,8 @@ fn joined(prefixes: &[Prefix]) -> String {
 pub enum Matcher {
     /// Everything in a cgroup and the cgroups below it.
     Cgroup(CgroupName),
+    /// Every socket a user owns.
+    Uid(u32),
 }
 
 impl Matcher {
@@ -255,6 +258,7 @@ impl Matcher {
             Self::Cgroup(name) => {
                 format!("socket cgroupv2 level {} \"{}\"", name.level, name.path)
             }
+            Self::Uid(uid) => format!("meta skuid {uid}"),
         }
     }
 }
@@ -266,6 +270,18 @@ pub struct Policy {
     pub resolvers: Vec<IpAddr>,
     /// The allowlist.
     pub allowed: Vec<SocketAddr>,
+}
+
+/// Who decides a build's local destinations other than its own allowlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalRule {
+    /// The build's own rules: its listeners on this host stay reachable to it,
+    /// and what it is refused is recorded as its own.
+    PerBuild,
+    /// The baseline, which every build shares. When builds are matched by uid,
+    /// one build's rules match its siblings' traffic too, so a refusal in them
+    /// would also refuse a sibling what its own allowlist allows.
+    Baseline,
 }
 
 /// The table, made afresh: the baseline every build gets, `builds` matching
@@ -435,7 +451,13 @@ fn pairs(endpoints: &[SocketAddr], family: Family) -> Vec<String> {
 /// One build's rules, loaded in one transaction: `matcher` names its
 /// processes.
 #[must_use]
-pub fn build_script(table: &Table, build_id: i32, matcher: &Matcher, policy: &Policy) -> String {
+pub fn build_script(
+    table: &Table,
+    build_id: i32,
+    matcher: &Matcher,
+    policy: &Policy,
+    local_rule: LocalRule,
+) -> String {
     let n = Names::of(build_id);
     let mut s = String::new();
     let rule = |s: &mut String, chain: &str, body: &str| {
@@ -499,46 +521,48 @@ pub fn build_script(table: &Table, build_id: i32, matcher: &Matcher, policy: &Po
         }
     }
     let build = matcher.expr();
-    rule(
-        &mut s,
-        &n.chain,
-        &format!("fib daddr type local meta mark set {mark:#010x} accept"),
-    );
-    for family in Family::ALL {
-        let ip = family.keyword();
+    if local_rule == LocalRule::PerBuild {
         rule(
             &mut s,
             &n.chain,
-            &format!(
-                "{ip} daddr {{ {} }} goto {}",
-                joined(&local::fixed(family)),
-                n.refuse
-            ),
+            &format!("fib daddr type local meta mark set {mark:#010x} accept"),
         );
-        for set in [family.links_set(), family.repo_set()] {
+        for family in Family::ALL {
+            let ip = family.keyword();
             rule(
                 &mut s,
                 &n.chain,
-                &format!("{ip} daddr @{set} goto {}", n.refuse),
+                &format!(
+                    "{ip} daddr {{ {} }} goto {}",
+                    joined(&local::fixed(family)),
+                    n.refuse
+                ),
             );
+            for set in [family.links_set(), family.repo_set()] {
+                rule(
+                    &mut s,
+                    &n.chain,
+                    &format!("{ip} daddr @{set} goto {}", n.refuse),
+                );
+            }
         }
+        rule(
+            &mut s,
+            "each_build_in",
+            &format!(
+                "meta mark {mark:#010x} {build} accept comment \"{}\"",
+                n.chain
+            ),
+        );
+        rule(
+            &mut s,
+            "each_build_in",
+            &format!(
+                "meta mark {mark:#010x} goto {} comment \"{}\"",
+                n.refuse, n.chain
+            ),
+        );
     }
-    rule(
-        &mut s,
-        "each_build_in",
-        &format!(
-            "meta mark {mark:#010x} {build} accept comment \"{}\"",
-            n.chain
-        ),
-    );
-    rule(
-        &mut s,
-        "each_build_in",
-        &format!(
-            "meta mark {mark:#010x} goto {} comment \"{}\"",
-            n.refuse, n.chain
-        ),
-    );
     rule(
         &mut s,
         "each_build",
@@ -876,6 +900,8 @@ pub enum Mode {
     /// By cgroup: every socket a build's processes open, root's in its
     /// container included.
     Cgroup,
+    /// By the build user's uid, where builds cannot be matched by cgroup.
+    Uid(u32),
 }
 
 /// The policy in force on this worker.
@@ -897,15 +923,27 @@ pub struct Firewall {
     allow: Vec<HostPort>,
 }
 
+/// What one build's rules match, and where its local refusals are.
+struct BuildMatch {
+    matcher: Matcher,
+    local_rule: LocalRule,
+}
+
 impl Firewall {
-    /// What one build's rules match.
-    fn matching(&self, cgroup: Option<&BuildCgroup>) -> Result<Matcher> {
+    fn matching(&self, cgroup: Option<&BuildCgroup>) -> Result<BuildMatch> {
         Ok(match &self.mode {
-            Mode::Cgroup => Matcher::Cgroup(
-                cgroup
-                    .and_then(BuildCgroup::name)
-                    .context("the build has no cgroup to match its network rules on")?,
-            ),
+            Mode::Cgroup => BuildMatch {
+                matcher: Matcher::Cgroup(
+                    cgroup
+                        .and_then(BuildCgroup::name)
+                        .context("the build has no cgroup to match its network rules on")?,
+                ),
+                local_rule: LocalRule::PerBuild,
+            },
+            Mode::Uid(uid) => BuildMatch {
+                matcher: Matcher::Uid(*uid),
+                local_rule: LocalRule::Baseline,
+            },
         })
     }
 }
@@ -931,12 +969,17 @@ impl BuildNetwork {
     }
 
     /// Make `table` afresh and put the baseline in place, matching builds by
-    /// their cgroup under `cgroups`.
+    /// their cgroup under `cgroups`, or by `build_user` where they cannot be.
     ///
     /// At startup, before any build: whatever a previous run left is gone
     /// with the old table. Blocking.
     #[must_use]
-    pub fn install(table: Table, cgroups: Option<&Hierarchy>, allow: Vec<HostPort>) -> Self {
+    pub fn install(
+        table: Table,
+        cgroups: Option<&Hierarchy>,
+        build_user: &str,
+        allow: Vec<HostPort>,
+    ) -> Self {
         if disabled() {
             tracing::warn!(
                 "{DISABLE_ENV} is off: builds can reach the server's API and worker \
@@ -944,13 +987,24 @@ impl BuildNetwork {
             );
             return Self::Unrestricted;
         }
-        let mode = match install(&table, cgroups) {
-            Ok(()) => {
+        let mode = match install(&table, cgroups, build_user) {
+            Ok(Baseline::Cgroup) => {
                 tracing::info!(
                     "Build network policy in place (table inet {table}): builds are \
                      matched by their cgroup"
                 );
                 Mode::Cgroup
+            }
+            Ok(Baseline::Uid { uid, why }) => {
+                tracing::warn!(
+                    "Build network policy in place (table inet {table}) for the build \
+                     user {build_user:?} only, because {why}. That does not hold a \
+                     hostile build: root inside a build's container is not matched, \
+                     and a build's dependencies can leave code for root to run \
+                     there. In this mode a build's log does not list what it was \
+                     refused."
+                );
+                Mode::Uid(uid)
             }
             Err(e) => {
                 let reason = format!(
@@ -1005,7 +1059,7 @@ impl BuildNetwork {
 fn load_build(
     table: Table,
     build_id: i32,
-    matcher: &Matcher,
+    matching: &BuildMatch,
     inputs: &Inputs<'_>,
     allow: &[HostPort],
 ) -> Result<BuildRules> {
@@ -1015,7 +1069,13 @@ fn load_build(
     let _ = remove(&table, build_id);
     let script = links_script(&table, &links)
         + &repo_script(&table, &resolved.repository)
-        + &build_script(&table, build_id, matcher, &resolved.policy);
+        + &build_script(
+            &table,
+            build_id,
+            &matching.matcher,
+            &resolved.policy,
+            matching.local_rule,
+        );
     load(&script).context("loading the build's network rules")?;
     Ok(BuildRules {
         table,
@@ -1050,17 +1110,29 @@ impl OwnedInputs {
     }
 }
 
-/// The table made afresh with the baseline, matching builds by cgroup.
-///
-/// # Errors
-/// When builds cannot be matched by cgroup here, with why: the policy does
-/// not hold a build it cannot tell apart from the worker.
-fn install(table: &Table, cgroups: Option<&Hierarchy>) -> Result<()> {
+/// How the baseline went in.
+enum Baseline {
+    /// On the builds' cgroup.
+    Cgroup,
+    /// On the build user, because builds could not be matched by cgroup for
+    /// the reason `why`.
+    Uid { uid: u32, why: String },
+}
+
+/// The table made afresh with the baseline, matching builds by cgroup where
+/// that holds them and by the build user's uid otherwise.
+fn install(table: &Table, cgroups: Option<&Hierarchy>, build_user: &str) -> Result<Baseline> {
     let links = Links::read()?;
-    match by_cgroup(table, cgroups, &links) {
-        ByCgroup::Holds => Ok(()),
-        ByCgroup::Unusable(why) => anyhow::bail!("builds cannot be matched by their cgroup: {why}"),
-    }
+    let why = match by_cgroup(table, cgroups, &links) {
+        ByCgroup::Holds => return Ok(Baseline::Cgroup),
+        ByCgroup::Unusable(why) => why,
+    };
+    let uid = aurcache_chroot::Owner::of_user(build_user)
+        .map(|owner| owner.uid)
+        .with_context(|| format!("no user named {build_user:?}"))?;
+    check_not_self(uid, aurcache_chroot::Owner::current().uid, build_user)?;
+    load(&(baseline_script(table, &Matcher::Uid(uid)) + &links_script(table, &links)))?;
+    Ok(Baseline::Uid { uid, why })
 }
 
 /// Whether the baseline can match builds by their cgroup.
@@ -1246,6 +1318,19 @@ unsafe fn connect_in_child(handle: &OwnedFd, addr: &libc::sockaddr_in) -> i32 {
     }
 }
 
+/// Refuse to match the worker's own uid.
+///
+/// A `WORKER_BUILD_USER` naming the worker's own account would firewall the
+/// worker off its own server and network.
+fn check_not_self(build_uid: u32, own_uid: u32, build_user: &str) -> Result<()> {
+    anyhow::ensure!(
+        build_uid != own_uid,
+        "build user {build_user:?} resolves to this process's own uid ({own_uid}); \
+         refusing rules that would hold the worker itself"
+    );
+    Ok(())
+}
+
 /// One build's rules while they are in place. Removed when dropped.
 pub struct BuildRules {
     table: Table,
@@ -1403,8 +1488,22 @@ mod tests {
     }
 
     #[test]
+    fn without_a_cgroup_the_baseline_matches_the_build_user() {
+        let script = baseline_script(&table(), &Matcher::Uid(967));
+        assert!(script.contains("meta skuid 967 jump builds"));
+    }
+
+    /// Exact pairs, the repository and a LAN mirror, and nothing about the
+    /// server's other ports: those are the local rule's.
+    #[test]
     fn the_allowlist_names_exact_endpoints_before_the_local_refusal() {
-        let script = build_script(&table(), 42, &cgroup("builds/build-42"), &compose());
+        let script = build_script(
+            &table(),
+            42,
+            &cgroup("builds/build-42"),
+            &compose(),
+            LocalRule::PerBuild,
+        );
         let chain = rules(&script, "build-42");
         let allow = chain
             .iter()
@@ -1431,7 +1530,13 @@ mod tests {
     #[test]
     fn dns_is_matched_as_the_build_asked_for_it() {
         let chain = rules(
-            &build_script(&table(), 42, &cgroup("builds/build-42"), &compose()),
+            &build_script(
+                &table(),
+                42,
+                &cgroup("builds/build-42"),
+                &compose(),
+                LocalRule::PerBuild,
+            ),
             "build-42",
         );
         assert_eq!(
@@ -1443,7 +1548,13 @@ mod tests {
 
     #[test]
     fn a_builds_own_listeners_are_told_apart_on_the_way_in() {
-        let script = build_script(&table(), 42, &cgroup("builds/build-42"), &compose());
+        let script = build_script(
+            &table(),
+            42,
+            &cgroup("builds/build-42"),
+            &compose(),
+            LocalRule::PerBuild,
+        );
         let chain = rules(&script, "build-42");
         let mark = format!("{:#010x}", table().mark(42));
         let local = chain
@@ -1482,9 +1593,39 @@ mod tests {
         );
     }
 
+    /// Matched by uid, every build's rules see every build's traffic, so the
+    /// local refusals stay in the baseline, after all of them.
+    #[test]
+    fn by_uid_a_build_refuses_nothing_local_itself() {
+        let script = build_script(
+            &table(),
+            42,
+            &Matcher::Uid(967),
+            &compose(),
+            LocalRule::Baseline,
+        );
+        let chain = rules(&script, "build-42");
+        assert!(
+            !chain
+                .iter()
+                .any(|r| r.contains("fib") || r.contains("10.0.0.0/8") || r.contains("@links"))
+        );
+        assert!(rules(&script, "each_build_in").is_empty());
+        assert_eq!(
+            rules(&script, "each_build"),
+            ["meta skuid 967 jump build-42 comment \"build-42\""]
+        );
+    }
+
     #[test]
     fn refusals_are_recorded_apart_from_the_refusal() {
-        let script = build_script(&table(), 42, &cgroup("builds/build-42"), &compose());
+        let script = build_script(
+            &table(),
+            42,
+            &cgroup("builds/build-42"),
+            &compose(),
+            LocalRule::PerBuild,
+        );
         assert!(script.contains(
             "add set inet aurcache_worker_5e1f0a2b3c4d5e6f build-42-refused4 \
              { type ipv4_addr . inet_proto . inet_service; flags dynamic; size 1024; }"
@@ -1503,7 +1644,13 @@ mod tests {
             ..Policy::default()
         };
         let chain = rules(
-            &build_script(&table(), 3, &cgroup("builds/build-3"), &policy),
+            &build_script(
+                &table(),
+                3,
+                &cgroup("builds/build-3"),
+                &policy,
+                LocalRule::PerBuild,
+            ),
             "build-3",
         );
         let allowing: Vec<&String> = chain.iter().filter(|r| r.contains("ct original")).collect();
@@ -1529,7 +1676,13 @@ mod tests {
         let script = baseline_script(&other, &cgroup("builds"));
         assert!(script.contains("delete table inet aurcache_worker_0000ffff0000ffff\n"));
         assert!(!script.contains(table().name()));
-        let build = build_script(&other, 1, &cgroup("builds/build-1"), &compose());
+        let build = build_script(
+            &other,
+            1,
+            &cgroup("builds/build-1"),
+            &compose(),
+            LocalRule::PerBuild,
+        );
         assert!(
             build
                 .lines()
@@ -1588,7 +1741,13 @@ mod tests {
     /// passes before its host's other ports are refused.
     #[test]
     fn the_repository_passes_before_its_host_is_refused() {
-        let script = build_script(&table(), 42, &cgroup("builds/build-42"), &compose());
+        let script = build_script(
+            &table(),
+            42,
+            &cgroup("builds/build-42"),
+            &compose(),
+            LocalRule::PerBuild,
+        );
         let chain = rules(&script, "build-42");
         let allowed = chain
             .iter()
@@ -1750,5 +1909,12 @@ mod tests {
             "192.168.1.9:3632/tcp: a local address; the worker's WORKER_BUILD_ALLOW \
              can allow it (host:port)"
         );
+    }
+
+    #[test]
+    fn a_rule_naming_our_own_uid_is_refused() {
+        assert!(check_not_self(967, 1000, "builder").is_ok());
+        let err = check_not_self(1000, 1000, "aurcache").unwrap_err();
+        assert!(format!("{err:#}").contains("own uid"));
     }
 }

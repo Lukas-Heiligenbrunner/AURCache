@@ -90,7 +90,8 @@ serves on it is opened with it; the repository's entry included.
 
 Rejections use TCP reset or ICMP unreachable, never a silent drop, so a build
 fails at once rather than timing out. The worker lists each refusal with its
-destination in the build's log: a rule that refuses something the operator needs should be
+destination in the build's log (when builds are matched by cgroup; see
+*Fallback*): a rule that refuses something the operator needs should be
 obvious to fix.
 
 The policy is on by default. `WORKER_BUILD_FIREWALL=0` still turns it off, for
@@ -222,7 +223,8 @@ the others' rules. The table holds:
   This is the baseline every build gets, even before its own rules load.
 - **The links' sets**, `links4` and `links6` (interval sets), with the local
   destinations the host's links make. Shared by every build, and filled afresh
-  in each build's transaction.
+  in each build's transaction, so that a build matched by uid, whose local
+  refusal is the baseline's, has them too.
 - **The repository's sets**, `repo4` and `repo6`, with the addresses of the
   repository's host, filled afresh in each build's transaction the same way.
   Apart from the links' sets so that what the host's links make and what the
@@ -242,12 +244,10 @@ removed: the task runs to the end, and its unclaimed result is dropped.
 nftables gives atomic replacement, sets, and one table to remove on shutdown.
 The worker depends on `nftables` instead of `iptables`.
 
-### Where builds cannot be matched by cgroup
+### Fallback
 
-The policy holds a build by its cgroup, and nothing else tells a build from
-the worker. Where builds cannot be matched that way, the policy cannot be put
-in place, and the worker takes no builds (see *Failure*), naming the reason.
-That is:
+Where builds cannot be matched by cgroup, the worker falls back to matching
+the build user's uid, and warns, naming the reason. That is:
 
 - no cgroup hierarchy (a container that is not privileged, a unit without
   `Delegate=yes`): no build cgroup exists to match;
@@ -258,17 +258,25 @@ That is:
   Linux 5.13;
 - the startup check below, when it connects or cannot be made.
 
-The same applies where the kernel does not match `socket cgroupv2` from the
-worker's cgroup namespace (cgroup namespaces are honoured from Linux 6.11). At
-startup the worker checks: a process it places in `builds/` (a forked child,
-which makes its socket there) connects to a listener of the worker's on
+The warning says that this mode does not hold a hostile build: root inside the
+build's container is not matched, and a build's dependencies can leave code
+for root to run there. The refusals of this mode are the baseline's, shared by
+every build of the user, so they are not recorded, and the build's log lists
+none; the docs say so.
+
+Matched by uid, every build's rules see every concurrent build's traffic, so a
+build's own chain keeps only rules 2 and 3, and rule 4 stays in the baseline,
+after all of them: otherwise one build's refusal would deny a sibling what its
+own allowlist allows. In this mode a build may reach a sibling's allowlist,
+and its own local test servers are refused.
+
+The same fallback applies where the kernel does not match `socket cgroupv2`
+from the worker's cgroup namespace (cgroup namespaces are honoured from Linux
+6.11). At startup the worker checks: a process it places in `builds/` (a forked
+child, which makes its socket there) connects to a listener of the worker's on
 loopback, which the baseline must refuse with a reset. Only `ECONNREFUSED`
 counts as held. If it connects, fails some other way, or the check cannot be
-made, the policy is not in place.
-
-*Follows, in a later PR of this chain: a fallback that matches the build
-user's uid in these cases instead, which holds the build user but not root in
-the build's container.*
+made, the worker reloads the baseline on the build user's uid and warns.
 
 ### Telling a build's own listeners apart
 
@@ -278,7 +286,8 @@ packet is for. So a build's packet to a local address is not refused at once;
 it leaves with a mark naming the build (`0x41` in the top byte, and the build
 id mixed with a number of the worker's below it, set only on packets to
 `fib daddr type local`), and the input hook accepts a marked packet only if
-the socket it reaches is in that build's cgroup, and refuses it otherwise.
+the socket it reaches is in that build's cgroup, and refuses it otherwise. Not
+available when builds are matched by uid.
 
 Each table claims only its own builds' marks, and lets any other marked
 packet through: with several workers in one network namespace, every table's
@@ -342,8 +351,8 @@ all of them. A repository beyond that host, on a routed address, is reached on
 its port while another port of its address is refused and reported, and
 another routed address stays reachable. Further tests check that a build
 cancelled while its rules load has them loaded and then removed (as `nft
-monitor` reports), and that two workers' tables coexist in one network
-namespace.
+monitor` reports), that two workers' tables coexist in one network namespace,
+and the uid fallback.
 
 Not tested against the kernel: that two workers matched by cgroup leave each
 other's builds' own listeners alone. It needs a second worker's `builds/`
