@@ -13,7 +13,7 @@ mod parser;
 
 pub use parser::{ByteSize, ParseSetting, Seconds};
 
-use aurcache_common::host_port::{HostPort, HostPortList};
+use aurcache_common::host_port::{HostPort, HostPortList, InvalidEntry};
 use aurcache_common::settings::{
     ApplicationSettings, BuildHostsEntry, Scope, Setting, SettingSource, SettingsEntry,
     SettingsMeta,
@@ -96,6 +96,10 @@ pub struct BuildHosts {
     pub package: Option<Vec<HostPort>>,
     /// The server's: `Env -> Global -> Default`.
     pub server: SettingsEntry<Vec<HostPort>>,
+    /// Entries of either list that are not `host:port`, which are left out:
+    /// the API refuses one before storing it, but nothing checks the
+    /// environment.
+    pub invalid: Vec<InvalidEntry>,
 }
 
 impl BuildHosts {
@@ -130,12 +134,18 @@ fn build_hosts_of(stored: &Stored) -> BuildHosts {
     let own = resolve(stored, key);
     let package = (own.source == SettingSource::Package).then_some(own.value);
     let server = resolve(&stored.server_wide(), key);
+    let invalid = package
+        .iter()
+        .chain([&server.value])
+        .flat_map(|list| list.invalid.iter().cloned())
+        .collect();
     BuildHosts {
         package: package.map(|list| list.entries),
         server: SettingsEntry {
             value: server.value.entries,
             source: server.source,
         },
+        invalid,
     }
 }
 
@@ -540,6 +550,28 @@ mod tests {
         let one = super::raw(&db, Setting::BuildHosts, Some(1)).await.unwrap();
         assert_eq!(one.value, "gitlab.lan:22, distcc.lan:3632");
         assert_eq!(one.source, SettingSource::Package);
+    }
+
+    /// An entry that is not `host:port` -- as one in `BUILD_HOSTS` can be,
+    /// which nothing checks before it is read -- leaves out only itself, and
+    /// is named for the startup warning.
+    #[tokio::test]
+    async fn a_bad_build_host_leaves_the_others_in_place() {
+        let db = db().await;
+        write(
+            &db,
+            [Change {
+                setting: Setting::BuildHosts,
+                pkg_id: None,
+                value: Some("distcc.lan:3632, gitlab.lan, flexo.lan:7878".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        let hosts = super::build_hosts(&db, None).await.unwrap();
+        assert_eq!(names(&hosts.union()), ["distcc.lan:3632", "flexo.lan:7878"]);
+        let invalid: Vec<String> = hosts.invalid.iter().map(ToString::to_string).collect();
+        assert_eq!(invalid, [r#""gitlab.lan": no port: write it as host:port"#]);
     }
 
     /// One a package may override is read for it.

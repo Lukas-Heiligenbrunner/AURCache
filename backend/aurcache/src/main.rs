@@ -54,6 +54,7 @@ async fn main() {
     let db = init_db().await.expect("failed to initialize database");
 
     startup::close_orphaned_operations(&db).await;
+    startup::warn_about_invalid_build_hosts(&db).await;
     if let Err(e) = mirrorlist::prepare().await {
         warn!("Could not write the configured mirrorlists: {e:#}");
     }
