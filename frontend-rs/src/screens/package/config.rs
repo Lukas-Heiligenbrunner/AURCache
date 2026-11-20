@@ -457,6 +457,18 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
     // that is still the package on screen: never with one package's draft
     // under another's name.
     let mut editing = use_signal(|| None::<String>);
+    // Leaving that package forgets it, so coming back finds the dialog
+    // closed, however it was left: a save cut short included. The check
+    // below hides the dialog in the same render; this runs after it.
+    use_effect(use_reactive(&pkgbase, move |pkgbase: String| {
+        if editing
+            .peek()
+            .as_deref()
+            .is_some_and(|opened| opened != pkgbase)
+        {
+            editing.set(None);
+        }
+    }));
     let mut edit_button = use_signal(|| None::<Rc<MountedData>>);
     // However the dialog closes, focus goes back to the button that opened it.
     let mut close = move || {
