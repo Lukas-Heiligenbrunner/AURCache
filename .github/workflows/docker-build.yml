@@ -11,6 +11,11 @@ on:
       - master
     tags:
       - '*'
+      # A CLI release tag is release-binaries.yml's alone: until the images
+      # are split per component, any other tag releases them all as `latest`.
+      # GitHub applies the patterns in order and the last match wins, so the
+      # exclusion has to come after '*'.
+      - '!aurcache-cli-v*'
   pull_request:
     branches:
       - master
