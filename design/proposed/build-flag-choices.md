@@ -87,46 +87,67 @@ the server, so the two cannot drift.
 
 ### The worker passes the three every build needs
 
-`aurcache-worker-core` exports the three (`--noconfirm --noprogressbar
---nocolor`). Both executors put them before the job's flags: the chroot worker
-after `--` in `build_command`, and the docker worker after `-s` in
-`build_build_command`. A new package stores an empty list, which means "build
-as makepkg would by default".
+`aurcache_common::build_flags::EVERY_BUILD` names the three (`--noconfirm
+--noprogressbar --nocolor`), and `for_makepkg` puts them before a job's flags,
+leaving out any copy of them the job carries. They live in `aurcache-common`
+rather than `aurcache-worker-core` because the server uses them too: the job
+descriptor sends them (below), and the startup step does not report losing
+one. Both executors call `for_makepkg`: the chroot worker after `--` in
+`build_command`, and the docker worker after `-s` in `build_build_command`. A
+new package stores an empty list, which means "build as makepkg would by
+default".
 
 **Wire compatibility.** Worker protocol 1 says `build_flags` are "arguments
 added to makepkg's command line, as given", and that does not change. But a
 0.6.0 docker worker adds nothing of its own, so if the server stopped sending
-`--noconfirm` it would build without it. So the server keeps adding the three
-to the job descriptor (`job_descriptor.rs`) for workers on protocol 1. A new
-worker given them twice drops the copies, because makepkg treats a repeated
-flag the same as one. When protocol 2 exists, it can say workers add the
-three themselves, and the server can stop sending them.
+`--noconfirm` it would build without it. So the job descriptor
+(`job_descriptor.rs`) puts the three in front of the package's flags, through
+`for_makepkg`, for every worker: protocol 1 is the only one, so there is no
+worker to leave them out for. A test pins the descriptor's `build_flags` for a
+package storing `[]` and one storing `--nocheck`. A new worker given them twice
+drops the copies; makepkg would treat a repeated flag the same as one
+anyway. When
+protocol 2 exists, it can say workers add the three themselves, and the server
+can stop sending them to workers on it.
 
 ### Startup reduces stored lists to offered flags, and says what it dropped
 
 This is not a migration, because migrations run in `init_db`, before the
 activity log exists. It is a startup step, `startup::settle_build_flags`,
 running after `activitylog::spawn` as `report_untrusted_workers` does, with
-its logic in `aurcache-utils`. It runs every package's stored list through
-`canonical` and writes back the lists that changed, one transaction per
-package. Running it again changes nothing, so it can run on every start; if
-the offered set changes in a later release, the same step tidies up after it.
-A list `canonical` refuses (impossible, since 0.6.0 refused at input) keeps
-its offered flags.
+its logic in `aurcache-utils` (`package::build_flags::settle`). It reads only
+each package's `id`, `name` and `build_flags`, so a row it does not need to
+understand cannot stop it, and writes back the lists that changed, one
+`UPDATE` per package. Running it again changes nothing, so it can run on every
+start; if the offered set changes in a later release, the same step tidies up
+after it.
 
-For each package that lost a flag other than `--noconfirm`,
+It settles option by option, not entry by entry. `build_flags::classify`
+breaks each stored entry into its options, one per letter of a bundle, each
+with its kind (`Kind::Kept` with the offered flags it stands for,
+`Kind::Dropped`, or `Kind::Refused` with the reason), and `build_flags::kept`
+gives the offered flags they keep, canonical. `choices` (pure) builds on the
+two, and so does `upgrade_from_paru`. So a list `canonical` would refuse
+(impossible, since 0.6.0 refused at input) keeps its offered flags, even within
+one bundle: `-cdo` keeps `--nodeps`, and loses `--clean` and `--nobuild`. A lost
+option is reported by its long form (`-c` as `--clean`), and not at all when it
+is one of `EVERY_BUILD`, in whichever spelling (`-m` is `--nocolor`).
+
+For each package that lost an option other than `--noconfirm`,
 `--noprogressbar` or `--nocolor` (which the worker now passes, so nothing
-changes), it emits an **Info** event, `BuildFlagsDropped { pkgbase, dropped
-}`, in the event catalogue in `aurcache-common`. The event says the flags had
-no effect on a build and are no longer stored. The case it is for is a
-package with `--cleanbuild` and a persistent build directory, which now
-starts reusing its tree.
+changes), it emits an **Info** event, `BuildFlagsDropped { pkg: PackageRef,
+dropped }`, in the event catalogue in `aurcache-common`. The event says what
+happened and why, without claiming the flags had no effect: "dropped
+--cleanbuild from the build flags of hello: a build does not take it as a
+choice". The case it is for is a package with `--cleanbuild` and a persistent
+build directory, which now starts reusing its tree, so dropping it does change
+something.
 
 `upgrade_from_paru` then returns `[]` for both 0.5.0 defaults. Its test
 changes to say so, and its doc comment drops "the current default". The 0.5.0
-migration keeps its `tracing::warn!` for the flags no build can take; those
-are refused, not dropped, and the activity log does not exist yet when it
-runs.
+migration keeps its `tracing::warn!` for the options no build can take, named
+by their long form as the startup step names them; those are refused, not
+dropped, and the activity log does not exist yet when it runs.
 
 ### The UI: a summary and a dialog
 
@@ -155,6 +176,9 @@ package's flags are a later decision.
 - Update the `aurcache-cli` `--build-flag` help to say that unknown or
   pointless flags are refused or dropped, and update the test that passes
   `--noconfirm`.
+- Give `pkg patch` a `--no-build-flags` option, conflicting with
+  `--build-flag`, which sends an empty list: without it the CLI could not take
+  a package back to makepkg's defaults.
 - Update `docs/docs/workers/protocol.md`: workers add the three themselves,
   and protocol-1 servers send them as well.
 
