@@ -253,6 +253,28 @@ impl Session {
         .await
     }
 
+    /// Wait until nothing matches `selector`.
+    async fn wait_gone(&self, selector: &str) {
+        self.wait_for_script(
+            &format!("{selector:?} to go"),
+            format!(
+                "return document.querySelector({}) === null;",
+                json(selector)
+            ),
+        )
+        .await;
+    }
+
+    /// Whether the checkbox matching `selector` is ticked: a property rather
+    /// than markup, like a field's value.
+    async fn checked(&self, selector: &str) -> bool {
+        self.eval(format!(
+            "return document.querySelector({})?.checked === true;",
+            json(selector)
+        ))
+        .await
+    }
+
     async fn url(&self) -> String {
         self.driver
             .current_url()
@@ -1444,28 +1466,34 @@ async fn a_per_package_file_leaves_the_server_wide_one_alone(session: &Session) 
     );
 }
 
-/// A build flag is stored, comes back on a fresh load, and can be removed.
+/// A build flag ticked in the dialog is stored, comes back on a fresh load,
+/// and can be unticked again; a dismissed draft is not.
 ///
-/// The reload is the point. Adding a chip to a local list renders identically
+/// The reload is the point. A chip drawn from a local list renders identically
 /// to one that reached the server, and this page is the only way to set flags
 /// at all.
 async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) {
-    // Deliberately not the placeholder's own text: a field that reported its
-    // placeholder as its value would pass if the two matched. An offered flag,
-    // so the server stores it as it is given.
+    // An offered flag the fixture gives no package.
     const FLAG: &str = "--holdver";
+    const BOX: &str = "#build-flag-holdver";
 
     session.open("/package/hello").await;
     session
-        .wait_until("the empty flag list", |t| t.contains("No build flags"))
+        .wait_until("the empty flag list", |t| t.contains("makepkg defaults"))
         .await;
 
+    open_build_flags(session).await;
+    // A click on the summary, not on the box: the whole row is its label.
+    session.click(&format!("{BOX}-summary")).await;
+    assert!(
+        session.checked(BOX).await,
+        "clicking the row did not tick {FLAG}"
+    );
+    save_build_flags(session).await;
     session
-        .type_into("input[placeholder='--nocheck']", FLAG)
-        .await;
-    session.click_labelled("button", "Add").await;
-    session
-        .wait_until("the flag to appear", |t| t.contains(FLAG))
+        .wait_until("the chip to appear", |t| {
+            t.contains(FLAG) && !t.contains("makepkg defaults")
+        })
         .await;
 
     session.open("/package/hello").await;
@@ -1473,12 +1501,43 @@ async fn a_build_flag_survives_a_reload_and_can_be_taken_off(session: &Session) 
         .wait_until("the flag to have persisted", |t| t.contains(FLAG))
         .await;
 
+    // Ticking another and dismissing the dialog leaves nothing behind it.
+    open_build_flags(session).await;
+    session.click("#build-flag-nocheck").await;
+    session.click_labelled(".modal-open button", "Cancel").await;
+    session.wait_gone(".modal-open").await;
+    open_build_flags(session).await;
+    assert!(
+        !session.checked("#build-flag-nocheck").await,
+        "a cancelled tick was still there on reopening"
+    );
+    assert!(
+        session.checked(BOX).await,
+        "reopening lost the saved {FLAG}"
+    );
+
+    session.click(BOX).await;
+    save_build_flags(session).await;
     session
-        .click(&format!("button[aria-label='Remove {FLAG}']"))
+        .wait_until("the flag to be gone", |t| {
+            t.contains("makepkg defaults") && !t.contains(FLAG)
+        })
         .await;
-    session
-        .wait_until("the flag to be gone", |t| t.contains("No build flags"))
-        .await;
+}
+
+/// The package page's button that opens the build flags dialog.
+const EDIT_FLAGS: &str = "button[aria-label='Edit build flags']";
+
+/// Open the package page's build flags dialog.
+async fn open_build_flags(session: &Session) {
+    session.click(EDIT_FLAGS).await;
+    session.wait_for(".modal-open #build-flag-nocheck").await;
+}
+
+/// Save the build flags dialog, and wait for it to close on the server's yes.
+async fn save_build_flags(session: &Session) {
+    session.click_labelled(".modal-open button", "Save").await;
+    session.wait_gone(".modal-open").await;
 }
 
 /// Removing a package takes it out of the repository.

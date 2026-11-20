@@ -247,8 +247,9 @@ ROUTES=(
     "/package/hello/config-files|>inherited<|an unset file says it inherits"
     "/package/neofetch/config-files|>package override<|a package that holds its own file says so"
     # Platforms, flags and removal live on the package page itself now.
+    # The dialog is mounted only while open, so the flag on the page is the chip.
     "/package/neofetch|--nocheck|build flags render as chips on the package page"
-    "/package/hello|No build flags|a package without flags says so"
+    "/package/hello|makepkg defaults|a package without flags says so"
     "/package/hello|href=\"/package/hello/config-files\"|the package links to its config files"
     # The one irreversible action, in its own card rather than in the header.
     "/package/hello|Remove package|a package can be removed from its own page"
