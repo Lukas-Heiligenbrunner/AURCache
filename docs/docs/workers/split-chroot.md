@@ -213,11 +213,11 @@ something the other covers:
 
 Of the build's binds, the containers that sync, upgrade and install are given
 only its package cache, and the install the sandbox as well: none of them
-gets the ssh-agent socket, a persistent build tree, or anything
-`WORKER_BIND_MOUNTS` adds. Those reach the build's own container alone. The
-install's container also drops `CAP_MKNOD`: a container kept in the build's
-cgroup has no device policy, so a device node made there would open the
-host's device.
+gets the ssh-agent socket, the staged `known_hosts`, a persistent build tree,
+or anything `WORKER_BIND_MOUNTS` adds. Those reach the build's own container
+alone. The install's container also drops `CAP_MKNOD`: a container kept in
+the build's cgroup has no device policy, so a device node made there would
+open the host's device.
 
 None of this holds root as the build starts: `/chrootbuild` runs there with
 the build's network, and runs whatever the dependencies left for it. Only a

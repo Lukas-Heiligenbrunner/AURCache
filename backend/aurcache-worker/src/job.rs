@@ -328,13 +328,9 @@ async fn prepare_bind_mounts(
     });
 
     // Operator-configured mounts, then this job's private pacman cache. The
-    // build's container is given all of these; the containers that sync and
-    // upgrade the copy and install the build's dependencies only those over a
-    // `CacheDir`, so only the cache. Those are started through arch-nspawn,
-    // which binds the host's directory at the first `CacheDir`
-    // (`/var/cache/pacman/pkg`) read-write; ours land after it on the
-    // systemd-nspawn command line, which is what lets the per-job cache
-    // override that bind.
+    // build gets all of these; the containers before it only the cache bind,
+    // which overrides arch-nspawn's bind of `/var/cache/pacman/pkg` (see
+    // packaging/patch-makechrootpkg.py).
     //
     // The build credential is deliberately *not* here. `makepkg` fetches
     // sources on the worker before the chroot is entered, so the key is never

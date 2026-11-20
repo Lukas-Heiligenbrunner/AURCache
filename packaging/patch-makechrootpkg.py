@@ -270,20 +270,13 @@ prepare_chroot
         # Neither variable set (anyone running this copy by hand) skips the
         # sync, as `makechrootpkg` without `-u` does.
         #
-        # Of the build's binds, the sync and the upgrade are given only those
-        # over the copy's package cache, as the dependency install is (below):
-        # not the operator's mounts, a persistent build tree or the ssh-agent
-        # socket, which root running pacman, and the scriptlets and hooks of
-        # whatever the upgrade installs, have no use for. A bind is the
-        # cache's when its target is a `CacheDir` of the build's
-        # configuration; the upgrade's lists the same ones, since the worker
-        # writes both with one cache layout
-        # (`aurcache_worker::devtools::write_configs`). Read once, here, after
-        # the configurations are installed and before any container has run
-        # in the copy. Nothing from `-D` or `-t`, which the worker does not
-        # pass and pacman does not need. arch-nspawn still binds the cache
-        # directories it reads from the copy's pacman.conf itself; a cache
-        # bind, which comes after them, overrides its bind of the same target.
+        # The sync and the upgrade, like the dependency install below, are
+        # given only the `-d` binds whose target is a `CacheDir` of the build's
+        # configuration, which the upgrade's shares
+        # (`aurcache_worker::devtools::write_configs`); no `-D` or `-t` mount.
+        # Read once, after the configurations are installed and before any
+        # container runs in the copy. A cache bind comes after arch-nspawn's
+        # own bind of the same directory, and overrides it.
         "-u refused; the copy synced, then upgraded without AURCache's repository",
         '(( update_first )) && arch-nspawn "$copydir" \\\n'
         '\t\t--machine="$(machine_name upgrade-packages)" \\\n'

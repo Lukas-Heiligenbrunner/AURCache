@@ -147,5 +147,8 @@ expose to the packages you build.
 
 They are mounted into the build's container only, not into the ones that
 sync the chroot's package databases, upgrade it and install the build's
-dependencies before it. So a mount here cannot serve those steps: a local
-`file://` repository for the chroot's upgrade cannot be provided through it.
+dependencies before it. A local `file://` repository in the chroot's
+`pacman.conf` still works for those steps, as long as it is at the same path
+on the worker as in the chroot: devtools' `arch-nspawn`, which starts those
+containers, binds every `file://` repository's directory itself, read-only at
+that path. `WORKER_BIND_MOUNTS` cannot move it to another path for them.
