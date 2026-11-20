@@ -4,10 +4,11 @@ sidebar_position: 6
 
 # Build flags
 
-A package can be built with some of `makepkg`'s options, chosen on its page,
-or with `aurcli pkg patch <pkgbase> --build-flag=<flag>`, repeated for the
-whole list; `aurcli pkg patch <pkgbase> --no-build-flags` clears it. A package
-with none set builds as `makepkg` does by default.
+A package can be built with some of `makepkg`'s options, ticked on its page
+(*Edit* beside *Flags*, under *Build config*), or with `aurcli pkg patch
+<pkgbase> --build-flag=<flag>`, repeated for the whole list; `aurcli pkg patch
+<pkgbase> --no-build-flags` clears it. A package with none set builds as
+`makepkg` does by default, and its page says "makepkg defaults".
 
 | Flag              | What it does                                                         |
 |-------------------|----------------------------------------------------------------------|
