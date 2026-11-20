@@ -12,7 +12,6 @@ use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
 use aurcache_worker_core::settings::WorkerSettings;
-use aurcache_worker_core::ssh_key::SshKeys;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,14 +61,14 @@ pub struct Shared {
     pub repo_dbs: RepoDbs,
     /// The SSH keys this worker holds for builds, by name: the socket of the
     /// agent it started, as the default key, or none.
-    pub ssh_keys: SshKeys<PathBuf>,
+    pub ssh_keys: BTreeMap<String, PathBuf>,
 }
 
 impl Shared {
     /// Set up, with nothing open yet (see [`Chroots::open`]), holding
     /// `ssh_keys` for builds.
     #[must_use]
-    pub fn new(cfg: &Config, ssh_keys: SshKeys<PathBuf>) -> Self {
+    pub fn new(cfg: &Config, ssh_keys: BTreeMap<String, PathBuf>) -> Self {
         let tunables = &cfg.tunables;
         Self {
             srcdest: SrcdestLocks::new(),
@@ -117,7 +116,7 @@ impl ChrootExecutor {
     ///
     /// Builds are offered only `ssh_keys`, never an agent this process's
     /// environment names.
-    pub async fn new(cfg: Config, ssh_keys: SshKeys<PathBuf>) -> Self {
+    pub async fn new(cfg: Config, ssh_keys: BTreeMap<String, PathBuf>) -> Self {
         let cgroups = prepare_cgroups(&cfg.tunables);
         log_limits(&cfg.tunables, cgroups.is_some());
         let shared = Arc::new(Shared::new(&cfg, ssh_keys));

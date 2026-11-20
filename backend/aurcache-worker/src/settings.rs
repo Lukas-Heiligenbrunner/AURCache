@@ -294,7 +294,6 @@ mod tests {
             "WORKER_POOL",
             "WORKER_DISK_RESERVE",
             "WORKER_GIT_SSH_KEY",
-            "WORKER_GIT_SSH_PACKAGES",
             "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_DATA_DIR",
             "AURCACHE_URL",
@@ -308,10 +307,5 @@ mod tests {
                 "{forbidden} must not be settable from the server"
             );
         }
-        // The ceiling on who gets the SSH key is read under the name listed.
-        assert_eq!(
-            aurcache_worker_core::ssh_key::PACKAGES_VAR,
-            "WORKER_GIT_SSH_PACKAGES"
-        );
     }
 }
