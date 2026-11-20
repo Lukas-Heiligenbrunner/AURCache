@@ -403,6 +403,32 @@ mod tests {
         assert_eq!(entry.source, SettingSource::Package);
     }
 
+    /// A package keeps its build tree only when it opts in, and one opting in
+    /// leaves every other package off.
+    #[tokio::test]
+    async fn a_persistent_build_tree_is_opt_in() {
+        let db = db().await;
+        let entry = get(&db, key::PERSISTENT_BUILDDIR, Some(1)).await.unwrap();
+        assert!(!entry.value);
+        assert_eq!(entry.source, SettingSource::Default);
+
+        write(
+            &db,
+            [Change {
+                setting: Setting::PersistentBuilddir,
+                pkg_id: Some(1),
+                value: Some("true".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        let entry = get(&db, key::PERSISTENT_BUILDDIR, Some(1)).await.unwrap();
+        assert!(entry.value);
+        assert_eq!(entry.source, SettingSource::Package);
+        let other = get(&db, key::PERSISTENT_BUILDDIR, Some(2)).await.unwrap();
+        assert!(!other.value, "one package opting in leaves the rest off");
+    }
+
     /// The whole page and one setting at a time give the same answers: they
     /// share one resolver, over one read.
     #[tokio::test]
