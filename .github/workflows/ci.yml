@@ -194,6 +194,16 @@ jobs:
       - name: Update local toolchain
         run: rustup update
 
+      # Ubuntu takes the capabilities of a new user namespace away from a
+      # process without CAP_SYS_ADMIN, as root in a build's container is, so
+      # no build could mount in one there. The test checks that a build can,
+      # as on a host that allows it; the key is absent elsewhere.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Sandbox test
         run: ./scripts/test-sandbox.sh
 
