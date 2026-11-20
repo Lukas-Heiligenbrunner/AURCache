@@ -141,24 +141,8 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
 
-    // Before any build: a crafted PKGBUILD can reach the worker-protocol port
-    // from inside a build (shared network namespace) and submit a rogue
-    // registration, so the build user is firewalled off it first. After
-    // enrollment, because the repository the rule must leave open comes from
-    // the server. Best-effort like the credential announcement: a worker that
-    // cannot set the rule still builds, but says so loudly.
-    match aurcache_worker::build_firewall::ensure(
-        &core.aurcache_url,
-        client.repo(),
-        &cfg.build_user,
-    ) {
-        Ok(()) => tracing::info!("Build user firewalled off the worker-protocol port"),
-        Err(e) => tracing::warn!(
-            "Build-user worker-port rule not installed ({e:#}); builds can reach \
-             the worker protocol port"
-        ),
-    }
-
-    let executor = ChrootExecutor::new(cfg).await;
+    // Builds' network rules go in place as the executor opens, once the
+    // cgroups they match on are prepared; see `build_firewall`.
+    let executor = ChrootExecutor::new(cfg, &identity.fingerprint).await;
     Runner::new(core, client, executor).run().await
 }
