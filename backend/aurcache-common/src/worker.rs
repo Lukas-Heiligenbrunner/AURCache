@@ -293,6 +293,13 @@ pub struct JobDescriptor {
     /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<String>,
+    /// Local destinations, `host:port`, the server allows this build: its
+    /// package's `build_hosts` added to the server's. A worker with a network
+    /// policy lets the build reach them; one without ignores them. The server
+    /// sends it with every job, `[]` when it allows none; `None`, from a
+    /// server that predates the field, means none as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_hosts: Option<Vec<String>>,
 }
 
 /// One `git+` source of a build, as the worker needs to find it.
@@ -471,6 +478,7 @@ mod tests {
             timeout_secs: Some(3600),
             expected_version: "1.0-1".into(),
             ssh_key: Some("gitlab".into()),
+            build_hosts: Some(vec!["distcc.lan:3632".into()]),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {
                 source_url: "git+https://example.test/repo.git".into(),
@@ -486,6 +494,7 @@ mod tests {
         assert_eq!(job.expected_packages, back.expected_packages);
         assert_eq!(job.expected_version, back.expected_version);
         assert_eq!(job.ssh_key, back.ssh_key);
+        assert_eq!(job.build_hosts, back.build_hosts);
     }
 
     fn range(min: u32, max: u32) -> ProtocolRange {

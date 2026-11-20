@@ -894,6 +894,7 @@ async fn execute_build_process(
                 server: client.server(),
                 pacman_conf: ctx.pacman.build.clone(),
                 mirrorlist: claimed.mirrorlist.clone(),
+                build_hosts: claimed.job.build_hosts.clone().unwrap_or_default(),
             },
         )
         .await
@@ -1543,6 +1544,7 @@ mod tests {
             timeout_secs: None,
             expected_version: "1-1".to_string(),
             ssh_key: None,
+            build_hosts: None,
         }
     }
 

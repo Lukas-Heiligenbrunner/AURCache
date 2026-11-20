@@ -216,6 +216,9 @@ defect this frontend has had was of that kind.
   `aurcache_db::helpers::builds::refresh_package_status` in the same transaction.
 - Settings are read through `aurcache_utils::settings::get` with a typed `settings::key::*`, not by
   reading env vars ad hoc. The effective precedence in code is `Package -> Env -> Global -> Default`.
+  `build_hosts` is the exception: a package's list is added to the server's rather than replacing
+  it, so it has no `key::*` and `get` cannot read it. `settings::build_hosts` reads it, the
+  package's own list and the server's, and `BuildHosts::union` is what a build gets.
 - Every other variable the server reads is declared in `aurcache_common::server_env` and read through
   its constant. Tests fail on a declared variable missing from
   `docs/docs/Configuration/environment-variables.md`, on a row there nothing declares, and on a plain

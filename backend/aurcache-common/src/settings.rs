@@ -49,6 +49,10 @@ pub struct ApplicationSettings {
     /// server that does not send it, which is what such a server's builds get.
     #[serde(default = "default_build_ssh_key")]
     pub build_ssh_key: SettingsEntry<String>,
+    /// Local `host:port`s builds may reach. See [`BuildHostsEntry`]. Read
+    /// as none from a server that does not send it.
+    #[serde(default = "default_build_hosts")]
+    pub build_hosts: BuildHostsEntry,
 }
 
 /// [`Setting::BuildSshKey`]'s built-in default, as a resolved entry.
@@ -57,6 +61,35 @@ fn default_build_ssh_key() -> SettingsEntry<String> {
         value: crate::ssh_key::DEFAULT.to_string(),
         source: SettingSource::Default,
     }
+}
+
+/// [`Setting::BuildHosts`]'s built-in default: no hosts, the package's or
+/// the server's.
+fn default_build_hosts() -> BuildHostsEntry {
+    BuildHostsEntry {
+        package: None,
+        server: SettingsEntry {
+            value: String::new(),
+            source: SettingSource::Default,
+        },
+    }
+}
+
+/// [`Setting::BuildHosts`] for the server or for one package, each list as
+/// it is typed: `host:port` separated by commas.
+///
+/// A package's hosts are added to the server's rather than replacing them,
+/// so this carries both: a build gets the package's followed by the
+/// server's.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BuildHostsEntry {
+    /// The package's own hosts, what its page edits; `None` for the server,
+    /// and for a package without a list of its own.
+    pub package: Option<String>,
+    /// The server's hosts, and where they come from: `Env`, `Global` or
+    /// `Default`. What a package inherits.
+    pub server: SettingsEntry<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +105,8 @@ pub struct SettingsMeta {
 pub enum Scope {
     /// One value for the whole server.
     Global,
-    /// A server-wide value that a package may override.
+    /// A server-wide value that a package may set for itself: in place of
+    /// the server's, or for [`Setting::BuildHosts`] added to it.
     Package,
 }
 
@@ -89,6 +123,7 @@ pub enum Setting {
     PacmanConf,
     ParseNetwork,
     BuildSshKey,
+    BuildHosts,
 }
 
 /// Keys of settings that no longer exist, which may still be stored or dumped.
@@ -135,7 +170,7 @@ impl Setting {
     /// separately: two lists drift, and a setting served by `GET /settings`
     /// but unknown to `PATCH /settings/<key>` cannot be changed through the
     /// API at all.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::VersionCheckInterval,
         Self::AutoUpdateSchedule,
         Self::BuildOnNewVersion,
@@ -147,6 +182,7 @@ impl Setting {
         Self::PacmanConf,
         Self::ParseNetwork,
         Self::BuildSshKey,
+        Self::BuildHosts,
     ];
 
     /// This setting's stable key, environment variable, built-in default and
@@ -271,6 +307,19 @@ impl Setting {
                 default: crate::ssh_key::DEFAULT,
                 scope: Scope::Package,
             },
+            // Destinations on the local network builds may reach, which the
+            // worker's network policy refuses otherwise: a distcc helper, a
+            // git server, a cache. Per package and for the server, and unlike
+            // every other setting a package's list is added to the server's
+            // rather than replacing it, so one package that needs one more
+            // host does not have to repeat the rest. Each entry opens exactly
+            // that host and port, the server's own host included.
+            Self::BuildHosts => SettingsMeta {
+                key: "build_hosts",
+                env_name: Some("BUILD_HOSTS"),
+                default: "",
+                scope: Scope::Package,
+            },
         }
     }
 
@@ -330,6 +379,19 @@ impl Setting {
             // Empty inherits; see `empty_inherits`.
             Self::BuildSshKey if value.is_empty() => Ok(()),
             Self::BuildSshKey => crate::ssh_key::validate_name(value),
+            Self::BuildHosts => {
+                let list = crate::host_port::HostPort::parse_list(value);
+                if list.invalid.is_empty() {
+                    Ok(())
+                } else {
+                    Err(list
+                        .invalid
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "))
+                }
+            }
             Self::DateFormat | Self::MakepkgConf | Self::PacmanConf => Ok(()),
         }
     }
@@ -379,10 +441,10 @@ mod tests {
         assert!(setting.validate(" default").is_err());
     }
 
-    /// Settings from a server that does not send `build_ssh_key` still read,
-    /// as the built-in default.
+    /// Settings from a server that sends neither `build_ssh_key` nor
+    /// `build_hosts` still read, as the built-in defaults.
     #[test]
-    fn settings_without_an_ssh_key_read_as_the_default() {
+    fn settings_without_an_ssh_key_or_hosts_read_as_the_defaults() {
         let entry = |value: &str| format!(r#"{{"value":{value},"source":"default"}}"#);
         let json = format!(
             r#"{{"version_check_interval":{n},"auto_update_schedule":{none},"job_timeout":{n},
@@ -396,6 +458,19 @@ mod tests {
         let settings: ApplicationSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(settings.build_ssh_key, default_build_ssh_key());
         assert_eq!(settings.build_ssh_key.value, "default");
+        assert_eq!(settings.build_hosts, default_build_hosts());
+    }
+
+    /// Every entry has to be a `host:port`, and the message names the ones
+    /// that are not; empty is none.
+    #[test]
+    fn build_hosts_are_host_port_lists() {
+        let setting = Setting::BuildHosts;
+        assert_eq!(setting.validate(""), Ok(()));
+        assert_eq!(setting.validate("distcc.lan:3632, [fd00::5]:22"), Ok(()));
+        let err = setting.validate("distcc.lan:3632, gitlab.lan").unwrap_err();
+        assert!(err.contains("gitlab.lan"), "{err}");
+        assert!(!err.contains("distcc"), "{err}");
     }
 
     /// A duration is checked before it is stored, and zero is refused: it
@@ -443,6 +518,7 @@ mod tests {
                 Setting::PacmanConf => 8,
                 Setting::ParseNetwork => 9,
                 Setting::BuildSshKey => 10,
+                Setting::BuildHosts => 11,
             }
         }
 

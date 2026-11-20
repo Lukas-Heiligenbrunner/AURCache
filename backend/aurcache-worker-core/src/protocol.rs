@@ -230,6 +230,7 @@ mod tests {
             timeout_secs,
             expected_version: "1-1".into(),
             ssh_key: None,
+            build_hosts: None,
         }
     }
 

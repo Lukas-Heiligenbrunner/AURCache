@@ -86,6 +86,16 @@ pub async fn descriptor(
 
     let ssh_key = ssh_key(db, build.pkg_id).await?;
 
+    // The package's local hosts added to the server's. Sent with every job,
+    // `[]` when there are none: only a server that predates the field leaves
+    // it out.
+    let build_hosts = settings::build_hosts(db, Some(build.pkg_id))
+        .await?
+        .union()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
     // Before `pkg.name` moves into the descriptor below.
     let packages = crate::publish::expected_pkgnames(&pkg);
     Ok(JobDescriptor {
@@ -103,6 +113,7 @@ pub async fn descriptor(
         pgp_keys,
         vcs_sources,
         ssh_key,
+        build_hosts: Some(build_hosts),
     })
 }
 
@@ -234,6 +245,56 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ssh_key(&db, 1).await.unwrap(), None);
+    }
+
+    /// Every job carries `build_hosts`: `[]` on the wire when neither the
+    /// package nor the server names a host, and otherwise the package's
+    /// followed by the server's.
+    #[tokio::test]
+    async fn every_job_carries_its_build_hosts() {
+        let db = aurcache_db::testing::memory_db().await;
+        let pkg = aurcache_db::testing::package("hello").insert(&db).await;
+        let build = aurcache_db::testing::build(&pkg).insert(&db).await;
+        // Sources nothing can be fetched from: the job's keys and VCS sources
+        // come out empty, which is all this needs.
+        let checkouts = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::with_checkout_root_and_aur_base(
+            checkouts.path().to_path_buf(),
+            checkouts
+                .path()
+                .join("no-aur")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let job = || descriptor(&db, &store, &build, &MirrorlistPreference::Local);
+
+        let wire = serde_json::to_value(job().await.unwrap()).unwrap();
+        assert_eq!(wire["build_hosts"], serde_json::json!([]));
+
+        write(
+            &db,
+            [
+                Change {
+                    setting: Setting::BuildHosts,
+                    pkg_id: None,
+                    value: Some("distcc.lan:3632".to_string()),
+                },
+                Change {
+                    setting: Setting::BuildHosts,
+                    pkg_id: Some(pkg.id),
+                    value: Some("gitlab.lan:22".to_string()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            job().await.unwrap().build_hosts,
+            Some(vec![
+                "gitlab.lan:22".to_string(),
+                "distcc.lan:3632".to_string()
+            ])
+        );
     }
 
     fn holding(arch: &str, checksum: &str) -> MirrorlistPreference {

@@ -14,7 +14,8 @@
 //! 1. established and related traffic: accepted;
 //! 2. DNS to the resolvers in the worker's `resolv.conf`: accepted;
 //! 3. the allowlist, exact `host:port` pairs (the `Server =` lines of the
-//!    build's `pacman.conf`, `WORKER_BUILD_ALLOW`): accepted;
+//!    build's `pacman.conf`, the server's `build_hosts`, and
+//!    `WORKER_BUILD_ALLOW`): accepted;
 //! 4. local destinations ([`local`]) -- the private, link-local, shared and
 //!    reserved ranges, multicast, their NAT64 forms, every address of the
 //!    worker host itself, the prefixes and default gateways of its links,
@@ -711,6 +712,8 @@ pub struct Inputs {
     pub pacman_conf: PathBuf,
     /// The mirrorlist the server sent for the build, if any.
     pub mirrorlist: Option<String>,
+    /// The local hosts the server allows the build (`build_hosts`).
+    pub build_hosts: Vec<String>,
 }
 
 /// A policy resolved for one build, with what could not be.
@@ -719,7 +722,8 @@ struct Resolved {
     /// The addresses the server's hosts resolve to: the repository's, and the
     /// worker protocol's.
     server: Vec<IpAddr>,
-    /// Allowlist entries whose names did not resolve, already explained.
+    /// Allowlist entries left out, already explained: a name that did not
+    /// resolve, or an entry from the server that did not parse.
     skipped: Vec<String>,
 }
 
@@ -775,8 +779,18 @@ fn resolve(inputs: &Inputs) -> Result<Resolved> {
     if let Some(list) = &inputs.mirrorlist {
         servers.extend(mirrors(list).servers);
     }
+    // What the server allows this build. The server checks each entry
+    // before storing it; one that still does not parse is left out here.
+    let mut from_server = Vec::new();
+    for raw in &inputs.build_hosts {
+        match HostPort::parse(raw) {
+            Ok(entry) => from_server.push(entry),
+            Err(e) => skipped.push(format!("{raw:?} from the server: {e}")),
+        }
+    }
     let entries = servers
         .into_iter()
+        .chain(from_server)
         .chain(inputs.allow.iter().cloned())
         .collect::<BTreeSet<_>>();
 
@@ -1159,7 +1173,8 @@ pub struct BuildRules {
 }
 
 impl BuildRules {
-    /// Allowlist entries left out because their names did not resolve.
+    /// Allowlist entries left out, each with why: a name that did not
+    /// resolve, or an entry from the server that did not parse.
     #[must_use]
     pub fn skipped(&self) -> &[String] {
         &self.skipped
@@ -1209,8 +1224,8 @@ impl Drop for BuildRules {
 /// A refusal as the build's log says it.
 fn explain(refusal: &Refusal) -> String {
     format!(
-        "{refusal}: a local address; the worker's WORKER_BUILD_ALLOW can allow it \
-         (host:port)"
+        "{refusal}: a local address; build_hosts on the server, or the worker's \
+         WORKER_BUILD_ALLOW, can allow it (host:port)"
     )
 }
 
@@ -1483,6 +1498,7 @@ mod tests {
             server: protocol,
             pacman_conf,
             mirrorlist: None,
+            build_hosts: Vec::new(),
         }
     }
 
@@ -1699,8 +1715,37 @@ mod tests {
         };
         assert_eq!(
             explain(&refusal),
-            "192.168.1.9:3632/tcp: a local address; the worker's WORKER_BUILD_ALLOW \
-             can allow it (host:port)"
+            "192.168.1.9:3632/tcp: a local address; build_hosts on the server, or the \
+             worker's WORKER_BUILD_ALLOW, can allow it (host:port)"
+        );
+    }
+
+    /// The server's hosts join the allowlist beside the worker's own, and one
+    /// that does not parse is left out and named.
+    #[test]
+    fn the_servers_hosts_join_the_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let pacman_conf = dir.path().join("pacman.conf");
+        std::fs::write(&pacman_conf, "[options]\n").unwrap();
+        let inputs = Inputs {
+            repo: None,
+            allow: vec![HostPort {
+                host: "10.0.0.5".to_string(),
+                port: 3632,
+            }],
+            server: None,
+            pacman_conf,
+            mirrorlist: None,
+            build_hosts: vec!["192.168.1.20:5000".to_string(), "gitlab.lan".to_string()],
+        };
+        let resolved = resolve(&inputs).unwrap();
+        assert_eq!(
+            resolved.policy.allowed,
+            [sock("10.0.0.5:3632"), sock("192.168.1.20:5000")]
+        );
+        assert_eq!(
+            resolved.skipped,
+            [r#""gitlab.lan" from the server: no port: write it as host:port"#]
         );
     }
 }

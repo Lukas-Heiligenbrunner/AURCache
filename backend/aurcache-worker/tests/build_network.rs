@@ -287,6 +287,7 @@ impl PacmanConf {
             server: None,
             pacman_conf: self.path.clone(),
             mirrorlist: None,
+            build_hosts: Vec::new(),
         }
     }
 }
@@ -354,12 +355,14 @@ fn nft_lists(what: &[&str]) -> bool {
 #[ignore = "restructures the caller's cgroup, adds nftables tables and a network namespace; run in a privileged container"]
 async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     // The server's worker protocol, API and repository; a git server on the
-    // server's host that the worker allows; and a service elsewhere on this
-    // host that nothing allows.
+    // server's host that the worker allows; and on another host of the local
+    // network, a forge the server allows (`build_hosts`) and a service beside
+    // it that nothing allows.
     let protocol = listen("127.0.0.1:0");
     let api = listen("127.0.0.1:0");
     let repo = listen("127.0.0.1:0");
     let git = listen("127.0.0.1:0");
+    let forge = listen("127.0.0.2:0");
     let nas = listen("127.0.0.2:0");
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
     let network = enforced(Table::for_worker("c9a0"), &hierarchy);
@@ -373,6 +376,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
     let cgroup = hierarchy
         .for_build(4242, &BuildLimits::default())
         .expect("creating the build cgroup");
+    let build_hosts = [forge.addr.to_string()];
     let rules = network
         .open(
             4242,
@@ -382,6 +386,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
                     host: "127.0.0.1".to_string(),
                     port: git.port(),
                 }],
+                build_hosts: build_hosts.to_vec(),
                 ..conf.inputs()
             },
         )
@@ -394,6 +399,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         protocol.target("worker-protocol"),
         repo.target("repository"),
         git.target("allowed-git"),
+        forge.target("server-allowed-forge"),
         nas.target("local-network"),
         on_lan.public_v4.target("lan-public-v4"),
         on_lan.global_v6.target("lan-global-v6"),
@@ -422,6 +428,10 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         },
         Want {
             check: "allowed-git",
+            got: "open",
+        },
+        Want {
+            check: "server-allowed-forge",
             got: "open",
         },
         Want {
@@ -489,7 +499,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
             listener.addr
         );
     }
-    for listener in [&repo, &git, &on_lan.beyond_v4, &on_lan.beyond_v6] {
+    for listener in [&repo, &git, &forge, &on_lan.beyond_v4, &on_lan.beyond_v6] {
         assert!(!reported(listener), "{refused:#?}");
     }
 
@@ -499,6 +509,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         &api,
         &repo,
         &git,
+        &forge,
         &nas,
         &on_lan.public_v4,
         &on_lan.global_v6,

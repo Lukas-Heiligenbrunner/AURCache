@@ -174,6 +174,15 @@ fn SettingsSections(
                 editor: Editor::Text { placeholder: "default".to_string(), wide: false },
                 save,
             }
+            SettingRow {
+                setting: Setting::BuildHosts,
+                label: "Build hosts",
+                description: "Local destinations builds may reach, as host:port separated by commas, such as a distcc helper or a git server. A worker with a network policy keeps builds off every other local address, the server's other ports included, except the repository; each entry opens exactly that host and port. A package's own hosts are added to these.",
+                value: settings.build_hosts.server.value.clone(),
+                source: settings.build_hosts.server.source,
+                editor: Editor::Text { placeholder: "distcc.lan:3632".to_string(), wide: true },
+                save,
+            }
         }
 
         ApiAccessSection {}

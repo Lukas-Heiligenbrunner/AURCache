@@ -119,6 +119,7 @@ mod tests {
             timeout_secs: None,
             expected_version: "1-1".to_string(),
             ssh_key: ssh_key.map(str::to_string),
+            build_hosts: None,
         }
     }
 

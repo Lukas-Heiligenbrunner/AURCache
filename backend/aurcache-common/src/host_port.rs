@@ -1,7 +1,9 @@
 //! `host:port` entries naming what a build may reach on the local network.
 //!
-//! The worker's `WORKER_BUILD_ALLOW` is a list of them. An entry opens its
-//! port on that host to TCP and to UDP alike.
+//! The worker's `WORKER_BUILD_ALLOW` is a list of them, and so is the server's
+//! `build_hosts` setting. One parser, so an entry the server accepts is one
+//! every worker reads the same way. An entry opens its port on that host to
+//! TCP and to UDP alike.
 //!
 //! The host is a name or an address; an IPv6 address goes in brackets, as in a
 //! URL (`[fd00::5]:3632`), and an IPv4 address is written in full, in decimal:

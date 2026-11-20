@@ -158,6 +158,11 @@ what they receive:
      field out for `default`. Only the name is sent; a worker maps it to a
      key through its own configuration, and builds without a key when it
      holds none by that name.
+   - `build_hosts`, optional: the local `host:port` destinations the server
+     allows the build, which a worker with a
+     [network policy](./split-chroot.md#what-builds-can-reach-on-the-network)
+     lets it reach. The server sends it with every job, `[]` when it allows
+     none; a server that predates it leaves it out, which means none as well.
 3. **Stream the log.** `POST /api/worker/jobs/{build_id}/logs` appends UTF-8
    text to the build's log, as the build prints it.
 4. **Upload the packages.** `POST

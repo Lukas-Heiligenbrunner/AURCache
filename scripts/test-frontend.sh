@@ -254,6 +254,10 @@ ROUTES=(
     # The one irreversible action, in its own card rather than in the header.
     "/package/hello|Remove package|a package can be removed from its own page"
     "/package/hello|Max artifact size|a package can have its own artifact size limit"
+    # A package's build hosts are added to the server's, which its page lists
+    # under the field holding its own.
+    "/package/hello|Inherited:|a package shows the build hosts it inherits"
+    "/package/hello|distcc.lan:3632, flexo.lan:7878|the inherited build hosts are listed"
     "/package/hello|>Edit sources<|an unpatched package's sources button says nothing more"
     # The remove card knows which way the delete will go: `yay` needs hello, so
     # it says removing only unflags it, while nothing depends on `paru`.

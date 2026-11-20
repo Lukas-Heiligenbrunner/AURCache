@@ -80,6 +80,12 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
                     entry,
                     which: PackageValue::SshKey,
                 }
+                PackageValueField {
+                    key: "hosts-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    which: PackageValue::BuildHosts,
+                }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
                 // row of its own saying so beside it.
@@ -214,14 +220,18 @@ fn PersistBuildDirField(
 }
 
 /// A server setting this package may set for itself: the largest file its
-/// builds may upload, how long one may run, or the SSH key its builds may use.
+/// builds may upload, how long one may run, the SSH key its builds may use, or
+/// the local hosts they may reach.
 ///
-/// Each resolves per package (see `Setting::MaxArtifactSize`), so one outsized
-/// or slow package can be allowed more without raising the limit for all, and
-/// one package can be given a key no other build gets. Shown as it is written
-/// (`20G`, `3h`, `default`), with where the value comes from; typing a new one
-/// offers Save, and a package override offers Reset. For the SSH key, a saved
-/// empty value is no value: the package uses the global key again.
+/// The limits and the key resolve per package (see `Setting::MaxArtifactSize`),
+/// so one outsized or slow package can be allowed more without raising the
+/// limit for all, and one package can be given a key no other build gets; each
+/// is shown with where its value comes from. For the SSH key, a saved empty
+/// value is no value: the package uses the global key again. The hosts are
+/// added to the server's (see `Setting::BuildHosts`), so the field holds this
+/// package's own, and the server's it inherits are listed under it.
+/// Shown as it is written (`20G`, `3h`, `default`); typing a new value offers
+/// Save, and a value of the package's own offers Reset.
 #[component]
 fn PackageValueField(
     pkgbase: String,
@@ -247,11 +257,14 @@ fn PackageValueField(
         let scope = save_scope.clone();
         async move {
             let value = draft().text().trim().to_owned();
-            if controller
-                .apply(&scope, SettingEdit::set(setting, value).editing(draft))
-                .await
-                == MutationOutcome::Applied
-            {
+            // Emptied, the field means the package has no value of its own:
+            // what Reset does, rather than an empty one stored in its place.
+            let edit = if value.is_empty() {
+                SettingEdit::reset(setting)
+            } else {
+                SettingEdit::set(setting, value)
+            };
+            if controller.apply(&scope, edit.editing(draft)).await == MutationOutcome::Applied {
                 entry.restart();
             }
         }
@@ -270,8 +283,10 @@ fn PackageValueField(
     };
 
     rsx! {
-        div { class: "flex gap-2 py-1 text-sm items-center",
-            span { class: "opacity-60 w-32 shrink-0", "{which.label()}" }
+        // Aligned on the first line, the field's, rather than centred against
+        // whatever is listed under it.
+        div { class: "flex gap-2 py-1 text-sm items-start",
+            span { class: "opacity-60 w-32 shrink-0 leading-6", "{which.label()}" }
             div { class: "min-w-0 flex-1",
                 match &*entry.read_unchecked() {
                     None => rsx! { span { class: "loading loading-spinner loading-xs" } },
@@ -280,33 +295,37 @@ fn PackageValueField(
                     },
                     Some(Ok(settings)) => {
                         let SettingsEntry { value: current, source } = which.shown(settings);
+                        let inherited = which.inherited(settings);
                         // No lock for an environment variable: a package's own
-                        // value outranks it (Package -> Env -> Global -> Default),
-                        // so an override here still applies.
+                        // value applies whatever it says. A limit or a key
+                        // of the package's outranks it (Package -> Env ->
+                        // Global -> Default), and the package's hosts are
+                        // added to it.
                         let changed = draft().text().trim() != current;
                         rsx! {
-                            div { class: "flex items-center gap-2 flex-wrap",
+                            // Wrapping, so a narrow screen puts the buttons
+                            // under the field rather than past the edge.
+                            div { class: "flex flex-wrap items-center gap-2",
                                 input {
                                     r#type: "text",
-                                    class: "input input-bordered input-xs w-24 font-mono",
+                                    class: "input input-bordered input-xs {which.input_width()} font-mono",
                                     placeholder: which.placeholder(),
                                     disabled: busy(),
                                     value: draft().text(),
                                     oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
                                 }
-                                span {
-                                    class: "badge badge-ghost badge-sm",
-                                    title: "Where this value comes from",
-                                    match source {
-                                        SettingSource::Package => "this package",
-                                        SettingSource::Global => "global",
-                                        SettingSource::Env => "environment",
-                                        SettingSource::Default => "default",
+                                // What is inherited says where it comes from
+                                // itself, under the field.
+                                if inherited.is_none() {
+                                    span {
+                                        class: "badge badge-ghost badge-sm shrink-0",
+                                        title: "Where this value comes from",
+                                        "{source_label(source)}"
                                     }
                                 }
                                 if changed {
                                     button {
-                                        class: "btn btn-primary btn-xs",
+                                        class: "btn btn-primary btn-xs shrink-0",
                                         disabled: busy(),
                                         onclick: save,
                                         "Save"
@@ -314,12 +333,18 @@ fn PackageValueField(
                                 }
                                 if source == SettingSource::Package && !busy() {
                                     button {
-                                        class: "btn btn-ghost btn-xs",
-                                        title: "Discard this package's value and use the global one again",
+                                        class: "btn btn-ghost btn-xs shrink-0",
+                                        title: which.reset_title(),
                                         onclick: reset,
                                         "Reset"
                                     }
                                 }
+                            }
+                            if let Some(inherited) = inherited {
+                                InheritedHosts { hosts: inherited }
+                            }
+                            if let Some(note) = which.note() {
+                                p { class: "text-xs opacity-60", "{note}" }
                             }
                             if let Some(message) = error() {
                                 p { class: "text-xs text-error", "{message}" }
@@ -332,20 +357,56 @@ fn PackageValueField(
     }
 }
 
+/// The server's build hosts, which a package's own are added to.
+#[component]
+fn InheritedHosts(hosts: SettingsEntry<String>) -> Element {
+    rsx! {
+        // Running text, so a long list breaks after its commas rather than
+        // inside a host.
+        p { class: "text-xs mt-1 break-words",
+            span { class: "opacity-60", "Inherited: " }
+            if hosts.value.is_empty() {
+                span { class: "opacity-60", "none" }
+            } else {
+                span { class: "font-mono", "{hosts.value}" }
+                " "
+                span {
+                    class: "badge badge-ghost badge-xs align-middle",
+                    title: "Where the inherited hosts come from",
+                    "{source_label(hosts.source)}"
+                }
+            }
+        }
+    }
+}
+
+/// Where a value comes from, as its badge says it.
+const fn source_label(source: SettingSource) -> &'static str {
+    match source {
+        SettingSource::Package => "this package",
+        SettingSource::Global => "global",
+        SettingSource::Env => "environment",
+        SettingSource::Default => "default",
+    }
+}
+
 /// The values a package may set for itself, each shown by [`PackageValueField`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PackageValue {
     ArtifactSize,
     JobTimeout,
     SshKey,
+    BuildHosts,
 }
 
 impl PackageValue {
+    /// The server setting it is stored as.
     const fn setting(self) -> Setting {
         match self {
             Self::ArtifactSize => Setting::MaxArtifactSize,
             Self::JobTimeout => Setting::JobTimeout,
             Self::SshKey => Setting::BuildSshKey,
+            Self::BuildHosts => Setting::BuildHosts,
         }
     }
 
@@ -354,6 +415,38 @@ impl PackageValue {
             Self::ArtifactSize => "Max artifact size",
             Self::JobTimeout => "Job timeout",
             Self::SshKey => "Build SSH key",
+            Self::BuildHosts => "Build hosts",
+        }
+    }
+
+    /// A list takes the whole row, its buttons going under it; a size, a
+    /// duration or a key name needs little.
+    const fn input_width(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout | Self::SshKey => "w-24",
+            Self::BuildHosts => "w-full",
+        }
+    }
+
+    const fn reset_title(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout | Self::SshKey => {
+                "Discard this package's value and use the global one again"
+            }
+            Self::BuildHosts => {
+                "Discard this package's own hosts; its builds keep the inherited ones"
+            }
+        }
+    }
+
+    /// What the field holds, where that is not obvious.
+    const fn note(self) -> Option<&'static str> {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout | Self::SshKey => None,
+            Self::BuildHosts => Some(
+                "Local host:port destinations this package's builds may reach, \
+                 separated by commas, besides the inherited ones.",
+            ),
         }
     }
 
@@ -362,10 +455,11 @@ impl PackageValue {
             Self::ArtifactSize => "20G",
             Self::JobTimeout => "1h",
             Self::SshKey => "default",
+            Self::BuildHosts => "gitlab.lan:22",
         }
     }
 
-    /// The value as it is written, and where it comes from.
+    /// The value the field holds, as it is written, and where it comes from.
     fn shown(self, settings: &aurcache_client::ApplicationSettings) -> SettingsEntry<String> {
         match self {
             Self::ArtifactSize => SettingsEntry {
@@ -382,6 +476,30 @@ impl PackageValue {
                 value: settings.build_ssh_key.value.clone(),
                 source: settings.build_ssh_key.source,
             },
+            // The package's own list, if it has one.
+            Self::BuildHosts => match &settings.build_hosts.package {
+                Some(hosts) => SettingsEntry {
+                    value: hosts.clone(),
+                    source: SettingSource::Package,
+                },
+                None => SettingsEntry {
+                    value: String::new(),
+                    source: SettingSource::Default,
+                },
+            },
+        }
+    }
+
+    /// What the package gets besides the field's value: the server's hosts,
+    /// for a list added to them. `None` for a limit or the key, whose value
+    /// replaces the server's.
+    fn inherited(
+        self,
+        settings: &aurcache_client::ApplicationSettings,
+    ) -> Option<SettingsEntry<String>> {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout | Self::SshKey => None,
+            Self::BuildHosts => Some(settings.build_hosts.server.clone()),
         }
     }
 }
