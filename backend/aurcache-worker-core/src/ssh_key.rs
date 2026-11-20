@@ -1,15 +1,12 @@
-//! Which of a worker's SSH keys a build is offered, and why not when none is.
+//! Which of a worker's SSH keys a build is offered, and why none when it
+//! asked for one.
 //!
-//! Three things decide it, all of them checked here so every executor decides
-//! the same way and says the same thing:
-//!
-//! 1. the job names a key -- the package's `build_ssh_key` setting -- or, from
-//!    a server that names none, implies [`ssh_key::DEFAULT`];
-//! 2. this worker holds a key by that name, in [`SshKeys`]: a lookup in the
-//!    worker's own configuration, never anything derived from the name;
-//! 3. `WORKER_GIT_SSH_PACKAGES` ([`SshPackages`]), when set, lists the
-//!    package: a ceiling the worker's operator sets and the server cannot
-//!    widen, since it is plain environment the worker alone reads.
+//! The server decides: a job names a key -- the package's `build_ssh_key`
+//! setting -- or, by naming none, asks for [`ssh_key::DEFAULT`], the worker's
+//! own. The worker offers the key by that name when it holds one, in
+//! [`SshKeys`]: a lookup in the worker's own configuration, never anything
+//! derived from the name. Decided here so every executor decides the same way
+//! and says the same thing.
 //!
 //! An executor calls [`offer`] with the claimed job and acts on the
 //! [`SshOffer`]: hand the build [`SshOffer::key`] when there is one, build
@@ -17,64 +14,13 @@
 //! log.
 
 use aurcache_common::ssh_key;
-use aurcache_common::worker::JobDescriptor;
+use aurcache_common::worker::{JobDescriptor, SshKeyRequest};
 use std::collections::BTreeMap;
-
-/// The variable naming the packages a worker's SSH keys may go to.
-pub const PACKAGES_VAR: &str = "WORKER_GIT_SSH_PACKAGES";
-
-/// The packages this worker's SSH keys may be offered to:
-/// `WORKER_GIT_SSH_PACKAGES`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SshPackages {
-    /// Unset: every package the job allows.
-    #[default]
-    All,
-    /// Exactly these pkgbases, matched as `WORKER_PACKAGES` matches: whole,
-    /// case-sensitive names, no wildcards. Empty lists none.
-    Only(Vec<String>),
-}
-
-impl SshPackages {
-    /// Read `WORKER_GIT_SSH_PACKAGES` from this process's environment.
-    ///
-    /// Read here, by the worker, and never declared as a setting: a value the
-    /// server could deliver would let it widen who gets the key.
-    #[must_use]
-    pub fn from_env() -> Self {
-        let raw = std::env::var_os(PACKAGES_VAR);
-        Self::parse(raw.as_deref().map(|raw| raw.to_string_lossy()).as_deref())
-    }
-
-    /// The list `raw` spells, in `WORKER_PACKAGES`' spelling (comma- or
-    /// space-separated); `None` is unset.
-    ///
-    /// Set but empty lists no package rather than reading as unset: it is
-    /// the only way to say "no build", and it fails closed.
-    #[must_use]
-    pub fn parse(raw: Option<&str>) -> Self {
-        match raw {
-            None => Self::All,
-            Some(raw) => Self::Only(crate::config::parse_list(raw)),
-        }
-    }
-
-    /// Whether this worker may offer a key to a build of `pkgbase`.
-    #[must_use]
-    pub fn offers(&self, pkgbase: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::Only(names) => names.iter().any(|name| name == pkgbase),
-        }
-    }
-}
 
 /// The SSH keys a worker holds, by name.
 ///
 /// `K` is whatever the executor hands a build to use one: an agent's socket,
-/// a mounted secret. Only [`ssh_key::DEFAULT`] exists for now, but a lookup
-/// by name is what lets a worker hold several without the job or the setting
-/// changing shape.
+/// a mounted secret.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshKeys<K> {
     by_name: BTreeMap<String, K>,
@@ -105,12 +51,6 @@ impl<K> SshKeys<K> {
         ssh_key::validate_name(name).ok()?;
         self.by_name.get(name)
     }
-
-    /// Whether this worker holds no key.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
 }
 
 /// What a build is offered of its worker's SSH keys.
@@ -118,18 +58,14 @@ impl<K> SshKeys<K> {
 pub enum SshOffer<'k, K> {
     /// The key `name`, which the build may use.
     Offered { name: String, key: &'k K },
-    /// The job names no key: the ordinary case, for a package that fetches
-    /// nothing over SSH.
-    NotRequested,
     /// The job names a key this worker does not hold. The build goes ahead
     /// without one: most never use it, and one that does fails at the fetch
     /// that needed it, with the notice above it in its log.
     NotHeld { name: String },
-    /// `WORKER_GIT_SSH_PACKAGES` does not list the package.
-    NotAllowed,
-    /// The job implies the default key, as a server that names none does,
-    /// and this worker holds none: nothing to offer, and nothing to say.
-    NoKeys,
+    /// No key, and nothing to say: the job asks for the default key on a
+    /// worker that holds none, or (`{"name": null}`, which no server sends
+    /// any more) for no key at all.
+    NoKey,
 }
 
 impl<'k, K> SshOffer<'k, K> {
@@ -138,14 +74,13 @@ impl<'k, K> SshOffer<'k, K> {
     pub fn key(&self) -> Option<&'k K> {
         match self {
             Self::Offered { key, .. } => Some(key),
-            _ => None,
+            Self::NotHeld { .. } | Self::NoKey => None,
         }
     }
 
-    /// One line for `pkgbase`'s build log saying what the build was offered
-    /// and, when nothing, why; `None` when there is nothing to say: a worker
-    /// with no key, or a package whose setting names none, which would
-    /// otherwise put a line in nearly every build log.
+    /// One line for `pkgbase`'s build log saying which key the build was
+    /// offered, or that the key its package names is not here; `None` when
+    /// there is nothing to say.
     #[must_use]
     pub fn notice(&self, pkgbase: &str) -> Option<String> {
         match self {
@@ -154,58 +89,43 @@ impl<'k, K> SshOffer<'k, K> {
                 "this worker holds no SSH key named {name:?}, which the build_ssh_key \
                  setting names for {pkgbase}; building without one"
             )),
-            Self::NotAllowed => Some(format!(
-                "no SSH key offered: {pkgbase} is not in this worker's {PACKAGES_VAR}"
-            )),
-            Self::NotRequested | Self::NoKeys => None,
+            Self::NoKey => None,
         }
     }
 }
 
-/// What `job`'s build is offered of `keys`, under `packages`.
+/// What `job`'s build is offered of `keys`.
 #[must_use]
-pub fn offer<'k, K>(
-    job: &JobDescriptor,
-    keys: &'k SshKeys<K>,
-    packages: &SshPackages,
-) -> SshOffer<'k, K> {
-    let requested = match &job.ssh_key {
-        // From a server that names no key: the default, unless the worker
-        // holds none.
-        None => None,
-        Some(request) => match &request.name {
-            None if keys.is_empty() => return SshOffer::NoKeys,
-            None => return SshOffer::NotRequested,
-            Some(name) => Some(name.as_str()),
-        },
-    };
-    let name = requested.unwrap_or(ssh_key::DEFAULT);
-    let Some(key) = keys.get(name) else {
-        return match requested {
-            Some(name) => SshOffer::NotHeld {
-                name: name.to_string(),
+pub fn offer<'k, K>(job: &JobDescriptor, keys: &'k SshKeys<K>) -> SshOffer<'k, K> {
+    match &job.ssh_key {
+        // The default key, as every job asks for unless its package names
+        // another; silent when this worker holds none.
+        None => keys
+            .get(ssh_key::DEFAULT)
+            .map_or(SshOffer::NoKey, |key| SshOffer::Offered {
+                name: ssh_key::DEFAULT.to_string(),
+                key,
+            }),
+        Some(SshKeyRequest { name: None }) => SshOffer::NoKey,
+        Some(SshKeyRequest { name: Some(name) }) => match keys.get(name) {
+            Some(key) => SshOffer::Offered {
+                name: name.clone(),
+                key,
             },
-            None => SshOffer::NoKeys,
-        };
-    };
-    if !packages.offers(&job.pkgbase) {
-        return SshOffer::NotAllowed;
-    }
-    SshOffer::Offered {
-        name: name.to_string(),
-        key,
+            None => SshOffer::NotHeld { name: name.clone() },
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurcache_common::worker::{MirrorlistOffer, SshKeyRequest};
+    use aurcache_common::worker::MirrorlistOffer;
 
-    fn job(pkgbase: &str, ssh_key: Option<SshKeyRequest>) -> JobDescriptor {
+    fn job(ssh_key: Option<SshKeyRequest>) -> JobDescriptor {
         JobDescriptor {
             build_id: 1,
-            pkgbase: pkgbase.to_string(),
+            pkgbase: "hello".to_string(),
             arch: "x86_64".to_string(),
             build_flags: Vec::new(),
             persistent_builddir: false,
@@ -227,127 +147,59 @@ mod tests {
         }
     }
 
-    fn none() -> SshKeyRequest {
-        SshKeyRequest { name: None }
-    }
-
     /// A worker holding one key, the default, behind an agent's socket.
-    fn agent() -> &'static SshKeys<&'static str> {
-        static KEYS: std::sync::LazyLock<SshKeys<&'static str>> =
-            std::sync::LazyLock::new(|| SshKeys::with_default(Some("/agent.sock")));
-        &KEYS
+    fn agent() -> SshKeys<&'static str> {
+        SshKeys::with_default(Some("/agent.sock"))
     }
 
-    fn offered(name: &str) -> SshOffer<'static, &'static str> {
+    fn offered(name: &str, key: &'static &'static str) -> SshOffer<'static, &'static str> {
         SshOffer::Offered {
             name: name.to_string(),
-            key: &"/agent.sock",
+            key,
         }
     }
 
-    #[test]
-    fn unset_is_every_package() {
-        let packages = SshPackages::parse(None);
-        assert_eq!(packages, SshPackages::All);
-        assert!(packages.offers("anything"));
-    }
-
-    /// Set but empty is "none", not unset: it fails closed.
-    #[test]
-    fn empty_lists_no_package() {
-        for raw in ["", " ", ",", " , "] {
-            let packages = SshPackages::parse(Some(raw));
-            assert_eq!(packages, SshPackages::Only(Vec::new()), "{raw:?}");
-            assert!(!packages.offers("unreal-engine"), "{raw:?}");
-            assert!(!packages.offers(""), "{raw:?}");
-        }
-    }
-
-    /// The spelling `WORKER_PACKAGES` takes, so the two can hold the same text.
-    #[test]
-    fn the_list_is_comma_or_space_separated() {
-        assert_eq!(
-            SshPackages::parse(Some("unreal-engine, epic-tools other")),
-            SshPackages::Only(vec![
-                "unreal-engine".to_string(),
-                "epic-tools".to_string(),
-                "other".to_string()
-            ])
-        );
-    }
-
-    /// Whole, case-sensitive names: no prefix, no wildcard, no case folding.
-    #[test]
-    fn membership_is_exact() {
-        let packages = SshPackages::parse(Some("unreal-engine"));
-        assert!(packages.offers("unreal-engine"));
-        assert!(!packages.offers("Unreal-Engine"));
-        assert!(!packages.offers("unreal"));
-        assert!(!packages.offers("unreal-engine-git"));
-        assert!(!SshPackages::parse(Some("unreal-*")).offers("unreal-engine"));
-    }
-
-    /// A job from a server that names no key gets the default, still under
-    /// the worker's ceiling.
+    /// A job naming nothing gets the default key, and its log says so.
     #[test]
     fn a_job_naming_nothing_gets_the_default_key() {
-        assert_eq!(
-            offer(&job("hello", None), agent(), &SshPackages::All),
-            offered("default")
-        );
-        let ceiling = SshPackages::parse(Some("unreal-engine"));
-        assert_eq!(
-            offer(&job("hello", None), agent(), &ceiling),
-            SshOffer::NotAllowed
-        );
-        assert_eq!(
-            offer(&job("unreal-engine", None), agent(), &ceiling),
-            offered("default")
-        );
-    }
-
-    #[test]
-    fn a_named_key_held_and_allowed_is_offered() {
-        let ceiling = SshPackages::parse(Some("unreal-engine"));
-        let offer = offer(
-            &job("unreal-engine", Some(named("default"))),
-            agent(),
-            &ceiling,
-        );
+        let keys = agent();
+        let offer = offer(&job(None), &keys);
+        assert_eq!(offer, offered("default", &"/agent.sock"));
         assert_eq!(offer.key(), Some(&"/agent.sock"));
-        assert_eq!(offer, offered("default"));
+        assert_eq!(
+            offer.notice("hello").unwrap(),
+            "SSH key \"default\" offered to this build"
+        );
     }
 
-    /// A job naming no key is offered none, and its log says nothing of it:
-    /// most packages fetch nothing over SSH.
+    /// A job naming the default outright gets it too.
+    #[test]
+    fn a_job_naming_the_default_gets_it() {
+        let keys = agent();
+        assert_eq!(
+            offer(&job(Some(named("default"))), &keys),
+            offered("default", &"/agent.sock")
+        );
+    }
+
+    /// A job naming no key at all, as no server sends any more but protocol
+    /// 1 still carries, is offered none, silently.
     #[test]
     fn a_job_naming_no_key_is_offered_none() {
-        let offer = offer(&job("hello", Some(none())), agent(), &SshPackages::All);
-        assert_eq!(offer, SshOffer::NotRequested);
-        assert_eq!(offer.key(), None);
+        let keys = agent();
+        let offer = offer(&job(Some(SshKeyRequest { name: None })), &keys);
+        assert_eq!(offer, SshOffer::NoKey);
         assert_eq!(offer.notice("hello"), None);
     }
 
-    /// The ceiling is checked after the job: a job that asks for a key on a
-    /// worker whose list leaves the package out is refused for that reason.
-    #[test]
-    fn the_ceiling_refuses_an_unlisted_package() {
-        let ceiling = SshPackages::parse(Some("unreal-engine"));
-        let offer = offer(&job("hello", Some(named("default"))), agent(), &ceiling);
-        assert_eq!(offer, SshOffer::NotAllowed);
-        assert_eq!(offer.key(), None);
-        assert_eq!(
-            offer.notice("hello").unwrap(),
-            "no SSH key offered: hello is not in this worker's WORKER_GIT_SSH_PACKAGES"
-        );
-    }
-
     /// A name the worker does not hold, or that is no name at all, is never
-    /// looked up as anything else, and the build is handed no key.
+    /// looked up as anything else; the build goes ahead without a key, and
+    /// its log says why.
     #[test]
-    fn a_name_the_worker_does_not_hold_is_not_held() {
+    fn a_name_the_worker_does_not_hold_is_built_without() {
+        let keys = agent();
         for name in ["gitlab", "../ssh/id_ed25519", "/run/secrets/key", "Default"] {
-            let offer = offer(&job("hello", Some(named(name))), agent(), &SshPackages::All);
+            let offer = offer(&job(Some(named(name))), &keys);
             assert_eq!(
                 offer,
                 SshOffer::NotHeld {
@@ -356,61 +208,26 @@ mod tests {
             );
             assert_eq!(offer.key(), None);
         }
-        let no_keys = SshKeys::<&str>::default();
-        let offer = offer(
-            &job("hello", Some(named("default"))),
-            &no_keys,
-            &SshPackages::All,
-        );
-        assert!(matches!(offer, SshOffer::NotHeld { .. }), "{offer:?}");
-        assert_eq!(offer.key(), None);
-    }
-
-    /// A build whose setting names a key its worker does not hold goes ahead
-    /// without one, and its log says so: a package that never fetches over
-    /// SSH builds, and one that does fails at that fetch with the reason
-    /// above it.
-    #[test]
-    fn a_key_the_worker_does_not_hold_is_built_without() {
-        let offer = offer(
-            &job("hello", Some(named("gitlab"))),
-            agent(),
-            &SshPackages::All,
-        );
-        assert_eq!(offer.key(), None);
         assert_eq!(
-            offer.notice("hello").unwrap(),
+            offer(&job(Some(named("gitlab"))), &keys)
+                .notice("hello")
+                .unwrap(),
             "this worker holds no SSH key named \"gitlab\", which the build_ssh_key \
              setting names for hello; building without one"
         );
     }
 
-    /// A worker with no key says nothing about keys to a build that did not
-    /// insist on one: not about the job, not about the ceiling.
+    /// A worker with no key builds a job that names none without a word;
+    /// one whose package names a key still hears that it is not here.
     #[test]
-    fn a_worker_without_keys_is_silent() {
+    fn a_worker_without_keys_is_silent_unless_a_key_is_named() {
         let keys = SshKeys::<&str>::default();
-        let ceiling = SshPackages::parse(Some("other"));
-        for request in [None, Some(none())] {
-            let offer = offer(&job("hello", request), &keys, &ceiling);
-            assert_eq!(offer, SshOffer::NoKeys);
-            assert_eq!(offer.notice("hello"), None);
-        }
-    }
-
-    /// Each refusal says its own reason.
-    #[test]
-    fn every_refusal_explains_itself() {
-        let notices: Vec<_> = [
-            SshOffer::<&str>::NotHeld {
-                name: "gitlab".to_string(),
-            },
-            SshOffer::NotAllowed,
-        ]
-        .iter()
-        .map(|offer| offer.notice("hello").unwrap())
-        .collect();
-        assert!(notices[0].contains("\"gitlab\""), "{}", notices[0]);
-        assert!(notices[1].contains(PACKAGES_VAR), "{}", notices[1]);
+        let offer_default = offer(&job(None), &keys);
+        assert_eq!(offer_default, SshOffer::NoKey);
+        assert_eq!(offer_default.notice("hello"), None);
+        assert!(matches!(
+            offer(&job(Some(named("gitlab"))), &keys),
+            SshOffer::NotHeld { .. }
+        ));
     }
 }
