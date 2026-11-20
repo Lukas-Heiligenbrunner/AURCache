@@ -7,7 +7,7 @@ use crate::platforms::PlatformChecklist;
 use crate::routes::Route;
 use crate::widgets::Modal;
 use aurcache_client::{ExtendedPackage, PackagePatch, Setting, SettingSource, SettingsEntry};
-use aurcache_common::build_flags::OFFERED;
+use aurcache_common::build_flags::{OFFERED, Offered};
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -613,47 +613,69 @@ struct Tick {
 /// A row per offered flag, laid out as the add dialog's search results are:
 /// the flag on one line, what it does under it.
 ///
-/// Each row is the checkbox's label, so a click anywhere on it toggles the box.
 /// The first box takes focus when the list mounts, which puts focus inside the
 /// dialog as it opens.
 fn flag_list(draft: &Draft, locked: bool, on_tick: EventHandler<Tick>) -> Element {
     rsx! {
         ul { class: "menu menu-sm p-0 max-h-[60vh] overflow-y-auto border border-base-300 rounded-box flex-nowrap",
             for (index, offered) in OFFERED.iter().enumerate() {
-                {
-                    let id = checkbox_id(offered.flag);
-                    rsx! {
-                        li { key: "{offered.flag}",
-                            label {
-                                class: if locked { "flex items-start gap-3 cursor-not-allowed" } else { "flex items-start gap-3 cursor-pointer" },
-                                input {
-                                    r#type: "checkbox",
-                                    class: "checkbox checkbox-sm mt-0.5",
-                                    id: "{id}",
-                                    aria_labelledby: "{id}-flag",
-                                    aria_describedby: "{id}-summary",
-                                    checked: draft.has(offered.flag),
-                                    disabled: locked,
-                                    onmounted: move |e: MountedEvent| async move {
-                                        if index == 0 {
-                                            let _ = e.set_focus(true).await;
-                                        }
-                                    },
-                                    onchange: move |e: FormEvent| {
-                                        on_tick.call(Tick { flag: offered.flag, on: e.checked() });
-                                    },
-                                }
-                                div { class: "flex flex-col gap-0.5 min-w-0",
-                                    span { id: "{id}-flag", class: "font-mono", "{offered.flag}" }
-                                    span { id: "{id}-summary", class: "text-xs opacity-60", "{offered.summary}" }
-                                }
-                            }
-                        }
+                li { key: "{offered.flag}",
+                    {
+                        flag_row(
+                            offered,
+                            draft.has(offered.flag),
+                            locked,
+                            on_tick,
+                            if index == 0 { take_focus() } else { Vec::new() },
+                        )
                     }
                 }
             }
         }
     }
+}
+
+/// An offered flag's checkbox, inside the label that names the flag and says
+/// what it does, so a click anywhere on it toggles the box. `extra` goes on
+/// the box itself.
+fn flag_row(
+    offered: &Offered,
+    ticked: bool,
+    locked: bool,
+    on_tick: EventHandler<Tick>,
+    extra: Vec<Attribute>,
+) -> Element {
+    let id = checkbox_id(offered.flag);
+    let flag = offered.flag;
+    rsx! {
+        label {
+            class: if locked { "flex items-start gap-3 cursor-not-allowed" } else { "flex items-start gap-3 cursor-pointer" },
+            input {
+                r#type: "checkbox",
+                class: "checkbox checkbox-sm mt-0.5",
+                id: "{id}",
+                aria_labelledby: "{id}-flag",
+                aria_describedby: "{id}-summary",
+                checked: ticked,
+                disabled: locked,
+                onchange: move |e: FormEvent| on_tick.call(Tick { flag, on: e.checked() }),
+                ..extra,
+            }
+            div { class: "flex flex-col gap-0.5 min-w-0",
+                span { id: "{id}-flag", class: "font-mono", "{flag}" }
+                span { id: "{id}-summary", class: "text-xs opacity-60", "{offered.summary}" }
+            }
+        }
+    }
+}
+
+/// The attribute that focuses an element once it is mounted.
+fn take_focus() -> Vec<Attribute> {
+    vec![dioxus_elements::events::onmounted(
+        |e: MountedEvent| async move {
+            let _ = e.set_focus(true).await;
+        },
+    )]
 }
 
 /// The element id of a flag's checkbox: `--nocheck` is `build-flag-nocheck`.
