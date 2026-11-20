@@ -32,30 +32,23 @@ struct Location {
     server: url::Url,
 }
 
-/// A host and the port actually dialled on it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Endpoint {
-    /// A domain, or an address -- an IPv6 one without its brackets, ready for
-    /// resolution.
-    pub host: String,
-    pub port: u16,
-}
+/// A host and the port actually dialled on it: the host a domain, or an
+/// address -- an IPv6 one without its brackets, ready for resolution.
+pub type Endpoint = aurcache_common::host_port::HostPort;
 
-impl Endpoint {
-    /// The endpoint `url` is dialled on: its explicit port, else the
-    /// scheme's default -- what an HTTP client connects to.
-    #[must_use]
-    pub fn of(url: &url::Url) -> Option<Self> {
-        let host = match url.host()? {
-            url::Host::Domain(domain) => domain.to_string(),
-            url::Host::Ipv4(addr) => addr.to_string(),
-            url::Host::Ipv6(addr) => addr.to_string(),
-        };
-        Some(Self {
-            host,
-            port: url.port_or_known_default()?,
-        })
-    }
+/// The endpoint `url` is dialled on: its explicit port, else the scheme's
+/// default -- what an HTTP client connects to.
+#[must_use]
+pub fn endpoint_of(url: &url::Url) -> Option<Endpoint> {
+    let host = match url.host()? {
+        url::Host::Domain(domain) => domain.to_string(),
+        url::Host::Ipv4(addr) => addr.to_string(),
+        url::Host::Ipv6(addr) => addr.to_string(),
+    };
+    Some(Endpoint {
+        host,
+        port: url.port_or_known_default()?,
+    })
 }
 
 impl RepoSection {
@@ -115,7 +108,7 @@ impl RepoSection {
     /// Where builds reach the repository, for the firewall to leave open.
     #[must_use]
     pub fn endpoint(&self) -> Option<Endpoint> {
-        Endpoint::of(self.server()?)
+        endpoint_of(self.server()?)
     }
 
     /// URL of the repository database for one arch.

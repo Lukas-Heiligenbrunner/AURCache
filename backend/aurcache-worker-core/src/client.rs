@@ -256,7 +256,7 @@ impl WorkerClient {
     /// The host and port this client dials the server on.
     #[must_use]
     pub fn server(&self) -> Option<Endpoint> {
-        Endpoint::of(&url::Url::parse(&self.base).ok()?)
+        crate::repo::endpoint_of(&url::Url::parse(&self.base).ok()?)
     }
 
     /// Build an enrollment client that trusts only the pinned CA and carries no

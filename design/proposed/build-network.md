@@ -89,9 +89,12 @@ explicitly. For each address family, in order:
    builds there cannot reach it. A proxy that answers DNS with fake addresses
    (Clash's or mihomo's fake-IP mode, in `198.18/15`) has every name resolve
    into a refused range; and a network whose NAT64 uses the local-use prefix
-   `64:ff9b:1::/48` has every IPv4-only destination there. Such a host runs
-   builds with the proxy's fake-IP mode off, or with
-   `WORKER_BUILD_FIREWALL=0`.
+   `64:ff9b:1::/48` has every IPv4-only destination there. An entry in
+   `WORKER_BUILD_ALLOW` opens the one `host:port` it names, resolved through
+   that same DNS, so it can let a mirror through, but not the internet at
+   large; an entry naming the IPv4 address itself does not match the
+   translated or faked address the build connects to. Such a host runs builds
+   with the proxy's fake-IP mode off, or with `WORKER_BUILD_FIREWALL=0`.
 5. Everything else: accept.
 
 The one thing the policy knows about the server is its hosts: the
@@ -139,13 +142,15 @@ The allowlist is the union of:
 | Server, global setting `build_hosts` (`BUILD_HOSTS` env, settings page) | every build | `distcc.lan:3632,flexo.lan:7878` |
 | Server, package setting `build_hosts` | that package's builds, **added to** the global list | `gitlab.lan:22` |
 | Derived: the `Server =` lines of the build's `pacman.conf`, including the server-supplied mirrorlist | every build | the AURCache repository, a LAN mirror |
-| Worker, optional `WORKER_BUILD_ALLOW` (*follows, in a later PR of this chain*) | every build on that worker | a worker on a different LAN with its own distcc helpers |
+| Worker, optional `WORKER_BUILD_ALLOW` | every build on that worker | a worker on a different LAN with its own distcc helpers |
 
-Entries are `host:port`, with the host a name or an address (IPv6 in brackets).
+Entries are `host:port`, with the host a name or an address (IPv6 in brackets,
+without a zone: the rules match an address, not an interface; IPv4 in full
+dotted decimal, since the C library reads `127.1` or `0x7f.1` as 127.0.0.1,
+and a name made of numbers alone is refused rather than resolved). An entry
+opens its port to TCP and UDP alike.
 
-The worker's policy takes the derived entries; `WORKER_BUILD_ALLOW` follows, in
-a later PR of this chain, with the `host:port` parser it and `build_hosts`
-share. The
+The worker's policy takes the derived entries and `WORKER_BUILD_ALLOW`. The
 server's `build_hosts` setting, with the `JobDescriptor` field below that
 carries it, is implemented separately, by #456, which follows it; until then
 the two `build_hosts` rows above, the resolution rule and the protocol change
@@ -356,7 +361,8 @@ a local address stays refused.
 Every refusal in a build's own rules (by cgroup) is added to a dynamic set of
 that build's (`address . protocol . port`, at most 1024), in a rule of its own
 so a full set never stops the refusal. When the build ends, the worker lists the set, removes
-the rules, and appends to the build's log what was refused. No kernel log is involved, so nothing needs reading
+the rules, and appends to the build's log what was refused, with a pointer to
+`WORKER_BUILD_ALLOW`. No kernel log is involved, so nothing needs reading
 `dmesg`.
 
 ### Failure

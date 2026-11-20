@@ -14,7 +14,7 @@
 //! 1. established and related traffic: accepted;
 //! 2. DNS to the resolvers in the worker's `resolv.conf`: accepted;
 //! 3. the allowlist, exact `host:port` pairs (the `Server =` lines of the
-//!    build's `pacman.conf`): accepted;
+//!    build's `pacman.conf`, `WORKER_BUILD_ALLOW`): accepted;
 //! 4. local destinations ([`local`]) -- the private, link-local, shared and
 //!    reserved ranges, multicast, their NAT64 forms, every address of the
 //!    worker host itself, the prefixes and default gateways of its links,
@@ -25,7 +25,7 @@
 //!
 //! A server on the local network or on the server's hosts, wherever they
 //! are, is refused on every port but what the allowlist names: its
-//! repository, and the other servers of the build's `pacman.conf`.
+//! repository, and whatever exact `host:port` someone chose to allow.
 //!
 //! Names are resolved, and the host's links read, when each build starts; a
 //! build whose server's hosts do not resolve is refused, since nothing would
@@ -79,7 +79,8 @@
 mod local;
 
 use anyhow::{Context, Result};
-use aurcache_worker_core::repo::{Endpoint, RepoSection};
+use aurcache_common::host_port::HostPort;
+use aurcache_worker_core::repo::{self, Endpoint, RepoSection};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -682,7 +683,7 @@ pub fn mirrors(conf: &str) -> Mirrors {
             "Server" | "CacheServer" => {
                 if let Some(endpoint) = url::Url::parse(value).ok().as_ref().and_then(|u| {
                     matches!(u.scheme(), "http" | "https")
-                        .then(|| Endpoint::of(u))
+                        .then(|| repo::endpoint_of(u))
                         .flatten()
                 }) && !found.servers.contains(&endpoint)
                 {
@@ -701,6 +702,9 @@ pub fn mirrors(conf: &str) -> Mirrors {
 /// What a build's policy is made from, before any name is resolved.
 pub struct Inputs {
     pub repo: Option<RepoSection>,
+    /// Local destinations every build on this worker may reach
+    /// (`WORKER_BUILD_ALLOW`).
+    pub allow: Vec<HostPort>,
     /// Where the worker reaches the server's worker protocol.
     pub server: Option<Endpoint>,
     /// The `pacman.conf` the build syncs and installs with.
@@ -725,15 +729,6 @@ fn lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     addrs.sort_unstable();
     addrs.dedup();
     Ok(addrs)
-}
-
-/// `host:port`, an IPv6 address in brackets.
-fn shown(endpoint: &Endpoint) -> String {
-    if endpoint.host.contains(':') {
-        format!("[{}]:{}", endpoint.host, endpoint.port)
-    } else {
-        format!("{}:{}", endpoint.host, endpoint.port)
-    }
 }
 
 /// Resolve everything a build's policy names. Blocking: DNS.
@@ -780,17 +775,15 @@ fn resolve(inputs: &Inputs) -> Result<Resolved> {
     if let Some(list) = &inputs.mirrorlist {
         servers.extend(mirrors(list).servers);
     }
-    let mut entries: Vec<Endpoint> = Vec::new();
-    for server in servers {
-        if !entries.contains(&server) {
-            entries.push(server);
-        }
-    }
+    let entries = servers
+        .into_iter()
+        .chain(inputs.allow.iter().cloned())
+        .collect::<BTreeSet<_>>();
 
     for entry in entries {
         match lookup(&entry.host, entry.port) {
             Ok(addrs) => allowed.extend(addrs),
-            Err(e) => skipped.push(format!("{}: {e}", shown(&entry))),
+            Err(e) => skipped.push(format!("{entry}: {e}")),
         }
     }
     allowed.sort_unstable();
@@ -1215,7 +1208,10 @@ impl Drop for BuildRules {
 
 /// A refusal as the build's log says it.
 fn explain(refusal: &Refusal) -> String {
-    format!("{refusal}: a local address")
+    format!(
+        "{refusal}: a local address; the worker's WORKER_BUILD_ALLOW can allow it \
+         (host:port)"
+    )
 }
 
 #[cfg(test)]
@@ -1483,6 +1479,7 @@ mod tests {
         std::fs::write(&pacman_conf, format!("[options]\n\n{section}")).unwrap();
         Inputs {
             repo: RepoSection::parse(section),
+            allow: Vec::new(),
             server: protocol,
             pacman_conf,
             mirrorlist: None,
@@ -1694,12 +1691,16 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_says_why() {
+    fn a_refusal_says_how_to_allow_it() {
         let refusal = Refusal {
             addr: ip("192.168.1.9"),
             protocol: "tcp".to_string(),
             port: 3632,
         };
-        assert_eq!(explain(&refusal), "192.168.1.9:3632/tcp: a local address");
+        assert_eq!(
+            explain(&refusal),
+            "192.168.1.9:3632/tcp: a local address; the worker's WORKER_BUILD_ALLOW \
+             can allow it (host:port)"
+        );
     }
 }
