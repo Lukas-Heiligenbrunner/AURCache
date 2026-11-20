@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 use aurcache_common::worker::BuildOutcome;
-use aurcache_worker_core::ssh_key::SshKeys;
 use aurcache_worker_core::{artifacts, report};
+use std::collections::BTreeMap;
 
 use crate::build;
 use crate::config::Config;
@@ -30,7 +30,7 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     // chroot's own, matching what a served build gets.
     let pacman_conf = existing("/etc/pacman.conf")?;
     // No key: a local build starts no agent.
-    let shared = Shared::new(cfg, SshKeys::default());
+    let shared = Shared::new(cfg, BTreeMap::new());
     let chroots = &shared.chroots;
     chroots.open().await?;
     chroots

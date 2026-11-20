@@ -16,8 +16,8 @@ use aurcache_worker::{build, credentials, oneshot};
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::Runner;
-use aurcache_worker_core::ssh_key::{PACKAGES_VAR, SshKeys, SshPackages};
 use aurcache_worker_core::{config::CoreConfig, enroll};
+use std::collections::BTreeMap;
 
 #[derive(Parser)]
 #[command(name = "aurcache-worker", version, about)]
@@ -143,46 +143,13 @@ fn announce_host_side_gate(data_dir: &Path, gate: agent::HostSideGate) {
     }
 }
 
-/// Say which packages the build SSH key may go to, when
-/// `WORKER_GIT_SSH_PACKAGES` limits them.
-///
-/// Set with no key to offer -- the configured one missing, or the agent not
-/// started -- it is a warning rather than a refusal to start: the worker
-/// already builds without a credential then, and the list only narrows who
-/// gets one.
-fn announce_ssh_packages(packages: &SshPackages, has_key: bool) {
-    let SshPackages::Only(names) = packages else {
-        return;
-    };
-    if !has_key {
-        tracing::warn!("{PACKAGES_VAR} is set, but this worker holds no SSH key: {WITHOUT_KEY}");
-    } else if names.is_empty() {
-        tracing::info!("{PACKAGES_VAR} is empty: no build is offered the SSH key");
-    } else {
-        tracing::info!(
-            "The build SSH key is offered only to: {} ({PACKAGES_VAR})",
-            names.join(", ")
-        );
-    }
-}
-
-/// Start the build ssh-agent holding the key, unless this machine cannot keep
-/// the builds `WORKER_GIT_SSH_PACKAGES` leaves out away from it, and say what
-/// builds are offered.
+/// Start the build ssh-agent holding the key, and say what builds are
+/// offered.
 ///
 /// `None` is a worker that holds no key: every build goes ahead without one.
 async fn start_agent(core: &CoreConfig, cfg: &Config) -> Option<agent::BuildAgent> {
     let gate = agent::host_side_gate(&core.data_dir);
-    if !agent::may_start(&cfg.ssh_packages, gate) {
-        let gap = gate_gap(&core.data_dir, gate).unwrap_or_default();
-        tracing::error!(
-            "{PACKAGES_VAR} is set, but builds could not be kept from the SSH agent \
-             outside their chroot, because {gap}: this worker holds no SSH key, so \
-             {WITHOUT_KEY}"
-        );
-        return None;
-    }
-    let agent = match agent::start(
+    match agent::start(
         &core.data_dir,
         credentials::resolve(cfg).path(),
         &cfg.build_user,
@@ -202,9 +169,7 @@ async fn start_agent(core: &CoreConfig, cfg: &Config) -> Option<agent::BuildAgen
             tracing::warn!("Could not start the build ssh-agent ({e:#}); {WITHOUT_KEY}");
             None
         }
-    };
-    announce_ssh_packages(&cfg.ssh_packages, agent.is_some());
-    agent
+    }
 }
 
 async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
@@ -244,7 +209,15 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // The agent's socket goes to the executor, never into this process's
     // environment: builds are offered the agent this worker started, and
     // never one an inherited `SSH_AUTH_SOCK` names.
-    let ssh_keys = SshKeys::with_default(agent.as_ref().map(|a| a.socket().to_path_buf()));
+    let ssh_keys: BTreeMap<String, PathBuf> = agent
+        .iter()
+        .map(|a| {
+            (
+                aurcache_common::ssh_key::DEFAULT.to_string(),
+                a.socket().to_path_buf(),
+            )
+        })
+        .collect();
     let executor = ChrootExecutor::new(cfg, ssh_keys).await;
     Runner::new(core, client, executor).run().await
 }

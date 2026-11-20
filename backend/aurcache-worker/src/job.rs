@@ -11,11 +11,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ssh_key;
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
-use aurcache_worker_core::ssh_key;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -90,7 +90,7 @@ async fn run_job_inner(
     let job = &claimed.job;
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
-    let ssh = ssh_key::offer(job, &shared.ssh_keys, &cfg.ssh_packages);
+    let ssh = ssh_key::offer(job, &shared.ssh_keys);
     tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
     if let Some(notice) = ssh.notice(&job.pkgbase) {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
@@ -1286,19 +1286,16 @@ mod tests {
     use super::*;
     use crate::cache::held;
 
-    /// Whether a build of `pkgbase` from a job of `ssh_key`, on a worker
-    /// whose agent is at `socket` and whose `WORKER_GIT_SSH_PACKAGES` is
-    /// `ceiling`, reaches the agent: through its `makepkg.conf` and through a
-    /// mount into its chroot. Both or neither; asserted here.
+    /// Whether a build from a job of `ssh_key`, on a worker whose default
+    /// agent is at `socket`, reaches the agent: through its `makepkg.conf` and
+    /// through a mount into its chroot. Both or neither; asserted here.
     fn reaches_agent(
         socket: &Path,
-        ceiling: &aurcache_worker_core::ssh_key::SshPackages,
-        pkgbase: &str,
         ssh_key: Option<aurcache_common::worker::SshKeyRequest>,
     ) -> bool {
         let job = JobDescriptor {
             build_id: 1,
-            pkgbase: pkgbase.to_string(),
+            pkgbase: "hello".to_string(),
             arch: "x86_64".to_string(),
             build_flags: Vec::new(),
             persistent_builddir: false,
@@ -1312,48 +1309,39 @@ mod tests {
             expected_version: "1-1".to_string(),
             ssh_key,
         };
-        let keys = ssh_key::SshKeys::with_default(Some(socket.to_path_buf()));
-        let ssh = ssh_key::offer(&job, &keys, ceiling);
+        let keys = std::collections::BTreeMap::from([(
+            aurcache_common::ssh_key::DEFAULT.to_string(),
+            socket.to_path_buf(),
+        )]);
+        let ssh = ssh_key::offer(&job, &keys);
         let agent = ssh.key().map(PathBuf::as_path);
         let staged =
             credentials::stage_for_job(None, &socket.with_extension("secrets"), agent).unwrap();
         let conf = credentials::augment_makepkg_conf("PKGDEST=/output", staged.as_ref());
         let exported = conf.contains("SSH_AUTH_SOCK");
         let mounted = agent_bind(agent).is_some();
-        assert_eq!(exported, mounted, "{pkgbase}: {conf}");
+        assert_eq!(exported, mounted, "{conf}");
         exported
     }
 
-    /// The build of a package `WORKER_GIT_SSH_PACKAGES` lists gets the agent;
-    /// one it does not list gets nothing of it, from a server that names the
-    /// key or from one that names none.
+    /// A build gets the default agent unless its job names another key, and
+    /// one naming a key this worker does not hold, or none at all, gets
+    /// nothing of it.
     #[test]
-    fn only_a_listed_package_reaches_the_agent() {
+    fn a_build_reaches_the_agent_of_the_key_it_is_offered() {
         use aurcache_common::worker::SshKeyRequest;
-        use aurcache_worker_core::ssh_key::SshPackages;
         let tmp = tempfile::tempdir().unwrap();
         let socket = tmp.path().join("agent").join("agent.sock");
-        let ceiling = SshPackages::parse(Some("unreal-engine"));
-        let default = || {
+        let named = |name: &str| {
             Some(SshKeyRequest {
-                name: Some("default".to_string()),
+                name: Some(name.to_string()),
             })
         };
 
-        assert!(reaches_agent(&socket, &ceiling, "unreal-engine", default()));
-        assert!(reaches_agent(&socket, &ceiling, "unreal-engine", None));
-        assert!(!reaches_agent(&socket, &ceiling, "hello", default()));
-        assert!(!reaches_agent(&socket, &ceiling, "hello", None));
-        // A package the job asks no key for gets none, listed or not.
-        let none = Some(SshKeyRequest { name: None });
-        assert!(!reaches_agent(&socket, &ceiling, "unreal-engine", none));
-        // Unset, every build the job allows is offered it.
-        assert!(reaches_agent(&socket, &SshPackages::All, "hello", None));
-        // A key this worker does not hold: the build goes ahead without one.
-        let unheld = Some(SshKeyRequest {
-            name: Some("gitlab".to_string()),
-        });
-        assert!(!reaches_agent(&socket, &SshPackages::All, "hello", unheld));
+        assert!(reaches_agent(&socket, None));
+        assert!(reaches_agent(&socket, named("default")));
+        assert!(!reaches_agent(&socket, named("gitlab")));
+        assert!(!reaches_agent(&socket, Some(SshKeyRequest { name: None })));
     }
 
     /// The mount is the agent's directory, read-only at the same path, and only
