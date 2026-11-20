@@ -398,11 +398,12 @@ events! {
         fields: Vec<String>,
     },
 
-    /// A package's stored build flags named options that change nothing in a
-    /// build, and they were taken off its list. Checked at startup.
+    /// A package's stored build flags named options a build does not take as
+    /// a choice, and they were taken off its list. Checked at startup.
     ///
-    /// Only worth a look where one did something after all: `--cleanbuild`
-    /// on a package that keeps its build tree, which from now on is reused.
+    /// Most such options change nothing in a build. The one worth a look is
+    /// `--cleanbuild` on a package that keeps its build tree: without it, the
+    /// tree is reused.
     BuildFlagsDropped => ("package.build_flags_dropped", "Packages", "Build flags dropped") {
         pkg: PackageRef,
         dropped: Vec<String>,
@@ -1118,9 +1119,9 @@ impl Event {
                 )),
                 entity(pkg),
                 text(if dropped.len() == 1 {
-                    ": it changes nothing in a build"
+                    ": a build does not take it as a choice"
                 } else {
-                    ": they change nothing in a build"
+                    ": a build does not take them as a choice"
                 }),
             ],
             Self::SourceEdited { pkg, path } => {
@@ -1759,11 +1760,11 @@ mod tests {
         };
         assert_eq!(
             message(&["--cleanbuild"]),
-            "dropped --cleanbuild from the build flags of hello: it changes nothing in a build"
+            "dropped --cleanbuild from the build flags of hello: a build does not take it as a choice"
         );
         assert_eq!(
             message(&["--clean", "--force"]),
-            "dropped --clean --force from the build flags of hello: they change nothing in a build"
+            "dropped --clean --force from the build flags of hello: a build does not take them as a choice"
         );
     }
 
