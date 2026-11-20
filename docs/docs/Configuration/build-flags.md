@@ -6,7 +6,8 @@ sidebar_position: 6
 
 A package can be built with some of `makepkg`'s options, chosen on its page,
 or with `aurcli pkg patch <pkgbase> --build-flag=<flag>`, repeated for the
-whole list. A package with none set builds as `makepkg` does by default.
+whole list; `aurcli pkg patch <pkgbase> --no-build-flags` clears it. A package
+with none set builds as `makepkg` does by default.
 
 | Flag              | What it does                                                         |
 |-------------------|----------------------------------------------------------------------|
@@ -23,7 +24,7 @@ The server also takes a flag in any spelling `makepkg` takes it in (`-d`,
 skips, `--skipchecksums` and `--skippgpcheck`.
 
 Every build is given `--noconfirm --noprogressbar --nocolor` by its worker,
-so these need not be set. Other options that change nothing in a build --
+so these need not be set. Other options a package does not choose --
 `--syncdeps`, `--check`, `--clean`, `--cleanbuild`, `--force`, `--rmdeps`,
 `--needed`, `--asdeps` and `--nosign` -- are accepted and not stored. A
 package's build tree, if it keeps one, is the `PERSISTENT_BUILDDIR`

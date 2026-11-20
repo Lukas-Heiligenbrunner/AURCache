@@ -16,6 +16,7 @@ aurcli pkg add --from-installed         # bulk-add what `pacman -Qm` reports, be
 aurcli pkg update hello
 aurcli pkg patch hello --platform x86_64
 aurcli pkg patch hello --build-flag=--nocheck   # the whole list; see Build flags
+aurcli pkg patch hello --no-build-flags         # clear them: build as makepkg does by default
 aurcli pkg rm hello                     # stop requesting it; delete what nothing needs
 ```
 
