@@ -27,7 +27,10 @@
 # root to follow out of the copy, and leaves an /etc/profile.d script that
 # tries the same ways around from the build's container, where root runs it.
 # There, root may mount only in a user namespace of its own, and neither it
-# nor such a mount may make a read-only bind writable.
+# nor such a mount may make a read-only bind writable. A package installed
+# with -I tries the same mounts from a container whose root keeps
+# CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
+# filter keeps from mounting.
 #
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
@@ -208,6 +211,19 @@ printf 'pkgname=aurcache-netprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=netpr
 chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
 cp /job/netprobe/*.pkg.tar.zst /srv/aurcache/
 repo-add -q /srv/aurcache/aurcache.db.tar.gz /srv/aurcache/aurcache-netprobe-*.pkg.tar.zst
+# Installed with -I: makechrootpkg runs `pacman -U` in a container of its own,
+# whose root keeps CAP_SYS_ADMIN and is in no sandbox.
+mkdir -p /job/mountprobe && cd /job/mountprobe
+cat > mountprobe.install <<'INSTALL'
+post_install() {
+    mkdir -p /var/lib/aurcache-mountprobe && cd /var/lib/aurcache-mountprobe || return
+    if mount -t tmpfs aurcache-mountprobe /mnt 2>/dev/null; then echo allowed; else echo refused; fi > mount
+    if unshare -rm mount -t tmpfs aurcache-mountprobe /mnt 2>/dev/null
+    then echo allowed; else echo refused; fi > userns-mount
+}
+INSTALL
+printf 'pkgname=aurcache-mountprobe\npkgver=1\npkgrel=1\narch=(any)\ninstall=mountprobe.install\npackage() { :; }\n' > PKGBUILD
+chown -R builder: . && sudo -u builder makepkg >/dev/null 2>&1
 python3 - <<'LISTEN' &
 import socket, threading
 heard = open("/tmp/heard", "a", buffering=1)
@@ -244,7 +260,8 @@ fi
 
 cd /job/pkg
 sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job1 \
-    -D /srv/ro-bind:/aurcache-ro -- --nocheck >/tmp/build.log 2>&1
+    -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
+    -- --nocheck >/tmp/build.log 2>&1
 echo "build_exit=$?"
 echo "gnupg=$([ -e /shared/gnupg/EVIL_trustdb ] && echo written || echo blocked)"
 echo "srcdest=$(cat /shared/srcdest-other/victim-source)"
@@ -276,6 +293,15 @@ echo "canary=$(ls -A /srv/canary | paste -sd, -)"
 echo "canary_victim=$(cat /srv/canary/victim 2>/dev/null || echo missing)"
 echo "canary_bind=$(cat /job/pkg/canary-bind 2>/dev/null || echo missing)"
 echo "ro_bind=$(ls -A /srv/ro-bind | paste -sd, -)"
+for e in mount userns-mount; do
+    echo "admin_$e=$(cat "/chroot/job1/var/lib/aurcache-mountprobe/$e" 2>/dev/null || echo missing)"
+done
+# Whether this host lets a process without CAP_SYS_ADMIN, as root in the
+# build's container is, mount in a user namespace of its own. Ubuntu's
+# kernel.apparmor_restrict_unprivileged_userns takes the capabilities of such
+# a namespace away, and user.max_user_namespaces=0 refuses one at all.
+if sudo -u builder unshare -rm mount -t tmpfs aurcache-host /mnt >/dev/null 2>&1
+then echo host_userns_mount=allowed; else echo host_userns_mount=refused; fi
 for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
     echo "install_$e=$(cat "/chroot/job1/var/lib/aurcache-netprobe/escapes/$e" 2>/dev/null || echo missing)"
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
@@ -326,6 +352,8 @@ check "unconfined: root may mount in a user namespace" allowed "$(get install_us
 check "unconfined: root may make a device node" allowed "$(get install_mknod "$unconfined")"
 check "unconfined: root may make a read-only bind writable" allowed "$(get install_remount-ro "$unconfined")"
 check "unconfined: a user namespace may not" refused "$(get install_userns-remount-ro "$unconfined")"
+check "unconfined: -I's root may mount"      allowed "$(get admin_mount "$unconfined")"
+check "unconfined: -I's root may mount in a user namespace" allowed "$(get admin_userns-mount "$unconfined")"
 check "unconfined: root writes through the read-only bind" by-root,intact "$(get ro_bind "$unconfined")"
 check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
 # With it, every write is denied and the build still succeeds.
@@ -362,13 +390,25 @@ for where in install build_root; do
     check "confined:   $where: no mount"         refused "$(get "${where}_mount" "$confined")"
     check "confined:   $where: no device node"   refused "$(get "${where}_mknod" "$confined")"
 done
-# The install's container refuses every mount call; the build's, without
-# CAP_SYS_ADMIN, is left them for a user namespace of its own, where the
-# read-only bind stays read-only.
+# A container whose root keeps CAP_SYS_ADMIN refuses every mount call: -I's,
+# outside any sandbox, shows the filter does, and the install's refuses them
+# too. The build's, without CAP_SYS_ADMIN, is left them for a user namespace
+# of its own, where the read-only bind stays read-only -- where the host
+# allows such a namespace its capabilities at all.
+check "confined:   -I's container: no mount"  refused "$(get admin_mount "$confined")"
+check "confined:   -I's container: no mount in a user namespace" refused "$(get admin_userns-mount "$confined")"
 check "confined:   install: no mount in a user namespace" refused "$(get install_userns-mount "$confined")"
-check "confined:   build_root: mounts in a user namespace" allowed "$(get build_root_userns-mount "$confined")"
 check "confined:   build_root: read-only bind stays so" refused "$(get build_root_remount-ro "$confined")"
-check "confined:   build_root: even from a user namespace" refused "$(get build_root_userns-remount-ro "$confined")"
+if [[ $(get host_userns_mount "$unconfined") == allowed ]]; then
+    check "confined:   build_root: mounts in a user namespace" allowed "$(get build_root_userns-mount "$confined")"
+    check "confined:   build_root: even from a user namespace" refused "$(get build_root_userns-remount-ro "$confined")"
+else
+    for what in "mounts in a user namespace" "even from a user namespace"; do
+        echo "    skip confined:   build_root: $what: this host gives a process without" \
+            "CAP_SYS_ADMIN no mount in a user namespace (kernel.apparmor_restrict_unprivileged_userns," \
+            "user.max_user_namespaces)"
+    done
+fi
 check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"

@@ -223,7 +223,9 @@ the container in that cgroup; one matched on the build user does not. What
 every container takes away is what would get around such a policy: raw
 packets (`CAP_NET_RAW`), a kernel NFS mount, whose sockets are not the
 cgroup's, and the kernel keyring. Every container whose root keeps
-`CAP_SYS_ADMIN`, which is every one but the build's, may not mount at all.
+`CAP_SYS_ADMIN`, which is every one but the build's (and the shell `-x`
+opens on a failed build, which reuses the build's arguments), may not mount
+at all.
 The build's container drops `CAP_SYS_ADMIN`, `CAP_SYS_PTRACE`,
 `CAP_SYS_BOOT`, `CAP_SYS_MODULE`, `CAP_SYS_RAWIO`, `CAP_MKNOD`,
 `CAP_AUDIT_CONTROL` and `CAP_LINUX_IMMUTABLE`, none of which root needs to
@@ -240,7 +242,12 @@ more than one user, or `fusermount3` for a FUSE mount. A `check()` that uses
 the kernel keyring fails too. Packages whose tests need these build with
 `--nocheck`. Mounting in a user namespace of the build's own does work, so a
 `check()` that runs `bwrap` or `unshare -rm` to mount something passes, as
-long as one user mapped is enough for it.
+long as one user mapped is enough for it and the host allows unprivileged
+user namespaces. Ubuntu does not by default:
+`kernel.apparmor_restrict_unprivileged_userns=1` takes a new namespace's
+capabilities away from a process without `CAP_SYS_ADMIN`, as root in the
+build's container is, and `user.max_user_namespaces=0` refuses one
+anywhere.
 :::
 
 :::note Emulated workers
@@ -249,10 +256,11 @@ nspawn's alike, so on a worker run emulated (see
 [Building for another architecture](#building-for-another-architecture)) the
 install falls back to the network namespace alone, with the capabilities
 above dropped (`aurcache-sandbox offline: netns`), and no container is
-refused mounts by a filter: the install's scriptlets and root in the build's
-container are kept from mounting by the capabilities they lack, as on any
-worker, while the other containers, which run no code but the official
-packages', may mount. The keyring stays
+refused mounts by a filter. The install's scriptlets and root in the build's
+container lack `CAP_SYS_ADMIN`, so they cannot mount in the container's own
+namespace, but both can in a user namespace of their own, where no NFS mount
+or writable read-only bind can be made. The other containers, which run no
+code but the official packages', may mount anything. The keyring stays
 closed there because qemu implements none of its calls.
 :::
 
