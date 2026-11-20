@@ -98,7 +98,10 @@ starts:
 - **The worker stays `privileged: true` with a tmpfs `/run`.** Each package is
   built in a `systemd-nspawn` chroot, which needs the mounts and namespaces a
   plain container forbids. Only the worker needs this; the server runs
-  unprivileged.
+  unprivileged. Keep its `cgroup: host` too: without it, a kernel older than
+  6.11 (or a stable one without the fix) cannot hold builds to the [network
+  policy](../workers/split-chroot.md#what-builds-can-reach-on-the-network),
+  and the worker takes no builds.
 - **Enrollment needs nothing.** Server and worker share the `enroll` volume, so
   the worker auto-approves on first start — no token, no approval click.
 

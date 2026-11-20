@@ -73,6 +73,19 @@ build container. The default arranges that for a worker that runs in a
 container. For one that runs on the host, set `AURCACHE_BUILDER_NETWORK=host`,
 or name a network on which `AURCACHE_REPO_URL` resolves.
 
+## What builds can reach on the network
+
+The Docker worker puts no network policy on its builds yet; the
+[chroot worker](./split-chroot.md#what-builds-can-reach-on-the-network) does.
+A build reaches whatever its network does. By default that is the worker's own
+network namespace, which in the [hybrid image](./hybrid.md) is the server's: a
+build reaches the web UI and API at `localhost:8080`, the worker protocol at
+`localhost:8083`, and the worker's local network. Without
+[OAuth](../Configuration/authentication.md) the API serves anyone who reaches
+it, so a build can add, delete and patch packages and change settings.
+Configure OAuth wherever this worker builds packages you did not write, or
+build them with a chroot worker.
+
 ## Settings
 
 Its tunables are `CPU_LIMIT` (milli-CPUs) and `MEMORY_LIMIT` (MB, negative for

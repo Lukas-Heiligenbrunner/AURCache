@@ -94,6 +94,7 @@ builder:
     - enroll:/enroll
     - worker_data:/var/lib/aurcache-worker
   privileged: true
+  cgroup: host
   tmpfs:
     - /run
 ```

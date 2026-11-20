@@ -39,7 +39,7 @@ way, and the hybrid image runs it as root. Its root actions are:
 | btrfs subvolume/snapshot/qgroup ioctls | one chroot per build, `WORKER_DISK_MAX` | `pool.rs`, `qgroup.rs` |
 | `rm`, `touch` on pool paths | sweep and cleanup | `pool.rs` |
 | `makechrootpkg` → `arch-nspawn` → `systemd-nspawn` | run each build in its chroot, as root in it | devtools |
-| `iptables`/`ip6tables` | keep builds off the worker-protocol port | `aurcache-worker/src/build_firewall.rs` |
+| `nft` | the build network policy (`design/implemented/build-network.md`) | `aurcache-worker/src/build_firewall.rs` |
 | cgroup writes | one cgroup per build: `memory.peak`, limits, kill | `aurcache-worker/src/cgroup.rs` |
 
 The sudoers file already says what that grant means: "with NOPASSWD:ALL,
@@ -149,7 +149,7 @@ What breaks, part by part:
 | qgroups (`WORKER_DISK_MAX`) | **lost**: btrfs quota ioctls check `CAP_SYS_ADMIN` in the host namespace. The total would have to come from the host (a quota on the backing zvol or dataset) and be reported rather than enforced |
 | `systemd-nspawn` | needs to create its own mount, PID and IPC namespaces and to mount `/proc` and `/sys`, which a user namespace allows. Whether nspawn accepts running this way is the **main unknown**. *Spike.* |
 | per-build cgroups | work with a delegated cgroup v2 subtree (rootless Podman under systemd delegates `memory`, `pids`, `cpu`). Without delegation the worker falls back to what it does today in an unprivileged container: no figure, no limits |
-| build firewall | works: `iptables` acts on the container's own network namespace, which its user namespace owns |
+| build network policy | works: `nft` acts on the container's own network namespace, which its user namespace owns |
 | `sudo` in the chroot | needs setuid, so `no-new-privileges` must stay off (the issue hit this). The worker itself could run as container-root and drop `sudo` altogether, since that root is not the host's |
 | AppArmor | `docker-default` denies `mount`; needs a custom profile (preferred) or `unconfined`. With a user namespace underneath, `unconfined` loses much less than it does in option A |
 
@@ -197,7 +197,7 @@ boot-time script:
 | cgroups | cgroup v2, `memory` and `pids` delegated, subgroups can be created |
 | namespaces | new mount/PID/IPC/UTS namespaces work; a **nested user namespace does not** (`mount /proc` and `gid_map` writes refused) |
 | mounts | tmpfs, proc and overlay mount; no loop devices |
-| `iptables` | works on the container's own network namespace |
+| `nft` | works on the container's own network namespace |
 | `mkarchroot` | fails: it mounts a devtmpfs `/dev` |
 | `systemd-nspawn` | fails: cannot mount `/proc` in the payload; idmapped mounts and `mknod` are refused, so `--private-users` in either ownership mode fails too |
 | rootful Podman | works once `default_sysctls = []` (it cannot write `net.ipv4.ping_group_range`), with native overlay on the container's ZFS root. A full `makepkg` build, `sudo` inside, and a `--memory` limit all work. `--userns=auto` fails, as nested user namespaces do |
@@ -386,7 +386,7 @@ What that gives up, part by part:
 | a fresh chroot per build, snapshotted from the base | builds share the container's root. Dependencies are installed into it and removed afterwards (`makepkg -r`), and the container is recreated to reset it | **the main loss.** A package that forgets a `makedepends` can still build because an earlier build left the dependency behind, and one build's `post_install` scriptlet can leave state behind for the next. Builds are less hermetic, and "it builds on AURCache" means less |
 | several builds at once | **one** at a time: two builds would install conflicting dependencies into the same root | throughput. It is fine for a homelab with tens of packages, and not for a fleet |
 | the build runs as `builder` in a chroot, the worker as `aurcache` outside | both in one container; the build as `builder`, the worker as root | the build can read whatever the container holds, including the worker's mTLS key. `aurcache-sandbox --read-except <identity dir>` around the whole build closes that; it already exists for the server's parse |
-| the build firewall (`iptables`, needs `NET_ADMIN`) | Landlock's network rules (`--no-net` already uses them): deny TCP connect to the worker-protocol port | about the same. Landlock's rules are by port, and the firewall's are by uid and port, so this has the same limitation when the worker port is 443 |
+| the build network policy (`nft`, needs `NET_ADMIN`) | Landlock's network rules (`--no-net` already uses them): deny TCP connect to the worker-protocol port | weaker. Landlock's rules are by port only, while the policy is by destination address and port, for everything in the build's cgroup |
 | the btrfs pool: snapshots, qgroups, `WORKER_DISK_MAX` | a plain directory | no per-build limit. The total comes from the host (a ZFS dataset quota on the volume, which TrueNAS sets natively) and the worker reports usage rather than enforcing it |
 | per-build cgroups: `memory.peak`, per-build limits, `cgroup.kill` | `/sys/fs/cgroup` is read-only, which the worker already copes with | no memory figure and no per-build limits. The container's `mem_limit` is the total, and a process-group kill replaces `cgroup.kill`. With one build at a time, the container *is* the build's cgroup, so `docker stats` still tells the story |
 | base chroot refresh (`root.next` / `root.prev`) | `pacman -Syu` of the container, between builds | no rollback point. A bad upgrade breaks builds until the image is pulled again, which is the recovery path anyway |

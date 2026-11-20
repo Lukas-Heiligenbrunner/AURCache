@@ -1,6 +1,10 @@
 # Keeping builds away from the API, and the LAN
 
-Status: **Proposed** · Last updated: 2026-10-05
+Status: **Proposed** · Last updated: 2026-11-18
+
+The chroot worker's part of this is now `design/implemented/build-network.md`:
+D's destination policy, enforced in the worker's own namespace on each build's
+cgroup rather than through a namespace per build.
 
 ## The problem
 

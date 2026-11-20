@@ -63,6 +63,9 @@ services:
       # (scripts/lib/e2e.sh, fresh_worker_data).
       - ${E2E_WORKER_DATA:-worker_data}:/var/lib/aurcache-worker
     privileged: true
+    # So the build network policy matches builds on older kernels; see
+    # design/implemented/build-network.md#where-builds-cannot-be-matched-by-cgroup
+    cgroup: host
     tmpfs:
       - /run
     networks:
