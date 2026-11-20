@@ -451,13 +451,13 @@ pub fn PlatformField(
 /// chips come in that order as given.
 #[component]
 fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler<()>) -> Element {
-    let mut editing = use_signal(|| false);
-    // This component stays mounted when the route moves between packages, and
-    // a dialog left open would then hold the last package's draft.
-    use_effect(use_reactive(&pkgbase, move |_: String| {
-        let mut editing = editing;
-        editing.set(false);
-    }));
+    // The package the dialog was opened for. This component stays mounted
+    // when the route moves between packages, so the dialog shows only while
+    // that is still the package on screen: never with one package's draft
+    // under another's name.
+    let mut editing = use_signal(|| None::<String>);
+    let open = editing.read().as_deref() == Some(pkgbase.as_str());
+    let opening = pkgbase.clone();
 
     rsx! {
         div { class: "flex gap-2 py-1 text-sm",
@@ -473,20 +473,20 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
                 button {
                     class: "btn btn-ghost btn-xs",
                     aria_label: "Edit build flags",
-                    onclick: move |_| editing.set(true),
+                    onclick: move |_| editing.set(Some(opening.clone())),
                     "Edit"
                 }
             }
         }
         // Mounted only while open, so every opening starts from the saved
         // flags and a dismissed draft is gone with it.
-        if editing() {
+        if open {
             BuildFlagsDialog {
                 pkgbase,
                 saved: flags,
-                on_close: move |()| editing.set(false),
+                on_close: move |()| editing.set(None),
                 on_saved: move |()| {
-                    editing.set(false);
+                    editing.set(None);
                     on_changed.call(());
                 },
             }
