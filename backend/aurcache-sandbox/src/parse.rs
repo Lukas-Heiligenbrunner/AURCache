@@ -12,7 +12,9 @@
 //! - write nothing at all;
 //! - signal or inspect no process outside itself;
 //! - see no environment beyond `PATH`, `HOME` and `LANG`;
-//! - connect over TCP only with `--network` -- where the kernel can deny it.
+//! - connect over TCP only with `--network` -- where the kernel can deny it;
+//! - open no `AF_VSOCK` socket, with or without `--network`, and use no
+//!   io_uring, which could open one without `socket(2)`.
 //!
 //! # How
 //!
@@ -36,6 +38,13 @@
 //! Landlock is all there is, so it must hold everything -- reads, writes,
 //! `truncate`, TCP and signals -- and needs ABI v6, Linux 6.12. Older is a
 //! refusal, never an unconfined parse.
+//!
+//! **Either way**, the `NO_VSOCK` seccomp filter of `seccomp.rs` is
+//! installed last, after Landlock: no network namespace confines vsock, so on
+//! a server in a virtual machine a parse could otherwise reach the
+//! hypervisor's vsock services and the machine's own vsock listeners. An
+//! emulated process cannot install it; the parse then runs anyway, after a
+//! warning on stderr, and the server says so once at startup.
 //!
 //! `AURCACHE_SANDBOX_DISABLE=landlock` drops the Landlock layer, so the
 //! permissions alone can be tested on a host that has it.
@@ -186,6 +195,10 @@ fn run(request: &Request, landlock_disabled: bool) -> Result<std::convert::Infal
             .map_err(|e| format!("cannot enter {}: {e}", dir.display()))?;
         (OsString::from(file), None)
     };
+    // Last, so the filter's no_new_privs follows the change of user.
+    if let Some(warning) = crate::seccomp::refuse_vsock()?.warning() {
+        eprintln!("{warning}");
+    }
 
     let err = std::process::Command::new(&request.program)
         .args(&request.args)

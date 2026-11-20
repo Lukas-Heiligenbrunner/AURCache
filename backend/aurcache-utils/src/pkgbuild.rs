@@ -28,8 +28,8 @@ pub fn fix_source_urls(content: &str) -> String {
 /// What the parse may do is stated here; how that is enforced is entirely the
 /// sandbox's business (its `parse` profile). The parse reads its PKGBUILD and
 /// nothing under `private`, writes nothing, cannot reach the processes around
-/// it, sees none of this process's environment, and touches the network only
-/// when `network` is on.
+/// it, sees none of this process's environment, touches the network only
+/// when `network` is on, and never opens a vsock socket.
 #[derive(Debug, Clone)]
 pub(crate) struct Bridge {
     sandbox: PathBuf,
@@ -251,6 +251,27 @@ impl Bridge {
         })
     }
 
+    /// What the sandbox says when it installs the filter every parse runs
+    /// under: a warning where it cannot refuse `AF_VSOCK`, none where it
+    /// can. Asked of the `container` profile, which installs the same
+    /// filter the same way and needs no PKGBUILD to do it.
+    fn vsock_warning(&self) -> anyhow::Result<Option<String>> {
+        let output = Command::new(&self.sandbox)
+            .args(["container", "--", "true"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .with_context(|| format!("cannot run {}", self.sandbox.display()))?;
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            anyhow::bail!(
+                "{} cannot install its filter ({}): {said}",
+                self.sandbox.display(),
+                output.status
+            );
+        }
+        Ok((!said.is_empty()).then_some(said))
+    }
+
     /// Whether both executables exist, for tests that need a real parse.
     #[cfg(test)]
     pub(crate) fn is_installed(&self) -> bool {
@@ -341,6 +362,24 @@ fn explain_network_need(error: anyhow::Error, content: &str, network: bool) -> a
          confined without network access; set `parse_network` if this source \
          is trusted"
     ))
+}
+
+/// Say at startup whether a parse can open vsock sockets.
+///
+/// Every parse runs under a seccomp filter refusing them, except where the
+/// sandbox cannot install one -- an emulated server, whose qemu refuses
+/// filters -- and there it parses anyway, warning on a stderr the server
+/// reads only when a parse fails. This asks once, so the warning reaches the
+/// server's log. Never fatal: the server runs without it, and a sandbox
+/// that cannot run at all already fails every parse, loudly.
+pub fn report_vsock() {
+    match Bridge::from_env(false).and_then(|bridge| bridge.vsock_warning()) {
+        Ok(None) => {}
+        Ok(Some(warning)) => tracing::warn!("PKGBUILD parsing: {warning}"),
+        Err(e) => {
+            tracing::warn!("Could not check whether PKGBUILD parsing refuses AF_VSOCK: {e:#}");
+        }
+    }
 }
 
 /// Parse a PKGBUILD file, applying workarounds for common issues found in

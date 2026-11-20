@@ -34,7 +34,8 @@
 #
 # And vsock, which no network namespace confines: a listener on the loopback
 # CID, where the kernel has one, which the PKGBUILD on the host, the
-# scriptlet, root at the build's start and the build itself try to reach.
+# scriptlet, root at the build's start and the build itself try to reach --
+# and the server's parse profile, which runs a PKGBUILD too.
 #
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
@@ -271,6 +272,7 @@ while True:
 LISTEN
 touch /tmp/heard /tmp/heard-vsock
 for _ in {1..50}; do [[ -s /tmp/vsock-kernel ]] && break; sleep 0.1; done
+
 # The build depends on it, and on an official package, whose signature is
 # checked by the confined install; and it tries to become root once it runs.
 cat >> /job/pkg/PKGBUILD <<'BUILD'
@@ -336,8 +338,27 @@ if sudo -u builder unshare -rm mount -t tmpfs aurcache-host /mnt >/dev/null 2>&1
 then echo host_userns_mount=allowed; else echo host_userns_mount=refused; fi
 echo "vsock_kernel=$(cat /tmp/vsock-kernel 2>/dev/null || echo missing)"
 echo "heard_vsock=$(sort -u /tmp/heard-vsock | paste -sd, -)"
+# The server's parse sources a PKGBUILD as well: as `aurcache-parse` when the
+# sandbox is started as root (the server images), and as the caller under
+# Landlock alone otherwise (a native server). The same PKGBUILD sourced
+# without it is the control. After the listener's count is taken: the
+# control reaches it.
+id aurcache-parse >/dev/null 2>&1 || useradd -r -M -s /usr/bin/nologin aurcache-parse
+mkdir -p /srv/parse && cat > /srv/parse/PKGBUILD <<'PARSE'
+perl -MSocket -e 'socket(my $s, 40, SOCK_STREAM, 0) or exit 2;
+    connect($s, pack("SSLLCx3", 40, 0, 7778, 1, 0)) or exit 1'
+case $? in 0) echo reached ;; 1) echo unreachable ;; *) echo refused ;; esac
+PARSE
+source_it=(bash -c 'source "$1"' parse)
+parse_bare=$("${source_it[@]}" /srv/parse/PKGBUILD)
+parse_root=$(aurcache-sandbox parse --pkgbuild /srv/parse/PKGBUILD -- "${source_it[@]}" 2>/dev/null)
+parse_user=$(sudo -u builder aurcache-sandbox parse --pkgbuild /srv/parse/PKGBUILD \
+    -- "${source_it[@]}" 2>/dev/null)
 echo "host_vsock=$([[ -s /job/pkg/host-vsock ]] && sort -u /job/pkg/host-vsock | paste -sd, - || echo missing)"
 echo "build_vsock=$(cat /job/pkg/vsock 2>/dev/null || echo missing)"
+echo "parse_bare_vsock=${parse_bare:-missing}"
+echo "parse_root_vsock=${parse_root:-missing}"
+echo "parse_user_vsock=${parse_user:-missing}"
 for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring vsock; do
     echo "install_$e=$(cat "/chroot/job1/var/lib/aurcache-netprobe/escapes/$e" 2>/dev/null || echo missing)"
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
@@ -470,6 +491,10 @@ if [[ -n $open ]]; then
     check "confined:   build_root: no vsock"         refused "$(get build_root_vsock "$confined")"
     check "confined:   build: no vsock"              refused "$(get build_vsock "$confined")"
     check "confined:   vsock listener hears nothing" ""     "$(get heard_vsock "$confined")"
+    # The parse profile, as both kinds of server run it, beside the control.
+    check "unsandboxed parse opens vsock"          "$open"  "$(get parse_bare_vsock "$confined")"
+    check "parse as root: no vsock"                refused  "$(get parse_root_vsock "$confined")"
+    check "parse unprivileged: no vsock"           refused  "$(get parse_user_vsock "$confined")"
 else
     echo "    skip vsock: this kernel has no AF_VSOCK ($(get vsock_kernel "$unconfined"))"
 fi
