@@ -64,9 +64,9 @@ pub async fn descriptor(
         Err(_) => (Vec::new(), Vec::new()),
     };
 
-    // With the flags every build takes in front, though a worker adds them
-    // itself: worker protocol 1 has makepkg given `build_flags` as they are,
-    // and a worker that adds nothing of its own builds with exactly these.
+    // With the flags every build takes in front. Workers on protocol 1 rely on
+    // it: the protocol has makepkg given `build_flags` as they are, so a
+    // worker that adds none of these itself builds with exactly this list.
     let build_flags = aurcache_common::build_flags::for_makepkg(pkg.build_flags.as_slice());
 
     // Resolved here rather than on the worker: settings are the server's,
@@ -137,9 +137,48 @@ fn resolve_mirrorlist(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_mirrorlist;
+    use super::{descriptor, resolve_mirrorlist};
+    use crate::snapshot::SnapshotStore;
     use aurcache_common::worker::{MirrorlistOffer, MirrorlistPreference};
+    use aurcache_db::testing::{build, memory_db, package};
+    use sea_orm::ActiveValue::Set;
     use std::collections::BTreeMap;
+
+    /// The `build_flags` of the descriptor for a build of a package storing
+    /// `stored`, written as the column is.
+    async fn descriptor_flags(stored: &str) -> Vec<String> {
+        let db = memory_db().await;
+        let pkg = package("hello")
+            .with(|row| row.build_flags = Set(stored.parse().expect("build flags")))
+            .insert(&db)
+            .await;
+        let build = build(&pkg).insert(&db).await;
+        // No source to fetch, which a descriptor does without.
+        let aur = tempfile::tempdir().unwrap();
+        let checkouts = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::with_checkout_root_and_aur_base(
+            checkouts.path().to_path_buf(),
+            aur.path().to_string_lossy().to_string(),
+        );
+        descriptor(&db, &store, &build, &MirrorlistPreference::Local)
+            .await
+            .expect("a descriptor")
+            .build_flags
+    }
+
+    /// A worker on protocol 1 may add no flag of its own, so the descriptor
+    /// carries the ones every build takes, then the package's.
+    #[tokio::test]
+    async fn the_descriptor_carries_the_flags_every_build_takes() {
+        assert_eq!(
+            descriptor_flags("").await,
+            ["--noconfirm", "--noprogressbar", "--nocolor"]
+        );
+        assert_eq!(
+            descriptor_flags("--nocheck").await,
+            ["--noconfirm", "--noprogressbar", "--nocolor", "--nocheck"]
+        );
+    }
 
     fn holding(arch: &str, checksum: &str) -> MirrorlistPreference {
         let mut checksums = BTreeMap::new();
