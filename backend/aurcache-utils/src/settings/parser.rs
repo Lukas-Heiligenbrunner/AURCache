@@ -39,15 +39,13 @@ impl ParseSetting for ByteSize {
 ///
 /// Its own type so that a name is checked wherever it is read from, and not
 /// only when the API stores one: `BUILD_SSH_KEY=Default` in the environment is
-/// no name, and reads as the default -- no key -- with a warning, as any value
+/// no name, and reads as the default, `default`, with a warning, as any value
 /// that does not parse does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SshKeyName(pub String);
 
-impl FromStr for SshKeyName {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, String> {
+impl ParseSetting for SshKeyName {
+    fn parse_setting(s: &str) -> Result<Self, String> {
         aurcache_common::ssh_key::validate_name(s).map(|()| Self(s.to_string()))
     }
 }
@@ -109,12 +107,13 @@ mod tests {
     }
 
     /// A key name is read as the API checks one before storing it, so a value
-    /// from the environment that is no name reads as no key at all.
+    /// from the environment that is no name does not parse, and reads as the
+    /// default.
     #[test]
     fn an_ssh_key_name_is_checked_wherever_it_is_read() {
-        let read = Option::<SshKeyName>::parse_setting;
-        assert_eq!(read(""), Ok(None));
-        assert_eq!(read("default"), Ok(Some(SshKeyName("default".to_string()))));
+        let read = SshKeyName::parse_setting;
+        assert_eq!(read("default"), Ok(SshKeyName("default".to_string())));
+        assert_eq!(read("gitlab"), Ok(SshKeyName("gitlab".to_string())));
         for bad in [
             "Default",
             " default",

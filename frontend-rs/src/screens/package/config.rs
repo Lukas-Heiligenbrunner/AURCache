@@ -220,8 +220,8 @@ fn PersistBuildDirField(
 /// or slow package can be allowed more without raising the limit for all, and
 /// one package can be given a key no other build gets. Shown as it is written
 /// (`20G`, `3h`, `default`), with where the value comes from; typing a new one
-/// offers Save, and a package override offers Reset. Saving an empty value is
-/// a value too: for the SSH key, "none for this package".
+/// offers Save, and a package override offers Reset. For the SSH key, a saved
+/// empty value is no value: the package uses the global key again.
 #[component]
 fn PackageValueField(
     pkgbase: String,
@@ -361,8 +361,7 @@ impl PackageValue {
         match self {
             Self::ArtifactSize => "20G",
             Self::JobTimeout => "1h",
-            // Empty is no key, so the hint must not read as a value in force.
-            Self::SshKey => "none",
+            Self::SshKey => "default",
         }
     }
 
@@ -380,7 +379,7 @@ impl PackageValue {
                 source: settings.job_timeout.source,
             },
             Self::SshKey => SettingsEntry {
-                value: settings.build_ssh_key.value.clone().unwrap_or_default(),
+                value: settings.build_ssh_key.value.clone(),
                 source: settings.build_ssh_key.source,
             },
         }
