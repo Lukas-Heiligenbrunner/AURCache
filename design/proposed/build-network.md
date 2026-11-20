@@ -42,27 +42,26 @@ explicitly. For each address family, in order:
 4. **Local destinations: reject.** That covers:
    - fixed ranges: loopback, 0/8, 10/8, 172.16/12, 192.168/16, 169.254/16,
      100.64/10, 198.18/15 (benchmarking), 240/4 (reserved, with the limited
-     broadcast address), fc00::/7, fe80::/10 and multicast. 198.18/15 and
-     240/4 follow, in a later PR of this chain; until then the limited
-     broadcast address is refused on its own;
-   - *(Follows, in a later PR of this chain.)* the NAT64 forms of those IPv4 ranges in the well-known prefix
+     broadcast address), fc00::/7, fe80::/10 and multicast;
+   - the NAT64 forms of those IPv4 ranges in the well-known prefix
      `64:ff9b::/96`, and all of the local-use prefix `64:ff9b:1::/48`. Which
      IPv4 address an address in the latter embeds depends on a prefix length
      the network picks (RFC 6052 allows /48 to /96 in it), so it is refused
      whole rather than guessed at;
    - every address of the worker host itself (`fib daddr type local`, which
      also catches the host's public addresses);
-   - *(Follows, in a later PR of this chain.)* **the host's links**, read from its main routing table when each build
-     starts (`ip -j route`): the prefix of every address on an interface
-     (routes of protocol `kernel`), what routers advertise as on-link (`ra`),
-     with no gateway; the gateways of its default routes; and the NAT64 forms
-     of the IPv4 ones. That is what makes a LAN on public IPv4 addresses, or
+   - **the host's links**, read when each build starts: the prefix of every
+     address on an interface (`ip -j addr`, so an address whose route is a
+     DHCP client's, one with `noprefixroute` and one in a VRF count too);
+     from every routing table (`ip -j route show table all`), what routers
+     advertise as on-link (`ra`, with no gateway) and the gateways of the
+     default routes; and the NAT64 forms of the IPv4 ones. That is what makes a LAN on public IPv4 addresses, or
      the global IPv6 addresses of a dual-stack LAN (the router, a NAS, the
      server's 2000::/3 address), local;
    - **the server's hosts**: every address the repository's host resolves to
      when the build starts, and every address of the host the worker dials
      for the worker protocol (`AURCACHE_URL`), with the NAT64 forms of the
-     IPv4 ones (with the other NAT64 forms, in a later PR of this chain).
+     IPv4 ones.
      Rule 3 lets the repository's own `address:port` through first, so what
      this refuses is those hosts' other ports, the server's API and worker
      protocol among them, wherever the hosts are. Without it a server one
@@ -77,14 +76,22 @@ explicitly. For each address family, in order:
    refusing them would fail their builds (see *Telling a build's own listeners
    apart*).
 
-   *(Follows, in a later PR of this chain.)* Rule 4 matches the destination, so the internet stays reachable through
+   Rule 4 matches the destination, so the internet stays reachable through
    the gateway: an internet destination is not on a link, and a default route
-   names no prefix. Routes of other protocols, a VPN's or the operator's own
-   (`boot`, `static`), are left out, because a tunnel that carries the
-   internet is routed the same way as one that carries a LAN; a destination
-   reached only through one is local only if a fixed range says so. A Docker
-   bridge on the host is a `kernel` route like any other, and its prefix is
-   private anyway.
+   names no prefix. Routes other than a router's advertisement, a VPN's or the
+   operator's own (`boot`, `static`), make nothing on link, because a tunnel
+   that carries the internet is routed the same way as one that carries a
+   LAN; a destination reached only through one is local only if a fixed range
+   or an address of the host's says so. A Docker bridge on the host is an
+   address like any other, and its prefix is private anyway.
+
+   Two of the fixed ranges are used for the internet on some hosts, and
+   builds there cannot reach it. A proxy that answers DNS with fake addresses
+   (Clash's or mihomo's fake-IP mode, in `198.18/15`) has every name resolve
+   into a refused range; and a network whose NAT64 uses the local-use prefix
+   `64:ff9b:1::/48` has every IPv4-only destination there. Such a host runs
+   builds with the proxy's fake-IP mode off, or with
+   `WORKER_BUILD_FIREWALL=0`.
 5. Everything else: accept.
 
 The one thing the policy knows about the server is its hosts: the
@@ -243,11 +250,14 @@ the cgroups of that run's builds, which went with it. The table holds:
 
 - **Static, at startup**, on `builds/`: rules 1, 4 and 5, which need no DNS.
   This is the baseline every build gets, even before its own rules load.
-- *(Follows, in a later PR of this chain.)* **The links' sets**, `links4` and `links6` (interval sets), with the local
-  destinations the host's links make. Shared by every build, and filled afresh
-  in each build's transaction.
-- **The server's sets**, `server4` and `server6` (interval sets), with the
-  addresses of the server's hosts, filled afresh in each build's transaction.
+- **The local sets**, `local4` and `local6` (interval sets), with the local
+  destinations the host's links make and the addresses of the server's hosts.
+  Shared by every build, and filled afresh in each build's transaction, so a
+  build that starts refills them for the builds already running. A start
+  replaces them whole: a link, a route or an address of the server's hosts
+  missing at that moment (a link down, a DNS answer that left one out) is
+  dropped for the running builds too, which are not refused it until the
+  next build starts.
 - **Per build**, on `build-N`, loaded atomically (`nft -f`) after the cgroup is
   created and before the build starts: rules 2 and 3, with the addresses
   resolved for that build, and rule 4 again, so that the build's own
@@ -351,7 +361,8 @@ the rules, and appends to the build's log what was refused. No kernel log is inv
 
 ### Failure
 
-A build whose rules cannot be loaded, or whose server's hosts do not resolve,
+A build whose rules cannot be loaded, whose server's hosts do not resolve, or
+whose host's links cannot be read,
 is refused. A worker that cannot put the baseline in place at all (no `nft`,
 no permission, no match by cgroup) claims no builds, rather than running them without the
 policy: one it claimed would only fail, and be retried until its attempts ran
@@ -376,8 +387,12 @@ root run as, is refused the server's worker protocol and API and another local
 address, reaches the repository and a listener of its own on loopback, and is
 still refused after moving itself to the root of its cgroup namespace and of a
 freshly mounted cgroup2 hierarchy (both moves are reported, and must succeed).
-Addresses routed through a host on a veth link of the worker's, in a network
-namespace of its own, stay reachable. The refusals are reported, and the
+A host on a veth link of the worker's, in a network namespace of its own, is
+refused on its public IPv4 address and its global IPv6 address, and on an
+address in a prefix of the worker's that has no kernel route (`noprefixroute`
+with a route of protocol `dhcp`, as dhcpcd makes them), as is the worker's
+default gateway on an address no link prefix holds, while addresses routed
+through that host stay reachable. The refusals are reported, and the
 worker process itself reaches all of them. A repository beyond that host, on a
 routed address, is reached on its port while another port of its address is
 refused and reported, and another routed address stays reachable; a worker

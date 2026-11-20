@@ -554,9 +554,16 @@ connection a build makes, in this order:
    repository, a LAN mirror, the mirrorlist AURCache sends).
 3. **Local destinations are refused**:
    - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
-     `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10` and
-     multicast;
+     `169.254.0.0/16`, `100.64.0.0/10`, `198.18.0.0/15`, `240.0.0.0/4`,
+     `fc00::/7`, `fe80::/10` and multicast;
+   - the NAT64 forms of those IPv4 ranges in `64:ff9b::/96`, and all of
+     `64:ff9b:1::/48`;
    - every address of the worker's own machine, its public ones included;
+   - the worker's links: the prefix of every address on its interfaces,
+     however it got there (DHCP, `noprefixroute`, a VRF), what routers
+     advertise as on-link, and its default gateways. A LAN on public IPv4
+     addresses, or the global IPv6 addresses of a dual-stack one, is local by
+     this rule;
    - every address of the server's hosts -- the repository's, and the one in
      the worker's `AURCACHE_URL` -- wherever they are: on your LAN, on another
      VLAN of a routed network, or on the internet. Past the repository
@@ -586,11 +593,21 @@ refused and why:
 [worker]   192.168.1.20:3632/tcp: a local address
 ```
 
-Names are resolved when each build starts, so a host whose address changed
-is picked up by the next build without a restart. A name in the allowlist
-that does not resolve is left out, and the build's log says so. A build whose
-repository's host, or the host in `AURCACHE_URL`, does not resolve is
-refused: the policy could not refuse that host's other ports.
+Names are resolved, and the worker's links read from its addresses and
+routes, when each build starts, so a host whose address changed, or a prefix
+the network added, is picked up by the next build without a restart. The
+local destinations are one set the worker shares between its builds, so a
+build that starts refills it for the ones already running too; between two
+starts, running builds keep the links and addresses read at the last one. A
+start replaces the set whole, so a link, a route or an address of the
+server's hosts missing at that moment (a link down, a DNS answer that left
+one out) is no longer refused to the builds already running either, until
+the next build starts. A destination
+beyond a router -- the internet, through the default route -- is not on a
+link, and stays reachable. A name in the allowlist that does not resolve is
+left out, and the build's log says so. A build whose repository's host, or
+the host in `AURCACHE_URL`, does not resolve is refused: the policy could not
+refuse that host's other ports.
 
 The rules match the build's cgroup, which holds everything the build runs:
 the reading of its dependencies, `makechrootpkg`, the containers, pacman, the
@@ -620,7 +637,8 @@ put the policy in place at all takes no builds: one that cannot match builds
 by their cgroup (a container that is not privileged, a unit without
 `Delegate=yes`, a kernel that takes no `socket cgroupv2` rule, before Linux
 5.13, or one that cannot match it from the worker container's own cgroup
-namespace), or that has no `nft` or no permission. It stays online but claims
+namespace), or that has no `nft`, no `ip` to read its links, or no
+permission. It stays online but claims
 none, so they go to other workers, and its log says why at startup and every
 ten minutes.
 
@@ -679,16 +697,31 @@ What the policy does not cover:
   the workers' addresses to it does not tell builds from workers, since builds
   connect from those same addresses.
 - **Anything else on a public address**: only local addresses, and the
-  server's hosts, are refused. That includes a LAN on public IPv4
-  addresses, and the global IPv6 addresses of a dual-stack one, which no
-  fixed range calls local.
+  server's hosts, are refused.
 - **`AF_VSOCK`**: no network namespace confines it and nftables cannot filter
   it, so where nothing else refuses it, a build on a worker in a virtual
   machine can reach the hypervisor's vsock services and vsock listeners in the
   machine itself. [What runs as root](#what-runs-as-root) says where the
   sandbox refuses it.
-- **A NAT64 translator** translates to whatever IPv4 address a build names,
-  local ones included, unless it refuses them itself.
+- **A destination reached through a route you added**, a VPN's or a static
+  one, unless it is local otherwise: the worker's links are the prefixes of
+  its own addresses and what routers advertise as on-link, and a tunnel that
+  carries the internet is routed the same way as one that carries a LAN.
+- **A NAT64 translator on a prefix of your own** translates to whatever IPv4
+  address a build names, local ones included. Have it refuse those, or use
+  `64:ff9b::/96`, where the forms of local addresses are refused.
+
+Two refused ranges carry the internet on some hosts, and builds there cannot
+reach it:
+
+- `198.18.0.0/15`, where a proxy in fake-IP mode (Clash, mihomo) answers
+  every DNS query: every name a build looks up resolves into it. Turn the
+  fake-IP mode off for the worker, or exempt it from the proxy.
+- `64:ff9b:1::/48`, the local-use NAT64 prefix: on a network whose NAT64
+  uses it, every IPv4-only destination is there. Use the well-known
+  `64:ff9b::/96` instead.
+
+Otherwise, `WORKER_BUILD_FIREWALL=0` turns the policy off.
 
 A [distcc](https://www.distcc.org/) helper, a git server or a cache a build
 needs on your network is refused for now: nothing but the build's
