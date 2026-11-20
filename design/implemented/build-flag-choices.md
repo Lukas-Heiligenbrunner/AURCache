@@ -17,7 +17,6 @@ because the worker passes them itself.
 
 Before this change:
 
-
 - **The list.** `aurcache-common/src/build_flags.rs` names every makepkg 7.1
   option as allowed or refused (with a reason). `canonical` turns flags into
   long names, splits bundles such as `-cf` and drops duplicates. The API's
