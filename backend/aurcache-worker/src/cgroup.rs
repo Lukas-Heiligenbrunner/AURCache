@@ -40,8 +40,10 @@
 //!  * **A native install** runs under `aurcache-worker.service`, which sets
 //!    `Delegate=yes` so systemd hands the subtree over rather than managing it.
 //!
-//! Where the hierarchy cannot be prepared, builds still run and simply report
-//! no figure; nothing here is on the path that produces packages.
+//! Where the hierarchy cannot be prepared, builds report no figure, and the
+//! network policy, which matches builds on their cgroups, cannot be put in
+//! place: unless `WORKER_BUILD_FIREWALL=0` turns it off, the worker then takes
+//! no builds.
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -131,6 +133,27 @@ impl Hierarchy {
     pub fn total_ooms(&self) -> Option<u64> {
         let raw = fs::read_to_string(self.builds.join("memory.events.local")).ok()?;
         parse_event(&raw, "oom")
+    }
+
+    /// Where `builds/` is, as the network policy names it; see [`CgroupName`].
+    #[must_use]
+    pub fn builds_name(&self) -> Option<CgroupName> {
+        CgroupName::of(&self.builds)
+    }
+
+    /// `builds/` itself.
+    #[must_use]
+    pub fn builds_dir(&self) -> &Path {
+        &self.builds
+    }
+
+    /// An empty cgroup under `builds/` that is no build's, for the worker to
+    /// check what a build's processes get there. Removed when dropped.
+    pub fn scratch(&self, name: &str) -> Result<BuildCgroup> {
+        let dir = self.builds.join(name);
+        let _ = remove_cgroup_tree(&dir);
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        Ok(BuildCgroup { dir })
     }
 
     /// Create the cgroup for one build, with `limits` applied.
@@ -319,7 +342,50 @@ impl OomCause {
     }
 }
 
+/// A cgroup as nftables' `socket cgroupv2` names it: its path below the
+/// cgroup root this process sees, and how deep that is.
+///
+/// Older kernels count the level from the host's root instead; see
+/// design/implemented/build-network.md#where-builds-cannot-be-matched-by-cgroup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CgroupName {
+    /// No leading slash: `system.slice/aurcache-worker.service/builds`.
+    pub path: String,
+    /// The number of components in `path`.
+    pub level: usize,
+}
+
+impl CgroupName {
+    /// The name of the cgroup at `dir`, under [`CGROUP_ROOT`].
+    ///
+    /// `None` for a path that nftables cannot take. Its quoted strings take
+    /// every character as it is, a backslash included -- systemd escapes a `-`
+    /// in a unit's name as `\x2d`, so a templated worker's cgroup is under
+    /// `system-aurcache\x2dworker.slice` -- but have no escape for `"`, and
+    /// end at a line break. No cgroup made by systemd or the worker has either.
+    #[must_use]
+    pub fn of(dir: &Path) -> Option<Self> {
+        let rel = dir.strip_prefix(CGROUP_ROOT).ok()?.to_str()?;
+        Self::from_relative(rel)
+    }
+
+    fn from_relative(rel: &str) -> Option<Self> {
+        let path = rel.trim_matches('/').to_string();
+        if path.is_empty() || path.contains(['"', '\n']) {
+            return None;
+        }
+        let level = path.split('/').count();
+        Some(Self { path, level })
+    }
+}
+
 impl BuildCgroup {
+    /// Where this cgroup is, as the network policy names it.
+    #[must_use]
+    pub fn name(&self) -> Option<CgroupName> {
+        CgroupName::of(&self.dir)
+    }
+
     /// How many processes in this build the kernel's OOM killer ended.
     ///
     /// `memory.events` counts the whole subtree, so a compiler killed inside the
@@ -358,8 +424,9 @@ impl BuildCgroup {
     /// as "whoever is writing" -- so there is no formatting and no allocation.
     ///
     /// # Safety
-    /// Must only be called from a `pre_exec` hook, with `handle` opened before
-    /// the fork.
+    /// Must only be called in a child just forked -- from a `pre_exec` hook,
+    /// or in one that makes only async-signal-safe calls before it exits --
+    /// with `handle` opened before the fork.
     pub unsafe fn join_current_process(handle: &OwnedFd) -> std::io::Result<()> {
         // SAFETY: a single write to an open descriptor is async-signal-safe.
         let written = unsafe { libc::write(handle.as_raw_fd(), c"0".as_ptr().cast(), 1) };
@@ -603,6 +670,50 @@ mod tests {
     #[test]
     fn a_v1_only_hierarchy_has_no_unified_entry() {
         assert!(parse_own_cgroup("12:pids:/x\n1:name=systemd:/y\n").is_none());
+    }
+
+    #[test]
+    fn a_cgroup_is_named_from_the_root_with_its_depth() {
+        assert_eq!(
+            CgroupName::of(Path::new(
+                "/sys/fs/cgroup/system.slice/aurcache-worker.service/builds"
+            )),
+            Some(CgroupName {
+                path: "system.slice/aurcache-worker.service/builds".to_string(),
+                level: 3,
+            })
+        );
+        // A container with a private cgroup namespace is at the root.
+        assert_eq!(
+            CgroupName::of(Path::new("/sys/fs/cgroup/builds/build-7")),
+            Some(CgroupName {
+                path: "builds/build-7".to_string(),
+                level: 2,
+            })
+        );
+        // The root itself is no build's, and nothing outside cgroupfs is one.
+        assert_eq!(CgroupName::of(Path::new("/sys/fs/cgroup")), None);
+        assert_eq!(CgroupName::of(Path::new("/tmp/builds")), None);
+        assert_eq!(CgroupName::from_relative("a\"b"), None);
+        assert_eq!(CgroupName::from_relative("a\nb"), None);
+    }
+
+    /// systemd's escapes stay as they are: nftables takes a backslash in a
+    /// quoted string literally, and so finds the cgroup by that path.
+    #[test]
+    fn a_templated_units_cgroup_is_named_with_its_escapes() {
+        assert_eq!(
+            CgroupName::of(Path::new(
+                "/sys/fs/cgroup/system.slice/system-aurcache\\x2dworker.slice/\
+                 aurcache-worker@2.service/builds"
+            )),
+            Some(CgroupName {
+                path:
+                    "system.slice/system-aurcache\\x2dworker.slice/aurcache-worker@2.service/builds"
+                        .to_string(),
+                level: 4,
+            })
+        );
     }
 
     #[test]

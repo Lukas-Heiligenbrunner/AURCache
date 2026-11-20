@@ -28,6 +28,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 percent-encoding = "2.3"
 url = "2"
+ipnet = "2.12"
 aurcache-common = { path = "../aurcache-common", features = ["digest"] }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
 aurcache-chroot = { path = "../aurcache-chroot" }

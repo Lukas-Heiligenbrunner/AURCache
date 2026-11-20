@@ -237,6 +237,11 @@ Nothing to do.
   per-build disk quota.
 - Source and package caches, so rebuilds do not re-download the world.
 - Build credentials for packages whose sources need authentication.
+- A network policy on builds. Here a build shares the server's network
+  namespace and reaches the API at `localhost:8080`, which without
+  [OAuth](../Configuration/authentication.md) lets it do anything an admin
+  can; a chroot worker
+  [keeps its builds off the server and the local network](./split-chroot.md#what-builds-can-reach-on-the-network).
 
 ### Migrating
 

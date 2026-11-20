@@ -142,6 +142,9 @@ services:
     # is the tightest config that works out of the box. If your host lets you,
     # you can narrow this to specific capabilities + seccomp/apparmor unconfined.
     privileged: true
+    # So the build network policy matches builds on older kernels; see
+    # design/implemented/build-network.md#where-builds-cannot-be-matched-by-cgroup
+    cgroup: host
     tmpfs:
       - /run
     networks:
@@ -192,6 +195,7 @@ services:
       - enroll:/enroll
       - worker_data_arm:/var/lib/aurcache-worker
     privileged: true
+    cgroup: host
     tmpfs:
       - /run
     networks:

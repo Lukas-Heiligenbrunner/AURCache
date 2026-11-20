@@ -28,5 +28,7 @@ export E2E_COMPOSE_FILE
 export E2E_SERVICES="aurcache"
 # The container builder has no storage pool, so its builds report no disk use.
 export E2E_EXPECT_DISK_USAGE=0
+# The Docker worker's builds have no network policy yet.
+export E2E_CHECK_BUILD_FIREWALL=0
 
 exec "$SCRIPT_DIR/test-e2e.sh" "${1:-hello}" "${2:-8090}" "${3:-900}"

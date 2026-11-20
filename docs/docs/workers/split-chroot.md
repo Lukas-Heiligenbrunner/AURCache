@@ -555,6 +555,160 @@ The server renders one repository URL for every worker from its
 the compose network rather than through a reverse proxy, say — sets one of the
 last two.
 
+## What builds can reach on the network
+
+A build runs in the worker's network namespace -- `systemd-nspawn` gives it no
+network of its own -- and it runs code from people other than you: the
+PKGBUILD, as the build user, and whatever its dependencies left for root to
+run as the build starts (see [What runs as root](#what-runs-as-root)). Two
+kinds of destination must stay out of its reach:
+
+- **the server**. Its worker protocol (`8083`) accepts a registration from
+  anyone, one mistaken approval away from a worker certificate; its web UI and
+  API (`8080`) serve anyone who reaches them when
+  [OAuth](../Configuration/authentication.md) is not configured, so a build
+  could add, delete and patch packages and change settings;
+- **the worker's local network**: routers, NAS admin pages, databases, and
+  whatever listens on the worker's own machine.
+
+So the worker puts a network policy on every build, in an `nftables` table of
+its own, `inet aurcache_worker_<id>`, named after the worker's fingerprint so
+that workers sharing a network namespace each keep theirs. For each
+connection a build makes, in this order:
+
+1. DNS to the resolvers in the worker's `/etc/resolv.conf` is allowed.
+2. **The allowlist is allowed**, exact `host:port` pairs: the hosts named by
+   the `Server =` lines of the build's `pacman.conf` (AURCache's repository, a
+   LAN mirror, the mirrorlist that AURCache sends).
+3. **Local destinations are refused**:
+   - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+     `169.254.0.0/16`, `100.64.0.0/10`, `fc00::/7`, `fe80::/10` and
+     multicast;
+   - every address of the worker's own machine, its public ones included;
+   - every address of the server's hosts -- the repository's, and the one in
+     the worker's `AURCACHE_URL` -- wherever they are: on your LAN, on another
+     VLAN of a routed network, or on the internet. Past the repository
+     itself, which 2. allows, those hosts' other ports -- the server's worker
+     protocol and API among them -- are refused. A server behind a CDN or a
+     proxy address shared with other sites has the other ports of that
+     address refused too.
+
+   The exception is a listener of the same build: a test suite that starts a
+   server on `127.0.0.1` and connects to it still passes.
+4. Everything else -- the AUR, source hosts, the official mirrors, the rest of
+   the internet -- is allowed.
+
+So on the server's hosts, and anywhere on your network, the worker protocol
+and the web UI and API are refused on whatever port they are published, along
+with everything else on that machine but the repository. The allowlist opens
+an address and port, not a name: everything served there is reachable through
+it, every virtual host of a reverse proxy on that port included, so an API
+behind the same proxy and port as the repository is reachable (see below).
+
+A refusal is a TCP reset or an ICMP error, so the build fails at once rather
+than timing out, and the build's log ends with the destinations it was
+refused and why:
+
+```text
+[worker] the build network policy refused connections to:
+[worker]   192.168.1.20:3632/tcp: a local address
+```
+
+Names are resolved when each build starts, so a host whose address changed
+is picked up by the next build without a restart. A name in the allowlist
+that does not resolve is left out, and the build's log says so. The server's
+hosts -- the repository's, and the one in `AURCACHE_URL` -- are resolved at
+startup too, and a worker whose server's hosts do not resolve then takes no
+builds. Builds only add to their addresses, so an address that the server's
+hosts no longer have stays refused until the worker restarts.
+
+The rules match the build's cgroup, which holds everything the build runs,
+root in its containers included, from before the first of it starts; the
+worker's own connections to the server are not affected. The
+[design](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/design/implemented/build-network.md#root-in-the-builds-container)
+says how the build's containers rule out what a match on connections cannot
+see: raw frames, and connections that the kernel opens for root.
+
+Workers of one server can share a network namespace, as containers on the
+host's network or as units on one machine: each keeps a table of its own.
+Workers of different servers need network namespaces of their own: their
+builds can have the same id, and each would refuse the other's build its own
+listeners. With `WORKER_BUILD_FIREWALL=0` a worker removes its table, so no
+earlier run's rules hold its builds.
+
+A build whose rules cannot be put in place does not run. A worker that cannot
+put the policy in place at all takes no builds: one that cannot match builds
+by their cgroup (a container that is not privileged, a unit without
+`Delegate=yes`, a kernel that takes no `socket cgroupv2` rule, before Linux
+5.13, or one that cannot match it from the worker container's own cgroup
+namespace), or that has no `nft` or no permission. It stays online but claims
+none, so they go to other workers, and its log says why at startup and every
+ten minutes.
+
+Matching from a container's own cgroup namespace needs Linux 6.11 or a
+stable kernel with its fix; on an older one, run the worker's container with
+`cgroup: host` (`--cgroupns=host`), as the compose files here do. The
+[design](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/design/implemented/build-network.md#where-builds-cannot-be-matched-by-cgroup) says why, and what that
+costs.
+
+There is no fallback that matches the build user instead: it would leave out
+root in the build's container, which is where code left by a dependency runs.
+Setting `WORKER_BUILD_FIREWALL=0` builds without the policy, with the server
+and your network open to every build.
+
+A native worker upgraded from a release that firewalled builds with
+`iptables` keeps that release's rule, which refuses the build user the
+worker-protocol port, until the machine reboots. It refuses nothing the policy
+allows; `iptables -S OUTPUT` (and `ip6tables -S OUTPUT`) show it, and
+`iptables -D` with the same arguments removes it.
+
+| Variable | Type | Description | Default |
+|---|---|---|---|
+| `WORKER_BUILD_FIREWALL` | Boolean | `0` puts no network policy on builds | on |
+
+It is this machine's alone; AURCache cannot set it.
+
+What the policy does not cover:
+
+- **An API on the same address and port as the repository.** Behind one
+  reverse proxy serving both at `https://aurcache.example.com`, or each at a
+  name of its own on the same address and port, a build reaches the API
+  through the proxy wherever it reaches the repository.
+  Configure OAuth, serve the repository on an address or port of its own, or
+  have the proxy refuse the API to the workers' addresses: a worker itself
+  only ever uses the worker protocol.
+- **The worker protocol on the repository's address and port**, such as one
+  TLS passthrough on 443 serving both: the repository is allowed, so the
+  worker protocol is reached through it. Give the worker protocol a port of
+  its own.
+- **An API on an address of its own**, away from the server's hosts and from
+  your network, such as an API published on the internet at another address
+  than the repository and the worker protocol: a build reaches it as anyone on
+  the internet does, so it needs OAuth. A firewall that admits only
+  the workers' addresses to it does not tell builds from workers, since builds
+  connect from those same addresses.
+- **Anything else on a public address**: only local addresses, and the
+  server's hosts, are refused. That includes a LAN on public IPv4
+  addresses, and the global IPv6 addresses of a dual-stack one, which no
+  fixed range calls local.
+- **`AF_VSOCK`**: no network namespace confines it and nftables cannot filter
+  it, so where nothing else refuses it, a build on a worker in a virtual
+  machine can reach the hypervisor's vsock services and vsock listeners in the
+  machine itself. [What runs as root](#what-runs-as-root) says where the
+  sandbox refuses it.
+- **A NAT64 translator** translates to whatever IPv4 address a build names,
+  local ones included, unless it refuses them itself.
+- **`flush ruleset`**, which many nftables configurations start with, removes
+  the worker's table: running builds go unrestricted, and new ones fail until
+  you restart the worker.
+
+A build that needs a [distcc](https://www.distcc.org/) helper, a git server or
+a cache on your network is refused it for now: nothing but the build's
+`pacman.conf` adds to the allowlist yet.
+
+The [Docker worker](./docker.md#what-builds-can-reach-on-the-network) has no
+such policy yet.
+
 ## Server-side settings
 
 These are set on the AURCache server, not the worker.

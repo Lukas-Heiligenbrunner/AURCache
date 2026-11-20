@@ -54,6 +54,9 @@ services:
     volumes:
       - worker_data:/var/lib/aurcache-worker   # persisted base chroot
     privileged: true
+    # So the build network policy matches builds on older kernels; see
+    # design/implemented/build-network.md#where-builds-cannot-be-matched-by-cgroup
+    cgroup: host
     tmpfs:
       - /run
     restart: unless-stopped

@@ -122,9 +122,11 @@ pub fn server_run(spec: &ServerRunSpec) -> DockerRun {
 ///
 /// `privileged` and a tmpfs `/run` are not optional: devtools builds each
 /// package in a systemd-nspawn chroot, which needs namespaces a plain container
-/// forbids. The data volume is not optional either — without it a recreated
-/// container loses its identity and re-enrolls as a fresh pending worker, which
-/// looks exactly like nobody having approved it.
+/// forbids. The host's cgroup namespace lets the build network policy match
+/// builds on older kernels (design/implemented/build-network.md). The data volume
+/// is not optional either — without it a recreated container loses its
+/// identity and re-enrolls as a fresh pending worker, which looks exactly like
+/// nobody having approved it.
 #[derive(Debug, Clone)]
 pub struct WorkerRunSpec {
     pub image: String,
@@ -160,6 +162,7 @@ pub fn worker_run(spec: &WorkerRunSpec) -> DockerRun {
         "--restart".into(),
         "unless-stopped".into(),
         "--privileged".into(),
+        "--cgroupns=host".into(),
         "--tmpfs".into(),
         "/run".into(),
     ];
@@ -368,6 +371,7 @@ mod tests {
         let run = worker_run(&spec(WorkerEnv::default(), false, "d"));
         let args = args_of(&run);
         assert!(args.contains("--privileged"), "{args}");
+        assert!(args.contains("--cgroupns=host"), "{args}");
         assert!(args.contains("--tmpfs /run"), "{args}");
     }
 

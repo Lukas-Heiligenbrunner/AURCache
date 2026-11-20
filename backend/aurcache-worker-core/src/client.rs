@@ -9,7 +9,7 @@
 //!   for all job endpoints.
 
 use crate::protocol::PackagesRefused;
-use crate::repo::RepoSection;
+use crate::repo::{Endpoint, RepoSection};
 use anyhow::{Context, Result, bail};
 use aurcache_common::api::activity::Severity;
 use aurcache_common::worker::{
@@ -251,6 +251,12 @@ impl WorkerClient {
     #[must_use]
     pub fn repo(&self) -> Option<&RepoSection> {
         self.repo.as_ref()
+    }
+
+    /// The host and port this client dials the server on.
+    #[must_use]
+    pub fn server(&self) -> Option<Endpoint> {
+        Endpoint::of(&url::Url::parse(&self.base).ok()?)
     }
 
     /// Build an enrollment client that trusts only the pinned CA and carries no

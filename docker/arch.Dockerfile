@@ -209,9 +209,13 @@ ARG TARGETPLATFORM
 # sudoers entry, the sandbox policy, and the patched makechrootpkg
 # (`aurcache-build`). pacman pulls devtools (mkarchroot / makechrootpkg /
 # arch-nspawn) and python as ordinary dependencies.
+#
+# nftables, which the worker firewalls builds with, is named here as well as
+# in the package's dependencies, so that an image built from a PKGBUILD that
+# predates it still has it.
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     --mount=type=bind,from=packager,source=/pkg,target=/tmp/pkg \
-    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker
+    aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-worker -- nftables
 
 # The same locations the package's tmpfiles declaration creates. A container
 # has no systemd unit to carry them, so they are set here instead.
