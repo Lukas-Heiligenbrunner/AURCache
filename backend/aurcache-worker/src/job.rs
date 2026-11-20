@@ -826,6 +826,7 @@ async fn execute_build_process(
             build_cgroup.as_ref(),
             build_firewall::Inputs {
                 repo: client.repo().cloned(),
+                allow: ctx.cfg.build_allow.clone(),
                 server: client.server(),
                 pacman_conf: ctx.pacman.build.clone(),
                 mirrorlist: claimed.mirrorlist.clone(),
