@@ -155,7 +155,11 @@ impl ChrootExecutor {
         log_limits(&cfg.tunables, cgroups.is_some());
         // After the hierarchy, whose `builds/` the rules match, and before any
         // job can be claimed.
-        let network = BuildNetwork::install(Table::for_worker(worker_id), cgroups.as_ref());
+        let network = BuildNetwork::install(
+            Table::for_worker(worker_id),
+            cgroups.as_ref(),
+            cfg.build_allow.clone(),
+        );
         let shared = Arc::new(Shared::new(&cfg));
         // Before anything can claim work: no build of ours is running yet, so
         // whatever a build left in the pool belongs to a run that is over.

@@ -14,7 +14,7 @@
 //! 1. established and related traffic: accepted;
 //! 2. DNS to the resolvers in the worker's `resolv.conf`: accepted;
 //! 3. the allowlist, exact `host:port` pairs (the `Server =` lines of the
-//!    build's `pacman.conf`): accepted;
+//!    build's `pacman.conf`, `WORKER_BUILD_ALLOW`): accepted;
 //! 4. local destinations ([`local`]) -- the private, link-local, shared and
 //!    reserved ranges, multicast, their NAT64 forms, every address of the
 //!    worker host itself, the prefixes and default gateways of its links,
@@ -24,7 +24,7 @@
 //!
 //! A server on the local network or on the repository's host, wherever that
 //! is, is refused on every port but what the allowlist names: its repository,
-//! and the other servers of the build's `pacman.conf`.
+//! and whatever exact `host:port` someone chose to allow.
 //!
 //! Names and the host's links are read when each build starts. A refusal is a
 //! TCP reset or an ICMP error, never a silent drop, and is recorded so the
@@ -74,6 +74,7 @@
 mod local;
 
 use anyhow::{Context, Result};
+use aurcache_common::host_port::HostPort;
 use aurcache_worker_core::repo::{Endpoint, RepoSection};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -757,17 +758,8 @@ fn lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
-/// `host:port`, an IPv6 address in brackets.
-fn shown(endpoint: &Endpoint) -> String {
-    if endpoint.host.contains(':') {
-        format!("[{}]:{}", endpoint.host, endpoint.port)
-    } else {
-        format!("{}:{}", endpoint.host, endpoint.port)
-    }
-}
-
 /// Resolve everything a build's policy names. Blocking: DNS.
-fn resolve(inputs: &Inputs<'_>) -> Result<Resolved> {
+fn resolve(inputs: &Inputs<'_>, worker_allow: &[HostPort]) -> Result<Resolved> {
     let mut skipped = Vec::new();
     // The repository is in the build's pacman.conf as well; named here so it
     // stays reachable whatever that file says.
@@ -798,17 +790,19 @@ fn resolve(inputs: &Inputs<'_>) -> Result<Resolved> {
     if let Some(list) = inputs.mirrorlist {
         servers.extend(mirrors(list).servers);
     }
-    let mut entries: Vec<Endpoint> = Vec::new();
-    for server in servers {
-        if !entries.contains(&server) {
-            entries.push(server);
-        }
-    }
+    let entries = servers
+        .into_iter()
+        .map(|e| HostPort {
+            host: e.host,
+            port: e.port,
+        })
+        .chain(worker_allow.iter().cloned())
+        .collect::<BTreeSet<_>>();
 
     for entry in entries {
         match lookup(&entry.host, entry.port) {
             Ok(addrs) => allowed.extend(addrs),
-            Err(e) => skipped.push(format!("{}: {e}", shown(&entry))),
+            Err(e) => skipped.push(format!("{entry}: {e}")),
         }
     }
     allowed.sort_unstable();
@@ -899,6 +893,8 @@ pub enum BuildNetwork {
 pub struct Firewall {
     table: Table,
     mode: Mode,
+    /// `WORKER_BUILD_ALLOW`.
+    allow: Vec<HostPort>,
 }
 
 impl Firewall {
@@ -940,7 +936,7 @@ impl BuildNetwork {
     /// At startup, before any build: whatever a previous run left is gone
     /// with the old table. Blocking.
     #[must_use]
-    pub fn install(table: Table, cgroups: Option<&Hierarchy>) -> Self {
+    pub fn install(table: Table, cgroups: Option<&Hierarchy>, allow: Vec<HostPort>) -> Self {
         if disabled() {
             tracing::warn!(
                 "{DISABLE_ENV} is off: builds can reach the server's API and worker \
@@ -965,7 +961,7 @@ impl BuildNetwork {
                 return Self::Unavailable(reason);
             }
         };
-        Self::Enforced(Firewall { table, mode })
+        Self::Enforced(Firewall { table, mode, allow })
     }
 
     /// Put one build's rules in place, after its cgroup exists and before it
@@ -988,9 +984,10 @@ impl BuildNetwork {
         };
         let matching = firewall.matching(cgroup)?;
         let inputs = OwnedInputs::from(&inputs);
+        let allow = firewall.allow.clone();
         let table = firewall.table.clone();
         tokio::task::spawn_blocking(move || {
-            load_build(table, build_id, &matching, &inputs.borrow())
+            load_build(table, build_id, &matching, &inputs.borrow(), &allow)
         })
         .await
         .context("the network rules' task died")?
@@ -1010,8 +1007,9 @@ fn load_build(
     build_id: i32,
     matcher: &Matcher,
     inputs: &Inputs<'_>,
+    allow: &[HostPort],
 ) -> Result<BuildRules> {
-    let resolved = resolve(inputs)?;
+    let resolved = resolve(inputs, allow)?;
     let links = Links::read()?;
     // A chain left by an earlier attempt under the same id.
     let _ = remove(&table, build_id);
@@ -1306,7 +1304,10 @@ impl Drop for BuildRules {
 
 /// A refusal as the build's log says it.
 fn explain(refusal: &Refusal) -> String {
-    format!("{refusal}: a local address")
+    format!(
+        "{refusal}: a local address; the worker's WORKER_BUILD_ALLOW can allow it \
+         (host:port)"
+    )
 }
 
 #[cfg(test)]
@@ -1738,12 +1739,16 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_says_why() {
+    fn a_refusal_says_how_to_allow_it() {
         let refusal = Refusal {
             addr: ip("192.168.1.9"),
             protocol: "tcp".to_string(),
             port: 3632,
         };
-        assert_eq!(explain(&refusal), "192.168.1.9:3632/tcp: a local address");
+        assert_eq!(
+            explain(&refusal),
+            "192.168.1.9:3632/tcp: a local address; the worker's WORKER_BUILD_ALLOW \
+             can allow it (host:port)"
+        );
     }
 }

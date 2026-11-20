@@ -15,6 +15,7 @@ pub mod digest;
 /// a browser, so wasm consumers leave it off.
 #[cfg(feature = "fs")]
 pub mod fs;
+pub mod host_port;
 pub mod ports;
 pub mod repo;
 pub mod schedule;
