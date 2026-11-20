@@ -64,7 +64,10 @@ pub async fn descriptor(
         Err(_) => (Vec::new(), Vec::new()),
     };
 
-    let build_flags = pkg.build_flags.as_slice().to_vec();
+    // With the flags every build takes in front, though a worker adds them
+    // itself: worker protocol 1 has makepkg given `build_flags` as they are,
+    // and a worker that adds nothing of its own builds with exactly these.
+    let build_flags = aurcache_common::build_flags::for_makepkg(pkg.build_flags.as_slice());
 
     // Resolved here rather than on the worker: settings are the server's,
     // with the package overriding the global default.
