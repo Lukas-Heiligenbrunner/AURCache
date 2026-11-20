@@ -211,10 +211,10 @@ something the other covers:
   sockets, and on kernels before 6.12, where Landlock does not scope them,
   the abstract UNIX sockets of the worker's network namespace with them.
 
-The install's binds are the build's package cache and the sandbox itself:
-not its ssh-agent socket, nor anything `WORKER_BIND_MOUNTS` adds. Its
-container also drops `CAP_MKNOD`: a container kept in the build's cgroup has
-no device policy, so a device node made there would open the host's device.
+Of the build's binds, the sync, the upgrade and the install get only its
+package cache, and the install the sandbox as well. Its container also drops
+`CAP_MKNOD`: a container kept in the build's cgroup has no device policy, so a
+device node made there would open the host's device.
 
 None of this holds root as the build starts: `/chrootbuild` runs there with
 the build's network, and runs whatever the dependencies left for it. Only a

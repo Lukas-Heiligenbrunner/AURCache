@@ -269,6 +269,9 @@ prepare_chroot
         #
         # Neither variable set (anyone running this copy by hand) skips the
         # sync, as `makechrootpkg` without `-u` does.
+        #
+        # Root runs packages' scriptlets in the sync and the upgrade too, so,
+        # like the dependency install below, they get only the cache binds.
         "-u refused; the copy synced, then upgraded without AURCache's repository",
         '(( update_first )) && arch-nspawn "$copydir" \\\n'
         '\t\t--machine="$(machine_name upgrade-packages)" \\\n'
@@ -284,14 +287,27 @@ if [[ -n ${AURCACHE_PACMAN_CONF:-} || -n ${AURCACHE_UPGRADE_CONF:-} ]]; then
 \t\tdie "Unable to install %s" "$AURCACHE_PACMAN_CONF"
 \tinstall -Dm644 "$AURCACHE_UPGRADE_CONF" "$copydir/etc/aurcache/pacman-upgrade.conf" ||
 \t\tdie "Unable to install %s" "$AURCACHE_UPGRADE_CONF"
+fi
+
+_aurcache_out=$(pacman-conf --config "$copydir/etc/pacman.conf" CacheDir) ||
+\tdie "Could not read the cache directories of %s" "$copydir/etc/pacman.conf"
+mapfile -t _aurcache_cache_dirs <<<"$_aurcache_out"
+_aurcache_cache_binds=()
+for _aurcache_bind in "${bindmounts_rw[@]}"; do
+\t_aurcache_target=${_aurcache_bind##*:}
+\tin_array "${_aurcache_target%/}" "${_aurcache_cache_dirs[@]%/}" &&
+\t\t_aurcache_cache_binds+=("$_aurcache_bind")
+done
+
+if [[ -n ${AURCACHE_PACMAN_CONF:-} ]]; then
 \tarch-nspawn "$copydir" \\
 \t\t--machine="$(machine_name sync-databases)" \\
-\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t"${_aurcache_cache_binds[@]}" \\
 \t\tpacman -Sy --noconfirm ||
 \t\tdie "Could not sync the package databases."
 \tarch-nspawn "$copydir" \\
 \t\t--machine="$(machine_name upgrade-packages)" \\
-\t\t"${bindmounts_ro[@]}" "${bindmounts_rw[@]}" "${bindmounts_tmpfs[@]}" \\
+\t\t"${_aurcache_cache_binds[@]}" \\
 \t\tpacman -Suu --noconfirm --config /etc/aurcache/pacman-upgrade.conf ||
 \t\tdie "Could not upgrade the chroot."
 fi
@@ -361,13 +377,6 @@ if [[ -n ${AURCACHE_BUILD_DEPS:-} ]]; then
 \tif (( ${#_aurcache_missing[@]} )); then
 \t\t_aurcache_sandbox=$(command -v aurcache-sandbox) ||
 \t\t\tdie "aurcache-sandbox is needed to install the build's dependencies"
-\t\tmapfile -t _aurcache_cache_dirs < <(pacman-conf --config "$copydir/etc/pacman.conf" CacheDir)
-\t\t_aurcache_cache_binds=()
-\t\tfor _aurcache_bind in "${bindmounts_rw[@]}"; do
-\t\t\t_aurcache_target=${_aurcache_bind##*:}
-\t\t\tin_array "${_aurcache_target%/}" "${_aurcache_cache_dirs[@]%/}" &&
-\t\t\t\t_aurcache_cache_binds+=("$_aurcache_bind")
-\t\tdone
 \t\tarch-nspawn "$copydir" \\
 \t\t\t--machine="$(machine_name download-dependencies)" \\
 \t\t\t"${_aurcache_cache_binds[@]}" \\
