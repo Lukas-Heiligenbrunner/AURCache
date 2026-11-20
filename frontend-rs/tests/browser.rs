@@ -1779,6 +1779,17 @@ const HOLD_NEXT_PATCH: &str = r#"
     return true;
 "#;
 
+/// Presses Escape on the open dialog's title, from where it bubbles to the box
+/// as a key pressed with focus anywhere inside would.
+const ESCAPE_IN_DIALOG: &str = r#"
+    const title = document.querySelector(".modal-open .modal-box h3");
+    if (!title) {
+        return false;
+    }
+    title.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    return true;
+"#;
+
 /// A refused save leaves the dialog open on the same draft, says why, and
 /// still closes on Escape. While the request is in flight, nothing dismisses
 /// the dialog out from under it.
@@ -1821,7 +1832,13 @@ async fn a_refused_build_flag_save_keeps_the_dialog_and_its_draft(session: &Sess
         "{body}"
     );
 
-    session.press_key(Key::Escape).await;
+    // Aimed at the box, where the dialog listens: every control in it is
+    // disabled while saving, so focus has left the dialog and a real key
+    // press would reach no listener of its, lock or none.
+    assert!(
+        session.eval::<bool>(ESCAPE_IN_DIALOG.to_string()).await,
+        "no dialog box to press Escape in"
+    );
     session.settle().await;
     session.click_at(5, 5).await;
     // Closing takes a render; give it time to happen before saying it did not.
