@@ -92,13 +92,6 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         uses: docker/setup-buildx-action@v4
 
-      # The image builds restore what they can from the Actions cache
-      # (E2E_IMAGE_CACHE below), which buildx in a `run:` step reaches only
-      # with the runtime's token, as in docker-worker-publish.yml.
-      - name: Expose the Actions cache to buildx
-        if: steps.changed.outputs.run == 'true'
-        uses: crazy-max/ghaction-github-runtime@v4
-
       - name: Run the Kubernetes E2E test
         if: steps.changed.outputs.run == 'true'
         env:
@@ -109,10 +102,6 @@ jobs:
           # namespace (its sysfs mount is refused), and left to find that out
           # the suite would skip the leg without anyone seeing.
           E2E_USER_NAMESPACES: '0'
-          # Restored from, never saved to: the repository's Actions cache is
-          # all but full with the publishing workflow's, which an amd64-only
-          # entry of this run's would evict.
-          E2E_IMAGE_CACHE: gha
         run: ./tests/e2e/topologies/kube/run.sh hello
 
   # The label means "run requested". Taking it back off once the run is over,
