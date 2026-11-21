@@ -38,7 +38,7 @@ pub use aurcache_common::api::package::{
     AddPackage as AddPackageRequest, SourcePreviewFileRequest, SourcePreviewRequest,
 };
 pub use aurcache_common::api::package::{SourceFileContent, SourceFileList, SourceFileUpdate};
-pub use aurcache_common::api::repo::RepoInfo;
+pub use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 pub use aurcache_common::api::settings::{SchedulePreview, SettingResponse, SettingValue};
 pub use aurcache_common::api::stats::{
     ApiTokenResponse, DashboardView, GraphDataPoint, ListStats, LongBuild, OutOfDateSlice,
@@ -173,6 +173,18 @@ impl AurCacheClient {
     /// How this instance publishes its pacman repository.
     pub async fn repo_info(&self) -> Result<RepoInfo> {
         self.get("/repo/info").await
+    }
+
+    /// The armored public key the repository is signed with, as
+    /// `pacman-key --add` takes it. An error when the instance does not sign.
+    pub async fn repo_key(&self) -> Result<String> {
+        self.request(Method::GET, "/repo/key").send_text().await
+    }
+
+    /// Whether the repository is signed, and with which key: `None` when it
+    /// is not. Needs no token, so a client can learn it before it has one.
+    pub async fn repo_signing(&self) -> Result<Option<SigningInfo>> {
+        self.get("/repo/signing").await
     }
 
     /// Calls the health endpoint and returns success when the instance is healthy.

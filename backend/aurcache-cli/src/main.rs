@@ -26,8 +26,9 @@ use crate::output::{
 use crate::packages::run_packages_command;
 use crate::setup::run_setup_command;
 use crate::workers::run_worker_command;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use aurcache_client::{AurCacheClient, Method};
+use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 use clap::{CommandFactory, Parser};
 use config::{
     ClientConfig, load_config, resolve_runtime_config, save_config, set_token, set_url,
@@ -120,7 +121,7 @@ async fn published_repo(
     api_url: &str,
     cli_token: Option<String>,
     args: &RepoConfigArgs,
-) -> Option<aurcache_client::RepoInfo> {
+) -> Option<RepoInfo> {
     // Overriding the port still leaves the repository name to discover.
     if args.offline {
         return None;
@@ -141,6 +142,15 @@ async fn published_repo(
     }
 }
 
+/// Ask the server, without a token, whether it signs its repository and with
+/// which key: pacman refuses a signed repository whose key it does not trust,
+/// so a stanza written without knowing would fail. `None` when it does not
+/// sign, or cannot say -- a server from before signing has no such route.
+async fn repo_signing(api_url: &str) -> Option<SigningInfo> {
+    let client = AurCacheClient::new(api_url.to_string(), None).ok()?;
+    client.repo_signing().await.ok().flatten()
+}
+
 /// Print the `pacman.conf` stanza, using optional server metadata.
 async fn run_repo_config(
     format: OutputFormat,
@@ -150,23 +160,75 @@ async fn run_repo_config(
 ) -> Result<()> {
     let api_url = config::resolve_url_only(cli_url)?;
     let published = published_repo(&api_url, cli_token, &args).await;
+    let signing = if args.offline {
+        None
+    } else {
+        repo_signing(&api_url).await
+    };
+    let explicit_siglevel = args.siglevel.is_some();
     let config = repo::repo_config(
         &api_url,
         args.port,
         args.name,
         args.siglevel,
         published.as_ref(),
+        signing.as_ref(),
     )?;
 
     if !args.install {
         return render(format, &config, repo::print_repo_config);
     }
+    let conf = repo::read_pacman_conf(&args.pacman_conf)?;
+    // The key before the stanza: a pacman.conf naming a signed repository
+    // whose key pacman does not trust fails every sync -- even with
+    // signatures optional, since pacman checks every one it finds. So an
+    // untrusted key leaves the file alone unless `--siglevel` says otherwise.
+    let key = match &config.key {
+        Some(key) => Some(trust_repo_key(&api_url, &config.name, key).await?),
+        None => None,
+    };
+    if let (Some(repo::KeyTrust::NotTrusted), Some(key)) = (key, &config.key)
+        && !explicit_siglevel
+        && !repo::has_section(&conf, &config.name)
+    {
+        let commands = repo::trust_commands(key);
+        bail!(
+            "not adding [{}] to {}: pacman refuses a signed repository whose key it does \
+             not trust. Trust the key first, then run this again:\n  {}\n  {}\n\
+             (--siglevel writes the section anyway)",
+            config.name,
+            args.pacman_conf.display(),
+            commands.add,
+            commands.lsign
+        );
+    }
+    let outcome = repo::install_stanza(&args.pacman_conf, &conf, &config)?;
+    // What the section says now: the one written, or the one found there.
+    let configured = match outcome {
+        repo::Install::AlreadyPresent => repo::section_siglevel(&conf, &config.name),
+        repo::Install::Appended | repo::Install::AppendedWithSudo => Some(config.siglevel.clone()),
+    };
     let installed = repo::Installed {
         path: &args.pacman_conf,
-        outcome: repo::install_stanza(&args.pacman_conf, &config)?,
+        outcome,
+        key,
+        siglevel: config
+            .key
+            .as_ref()
+            .zip(configured.as_deref())
+            .and_then(|(key, configured)| repo::siglevel_advice(key, configured)),
     };
     render(format, &installed, |installed| {
         let path = installed.path.display();
+        if let (Some(repo::KeyTrust::NotTrusted), Some(key)) = (installed.key, &config.key) {
+            eprintln!("pacman refuses [{}] until it trusts its key:", config.name);
+            for command in repo::trust_commands(key).iter() {
+                eprintln!("  {command}");
+            }
+        }
+        if let Some(advice) = &installed.siglevel {
+            repo::print_siglevel_advice(advice, &config.name, &path.to_string());
+        }
         match installed.outcome {
             repo::Install::AlreadyPresent => {
                 println!("[{}] is already configured in {path}", config.name);
@@ -177,6 +239,51 @@ async fn run_repo_config(
             }
         }
     })
+}
+
+/// Have pacman trust the repository's key, once the user has seen its
+/// fingerprint and said yes. The fingerprint comes over the same connection
+/// as the key, so the yes is what makes trusting it a decision: the prompt
+/// says to compare it with what the server's log or Settings page shows. A
+/// key pacman trusts already is added again without asking -- pacman checks
+/// a signature against the key as it imported it, so a new expiry or subkey
+/// reaches the keyring only that way -- and not signed again.
+async fn trust_repo_key(api_url: &str, name: &str, key: &repo::RepoKey) -> Result<repo::KeyTrust> {
+    if repo::is_trusted(key.fingerprint()) {
+        repo::add_key(&fetch_repo_key(api_url).await?)?;
+        return Ok(repo::KeyTrust::AlreadyTrusted);
+    }
+    if !config::is_interactive() {
+        eprintln!("Not trusting the repository's key without asking; nobody is here to ask.");
+        return Ok(repo::KeyTrust::NotTrusted);
+    }
+    eprintln!(
+        "[{name}] is signed with key {}. Trusting it lets pacman install whatever it signs.",
+        key.fingerprint()
+    );
+    eprintln!(
+        "That fingerprint came over the same connection as the key: before saying yes, \
+         compare it with the one on the server's Settings page or in its log."
+    );
+    let trust = dialoguer::Confirm::new()
+        .with_prompt("Add it to pacman's keyring and trust it?")
+        .default(false)
+        .interact()
+        .context("failed to read confirmation")?;
+    if !trust {
+        return Ok(repo::KeyTrust::NotTrusted);
+    }
+    repo::trust_key(&fetch_repo_key(api_url).await?, key.fingerprint())?;
+    Ok(repo::KeyTrust::Trusted)
+}
+
+/// The repository's key, armored, served without authentication like the
+/// repository itself.
+async fn fetch_repo_key(api_url: &str) -> Result<String> {
+    AurCacheClient::new(api_url.to_string(), None)?
+        .repo_key()
+        .await
+        .context("failed to fetch the repository's key")
 }
 
 fn run_completions(shell: clap_complete::Shell) {

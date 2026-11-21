@@ -1,9 +1,9 @@
 # Signed packages and a signed repository
 
 Status: **In progress** (server-side signing of packages and databases, the
-backfill and key publication done; the CLI's and web UI's trust flow, rotation,
-workers verifying, a keyring package and a staged rollout open — see [What is
-left](#what-is-left)) · Last updated: 2026-11-20
+backfill, key publication, CLI and web UI done; rotation, workers verifying,
+a keyring package and a staged rollout open — see [What is left](#what-is-left))
+· Last updated: 2026-11-20
 
 Upstream issue: Lukas-Heiligenbrunner/AURCache#274 ("Feature: Signed packages &
 repo"). It asks for three things:
@@ -32,6 +32,10 @@ fits into `Repository`.
   unsigned, or under another key, signed through `Update::resign`, and
   databases no update has signed since, through `Update::rewrite_databases`.
 - `GET /api/repo/key` and `GET /api/repo/signing` (no authentication).
+- `aurcli repo config`: `SigLevel = Required` and the commands to trust the
+  key; `--install` offers to run them, behind a prompt showing the
+  fingerprint.
+- The Settings page's *Repository signing* section.
 - Docs: `docs/docs/Configuration/pacman-repo.md#signing-the-repository`, three
   rows in the environment page.
 - `scripts/test-signed-repo.sh`: pacman itself, in a container, against a
@@ -330,7 +334,8 @@ one. So from the first start with signing on, a client still on the
 documented `SigLevel = Optional TrustAll` refuses the repository
 (`key "…" is unknown`) until it trusts the key — `test-signed-repo.sh`
 asserts exactly that. Only `SigLevel = Never` clients are unaffected. The
-proposal assumed the opposite. The docs carry a warning.
+proposal assumed the opposite. The docs carry a warning, and
+`aurcli repo config --install` trusts the key before writing the stanza.
 pacman names the signing *subkey* in that error, not the fingerprint clients
 are told to trust; the docs say so.
 
@@ -499,21 +504,32 @@ A signature is only as useful as the client's way of knowing the key.
   means unsigned too. It is the only place that says so: `GET /api/repo/info`
   carried the same once, which only doubled what a client has to ask and
   fall back between. **Finding:** dropped before any release had it.
-- **`aurcli repo config`** (not in this change; its own, the client trust
-  flow) prints `SigLevel = Required` and the two
+- **`aurcli repo config`** (built) prints `SigLevel = Required` and the two
   commands (`curl … | sudo pacman-key --add -`, `sudo pacman-key --lsign-key
   <fpr>`) when the instance signs and has finished backfilling, and keeps
-  `Optional TrustAll` — still printing the commands — while it has not.
+  `Optional TrustAll` — still printing the commands — while it has not,
+  saying to set `Required` in the section once it has; `--install` on a
+  section it wrote optional says the same once the backfill is done, rather
+  than leave signatures optional for good.
   `--install` trusts the key *before* writing the stanza, after showing the
   fingerprint and asking (`sudo` unless root); without a terminal it does not
   ask, prints the commands, and writes no section unless `--siglevel` is
   given, since pacman would refuse it even under `Optional`. `pacman-key
   --add` is given `-` for the pipe: with no argument at all, pacman-key 7.1
   refuses. It always asks `/repo/signing`, with a token or without. The
-  fingerprint comes over the same connection as the key; the prompt is what makes
-  `--lsign` a decision, and lsigning by the reported fingerprint means a
-  served key that is not that one is never trusted.
-- **The web UI** (not in this change, with the CLI's): a *Repository signing* section on the Settings page
+  fingerprint comes over the same connection as the key; the prompt is what
+  makes `--lsign` a decision, so it says to compare the fingerprint with the
+  server's Settings page or log, and lsigning by the reported fingerprint
+  means a served key that is not that one is never trusted. A reported
+  fingerprint that is not 40 hex digits is refused before it reaches a
+  command run as root. A key pacman's keyring already holds with full
+  validity and not disabled (`gpg --with-colons --list-keys` on
+  `/etc/pacman.d/gnupg`, which needs no root; a `GPGDir` elsewhere is not
+  read, so such a key is only asked about again) is not asked about or
+  signed again, but is added again: pacman checks a signature against the key
+  as imported, so a new expiry or subkey reaches the keyring that way. `--offline` asks nothing: it writes `Optional
+  TrustAll` and trusts no key.
+- **The web UI** (built): a *Repository signing* section on the Settings page
   with the fingerprint, the backfill state, the commands and a link to the
   key. There is no repository page to put it on. `test-frontend.sh` runs its
   server with signing on, so the browser checks render the section in its
@@ -595,6 +611,9 @@ Built:
   its signature, in its entry and beside it, and a signed database; once it
   no longer signs, a rebuild under the same file name takes the old `.sig`
   away.
+- `aurcache-cli`: the stanza and commands for signed, backfilling and
+  unsigned instances, `--siglevel` still winning, and when to say the
+  optional level should become `Required`.
 - `scripts/test-signed-repo.sh`, with its fixture
   `aurcache-utils/tests/signed_repository.rs` (ignored by `cargo test`).
 
@@ -608,9 +627,6 @@ pacman makes of the server's output without workers.
 
 - **Workers verifying** the repository they install dependencies from
   ([Workers](#workers)).
-- **The client trust flow**: `aurcli repo config` and the Settings page
-  telling a client how to trust the key ([Getting the key to
-  clients](#4-getting-the-key-to-clients)), its own change.
 - **Rotation** as an operation -- a rotate-key command, more than one signing
   subkey and the handover between them, and certifying the new key with the
   old one ([Rotation](#rotation)).

@@ -76,8 +76,36 @@ port says nothing about the repository's, so against a server that moved it pass
 `--port`. `--offline` forces
 that fallback; `--port`, `--name` and `--siglevel` override the result outright.
 
-For a signed repository, change the `SigLevel` it writes to `Required` once
-the key is trusted; see [Signing the repository](#signing-the-repository).
+It also asks whether the repository is signed, which the server answers
+without a token too (`GET /api/repo/signing`). If it is, the stanza says
+`SigLevel = Required`, the commands to trust the key are printed with it, and
+`--install` first offers to run them: it shows the key's fingerprint and asks
+before adding the key to pacman's keyring and locally signing it (through
+`sudo` unless run as root). The fingerprint comes over the same connection as
+the key, so compare it with the one the server's Settings page or log shows
+before saying yes. A key pacman already trusts is added again without asking,
+which takes a new expiry or subkey into the keyring, and not signed again.
+Whether it is trusted is read from `/etc/pacman.d/gnupg`; with `GPGDir` set
+elsewhere in `pacman.conf` the key is asked about each time. Answering no, or
+running without a terminal to ask on, leaves the keyring alone, prints the
+commands, and does not write the section either — pacman would refuse it, even with
+signatures optional, until the key is trusted. Run it again once the key is
+trusted, or pass `--siglevel` to write the section regardless. A section
+already in `pacman.conf` is left as it is, its `SigLevel` included: change
+that one yourself.
+
+`--offline` asks nothing, so it cannot tell a signed repository either: it
+writes `SigLevel = Optional TrustAll` and trusts no key. Against a signed
+repository pacman refuses that section until the key is trusted by hand
+([Turning it on](#turning-it-on)).
+
+While the server has not signed everything clients can install — it is still
+signing what it published before, or some package cannot be signed until it
+is rebuilt (below) — the stanza says `SigLevel = Optional TrustAll` instead,
+and both the printed instructions and `--install` say to set `SigLevel =
+Required` in the section once that is done.
+`aurcli repo config` prints `Required` from then on, and `--install` run again
+on a section it wrote optional says to make that change.
 
 `$arch` is pacman's own variable and is deliberately left unexpanded: one stanza
 serves every architecture the instance builds for.
@@ -115,8 +143,9 @@ directory without running the server, and a stale or swapped `repo.db`.
 ### Turning it on
 
 1. Set `AURCACHE_SIGN=true` on the server and restart it.
-2. On every client, trust the key, comparing the fingerprint with the one
-   the server logs (and `GET /api/repo/signing` reports):
+2. On every client, trust the key: `aurcli repo config --install`, or by hand,
+   comparing the fingerprint with the one the server logs or the Settings page
+   shows:
 
    ```bash
    curl -fsSL http://<server_ip>:8080/api/repo/key | sudo pacman-key --add -
@@ -131,15 +160,16 @@ pacman checks every signature it finds, even under `SigLevel = Optional`, the
 stanza above included. From the moment the server signs, a client that does
 not trust the key refuses the repository with `key "<fingerprint>" is
 unknown`. That fingerprint is the signing subkey's, not the primary key's
-the server logs: adding and trusting the key as
+the server logs and the Settings page shows: adding and trusting the key as
 above takes care of both. Clients set to `SigLevel = Never` ignore signatures
 and are not affected.
 :::
 
 Packages published before signing was turned on — or signed by another key —
 are signed in the background after the server starts, a batch at a time,
-without holding up publishing. Until that has finished, `GET /api/repo/signing`
-says so (`backfilling`): a client requiring
+without holding up publishing. Until that has finished, the Settings page
+and `GET /api/repo/signing` say so (`backfilling`), and `aurcli repo config`
+keeps `SigLevel = Optional TrustAll`: a client requiring
 signatures would refuse the packages not yet signed. Whatever cannot be
 signed yet is retried later and reported in the **Logs** page. Some packages
 the repository lists cannot be signed at all, and are reported there at every

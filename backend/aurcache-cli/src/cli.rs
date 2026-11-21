@@ -458,8 +458,11 @@ pub(crate) enum RepoCommand {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct RepoConfigArgs {
     /// Add the stanza to pacman.conf instead of printing it. Asks for sudo only
-    /// if the file is not already writable, and does nothing if the repository
-    /// is already configured.
+    /// if the file is not already writable, and leaves the file alone if the
+    /// repository is already configured. For a signed repository, first offers
+    /// to add its key to pacman's keyring and trust it, showing the
+    /// fingerprint; a key pacman trusts already is added again without asking,
+    /// to take a new expiry or subkey.
     #[arg(long)]
     pub(crate) install: bool,
 
@@ -468,7 +471,9 @@ pub(crate) struct RepoConfigArgs {
     pub(crate) pacman_conf: PathBuf,
 
     /// Do not ask the server how it publishes the repository; derive the
-    /// address from the configured URL alone.
+    /// address from the configured URL alone. Nor whether it is signed: the
+    /// stanza says `Optional TrustAll` and no key is trusted, so against a
+    /// signed repository pacman refuses it until the key is trusted by hand.
     #[arg(long)]
     pub(crate) offline: bool,
 
@@ -483,8 +488,9 @@ pub(crate) struct RepoConfigArgs {
     #[arg(long)]
     pub(crate) name: Option<String>,
 
-    /// `SigLevel` to write. AURCache does not sign packages, so a stricter
-    /// level than the default refuses everything it serves.
+    /// `SigLevel` to write. By default `Required` for an instance that signs
+    /// its repository, as the server reports, and
+    /// `Optional TrustAll` for one that does not.
     #[arg(long)]
     pub(crate) siglevel: Option<String>,
 }

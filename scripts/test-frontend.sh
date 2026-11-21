@@ -116,8 +116,10 @@ echo "==> starting the server"
 # A long liveness timeout so "is this worker connected" does not depend on how
 # far into the run the check happens: the fixture's online worker last checked
 # in seconds before seeding, and the default timeout is 60.
+# Signing on, so the Settings page shows its signing section in its widest
+# form, commands and all; the key is created beside the work directory's CA.
 ( cd "$WORKDIR" && exec env VERSION_CHECK_INTERVAL=86400 WORKER_LIVENESS_TIMEOUT=3600 \
-    AURCACHE_HTTP_PORT="$API_PORT" \
+    AURCACHE_HTTP_PORT="$API_PORT" AURCACHE_SIGN=true \
     "$SERVER_BIN" > "$WORKDIR/server.log" 2>&1 ) &
 BACKEND_PID=$!
 
@@ -176,6 +178,10 @@ ROUTES=(
     "/|s=enqueued|the stuck queue links to both queued states"
     "/builds|Duration|builds list"
     "/settings|Max artifact size|the artifact size limit is a setting"
+    # The server runs with signing on: the section names the key and the
+    # commands that trust it, whether or not its backfill has finished.
+    "/settings|Repository signing|the Settings page has a repository signing section"
+    "/settings|pacman-key --lsign-key|the signing section says how to trust the key"
     "/builds|6.4 GiB|a build's peak memory is reported"
     # The fixture holds more builds than fit on a page. That the second page
     # holds different rows is an interaction test; this is only that the

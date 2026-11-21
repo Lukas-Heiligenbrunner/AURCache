@@ -8,8 +8,9 @@
 
 use crate::url::{is_loopback, scheme_from_url};
 use anyhow::{Context, Result, anyhow, bail};
-use aurcache_common::api::repo::RepoInfo;
+use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 use aurcache_common::ports::AURCACHE_REPO_PORT;
+use aurcache_common::repo::KeyTrustCommands;
 use aurcache_common::repo::host_from_url;
 use serde::Serialize;
 use std::fs;
@@ -20,9 +21,13 @@ use std::process::{Command, Stdio};
 /// The name assumed offline or when a server predates configurable names.
 pub use aurcache_common::repo::DEFAULT_REPO_NAME;
 
-/// Matches the documented stanza. AURCache does not sign its packages, so a
-/// stricter level would refuse everything it serves.
+/// Matches the documented stanza, for an instance that does not sign -- or
+/// is still signing what it published before -- so that a stricter level
+/// would refuse what it serves unsigned.
 pub const DEFAULT_SIGLEVEL: &str = "Optional TrustAll";
+
+/// For an instance that signs every package and both databases.
+pub const SIGNED_SIGLEVEL: &str = "Required";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoConfig {
@@ -32,6 +37,53 @@ pub struct RepoConfig {
     /// The three lines as they go into `pacman.conf`, so a JSON consumer does
     /// not have to reassemble them and get the order or spacing wrong.
     pub block: String,
+    /// The key the repository is signed with, when the server said it signs.
+    /// pacman checks any signature it finds, even where they are optional, so
+    /// it has to trust this key before it syncs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<RepoKey>,
+}
+
+/// The key a signed repository is signed with, as the server reports it, and
+/// where to get it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoKey {
+    /// Its fingerprint, checked to be one ([`RepoKey::new`]), and whether
+    /// the instance has signed all it publishes yet: until it has, the
+    /// stanza keeps signatures optional.
+    #[serde(flatten)]
+    pub signing: SigningInfo,
+    /// Where the armored public key is served, without authentication.
+    pub url: String,
+}
+
+impl RepoKey {
+    /// The key `signing` reports, served by the API at `api_url`. Refused
+    /// unless its fingerprint is one -- 40 hex digits -- since it goes into
+    /// the commands printed and run as root.
+    pub fn new(signing: &SigningInfo, api_url: &str) -> Result<Self> {
+        if !is_fingerprint(&signing.fingerprint) {
+            bail!(
+                "the server reported {:?} as its signing key's fingerprint, which is not one",
+                signing.fingerprint
+            );
+        }
+        Ok(Self {
+            signing: signing.clone(),
+            url: aurcache_common::repo::key_url(api_url),
+        })
+    }
+
+    /// As `pacman-key --lsign-key` takes it.
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.signing.fingerprint
+    }
+}
+
+/// Whether `text` is an OpenPGP v4 fingerprint: 40 hex digits.
+fn is_fingerprint(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The `Server =` value for the repository published by the instance at
@@ -81,34 +133,47 @@ pub fn server_url_from_public(published: &RepoInfo, api_url: &str) -> Result<Str
 /// Build the stanza for the instance at `api_url`.
 ///
 /// `published` is what the server said about itself, when it could be asked.
-/// An explicit `port` outranks it: someone passing `--port` is correcting us,
-/// not asking to be corrected. With neither, the repository is assumed to be
-/// on the default port, which is only a guess: the server may listen on
-/// another (`AURCACHE_REPO_PORT`).
+/// An explicit `port` outranks the address it gives: someone passing `--port`
+/// is correcting us, not asking to be corrected. With neither, the repository
+/// is assumed to be on the default port, which is only a guess: the server may
+/// listen on another (`AURCACHE_REPO_PORT`). `signing` -- what the server
+/// says about its key, which it says without a token too -- decides the
+/// default `SigLevel`, which `siglevel` outranks in turn.
 pub fn repo_config(
     api_url: &str,
     port: Option<u16>,
     name: Option<String>,
     siglevel: Option<String>,
     published: Option<&RepoInfo>,
+    signing: Option<&SigningInfo>,
 ) -> Result<RepoConfig> {
     let server = match (port, published) {
         (None, Some(published)) => server_url_from_public(published, api_url)?,
         (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_REPO_PORT))?,
     };
+    let key = signing
+        .map(|signing| RepoKey::new(signing, api_url))
+        .transpose()?;
     let name = name.unwrap_or_else(|| {
         published
             .map_or(DEFAULT_REPO_NAME, |info| info.name.as_str())
             .to_string()
     });
     aurcache_common::repo::validate_name(&name).map_err(anyhow::Error::msg)?;
-    let siglevel = siglevel.unwrap_or_else(|| DEFAULT_SIGLEVEL.to_string());
+    let siglevel = siglevel.unwrap_or_else(|| {
+        match &key {
+            Some(key) if !key.signing.backfilling => SIGNED_SIGLEVEL,
+            _ => DEFAULT_SIGLEVEL,
+        }
+        .to_string()
+    });
     let block = format!("[{name}]\nSigLevel = {siglevel}\nServer = {server}\n");
     Ok(RepoConfig {
         name,
         server,
         siglevel,
         block,
+        key,
     })
 }
 
@@ -126,6 +191,88 @@ pub fn has_section(conf: &str, name: &str) -> bool {
     // Matched whole, so a commented-out section is not a section: someone who
     // disabled it gets it back, rather than a confusing "already configured".
     conf.lines().any(|line| line.trim() == header)
+}
+
+/// The `SigLevel` the `[name]` section of `conf` sets, if it is there and
+/// sets one.
+#[must_use]
+pub fn section_siglevel(conf: &str, name: &str) -> Option<String> {
+    let header = format!("[{name}]");
+    let mut lines = conf.lines().map(str::trim);
+    lines.find(|line| *line == header)?;
+    lines
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "SigLevel").then(|| value.trim().to_string())
+        })
+}
+
+/// What a client set up for a signed repository should still change in
+/// its `SigLevel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "advice")]
+pub enum SigLevelAdvice {
+    /// Signatures stay optional while the server has not signed everything
+    /// a client can install -- what it published before, still being
+    /// signed, or a package it cannot sign until it is rebuilt; `Required`
+    /// is for once it has.
+    WaitForBackfill,
+    /// The server has signed everything: `Required` in place of the
+    /// optional level set now.
+    Require,
+}
+
+/// What to advise about the `SigLevel` `configured` for the repository `key`
+/// signs: nothing unless it is the optional level this writes by default --
+/// any other is someone's own choice.
+#[must_use]
+pub fn siglevel_advice(key: &RepoKey, configured: &str) -> Option<SigLevelAdvice> {
+    if configured != DEFAULT_SIGLEVEL {
+        return None;
+    }
+    Some(if key.signing.backfilling {
+        SigLevelAdvice::WaitForBackfill
+    } else {
+        SigLevelAdvice::Require
+    })
+}
+
+/// On stderr, what `advice` asks of the `[name]` section of the pacman
+/// configuration `conf` names.
+pub fn print_siglevel_advice(advice: &SigLevelAdvice, name: &str, conf: &str) {
+    eprintln!("{}", siglevel_advice_text(advice, name, conf));
+}
+
+/// What [`print_siglevel_advice`] says.
+fn siglevel_advice_text(advice: &SigLevelAdvice, name: &str, conf: &str) -> String {
+    match advice {
+        SigLevelAdvice::WaitForBackfill => format!(
+            "The server has not signed everything it publishes yet, so [{name}] keeps \
+             SigLevel = {DEFAULT_SIGLEVEL} for now. Once it has -- `aurcli repo config` \
+             then prints SigLevel = {SIGNED_SIGLEVEL} -- set SigLevel = {SIGNED_SIGLEVEL} in \
+             the [{name}] section of {conf}."
+        ),
+        SigLevelAdvice::Require => format!(
+            "Everything the server publishes is signed: set SigLevel = {SIGNED_SIGLEVEL} in \
+             the [{name}] section of {conf}, in place of {DEFAULT_SIGLEVEL}."
+        ),
+    }
+}
+
+/// The pacman configuration at `path`, read once for everything `--install`
+/// decides. A file that is not there is an error: there is nowhere to add a
+/// section.
+pub fn read_pacman_conf(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(conf) => Ok(conf),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            bail!("{} does not exist; is this an Arch system?", path.display())
+        }
+        Err(e) => {
+            Err(anyhow::Error::new(e)).with_context(|| format!("failed to read {}", path.display()))
+        }
+    }
 }
 
 /// `conf` with `block` appended, separated by exactly one blank line.
@@ -146,29 +293,19 @@ pub fn append_stanza(conf: &str, block: &str) -> String {
     out
 }
 
-/// Write the stanza into `path`, elevating only if we have to.
+/// Write the stanza into `path`, whose content is `existing`
+/// ([`read_pacman_conf`]), elevating only if we have to.
 ///
 /// Tries the unprivileged write first: running as root, or against a file the
 /// user owns, then never prompts for a password. Only a `PermissionDenied`
 /// falls back to `sudo`, which prompts on the terminal — a process cannot raise
 /// its own privileges, but it can hand the work to one that has them.
-pub fn install_stanza(path: &Path, config: &RepoConfig) -> Result<Install> {
-    let existing = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            bail!("{} does not exist; is this an Arch system?", path.display())
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e))
-                .with_context(|| format!("failed to read {}", path.display()));
-        }
-    };
-
-    if has_section(&existing, &config.name) {
+pub fn install_stanza(path: &Path, existing: &str, config: &RepoConfig) -> Result<Install> {
+    if has_section(existing, &config.name) {
         return Ok(Install::AlreadyPresent);
     }
 
-    let updated = append_stanza(&existing, &config.block);
+    let updated = append_stanza(existing, &config.block);
     match fs::write(path, &updated) {
         Ok(()) => Ok(Install::Appended),
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
@@ -223,6 +360,13 @@ fn append_via_sudo(path: &Path, block: &str) -> Result<()> {
 pub struct Installed<'a> {
     pub path: &'a Path,
     pub outcome: Install,
+    /// What became of the repository's key, when it is signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<KeyTrust>,
+    /// What is left to change in the section's `SigLevel`, when it is
+    /// signed and still the optional level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siglevel: Option<SigLevelAdvice>,
 }
 
 /// What `--install` did to `pacman.conf`.
@@ -245,20 +389,178 @@ pub enum Install {
 pub fn print_repo_config(config: &RepoConfig) {
     print!("{}", config.block);
     eprintln!();
+    if let Some(key) = &config.key {
+        print_trust_instructions(key);
+        if let Some(advice) = siglevel_advice(key, &config.siglevel) {
+            print_siglevel_advice(&advice, &config.name, "pacman.conf");
+        }
+        eprintln!();
+    }
     eprintln!("Add it to /etc/pacman.conf (asks for sudo only if it has to):");
     eprintln!("  aurcli repo config --install");
+}
+
+/// What to run so that pacman trusts `key`, on stderr.
+pub fn print_trust_instructions(key: &RepoKey) {
+    eprintln!(
+        "The repository is signed with key {}. pacman checks every signature it finds,",
+        key.fingerprint()
+    );
+    eprintln!("so trust that key first:");
+    for command in trust_commands(key).iter() {
+        eprintln!("  {command}");
+    }
+}
+
+/// The commands that make pacman trust `key`, as one would type them.
+#[must_use]
+pub fn trust_commands(key: &RepoKey) -> KeyTrustCommands {
+    KeyTrustCommands::new(&key.url, key.fingerprint())
+}
+
+/// What `--install` did about the repository's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyTrust {
+    /// pacman's keyring trusted it already: added again without asking, so
+    /// the keyring takes a new expiry or subkey, and not signed again.
+    AlreadyTrusted,
+    /// Added to pacman's keyring and locally signed.
+    Trusted,
+    /// Left alone: declined at the prompt, or there was no one to ask.
+    NotTrusted,
+}
+
+/// Where pacman keeps its keyring by default. A `GPGDir` set in
+/// `pacman.conf` is not read: a key trusted only in a keyring elsewhere reads
+/// as untrusted here, which only means it is asked about, and `pacman-key`
+/// then adds and signs it where `pacman.conf` says.
+const PACMAN_KEYRING: &str = "/etc/pacman.d/gnupg";
+
+/// Whether pacman's keyring already trusts the key `fingerprint`: holds it
+/// with full or ultimate validity, as `pacman-key --lsign-key` leaves it,
+/// and not disabled.
+///
+/// Asked of `gpg` directly, which reads the keyring without root. Anything
+/// that goes wrong reads as not trusted, which only means asking.
+#[must_use]
+pub fn is_trusted(fingerprint: &str) -> bool {
+    if !is_fingerprint(fingerprint) {
+        return false;
+    }
+    Command::new("gpg")
+        .args([
+            "--homedir",
+            PACMAN_KEYRING,
+            "--no-permission-warning",
+            "--batch",
+        ])
+        .args(["--with-colons", "--list-keys", fingerprint])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && listed_as_trusted(&String::from_utf8_lossy(&output.stdout))
+        })
+}
+
+/// Whether `listing`, `gpg --with-colons --list-keys` of one key, gives it
+/// full (`f`) or ultimate (`u`) validity and does not list it as disabled
+/// (`D` among its capabilities, the twelfth field).
+fn listed_as_trusted(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        fields.first() == Some(&"pub")
+            && matches!(fields.get(1), Some(&("f" | "u")))
+            && !fields
+                .get(11)
+                .is_some_and(|capabilities| capabilities.contains('D'))
+    })
+}
+
+/// Add `armored` -- the key the server served -- to pacman's keyring, and
+/// locally sign it by `fingerprint`, as `pacman-key` does: through `sudo`
+/// unless already root.
+///
+/// The signing is by the fingerprint the server reported, so a served key
+/// that is not that one is added but never trusted, and this fails. A
+/// fingerprint that is not 40 hex digits is refused before anything runs.
+pub fn trust_key(armored: &str, fingerprint: &str) -> Result<()> {
+    if !is_fingerprint(fingerprint) {
+        bail!("{fingerprint:?} is not a key fingerprint");
+    }
+    add_key(armored)?;
+    let signed = pacman_key()
+        .args(["--lsign-key", fingerprint])
+        .status()
+        .map_err(spawn_error)?;
+    if !signed.success() {
+        bail!("pacman-key --lsign-key {fingerprint} failed; is that the key the server served?");
+    }
+    Ok(())
+}
+
+/// Add `armored` to pacman's keyring with `pacman-key --add`, through `sudo`
+/// unless already root, trusting nothing: a key the keyring holds already
+/// takes whatever the copy adds, a new expiry or subkey, which only the
+/// key's own signatures can make.
+pub fn add_key(armored: &str) -> Result<()> {
+    // `-` for the pipe: `pacman-key --add` with no file refuses outright.
+    let mut add = pacman_key()
+        .args(["--add", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(spawn_error)?;
+    add.stdin
+        .take()
+        .context("pacman-key stdin was not available")?
+        .write_all(armored.as_bytes())
+        .context("failed to send the key to pacman-key")?;
+    if !add.wait().context("waiting for pacman-key")?.success() {
+        bail!("pacman-key --add did not add the repository's key");
+    }
+    Ok(())
+}
+
+/// `pacman-key`, run as root: directly when we are, else through `sudo`,
+/// which prompts on the terminal.
+fn pacman_key() -> Command {
+    if running_as_root() {
+        Command::new("pacman-key")
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg("pacman-key");
+        command
+    }
+}
+
+/// Whether this process runs as root: `/proc/self` belongs to the
+/// effective user.
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata("/proc/self").is_ok_and(|meta| meta.uid() == 0)
+}
+
+fn spawn_error(error: std::io::Error) -> anyhow::Error {
+    if error.kind() == ErrorKind::NotFound {
+        anyhow!("cannot run pacman-key (or sudo); trust the key by hand")
+    } else {
+        anyhow::Error::new(error).context("failed to run pacman-key")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_REPO_NAME, Install, append_stanza, has_section, install_stanza, repo_config,
-        repo_server_url,
+        DEFAULT_REPO_NAME, DEFAULT_SIGLEVEL, Install, RepoKey, SIGNED_SIGLEVEL, SigLevelAdvice,
+        append_stanza, has_section, install_stanza, is_fingerprint, listed_as_trusted,
+        read_pacman_conf, repo_config, repo_server_url, section_siglevel, siglevel_advice,
+        siglevel_advice_text, trust_commands, trust_key,
     };
-    use aurcache_common::api::repo::RepoInfo;
+    use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 
-    /// What a server answers, `listen_port` absent as from one too old to
-    /// report it.
+    /// What a server answers, `listen_port` absent as from
+    /// one too old to report it.
     fn published(public_url: &str, listen_port: Option<u16>) -> RepoInfo {
         RepoInfo {
             name: DEFAULT_REPO_NAME.to_string(),
@@ -267,11 +569,19 @@ mod tests {
         }
     }
 
+    fn signing(backfilling: bool) -> SigningInfo {
+        SigningInfo {
+            fingerprint: "0123456789ABCDEF0123456789ABCDEF01234567".to_string(),
+            backfilling,
+        }
+    }
+
     #[test]
     fn the_server_name_is_used_unless_explicitly_overridden() {
         let mut info = published("http://localhost:8081", Some(8081));
         info.name = "custom_name".to_string();
-        let config = repo_config("http://host:8080/api", None, None, None, Some(&info)).unwrap();
+        let config =
+            repo_config("http://host:8080/api", None, None, None, Some(&info), None).unwrap();
         assert_eq!(config.name, "custom_name");
         assert!(config.block.starts_with("[custom_name]\n"));
         let config = repo_config(
@@ -280,6 +590,7 @@ mod tests {
             Some("override".into()),
             None,
             Some(&info),
+            None,
         )
         .unwrap();
         assert_eq!(config.name, "override");
@@ -292,6 +603,7 @@ mod tests {
                 "http://host:8080/api",
                 None,
                 Some("bad]\nServer = bad".into()),
+                None,
                 None,
                 None
             )
@@ -324,7 +636,8 @@ mod tests {
     /// the instance builds, so the CLI must not expand it.
     #[test]
     fn the_block_is_three_lines_and_keeps_the_arch_variable() {
-        let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
+        let config =
+            repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
         let lines: Vec<&str> = config.block.lines().collect();
         assert_eq!(lines.len(), 3, "{:?}", config.block);
         assert_eq!(lines[0], format!("[{DEFAULT_REPO_NAME}]"));
@@ -340,6 +653,7 @@ mod tests {
             Some(9000),
             Some("mine".to_string()),
             Some("Never".to_string()),
+            None,
             None,
         )
         .unwrap();
@@ -411,8 +725,13 @@ mod tests {
         let path = dir.path().join("pacman.conf");
         std::fs::write(&path, "[options]\nHoldPkg = pacman\n").unwrap();
 
-        let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
-        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
+        let config =
+            repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
+        let existing = read_pacman_conf(&path).unwrap();
+        assert_eq!(
+            install_stanza(&path, &existing, &config).unwrap(),
+            Install::Appended
+        );
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("[repo]"), "{written}");
         assert!(
@@ -428,12 +747,17 @@ mod tests {
         let path = dir.path().join("pacman.conf");
         std::fs::write(&path, "[options]\n").unwrap();
 
-        let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
-        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
-        let once = std::fs::read_to_string(&path).unwrap();
+        let config =
+            repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
+        let existing = read_pacman_conf(&path).unwrap();
+        assert_eq!(
+            install_stanza(&path, &existing, &config).unwrap(),
+            Install::Appended
+        );
+        let once = read_pacman_conf(&path).unwrap();
 
         assert_eq!(
-            install_stanza(&path, &config).unwrap(),
+            install_stanza(&path, &once, &config).unwrap(),
             Install::AlreadyPresent
         );
         assert_eq!(once, std::fs::read_to_string(&path).unwrap());
@@ -450,6 +774,7 @@ mod tests {
             None,
             None,
             Some(&published("http://localhost:9000/arch", Some(8081))),
+            None,
         )
         .unwrap();
         assert_eq!(config.server, "http://192.168.1.5:9000/arch/$arch");
@@ -466,6 +791,7 @@ mod tests {
             None,
             None,
             Some(&published("https://aurcache.example.com/repo", None)),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -484,6 +810,7 @@ mod tests {
             None,
             None,
             Some(&published("http://localhost:8081", Some(8081))),
+            None,
         )
         .unwrap();
         assert_eq!(config.server, "http://192.168.1.5:8081/$arch");
@@ -498,6 +825,7 @@ mod tests {
             None,
             None,
             Some(&published("http://localhost:9000", Some(9000))),
+            None,
         )
         .unwrap();
         assert!(config.server.contains(":9999/"), "{}", config.server);
@@ -513,6 +841,7 @@ mod tests {
             None,
             None,
             Some(&published("http://localhost:9081", Some(9081))),
+            None,
         )
         .unwrap();
         assert_eq!(config.server, "http://192.168.1.5:9081/$arch");
@@ -523,6 +852,7 @@ mod tests {
             None,
             None,
             Some(&published("http://aurcache.example.com/repo", Some(9081))),
+            None,
         )
         .unwrap();
         assert_eq!(config.server, "http://aurcache.example.com:9081/repo/$arch");
@@ -532,15 +862,190 @@ mod tests {
     /// API URL's own port says nothing about the repository's.
     #[test]
     fn without_the_server_the_default_port_is_assumed() {
-        let config = repo_config("http://192.168.1.5:9080/api", None, None, None, None).unwrap();
+        let config =
+            repo_config("http://192.168.1.5:9080/api", None, None, None, None, None).unwrap();
         assert_eq!(config.server, "http://192.168.1.5:8081/$arch");
     }
 
     #[test]
     fn a_missing_pacman_conf_is_a_clear_error() {
         let dir = tempfile::tempdir().unwrap();
-        let config = repo_config("http://localhost:8080/api", None, None, None, None).unwrap();
-        let err = install_stanza(&dir.path().join("nope.conf"), &config).unwrap_err();
+        let err = read_pacman_conf(&dir.path().join("nope.conf")).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
+    }
+
+    /// A signed repository gets signatures required, and the key to trust;
+    /// one that does not sign keeps them optional and names no key.
+    #[test]
+    fn a_signed_repository_requires_signatures() {
+        let api = "http://192.168.1.5:8080/api";
+        let signed = repo_config(api, None, None, None, None, Some(&signing(false))).unwrap();
+        assert_eq!(signed.siglevel, SIGNED_SIGLEVEL);
+        let key = signed.key.unwrap();
+        assert_eq!(
+            key.fingerprint(),
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        );
+        assert_eq!(key.url, "http://192.168.1.5:8080/api/repo/key");
+
+        let unsigned =
+            repo_config(api, None, None, None, Some(&published(api, None)), None).unwrap();
+        assert_eq!(unsigned.siglevel, DEFAULT_SIGLEVEL);
+        assert!(unsigned.key.is_none());
+    }
+
+    /// Until everything published before is signed, requiring signatures
+    /// would refuse what is not yet; the key is still to be trusted, for what
+    /// is signed already.
+    #[test]
+    fn a_repository_still_backfilling_keeps_signatures_optional() {
+        let config = repo_config(
+            "http://localhost:8080/api",
+            None,
+            None,
+            None,
+            None,
+            Some(&signing(true)),
+        )
+        .unwrap();
+        assert_eq!(config.siglevel, DEFAULT_SIGLEVEL);
+        assert!(config.key.unwrap().signing.backfilling);
+    }
+
+    #[test]
+    fn an_explicit_siglevel_outranks_signing() {
+        let config = repo_config(
+            "http://localhost:8080/api",
+            None,
+            None,
+            Some("Never".to_string()),
+            None,
+            Some(&signing(false)),
+        )
+        .unwrap();
+        assert_eq!(config.siglevel, "Never");
+    }
+
+    #[test]
+    fn the_trust_commands_fetch_and_sign_the_key() {
+        let config = repo_config(
+            "http://localhost:8080/api",
+            None,
+            None,
+            None,
+            None,
+            Some(&signing(false)),
+        )
+        .unwrap();
+        let commands = trust_commands(&config.key.unwrap());
+        assert_eq!(
+            commands.add,
+            "curl -fsSL http://localhost:8080/api/repo/key | sudo pacman-key --add -"
+        );
+        assert_eq!(
+            commands.lsign,
+            "sudo pacman-key --lsign-key 0123456789ABCDEF0123456789ABCDEF01234567"
+        );
+    }
+
+    /// A fingerprint the server reports goes into commands run as root, so
+    /// anything but 40 hex digits is refused before it gets there.
+    #[test]
+    fn only_a_fingerprint_is_taken_for_one() {
+        assert!(is_fingerprint("0123456789ABCDEF0123456789ABCDEF01234567"));
+        assert!(is_fingerprint("0123456789abcdef0123456789abcdef01234567"));
+        for not in [
+            "",
+            "0123456789ABCDEF0123456789ABCDEF0123456",
+            "0123456789ABCDEF0123456789ABCDEF012345678",
+            "0123456789ABCDEF0123456789ABCDEF0123456G",
+            "--homedir=/tmp/x 0123456789ABCDEF01234567",
+            "0123456789ABCDEF0123456789ABCDEF0123456 ",
+        ] {
+            assert!(!is_fingerprint(not), "{not:?}");
+            let reported = SigningInfo {
+                fingerprint: not.to_string(),
+                backfilling: false,
+            };
+            assert!(RepoKey::new(&reported, "http://localhost:8080/api").is_err());
+            assert!(trust_key("", not).is_err());
+        }
+    }
+
+    /// The advice is one sentence per line on a terminal: no run of spaces
+    /// left from wrapping its source.
+    #[test]
+    fn the_siglevel_advice_reads_as_prose() {
+        for advice in [SigLevelAdvice::WaitForBackfill, SigLevelAdvice::Require] {
+            let text = siglevel_advice_text(&advice, "repo", "/etc/pacman.conf");
+            assert!(!text.contains("  "), "{text:?}");
+            assert!(text.contains("SigLevel = Required"), "{text:?}");
+        }
+    }
+
+    /// A key gpg lists with full or ultimate validity is trusted; one it
+    /// lists otherwise, or disabled, or not at all, is not.
+    #[test]
+    fn a_key_is_trusted_by_its_validity() {
+        let listing = |validity: &str, capabilities: &str| {
+            format!(
+                "tru::1:1793064215:1798709647:3:1:5\n\
+                 pub:{validity}:255:22:0123456789ABCDEF:1700000000:::-:::{capabilities}::::::23::0:\n\
+                 fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n"
+            )
+        };
+        assert!(listed_as_trusted(&listing("f", "scSC")));
+        assert!(listed_as_trusted(&listing("u", "scSC")));
+        for validity in ["-", "q", "m", "e", "r", "n"] {
+            assert!(!listed_as_trusted(&listing(validity, "scSC")), "{validity}");
+        }
+        assert!(!listed_as_trusted(&listing("f", "scSCD")));
+        assert!(!listed_as_trusted(""));
+    }
+
+    /// The `SigLevel` of one section, not of the one before or after it, and
+    /// none for a section that sets none.
+    #[test]
+    fn a_sections_siglevel_is_read_from_that_section() {
+        let conf = "[options]\nSigLevel = Required DatabaseOptional\n\n[repo]\n\
+                    SigLevel = Optional TrustAll\nServer = x\n\n[other]\nServer = y\n";
+        assert_eq!(
+            section_siglevel(conf, "repo").as_deref(),
+            Some(DEFAULT_SIGLEVEL)
+        );
+        assert_eq!(section_siglevel(conf, "other"), None);
+        assert_eq!(section_siglevel(conf, "missing"), None);
+    }
+
+    /// A repository still backfilling keeps signatures optional, with what
+    /// to change once it is done; one that is done has the optional level
+    /// it was given turned into `Required`. A level someone chose is left
+    /// alone.
+    #[test]
+    fn the_optional_level_is_not_left_for_good() {
+        let config = |backfilling| {
+            repo_config(
+                "http://localhost:8080/api",
+                None,
+                None,
+                None,
+                None,
+                Some(&signing(backfilling)),
+            )
+            .unwrap()
+        };
+        let backfilling = config(true);
+        assert_eq!(
+            siglevel_advice(backfilling.key.as_ref().unwrap(), &backfilling.siglevel),
+            Some(SigLevelAdvice::WaitForBackfill)
+        );
+        let done = config(false);
+        let key = done.key.as_ref().unwrap();
+        assert_eq!(
+            siglevel_advice(key, DEFAULT_SIGLEVEL),
+            Some(SigLevelAdvice::Require)
+        );
+        assert_eq!(siglevel_advice(key, SIGNED_SIGLEVEL), None);
+        assert_eq!(siglevel_advice(key, "Never"), None);
     }
 }
