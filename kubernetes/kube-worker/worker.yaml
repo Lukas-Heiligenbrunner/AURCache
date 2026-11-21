@@ -170,7 +170,13 @@ spec:
             # repositories: a Secret in this namespace (not the builds'), with
             # the private key under `ssh-privatekey` and the host keys of the
             # servers it is used with under `known_hosts`, mounted below. Both
-            # are required: a build's ssh trusts no host it was not told about.
+            # are required: the ssh git runs in a build (GIT_SSH_COMMAND)
+            # trusts these hosts and no others, whatever the builder image's
+            # ssh_config or ssh_known_hosts say. That pins git's ssh against
+            # the image, and nothing more: a PKGBUILD can set its own
+            # GIT_SSH_COMMAND or run ssh directly, and root in the build
+            # container (a dependency's install script) could replace ssh
+            # itself, for the rest of that build.
             #
             #     ssh-keygen -t ed25519 -N '' -f id_ed25519
             #     ssh-keyscan github.com > known_hosts
