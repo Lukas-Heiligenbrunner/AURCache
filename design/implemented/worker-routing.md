@@ -446,35 +446,38 @@ file could be read, protects something, and protects that directory where it
 really is (a directory spelled beneath a protected one, through a symlink or
 `..`, may be anywhere); otherwise `no-resolve-unix: ` and which of those
 failed, which the worker logs. The worker creates the directory before it
-asks, and asks again before each build while it holds named keys: a policy
-edited or a sandbox replaced under it changes the answer. On the first answer
-that is not `resolve-unix`, or a question that fails, the worker stops the
-named keys' agents (`agent::NamedKeysGate` owns them), which removes their
-sockets, and logs why once: withholding a key only from the build that names
-it would leave every other build's PKGBUILD code able to reach its agent by
-path. It holds no named key again until it restarts, and a build whose
-package names one goes ahead without it. Reading the policy as the build user is the point: that user cannot
-read a policy at `0600 root`, and a check made with the worker's rights
-would pass where the sandbox's would not. The sandbox refuses a build
-outright whenever its policy file exists but cannot be read, so such a
-policy cannot leave builds unconfined, the other protected secrets
-included. The directory is an argument because the
-worker's data directory is its own configuration, which the sandbox, reached
-through `sudo` with the worker's environment gone, never sees. A sandbox from
-before the question refuses it as a usage error, which reads as not having
-the rule. The worker keeps its default key, which every build may have
-anyway. This follows how a
-build limit the machine's own environment sets is treated when the machine
-cannot enforce it, where builds are refused rather than run without it; here
-only the named keys are refused, and builds that name them go ahead without.
+asks, and asks again as each build starts while it holds named keys: a
+policy edited or a sandbox replaced under it changes the answer. That is a
+check at each build start, not for the agents' lifetime: a build already
+running when the policy changes runs its host-side PKGBUILD code under the
+policy as it then reads, until the next build start stops the agents. A
+question unanswered after 5 seconds (a hung `sudo`, a path on a dead network
+mount) counts as one that failed. On the first answer that is not
+`resolve-unix`, or a question that fails, the worker stops the named keys'
+agents (`agent::NamedKeysGate` owns them), which removes their sockets, and
+logs why once: withholding a key only from the build that names it would leave
+every other build's PKGBUILD code able to reach its agent by path. It holds no
+named key again until it restarts, and a build whose package names one goes
+ahead without it. Reading the policy as the build user is the point: that user
+cannot read a policy at `0600 root`, and a check made with the worker's rights
+would pass where the sandbox's would not. The sandbox refuses a build outright
+whenever its policy file exists but cannot be read, so such a policy cannot
+leave builds unconfined, the other protected secrets included. The directory
+is an argument because the worker's data directory is its own configuration,
+which the sandbox, reached through `sudo` with the worker's environment gone,
+never sees. A sandbox from before the question refuses it as a usage error,
+which reads as not having the rule. The worker keeps its default key, which
+every build may have anyway. This follows how a build limit the machine's own
+environment sets is treated when the machine cannot enforce it, where builds
+are refused rather than run without it; here only the named keys are refused,
+and builds that name them go ahead without.
 
 `scripts/test-sandbox.sh` holds it to that: under the shipped policy, with two
 agents running, the hostile fixture reaches both by their fixed paths when
 unconfined, is refused both (`EACCES`) when confined and offered none -- while
 another process is using one -- and, offered the default key, reaches its
 agent and is refused the other. With the policy at `0600 root`, the sandbox,
-asked as the build user, answers `no-resolve-unix: bad policy`, and a
-build offered the default key is refused before any of its code runs.
+asked as the build user, answers `no-resolve-unix: bad policy`.
 
 **What it guarantees.** A private key never leaves the worker, and builds only
 get an agent that signs SSH logins. A build reaches no agent but the one it is

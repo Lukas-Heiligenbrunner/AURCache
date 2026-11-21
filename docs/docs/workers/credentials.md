@@ -224,29 +224,45 @@ It holds named keys only when the answer is `resolve-unix`. The sandbox
 answers `no-resolve-unix:` and its reason instead on an older kernel, and
 also when:
 
-- the build user cannot read `/etc/aurcache/sandbox-protected`, or the file
-  names a path under a directory that does not exist. Either way no build
-  starts at all, not only those naming a key. Keep the file readable by
-  everyone: it lists paths, not secrets.
-- that file is missing, lists nothing, or does not protect the agents'
-  directory, `<WORKER_DATA_DIR>/agent`, where it really is: listing it, or a
-  directory above where it really is, does.
+- `/etc/aurcache/sandbox-protected` exists and:
+  - the build user cannot read it, as at `0600 root`;
+  - it is anything but a regular file;
+  - it is, or is reached through, a symlink to nothing;
+  - it is larger than 1 MiB;
+  - or it names a path under a directory that does not exist.
+
+  No build starts at all then, not only those naming a key. Keep the file
+  readable by everyone: it lists paths, not secrets.
+- that file is missing or lists nothing, so builds are kept from no path, or
+  it does not protect the agents' directory, `<WORKER_DATA_DIR>/agent`, where
+  it really is: listing it, or a directory above where it really is, does.
 
 The log says which. When the sandbox could not be asked, it gives how the
 question failed and what was printed: an `aurcache-sandbox` too old to know
 the question (update the package) refuses it as a usage error, exit status 2.
+A sandbox that does not answer within 5 seconds counts as one that could not
+be asked.
+
 Where the worker holds named keys, it says:
 
 ```
 INFO Builds are refused the agents of the SSH keys they are not offered outside their chroot as well (Landlock)
 ```
 
-It asks again before each build. Should the answer change, as with the
+It asks again as each build starts. Should the answer change, as with the
 policy file edited or the sandbox package replaced under a running worker, or
-should the question fail, the worker stops the named keys' agents, so no
-build can reach them, and says why in its log, once. From then on it holds
-only its default key until it restarts: a build whose package names a key
-goes ahead without it, with a line in its log.
+should the question fail, the worker stops the named keys' agents, removing
+their sockets, and says why in its log, once. From then on it holds only its
+default key until it restarts: a build whose package names a key goes ahead
+without it, with a line in its log.
+
+The check is made when a build starts, not while builds run: a change takes
+effect for the builds that start after it. A build already under way is not
+checked again, and its PKGBUILD code outside the chroot runs under the policy
+as it reads by then, which may leave the agents within its reach until the
+next build start stops them. A fetch that needs the key after its agent is
+stopped fails, and the worker's log says why the agents were stopped. Change
+the policy or the sandbox with no builds running.
 :::
 
 ## Host keys
@@ -327,11 +343,12 @@ What this guarantees:
 
 The last point takes Landlock's `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (Landlock
 ABI 9, Linux 7.1 and later), an `aurcache-sandbox` that has the rule, and a
-sandbox policy the build user can read that lists the agents' directory. On
-an older kernel, with an older sandbox, or without that entry, sockets are not
-restricted. With a policy the build user cannot read, every build is refused.
-Either way the worker holds no named key there, and should that change under a
-running worker, it stops the agents of those it holds.
+sandbox policy that lists the agents' directory. On an older kernel, with an
+older sandbox, or without that entry, the agents' sockets are not kept from
+builds, and the worker holds no named key there; under a policy the build
+user cannot read, no build runs at all. Should that change under a running
+worker, it stops the agents of the named keys it holds at the next build
+start.
 
 What it does not:
 
