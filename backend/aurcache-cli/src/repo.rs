@@ -165,6 +165,62 @@ pub fn has_section(conf: &str, name: &str) -> bool {
     conf.lines().any(|line| line.trim() == header)
 }
 
+/// The `SigLevel` the `[name]` section of `conf` sets, if it is there and
+/// sets one.
+#[must_use]
+pub fn section_siglevel(conf: &str, name: &str) -> Option<String> {
+    let header = format!("[{name}]");
+    let mut lines = conf.lines().map(str::trim);
+    lines.find(|line| *line == header)?;
+    lines
+        .take_while(|line| !line.starts_with('['))
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "SigLevel").then(|| value.trim().to_string())
+        })
+}
+
+/// What a client set up for a signed repository should still change in
+/// its `SigLevel`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "advice")]
+pub enum SigLevelAdvice {
+    /// Signatures stay optional while the server signs what it published
+    /// before; `Required` is for once it is done.
+    WaitForBackfill,
+    /// The server has signed everything: `Required` in place of the
+    /// optional level set now.
+    Require,
+}
+
+/// What to advise about the `SigLevel` `configured` for the repository `key`
+/// signs: nothing unless it is the optional level this writes by default --
+/// any other is someone's own choice.
+#[must_use]
+pub fn siglevel_advice(key: &RepoKey, configured: &str) -> Option<SigLevelAdvice> {
+    if configured != DEFAULT_SIGLEVEL {
+        return None;
+    }
+    Some(if key.backfilling {
+        SigLevelAdvice::WaitForBackfill
+    } else {
+        SigLevelAdvice::Require
+    })
+}
+
+/// On stderr, what `advice` asks of the `[name]` section of the pacman
+/// configuration `conf` names.
+pub fn print_siglevel_advice(advice: &SigLevelAdvice, name: &str, conf: &str) {
+    match advice {
+        SigLevelAdvice::WaitForBackfill => eprintln!(
+            "The server is still signing packages it published before, so [{name}] keeps              SigLevel = {DEFAULT_SIGLEVEL} for now. Once it is done -- `aurcli repo config`              then prints SigLevel = {SIGNED_SIGLEVEL} -- set SigLevel = {SIGNED_SIGLEVEL} in              the [{name}] section of {conf}."
+        ),
+        SigLevelAdvice::Require => eprintln!(
+            "Everything the server publishes is signed: set SigLevel = {SIGNED_SIGLEVEL} in              the [{name}] section of {conf}, in place of {DEFAULT_SIGLEVEL}."
+        ),
+    }
+}
+
 /// Whether the pacman configuration at `path` already declares `[name]`. A
 /// file that is not there declares nothing.
 pub fn is_configured(path: &Path, name: &str) -> Result<bool> {
@@ -275,6 +331,10 @@ pub struct Installed<'a> {
     /// What became of the repository's key, when it is signed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<KeyTrust>,
+    /// What is left to change in the section's `SigLevel`, when it is
+    /// signed and still the optional level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siglevel: Option<SigLevelAdvice>,
 }
 
 /// What `--install` did to `pacman.conf`.
@@ -299,6 +359,9 @@ pub fn print_repo_config(config: &RepoConfig) {
     eprintln!();
     if let Some(key) = &config.key {
         print_trust_instructions(key);
+        if let Some(advice) = siglevel_advice(key, &config.siglevel) {
+            print_siglevel_advice(&advice, &config.name, "pacman.conf");
+        }
         eprintln!();
     }
     eprintln!("Add it to /etc/pacman.conf (asks for sudo only if it has to):");
@@ -314,12 +377,6 @@ pub fn print_trust_instructions(key: &RepoKey) {
     eprintln!("so trust that key first:");
     for command in trust_commands(key).iter() {
         eprintln!("  {command}");
-    }
-    if key.backfilling {
-        eprintln!(
-            "It is still signing packages it published before; once it is done, run this \
-             again for SigLevel = {SIGNED_SIGLEVEL}."
-        );
     }
 }
 
@@ -400,8 +457,9 @@ fn spawn_error(error: std::io::Error) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_REPO_NAME, DEFAULT_SIGLEVEL, Install, SIGNED_SIGLEVEL, append_stanza, has_section,
-        install_stanza, is_configured, repo_config, repo_server_url, trust_commands,
+        DEFAULT_REPO_NAME, DEFAULT_SIGLEVEL, Install, SIGNED_SIGLEVEL, SigLevelAdvice,
+        append_stanza, has_section, install_stanza, is_configured, repo_config, repo_server_url,
+        section_siglevel, siglevel_advice, trust_commands,
     };
     use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 
@@ -795,5 +853,51 @@ mod tests {
         std::fs::write(&path, "[options]\n\n[repo]\nServer = x\n").unwrap();
         assert!(is_configured(&path, "repo").unwrap());
         assert!(!is_configured(&path, "other").unwrap());
+    }
+
+    /// The `SigLevel` of one section, not of the one before or after it, and
+    /// none for a section that sets none.
+    #[test]
+    fn a_sections_siglevel_is_read_from_that_section() {
+        let conf = "[options]\nSigLevel = Required DatabaseOptional\n\n[repo]\n\
+                    SigLevel = Optional TrustAll\nServer = x\n\n[other]\nServer = y\n";
+        assert_eq!(
+            section_siglevel(conf, "repo").as_deref(),
+            Some(DEFAULT_SIGLEVEL)
+        );
+        assert_eq!(section_siglevel(conf, "other"), None);
+        assert_eq!(section_siglevel(conf, "missing"), None);
+    }
+
+    /// A repository still backfilling keeps signatures optional, with what
+    /// to change once it is done; one that is done has the optional level
+    /// it was given turned into `Required`. A level someone chose is left
+    /// alone.
+    #[test]
+    fn the_optional_level_is_not_left_for_good() {
+        let config = |backfilling| {
+            repo_config(
+                "http://localhost:8080/api",
+                None,
+                None,
+                None,
+                None,
+                Some(&signing(backfilling)),
+            )
+            .unwrap()
+        };
+        let backfilling = config(true);
+        assert_eq!(
+            siglevel_advice(backfilling.key.as_ref().unwrap(), &backfilling.siglevel),
+            Some(SigLevelAdvice::WaitForBackfill)
+        );
+        let done = config(false);
+        let key = done.key.as_ref().unwrap();
+        assert_eq!(
+            siglevel_advice(key, DEFAULT_SIGLEVEL),
+            Some(SigLevelAdvice::Require)
+        );
+        assert_eq!(siglevel_advice(key, SIGNED_SIGLEVEL), None);
+        assert_eq!(siglevel_advice(key, "Never"), None);
     }
 }

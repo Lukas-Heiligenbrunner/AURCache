@@ -201,10 +201,25 @@ async fn run_repo_config(
             commands.lsign
         );
     }
+    let outcome = repo::install_stanza(&args.pacman_conf, &config)?;
+    // What the section says now: the one written, or the one found there.
+    let configured = match outcome {
+        repo::Install::AlreadyPresent => {
+            let conf = std::fs::read_to_string(&args.pacman_conf)
+                .with_context(|| format!("failed to read {}", args.pacman_conf.display()))?;
+            repo::section_siglevel(&conf, &config.name)
+        }
+        repo::Install::Appended | repo::Install::AppendedWithSudo => Some(config.siglevel.clone()),
+    };
     let installed = repo::Installed {
         path: &args.pacman_conf,
-        outcome: repo::install_stanza(&args.pacman_conf, &config)?,
+        outcome,
         key,
+        siglevel: config
+            .key
+            .as_ref()
+            .zip(configured.as_deref())
+            .and_then(|(key, configured)| repo::siglevel_advice(key, configured)),
     };
     render(format, &installed, |installed| {
         let path = installed.path.display();
@@ -213,6 +228,9 @@ async fn run_repo_config(
             for command in repo::trust_commands(key).iter() {
                 eprintln!("  {command}");
             }
+        }
+        if let Some(advice) = &installed.siglevel {
+            repo::print_siglevel_advice(advice, &config.name, &path.to_string());
         }
         match installed.outcome {
             repo::Install::AlreadyPresent => {
