@@ -179,11 +179,25 @@ type.
 
 ### When a host's key changes
 
-The refusal says what to run. With the server's own file, remove the old entry
-and the next attempt records the new key:
+The refusal names the file and the entry. With the server's own file, remove
+the old entry and the next attempt records the new key. The file is
+`known_hosts` in `AURCACHE_SSH_DIR`:
+
+| Install | File, as the server names it |
+|---|---|
+| Server image | `/app/data/ssh/known_hosts` |
+| Hybrid image | `/app/repo/.ssh/known_hosts` while only the repository is on a volume; `/app/data/ssh/known_hosts` once `/app` is mounted |
+| Native package | `/var/lib/aurcache/data/ssh/known_hosts` |
+
+The images have no `ssh-keygen`, and the path the refusal gives is the one
+inside the container. Either delete the host's line from the file by hand, or
+run `ssh-keygen -R` on the host, against the volume's copy of the file:
 
 ```sh
-ssh-keygen -R github.com -f /app/data/ssh/known_hosts
+# The volume mounted at /app. Compose prefixes its name with the project's,
+# as `docker volume ls` shows.
+volume="$(docker volume inspect -f '{{ .Mountpoint }}' aurcache_aurcache_data)"
+sudo ssh-keygen -R github.com -f "$volume/data/ssh/known_hosts"
 ```
 
 With your own file, replace the entry with the host's new key.

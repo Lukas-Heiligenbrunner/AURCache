@@ -592,8 +592,7 @@ impl HostKeys {
                 bail!(
                     "{name} presented the SSH host key {} {fingerprint}, but {} records \
                      another of that type for it: {}. Someone may be intercepting the \
-                     connection. If the host's key really changed, remove the old entry \
-                     (`{}`), {renew}.",
+                     connection. If the host's key really changed, {}, {renew}.",
                     presented.algorithm(),
                     file.display(),
                     recorded.join(", "),
@@ -675,13 +674,20 @@ fn keyscan_type(key: &PublicKey) -> Option<&'static str> {
     }
 }
 
-/// The command, ready to paste into a shell, that removes `name`'s entries
-/// from `file`.
+/// How to remove `name`'s entries from `file`, as a refusal says it.
+///
+/// The container images have no `ssh-keygen`, and `file` is the server's
+/// own path to it, which in a container is not the host's: so the command
+/// is for the host, against the volume, and deleting the line is the other
+/// way.
 fn forget(name: &str, file: &Path) -> String {
+    let file = file.display().to_string();
     format!(
-        "ssh-keygen -R {} -f {}",
+        "remove the old entry: delete the line for {name} from {file}, or run \
+         `ssh-keygen -R {} -f {}` (in a container, which has no ssh-keygen, on \
+         the host against the volume's copy of that file)",
         quote_argument(name),
-        quote_argument(&file.display().to_string())
+        quote_argument(&file)
     )
 }
 
@@ -1020,6 +1026,9 @@ mod tests {
 
         let error = hosts.verify(&host, &random_key()).unwrap_err().to_string();
         assert!(error.contains("records another"), "{error}");
+        // The images have no ssh-keygen, so the refusal also says how
+        // without it.
+        assert!(error.contains("delete the line for"), "{error}");
         assert!(
             error.contains("ssh-keygen -R '[git.example.com]:2222'"),
             "{error}"
@@ -1116,10 +1125,9 @@ mod tests {
             keyscan(&remote("git.example.com", Some(22)), file, None),
             "ssh-keyscan git.example.com >> '/srv/aurcache data/known_hosts'"
         );
-        assert_eq!(
-            forget("[git.example.com]:2222", file),
-            "ssh-keygen -R '[git.example.com]:2222' -f '/srv/aurcache data/known_hosts'"
-        );
+        assert!(forget("[git.example.com]:2222", file).contains(
+            "`ssh-keygen -R '[git.example.com]:2222' -f '/srv/aurcache data/known_hosts'`"
+        ));
     }
 
     #[test]
