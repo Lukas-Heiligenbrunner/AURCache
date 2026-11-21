@@ -105,11 +105,18 @@ volume or in a backup of it, is no use to whoever holds it: keep the passphrase
 somewhere else.
 
 This applies to a key you supply, and to the one the server generated if you
-protect it yourself afterwards:
+protect it yourself afterwards. The images have no `ssh-keygen`, so run it on
+the host, against the volume's copy of the key:
 
 ```sh
-ssh-keygen -p -f /app/data/ssh/id_ed25519
+# The volume mounted at /app: `compose_aurcache_data` with the shipped
+# compose/docker-compose.yaml, prefixed by your own project's name otherwise.
+# `docker volume ls` lists them.
+volume="$(docker volume inspect -f '{{ .Mountpoint }}' compose_aurcache_data)"
+sudo ssh-keygen -p -f "$volume/data/ssh/id_ed25519"
 ```
+
+`ssh-keygen -p` rewrites the file in place, so it keeps its owner and mode.
 
 The server writes the key it generates without a passphrase, since one it chose
 and stored beside the key would protect nothing.
@@ -202,13 +209,18 @@ the old entry and the next attempt records the new key. The file is
 
 The images have no `ssh-keygen`, and the path the refusal gives is the one
 inside the container. Either delete the host's line from the file by hand, or
-run `ssh-keygen -R` on the host, against the volume's copy of the file:
+run `ssh-keygen -R` on the host, against the volume's copy of the file. A
+hashed entry (what `ssh-keyscan -H` writes) does not show the host's name, so
+`ssh-keygen -R` is the only way to find it.
 
 ```sh
-# The volume mounted at /app. Compose prefixes its name with the project's,
-# as `docker volume ls` shows.
-volume="$(docker volume inspect -f '{{ .Mountpoint }}' aurcache_aurcache_data)"
-sudo ssh-keygen -R github.com -f "$volume/data/ssh/known_hosts"
+# The volume mounted at /app, as above.
+volume="$(docker volume inspect -f '{{ .Mountpoint }}' compose_aurcache_data)"
+file="$volume/data/ssh/known_hosts"
+sudo ssh-keygen -R github.com -f "$file"
+# ssh-keygen replaces the file with one of its own, owned by root and mode
+# 0600: give it back to the server's user.
+sudo chown --reference="$file.old" "$file"
 ```
 
 With your own file, replace the entry with the host's new key.
@@ -221,7 +233,8 @@ With your own file, replace the entry with the host's new key.
 - **"needs the server's SSH key, which it has none of"**: the key could not be
   loaded at start; the rest of the message, and the server log, say why.
 - **"is not in AURCACHE_SSH_KNOWN_HOSTS"**: add the host to your file, with the
-  `ssh-keyscan` command the message gives.
+  `ssh-keyscan` command the message gives, run on the host (the images have
+  none) against your copy of the file.
 - **"records another of that type for it"**: the host presented a key other
   than the one recorded. This is what someone intercepting the connection looks
   like, so check with the host's owner before replacing the entry.

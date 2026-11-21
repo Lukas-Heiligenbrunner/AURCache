@@ -581,7 +581,10 @@ impl HostKeys {
             ),
             HostKeyCheck::Changed { recorded } => {
                 let renew = match self.source {
-                    HostKeySource::Pinned(_) => format!("then `{}`", keyscan(remote, file, None)),
+                    HostKeySource::Pinned(_) => format!(
+                        "then {}",
+                        on_the_host(&keyscan(remote, file, None), "ssh-keyscan")
+                    ),
                     HostKeySource::TrustOnFirstUse(_) => {
                         "and the next attempt records the new one".to_string()
                     }
@@ -601,18 +604,18 @@ impl HostKeys {
             // for this one.
             HostKeyCheck::OtherTypes { recorded } => bail!(
                 "only {} recorded for {name} in {}, and it offered its {} key \
-                 ({fingerprint}); record that key too: `{}`",
+                 ({fingerprint}); record that key too: {}",
                 recorded.join(", "),
                 file.display(),
                 presented.algorithm(),
-                keyscan(remote, file, Some(presented)),
+                on_the_host(&keyscan(remote, file, Some(presented)), "ssh-keyscan"),
             ),
             HostKeyCheck::Unknown => match &self.source {
                 HostKeySource::Pinned(_) => bail!(
                     "{name} is not in {AURCACHE_SSH_KNOWN_HOSTS} ({}), so its SSH host key \
-                     {fingerprint} is not trusted. If that is the host's key, add it: `{}`",
+                     {fingerprint} is not trusted. If that is the host's key, add it: {}",
                     file.display(),
-                    keyscan(remote, file, None)
+                    on_the_host(&keyscan(remote, file, None), "ssh-keyscan")
                 ),
                 HostKeySource::TrustOnFirstUse(_) => {
                     record(file, &name, presented)?;
@@ -671,20 +674,36 @@ fn keyscan_type(key: &PublicKey) -> Option<&'static str> {
     }
 }
 
+/// `command`, which runs `tool` on a file the server names, as a refusal
+/// suggests it.
+///
+/// The container images have neither `ssh-keygen` nor `ssh-keyscan`, and the
+/// path is the server's own, which in a container is not the host's: so the
+/// command is for the host, against its copy of that file.
+fn on_the_host(command: &str, tool: &str) -> String {
+    format!(
+        "`{command}` (in a container, which has no {tool}, on the host against \
+         the host's copy of that file)"
+    )
+}
+
 /// How to remove `name`'s entries from `file`, as a refusal says it.
 ///
-/// The container images have no `ssh-keygen`, and `file` is the server's
-/// own path to it, which in a container is not the host's: so the command
-/// is for the host, against the volume, and deleting the line is the other
-/// way.
+/// `ssh-keygen -R` replaces the file with one owned by whoever runs it, mode
+/// `0600`, which the server may no longer read. Deleting the line by hand is
+/// the other way, except for a hashed entry, which does not show the name.
 fn forget(name: &str, file: &Path) -> String {
-    let file = file.display().to_string();
-    format!(
-        "remove the old entry: delete the line for {name} from {file}, or run \
-         `ssh-keygen -R {} -f {}` (in a container, which has no ssh-keygen, on \
-         the host against the volume's copy of that file)",
+    let display = file.display().to_string();
+    let command = format!(
+        "ssh-keygen -R {} -f {}",
         quote_argument(name),
-        quote_argument(&file)
+        quote_argument(&display)
+    );
+    format!(
+        "remove the old entry: delete the line for {name} from {display}, or run {} \
+         and restore the file's owner and mode, which ssh-keygen -R does not keep; \
+         a hashed entry does not show the name, and only ssh-keygen -R finds it",
+        on_the_host(&command, "ssh-keygen"),
     )
 }
 
@@ -914,6 +933,10 @@ mod tests {
             .to_string();
         assert!(error.contains("only ssh-ed25519 recorded"), "{error}");
         assert!(error.contains("ssh-keyscan -t ecdsa github.com"), "{error}");
+        assert!(
+            error.contains("which has no ssh-keyscan, on the host"),
+            "{error}"
+        );
         assert!(!error.contains("intercepting"), "{error}");
         // The same type with another key still reads as one.
         let error = hosts
@@ -1029,6 +1052,11 @@ mod tests {
             error.contains("ssh-keygen -R '[git.example.com]:2222'"),
             "{error}"
         );
+        assert!(
+            error.contains("which has no ssh-keygen, on the host"),
+            "{error}"
+        );
+        assert!(error.contains("a hashed entry"), "{error}");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1099,6 +1127,10 @@ mod tests {
                 "ssh-keyscan -p 2222 git.example.com >> {}",
                 file.display()
             )),
+            "{error}"
+        );
+        assert!(
+            error.contains("which has no ssh-keyscan, on the host"),
             "{error}"
         );
         assert_eq!(
