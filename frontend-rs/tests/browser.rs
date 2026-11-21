@@ -461,6 +461,8 @@ async fn interactions() {
     escape_and_clicking_away_discard_a_build_flag_draft(&session).await;
     a_refused_build_flag_save_keeps_the_dialog_and_its_draft(&session).await;
     moving_to_another_package_takes_the_build_flags_dialog_away(&session).await;
+    a_saved_build_flag_shows_before_the_package_is_fetched_again(&session).await;
+    a_refresh_reaches_a_build_flags_draft_only_while_untouched(&session).await;
     dependencies_stay_out_of_the_list_until_asked_for(&session).await;
     following_a_dependency_loads_that_package(&session).await;
     a_second_page_holds_different_builds(&session).await;
@@ -1934,6 +1936,251 @@ async fn moving_to_another_package_takes_the_build_flags_dialog_away(session: &S
             .await,
         "focus went into a dialog nobody opened"
     );
+}
+
+/// Holds the package fetch that follows the page's next PATCH unanswered,
+/// until `window.releaseHeldFetch()` lets it go; `window.heldFetchLanded`
+/// then says its answer is in. Given a list of flags, the release first stores
+/// them for the package itself, as another operator saving in the meantime
+/// would, so the fetch brings back them rather than what the page saved.
+///
+/// Only that one fetch is held: `fetch` is itself again as soon as it is seen.
+const HOLD_FETCH_AFTER_PATCH: &str = r#"
+    const fetch = window.fetch;
+    let patched = false;
+    window.heldFetch = false;
+    window.heldFetchLanded = false;
+    window.fetch = function (input, init) {
+        if (!(input instanceof Request)) {
+            return fetch.apply(this, arguments);
+        }
+        if (input.method === "PATCH") {
+            patched = true;
+        }
+        if (!patched || input.method !== "GET" || !/\/package\/[^/?]+$/.test(input.url)) {
+            return fetch.apply(this, arguments);
+        }
+        window.fetch = fetch;
+        window.heldFetch = true;
+        const headers = new Headers(input.headers);
+        headers.set("Content-Type", "application/json");
+        return new Promise(release => { window.releaseHeldFetch = release; })
+            .then(flags => flags === undefined
+                ? null
+                : fetch(input.url, {
+                    method: "PATCH",
+                    headers,
+                    body: JSON.stringify({ build_flags: flags }),
+                }).then(answer => {
+                    if (!answer.ok) {
+                        throw new Error(`the change behind the page got ${answer.status}`);
+                    }
+                }))
+            .then(() => fetch(input))
+            .then(answer => { window.heldFetchLanded = true; return answer; });
+    };
+    return true;
+"#;
+
+/// A save shows the flags it stored at once, and the dialog opened again
+/// before the package is fetched again starts from them, with nothing to
+/// save. The fetch landing changes neither.
+///
+/// The page holds the package as it was until that fetch lands, so a dialog
+/// seeded from it would start from the old flags, and Save would put them
+/// back.
+async fn a_saved_build_flag_shows_before_the_package_is_fetched_again(session: &Session) {
+    const BOX: &str = "#build-flag-holdver";
+
+    open_hello_flags(session).await;
+    hold_fetch_after_patch(session).await;
+    open_build_flags(session).await;
+    session.wait_for_focus("#build-flag-nocheck").await;
+    // Pressed rather than clicked from a script, so focus moves to the box.
+    session.press(BOX).await;
+    session.settle().await;
+    assert!(
+        session
+            .eval::<bool>("return document.activeElement?.id === 'build-flag-holdver';".to_string())
+            .await,
+        "ticking a box other than the first moved focus away from it"
+    );
+    save_build_flags(session).await;
+    session
+        .wait_for_script(
+            "the package to be fetched again",
+            "return window.heldFetch === true;".to_string(),
+        )
+        .await;
+    // Still held, so the chip can only come from the save itself.
+    session
+        .wait_until("the chip to show the save", |t| {
+            t.contains("--holdver") && !t.contains("makepkg defaults")
+        })
+        .await;
+    session.wait_for_focus(EDIT_FLAGS).await;
+
+    open_build_flags(session).await;
+    assert!(
+        session.checked(BOX).await,
+        "the reopened dialog lost the save"
+    );
+    assert!(
+        save_disabled(session).await,
+        "Save was offered with nothing changed"
+    );
+
+    release_held_fetch(session).await;
+    session.settle().await;
+    // The fetch landing takes a render; give it time to before saying it
+    // changed nothing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        session.checked(BOX).await,
+        "the fetch after the save unticked the saved flag"
+    );
+    assert!(
+        save_disabled(session).await,
+        "the fetch after the save offered Save with nothing changed"
+    );
+
+    session.click(BOX).await;
+    save_build_flags(session).await;
+    session
+        .wait_until("the flag to be gone", |t| t.contains("makepkg defaults"))
+        .await;
+}
+
+/// Flags fetched while the dialog is open replace a draft nobody has touched,
+/// and leave an edited one as it is.
+///
+/// The change comes from outside the page, saved while the fetch after the
+/// page's own save is held, so that fetch is what brings it in.
+async fn a_refresh_reaches_a_build_flags_draft_only_while_untouched(session: &Session) {
+    // Untouched: the draft follows.
+    open_hello_flags(session).await;
+    hold_fetch_after_patch(session).await;
+    open_build_flags(session).await;
+    session.click("#build-flag-holdver").await;
+    save_build_flags(session).await;
+    open_build_flags(session).await;
+    release_held_fetch_over(session, &["--nodeps"]).await;
+    session
+        .wait_for_script(
+            "the fetched flag to reach the draft",
+            "return document.querySelector('#build-flag-nodeps')?.checked === true;".to_string(),
+        )
+        .await;
+    assert!(
+        !session.checked("#build-flag-holdver").await,
+        "the draft kept the list the fetch replaced"
+    );
+    assert!(
+        save_disabled(session).await,
+        "Save was offered over a draft nobody touched"
+    );
+    session.click_labelled(".modal-open button", "Cancel").await;
+    session.wait_gone(".modal-open").await;
+
+    // Edited: the draft stays. The flags fetched differ from the ones the
+    // page had before its save, which is how it tells them for newer.
+    hold_fetch_after_patch(session).await;
+    open_build_flags(session).await;
+    session.click("#build-flag-nodeps").await;
+    save_build_flags(session).await;
+    open_build_flags(session).await;
+    session.click("#build-flag-noprepare").await;
+    release_held_fetch_over(session, &["--nocheck"]).await;
+    session
+        .wait_for_script(
+            "the fetched flag to reach the chips",
+            "return [...document.querySelectorAll('.badge')].some(b => b.textContent === '--nocheck');"
+                .to_string(),
+        )
+        .await;
+    // Taking it into the draft would take a render; give it time to before
+    // saying it did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        session.checked("#build-flag-noprepare").await
+            && !session.checked("#build-flag-nocheck").await,
+        "the fetch replaced an edited draft"
+    );
+    assert!(
+        !save_disabled(session).await,
+        "the edit could no longer be saved"
+    );
+    session.click_labelled(".modal-open button", "Cancel").await;
+    session.wait_gone(".modal-open").await;
+
+    open_build_flags(session).await;
+    session.click("#build-flag-nocheck").await;
+    save_build_flags(session).await;
+    session
+        .wait_until("the flag to be gone", |t| t.contains("makepkg defaults"))
+        .await;
+}
+
+/// Open hello's page, with the flags the fixture gives it: none.
+async fn open_hello_flags(session: &Session) {
+    session.open("/package/hello").await;
+    session
+        .wait_until("hello without flags", |t| {
+            t.contains("Remove package") && t.contains("makepkg defaults")
+        })
+        .await;
+}
+
+/// Install [`HOLD_FETCH_AFTER_PATCH`].
+async fn hold_fetch_after_patch(session: &Session) {
+    assert!(
+        session
+            .eval::<bool>(HOLD_FETCH_AFTER_PATCH.to_string())
+            .await,
+        "could not hold the fetch"
+    );
+}
+
+/// Let the fetch [`HOLD_FETCH_AFTER_PATCH`] holds go, and wait for its
+/// answer.
+async fn release_held_fetch(session: &Session) {
+    let_held_fetch_go(session, "undefined").await;
+}
+
+/// Store `flags` for the package behind the page's back, then let the held
+/// fetch go and wait for its answer.
+async fn release_held_fetch_over(session: &Session, flags: &[&str]) {
+    let flags = serde_json::to_string(flags).expect("a JSON list");
+    let_held_fetch_go(session, &flags).await;
+}
+
+/// Call `window.releaseHeldFetch` with `argument`, once the fetch is held.
+async fn let_held_fetch_go(session: &Session, argument: &str) {
+    session
+        .wait_for_script(
+            "the package to be fetched again",
+            "return window.heldFetch === true;".to_string(),
+        )
+        .await;
+    let _: bool = session
+        .eval(format!("window.releaseHeldFetch({argument}); return true;"))
+        .await;
+    session
+        .wait_for_script(
+            "the held fetch to land",
+            "return window.heldFetchLanded === true;".to_string(),
+        )
+        .await;
+}
+
+/// Whether the open build flags dialog's Save is disabled.
+async fn save_disabled(session: &Session) -> bool {
+    session
+        .eval(
+            "return document.querySelector('.modal-open button.btn-primary')?.disabled === true;"
+                .to_string(),
+        )
+        .await
 }
 
 /// The package page's button that opens the build flags dialog.
