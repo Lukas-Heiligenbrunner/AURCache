@@ -224,6 +224,11 @@ fn resolve_writable_dirs(
 fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = match read_policy(file) {
         Ok(contents) => contents,
+        // Missing only when there is nothing by its name: a symlink to nothing,
+        // on the way to it or in its place, is a list that cannot be read.
+        Err(Unreadable::Io(e)) if e.kind() == std::io::ErrorKind::NotFound && dangles(file) => {
+            return Err(Unreadable::Dangling.refusal(file));
+        }
         Err(Unreadable::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Vec::new());
         }
@@ -250,6 +255,8 @@ enum Unreadable {
     NotAFile,
     /// It holds more than [`MAX_POLICY_BYTES`].
     TooLarge,
+    /// It is a symlink to nothing, or is reached through one.
+    Dangling,
     /// Opening or reading it failed.
     Io(std::io::Error),
 }
@@ -266,6 +273,10 @@ impl Unreadable {
             Self::TooLarge => format!(
                 "{cannot} (larger than {MAX_POLICY_BYTES} bytes); {refusing}: \
                  list only the paths a build must never read"
+            ),
+            Self::Dangling => format!(
+                "{cannot} (a symlink to nothing, in its place or on the way to it); \
+                 {refusing}: fix the symlink that leads nowhere"
             ),
             Self::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => format!(
                 "{cannot} ({e}); {refusing}: make it readable by the build user \
@@ -301,6 +312,15 @@ fn read_policy(file: &Path) -> Result<String, Unreadable> {
         return Err(Unreadable::TooLarge);
     }
     Ok(contents)
+}
+
+/// Whether `path`, or a directory on the way to it, is a symlink that cannot
+/// be resolved.
+fn dangles(path: &Path) -> bool {
+    path.ancestors().any(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && std::fs::canonicalize(path).is_err()
+    })
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -600,7 +620,8 @@ mod tests {
     /// A list that is there but cannot be read refuses the build rather than
     /// protecting nothing: that is what a policy at `0600 root` looks like to
     /// the build user. A directory in its place stands in for it, as root
-    /// reads any file whatever its mode.
+    /// reads any file whatever its mode. So does a symlink to nothing, in its
+    /// place or on the way to it (`/etc/aurcache -> /nowhere`).
     #[test]
     fn an_unreadable_protected_list_refuses() {
         let dir = std::env::temp_dir().join(format!(
@@ -610,13 +631,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("list")).unwrap();
         std::fs::write(dir.join("file"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("nothing"), dir.join("dangling")).unwrap();
 
-        for unreadable in [dir.join("list"), dir.join("file/list")] {
+        for unreadable in [
+            dir.join("list"),
+            dir.join("file/list"),
+            dir.join("dangling"),
+            dir.join("dangling/list"),
+        ] {
             let refused = protected_paths(&unreadable).unwrap_err();
             assert!(
                 refused.contains(&unreadable.display().to_string()),
                 "{refused}"
             );
+        }
+        // A link to nothing is named as one, not as a missing file.
+        for dangling in [dir.join("dangling"), dir.join("dangling/list")] {
+            let refused = protected_paths(&dangling).unwrap_err();
+            assert!(refused.contains("a symlink to nothing"), "{refused}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
