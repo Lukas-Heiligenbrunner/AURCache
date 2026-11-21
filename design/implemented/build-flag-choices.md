@@ -178,13 +178,10 @@ same render, and coming back to the first finds it closed. Building the list
 from the ticked boxes and deciding whether it is a change are plain functions
 (`Draft`), tested on their own.
 
-A save closes the dialog before the page has fetched the package again, so
-the summary shows the list the server took as soon as it takes it
-(`Accepted`), and a dialog opened before the fetch lands starts from that
-list. The page's flags take over again once they are no longer the ones the
-save replaced, whether the fetch brought back the saved list or someone
-else's. Flags that change while the dialog is open, with a refresh, replace a
-draft nobody has edited; an edited draft is kept.
+A save writes the list the server took into the package the page fetched,
+then fetches it again, so the summary and a dialog opened at once show the
+saved list. Flags that change while the dialog is open, with a refresh,
+replace a draft nobody has edited; an edited draft is kept.
 
 There is no tri-state check option: the only choice is `--nocheck` or nothing.
 

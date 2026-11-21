@@ -2082,8 +2082,7 @@ async fn a_refresh_reaches_a_build_flags_draft_only_while_untouched(session: &Se
     session.click_labelled(".modal-open button", "Cancel").await;
     session.wait_gone(".modal-open").await;
 
-    // Edited: the draft stays. The flags fetched differ from the ones the
-    // page had before its save, which is how it tells them for newer.
+    // Edited: the draft stays.
     hold_fetch_after_patch(session).await;
     open_build_flags(session).await;
     session.click("#build-flag-nodeps").await;
