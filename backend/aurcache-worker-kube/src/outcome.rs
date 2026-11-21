@@ -1,6 +1,5 @@
 //! How a build pod is doing and how it ended, from its status and the
-//! hand-back: the table in `kubernetes-executor.md`, "How a build ended", as
-//! pure functions.
+//! hand-back, as pure functions.
 //!
 //! [`observe`] reads where a pod is from its status. A pod whose build
 //! container ended is judged by [`ending`], from what the container's status
