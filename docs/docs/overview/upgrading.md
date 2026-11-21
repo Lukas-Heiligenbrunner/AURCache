@@ -126,9 +126,11 @@ built before still build, but some things change:
 - **`BUILD_ARTIFACT_DIR` must allow executing.** The agent is run from the
   build directory, so one on a filesystem mounted `noexec` fails every build
   as its container starts. The worker warns about it when it starts.
-- **Build containers have a new name**, `aurcache_build_<worker>_<build>`, so
-  that two instances on one Docker daemon keep apart. A container an older
-  worker left behind under the old name is not removed by the new one.
+- **Build containers and directories have new names**,
+  `aurcache_build_<worker>_<build>` and `<worker>_<build>`, so that two
+  instances on one Docker daemon or one build directory keep apart. A
+  container or directory an older worker left behind under the old name is
+  not removed by the new one.
 - **Builds report what they used.** Each build reports its disk use, its VCS
   commits and, where the engine's cgroup allows it, its peak memory. An
   out-of-memory failure says so and names `MEMORY_LIMIT`.
