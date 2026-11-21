@@ -121,6 +121,11 @@ pub struct BuildSummary {
     #[cfg_attr(feature = "db", sea_orm(skip))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_reason: Option<WaitingReason>,
+    /// Whether it was built elsewhere and uploaded. Its times are then when
+    /// it arrived and when it was published, not how long it took to build.
+    #[cfg_attr(feature = "db", sea_orm(skip))]
+    #[serde(default)]
+    pub uploaded: bool,
 }
 
 impl BuildSummary {

@@ -998,6 +998,7 @@ mod tests {
             worker_name: None,
             log_size: None,
             waiting_reason: None,
+            uploaded: false,
         }
     }
 

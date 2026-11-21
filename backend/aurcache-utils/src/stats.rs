@@ -11,7 +11,7 @@ use aurcache_common::api::stats::{
     DashboardView, GraphDataPoint, LONGEST_WINDOW_DAYS, ListStats, LongBuild, OutOfDateSlice,
     QueueSlice, RECENT_DAYS,
 };
-use aurcache_common::build_state::BuildState;
+use aurcache_common::build_state::{BuildState, BuildTrigger};
 use aurcache_db::builds;
 use aurcache_db::helpers::files::total_artifact_size_expr;
 use aurcache_db::prelude::{Builds, Packages};
@@ -138,6 +138,9 @@ async fn count_packages(db: &DatabaseConnection, requested: bool) -> anyhow::Res
 
 /// SQL counterpart of elapsed_between: unknown for missing, reversed or
 /// overflowing endpoints. CASE guards arithmetic that PostgreSQL would reject.
+///
+/// Unknown for an upload too: built elsewhere, its times are when it arrived
+/// and when it was published, which say nothing about how long a build takes.
 fn build_elapsed_seconds_expr() -> sea_orm::sea_query::SimpleExpr {
     let start = Expr::col(builds::Column::StartTime);
     let end = Expr::col(builds::Column::EndTime);
@@ -145,7 +148,8 @@ fn build_elapsed_seconds_expr() -> sea_orm::sea_query::SimpleExpr {
     let checked = Expr::case(start.clone().gte(0), difference.clone())
         .case(end.clone().lte(start.clone().add(i64::MAX)), difference)
         .finally(Expr::val(None::<i64>));
-    Expr::case(end.gte(start), checked)
+    let built_here = Expr::col(builds::Column::Trigger).ne(BuildTrigger::Upload.as_i32());
+    Expr::case(end.gte(start).and(built_here), checked)
         .finally(Expr::val(None::<i64>))
         .into()
 }
@@ -564,6 +568,7 @@ async fn longest_builds(db: &DatabaseConnection) -> anyhow::Result<Vec<LongBuild
                     .filter(builds::Column::PkgId.eq(row.pkg_id))
                     .filter(builds::Column::Platform.eq(row.platform.as_str()))
                     .filter(builds::Column::Status.eq(BuildState::Successful))
+                    .filter(builds::Column::Trigger.ne(BuildTrigger::Upload))
                     .filter(builds::Column::StartTime.lt(started))
                     .order_by(builds::Column::StartTime, Order::Desc)
                     .limit(1)
@@ -593,6 +598,7 @@ async fn longest_builds(db: &DatabaseConnection) -> anyhow::Result<Vec<LongBuild
                 worker_name: row.worker_name,
                 log_size: None,
                 waiting_reason: None,
+                uploaded: false,
             },
             previous_secs,
         });
@@ -695,6 +701,72 @@ mod tests {
         builds::Entity::delete_many().exec(&db).await.unwrap();
         insert_build(&db, pkg, 8, BuildState::Successful, Some(0), Some(0)).await;
         assert_eq!(avg_build_time(&db).await.unwrap(), Some(0));
+    }
+
+    /// An upload's times are when it arrived and when it was published: no
+    /// average, ranking or "previous run" takes them for a build's duration.
+    #[tokio::test]
+    async fn uploads_have_no_build_duration() {
+        use sea_orm::{ColumnTrait, QueryFilter};
+        let db = aurcache_db::testing::memory_db().await;
+        let now = now_secs();
+        let pkg = insert_package(&db, "uploaded", false, true).await;
+        insert_build(
+            &db,
+            pkg,
+            1,
+            BuildState::Successful,
+            Some(now - 300),
+            Some(now - 200),
+        )
+        .await;
+        insert_build(
+            &db,
+            pkg,
+            2,
+            BuildState::Successful,
+            Some(now - 100),
+            Some(now),
+        )
+        .await;
+        builds::Entity::update_many()
+            .col_expr(
+                builds::Column::Trigger,
+                aurcache_common::build_state::BuildTrigger::Upload
+                    .as_i32()
+                    .into(),
+            )
+            .col_expr(builds::Column::EndTime, Some(now + 5000).into())
+            .filter(builds::Column::Number.eq(2))
+            .exec(&db)
+            .await
+            .unwrap();
+        insert_build(
+            &db,
+            pkg,
+            3,
+            BuildState::Successful,
+            Some(now - 50),
+            Some(now - 40),
+        )
+        .await;
+
+        assert_eq!(avg_build_time(&db).await.unwrap(), Some(55));
+        assert_eq!(
+            super::window_stats(&db, i64::MIN, None)
+                .await
+                .unwrap()
+                .avg_duration,
+            Some(55.0)
+        );
+        let longest = longest_builds(&db).await.unwrap();
+        let numbers: Vec<i32> = longest.iter().map(|long| long.build.number).collect();
+        assert_eq!(numbers, [1, 3]);
+        assert_eq!(
+            longest[1].previous_secs,
+            Some(100),
+            "the upload is passed over"
+        );
     }
 
     /// Run against an empty disposable PostgreSQL database, supplied through

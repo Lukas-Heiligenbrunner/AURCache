@@ -1087,6 +1087,7 @@ mod tests {
             waiting_reason: Some(WaitingReason::Arch {
                 arch: "x86_64".to_string(),
             }),
+            uploaded: false,
         };
         let reason = queue_reason(&reasoned).expect("a reason");
         assert!(reason.contains("x86_64"), "{reason}");
