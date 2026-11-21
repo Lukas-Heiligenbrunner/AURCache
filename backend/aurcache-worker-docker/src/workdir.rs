@@ -35,13 +35,14 @@ pub enum Report {
 }
 
 /// What removing a build directory as this worker's own user came to.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Removal {
     /// It is gone, or was never there.
     Removed,
-    /// Something in it is not this worker's to remove: a build that was
-    /// stopped leaves the directory root's.
-    NotPermitted,
+    /// Some of it is still there. A build that was stopped leaves the
+    /// directory root's, and root in a build container can leave a tree
+    /// deeper than this process may hold directories open to walk.
+    Left(std::io::Error),
 }
 
 /// Who besides its owner can reach what is in a directory.
@@ -120,12 +121,11 @@ pub fn report(dir: &Path) -> Report {
 }
 
 /// Remove `dir` as this worker's own user.
-pub fn remove(dir: &Path) -> Result<Removal> {
+pub fn remove(dir: &Path) -> Removal {
     match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(Removal::Removed),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Removal::Removed),
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(Removal::NotPermitted),
-        Err(e) => Err(e).with_context(|| format!("removing {}", dir.display())),
+        Ok(()) => Removal::Removed,
+        Err(e) if e.kind() == ErrorKind::NotFound => Removal::Removed,
+        Err(e) => Removal::Left(e),
     }
 }
 
@@ -419,8 +419,8 @@ mod tests {
         let scratch = Scratch::new("remove");
         let dir = scratch.0.join("7");
         fs::create_dir_all(dir.join("pkg")).unwrap();
-        assert_eq!(remove(&dir).unwrap(), Removal::Removed);
+        assert!(matches!(remove(&dir), Removal::Removed));
         assert!(!dir.exists());
-        assert_eq!(remove(&dir).unwrap(), Removal::Removed);
+        assert!(matches!(remove(&dir), Removal::Removed));
     }
 }

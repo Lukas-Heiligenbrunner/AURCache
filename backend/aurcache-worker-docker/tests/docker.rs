@@ -268,9 +268,8 @@ async fn a_killed_build_leaves_nothing_behind() {
         ending(workdir::report(&dirs.local), verdict),
         Ending::Unreported { .. }
     ));
-    assert_eq!(
-        workdir::remove(&dirs.local).unwrap(),
-        workdir::Removal::NotPermitted,
+    assert!(
+        matches!(workdir::remove(&dirs.local), workdir::Removal::Left(_)),
         "the stopped build left its directory root's"
     );
 

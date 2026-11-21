@@ -1,7 +1,7 @@
 //! Removing what a build leaves: its container, and its directory even when
-//! a stopped build left that root's.
+//! root in the build left some of it beyond this worker's own user.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use aurcache_worker_container::arch::Platform;
 use bollard::Docker;
 use bollard::query_parameters::{
@@ -38,19 +38,19 @@ pub async fn remove_container(docker: &Docker, name_or_id: &str) {
         .await;
 }
 
-/// Remove a build's directory: as this worker's user, and when that is not
-/// permitted, after a container of the builder image has emptied it as root.
+/// Remove a build's directory: as this worker's user, and when some of it is
+/// left, after a container of the builder image has emptied it as root.
 pub async fn clear(docker: &Docker, leftover: &Leftover<'_>) -> Result<()> {
-    if workdir::remove(&leftover.dirs.local)? == Removal::Removed {
+    if let Removal::Removed = workdir::remove(&leftover.dirs.local) {
         return Ok(());
     }
     remove_container(docker, &leftover.name).await;
     let emptied = empty(docker, leftover).await;
     remove_container(docker, &leftover.name).await;
     emptied?;
-    match workdir::remove(&leftover.dirs.local)? {
+    match workdir::remove(&leftover.dirs.local) {
         Removal::Removed => Ok(()),
-        Removal::NotPermitted => bail!("it is still not empty after emptying it as root"),
+        Removal::Left(e) => Err(e).context("it is still there after emptying it as root"),
     }
 }
 

@@ -96,7 +96,10 @@ sources, and its peak memory and out-of-memory kills, read from the
 container's own cgroup (cgroup v2; on a host without it those two are left
 unknown). That is where the figures on a build's page come from, against the
 host's Docker and against the Podman the hybrid image runs inside itself
-alike.
+alike. A build that fills the filesystem `BUILD_ARTIFACT_DIR` is on leaves
+no room for the report: it is handed back as the worker's, and queued again
+while the package has attempts left. Nothing limits a build's disk use on
+this worker, so leave room there for the largest.
 
 ### What a build may do
 
