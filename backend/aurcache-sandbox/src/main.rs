@@ -78,20 +78,73 @@ fn list_dir(dir: &Path) -> Vec<PathBuf> {
     entries.flatten().map(|e| e.path()).collect()
 }
 
+/// Where a directory entry leads, as the read walk sees it.
+enum Leads {
+    /// It is not a symlink.
+    Itself,
+    /// A symlink, to this real path.
+    To(PathBuf),
+    /// A symlink that cannot be resolved, or an entry that cannot be looked at.
+    Nowhere,
+}
+
+/// Where `path` leads.
+fn leads(path: &Path) -> Leads {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() => Leads::Itself,
+        Ok(_) => std::fs::canonicalize(path).map_or(Leads::Nowhere, Leads::To),
+        Err(_) => Leads::Nowhere,
+    }
+}
+
+/// `paths`, each also where it really is when that differs.
+///
+/// The read walk keeps a path unreadable as it is written, so a secret behind
+/// a symlink -- a Kubernetes secret is `key -> ..data/key` -- or under a linked
+/// directory would otherwise stay readable where it really is. A path that does
+/// not exist yet is placed by its parent, so one created later under a linked
+/// directory is covered too.
+fn with_real_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut real: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|path| real_path(path))
+        .filter(|real| !paths.contains(real))
+        .collect();
+    real.sort();
+    real.dedup();
+    paths.into_iter().chain(real).collect()
+}
+
+/// Where `path` really is: resolved if it exists, else its resolved parent
+/// joined with its name. `None` when neither can be resolved.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok().or_else(|| {
+        let name = path.file_name()?;
+        Some(std::fs::canonicalize(path.parent()?).ok()?.join(name))
+    })
+}
+
 /// Expand exclusions into the positive read grants Landlock needs.
 ///
 /// Walks from the filesystem root towards each excluded path, granting every
 /// entry that is neither an excluded path nor an ancestor of one, and
 /// descending into the ancestors. The excluded paths themselves are never
 /// granted, so nothing beneath them is readable.
+///
+/// A rule is attached to what a path resolves to, so a symlink is granted only
+/// when it leads clear of every exclusion: `/var/run` leads to `/run`, and
+/// granting it would grant all of `/run`, a protected path under it included.
+/// One that cannot be resolved is not granted at all.
 fn read_grants_excluding(
     excludes: &[PathBuf],
     list_dir: impl Fn(&Path) -> Vec<PathBuf> + Copy,
+    leads: impl Fn(&Path) -> Leads + Copy,
 ) -> Vec<PathBuf> {
     fn walk(
         dir: &Path,
         excludes: &[PathBuf],
         list_dir: impl Fn(&Path) -> Vec<PathBuf> + Copy,
+        leads: impl Fn(&Path) -> Leads + Copy,
         out: &mut Vec<PathBuf>,
     ) {
         for entry in list_dir(dir) {
@@ -103,15 +156,24 @@ fn read_grants_excluding(
             if excludes.iter().any(|e| e.starts_with(&entry)) {
                 // On the path to an exclusion: descend rather than granting the
                 // whole subtree, which would grant the exclusion with it.
-                walk(&entry, excludes, list_dir, out);
+                walk(&entry, excludes, list_dir, leads, out);
                 continue;
             }
-            out.push(entry);
+            let clear = match leads(&entry) {
+                Leads::Itself => true,
+                Leads::To(real) => !excludes
+                    .iter()
+                    .any(|e| e.starts_with(&real) || real.starts_with(e)),
+                Leads::Nowhere => false,
+            };
+            if clear {
+                out.push(entry);
+            }
         }
     }
 
     let mut out = Vec::new();
-    walk(Path::new("/"), excludes, list_dir, &mut out);
+    walk(Path::new("/"), excludes, list_dir, leads, &mut out);
     out.sort();
     out
 }
@@ -119,6 +181,10 @@ fn read_grants_excluding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_links(_: &Path) -> Leads {
+        Leads::Itself
+    }
 
     /// The whole point of the walk: a short list of secrets stays unreadable
     /// while everything else is granted, without enumerating the filesystem by
@@ -134,7 +200,7 @@ mod tests {
                 _ => Vec::new(),
             }
         };
-        let grants = read_grants_excluding(&[PathBuf::from("/app")], listing);
+        let grants = read_grants_excluding(&[PathBuf::from("/app")], listing, no_links);
         assert_eq!(
             grants,
             vec![
@@ -161,7 +227,11 @@ mod tests {
                 _ => Vec::new(),
             }
         };
-        let grants = read_grants_excluding(&[PathBuf::from("/var/lib/aurcache-worker")], listing);
+        let grants = read_grants_excluding(
+            &[PathBuf::from("/var/lib/aurcache-worker")],
+            listing,
+            no_links,
+        );
         assert_eq!(
             grants,
             vec![
@@ -184,8 +254,56 @@ mod tests {
                 _ => Vec::new(),
             }
         };
-        let grants =
-            read_grants_excluding(&[PathBuf::from("/app"), PathBuf::from("/srv")], listing);
+        let grants = read_grants_excluding(
+            &[PathBuf::from("/app"), PathBuf::from("/srv")],
+            listing,
+            no_links,
+        );
         assert_eq!(grants, vec![PathBuf::from("/usr")]);
+    }
+
+    /// A symlink is granted by what it leads to: `/var/run -> /run` would
+    /// grant all of `/run`, and a secret under it, while `/run` itself is
+    /// walked for its siblings.
+    #[test]
+    fn grants_no_symlink_that_leads_to_an_exclusion_or_its_ancestor() {
+        let listing = |dir: &Path| -> Vec<PathBuf> {
+            let entries: &[&str] = match dir.to_str().unwrap() {
+                "/" => &["/run", "/usr", "/var"],
+                "/run" => &["/run/secrets", "/run/user"],
+                "/var" => &[
+                    "/var/run",
+                    "/var/into",
+                    "/var/elsewhere",
+                    "/var/dangling",
+                    "/var/lib",
+                ],
+                _ => &[],
+            };
+            entries.iter().map(PathBuf::from).collect()
+        };
+        let leads = |path: &Path| match path.to_str().unwrap() {
+            "/var/run" => Leads::To(PathBuf::from("/run")),
+            "/var/into" => Leads::To(PathBuf::from("/run/secrets/key")),
+            "/var/elsewhere" => Leads::To(PathBuf::from("/usr/share")),
+            "/var/dangling" => Leads::Nowhere,
+            _ => Leads::Itself,
+        };
+        let grants = read_grants_excluding(
+            &[
+                PathBuf::from("/run/secrets"),
+                PathBuf::from("/var/lib/aurcache-worker"),
+            ],
+            listing,
+            leads,
+        );
+        assert_eq!(
+            grants,
+            vec![
+                PathBuf::from("/run/user"),
+                PathBuf::from("/usr"),
+                PathBuf::from("/var/elsewhere"),
+            ]
+        );
     }
 }
