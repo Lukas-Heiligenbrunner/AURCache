@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::{
     AfterLog, Answer, Call, HostUsers, INPUT, Package, Receive, Rig, Script, Sending, Sink,
-    SshLinkScript, Start, VCS_COMMIT, VCS_SOURCE, claimed, config, pod_name, report, status,
+    SshLinkScript, Start, VCS_COMMIT, VCS_SOURCE, claimed, config, input, pod_name, report, status,
 };
 
 const GRACE: Duration = Duration::from_secs(5);
@@ -777,7 +777,7 @@ async fn a_panic_while_building_still_deletes_the_pod() {
     let (log, mut lines) = tokio::sync::mpsc::channel(16);
     let build = Build {
         claimed: &job,
-        input: INPUT.to_vec(),
+        input: input(),
         log,
         uploads: &Panics,
         ssh: None,

@@ -646,7 +646,12 @@ a tar of two entries to its stdin: `spec.json` (the `BuildSpec`) and
 `source.tar.gz`. `receive` reads up to the tar's end-of-archive marker, so it
 does not depend on the exec's stdin being half-closed, writes both under
 `/work/in`, and marks the directory ready; `stage` sees the mark and exits,
-and the build container starts.
+and the build container starts. The source is held once in the dispatcher's
+memory, from its download until `receive` has it: the tar is written as the
+headers and the spec, then the downloaded source as it is, then the padding
+and the end-of-archive marker, so it is never copied into an archive of its
+own. The dispatcher's memory limit covers its own 15 MiB or so plus, for each
+build running at once, the largest source.
 
 **Out, streamed.** The dispatcher has no disk for packages and must not need
 one: a package can be tens of gigabytes, and the dispatcher's only volume
