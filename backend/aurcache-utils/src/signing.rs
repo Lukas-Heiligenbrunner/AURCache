@@ -189,7 +189,7 @@ struct Staged {
 
 /// What became of staging one listed file.
 enum Staging {
-    Staged(Staged),
+    Staged(Box<Staged>),
     /// It cannot be signed.
     Unsignable(Unsignable),
 }
@@ -241,7 +241,7 @@ async fn sign_batch(
     let mut staged = Vec::with_capacity(batch.len());
     for before in batch {
         match stage(repo, platform, before).await {
-            Ok(Staging::Staged(copy)) => staged.push(copy),
+            Ok(Staging::Staged(copy)) => staged.push(*copy),
             Ok(Staging::Unsignable(why)) => pass.skipped.push(Skipped {
                 path: published(&before.filename),
                 why,
@@ -289,11 +289,11 @@ async fn stage(
             }));
         }
     };
-    Ok(Staging::Staged(Staged {
+    Ok(Staging::Staged(Box::new(Staged {
         path,
         entry,
         before: before.clone(),
-    }))
+    })))
 }
 
 /// Whether the file at `path` is the one `listed` describes, by its
@@ -532,7 +532,7 @@ mod tests {
         publish(&db, &unsigned, 2, "foo", "two").await;
         let db_before = std::fs::read(platform_file(tmp.path(), "repo.db.tar.gz")).unwrap();
 
-        let resigned = resign(&db, &repo, key, Platform::X86_64, vec![copy])
+        let resigned = resign(&db, &repo, key, Platform::X86_64, vec![*copy])
             .await
             .unwrap();
         assert_eq!(resigned.signed, 0);

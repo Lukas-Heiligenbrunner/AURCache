@@ -274,8 +274,8 @@ struct Staged {
 struct Upload {
     path: PathBuf,
     filename: String,
-    /// The version its filename says it is.
-    version: String,
+    /// What its filename says it is.
+    named: ParsedPkg,
 }
 
 /// One published file, as its `files` row will hold it.
@@ -310,17 +310,23 @@ async fn publish(
     let platform = build.platform;
     let staged = read_staging(repo, build, &pkg).await?;
     let packages = staged.len();
-    let version = staged[0].version.clone();
+    let version = staged[0].named.version.clone();
 
     // The slow part, and private: every archive read in full, before anything
     // is locked or changed.
     let mut described = Vec::with_capacity(staged.len());
-    for Upload { path, filename, .. } in staged {
+    for Upload {
+        path,
+        filename,
+        named,
+    } in staged
+    {
         let size = i64::try_from(tokio::fs::metadata(&path).await?.len()).unwrap_or(i64::MAX);
         let entry = repo
             .describe(path.clone())
             .await
             .map_err(|e| e.context(format!("reading {filename}")))?;
+        check_contents(&filename, &named, &entry)?;
         described.push(Staged {
             path,
             filename,
@@ -416,10 +422,10 @@ async fn read_staging(
                 )
                 .await;
             }
-            Artifact::Package(parsed) => names.push(Upload {
+            Artifact::Package(named) => names.push(Upload {
                 path: entry.path(),
                 filename,
-                version: parsed.version,
+                named,
             }),
         }
     }
@@ -670,6 +676,24 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     })
 }
 
+/// [`artifact`] checks the filename against the names that a build may
+/// produce, but the `repo.db` entry is made from the `.PKGINFO`: they must agree.
+fn check_contents(filename: &str, named: &ParsedPkg, entry: &PackageEntry) -> anyhow::Result<()> {
+    ensure!(
+        entry.pkgname == named.name,
+        "{filename} holds pkgname '{}', not '{}'",
+        entry.pkgname,
+        named.name
+    );
+    ensure!(
+        entry.version == named.version,
+        "{filename} holds version '{}', not '{}'",
+        entry.version,
+        named.version
+    );
+    Ok(())
+}
+
 /// What a staged package file is to publishing.
 #[derive(Debug)]
 enum Artifact {
@@ -695,7 +719,7 @@ enum Artifact {
 /// [`expected_pkgnames`]).
 ///
 /// This blocks *wrong-named* artifacts (e.g. a worker uploading `openssh-*`
-/// under a job for `hello`); it does **not** and cannot verify the *contents*
+/// under a job for `hello`); it does **not** and cannot verify the *binaries*
 /// of a correctly-named package (see design non-goals). A file that is not a
 /// `*.pkg.tar.*` at all is refused too.
 fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {

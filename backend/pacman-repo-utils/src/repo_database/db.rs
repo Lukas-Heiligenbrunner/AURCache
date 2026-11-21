@@ -198,6 +198,8 @@ mod tests {
             sha256sum: String::new(),
             desc: format!("%FILENAME%\n{filename}\n"),
             files: "%FILES%\nusr/bin/x".to_string(),
+            pkgname: String::new(),
+            version: String::new(),
         }
     }
 
@@ -357,6 +359,8 @@ mod tests {
                 "%FILENAME%\nfoo-1.0-1-x86_64.pkg.tar.zst\n\n%SHA256SUM%\nabc\n\n%PGPSIG%\nc2ln\n\n"
                     .to_string(),
             files: "%FILES%\nusr/bin/foo".to_string(),
+            pkgname: String::new(),
+            version: String::new(),
         };
         update(
             tmp.path(),

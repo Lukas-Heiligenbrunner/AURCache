@@ -30,6 +30,10 @@ pub struct PackageEntry {
     pub(crate) desc: String,
     /// The `files` file only `repo.files` carries.
     pub(crate) files: String,
+    /// Its `.PKGINFO`'s `pkgname`.
+    pub pkgname: String,
+    /// Its `.PKGINFO`'s `pkgver`: `[epoch:]pkgver-pkgrel`.
+    pub version: String,
 }
 
 // Bounds on reading one package archive. The package's builder writes the
@@ -199,7 +203,9 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
         .ok_or_else(|| anyhow!("invalid package path: {pkgpath}"))?
         .to_string();
 
-    let dir_name = format!("{}-{}", pkginfo.pkgname, pkginfo.pkgver);
+    let pkgname = pkginfo.pkgname.clone();
+    let version = pkginfo.pkgver.clone();
+    let dir_name = format!("{pkgname}-{version}");
 
     let mut desc = Desc::from(pkginfo);
     desc.filename.clone_from(&filename);
@@ -213,6 +219,8 @@ pub fn describe_package(pkgfile: &Path) -> anyhow::Result<PackageEntry> {
         sha256sum,
         desc: desc.to_string(),
         files,
+        pkgname,
+        version,
     })
 }
 
