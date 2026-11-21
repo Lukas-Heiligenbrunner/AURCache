@@ -37,7 +37,8 @@
 //! - **Reads**: everything except the paths listed in [`PROTECTED_PATHS_FILE`]
 //!   -- the worker's own secrets. A build legitimately reads most of the
 //!   filesystem, and reading is not how one build corrupts another; what must
-//!   stay secret is short and known. With no list, reads are not restricted.
+//!   stay secret is short and known. With no list, reads are not restricted;
+//!   a list that exists but cannot be read refuses the build.
 //!
 //! What this cannot do is protect a secret already in the process environment:
 //! a PKGBUILD reads it without touching the filesystem. makechrootpkg reaches
@@ -81,8 +82,8 @@ struct Request {
 
 /// Why a build was not run.
 enum Failure {
-    /// The protected-path list names a path under a directory that does not
-    /// exist.
+    /// The protected-path list cannot be read, or names a path under a
+    /// directory that does not exist.
     BadPolicy(String),
     /// Landlock could not be applied in full.
     Unconfined(String),
@@ -135,7 +136,7 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Request, Strin
 
 /// Confine this process and exec the program; returns only on failure.
 fn run(request: &Request) -> Result<Infallible, Failure> {
-    let protected = protected_paths(Path::new(PROTECTED_PATHS_FILE));
+    let protected = protected_paths(Path::new(PROTECTED_PATHS_FILE)).map_err(Failure::BadPolicy)?;
     check_parents(&protected).map_err(Failure::BadPolicy)?;
     let read = if protected.is_empty() {
         Vec::new()
@@ -213,20 +214,93 @@ fn resolve_writable_dirs(
 /// A missing file means "protect nothing", which is the correct default for a
 /// worker with no secrets on disk. Blank lines and `#` comments are ignored.
 ///
+/// A file that exists but cannot be read is an error, never an empty list: a
+/// policy at `0600 root` reads as missing to the build user this runs as, and
+/// taking that for "protect nothing" would leave every secret it lists
+/// readable while looking exactly like a confined build.
+///
 /// Each listed path is protected where it really is, whether or not it exists
 /// yet ([`crate::with_real_paths`]).
-fn protected_paths(file: &Path) -> Vec<PathBuf> {
-    let Ok(contents) = std::fs::read_to_string(file) else {
-        return Vec::new();
+fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
+    let contents = match read_policy(file) {
+        Ok(contents) => contents,
+        Err(Unreadable::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(unreadable) => return Err(unreadable.refusal(file)),
     };
-    crate::with_real_paths(
+    Ok(crate::with_real_paths(
         contents
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .map(PathBuf::from)
             .collect(),
-    )
+    ))
+}
+
+/// The most a protected-path list may hold: far more than any list of paths
+/// needs, and little enough to read whole.
+const MAX_POLICY_BYTES: u64 = 1 << 20;
+
+/// Why the protected-path list could not be read.
+enum Unreadable {
+    /// Something other than a regular file is in its place, such as a
+    /// directory, a FIFO or a device.
+    NotAFile,
+    /// It holds more than [`MAX_POLICY_BYTES`].
+    TooLarge,
+    /// Opening or reading it failed.
+    Io(std::io::Error),
+}
+
+impl Unreadable {
+    /// The message refusing the build, with what to do about it.
+    fn refusal(&self, file: &Path) -> String {
+        let cannot = format!("cannot read the protected-path list {}", file.display());
+        let refusing = "refusing to build without knowing what it protects";
+        match self {
+            Self::NotAFile => {
+                format!("{cannot} (not a regular file); {refusing}: replace it with a regular file")
+            }
+            Self::TooLarge => format!(
+                "{cannot} (larger than {MAX_POLICY_BYTES} bytes); {refusing}: \
+                 list only the paths a build must never read"
+            ),
+            Self::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied => format!(
+                "{cannot} ({e}); {refusing}: make it readable by the build user \
+                 (it lists paths, not secrets)"
+            ),
+            Self::Io(e) => format!("{cannot} ({e}); {refusing}"),
+        }
+    }
+}
+
+/// Read the protected-path list whole, if it is a regular file.
+///
+/// Opened without blocking and checked before reading: a FIFO in its place
+/// would block the build forever, and a device such as `/dev/zero` never ends.
+fn read_policy(file: &Path) -> Result<String, Unreadable> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(file)
+        .map_err(Unreadable::Io)?;
+    if !opened.metadata().map_err(Unreadable::Io)?.is_file() {
+        return Err(Unreadable::NotAFile);
+    }
+    let mut contents = String::new();
+    opened
+        .take(MAX_POLICY_BYTES + 1)
+        .read_to_string(&mut contents)
+        .map_err(Unreadable::Io)?;
+    if contents.len() as u64 > MAX_POLICY_BYTES {
+        return Err(Unreadable::TooLarge);
+    }
+    Ok(contents)
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -396,7 +470,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            protected_paths(&file),
+            protected_paths(&file).unwrap(),
             vec![
                 PathBuf::from("/var/lib/aurcache-worker/ssh"),
                 PathBuf::from("/etc/aurcache/identity"),
@@ -419,7 +493,7 @@ mod tests {
         let file = dir.join("list");
         std::fs::write(&file, format!("{}\n", dir.join("secret/key").display())).unwrap();
 
-        let protected = protected_paths(&file);
+        let protected = protected_paths(&file).unwrap();
         assert_eq!(
             protected,
             vec![std::fs::canonicalize(stamped.join("key")).unwrap()]
@@ -442,7 +516,7 @@ mod tests {
         let file = dir.join("list");
         std::fs::write(&file, format!("{}\n", dir.join("alias/identity").display())).unwrap();
 
-        let protected = protected_paths(&file);
+        let protected = protected_paths(&file).unwrap();
         assert!(check_parents(&protected).is_ok(), "{protected:?}");
         assert_eq!(
             protected,
@@ -478,7 +552,7 @@ mod tests {
         )
         .unwrap();
 
-        let protected = protected_paths(&file);
+        let protected = protected_paths(&file).unwrap();
         assert!(check_parents(&protected).is_ok(), "{protected:?}");
         assert_eq!(
             protected,
@@ -494,13 +568,13 @@ mod tests {
             format!("{}\n", dir.join("w/ssh/id_ed25519").display()),
         )
         .unwrap();
-        assert!(check_parents(&protected_paths(&file)).is_err());
+        assert!(check_parents(&protected_paths(&file).unwrap()).is_err());
 
         // A `..` after a missing part: `gone/..` is `w` once `gone` exists.
         std::fs::create_dir_all(dir.join("w/store")).unwrap();
         std::os::unix::fs::symlink("gone/../store/key", dir.join("w/k")).unwrap();
         std::fs::write(&file, format!("{}\n", dir.join("w/k").display())).unwrap();
-        let protected = protected_paths(&file);
+        let protected = protected_paths(&file).unwrap();
         assert!(check_parents(&protected).is_ok(), "{protected:?}");
         assert_eq!(
             protected,
@@ -517,6 +591,64 @@ mod tests {
     /// with no on-disk secrets is a normal deployment.
     #[test]
     fn a_missing_protected_list_protects_nothing() {
-        assert!(protected_paths(Path::new("/nonexistent/aurcache/list")).is_empty());
+        assert_eq!(
+            protected_paths(Path::new("/nonexistent/aurcache/list")),
+            Ok(Vec::new())
+        );
+    }
+
+    /// A list that is there but cannot be read refuses the build rather than
+    /// protecting nothing: that is what a policy at `0600 root` looks like to
+    /// the build user. A directory in its place stands in for it, as root
+    /// reads any file whatever its mode.
+    #[test]
+    fn an_unreadable_protected_list_refuses() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("list")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+
+        for unreadable in [dir.join("list"), dir.join("file/list")] {
+            let refused = protected_paths(&unreadable).unwrap_err();
+            assert!(
+                refused.contains(&unreadable.display().to_string()),
+                "{refused}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A FIFO in the list's place is refused without being read: reading one
+    /// would block until something writes to it, so the build would hang.
+    /// So is a device, such as `/dev/zero` behind a link, which never ends,
+    /// and a file larger than any list of paths.
+    #[test]
+    fn a_protected_list_that_is_not_a_file_is_refused_unread() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-not-a-file-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("fifo");
+        let c_fifo = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `c_fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o644) }, 0);
+        std::os::unix::fs::symlink("/dev/zero", dir.join("zero")).unwrap();
+        std::fs::File::create(dir.join("large"))
+            .unwrap()
+            .set_len(MAX_POLICY_BYTES + 1)
+            .unwrap();
+
+        for not_a_file in [fifo, dir.join("zero")] {
+            let refused = protected_paths(&not_a_file).unwrap_err();
+            assert!(refused.contains("not a regular file"), "{refused}");
+        }
+        let refused = protected_paths(&dir.join("large")).unwrap_err();
+        assert!(refused.contains("larger than"), "{refused}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
