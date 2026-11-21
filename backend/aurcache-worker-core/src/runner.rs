@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::{Lease, Refused, WorkerClient};
 use crate::config::CoreConfig;
-use crate::executor::{ClaimedJob, Executor};
+use crate::executor::{ClaimedJob, Executor, Serving};
 use crate::gate::ConcurrencyGate;
 use crate::live::Live;
 use crate::protocol::{Timeout, log};
@@ -38,20 +38,48 @@ use crate::report;
 /// affinity, which the server's scheduler reads from the worker's row. When
 /// delivered values change any of them, the worker registers again with what
 /// it now runs, so neither end has to know that the `concurrency` setting and
-/// the registered concurrency are the same thing.
+/// the registered concurrency are the same thing. It carries the
+/// architectures too, which change when the executor stops or resumes
+/// taking builds for one ([`Executor::serving`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Routing {
     packages: Vec<String>,
     priority: i32,
     concurrency: usize,
+    arches: Vec<String>,
 }
 
 impl Routing {
+    /// What `cfg` registers, for every architecture it names.
     fn of(cfg: &CoreConfig) -> Self {
         Self {
             packages: cfg.tunables.packages.clone(),
             priority: cfg.tunables.priority,
             concurrency: cfg.tunables.concurrency,
+            arches: cfg.arches.clone(),
+        }
+    }
+
+    /// The same, for the architectures an executor serves now: those of
+    /// `serving` that `cfg` names, in `cfg`'s order, or all of `cfg`'s when
+    /// that leaves none.
+    fn serving(cfg: &CoreConfig, serving: &Serving) -> Self {
+        let Serving::Only(only) = serving else {
+            return Self::of(cfg);
+        };
+        let arches: Vec<String> = cfg
+            .arches
+            .iter()
+            .filter(|arch| only.contains(arch))
+            .cloned()
+            .collect();
+        Self {
+            arches: if arches.is_empty() {
+                cfg.arches.clone()
+            } else {
+                arches
+            },
+            ..Self::of(cfg)
         }
     }
 }
@@ -571,7 +599,7 @@ impl<E: Executor> Runner<E> {
     /// touches no lease, build or approval.
     async fn sync_registration(&self) {
         let cfg = self.cfg();
-        let routing = Routing::of(&cfg);
+        let routing = Routing::serving(&cfg, &self.executor.serving(&cfg.arches));
         let mut registered = self.registered.lock().await;
         if *registered == routing {
             return;
@@ -582,15 +610,18 @@ impl<E: Executor> Runner<E> {
             tracing::error!("this worker's client holds no registration to send again");
             return;
         };
-        let request = crate::enroll::register_request(&cfg, csr_pem, E::KIND);
+        let mut request = crate::enroll::register_request(&cfg, csr_pem, E::KIND);
+        request.arches.clone_from(&routing.arches);
         match self.client.register(&request).await {
             Ok(_) => {
                 tracing::info!(
-                    "Registered again with concurrency {}, priority {}, packages {:?}",
+                    "Registered again with arches {:?}, concurrency {}, priority {}, packages {:?}",
+                    routing.arches,
                     routing.concurrency,
                     routing.priority,
                     routing.packages
                 );
+                self.executor.registered(&routing.arches);
                 *registered = routing;
             }
             // Retried on the next heartbeat. The gate already holds the new
@@ -598,6 +629,41 @@ impl<E: Executor> Runner<E> {
             // offer this worker less work than it would take, never more.
             Err(e) => tracing::warn!("registering the new settings failed: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::Routing;
+    use crate::config::CoreConfig;
+    use crate::executor::Serving;
+
+    fn cfg() -> CoreConfig {
+        let mut cfg = CoreConfig::from_env("test".into(), Vec::new());
+        cfg.arches = vec!["x86_64".to_string(), "aarch64".to_string()];
+        cfg
+    }
+
+    #[test]
+    fn what_is_registered_is_what_the_executor_serves() {
+        let cfg = cfg();
+        let all = Routing::of(&cfg);
+        assert_eq!(all.arches, ["x86_64", "aarch64"]);
+        assert_eq!(Routing::serving(&cfg, &Serving::All), all);
+        assert_eq!(
+            Routing::serving(&cfg, &Serving::Only(cfg.arches.clone())),
+            all
+        );
+
+        let narrowed = Routing::serving(&cfg, &Serving::Only(vec!["aarch64".to_string()]));
+        assert_eq!(narrowed.arches, ["aarch64"]);
+        assert_ne!(narrowed, all);
+        // In the configuration's order, and nothing it does not name.
+        let odd = ["riscv64", "aarch64", "x86_64"].map(String::from).to_vec();
+        assert_eq!(Routing::serving(&cfg, &Serving::Only(odd)), all);
+        // Only what the configuration does not name is read as everything.
+        let foreign = Serving::Only(vec!["riscv64".to_string()]);
+        assert_eq!(Routing::serving(&cfg, &foreign), all);
     }
 }
 
