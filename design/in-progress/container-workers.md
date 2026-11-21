@@ -119,7 +119,8 @@ in a container needs exactly the same thing, so it is written once.
   the worker, the agent is always the worker's own build.
 - The builder image stays what 0.6.0's worker expects (the `ab` user, its
   sudo rules, an entrypoint that runs its arguments), so an older Docker
-  worker keeps working with a newer image.
+  worker keeps working with a newer image. The one thing it gains is
+  `openssh` beside `git`, for builds that are given an SSH key.
 
 The Docker worker copies the agent into the build's directory, which is the
 one path it shares with the daemon.
@@ -164,6 +165,9 @@ worker that expects another interface (`build-runner.md`, step 0).
   srcdest/                    SRCDEST
   home/                       the build user's home and keyring
   makepkg.conf                the build's, written by root
+  ssh/agent.sock              with the worker's SSH key, while makepkg runs:
+                              the build user's way to it
+  ssh-link/link.sock          root's: where the worker's `ssh-link` connects
 ```
 
 The worker reads back `pkg/`, `out/report.json` and, if it asked for one,
@@ -193,7 +197,9 @@ the runtime:
    could write would be configuration nothing checked. Then write the first as
    `/etc/pacman.conf`, the second as `/etc/aurcache/pacman-upgrade.conf`,
    and the mirrorlist. Root writes them, so nothing is bind-mounted over a
-   packaged file any more, and the build user cannot change either.
+   packaged file any more, and the build user cannot change either. With
+   `ssh` in the spec, the worker's SSH link is taken first, before anything
+   else runs (step 7).
 3. **Keyring and upgrade.** `pacman-key --init` (what the image's entrypoint
    did), then the upgrade in two commands:
 
@@ -222,7 +228,7 @@ the runtime:
    which is the agent's), then `PKGDEST`, `BUILDDIR`, `SRCDEST` and the
    parallelism for the spec's CPU count (the chroot worker's rule:
    `MAKEFLAGS`, `OMP_NUM_THREADS`, `CARGO_BUILD_JOBS`). Whatever the root
-   step left running (pacman-key's gpg-agent) is then killed, as in step 8,
+   step left running (pacman-key's gpg-agent) is then killed, as in step 9,
    so the build user's processes have nothing of root's beside them.
 5. **As the build user**, each through `setgroups`, `setresgid`,
    `setresuid` and `PR_SET_NO_NEW_PRIVS`, which leaves a process with no
@@ -235,24 +241,43 @@ the runtime:
    Its stdout is read back, 16 MiB at most; its stderr goes to the log.
    Under `--nodeps` it is not printed at all.
 6. **The dependencies**, as root, once every process of the build user's
-   is dead (as in step 8). See below.
-7. **makepkg**, as the build user, for good: `makepkg` without `-s`, the
+   is dead (as in step 9). See below.
+7. **With the worker's SSH key** (`ssh` in the spec, which carries the
+   hosts' keys and never the key): root took the worker's `ssh-link` on
+   `ssh-link/link.sock` right after reading the spec, before the keyring,
+   the upgrade or anything of the job's ran, so whatever connected was the
+   worker's exec: nothing else in the container could be there first. After
+   step 3 it installed `openssh` and `git` where the image had none (with
+   the upgrade's configuration, so neither comes from AURCache's repository)
+   and wrote the hosts' keys; now it opens `ssh/agent.sock` for the build
+   user over the link. The socket stays until makepkg has ended. "The SSH
+   link" below is the whole of it. A link that does not come stops the build
+   at its `credential` step. The link's process is the one thing the kills
+   of steps 4 and 6 leave running: they spare the process the kernel says is
+   at the link's other end, by its number and only while it has no parent
+   in the container, as what the engine starts from outside has none and a
+   process that later got its number and was started in the container
+   does. Every other process is killed, any other exec of the engine's (an
+   image's health check) among them.
+8. **makepkg**, as the build user, for good: `makepkg` without `-s`, the
    flags every build takes (`--noconfirm --noprogressbar --nocolor`), then
    the job's, in `src/<pkgbase>`. makepkg checks the dependencies itself,
-   and a build missing one fails with makepkg's own message. Its output
-   goes to the agent's stdout and to the log file.
-8. **Afterwards.** Kill whatever the build left running: as PID 1,
+   and a build missing one fails with makepkg's own message. With the
+   worker's SSH key, its `makepkg.conf` also names the agent socket and the
+   hosts ssh trusts. Its output goes to the agent's stdout and to the log
+   file.
+9. **Afterwards.** Kill whatever the build left running: as PID 1,
    `kill(-1, SIGKILL)` reaches every other process in the container. Then,
    as the build user, ask git what each VCS source was at (as the build
    user because git on a repository the build wrote runs hooks and
    configuration the build chose).
-9. **Measure**: `memory.peak` and `memory.events`' `oom_kill` from the
+10. **Measure**: `memory.peak` and `memory.events`' `oom_kill` from the
    container's own cgroup, found through `/proc/self/cgroup` so that a
    container sharing the host's cgroup namespace does not read the host's;
    the bytes under the work and scratch directories.
-10. **Hand back.** Write `out/report.json`, then give the work directory,
+11. **Hand back.** Write `out/report.json`, then give the work directory,
     and `pkg/`, `log/` and `out/` with the regular files in them, back to
-    whoever owned it, readable by anyone. Last, after step 8, so nothing the
+    whoever owned it, readable by anyone. Last, after step 9, so nothing the
     build started can write the report or change a package. Root in the
     container may have left anything at `out/`; unless it is the empty
     directory it was, whatever is there is renamed aside into the work
@@ -311,7 +336,12 @@ file, remove a package, or run pacman with other options.
 
 A hostile package already published in one of those repositories runs its
 install scriptlet as root in the container of every build that depends on
-it, before that build starts. That is true of the chroot worker too.
+it, before that build starts. That is true of the chroot worker too. It
+runs when the build has no SSH agent yet, and whatever it leaves running is
+ended before the build starts; what it can still do is change what the
+build later runs, which then has the agent as the build itself does. That
+is why the SSH build credential is never in the container: nothing there
+can copy it.
 
 What the chroot worker does and the agent does not: it downloads the
 dependencies with network and installs them with none (`aurcache-sandbox
@@ -346,6 +376,175 @@ A container that ends with no report was killed whole (out of memory, with
 `memory.oom.group`; the node; the operator), and the worker says so from what
 the engine tells it.
 
+### The SSH link
+
+An SSH build credential never enters a build container. The worker keeps the
+key in an OpenSSH `ssh-agent` of its own, and a build reaches that agent over
+a link while makepkg runs. A build can use the key, and can take nothing of
+it away.
+
+**What this guarantees: the key cannot leave.** It is in the worker's file
+and in an `ssh-agent` on the worker's side, and nowhere in the container: in
+no file, no environment, not the job's spec, not the process that relays the
+link. What crosses is the SSH agent protocol, which has no request that
+returns a private key.
+
+**What it does not.** While a build runs, code in its container can have the
+key sign. That code is the PKGBUILD and its functions, and whatever else runs
+there: a dependency's install scriptlet, as root, reaches the agent as well.
+`ssh-agent` signs whatever it is asked to and does not ask what it is, so
+this is two things:
+
+- **Logging in** as the key, to any host that accepts it. A login signature
+  covers the session id of one SSH connection, so it authenticates that
+  connection and no later one. That connection need not be the build's: the
+  build can pass a server's challenge for one opened elsewhere to the agent
+  and send the signature back. The session is then not in the container,
+  and stays open after the build ends, for as long as whoever opened it
+  keeps it.
+- **Signing anything else.** `ssh-keygen -Y sign` through the agent makes an
+  SSHSIG: a signed git commit or tag, a signed file. Such a signature does
+  not expire with the build. It is worth something only where the key is
+  trusted *as a signing key*.
+
+So the key should be a key for builds and nothing else: a deploy key that
+reaches only what the worker's packages need, read-only where the host allows
+it, with `WORKER_PACKAGES` routing the packages that need it; and it must not
+be registered as a signing key anywhere (not as a signing key on GitHub or
+GitLab, not in an `allowed_signers` file). A key that only ever authenticates
+gives a build nothing to keep.
+
+`WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS` name the key and the hosts'
+keys on the worker, as on the chroot worker. `known_hosts` is required: a
+container is new for every build, so an ssh that accepts the first key a host
+shows would accept any host, every time. The worker refuses to start with a
+key and no host keys, and with a key `ssh-add` does not take. A key protected
+by a passphrase is one of those: there is no one to enter it.
+
+Why not in the container: a key mounted `0400`, root's alone, and loaded into
+an `ssh-agent` running as the build user, is kept from the build *user* and
+from nothing else that runs as root there. A dependency's install scriptlet
+runs as root in the container, and one that copied the mounted key out was
+shown to work. One deploy key shared by every build of a worker, taken for
+good by any package in any repository a build installs from, is not a
+boundary. Being used while a build runs is a much smaller thing than being
+copied.
+
+**The worker's ssh-agent.** For each build that is given the key, the worker
+starts `ssh-agent -D -a <socket>` as its own user, on a socket in a new
+directory of mode `0700` under its temporary directory, and loads the key
+with `ssh-add -`, which reads it from standard input: the key is in no
+process's arguments or environment and in no second file. The agent is the
+worker's child and is killed when the build is over, or with the worker.
+OpenSSH has to be installed where the worker runs; the hybrid image has it.
+
+One agent for each build, and not one for the worker's life, because then
+nothing has to be looked after. An agent that dies takes one build's logins
+with it: requests fail from then on, ssh in the build says the agent refused,
+and the link's last line in the build log counts the requests that went
+unanswered and says why. The next build starts its own. A key or host keys
+that were replaced are the ones the next build gets. An agent that cannot be
+started (no OpenSSH, a key `ssh-add` refuses) fails the build it was for, as
+the worker's failure, with what `ssh-add` said. The worker also starts one
+when it starts and stops if that fails, so a bad key is found before the
+first build. The cost is two short-lived processes per build.
+
+This is the mechanism the chroot worker uses, mirrored and not shared: there
+the agent runs as the build user through `sudo`, in a directory the build
+group can enter, because builds connect to it directly, and it lives as long
+as the worker. Here nothing of a build ever connects to the agent's socket.
+A passphrase is refused on both; neither has a way to enter one.
+
+**What the link passes on.** The worker's end passes on the two requests a
+login makes, unchanged, and passes their answers back unchanged:
+
+- `SSH_AGENTC_REQUEST_IDENTITIES`: which keys the agent has;
+- `SSH_AGENTC_SIGN_REQUEST`: sign this with that key.
+
+Every other request is answered with `SSH_AGENT_FAILURE` at the worker's end
+and never reaches `ssh-agent`: adding, removing or locking keys, naming a
+library for the agent to load (a smartcard or security-key provider), and
+extensions (`session-bind@openssh.com` among them, which OpenSSH's client
+treats as optional). None of them is part of a login, and each is a way for
+a build to make a process on the worker's side hold or do something: a
+thousand keys added, a library loaded. `ssh-agent` is also started with an
+empty provider list (`-P ''`), which says the same about libraries to the
+agent itself. Each request goes to `ssh-agent` on a connection of its own,
+which is all these two need.
+
+There is no limit on how many signatures a build may ask for. A package with
+many SSH submodules needs many.
+
+**Not done: destination constraints.** `ssh-add -h <host>` binds a key to the
+hosts it may be used to log in to, and an agent holding such a key refuses to
+sign anything that is not a login to one of them. With
+`WORKER_SSH_KNOWN_HOSTS` naming the hosts already, the worker could add the
+key with `-h` for each, which would limit where a build can log in and bring
+back "logins only". It needs two things this does not have: the link would
+have to pass `session-bind@openssh.com` on, and keep one connection to
+`ssh-agent` for each connection of the build's, since the agent checks a
+signature request against the session bound on the same connection. It is
+hardening that can be added later without changing anything a build sees.
+
+**The link.** The requests travel over one exec into the container, so no
+path has to be shared with the engine and the same thing works against a
+remote daemon. Docker alone could have the agent's socket bound into the
+container instead. A Kubernetes worker cannot: its build pods run on nodes
+whose filesystems are not the worker's, and an exec is the one channel into
+a pod it has. So one mechanism serves both, and there is one thing to secure:
+one place that decides which requests pass, one hello, one set of tests. The agent in the container (PID 1, root) is one end of it, the
+worker the other, and `ssh-link` between them copies bytes and understands
+nothing:
+
+1. With `ssh` in the spec, the agent first listens on
+   `<scratch>/ssh-link/link.sock`, in a directory only root can enter.
+2. As the container starts, the worker execs
+   `aurcache-build-agent ssh-link --socket <scratch>/ssh-link/link.sock` into
+   it, once. `ssh-link` connects, waiting up to a minute for the socket. The
+   agent accepts that one connection, checks the peer is root and keeps its
+   pid, stops listening, and the two ends exchange a hello
+   (`aurcache-ssh-link 1`). Only then does anything else run: the keyring,
+   the upgrade and the job. The root step then installs `openssh` and `git`
+   where the image has none (`pacman -S --needed`, after the upgrade and
+   with the upgrade's configuration; the builder image is built with both).
+3. Before makepkg, the agent listens on `<scratch>/ssh/agent.sock`,
+   owned by the build user and mode `0600`, in a directory of root's that only
+   the build group can enter, and the build's `makepkg.conf` exports
+   `SSH_AUTH_SOCK` and a `GIT_SSH_COMMAND` that trusts the job's host keys and
+   no others: the chroot worker's options
+   (`aurcache_common::shell::pinned_ssh_command`), which no `ssh_config` or
+   system `known_hosts` of the image overrides. That pins git's ssh, and
+   only against the image: a PKGBUILD can set its own `GIT_SSH_COMMAND` or
+   run `ssh` directly, and root in the container (a dependency's scriptlet)
+   could replace `ssh` for the rest of the build. That gives it nothing the agent did not, since it can log in
+   as the key anywhere already, but a fetch after it is then not checked
+   against the host keys.
+4. Each agent request a connection sends there (a length-prefixed message of
+   at most 256 KiB, OpenSSH's own limit) goes to the worker as a frame with
+   an id, and the answer comes back under the same id; the worker keeps no
+   state per connection.
+5. When makepkg has ended, the agent stops listening, removes the socket,
+   shuts every connection, sends a closing frame and waits for `ssh-link` to
+   pass it on, before it kills every other process as it does for every
+   build.
+
+A link that has not come within two minutes of the agent listening for it
+stops the build at its `credential` step. It is reported as interrupted, so
+the server builds it again; it is not the package's failure. A link that
+breaks while makepkg runs is said in the log and fails nothing by itself: a
+fetch that still needed the key fails, and the build with it.
+
+As on the chroot worker, the agent is there for the whole of makepkg, so a
+PKGBUILD that fetches over SSH from `prepare()` or `build()` and not through
+`source=` (`unreal-engine` does) authenticates here too.
+
+It is one key per worker, held as its default key (`ssh_key::DEFAULT`): a
+build is given it unless its job names another key, which a container worker
+does not hold, so that build is given none and its log says so, as on a
+chroot worker that does not hold the key named. Which key a job gets is
+`aurcache_worker_core::ssh_key::offer`, for every worker; named keys
+(`WORKER_GIT_SSH_KEYS`) are the chroot worker's alone.
+
 ---
 
 ## The worker's side
@@ -373,6 +572,8 @@ job, whatever engine its containers come from, and nothing of one engine:
 - **where the agent is** on the worker's machine, and the constants a
   container's renderer needs: the capability list, the paths inside the
   container.
+- **the SSH key**: starting an `ssh-agent` that has it for a build, and
+  serving the build's link to that agent ("The SSH link").
 
 It is a crate of its own, and not a module of `aurcache-worker-core`, because
 core is by its own account "everything that makes a process a worker" and
@@ -397,7 +598,8 @@ cannot build on one worker and miss a dependency on the other.
 
 Nothing else of the chroot worker changes. Its `oom_reason` knows two limits
 and three causes that only it has; its parallelism rule is fifteen lines
-tied to a comment about `WORKER_BUILD_CPUS`. The agent has its own, and
+tied to a comment about `WORKER_BUILD_CPUS`; its credential lines are
+written around a socket bound into a chroot. The agent has its own, and
 when `build-runner.md` gives the chroot worker an in-container script of the
 same shape, that is the moment to give it the agent's.
 
@@ -451,13 +653,16 @@ What an operator sees change:
   needs sudo or an `ab` user. Every image that worked still works.
 
 Still not supported: a persistent build directory (every build starts from a
-fresh tree, silently), kept failed builds, caches, SSH build credentials.
+fresh tree, silently), kept failed builds, caches. SSH build credentials
+are supported: `WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS` on the
+worker, whose `ssh-agent` answers for the key over a `docker exec` of
+`ssh-link` ("The SSH link"); no path is shared with the engine for it.
 
 ### With Podman, rootless engines, and the hybrid image
 
 The hybrid image's own Podman (`userns = "host"`, `cgroupns = "host"`) takes
 the same container options through its Docker-compatible socket. Its builds
-find their cgroup through `/proc/self/cgroup` (step 9 above). Under a
+find their cgroup through `/proc/self/cgroup` (step 10 above). Under a
 rootless or user-namespaced engine, root in the container is not the host's
 root; the hand-back's `chown` is to an id inside that mapping, and if it is
 refused the agent falls back to making `pkg/`, `log/` and `out/` writable by
@@ -481,6 +686,7 @@ What changes is inside the build container:
 | a setuid file left in the build directory | possible, as root in the container | still possible (Docker cannot mount a bind `nosuid`); the directory builds go in is made `0700`, and the worker warns when it is open to others, so nobody else on the host can run one |
 | what the build can make root do | `pacman` with any arguments, `chmod` with any arguments | before makepkg starts, install packages by name from the job's repositories; once it has, nothing |
 | what the build leaves where root's pacman runs | its processes and its files | its files only: what the PKGBUILD writes to `/tmp`, `/var/tmp`, `/dev/shm` or its home while `--printsrcinfo` sources it is still there when root's pacman and the dependencies' scriptlets run. Minor: pacman makes its own temporary directories with `mkdtemp` and runs scriptlets chrooted at `/`, so making use of it takes a scriptlet or hook in a repository package that trusts a fixed path in `/tmp` |
+| the worker's SSH key | not offered | never in the container; whatever runs there while makepkg does can have it sign, a login or anything else, and a session it logs in for someone else outlives the build |
 
 A link in `pkg/` named like a package is no package, and a `pkg/` that is a
 link is no package directory: `discover_artifacts` opens both without
@@ -502,12 +708,29 @@ source.
   image under the exact flags above: `docker/testpkg/hello` builds, and a
   hostile fixture checks, while its `.SRCINFO` is printed and from inside
   `build()`, what it must not be able to do, finding nothing of root's to
-  talk to either time. Both polarities, as `test-sandbox.sh` does it: the
-  fixture's dependencies are only there if root installed them, one from a
-  repository of the test's own that stands for AURCache's and that the
-  image's upgrade must not see. The same fixture, its `.SRCINFO` forged to
-  name a package file and pacman's options, fails at its `dependencies`
-  step with nothing of its making run as root.
+  talk to either time but the SSH agent socket. Both polarities, as
+  `test-sandbox.sh` does it: the fixture's dependencies are only there if
+  root installed them, one from a repository of the test's own that stands
+  for AURCache's and that the image's upgrade must not see. The same
+  fixture, its `.SRCINFO` forged to name a package file and pacman's
+  options, fails at its `dependencies` step with nothing of its making run
+  as root. Its source comes over the SSH link, with a stand-in for the
+  worker that starts an `ssh-agent` as a worker does, and `build()` reaches
+  the server again. Both `build()` and a dependency's root scriptlet look
+  for the key (files, the job, environments, every process and the relay)
+  and find nothing; `build()` asks the agent for an SSHSIG and gets one,
+  which is what the documentation says a build can do, and the scriptlet,
+  which runs before the build, finds no agent to ask but one it started
+  itself with a key of its own, so a hunt that finds nothing at all fails
+  rather than passes. While `build()`
+  waits, the script looks from outside the build, as root with every
+  capability: for the key's own bytes, in the form its file has them and in
+  the form a process that had parsed it would hold, in every file and in
+  every process's environment, command line and memory. A canary the build
+  holds shows that the look finds what is there.
+- The link's frames, the worker's `ssh-agent` (its private socket, the keys
+  `ssh-add` takes and refuses, a passphrase) and what the link passes on and
+  refuses have unit tests, against the real `ssh-agent`.
 - The Docker worker's container options are rendered by a pure function,
   tested for never asking for `privileged` and for the exact capability
   list.
