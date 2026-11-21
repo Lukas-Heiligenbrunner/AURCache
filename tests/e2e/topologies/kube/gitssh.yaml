@@ -1,7 +1,8 @@
 # An SSH git server for the SSH build key check: docker/git-ssh.Dockerfile,
 # serving `payload.git` over ssh to the key the dispatcher holds, at
 # kube-e2e-gitssh.kube-e2e.svc. Builds fetch from it, and only through the
-# dispatcher's SSH link, since the key is in no build pod.
+# dispatcher's SSH link, since the key is in no build pod; they reach it
+# through the policy in gitssh-policy.yaml.
 #
 # The authorised key and the server's host key come from the Secret
 # `kube-e2e-gitssh`, which the test's run-time kustomization generates, so
@@ -70,29 +71,3 @@ spec:
     - name: ssh
       port: 22
       targetPort: ssh
----
-# Builds reach nothing in the cluster but the server's repository; this lets
-# them reach the SSH git server too, as a deployment with a private git server
-# would.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: kube-e2e-builds-to-gitssh
-  namespace: aurcache-builds
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/managed-by: aurcache-worker-kube
-  policyTypes:
-    - Egress
-  egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-e2e
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: kube-e2e-gitssh
-      ports:
-        - protocol: TCP
-          port: 22

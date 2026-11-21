@@ -9,7 +9,9 @@
 #   git.yaml        a git daemon serving the test's packages, which the server
 #                   fetches from
 #   gitssh.yaml     an SSH git server builds fetch a source from with the
-#                   dispatcher's SSH key, and the policy that lets them
+#                   dispatcher's SSH key
+#   gitssh-policy.yaml
+#                   the NetworkPolicy that lets builds reach it
 #   server.yaml     what the test changes on the server: a verbose log, and
 #                   an image loaded onto the node rather than pulled
 #   worker.yaml     the same for the worker
@@ -26,6 +28,7 @@ resources:
   - namespace.yaml
   - git.yaml
   - gitssh.yaml
+  - gitssh-policy.yaml
   - ../../../../kubernetes/server
   - ../../../../kubernetes/kube-worker
 

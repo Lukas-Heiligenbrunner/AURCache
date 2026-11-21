@@ -1291,14 +1291,9 @@ server_logged() {
 check_open_policy() {
     log "=== 11. Without the NetworkPolicy ==="
     local since
-    k -n aurcache-builds delete networkpolicy aurcache-builds --ignore-not-found >/dev/null
     # The SSH leg's policy selects build pods too, and would keep them fenced.
-    # Kept from the first time, for a run that stopped before putting it back.
-    if k -n aurcache-builds get networkpolicy kube-e2e-builds-to-gitssh >/dev/null 2>&1; then
-        k -n aurcache-builds get networkpolicy kube-e2e-builds-to-gitssh -o yaml \
-            >"$SCRATCH/gitssh-policy.yaml"
-        k -n aurcache-builds delete networkpolicy kube-e2e-builds-to-gitssh >/dev/null
-    fi
+    k -n aurcache-builds delete networkpolicy aurcache-builds kube-e2e-builds-to-gitssh \
+        --ignore-not-found >/dev/null
     since=$(now)
     crash_dispatcher
     expect_said "The builds' NetworkPolicy is not enforced" "$since" 180
@@ -1311,7 +1306,7 @@ check_open_policy() {
     # Put back, and the worker started once more so that what it last said of
     # the policy is true of the cluster as it is left.
     k apply -f "$PROJECT_DIR/kubernetes/kube-worker/networkpolicy.yaml" >/dev/null
-    k apply -f "$SCRATCH/gitssh-policy.yaml" >/dev/null
+    k apply -f "$FIXTURE/gitssh-policy.yaml" >/dev/null
     since=$(now)
     crash_dispatcher
     expect_said "The builds' NetworkPolicy is enforced" "$since" 180
