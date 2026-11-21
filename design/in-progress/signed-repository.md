@@ -281,14 +281,16 @@ Only the key's own signatures are checked (`self_signed`): a certification
 by someone else, which `gpg --export-secret-keys` includes, would fail rPGP's
 `verify_bindings` for want of its issuer.
 
-rPGP 0.21 refuses about one unprotected Ed25519 secret in 256 that GnuPG
-(2.4.9 included) writes: it checks the secret's checksum over its own,
-canonical encoding of the MPI, and GnuPG writes a secret whose first byte is
-zero with a bit count of 256. Not fixed upstream as of 0.21.1; reported as
-[rPGP #901](https://github.com/rpgp/rpgp/issues/901). rPGP's error is the one
-a damaged file gets, so the server refuses either at load with one message
-naming both, and what to try: a copy locked with a passphrase, whose checksum
-is over the decrypted bytes, which rPGP gets right, else a backup. Reading the key anyway, by rewriting its checksum
+About one unprotected Ed25519 secret in 256 that GnuPG (2.4.9 included)
+writes is off the OpenPGP standard: GnuPG keeps the leading zero octet of a
+secret whose first byte is zero in its MPI, which RFC 9580 and RFC 4880
+forbid (GnuPG follows its own LibrePGP draft), and rPGP 0.21 refuses it as
+an invalid checksum. An rPGP contributor argues it should not accept such
+secrets; the issue is open
+([rPGP #901](https://github.com/rpgp/rpgp/issues/901)). rPGP's error is the
+one a damaged file gets, so the server refuses either at load with one
+message naming both, and what to try: a copy locked with a passphrase, which
+rPGP reads, else a backup. Reading the key anyway, by rewriting its checksum
 before rPGP sees it, was built and taken out: about 130 lines of packet
 parsing for one key in 256, which a passphrase avoids. The tests that load
 keys GnuPG made run again with new keys when they hit one
@@ -584,9 +586,9 @@ Built:
   (above), GnuPG-exported keys, GnuPG keys whose primary key has expired, is
   revoked, or expires before its signing subkey, keys with two signing
   subkeys refused, one that stops signing within 30 days loading with a
-  warning that names what ends it, a key past its expiry
-  making no signature, and a key rPGP misreads refused with the way around
-  it, which a GnuPG check then follows.
+  warning that names what ends it, a key past its expiry making no
+  signature, and a key GnuPG wrote off the standard refused with the way
+  around it, which a GnuPG check then follows.
 - `pacman-repo-utils`: `%PGPSIG%` round-trips from a sidecar through the
   databases and `listed_packages`; an unsigned package has none; signature
   links made and removed.
