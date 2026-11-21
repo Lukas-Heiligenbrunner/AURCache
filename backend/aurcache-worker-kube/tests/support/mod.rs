@@ -403,6 +403,9 @@ struct State {
     rendered: Vec<Pod>,
     /// What each `receive` read from its stdin.
     received: Vec<Vec<u8>>,
+    /// Whether a deleted pod stays in what the watch shows, as it does
+    /// until the watch has caught up.
+    lagging: bool,
     /// What came back to the agent's side of each SSH link.
     ssh_answers: Vec<Vec<Vec<u8>>>,
     script: Script,
@@ -460,6 +463,7 @@ impl FakeCluster {
                     calls: Vec::new(),
                     rendered: Vec::new(),
                     received: Vec::new(),
+                    lagging: false,
                     ssh_answers: Vec::new(),
                     script,
                 }),
@@ -562,6 +566,12 @@ impl FakeCluster {
 
     pub fn remove(&self, name: &str) {
         self.shared.remove(name);
+    }
+
+    /// Have the watch go on showing a deleted pod, as it does until it has
+    /// seen the delete, until [`Self::remove`] takes it out.
+    pub fn lag_deletions(&self) {
+        self.shared.state().lagging = true;
     }
 
     /// Have a dry run answer `refusal` instead of admitting the pod.
@@ -794,7 +804,9 @@ impl Cluster for FakeCluster {
             name: name.to_string(),
             grace,
         });
-        self.shared.remove(name);
+        if !self.shared.state().lagging {
+            self.shared.remove(name);
+        }
         Ok(())
     }
 

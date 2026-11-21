@@ -863,6 +863,40 @@ async fn pods_nobody_holds_are_deleted_before_a_claim() {
     assert_eq!(rig.cluster.deletions(), [gone(&pod_name(3))]);
 }
 
+/// A pod its own build deleted is not deleted again, nor reported as nobody's,
+/// while the watch has yet to see it go.
+#[tokio::test(start_paused = true)]
+async fn a_pod_its_build_deleted_is_not_reaped_again() {
+    let rig = Rig::new(Script::default());
+    rig.cluster.lag_deletions();
+    let built = rig.build(&claimed(7, None)).await;
+    assert_eq!(built.report.outcome, BuildOutcome::Succeeded);
+    assert!(rig.cluster.has_pod(&pod_name(7)));
+    assert!(rig.executor.ready_for_work(0).await);
+    let own = Call::Delete {
+        name: pod_name(7),
+        grace: GRACE,
+    };
+    assert_eq!(rig.cluster.deletions(), std::slice::from_ref(&own));
+
+    // Gone from the watch, it is forgotten; back under the same name, it is
+    // nobody's again.
+    rig.cluster.remove(&pod_name(7));
+    assert!(rig.executor.ready_for_work(0).await);
+    rig.cluster.leave_build(7, status::built(0, "Completed"));
+    assert!(rig.executor.ready_for_work(0).await);
+    assert_eq!(
+        rig.cluster.deletions(),
+        [
+            own,
+            Call::Delete {
+                name: pod_name(7),
+                grace: aurcache_worker_kube::cluster::PROMPT,
+            }
+        ]
+    );
+}
+
 /// The pod of a build that is running is that build's, whatever else is
 /// asked of the cluster meanwhile.
 #[tokio::test(start_paused = true)]
