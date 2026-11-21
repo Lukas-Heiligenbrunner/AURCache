@@ -141,6 +141,7 @@ async fn main() {
 
     // Builds a restart caught mid-publish pick up where they were.
     startup::resume_publishing(&db, &repo, &activity).await;
+    startup::warn_about_shared_names(&db).await;
 
     // Before anything else can resolve a source: a prune cannot distinguish a
     // clone in flight from a stranded one.
