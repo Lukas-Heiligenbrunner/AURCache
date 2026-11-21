@@ -70,12 +70,23 @@ fn grant(
     Ok(ruleset.add_rule(PathBeneath::new(fd, access))?)
 }
 
-/// The entries of `dir`; none when it cannot be read.
+/// The entries of `dir` that are not symlinks; none when it cannot be read.
+///
+/// The read walk grants what this lists, and a Landlock rule is attached to
+/// what its path resolves to: granting `/var/run`, which leads to `/run`,
+/// would grant all of `/run`, a protected path under it included. Leaving a
+/// link out costs nothing: what it leads to, when that is clear of every
+/// exclusion, is granted under its real name, and following a link needs no
+/// right of its own. An entry whose type cannot be read is left out too.
 fn list_dir(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    entries.flatten().map(|e| e.path()).collect()
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_symlink()))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// Expand exclusions into the positive read grants Landlock needs.
@@ -84,6 +95,29 @@ fn list_dir(dir: &Path) -> Vec<PathBuf> {
 /// entry that is neither an excluded path nor an ancestor of one, and
 /// descending into the ancestors. The excluded paths themselves are never
 /// granted, so nothing beneath them is readable.
+///
+/// `list_dir` lists no symlink ([`list_dir`]), so none is ever granted or
+/// descended. One on the way to an exclusion by name lists entries that lie
+/// elsewhere: with `state -> srv`, `state/db` is `srv/db`, protected or not
+/// by that name. Each exclusion is expected where it really is instead, and
+/// the walk reaches it under its own name.
+///
+/// Not covered:
+/// - A bind mount is no symlink: one showing an excluded directory elsewhere
+///   grants it there. Only a deployment makes those, never a build.
+/// - A hard link to an excluded file, in a granted directory, likewise: a
+///   build or a parse cannot make one.
+/// - A directory with case-insensitive lookup (casefold), where an exclusion
+///   is spelled in another case than the stored name: the walk lists the
+///   stored name, which matches no exclusion, and grants it. Comparing
+///   `(st_dev, st_ino)` instead of names would close that.
+/// - An entry swapped for a symlink after the walk looks at it: every grant
+///   is opened by path once the walk is done, so the window is the whole
+///   walk, and the grant follows the link. Nothing reaches that window in
+///   the shipped layout, where every ancestor of a protected path is owned
+///   by root or aurcache; it matters for a protected path under a directory
+///   a build can write. Granting the very descriptor the walk looked at
+///   (`PathBeneath::new` takes any `AsFd`) would close it.
 fn read_grants_excluding(
     excludes: &[PathBuf],
     list_dir: impl Fn(&Path) -> Vec<PathBuf> + Copy,
@@ -187,5 +221,64 @@ mod tests {
         let grants =
             read_grants_excluding(&[PathBuf::from("/app"), PathBuf::from("/srv")], listing);
         assert_eq!(grants, vec![PathBuf::from("/usr")]);
+    }
+
+    /// A fresh directory for a test that needs a real filesystem, resolved,
+    /// so the paths it lists compare equal to the ones built from it.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    /// The real listing leaves every symlink out, dangling or not.
+    #[test]
+    fn lists_no_symlink() {
+        let dir = scratch("aurcache-sandbox-list");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::fs::write(dir.join("file"), "").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+        std::os::unix::fs::symlink("missing", dir.join("dangling")).unwrap();
+
+        let mut listed = list_dir(&dir);
+        listed.sort();
+        assert_eq!(listed, vec![dir.join("file"), dir.join("real")]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The walk over a real tree with links on the way: `var/run -> ../run`
+    /// would grant `run` whole, `state -> srv` lists `state/db`, which is the
+    /// protected `srv/db`, and neither is granted; what they lead to is,
+    /// under its own name, but for the exclusions.
+    #[test]
+    fn grants_no_symlink_on_the_way_to_an_exclusion() {
+        let dir = scratch("aurcache-sandbox-walk");
+        for sub in ["run/secrets", "run/user", "var/lib/worker", "srv/db"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("srv/pub"), "").unwrap();
+        std::os::unix::fs::symlink("../run", dir.join("var/run")).unwrap();
+        std::os::unix::fs::symlink("srv", dir.join("state")).unwrap();
+        // The real tree above `dir`, cut down to the way to it.
+        let listing = |path: &Path| match dir.strip_prefix(path) {
+            Ok(rest) => match rest.components().next() {
+                Some(next) => vec![path.join(next)],
+                None => list_dir(path),
+            },
+            Err(_) => list_dir(path),
+        };
+
+        let grants = read_grants_excluding(
+            &[
+                dir.join("run/secrets"),
+                dir.join("var/lib/worker"),
+                dir.join("srv/db"),
+                dir.join("state/build_logs"),
+            ],
+            listing,
+        );
+        assert_eq!(grants, vec![dir.join("run/user"), dir.join("srv/pub")]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
