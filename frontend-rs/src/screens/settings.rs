@@ -774,13 +774,18 @@ fn RepositorySigningSection() -> Element {
     rsx! {
         Section { title: "Repository signing",
             div { class: "py-3 space-y-2",
-                p { class: "text-sm", "Every package and both databases are signed with the key" }
+                if signing.backfilling {
+                    p { class: "text-sm", "New packages and both databases are signed with the key" }
+                } else {
+                    p { class: "text-sm", "Every package and both databases are signed with the key" }
+                }
                 code { class: "font-mono text-xs break-all block", "{signing.fingerprint}" }
                 if signing.backfilling {
                     div { class: "alert alert-info text-sm",
                         span {
-                            "Packages published before signing began are still being signed; \
-                             until they are, keep signatures optional on clients."
+                            "Not every package is signed yet: those published before signing began \
+                             are still being signed, or need rebuilding first (see the Logs page). \
+                             Until they are, keep signatures optional on clients."
                         }
                     }
                 }

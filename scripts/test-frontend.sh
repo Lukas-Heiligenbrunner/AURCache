@@ -178,6 +178,10 @@ ROUTES=(
     "/|s=enqueued|the stuck queue links to both queued states"
     "/builds|Duration|builds list"
     "/settings|Max artifact size|the artifact size limit is a setting"
+    # The server runs with signing on: the section names the key and the
+    # commands that trust it, whether or not its backfill has finished.
+    "/settings|Repository signing|the Settings page has a repository signing section"
+    "/settings|pacman-key --lsign-key|the signing section says how to trust the key"
     "/builds|6.4 GiB|a build's peak memory is reported"
     # The fixture holds more builds than fit on a page. That the second page
     # holds different rows is an interaction test; this is only that the
