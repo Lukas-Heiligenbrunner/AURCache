@@ -51,4 +51,6 @@ pub enum SetupStep {
     Keys,
     /// Reading the PKGBUILD's dependencies and installing them.
     Dependencies,
+    /// Loading the SSH credential into the build user's agent.
+    Credential,
 }

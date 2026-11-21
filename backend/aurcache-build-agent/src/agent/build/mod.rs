@@ -5,20 +5,27 @@
 //! order is what makes it safe:
 //!
 //! 1. as root, before the build user has any process: take the work
-//!    directory, write pacman's and makepkg's configuration, upgrade the
-//!    image with AURCache's repository out of sight, make the build user and
-//!    its directories; then end whatever that left running;
+//!    directory, take the worker's SSH link when the job has its key, before
+//!    anything of the job runs; write pacman's and makepkg's configuration,
+//!    upgrade the image with AURCache's repository out of sight, make the
+//!    build user and its directories; then end whatever that left running;
 //! 2. as the build user, through [`user::BuildUser::command`] and nothing
 //!    else: unpack the source, fetch the keys, print the PKGBUILD's
 //!    `.SRCINFO`;
 //! 3. as root, once every other process is dead: install the dependencies
 //!    it names ([`deps`]);
-//! 4. as the build user, for good: makepkg, which has nothing in the
-//!    container to ask root for anything;
+//! 4. as the build user, for good: with the worker's SSH key, open the
+//!    socket that reaches it over the link ([`relay`]); run makepkg, which
+//!    has nothing in the container to ask root for anything else; close the
+//!    link;
 //! 5. as root again, once every other process is dead: measure, write the
 //!    report, hand the directory back.
+//!
+//! "Every other process" is never the SSH link's: the one process the agent
+//! took the link from is left alone until the end ([`children::Spare`]).
 
 mod children;
+mod credential;
 mod deps;
 mod dirs;
 mod handback;
@@ -27,18 +34,20 @@ mod keys;
 mod makepkg;
 mod measure;
 mod output;
+mod relay;
 mod run;
 mod source;
 mod user;
 mod vcs;
 
 use aurcache_build_agent::layout::{Scratch, Work};
-use aurcache_build_agent::makepkg_conf::{self, Rendering};
+use aurcache_build_agent::makepkg_conf::{self, Rendering, Ssh};
 use aurcache_build_agent::pacman_conf;
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
-use children::Quiet;
+use children::{Quiet, Spare};
 use output::Output;
+use relay::{Link, LinkEnd, Listening, Relay};
 use run::Keep;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -49,6 +58,12 @@ use user::BuildUser;
 
 /// How long the build's processes have to die once they are killed.
 const ENDING: Duration = Duration::from_secs(60);
+
+/// How long the worker's SSH link may take to come once the agent listens
+/// for it, which it does first. The worker opens it as soon as it sees the
+/// container run (a Kubernetes worker, the pod's build container), so it
+/// normally comes within seconds.
+const LINK_WAIT: Duration = Duration::from_secs(120);
 
 /// What root finds programs through when it was started with nothing set.
 const ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
@@ -168,7 +183,7 @@ fn build(work: &Work, log_file: Option<&Path>) -> Result<(), String> {
 /// Kill everything the build left running, and make sure of it. What comes
 /// next reads and gives away files that only a dead build cannot change.
 fn end() -> Result<(), String> {
-    match children::kill_all(ENDING) {
+    match children::kill_all(ENDING, Spare::Nothing) {
         Quiet::Alone => Ok(()),
         Quiet::Lingering => {
             Err("a process of the build outlived being killed; nothing is reported".to_string())
@@ -176,11 +191,11 @@ fn end() -> Result<(), String> {
     }
 }
 
-/// Kill every other process in the container: whatever `what` left
-/// running. Each step that follows is root's or the build user's alone, with
-/// nothing of the other's beside it.
-fn clear(what: &str) -> Result<(), String> {
-    match children::kill_all(ENDING) {
+/// Kill every other process in the container but the one `spare` names:
+/// whatever `what` left running. Each step that follows is root's or the
+/// build user's alone, with nothing of the other's beside it.
+fn clear(what: &str, spare: Spare) -> Result<(), String> {
+    match children::kill_all(ENDING, spare) {
         Quiet::Alone => Ok(()),
         Quiet::Lingering => Err(format!("a process {what} started outlived being killed")),
     }
@@ -229,25 +244,52 @@ fn make(spec: &BuildSpec, work: &Work, output: &Output) -> Result<Made, Failed> 
     let root = spec.scratch.as_path();
     let scratch = Scratch::new(root);
 
-    // As root, with no process of the build user's anywhere.
+    // As root, with no process of the build user's anywhere. The link is
+    // taken first, before any scriptlet or anything else of the job's runs:
+    // whatever connects is the worker's exec, as nothing else in the
+    // container can be there first.
+    let link = spec.ssh.as_ref().map(|_| take_link(&scratch)).transpose()?;
+    let spare = link
+        .as_ref()
+        .map_or(Spare::Nothing, |link| Spare::Link { pid: link.pid });
     configure_pacman(spec).map_err(at(SetupStep::Config))?;
     output.say("preparing pacman's keyring");
     init_keyring(output).map_err(at(SetupStep::Keyring))?;
     output.say("upgrading the image");
     upgrade(output).map_err(at(SetupStep::Sync))?;
+    // With the worker's SSH key: ssh and git, and the hosts' keys, which
+    // makepkg's configuration names along with the socket the link will be
+    // reached through.
+    let known_hosts = match &spec.ssh {
+        Some(ssh) => {
+            credential::provide(output, Path::new(UPGRADE_CONF))
+                .map_err(at(SetupStep::Credential))?;
+            let path = spec.scratch.join(credential::KNOWN_HOSTS);
+            Some(
+                credential::known_hosts(&ssh.known_hosts, &path)
+                    .map_err(at(SetupStep::Credential))?,
+            )
+        }
+        None => None,
+    };
     let agent = std::env::current_exe().map_err(at(SetupStep::User))?;
     dirs::lay_out(root, &scratch, work).map_err(at(SetupStep::User))?;
     let user = BuildUser::ensure(&scratch.home()).map_err(at(SetupStep::User))?;
     let conf = scratch.makepkg_conf();
+    let socket = scratch.ssh_socket();
     let rendered = makepkg_conf::render(&Rendering {
         job: &spec.makepkg_conf,
         work,
         scratch: &scratch,
         cpus: spec.cpus,
+        ssh: known_hosts.as_deref().map(|known_hosts| Ssh {
+            socket: &socket,
+            known_hosts,
+        }),
     });
     std::fs::write(&conf, rendered).map_err(at(SetupStep::Config))?;
     // pacman-key's gpg-agent, for one, outlives the root step.
-    clear("the root step").map_err(at(SetupStep::User))?;
+    clear("the root step", spare).map_err(at(SetupStep::User))?;
 
     // As the build user, but for the dependencies' install.
     let unpacking = source::Unpacking {
@@ -271,15 +313,39 @@ fn make(spec: &BuildSpec, work: &Work, output: &Output) -> Result<Made, Failed> 
         place: &place,
         arch: &spec.arch,
         flags: &spec.build_flags,
+        spare,
     };
     deps::install(&needs, &user, output).map_err(at(SetupStep::Dependencies))?;
 
+    // With the worker's SSH key: the socket that reaches it, from here to the
+    // end of makepkg.
+    let relay = link
+        .map(|link| Relay::start(link, &scratch))
+        .transpose()
+        .map_err(at(SetupStep::Credential))?;
     output.say("running makepkg");
-    let status = makepkg::run(&place, &spec.build_flags, &user, output).map_err(|e| Failed {
+    let made = makepkg::run(&place, &spec.build_flags, &user, output).map_err(|e| Failed {
         step: SetupStep::Config,
         message: format!("makepkg could not be started: {e}"),
-    })?;
-    Ok(Made { status, user })
+    });
+    if let Some(relay) = relay
+        && let LinkEnd::Broken { message } = relay.close()
+    {
+        // Not the build's failure by itself: makepkg has said so already if
+        // it needed the key after the link was gone.
+        output.say(&format!(
+            "the SSH link to the worker broke during the build: {message}"
+        ));
+    }
+    made.map(|status| Made { status, user })
+}
+
+/// Listen for the worker's link and take it.
+fn take_link(scratch: &Scratch) -> Result<Link, Failed> {
+    Listening::open(scratch)
+        .map_err(at(SetupStep::Credential))?
+        .accept(LINK_WAIT)
+        .map_err(at(SetupStep::Credential))
 }
 
 /// The job's pacman configuration, checked: what goes where in `/etc`.

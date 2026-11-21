@@ -42,7 +42,11 @@ rm /etc/pacman.d/mirrorlist.backup
 # base-devel and git down with it -- producing an image with no compiler that
 # still built successfully, and failed much later inside somebody's package
 # build with "a compiler with support for C++14 language features is required".
-pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git
+#
+# git and openssh beside it: what a build fetches a private source with. A
+# worker that gives builds an SSH key installs them where an image has none,
+# which this spares every such build.
+pacman --sync --needed --noconfirm --noprogressbar sudo base-devel git openssh
 
 # multilib is x86_64-only, and lives behind a repository that only the amd64
 # pacman.conf above enables. Asked for separately so that its absence skips

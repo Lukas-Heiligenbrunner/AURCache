@@ -16,7 +16,7 @@
 //! this pass: that is the break it exists to catch.
 
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
-use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
+use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -91,6 +91,7 @@ fn specs() -> Vec<BuildSpec> {
         }],
         cpus: Some(2.5),
         scratch: PathBuf::from("/work/scratch"),
+        ssh: None,
     };
     let bare = BuildSpec {
         build_flags: Vec::new(),
@@ -102,7 +103,13 @@ fn specs() -> Vec<BuildSpec> {
         scratch: PathBuf::from("/var/lib/aurcache-build"),
         ..full.clone()
     };
-    vec![full, bare]
+    let with_key = BuildSpec {
+        ssh: Some(SshAccess {
+            known_hosts: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n".to_string(),
+        }),
+        ..full.clone()
+    };
+    vec![full, bare, with_key]
 }
 
 fn reports() -> Vec<BuildReport> {
@@ -115,6 +122,7 @@ fn reports() -> Vec<BuildReport> {
         SetupStep::Source,
         SetupStep::Keys,
         SetupStep::Dependencies,
+        SetupStep::Credential,
     ]
     .into_iter()
     .map(|step| BuildReport {
@@ -154,6 +162,9 @@ fn a_spec_with_an_unknown_field_still_reads() {
     for (i, mut sample) in check("spec", &specs()).into_iter().enumerate() {
         let object = sample.as_object_mut().unwrap();
         object.insert("added_later".to_string(), Value::from("x"));
+        if let Some(Value::Object(ssh)) = object.get_mut("ssh") {
+            ssh.insert("added_later".to_string(), Value::from(1));
+        }
         serde_json::from_value::<BuildSpec>(sample)
             .unwrap_or_else(|e| panic!("spec #{i} with an unknown field: {e}"));
     }

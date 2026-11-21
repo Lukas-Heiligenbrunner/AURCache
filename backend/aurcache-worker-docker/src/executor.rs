@@ -36,8 +36,13 @@ use crate::cleanup::{self, Leftover};
 use crate::config::{BuildDirs, Config};
 use crate::container::{self, Build};
 use crate::ending::{Verdict, ending};
+use crate::link;
 use crate::network::{self, NetworkPlan};
 use crate::workdir::{self, Report};
+use aurcache_build_agent::spec::SshAccess;
+use aurcache_worker_container::ssh::agent::Agent;
+use aurcache_worker_container::ssh::{self, Credential, CredentialFiles};
+use aurcache_worker_core::ssh_key;
 
 /// Builds each package in a container spawned from the builder image.
 pub struct DockerExecutor {
@@ -218,11 +223,34 @@ impl DockerExecutor {
         target: &Target<'_>,
     ) -> Result<CompleteReport> {
         let build_id = claimed.job.build_id;
+        // Decided before anything is prepared and said first in the build
+        // log, so a fetch that fails for want of a key has the reason above
+        // it. This worker holds no named key, so none is ever withheld.
+        let held = ssh::held(cfg.credential.as_ref());
+        let offer = ssh_key::offer(&claimed.job, &held, true);
+        if let Some(notice) = offer.notice(&claimed.job.pkgbase) {
+            log(client, build_id, &format!("[worker] {notice}\n")).await;
+        }
         let source = client
             .source(build_id)
             .await
             .context("downloading source")?;
-        let spec = spec::for_job(claimed, client.repo(), spec_options(cfg));
+        // An ssh-agent of this build's own, started from the files as they
+        // are now, so that a changed key or host keys are used from the next
+        // build on. It is killed when this returns.
+        let credential = match offer.key() {
+            Some(files) => Some(
+                CredentialFiles::load(files)
+                    .await
+                    .context("the worker's SSH key")?,
+            ),
+            None => None,
+        };
+        let ssh = credential.as_ref().map(|credential| SshAccess {
+            known_hosts: credential.known_hosts.clone(),
+        });
+        let agent = credential.map(|credential: Credential| credential.agent);
+        let spec = spec::for_job(claimed, client.repo(), spec_options(cfg, ssh));
         workdir::prepare(&target.dirs.local, &self.agent, &spec, &source)
             .context("preparing the build directory")?;
 
@@ -236,7 +264,7 @@ impl DockerExecutor {
             network: &self.network,
         });
         let id = self.create(target, body).await?;
-        let run = self.run_container(client, claimed, &id).await;
+        let run = self.run_container(client, claimed, &id, agent).await;
         let oom_killed = match &run {
             Ok(_) => self.oom_killed(&id).await,
             Err(_) => false,
@@ -289,6 +317,7 @@ impl DockerExecutor {
         client: &Arc<WorkerClient>,
         claimed: &ClaimedJob,
         container_id: &str,
+        ssh: Option<Arc<Agent>>,
     ) -> Result<Run> {
         let build_id = claimed.job.build_id;
         let attached = self
@@ -309,6 +338,16 @@ impl DockerExecutor {
             .start_container(container_id, None::<StartContainerOptions>)
             .await
             .context("starting build container")?;
+        // Once, as the container starts, for the whole build. Aborted when
+        // this returns, whichever way: an error waiting for the container,
+        // or a link that outlives it.
+        let mut link = ssh.map(|agent| {
+            Aborting(tokio::spawn(link::serve(
+                self.docker.clone(),
+                container_id.to_string(),
+                agent,
+            )))
+        });
 
         // Pump container output into the build log.
         let build_log = BuildLog::open(Arc::clone(client), build_id);
@@ -356,6 +395,14 @@ impl DockerExecutor {
             }
         };
 
+        if let Some(Aborting(handle)) = link.as_mut() {
+            // The container ended, and the exec with it: what is left is the
+            // end of the stream.
+            if let Ok(Ok(served)) = tokio::time::timeout(LINK_END, handle).await {
+                let _ = build_log.sender().send(served.line()).await;
+            }
+        }
+        drop(link);
         build_log.close(vec![pump], stop).await;
         Ok(Run {
             stop,
@@ -455,13 +502,26 @@ fn dir_name(tag: &str, build_id: i32) -> String {
 }
 
 /// What this worker decides about a build beside what the job says.
-fn spec_options(cfg: &Config) -> SpecOptions {
+fn spec_options(cfg: &Config, ssh: Option<SshAccess>) -> SpecOptions {
     SpecOptions {
         cpus: cfg.tunables.cpus(),
         keyserver: DEFAULT_KEYSERVER.to_string(),
         scratch: PathBuf::from(container::SCRATCH),
+        ssh,
     }
 }
+
+/// A task that is aborted when this is dropped.
+struct Aborting<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for Aborting<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// How long the SSH link may take to end once the container has.
+const LINK_END: Duration = Duration::from_secs(5);
 
 /// The memory limit this worker set, for naming in an out-of-memory failure.
 fn memory_limit(cfg: &Config) -> Option<MemoryLimit> {

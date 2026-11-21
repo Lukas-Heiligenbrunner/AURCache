@@ -53,6 +53,21 @@ pub enum Quiet {
     Lingering,
 }
 
+/// Which process killing every other one leaves alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spare {
+    /// None: the agent is left alone in the container.
+    Nothing,
+    /// The worker's SSH link: the process the agent took the link from,
+    /// before anything of the job ran. It is spared only while it still has
+    /// no parent in this PID namespace, as what the engine starts from
+    /// outside has none, so a process that got its number later is not:
+    /// what a process in the container starts is its child, or the agent's
+    /// once orphaned. Every other exec, an image's health check among them,
+    /// is killed like the rest.
+    Link { pid: u32 },
+}
+
 /// Start the thread that waits for every child. Call once, before `spawn`.
 pub fn start() {
     table().own = Some(HashMap::new());
@@ -114,19 +129,32 @@ pub fn kill(pid: u32) -> ExitStatus {
     wait(pid)
 }
 
-/// Kill every other process in the container, and wait until none is left.
+/// Kill every other process in the container but those `spare` names, and
+/// wait until none is left.
 ///
 /// Only PID 1 may call this: for it, `kill(-1)` reaches exactly the
 /// container's other processes, and each of them is its child or becomes one
 /// when its parent dies, so having no child left means nothing else runs.
 /// The signal is sent again on every round, for a process started while the
-/// first was being delivered.
-pub fn kill_all(limit: Duration) -> Quiet {
+/// first was being delivered. Sparing some, each of the others is signalled
+/// by its number instead.
+pub fn kill_all(limit: Duration, spare: Spare) -> Quiet {
     let deadline = Instant::now() + limit;
     loop {
-        // SAFETY: see above; the caller is PID 1 of its own PID namespace.
-        unsafe { libc::kill(-1, libc::SIGKILL) };
-        if childless() && alone() {
+        match spare {
+            Spare::Nothing => {
+                // SAFETY: see above; the caller is PID 1 of its own PID
+                // namespace.
+                unsafe { libc::kill(-1, libc::SIGKILL) };
+            }
+            Spare::Link { .. } => {
+                for pid in others(spare) {
+                    // SAFETY: a signal to a process of this namespace.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+        if childless() && others(spare).is_empty() {
             return Quiet::Alone;
         }
         if Instant::now() >= deadline {
@@ -224,26 +252,75 @@ fn childless() -> bool {
     matches!(peek(libc::WNOHANG), Peek::Childless)
 }
 
-/// Whether `/proc` lists no process but this one. This also sees a process
-/// that entered the container from outside and is nobody's child in here.
-/// Without a readable `/proc` there is nothing more to learn, and having no
-/// child decides.
-fn alone() -> bool {
+/// The processes `/proc` lists but this one and the one `spare` leaves
+/// alone. This also sees a process that entered the container from outside
+/// and is nobody's child in here. Without a readable `/proc` there is
+/// nothing more to learn, and having no child decides.
+fn others(spare: Spare) -> Vec<libc::pid_t> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return true;
+        return Vec::new();
     };
-    let own = std::process::id().to_string();
-    !entries.flatten().any(|entry| {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        name != own.as_str() && !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
-    })
+    let own = std::process::id();
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| pid != own && !spared(spare, pid))
+        .filter_map(|pid| libc::pid_t::try_from(pid).ok())
+        .collect()
+}
+
+/// Whether `spare` leaves the process numbered `pid` alone.
+fn spared(spare: Spare, pid: u32) -> bool {
+    match spare {
+        Spare::Nothing => false,
+        Spare::Link { pid: link } => pid == link && parent(pid) == Some(0),
+    }
+}
+
+/// A process's parent, as `/proc` gives it: 0 for one whose parent is
+/// outside this PID namespace. `None` once it is gone.
+fn parent(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|ppid| ppid.trim().parse().ok())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Peek, collect, peek};
+    use super::{Peek, Spare, collect, parent, peek, spared};
     use std::process::Command;
+
+    /// A process's parent is read as `/proc` has it, and a process that is
+    /// gone has none.
+    #[test]
+    fn a_parent_is_read_from_proc() {
+        assert_eq!(
+            parent(std::process::id()),
+            Some(std::os::unix::process::parent_id())
+        );
+        assert_eq!(parent(u32::MAX), None);
+    }
+
+    /// The link's process is spared by its number only while it has no
+    /// parent here: this one has one, as anything started in the container
+    /// does, and so does a process that got a gone link's number.
+    #[test]
+    fn only_a_process_from_outside_is_spared_by_its_number() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("running sleep");
+        let pid = child.id();
+        assert_eq!(parent(pid), Some(std::process::id()));
+        assert!(!spared(Spare::Link { pid }, pid));
+        assert!(!spared(Spare::Nothing, pid));
+        // Nor is a process that is gone.
+        assert!(!spared(Spare::Link { pid: u32::MAX }, u32::MAX));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
 
     /// A child that ended is seen without being collected, and collected
     /// once. Other tests have children of their own, which are looked at and
