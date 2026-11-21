@@ -4,6 +4,7 @@
 //! aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...
 //! aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] -- PROGRAM [ARGS]...
 //! aurcache-sandbox offline -- PROGRAM [ARGS]...
+//! aurcache-sandbox --capabilities --agent-dir DIR
 //! ```
 //!
 //! - the build profile (`build.rs`): a worker's source download, which runs a
@@ -11,7 +12,10 @@
 //! - `parse` (`parse.rs`): the server's PKGBUILD parsing, which may write
 //!   nothing and read nothing private;
 //! - `offline` (`offline.rs`): a build's dependency install, which runs other
-//!   packages' scriptlets as root inside the chroot, reaches no network.
+//!   packages' scriptlets as root inside the chroot, reaches no network;
+//! - `--capabilities` runs nothing: it says what the build profile would
+//!   enforce beyond what every version has, if a build started now, as the
+//!   user it runs as -- for a caller that relies on it to ask first.
 //!
 //! Each profile owns its whole policy, stated by purpose rather than by
 //! mechanism, so a caller cannot assemble a weaker one. What they share is
@@ -34,8 +38,36 @@ fn main() -> std::process::ExitCode {
     if args.next_if(|arg| arg == "offline").is_some() {
         return offline::main(args);
     }
+    if args.next_if(|arg| arg == CAPABILITIES_ARG).is_some() {
+        return build::capabilities(args);
+    }
     build::main(args)
 }
+
+// What a caller has to agree with this program on beyond its profiles. The
+// worker keeps copies of these, which its tests hold to these definitions.
+
+/// The argument that makes the sandbox say what the build profile would
+/// enforce, and run nothing: `--capabilities --agent-dir DIR`. A sandbox that
+/// predates it refuses it as a usage error.
+const CAPABILITIES_ARG: &str = "--capabilities";
+
+/// The argument naming the directory the caller's ssh-agents' sockets are
+/// beneath.
+///
+/// Given by the caller rather than assumed: the worker's data directory is
+/// its own configuration, which this program -- reached through `sudo`, with
+/// the worker's environment gone -- never sees, so a default would answer for
+/// a directory the worker may not use.
+const AGENT_DIR_ARG: &str = "--agent-dir";
+
+/// The line `--capabilities` prints when a build started now would be refused
+/// every pathname UNIX socket beneath the agents' directory but the one it is
+/// offered.
+const RESOLVE_UNIX: &str = "resolve-unix";
+
+/// The line it prints instead, followed by `: ` and why not.
+const NO_RESOLVE_UNIX: &str = "no-resolve-unix";
 
 /// Add one path to the ruleset, narrowing the rights to what its file type can
 /// actually carry.

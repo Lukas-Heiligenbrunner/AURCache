@@ -46,6 +46,12 @@
 //!   agent is told so by `SSH_AUTH_SOCK`, and may connect to that one socket
 //!   as well. Older kernels cannot say, and leave sockets unrestricted.
 //!
+//! `--capabilities --agent-dir DIR` builds nothing: it says whether that
+//! socket rule would hold for the sockets beneath `DIR`, for a build started
+//! now as the user it runs as -- whether this kernel has the right, and the
+//! list could be read, protects something and protects `DIR`. The worker asks
+//! it, as the build user, before it holds a key only some packages may use.
+//!
 //! What this cannot do is protect a secret already in the process environment:
 //! a PKGBUILD reads it without touching the filesystem. makechrootpkg reaches
 //! here through `sudo`, which passes on only what it is told to preserve.
@@ -86,7 +92,8 @@ const PROTECTED_PATHS_FILE: &str = "/etc/aurcache/sandbox-protected";
 const USAGE: &str = "usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...\n       \
                      aurcache-sandbox parse --pkgbuild FILE [--private PATH]... [--network] \
                      -- PROGRAM [ARGS]...\n       \
-                     aurcache-sandbox offline -- PROGRAM [ARGS]...";
+                     aurcache-sandbox offline -- PROGRAM [ARGS]...\n       \
+                     aurcache-sandbox --capabilities --agent-dir DIR";
 
 struct Request {
     program: OsString,
@@ -145,6 +152,125 @@ fn parse_args(mut args: impl Iterator<Item = OsString>) -> Result<Request, Strin
         program,
         args: args.collect(),
     })
+}
+
+/// `--capabilities --agent-dir DIR` (the first argument already taken): print
+/// [`crate::RESOLVE_UNIX`] when a build started now would be refused the
+/// sockets beneath `DIR` but the one it is offered, and otherwise
+/// [`crate::NO_RESOLVE_UNIX`] and why not. Runs nothing.
+///
+/// Asked of the same checks a build makes, as the user this runs as, so it
+/// cannot say yes where that user's build would not hold to it: a policy that
+/// user cannot read refuses its every build.
+pub fn capabilities(args: impl Iterator<Item = OsString>) -> ExitCode {
+    let agents = match parse_capabilities_args(args) {
+        Ok(agents) => agents,
+        Err(e) => {
+            eprintln!("aurcache-sandbox: {e}");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let sockets = agent_sockets(
+        resolve_unix_supported(),
+        &protected_paths(Path::new(PROTECTED_PATHS_FILE)),
+        &agents,
+    );
+    println!("{}", capability_line(&sockets));
+    ExitCode::SUCCESS
+}
+
+fn parse_capabilities_args(mut args: impl Iterator<Item = OsString>) -> Result<PathBuf, String> {
+    if args.next().is_none_or(|arg| arg != crate::AGENT_DIR_ARG) {
+        return Err(format!(
+            "expected `{}` after `{}`",
+            crate::AGENT_DIR_ARG,
+            crate::CAPABILITIES_ARG
+        ));
+    }
+    let dir = args
+        .next()
+        .filter(|dir| !dir.is_empty())
+        .ok_or_else(|| format!("missing DIR after `{}`", crate::AGENT_DIR_ARG))?;
+    if let Some(extra) = args.next() {
+        return Err(format!("unexpected `{}`", extra.to_string_lossy()));
+    }
+    Ok(PathBuf::from(dir))
+}
+
+/// Whether a build would be refused the sockets beneath the agents' directory.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentSockets {
+    /// Refused, but for the one socket a build is offered.
+    Refused,
+    /// This kernel's Landlock cannot restrict UNIX sockets.
+    KernelCannot,
+    /// There is no list, or it lists nothing: nothing is protected.
+    NothingProtected,
+    /// The list cannot be read, or names a path under a missing directory:
+    /// every build is refused.
+    BadPolicy(String),
+    /// The list does not protect the agents' directory.
+    AgentsUnprotected(PathBuf),
+}
+
+/// The [`AgentSockets`] for `agents`, from whether this kernel can restrict
+/// UNIX sockets (`kernel_can`) and the protected-path list as it was read,
+/// or why it could not be.
+fn agent_sockets(
+    kernel_can: bool,
+    protected: &Result<Vec<PathBuf>, String>,
+    agents: &Path,
+) -> AgentSockets {
+    // A policy every build is refused under first: it is the gap that
+    // matters most, whatever the kernel.
+    let protected = match protected {
+        Ok(protected) => protected,
+        Err(e) => return AgentSockets::BadPolicy(e.clone()),
+    };
+    if let Err(e) = check_parents(protected) {
+        return AgentSockets::BadPolicy(e);
+    }
+    if !kernel_can {
+        return AgentSockets::KernelCannot;
+    }
+    if protected.is_empty() {
+        return AgentSockets::NothingProtected;
+    }
+    if !protects(protected, agents) {
+        return AgentSockets::AgentsUnprotected(agents.to_path_buf());
+    }
+    AgentSockets::Refused
+}
+
+/// Whether `protected` keeps builds out of `dir`: one of its paths is `dir`
+/// or a parent of it, as written or where it really is.
+fn protects(protected: &[PathBuf], dir: &Path) -> bool {
+    let real = std::fs::canonicalize(dir).ok();
+    protected
+        .iter()
+        .any(|path| dir.starts_with(path) || real.as_ref().is_some_and(|r| r.starts_with(path)))
+}
+
+/// What `--capabilities` prints for `sockets`: one line, the capability or
+/// its absence and why.
+fn capability_line(sockets: &AgentSockets) -> String {
+    let why = match sockets {
+        AgentSockets::Refused => return crate::RESOLVE_UNIX.to_string(),
+        AgentSockets::KernelCannot => "kernel (this kernel's Landlock cannot restrict UNIX \
+                                       sockets: that takes Landlock ABI 9, Linux 7.1 or later)"
+            .to_string(),
+        AgentSockets::NothingProtected => format!(
+            "no policy ({PROTECTED_PATHS_FILE} is missing or lists nothing, so builds \
+              are not kept from any path)"
+        ),
+        AgentSockets::BadPolicy(e) => format!("bad policy ({e})"),
+        AgentSockets::AgentsUnprotected(agents) => format!(
+            "policy misses the agents ({PROTECTED_PATHS_FILE} does not list {}; add it)",
+            agents.display()
+        ),
+    };
+    format!("{}: {why}", crate::NO_RESOLVE_UNIX)
 }
 
 /// Confine this process and exec the program; returns only on failure.
@@ -517,6 +643,152 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == "/var/lib/aurcache-worker/agent"),
             "packaging/sandbox-protected must list the agent's directory"
+        );
+    }
+
+    /// The question takes the agents' directory, and nothing else.
+    #[test]
+    fn capabilities_take_the_agents_directory() {
+        assert_eq!(
+            parse_capabilities_args(args(&["--agent-dir", "/var/lib/aurcache-worker/agent"])),
+            Ok(PathBuf::from("/var/lib/aurcache-worker/agent"))
+        );
+        for list in [
+            &[][..],
+            &["--agent-dir"],
+            &["--agent-dir", ""],
+            &["/var/lib/aurcache-worker/agent"],
+            &["--agent-dir", "/a", "/b"],
+        ] {
+            assert!(parse_capabilities_args(args(list)).is_err(), "{list:?}");
+        }
+    }
+
+    /// The socket rule is claimed only where a build started now would hold
+    /// to it: a kernel that has the right, and a list that could be read,
+    /// protects something, names no path under a missing directory, and
+    /// protects the agents' directory.
+    #[test]
+    fn resolve_unix_is_claimed_only_where_a_build_would_enforce_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-capabilities-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("worker/agent")).unwrap();
+        let agents = dir.join("worker/agent");
+        let policy = |paths: &[&str]| -> Result<Vec<PathBuf>, String> {
+            Ok(paths.iter().map(|path| dir.join(path)).collect())
+        };
+
+        for protecting in [
+            &["worker/agent"][..],
+            &["worker"],
+            &["worker/ssh", "worker/agent"],
+        ] {
+            assert_eq!(
+                agent_sockets(true, &policy(protecting), &agents),
+                AgentSockets::Refused,
+                "{protecting:?}"
+            );
+        }
+        assert_eq!(
+            agent_sockets(false, &policy(&["worker/agent"]), &agents),
+            AgentSockets::KernelCannot
+        );
+        assert_eq!(
+            agent_sockets(true, &policy(&[]), &agents),
+            AgentSockets::NothingProtected
+        );
+        assert!(matches!(
+            agent_sockets(true, &policy(&["missing/agent"]), &agents),
+            AgentSockets::BadPolicy(_)
+        ));
+        for missing in [
+            &["worker/ssh"][..],
+            &["worker/agent/default"],
+            &["worker/agen"],
+        ] {
+            assert_eq!(
+                agent_sockets(true, &policy(missing), &agents),
+                AgentSockets::AgentsUnprotected(agents.clone()),
+                "{missing:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A list the build user cannot read refuses every build, which the
+    /// sandbox answers as a bad policy, whatever the kernel. A directory in
+    /// its place stands in for a list at `0600 root`, as root reads any file
+    /// whatever its mode.
+    #[test]
+    fn an_unreadable_policy_protects_no_agents() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-agents-unreadable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("list")).unwrap();
+        std::fs::create_dir_all(dir.join("worker/agent")).unwrap();
+
+        let protected = protected_paths(&dir.join("list"));
+        for kernel_can in [true, false] {
+            assert!(matches!(
+                agent_sockets(kernel_can, &protected, &dir.join("worker/agent")),
+                AgentSockets::BadPolicy(_)
+            ));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The agents' directory reached through a symlink is protected where it
+    /// really is, as the read walk protects a listed path at its real path.
+    #[test]
+    fn the_agents_directory_is_judged_where_it_really_is() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-agents-link-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real/agent")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let real = std::fs::canonicalize(dir.join("real/agent")).unwrap();
+
+        assert!(protects(
+            std::slice::from_ref(&real),
+            &dir.join("link/agent")
+        ));
+        assert!(!protects(&[dir.join("real/ssh")], &dir.join("link/agent")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One line: the capability, or its absence and why, which the worker
+    /// logs as its reason.
+    #[test]
+    fn the_answer_is_one_line_naming_the_reason() {
+        assert_eq!(capability_line(&AgentSockets::Refused), "resolve-unix");
+        for (sockets, reason) in [
+            (AgentSockets::KernelCannot, "kernel"),
+            (AgentSockets::NothingProtected, "no policy"),
+            (AgentSockets::BadPolicy("typo".into()), "bad policy"),
+            (
+                AgentSockets::AgentsUnprotected(PathBuf::from("/srv/agent")),
+                "policy misses the agents",
+            ),
+        ] {
+            let line = capability_line(&sockets);
+            assert!(
+                line.starts_with(&format!("no-resolve-unix: {reason} (")),
+                "{line}"
+            );
+            assert!(!line.contains('\n'), "{line}");
+        }
+        assert!(
+            capability_line(&AgentSockets::AgentsUnprotected(PathBuf::from(
+                "/srv/agent"
+            )))
+            .contains("/srv/agent")
         );
     }
 
