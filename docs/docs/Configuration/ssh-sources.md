@@ -50,6 +50,12 @@ the key only the repositories you mean AURCache to build: added to several
 repositories, or to an account that reads many, it gives every API user read
 access to all of them through the server.
 
+The same goes for hosts: by adding a source, any API user can make the server
+connect over SSH to any `host:port` it can reach. With the default host-key
+policy (below), each new host's key is then recorded for good, listed in
+`trusted_hosts` by `GET /api/ssh` (and on the **Settings** page), and logged in
+the activity log, which is where to look for hosts nobody meant to add.
+
 The key lives in `AURCACHE_SSH_DIR` (`./data/ssh`, so `/app/data/ssh` in the
 images), which must be persisted: a server that loses it generates a new one,
 and every remote you added the old one to then refuses it.
