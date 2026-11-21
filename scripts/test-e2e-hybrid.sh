@@ -15,10 +15,14 @@
 #   * a package builds and lands in the repository.
 #
 # Usage: scripts/test-e2e-hybrid.sh [package] [port] [timeout]
+#
+# Environment:
+#   E2E_COMPOSE_FILE  another compose file of the same shape, for an image
+#                     already built or storage somewhere else
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-E2E_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/compose/docker-compose.e2e-hybrid.yaml"
+E2E_COMPOSE_FILE="${E2E_COMPOSE_FILE:-$(dirname "$SCRIPT_DIR")/compose/docker-compose.e2e-hybrid.yaml}"
 export E2E_COMPOSE_FILE
 # One container fills both roles, so only one service must stay alive.
 export E2E_SERVICES="aurcache"
