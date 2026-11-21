@@ -205,13 +205,11 @@ enum AgentSockets {
     Refused,
     /// This kernel's Landlock cannot restrict UNIX sockets.
     KernelCannot,
-    /// The protected-path list cannot be read: every build is refused.
-    PolicyUnreadable(String),
+    /// The protected-path list cannot be read, or names a path under a
+    /// missing directory: every build is refused.
+    BadPolicy(String),
     /// There is no list, or it lists nothing: nothing is protected.
     NothingProtected,
-    /// The list names a path under a missing directory: every build is
-    /// refused.
-    PolicyInvalid(String),
     /// The list does not protect the agents' directory.
     AgentsUnprotected(PathBuf),
 }
@@ -227,10 +225,10 @@ fn agent_sockets(
     // matters most, whatever the kernel.
     let protected = match protected {
         Ok(protected) => protected,
-        Err(e) => return AgentSockets::PolicyUnreadable(e),
+        Err(e) => return AgentSockets::BadPolicy(e),
     };
     if let Err(e) = check_parents(&protected) {
-        return AgentSockets::PolicyInvalid(e);
+        return AgentSockets::BadPolicy(e);
     }
     if !kernel_can {
         return AgentSockets::KernelCannot;
@@ -244,13 +242,21 @@ fn agent_sockets(
     AgentSockets::Refused
 }
 
-/// Whether `protected` keeps builds out of `dir`: one of its paths is `dir`
-/// or a parent of it, as written or where it really is.
+/// Whether `protected` keeps builds out of `dir`: where `dir` really is, it
+/// is one of its paths, where that really is, or beneath one.
+///
+/// Judged by real paths alone, as a rule applies to what a path resolves to:
+/// `dir` spelled beneath a protected path -- through a symlink out of it, or
+/// with `..` -- may be anywhere. A path that cannot be resolved protects
+/// nothing, and a `dir` that cannot be is not protected.
 fn protects(protected: &[PathBuf], dir: &Path) -> bool {
-    let real = std::fs::canonicalize(dir).ok();
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return false;
+    };
     protected
         .iter()
-        .any(|path| dir.starts_with(path) || real.as_ref().is_some_and(|r| r.starts_with(path)))
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .any(|path| real.starts_with(path))
 }
 
 /// What `--capabilities` prints for `sockets`: one line, the capability or
@@ -261,14 +267,14 @@ fn capability_line(sockets: &AgentSockets) -> String {
         AgentSockets::KernelCannot => "kernel (this kernel's Landlock cannot restrict UNIX \
                                        sockets: that takes Landlock ABI 9, Linux 7.1 or later)"
             .to_string(),
-        AgentSockets::PolicyUnreadable(e) => format!("policy unreadable ({e})"),
+        AgentSockets::BadPolicy(e) => format!("bad policy ({e})"),
         AgentSockets::NothingProtected => format!(
             "no policy ({PROTECTED_PATHS_FILE} is missing or lists nothing, so builds are \
              not kept from any path)"
         ),
-        AgentSockets::PolicyInvalid(e) => format!("policy invalid ({e})"),
         AgentSockets::AgentsUnprotected(agents) => format!(
-            "policy misses the agents ({PROTECTED_PATHS_FILE} does not list {}; add it)",
+            "policy misses the agents ({PROTECTED_PATHS_FILE} lists neither {} nor a \
+             directory above it, where it really is; add it, and create it if it is missing)",
             agents.display()
         ),
     };
@@ -400,7 +406,14 @@ fn resolve_unix_supported() -> bool {
 fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = match std::fs::read_to_string(file) {
         Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        // Missing only when there is nothing by its name: a symlink to nothing
+        // is a list that cannot be read.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(file).is_err() =>
+        {
+            return Ok(Vec::new());
+        }
         Err(e) => {
             return Err(format!(
                 "cannot read the protected-path list {} ({e}); refusing to build \
@@ -619,7 +632,7 @@ mod tests {
         for kernel_can in [true, false] {
             assert_eq!(
                 agent_sockets(kernel_can, Err("cannot read it".into()), &agents),
-                AgentSockets::PolicyUnreadable("cannot read it".into())
+                AgentSockets::BadPolicy("cannot read it".into())
             );
         }
         assert_eq!(
@@ -628,7 +641,7 @@ mod tests {
         );
         assert!(matches!(
             agent_sockets(true, policy(&["missing/agent"]), &agents),
-            AgentSockets::PolicyInvalid(_)
+            AgentSockets::BadPolicy(_)
         ));
         for missing in [
             &["worker/ssh"][..],
@@ -665,6 +678,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Spelled beneath a protected path, the agents' directory is not
+    /// protected where it really is elsewhere: a symlink out of a listed
+    /// directory, or `..` out of one. Nor is one that does not exist.
+    #[test]
+    fn the_agents_directory_is_not_judged_by_its_spelling() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-agents-spelling-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("w/agent")).unwrap();
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("w/agent2")).unwrap();
+
+        assert!(protects(&[dir.join("w")], &dir.join("w/agent")));
+        assert!(!protects(&[dir.join("w")], &dir.join("w/agent2")));
+        assert!(!protects(
+            &[dir.join("w/agent")],
+            &dir.join("w/agent/../../elsewhere")
+        ));
+        assert!(!protects(&[dir.join("w")], &dir.join("w/missing")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// One line: the capability, or its absence and why, which the worker
     /// logs as its reason.
     #[test]
@@ -673,11 +711,10 @@ mod tests {
         for (sockets, reason) in [
             (AgentSockets::KernelCannot, "kernel"),
             (
-                AgentSockets::PolicyUnreadable("Permission denied".into()),
-                "policy unreadable",
+                AgentSockets::BadPolicy("Permission denied".into()),
+                "bad policy",
             ),
             (AgentSockets::NothingProtected, "no policy"),
-            (AgentSockets::PolicyInvalid("typo".into()), "policy invalid"),
             (
                 AgentSockets::AgentsUnprotected(PathBuf::from("/srv/agent")),
                 "policy misses the agents",
@@ -872,8 +909,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("list")).unwrap();
         std::fs::write(dir.join("file"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("nothing"), dir.join("dangling")).unwrap();
 
-        for unreadable in [dir.join("list"), dir.join("file/list")] {
+        for unreadable in [
+            dir.join("list"),
+            dir.join("file/list"),
+            dir.join("dangling"),
+        ] {
             let refused = protected_paths(&unreadable).unwrap_err();
             assert!(
                 refused.contains(&unreadable.display().to_string()),

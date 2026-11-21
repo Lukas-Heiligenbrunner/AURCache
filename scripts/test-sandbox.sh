@@ -364,6 +364,11 @@ capabilities() {
         paste -sd,
 }
 echo "capabilities=$(capabilities)"
+# Judged where it really is: a directory spelled beneath the agents' one but
+# elsewhere is not protected.
+mkdir -p /var/lib/aurcache-worker/elsewhere
+echo "dotdot_capabilities=$(sudo -u builder aurcache-sandbox --capabilities \
+    --agent-dir /var/lib/aurcache-worker/agent/../elsewhere | cut -d' ' -f1-5)"
 
 if [[ $mode == offered ]]; then
     # The policy where the build user cannot read it: the sandbox must say it
@@ -502,13 +507,15 @@ check "confined:   build_root: no keyring"   "Operation not permitted" "$(get bu
 # before it holds named keys -- where the kernel can.
 if (( $(get landlock_abi "$confined") >= 9 )); then
     check "sandbox:    reports resolve-unix"    resolve-unix "$(get capabilities "$confined")"
+    check "sandbox:    judges the directory where it really is" \
+        "no-resolve-unix: policy misses the agents" "$(get dotdot_capabilities "$confined")"
 else
     check "sandbox:    reports the kernel cannot" "no-resolve-unix: kernel" \
         "$(get capabilities "$confined" | cut -d' ' -f1-2)"
 fi
 # With the policy unreadable to the build user, whatever the kernel: the
 # sandbox says so, and a build is refused before any of its code runs.
-check "unreadable: sandbox says it would not" "no-resolve-unix: policy unreadable" \
+check "unreadable: sandbox says it would not" "no-resolve-unix: bad policy" \
     "$(get unreadable_capabilities "$offered" | cut -d' ' -f1-3)"
 check "unreadable: build refused"           failed  "$(get unreadable_build "$offered")"
 check "unreadable: by the sandbox"          refused "$(get unreadable_refusal "$offered")"
