@@ -373,10 +373,23 @@ A build fetches such sources with `git` and `openssh`. Where the builder image
 lacks either, the build installs it at its start.
 
 **`known_hosts` is required.** It holds the host keys of the servers the key is
-used with, and a build's ssh accepts no host that is not in it. A pod is new
-for every build, so an ssh left to trust the first key a host shows would trust
-any host, on every build. The dispatcher refuses to start with a key and no
-`known_hosts`, or with a key it cannot use, and says why.
+used with. A pod is new for every build, so an ssh left to trust the first key
+a host shows would trust any host, on every build. The dispatcher refuses to
+start with a key and no `known_hosts`, or with a key it cannot use, and says
+why.
+
+**Which hosts it trusts.** The ssh that git runs in the build trusts the
+hosts `WORKER_SSH_KNOWN_HOSTS` names and no others: the build's `makepkg.conf`
+sets `GIT_SSH_COMMAND` to an ssh told to ignore the image's
+`/etc/ssh/ssh_known_hosts`, any `KnownHostsCommand` and host keys in DNS, and
+never to accept a host on first use, in options that win over any
+`ssh_config` in the image. That pins git's ssh against the image's
+configuration, and nothing more. A PKGBUILD can set `GIT_SSH_COMMAND` itself,
+an `ssh` or `scp` it runs directly is not given these options, and a
+dependency's install script runs as root in the build container and could
+replace `ssh` itself for the rest of that build. A build can log in as the key
+to any host anyway (above), so none of this adds reach; it only means a fetch
+made another way may not be checked against your host keys.
 
 The [generated-key onboarding](./credentials.md) of the chroot worker does not
 apply here: a key generated in a pod would be lost with it.
