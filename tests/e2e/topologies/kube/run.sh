@@ -128,6 +128,7 @@ E2E_SERVICES=""
 
 FORWARD_PID=
 ADD_PID=
+FOLLOW_PID=
 CLUSTER_CREATED=0
 RESULTS=()
 
@@ -578,7 +579,9 @@ ensure_forward() {
         return
     fi
     local out="$SCRATCH/port-forward.log" port='' i
-    k -n aurcache port-forward svc/aurcache :8080 >"$out" 2>&1 &
+    # kubectl itself, not `k`: a function in the background is a subshell,
+    # and killing it would leave the port-forward running.
+    "$KUBECTL" -n aurcache port-forward svc/aurcache :8080 >"$out" 2>&1 &
     FORWARD_PID=$!
     for i in $(seq 50); do
         port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$out" | head -n 1)
@@ -996,6 +999,9 @@ check_restart() {
 # Whether no pod named `$1` is in the server's namespace any more.
 dispatcher_pod_gone() { ! k -n aurcache get pod "$1" >/dev/null 2>&1; }
 
+# Whether process `$1` has ended.
+process_gone() { ! kill -0 "$1" 2>/dev/null; }
+
 check_stop() {
     log "=== 7. The worker is stopped under a build ==="
     local before ref pod uid old said took
@@ -1010,11 +1016,18 @@ check_stop() {
     read -r pod uid _ <<<"$(build_pods | head -n 1)"
     log "    $ref runs in $pod ($uid)"
 
-    # The pod's log goes with the pod, so it is followed from before.
+    # The pod's log goes with the pod, so it is followed from before: by
+    # kubectl itself, which the cleanup can stop, and once it has written
+    # the log so far, which the worker's start never leaves empty, so that
+    # it is following before the pod is told to stop.
     old=$(dispatcher_pod)
     said="$SCRATCH/stopped-worker.log"
-    k -n aurcache logs -f "$old" -c worker >"$said" 2>&1 &
-    local follower=$! started=$SECONDS
+    : >"$said"
+    "$KUBECTL" -n aurcache logs -f "$old" -c worker >"$said" 2>"$said.err" &
+    FOLLOW_PID=$!
+    wait_for 30 "the log of $old to be followed" test -s "$said" \
+        || fail "the log of $old could not be followed: $(cat "$said.err")"
+    local started=$SECONDS
     k -n aurcache delete pod "$old" --wait=false >/dev/null
     # Its grace period is 60s: a worker that did not act on the signal is
     # killed at the end of it, and not before. One that did is gone in a few
@@ -1022,7 +1035,11 @@ check_stop() {
     wait_for 54 "the worker's pod $old to stop" dispatcher_pod_gone "$old" \
         || fail "the worker's pod was still there 54s after it was deleted: it did not stop when told to"
     took=$((SECONDS - started))
-    wait "$follower" 2>/dev/null || true
+    # The container is gone, and its log has ended with it.
+    wait_for 30 "the log of $old to end" process_gone "$FOLLOW_PID" \
+        || fail "following the log of $old did not end with its pod"
+    wait "$FOLLOW_PID" 2>/dev/null || true
+    FOLLOW_PID=
     sed 's/\x1b\[[0-9;]*m//g' "$said" | grep -E "Received SIGTERM" | sed 's/^/    | /' \
         || fail "the stopped worker never logged that it received SIGTERM"
     # The stopped worker deleted the pod itself, rather than leave it to its
@@ -1347,6 +1364,7 @@ cleanup() {
         do_cleanup=0
     fi
     if [ -n "$FORWARD_PID" ]; then kill "$FORWARD_PID" 2>/dev/null || true; fi
+    if [ -n "$FOLLOW_PID" ]; then kill "$FOLLOW_PID" 2>/dev/null || true; fi
     # An add still waiting for a build that the run gave up on.
     stop_background
 
