@@ -50,10 +50,11 @@ supplied with `AURCACHE_SIGNING_KEY_FILE`, exactly as stored. A dump without
 secrets says nothing about signing at all, and restores anywhere. On restore:
 
 - **Checked first.** A restore whose secrets cannot all be put in place is
-  refused before anything changes — a CA that is not a pair, a CA directory
+  refused before anything changes, and before it starts — the server answers
+  `400`, `nothing was imported: …` — a CA that is not a pair, a CA directory
   it cannot write, a key file mounted where the server keeps its own (name
-  such a key with `AURCACHE_SIGNING_KEY_FILE` instead) — and so is a key it
-  cannot use as it would be used. The passphrase file is read only when a key
+  such a key with `AURCACHE_SIGNING_KEY_FILE` instead), and a key it cannot
+  use as it would be used. The passphrase file is read only when a key
   is written, so a restore that writes none goes through whatever has become
   of it:
   - one the server is to sign with has to unlock with the passphrase this
@@ -66,18 +67,20 @@ secrets says nothing about signing at all, and restores anywhere. On restore:
 
   A key that comes unlocked onto a server with a passphrase configured is
   written locked with it. A dump whose key has expired since still restores,
-  except as the key to sign with. `--dry-run` says the same, naming what is
-  missing, and lists nothing else when it refuses. Everything new is written
-  beside what it replaces before the packages are imported, and renamed into
-  place after; should a rename still fail, the restore says which secret was
-  not put in place, and that one is as it was. A rename that succeeded whose
-  directory could not be synced after is in place, and the restore says a
-  crash soon after may undo it. One restore runs at a time: another is
-  refused until it ends.
-- **Reported.** `--dry-run` and the restore both say, beside the packages,
-  what becomes of the worker CA and of the signing key — `kept`, `restored`,
-  `replaced`, `generated` or `removed` — with the fingerprints, and where the
-  key that is replaced or removed goes.
+  except as the key to sign with. `--dry-run` is refused the same way, naming
+  what is missing. Everything new is written beside what it replaces before
+  the packages are imported, and renamed into place after; should a rename
+  still fail, the restore says which secret was not put in place, and that
+  one is as it was. A rename that succeeded whose directory could not be
+  synced after is in place, and the **Logs** page says a crash soon after
+  may undo it. One restore runs at a time: another is refused until it ends.
+- **Reported.** `--dry-run` and the restore both say, apart from the packages,
+  what becomes of each secret they touch — `kept`, `restored`, `replaced`,
+  `generated` or `removed` — with the fingerprints, and where the key that is
+  replaced or removed goes: what happens should every rename succeed. A
+  restore that takes no secret says nothing about them, and an `aurcli` from
+  before this reads the answer as it always did. Restoring the same dump
+  again replaces nothing: the CA and the key are the ones in place already.
 - **Only once the packages are known to be in.** If the database cannot
   confirm that the packages committed — a connection lost while committing,
   and the server unable to read back what it wrote — the restore says the
@@ -103,8 +106,8 @@ directory (`.2`, `.3` and so on after it when that name holds another file
 already). The restore's report says where it went. Clients still have to
 trust the key the server signs with after; the kept one is there to go back
 to, or to sign with elsewhere. A file that does not read as a key is kept as
-`signing-key.asc.replaced-sha256-<16 hex digits of its SHA-256>`. The worker CA a restore replaces is not
-kept.
+`signing-key.asc.replaced-sha256-<16 hex digits of its SHA-256>`. The worker
+CA a restore replaces is not kept.
 
 Values set on workers from AURCache are included in a backup with the worker
 they belong to, and restored with it.
