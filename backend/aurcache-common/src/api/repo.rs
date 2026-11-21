@@ -24,6 +24,22 @@ pub struct RepoInfo {
     pub listen_port: Option<u16>,
 }
 
+/// The key a signed repository's packages and databases are signed with, as
+/// `GET /api/repo/signing` reports it, without authentication.
+///
+/// The public key itself is served at `GET /api/repo/key`, without
+/// authentication too, as the repository is.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SigningInfo {
+    /// The fingerprint of the key clients trust, as `pacman-key --lsign-key`
+    /// takes it: 40 uppercase hex digits.
+    pub fingerprint: String,
+    /// Whether packages published before signing began may still be unsigned.
+    /// A client requiring signatures fails on those until this is false.
+    pub backfilling: bool,
+}
+
 fn default_name() -> String {
     crate::repo::DEFAULT_REPO_NAME.to_string()
 }

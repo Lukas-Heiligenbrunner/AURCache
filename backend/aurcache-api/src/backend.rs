@@ -58,6 +58,8 @@ pub fn build_api() -> Vec<Route> {
         health,
         server_info,
         crate::repo::repo_info,
+        crate::repo::repo_key,
+        crate::repo::repo_signing,
         log,
         get_settings,
         get_package_settings,

@@ -41,6 +41,7 @@ just lint          # what CI lints: fmt --check, clippy (also `static`, and the 
 just test          # cargo test, both workspaces (no browser)
 just test-browser  # scripts/test-frontend.sh
 just test-kernel   # scripts/test-kernel.sh (docker, privileged)
+just test-signed-repo  # scripts/test-signed-repo.sh (docker, pacman checks signing)
 just clean
 
 # Rust backend workspace
@@ -92,7 +93,7 @@ cd docs && yarn install --frozen-lockfile && yarn build
 
 `scripts/test-e2e.sh` (the split server/worker path, ~4 min) is the default and
 is what CI runs nightly. Reach for the others only when a change touches what
-they cover, rather than running all four as a matter of course:
+they cover, rather than running all of them as a matter of course:
 
 - `test-e2e-hybrid.sh` — for changes to the hybrid image itself (its
   entrypoint, the embedded worker's loopback enrollment, the Podman it runs in
@@ -102,6 +103,10 @@ they cover, rather than running all four as a matter of course:
   directory with a daemon outside the container.
 - `test-sandbox.sh` — only for changes to `aurcache-sandbox`, the PKGBUILD
   sourcing path, or how the patched makechrootpkg upgrades a build's system.
+- `test-signed-repo.sh` — for changes to signing (`aurcache-signing`, or how
+  `Repository` signs and backfills): pacman in an Arch container, without
+  network, installs from a repository the server's code wrote and refuses it
+  tampered (~1 min, Docker).
 - `test-kernel.sh` — for changes to `aurcache-chroot`, the worker's pool or
   cache volumes, or its cgroups. It runs the tests `cargo test` leaves out
   (`AURCACHE_POOL_TESTS`, `#[ignore]`d cgroup tests) as root in a privileged
@@ -144,6 +149,8 @@ defect this frontend has had was of that kind.
   catalogue itself is in `aurcache-common`, so the browser can render it.
 - `backend/aurcache-ca` is the internal certificate authority: it issues the server's certificate and
   signs a worker's CSR on approval; workers are known by their key's fingerprint.
+- `backend/aurcache-signing` is the repository's OpenPGP key (rPGP, no `gpg`): created, loaded and
+  unlocked from a file, and signing what `Repository` publishes. Nothing hands its secret out.
 - `backend/pacman-repo-utils` writes pacman's `repo.db`/`repo.files` (only ever through
   `Repository`, see below), and `backend/pacman-mirrors` fetches and parses the Arch mirror list.
 - Workers are separate processes. `backend/aurcache-worker-core` is everything that makes one a worker
@@ -235,6 +242,13 @@ defect this frontend has had was of that kind.
   `RETIRED_PACKAGE_GRACE`; the sweep judges by `repo.db`, never by the `files` table. Never write `repo.db` or a repository file any other way -- the lock is what
   keeps two changes from each dropping the other's entry. Uploads are staged under the repository root
   (`staging_dir`), so publishing is a rename on one filesystem.
+- A repository given the instance key (`AURCACHE_SIGN`, `aurcache-signing`) signs inside that same
+  flow: `Repository::describe` signs a staged package before the lock (its `.sig` beside it, and
+  `%PGPSIG%` in its entry), the update signs each database it writes beside its `.next`, and the plan
+  renames each signature right after what it signs. Packages published before signing, or under
+  another key, are signed by `aurcache_utils::signing::backfill` through `Update::resign`, and
+  databases no update has signed through `Update::rewrite_databases`; never write a `.sig` into a
+  platform directory any other way. The key is a file beside the CA, never a row and never in a dump.
 - Workers and the server agree on a numbered worker protocol at registration, never on versions:
   workers are released separately and may come from elsewhere. The types in
   `aurcache-common/src/worker.rs` are that protocol, and within one protocol they only gain optional

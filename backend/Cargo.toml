@@ -14,6 +14,7 @@ members = [
     "aurcache-scheduler",
     "aurcache-common",
     "aurcache-ca",
+    "aurcache-signing",
     "aurcache-worker",
     "aurcache-worker-core",
     "aurcache-worker-demo",

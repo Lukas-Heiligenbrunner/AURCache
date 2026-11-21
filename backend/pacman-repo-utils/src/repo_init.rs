@@ -21,6 +21,46 @@ pub fn init_repo(path: &Path, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Link `<name>.db.sig` and `<name>.files.sig`, which pacman asks for, to the
+/// archives' detached signatures, as `repo-add --sign` names them.
+///
+/// A link to a signature not written yet is left dangling, and answers "not
+/// found" until there is one -- which is what a missing signature is. A file
+/// under the link's name -- a signature some other tool wrote, of databases
+/// since rewritten -- is replaced by the link: pacman refuses a signature
+/// that does not match, even where signatures are optional.
+pub fn link_signatures(path: &Path, name: &str) -> anyhow::Result<()> {
+    for suffix in ["db", "files"] {
+        let [signature, link] = get_archive_names(name, suffix).map(|n| format!("{n}.sig"));
+        let link = path.join(link);
+        match link.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(_) => fs::remove_file(&link).context("failed to replace a database signature")?,
+            Err(_) => {}
+        }
+        symlink(signature, link).context("failed to link a database signature")?;
+    }
+    Ok(())
+}
+
+/// Remove the databases' detached signatures and the links to them.
+///
+/// For a repository that has stopped signing: the next update rewrites the
+/// databases unsigned, and a signature left beside them would then be a
+/// wrong one, which pacman refuses even where signatures are optional.
+pub fn remove_signatures(path: &Path, name: &str) -> anyhow::Result<()> {
+    for suffix in ["db", "files"] {
+        for file in get_archive_names(name, suffix) {
+            match fs::remove_file(path.join(format!("{file}.sig"))) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).context("failed to remove a database signature"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// assembles the filenames of the archive and its symlink, in that order
 fn get_archive_names(name: &str, suffix: &str) -> [String; 2] {
     [
@@ -77,5 +117,52 @@ mod tests {
             b"populated"
         );
         assert!(tmp.path().join("repo.files").exists());
+    }
+
+    /// A signature file where the link goes -- left by another tool, of
+    /// databases since rewritten -- would be refused by every client.
+    #[test]
+    fn a_stray_signature_file_is_replaced_by_the_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo").unwrap();
+        fs::write(tmp.path().join("repo.db.sig"), b"stale").unwrap();
+        fs::write(tmp.path().join("repo.db.tar.gz.sig"), b"current").unwrap();
+
+        link_signatures(tmp.path(), "repo").unwrap();
+
+        let link = tmp.path().join("repo.db.sig");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(link).unwrap(), b"current");
+    }
+
+    /// pacman asks for `repo.db.sig`; it is a link to the archive's
+    /// signature, made whether or not that is there yet, and removed with it.
+    #[test]
+    fn database_signatures_are_linked_where_pacman_asks_and_removed_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path(), "repo").unwrap();
+        link_signatures(tmp.path(), "repo").unwrap();
+        link_signatures(tmp.path(), "repo").unwrap();
+        assert!(!tmp.path().join("repo.db.sig").exists(), "dangling for now");
+
+        fs::write(tmp.path().join("repo.db.tar.gz.sig"), b"db").unwrap();
+        fs::write(tmp.path().join("repo.files.tar.gz.sig"), b"files").unwrap();
+        assert_eq!(fs::read(tmp.path().join("repo.db.sig")).unwrap(), b"db");
+        assert_eq!(
+            fs::read(tmp.path().join("repo.files.sig")).unwrap(),
+            b"files"
+        );
+
+        remove_signatures(tmp.path(), "repo").unwrap();
+        remove_signatures(tmp.path(), "repo").unwrap();
+        for name in [
+            "repo.db.sig",
+            "repo.db.tar.gz.sig",
+            "repo.files.sig",
+            "repo.files.tar.gz.sig",
+        ] {
+            assert!(tmp.path().join(name).symlink_metadata().is_err(), "{name}");
+        }
+        assert!(tmp.path().join("repo.db.tar.gz").exists());
     }
 }

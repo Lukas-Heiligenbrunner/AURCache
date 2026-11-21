@@ -36,7 +36,7 @@ because the build pipeline depends on the internal one.
   AURCache package gets it from here, and dependents are promoted as soon as
   the dependency is published (`worker_complete::trigger_dependents`). The
   internal repository is part of the build pipeline, not only its output.
-- Nothing is signed (`design/proposed/signed-repository.md`).
+- Nothing is signed (`design/in-progress/signed-repository.md`).
 - `plugins.md` lists "repository mirroring" (S3, rsync, CDN purge) as plugin
   example 13, on the `build.published` and `repo.swept` events. A Gitea
   registry is a mirror of that kind, with one difference covered below: the

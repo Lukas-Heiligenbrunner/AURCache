@@ -24,7 +24,11 @@ fn quiet_logs() {
 
 /// A minimal valid `.pkg.tar.zst`: a zstd-compressed tar holding a `.PKGINFO`.
 fn fake_pkg_zst(pkgname: &str, pkgver: &str) -> Vec<u8> {
-    let pkginfo = format!("pkgname = {pkgname}\npkgver = {pkgver}\n");
+    pkg_zst(&format!("pkgname = {pkgname}\npkgver = {pkgver}\n"))
+}
+
+/// A `.pkg.tar.zst` holding only `pkginfo`, as its `.PKGINFO`.
+fn pkg_zst(pkginfo: &str) -> Vec<u8> {
     let mut tar_bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -162,6 +166,75 @@ async fn a_published_build_is_in_the_repository_and_recorded() {
             .exists()
     );
     assert!(!repo.staging_dir(1).exists(), "staging is cleared");
+}
+
+/// A server that signs publishes each package with its detached signature,
+/// the same signature in its entry, and the database signed beside it.
+#[tokio::test]
+async fn a_signing_server_publishes_the_package_signed() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path())
+        .with_key(aurcache_signing::InstanceKey::generate(None).unwrap());
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "hello", "2.12.1-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    let key = repo.key().unwrap();
+    let dir = tmp.path().join("x86_64");
+    let package = dir.join(filename("hello", "2.12.1-1"));
+    let signature = std::fs::read(dir.join(format!("{}.sig", filename("hello", "2.12.1-1"))))
+        .expect("the package is published with its signature");
+    assert!(key.verifies(&signature, &std::fs::read(&package).unwrap()));
+    let entries = pacman_repo_utils::listed_packages(&dir.join("repo.db.tar.gz")).unwrap();
+    assert_eq!(entries[0].signature.as_ref(), Some(&signature));
+    let db_signature = std::fs::read(dir.join("repo.db.tar.gz.sig")).unwrap();
+    assert!(key.verifies(
+        &db_signature,
+        &std::fs::read(dir.join("repo.db.tar.gz")).unwrap()
+    ));
+}
+
+/// A package published signed, then rebuilt under the same file name once the
+/// server no longer signs, is published unsigned: the old signature, over
+/// the file the rebuild replaced, goes with it, rather than stay for pacman
+/// to check the new file against and refuse.
+#[tokio::test]
+async fn a_rebuild_once_signing_is_off_takes_the_old_signature_away() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let signing = Repository::new(tmp.path())
+        .with_key(aurcache_signing::InstanceKey::generate(None).unwrap());
+    signing.init().unwrap();
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&signing, 1, "hello", "2.12.1-1");
+    publish_build(&db, &signing, &ActivityLog::discarding(), 1).await;
+    let dir = tmp.path().join("x86_64");
+    let name = filename("hello", "2.12.1-1");
+    let signature = dir.join(format!("{name}.sig"));
+    assert!(signature.exists(), "published signed");
+
+    let unsigned = Repository::new(tmp.path());
+    unsigned.init().unwrap();
+    publishing_build(&db, 2, 1).await;
+    let staged = stage(&unsigned, 2, "hello", "2.12.1-1");
+    // The same version built again: the same name, other bytes.
+    let rebuilt = pkg_zst("pkgname = hello\npkgver = 2.12.1-1\npkgdesc = rebuilt\n");
+    std::fs::write(&staged, &rebuilt).unwrap();
+    publish_build(&db, &unsigned, &ActivityLog::discarding(), 2).await;
+
+    assert_eq!(status(&db, 2).await, BuildState::Successful);
+    assert_eq!(std::fs::read(dir.join(&name)).unwrap(), rebuilt);
+    assert!(!signature.exists(), "the old signature went with its file");
+    let entries = pacman_repo_utils::listed_packages(&dir.join("repo.db.tar.gz")).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].signature, None);
+    assert!(!dir.join("repo.db.tar.gz.sig").exists());
+    assert!(!dir.join("repo.db.sig").exists());
 }
 
 /// A new version replaces the old one in the database and the `files` rows at

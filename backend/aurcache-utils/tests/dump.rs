@@ -1009,6 +1009,12 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
 
     let ca_dir = tempfile::tempdir().unwrap();
     let ca = aurcache_ca::Ca::load_or_create(ca_dir.path()).unwrap();
+    // The repository's signing key lives beside the CA, and stays there.
+    aurcache_signing::InstanceKey::load_or_create(
+        &ca_dir.path().join(aurcache_signing::KEY_FILE),
+        None,
+    )
+    .unwrap();
 
     let dump = build_dump(&source, "test", Some(ca_dir.path()))
         .await
@@ -1024,6 +1030,12 @@ async fn a_private_dump_carries_the_ca_and_says_so() {
     assert_eq!(
         files.get("ca-key.pem").map(String::as_str),
         Some(ca.private_key_pem())
+    );
+    assert!(
+        !files
+            .values()
+            .any(|content| content.contains("PGP PRIVATE KEY")),
+        "a dump never carries the repository's signing key"
     );
 
     // And it round-trips through the reader, which is what a restore does.
