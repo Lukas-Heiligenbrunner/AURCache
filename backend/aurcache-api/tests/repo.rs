@@ -40,3 +40,28 @@ async fn an_unsigned_repository_has_no_key() {
     let response = api.client.get("/api/repo/key").dispatch().await;
     assert_eq!(response.status(), rocket::http::Status::NotFound);
 }
+
+/// A signing repository says which key it signs with, and that it has not
+/// finished backfilling before a run has; one that does not sign says `null`.
+#[rocket::async_test]
+async fn a_repository_says_whether_and_how_it_signs() {
+    use aurcache_common::api::repo::SigningInfo;
+    let key = aurcache_signing::InstanceKey::generate(None).unwrap();
+    let fingerprint = key.fingerprint().to_string();
+    let api =
+        common::test_api_with_repository("test", |repo| repo.with_key(key), |rocket| rocket).await;
+    let response = api.client.get("/api/repo/signing").dispatch().await;
+    assert_eq!(response.status(), rocket::http::Status::Ok);
+    assert_eq!(
+        response.into_json::<Option<SigningInfo>>().await.unwrap(),
+        Some(SigningInfo {
+            fingerprint,
+            backfilling: true,
+        })
+    );
+
+    let api = common::test_api("test", |rocket| rocket).await;
+    let response = api.client.get("/api/repo/signing").dispatch().await;
+    assert_eq!(response.status(), rocket::http::Status::Ok);
+    assert_eq!(response.into_string().await.unwrap(), "null");
+}

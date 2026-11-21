@@ -31,8 +31,7 @@ fits into `Repository`.
   it (`aurcache-scheduler/src/signing_backfill.rs`): packages published
   unsigned, or under another key, signed through `Update::resign`, and
   databases no update has signed since, through `Update::rewrite_databases`.
-- `GET /api/repo/key` and `GET /api/repo/signing` (no authentication), and
-  `signing` in `GET /api/repo/info`.
+- `GET /api/repo/key` and `GET /api/repo/signing` (no authentication).
 - Docs: `docs/docs/Configuration/pacman-repo.md#signing-the-repository`, three
   rows in the environment page.
 - `scripts/test-signed-repo.sh`: pacman itself, in a container, against a
@@ -407,7 +406,7 @@ the plan, as every update signs them.
 
 The job (`aurcache-scheduler`) runs it at start, and again after 1 minute,
 doubling to an hour, while it leaves anything unsigned; each run records
-`repo.signed` and `repo.signing_incomplete` events. `/repo/info` reports
+`repo.signed` and `repo.signing_incomplete` events. `/repo/signing` reports
 `backfilling: true` until a run finds nothing left that a client can install
 (`Repository::mark_signed`).
 
@@ -494,10 +493,12 @@ A signature is only as useful as the client's way of knowing the key.
 
 - **`GET /api/repo/key`** (built) serves the armored public key without
   authentication, as `application/pgp-keys`, and 404 when the instance does
-  not sign. **`GET /api/repo/info`** (built) carries
-  `signing: Option<SigningInfo { fingerprint, backfilling }>`; `None`, or a
-  server that predates it, means unsigned. **`GET /api/repo/signing`** (built)
-  answers the same without authentication, for a client with no token yet.
+  not sign. **`GET /api/repo/signing`** (built) answers
+  `Option<SigningInfo { fingerprint, backfilling }>` without authentication,
+  `null` meaning unsigned; a server that predates it answers 404, which
+  means unsigned too. It is the only place that says so: `GET /api/repo/info`
+  carried the same once, which only doubled what a client has to ask and
+  fall back between. **Finding:** dropped before any release had it.
 - **`aurcli repo config`** (not in this change; its own, the client trust
   flow) prints `SigLevel = Required` and the two
   commands (`curl … | sudo pacman-key --add -`, `sudo pacman-key --lsign-key
@@ -508,10 +509,8 @@ A signature is only as useful as the client's way of knowing the key.
   ask, prints the commands, and writes no section unless `--siglevel` is
   given, since pacman would refuse it even under `Optional`. `pacman-key
   --add` is given `-` for the pipe: with no argument at all, pacman-key 7.1
-  refuses. Without a token, it asks `/repo/signing`; with one, `/repo/info`,
-  even with `--port`, since the answer is about more than the address. The
-  fingerprint comes over
-  the same connection the token authenticates; the prompt is what makes
+  refuses. It always asks `/repo/signing`, with a token or without. The
+  fingerprint comes over the same connection as the key; the prompt is what makes
   `--lsign` a decision, and lsigning by the reported fingerprint means a
   served key that is not that one is never trusted.
 - **The web UI** (not in this change, with the CLI's): a *Repository signing* section on the Settings page
