@@ -239,6 +239,9 @@ check_hello() { # leg status
         "$(stat -c '%u:%g %a' "${package:-/nonexistent}" 2>/dev/null)"
     check "$leg: the report too" "$(id -u):$(id -g) 644" \
         "$(stat -c '%u:%g %a' "$WORK/$leg/out/report.json" 2>/dev/null)"
+    # What root would leave there is root's: the owner could not remove it.
+    check "$leg: nothing was set aside beside out/" none \
+        "$(find "$WORK/$leg" -mindepth 1 -maxdepth 1 -name '.out.old.*' -printf '%f\n' | paste -sd' ' | grep . || echo none)"
     check "$leg: the log file holds what the container wrote" same \
         "$(cmp -s "$WORK/$leg/log/build.log" "$WORK/$leg.stdout" && echo same || echo differs)"
 }

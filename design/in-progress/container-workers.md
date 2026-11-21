@@ -245,7 +245,15 @@ the runtime:
 10. **Hand back.** Write `out/report.json`, then give the work directory,
     and `pkg/`, `log/` and `out/` with the regular files in them, back to
     whoever owned it, readable by anyone. Last, after step 8, so nothing the
-    build started can write the report or change a package.
+    build started can write the report or change a package. Root in the
+    container may have left anything at `out/`; unless it is the empty
+    directory it was, whatever is there is renamed aside into the work
+    directory, never walked (a tree deeper than the
+    agent may hold descriptors open could not be removed), and left to
+    whoever removes the work directory, and `out/` is made again. So what a
+    build leaves cannot keep the report from being written, with one
+    exception: a build that fills the filesystem the work directory is on
+    leaves no room for it, and reads as interrupted.
 
 The agent exits 0 when it wrote a report, whatever the build did; the build's
 own result is in the report. On `SIGTERM` or `SIGINT` from outside the

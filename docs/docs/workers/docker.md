@@ -96,7 +96,10 @@ sources, and its peak memory and out-of-memory kills, read from the
 container's own cgroup (cgroup v2; on a host without it those two are left
 unknown). That is where the figures on a build's page come from, against the
 host's Docker and against the Podman the hybrid image runs inside itself
-alike.
+alike. A build that fills the filesystem `BUILD_ARTIFACT_DIR` is on leaves
+no room for the report: it is handed back as the worker's, and queued again
+while the package has attempts left. Nothing limits a build's disk use on
+this worker, so leave room there for the largest.
 
 ### What a build may do
 
@@ -141,7 +144,11 @@ from the AUR package of that name. The package installs the program, the
 build agent and the `aurcache` user and directories, and no service unit:
 start it from a unit of your own, as a user that may use the engine's socket
 (`/var/run/docker.sock`, or the Unix socket `DOCKER_HOST` names). There is no
-image of it alone.
+image of it alone. It removes each build's directory with `rm`, from
+coreutils, as its own user. What that leaves, usually a directory the build
+user made in `pkg/` and put something in, or whatever root in the build made
+its own, a container of the builder image empties as root, and `rm` then
+runs again.
 
 It connects to AURCache and is approved like the chroot worker, with the same
 variables: [Connecting to AURCache](./split-chroot.md#connecting-to-aurcache),
