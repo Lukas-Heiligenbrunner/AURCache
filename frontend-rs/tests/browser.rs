@@ -1939,10 +1939,11 @@ async fn moving_to_another_package_takes_the_build_flags_dialog_away(session: &S
 }
 
 /// Holds the first package fetch made once the page's next PATCH is answered,
-/// unanswered until `window.releaseHeldFetch()` lets it go; `window.heldFetchLanded`
-/// then says its answer is in. Given a list of flags, the release first stores
-/// them for the package itself, as another operator saving in the meantime
-/// would, so the fetch brings back them rather than what the page saved.
+/// unanswered until `window.releaseHeldFetch()` lets it go;
+/// `window.heldFetchLanded` then says its answer is in. Given a list of flags,
+/// the release first stores them for the package itself, as another operator
+/// saving in the meantime would, so the fetch brings them back rather than
+/// what the page saved.
 ///
 /// Only that one fetch is held: `fetch` is itself again as soon as it is seen.
 const HOLD_FETCH_AFTER_PATCH: &str = r#"
@@ -1992,9 +1993,9 @@ const HOLD_FETCH_AFTER_PATCH: &str = r#"
 /// before the package is fetched again starts from them, with nothing to
 /// save. The fetch landing changes neither.
 ///
-/// The page holds the package as it was until that fetch lands, so a dialog
-/// seeded from it would start from the old flags, and Save would put them
-/// back.
+/// Were the save not written into the package the page holds, the chip would
+/// lag until that fetch lands, and a dialog reopened meanwhile would start
+/// from the old flags, so Save would put them back.
 async fn a_saved_build_flag_shows_before_the_package_is_fetched_again(session: &Session) {
     const BOX: &str = "#build-flag-holdver";
 
@@ -2147,10 +2148,10 @@ async fn hold_fetch_after_patch(session: &Session) {
 }
 
 /// Let the fetch [`HOLD_FETCH_AFTER_PATCH`] holds go, once it is held, and
-/// wait for its answer. Given `flags`, they are first stored for the package
-/// behind the page's back, so that answer brings them.
-async fn release_held_fetch(session: &Session, flags: Option<&[&str]>) {
-    let argument = match flags {
+/// wait for its answer. Given `stored_meanwhile`, those flags are first stored
+/// for the package behind the page's back, so that answer brings them.
+async fn release_held_fetch(session: &Session, stored_meanwhile: Option<&[&str]>) {
+    let argument = match stored_meanwhile {
         Some(flags) => serde_json::to_string(flags).expect("a JSON list"),
         None => "undefined".to_string(),
     };

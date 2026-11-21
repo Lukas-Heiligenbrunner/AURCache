@@ -45,12 +45,13 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
                         .filter(|flag| !flag.trim().is_empty())
                         .collect(),
                     // The chips show the package as it was fetched, and the
-                    // fetch a save restarts lands later. The saved list goes
-                    // into what was fetched meanwhile, so they show what the
-                    // server took rather than the flags it replaced -- only
-                    // while that is still the package it was saved for.
-                    // Restarting cancels any fetch in flight, so the next
-                    // package shown is one fetched after the save was stored.
+                    // fetch a save restarts lands later. Until it does, the
+                    // saved list is written into the package already fetched
+                    // -- while that is still the package it was saved for --
+                    // so the chips show what the server took. `on_changed`
+                    // restarts the fetch, which cancels any in flight (a poll
+                    // included), so the next package shown was fetched after
+                    // the save was stored.
                     on_saved: move |saved: Vec<String>| {
                         if let Some(Ok(pkg)) = &mut *package.write()
                             && pkg.name == saved_for
