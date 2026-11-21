@@ -252,7 +252,7 @@ defect this frontend has had was of that kind.
   flow: `Repository::describe` signs a staged package before the lock (its `.sig` beside it, and
   `%PGPSIG%` in its entry), the update signs each database it writes beside its `.next`, and the plan
   renames each signature right after what it signs. Packages published before signing, or under
-  another key, are signed by `aurcache_utils::signing::Backfiller::run` through `Update::resign`, and
+  another key, are signed by `aurcache_utils::signing::backfill` through `Update::resign`, and
   databases no update has signed through `Update::rewrite_databases`; never write a `.sig` into a
   platform directory any other way. The key is a file beside the CA, never a row and never in a dump.
 - Workers and the server agree on a numbered worker protocol at registration, never on versions:

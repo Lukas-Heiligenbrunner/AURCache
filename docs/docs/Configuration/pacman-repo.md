@@ -141,10 +141,17 @@ are signed in the background after the server starts, a batch at a time,
 without holding up publishing. Until that has finished, `GET /api/repo/info`
 and `GET /api/repo/signing` say so (`backfilling`): a client requiring
 signatures would refuse the packages not yet signed. Whatever cannot be
-signed yet is retried later and reported in the **Logs** page. A package the
-repository lists but cannot sign at all — no longer on disk, or not the file
-its entry describes — is reported there once and does not hold the rest up:
-no client can install it either, and rebuilding it publishes it again.
+signed yet is retried later and reported in the **Logs** page. Some packages
+the repository lists cannot be signed at all, and are reported there at every
+attempt; rebuilding one publishes it again, signed:
+
+- one no longer on disk, or not the file its entry describes, does not hold
+  the rest up: no client can install it either;
+- one clients can still install where signatures are optional — its entry
+  has no checksum to check the file against, or it is a package the server
+  cannot read, in a compression it does not support — keeps the repository
+  `backfilling` until it is rebuilt, since a client requiring signatures
+  refuses it.
 
 ### The key
 

@@ -10,12 +10,13 @@
 //! would.
 
 use crate::repository::{NotAPackage, Repository, Unsigned};
+use anyhow::Context;
 use aurcache_signing::InstanceKey;
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::{ListedPackage, PackageEntry};
 use sea_orm::DatabaseConnection;
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// How many updates a platform's backfill is spread over, at most. Each one
 /// writes the platform's databases again, whatever it signs, so a batch
@@ -30,26 +31,46 @@ const MIN_BATCH: usize = 64;
 /// What a backfill did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backfill {
-    /// Every listed package on disk that can be signed, and every database,
-    /// carries the key's signature.
+    /// Every package a client can install, and every database, carries the
+    /// key's signature: a client requiring signatures installs whatever any
+    /// client can.
     Complete {
         signed: usize,
-        /// The listed files that cannot be signed, as no earlier run of the
-        /// same [`Backfiller`] found them: they do not keep a backfill from
-        /// being complete.
+        /// The listed files that cannot be signed, none of which any client
+        /// can install either ([`Unsignable::installable`]).
         skipped: Vec<Skipped>,
     },
-    /// Some packages could not be signed this time, each with why.
+    /// Something a client can install is left unsigned: a package that could
+    /// not be signed this time, each in `problems` with why, or one that
+    /// cannot be signed at all but installs where signatures are optional,
+    /// in `skipped`.
     Incomplete {
         signed: usize,
-        /// As [`Backfill::Complete`]'s.
+        /// Every listed file that cannot be signed.
         skipped: Vec<Skipped>,
         problems: Vec<String>,
     },
 }
 
-/// A listed file a backfill leaves unsigned for good: signing it again would
-/// fail the same way. Publishing its package again replaces it.
+impl Backfill {
+    /// What a run that signed `signed` packages, found `skipped` cannot be
+    /// signed and failed on `problems` did: complete only when nothing a
+    /// client can install is left unsigned.
+    fn of(signed: usize, skipped: Vec<Skipped>, problems: Vec<String>) -> Self {
+        if problems.is_empty() && !skipped.iter().any(|skip| skip.why.installable()) {
+            Self::Complete { signed, skipped }
+        } else {
+            Self::Incomplete {
+                signed,
+                skipped,
+                problems,
+            }
+        }
+    }
+}
+
+/// A listed file a backfill cannot sign: signing it again would fail the same
+/// way. Publishing its package again replaces it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
     /// Where the file is, or should be.
@@ -72,6 +93,19 @@ pub enum Unsignable {
 }
 
 impl Unsignable {
+    /// Whether a client that does not require signatures can still install
+    /// the file. One that cannot -- not there, or not the file its entry
+    /// describes, which pacman checks -- is lost to every client alike, and
+    /// does not keep a backfill from being complete; one that can keeps it
+    /// incomplete, since a client requiring signatures refuses it.
+    #[must_use]
+    pub fn installable(&self) -> bool {
+        match self {
+            Self::Missing | Self::NotTheListedFile => false,
+            Self::NoChecksum | Self::NotAPackage { .. } => true,
+        }
+    }
+
     /// What an operator is told about a file left unsigned for this.
     #[must_use]
     pub fn explain(&self) -> String {
@@ -88,69 +122,46 @@ impl Unsignable {
                     .to_string()
             }
         };
-        format!("{what}; rebuilding its package publishes it again")
-    }
-}
-
-/// Backfills run one after another, each remembering in memory, for the
-/// next, the listed files it found it cannot sign: reported once.
-#[derive(Debug, Default)]
-pub struct Backfiller {
-    /// The listed files the last run found it cannot sign.
-    skipped: HashSet<PathBuf>,
-}
-
-impl Backfiller {
-    /// Sign every package the repository lists that does not carry its
-    /// key's signature, then the databases of every platform that do not.
-    ///
-    /// Packages published meanwhile are signed by their own publication, and
-    /// ones retired meanwhile are left alone. Safe to run again at any point:
-    /// an interrupted run leaves either the entries it had not committed,
-    /// unsigned, or a recovery plan the next update finishes.
-    pub async fn run(
-        &mut self,
-        db: &DatabaseConnection,
-        repo: &Repository,
-    ) -> anyhow::Result<Backfill> {
-        let Some(key) = repo.key() else {
-            return Ok(Backfill::Complete {
-                signed: 0,
-                skipped: Vec::new(),
-            });
-        };
-        let mut signed = 0;
-        let mut skipped = Vec::new();
-        let mut still_skipped = HashSet::new();
-        let mut problems = Vec::new();
-        for platform in Platform::ALL {
-            let pass = backfill_platform(db, repo, key, platform).await?;
-            signed += pass.signed;
-            for skip in pass.skipped {
-                still_skipped.insert(skip.path.clone());
-                if !self.skipped.contains(&skip.path) {
-                    skipped.push(skip);
-                }
-            }
-            problems.extend(pass.problems);
-            if !repo.databases_signed(platform).await? {
-                let mut update = repo.begin(db).await?;
-                update.rewrite_databases(platform);
-                update.commit(db, |_| Box::pin(async { Ok(()) })).await?;
-            }
-        }
-        // Only a run that returns what it skipped has reported it.
-        self.skipped = still_skipped;
-        Ok(if problems.is_empty() {
-            Backfill::Complete { signed, skipped }
+        if self.installable() {
+            format!(
+                "{what}; clients that require signatures refuse it until rebuilding its package \
+                 publishes it again, signed"
+            )
         } else {
-            Backfill::Incomplete {
-                signed,
-                skipped,
-                problems,
-            }
-        })
+            format!("{what}; rebuilding its package publishes it again")
+        }
     }
+}
+
+/// Sign every package the repository lists that does not carry its key's
+/// signature, then the databases of every platform that do not.
+///
+/// Packages published meanwhile are signed by their own publication, and
+/// ones retired meanwhile are left alone. Safe to run again at any point: an
+/// interrupted run leaves either the entries it had not committed, unsigned,
+/// or a recovery plan the next update finishes.
+pub async fn backfill(db: &DatabaseConnection, repo: &Repository) -> anyhow::Result<Backfill> {
+    let Some(key) = repo.key() else {
+        return Ok(Backfill::Complete {
+            signed: 0,
+            skipped: Vec::new(),
+        });
+    };
+    let mut signed = 0;
+    let mut skipped = Vec::new();
+    let mut problems = Vec::new();
+    for platform in Platform::ALL {
+        let pass = backfill_platform(db, repo, key, platform).await?;
+        signed += pass.signed;
+        skipped.extend(pass.skipped);
+        problems.extend(pass.problems);
+        if !repo.databases_signed(platform).await? {
+            let mut update = repo.begin(db).await?;
+            update.rewrite_databases(platform);
+            update.commit(db, |_| Box::pin(async { Ok(()) })).await?;
+        }
+    }
+    Ok(Backfill::of(signed, skipped, problems))
 }
 
 /// How many packages each update signs, of `count` to sign on a platform.
@@ -246,12 +257,17 @@ async fn stage(
     let entry = match repo.describe(path.clone()).await {
         Ok(entry) => entry,
         Err(error) => {
-            return match error.downcast_ref::<NotAPackage>() {
-                Some(not) => Ok(Staging::Unsignable(Unsignable::NotAPackage {
-                    error: not.to_string(),
-                })),
-                None => Err(error),
+            let Some(not) = error.downcast_ref::<NotAPackage>() else {
+                return Err(error);
             };
+            // Changed since it was listed, then: nothing a client checking
+            // it against its entry installs, whatever it is now.
+            if !is_listed_file(&path, before).await? {
+                return Ok(Staging::Unsignable(Unsignable::NotTheListedFile));
+            }
+            return Ok(Staging::Unsignable(Unsignable::NotAPackage {
+                error: not.to_string(),
+            }));
         }
     };
     Ok(Staging::Staged(Staged {
@@ -259,6 +275,19 @@ async fn stage(
         entry,
         before: before.clone(),
     }))
+}
+
+/// Whether the file at `path` is the one `listed` describes, by its
+/// `%SHA256SUM%`.
+async fn is_listed_file(path: &Path, listed: &ListedPackage) -> anyhow::Result<bool> {
+    let path = path.to_path_buf();
+    let sha256sum = tokio::task::spawn_blocking(move || {
+        std::fs::File::open(&path)
+            .and_then(aurcache_common::digest::sha256_hex_of)
+            .with_context(|| format!("reading {}", path.display()))
+    })
+    .await??;
+    Ok(listed.sha256sum.as_deref() == Some(sha256sum.as_str()))
 }
 
 /// What [`resign`] did with a batch.
@@ -422,8 +451,7 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         repo.init().unwrap();
-        let mut backfiller = Backfiller::default();
-        assert_eq!(backfiller.run(&db, &repo).await.unwrap(), complete(2));
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(2));
 
         let key = repo.key().unwrap();
         let db_archive = platform_file(tmp.path(), "repo.db.tar.gz");
@@ -441,11 +469,7 @@ mod tests {
         ));
         assert!(!repo.resign_dir(Platform::X86_64).exists());
 
-        assert_eq!(backfiller.run(&db, &repo).await.unwrap(), complete(0));
-        assert_eq!(
-            Backfiller::default().run(&db, &repo).await.unwrap(),
-            complete(0)
-        );
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(0));
     }
 
     /// Packages signed by another key are signed again with this one.
@@ -457,10 +481,7 @@ mod tests {
         publish(&db, &old, 1, "foo", "one").await;
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
-        assert_eq!(
-            Backfiller::default().run(&db, &repo).await.unwrap(),
-            complete(1)
-        );
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(1));
         let key = repo.key().unwrap();
         assert!(signed_beside(
             key,
@@ -504,13 +525,12 @@ mod tests {
         );
     }
 
-    /// A listed file that is not a package any more, or not the one its
-    /// entry describes -- changed behind the repository's back -- is
-    /// reported by the first run that finds it, and by no later one, and
-    /// does not keep the backfill from completing: signing it again would
-    /// fail the same way.
+    /// A listed file changed behind the repository's back -- into something
+    /// that is not a package, or into another package -- is not the file its
+    /// entry describes, which no client installs either: it is reported by
+    /// every run, and does not keep the backfill from completing.
     #[tokio::test]
-    async fn a_file_that_cannot_be_signed_is_reported_once() {
+    async fn a_file_no_client_installs_is_reported_and_left() {
         let tmp = tempfile::tempdir().unwrap();
         let db = aurcache_db::testing::memory_db().await;
         let unsigned = Repository::new(tmp.path());
@@ -525,23 +545,27 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         repo.init().unwrap();
-        let mut backfiller = Backfiller::default();
-        let Backfill::Complete { signed, skipped } = backfiller.run(&db, &repo).await.unwrap()
+        let Backfill::Complete {
+            signed,
+            mut skipped,
+        } = backfill(&db, &repo).await.unwrap()
         else {
-            panic!("what cannot be signed does not keep the backfill going");
+            panic!("what no client installs does not keep the backfill going");
         };
         assert_eq!(signed, 1);
-        assert_eq!(skipped.len(), 2, "{skipped:?}");
-        assert!(
-            skipped
-                .iter()
-                .any(|skip| skip.path == broken
-                    && matches!(skip.why, Unsignable::NotAPackage { .. }))
-        );
-        assert!(skipped.contains(&Skipped {
-            path: changed.clone(),
-            why: Unsignable::NotTheListedFile,
-        }));
+        skipped.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut expected = vec![
+            Skipped {
+                path: broken.clone(),
+                why: Unsignable::NotTheListedFile,
+            },
+            Skipped {
+                path: changed.clone(),
+                why: Unsignable::NotTheListedFile,
+            },
+        ];
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(skipped, expected);
         let key = repo.key().unwrap();
         assert!(signed_beside(
             key,
@@ -557,7 +581,53 @@ mod tests {
                 .all(|skip| skip.why.explain().contains("rebuilding"))
         );
 
-        assert_eq!(backfiller.run(&db, &repo).await.unwrap(), complete(0));
+        let Backfill::Complete { signed, skipped } = backfill(&db, &repo).await.unwrap() else {
+            panic!("a second run is complete too");
+        };
+        assert_eq!(signed, 0);
+        assert_eq!(skipped.len(), 2, "reported again: {skipped:?}");
+    }
+
+    /// A file a client that does not require signatures still installs, but
+    /// that cannot be signed, keeps the backfill incomplete: a client that
+    /// requires signatures would refuse it. One no client installs does not.
+    #[test]
+    fn what_clients_still_install_keeps_the_backfill_incomplete() {
+        let skipped = |why| Skipped {
+            path: PathBuf::from("x86_64/foo-1.0-1-x86_64.pkg.tar.zst"),
+            why,
+        };
+        for why in [Unsignable::Missing, Unsignable::NotTheListedFile] {
+            assert!(!why.installable());
+            assert_eq!(
+                Backfill::of(0, vec![skipped(why.clone())], Vec::new()),
+                Backfill::Complete {
+                    signed: 0,
+                    skipped: vec![skipped(why)],
+                }
+            );
+        }
+        for why in [
+            Unsignable::NoChecksum,
+            Unsignable::NotAPackage {
+                error: "unsupported compression".to_string(),
+            },
+        ] {
+            assert!(why.installable());
+            assert!(why.explain().contains("require signatures"));
+            assert_eq!(
+                Backfill::of(0, vec![skipped(why.clone())], Vec::new()),
+                Backfill::Incomplete {
+                    signed: 0,
+                    skipped: vec![skipped(why)],
+                    problems: Vec::new(),
+                }
+            );
+        }
+        assert!(matches!(
+            Backfill::of(1, Vec::new(), vec!["x86_64/foo: busy".to_string()]),
+            Backfill::Incomplete { .. }
+        ));
     }
 
     /// A repository whose packages are all signed, but not its databases --
@@ -571,10 +641,7 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         repo.init().unwrap();
-        assert_eq!(
-            Backfiller::default().run(&db, &repo).await.unwrap(),
-            complete(0)
-        );
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(0));
         let key = repo.key().unwrap();
         for platform in Platform::ALL {
             assert!(repo.databases_signed(platform).await.unwrap(), "{platform}");
@@ -584,10 +651,7 @@ mod tests {
             &platform_file(tmp.path(), "repo.files.tar.gz")
         ));
         let signature = std::fs::read(platform_file(tmp.path(), "repo.db.tar.gz.sig")).unwrap();
-        assert_eq!(
-            Backfiller::default().run(&db, &repo).await.unwrap(),
-            complete(0)
-        );
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(0));
         assert_eq!(
             std::fs::read(platform_file(tmp.path(), "repo.db.tar.gz.sig")).unwrap(),
             signature,
@@ -607,10 +671,10 @@ mod tests {
 
     /// A file the database lists that is not on disk -- what an update whose
     /// staged file was gone before it could be moved in leaves -- is
-    /// reported by the first run that finds it, and by no later one, and
-    /// does not keep the backfill from completing: nothing can sign it.
+    /// reported by every run, and does not keep the backfill from
+    /// completing: nothing can sign it, and no client download it.
     #[tokio::test]
-    async fn a_listed_file_missing_from_disk_is_reported_once() {
+    async fn a_listed_file_missing_from_disk_is_reported_and_left() {
         let tmp = tempfile::tempdir().unwrap();
         let db = aurcache_db::testing::memory_db().await;
         let unsigned = Repository::new(tmp.path());
@@ -622,15 +686,15 @@ mod tests {
 
         let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
         repo.init().unwrap();
-        let mut backfiller = Backfiller::default();
+        let missing = vec![Skipped {
+            path: gone.clone(),
+            why: Unsignable::Missing,
+        }];
         assert_eq!(
-            backfiller.run(&db, &repo).await.unwrap(),
+            backfill(&db, &repo).await.unwrap(),
             Backfill::Complete {
                 signed: 1,
-                skipped: vec![Skipped {
-                    path: gone.clone(),
-                    why: Unsignable::Missing,
-                }],
+                skipped: missing.clone(),
             }
         );
         let key = repo.key().unwrap();
@@ -644,7 +708,13 @@ mod tests {
             &platform_file(tmp.path(), "repo.db.tar.gz")
         ));
 
-        assert_eq!(backfiller.run(&db, &repo).await.unwrap(), complete(0));
+        assert_eq!(
+            backfill(&db, &repo).await.unwrap(),
+            Backfill::Complete {
+                signed: 0,
+                skipped: missing,
+            }
+        );
     }
 
     /// A repository that does not sign has nothing to backfill.
@@ -654,10 +724,7 @@ mod tests {
         let db = aurcache_db::testing::memory_db().await;
         let repo = Repository::new(tmp.path());
         publish(&db, &repo, 1, "foo", "one").await;
-        assert_eq!(
-            Backfiller::default().run(&db, &repo).await.unwrap(),
-            complete(0)
-        );
+        assert_eq!(backfill(&db, &repo).await.unwrap(), complete(0));
         let db_archive = platform_file(tmp.path(), "repo.db.tar.gz");
         assert!(
             pacman_repo_utils::listed_packages(&db_archive).unwrap()[0]
