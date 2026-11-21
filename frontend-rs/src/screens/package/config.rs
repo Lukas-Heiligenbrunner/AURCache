@@ -531,7 +531,7 @@ fn BuildFlagsDialog(
     /// The server took the new list.
     on_saved: EventHandler<()>,
 ) -> Element {
-    let mut draft = use_signal(|| Draft::new(&saved));
+    let draft = use_signal(|| Draft::new(&saved));
     let action = use_action();
     let busy = action.busy();
     let changed = draft.read().differs(&saved);
@@ -567,7 +567,7 @@ fn BuildFlagsDialog(
             p { class: "text-sm opacity-70 pt-1 pb-3",
                 "Passed to makepkg on every build of {pkgbase}. With none ticked, it builds as makepkg does by default."
             }
-            {flag_list(&draft.read(), busy, EventHandler::new(move |tick: Tick| draft.with_mut(|d| d.set(tick.flag, tick.on))))}
+            {flag_list(draft, busy)}
             if let Some(message) = action.error() {
                 div {
                     class: "alert alert-error text-sm mt-3",
@@ -603,50 +603,27 @@ fn BuildFlagsDialog(
     }
 }
 
-/// A box ticked or unticked in [`flag_list`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Tick {
-    flag: &'static str,
-    on: bool,
-}
-
 /// A row per offered flag, laid out as the add dialog's search results are:
 /// the flag on one line, what it does under it.
-///
-/// The first box takes focus when the list mounts, which puts focus inside the
-/// dialog as it opens.
-fn flag_list(draft: &Draft, locked: bool, on_tick: EventHandler<Tick>) -> Element {
+fn flag_list(draft: Signal<Draft>, locked: bool) -> Element {
     rsx! {
         ul { class: "menu menu-sm p-0 max-h-[60vh] overflow-y-auto border border-base-300 rounded-box flex-nowrap",
             for (index, offered) in OFFERED.iter().enumerate() {
-                li { key: "{offered.flag}",
-                    {
-                        flag_row(
-                            offered,
-                            draft.has(offered.flag),
-                            locked,
-                            on_tick,
-                            if index == 0 { take_focus() } else { Vec::new() },
-                        )
-                    }
-                }
+                li { key: "{offered.flag}", {flag_row(offered, draft, locked, index == 0)} }
             }
         }
     }
 }
 
 /// An offered flag's checkbox, inside the label that names the flag and says
-/// what it does, so a click anywhere on it toggles the box. `extra` goes on
-/// the box itself.
-fn flag_row(
-    offered: &Offered,
-    ticked: bool,
-    locked: bool,
-    on_tick: EventHandler<Tick>,
-    extra: Vec<Attribute>,
-) -> Element {
+/// what it does, so a click anywhere on it toggles the box.
+///
+/// The `first` box takes focus as it mounts, which puts focus inside the
+/// dialog as it opens.
+fn flag_row(offered: &Offered, mut draft: Signal<Draft>, locked: bool, first: bool) -> Element {
     let id = checkbox_id(offered.flag);
     let flag = offered.flag;
+    let ticked = draft.read().has(flag);
     rsx! {
         label {
             class: if locked { "flex items-start gap-3 cursor-not-allowed" } else { "flex items-start gap-3 cursor-pointer" },
@@ -658,8 +635,12 @@ fn flag_row(
                 aria_describedby: "{id}-summary",
                 checked: ticked,
                 disabled: locked,
-                onchange: move |e: FormEvent| on_tick.call(Tick { flag, on: e.checked() }),
-                ..extra,
+                onchange: move |e: FormEvent| draft.with_mut(|draft| draft.set(flag, e.checked())),
+                onmounted: move |e: MountedEvent| async move {
+                    if first {
+                        let _ = e.set_focus(true).await;
+                    }
+                },
             }
             div { class: "flex flex-col gap-0.5 min-w-0",
                 span { id: "{id}-flag", class: "font-mono", "{flag}" }
@@ -667,15 +648,6 @@ fn flag_row(
             }
         }
     }
-}
-
-/// The attribute that focuses an element once it is mounted.
-fn take_focus() -> Vec<Attribute> {
-    vec![dioxus_elements::events::onmounted(
-        |e: MountedEvent| async move {
-            let _ = e.set_focus(true).await;
-        },
-    )]
 }
 
 /// The element id of a flag's checkbox: `--nocheck` is `build-flag-nocheck`.
