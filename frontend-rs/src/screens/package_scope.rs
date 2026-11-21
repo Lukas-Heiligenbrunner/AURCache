@@ -133,6 +133,10 @@ pub fn PackageHeader(
         PackageSource::Aur(aur) => Some(aur.aur_url.clone()),
         _ => None,
     };
+    // Nothing here builds an uploaded package, so uploading is its one way
+    // to a new version; any other package can take an upload too, as a build
+    // done elsewhere.
+    let uploaded = matches!(pkg.package_source, PackageSource::Upload(_));
 
     rsx! {
         div { class: "card bg-base-100 shadow-xl",
@@ -224,8 +228,10 @@ pub fn PackageHeader(
                     // package-scoped page shares — instead of beside the builds
                     // list on one of them.
                     div { class: "shrink-0 flex items-center gap-2",
-                        UploadButton { pkgbase: pkgbase.clone(), on_changed: on_rebuilt }
-                        RebuildButton { pkgbase, on_changed: on_rebuilt }
+                        UploadButton { pkgbase: pkgbase.clone(), primary: uploaded, on_changed: on_rebuilt }
+                        if !uploaded {
+                            RebuildButton { pkgbase, on_changed: on_rebuilt }
+                        }
                     }
                 }
             }
@@ -318,7 +324,7 @@ fn RebuildButton(pkgbase: String, on_changed: EventHandler<()>) -> Element {
 /// Read into the page before sending, which is all a browser offers: a package
 /// too large for that goes through `aurcli pkg upload`, which streams it.
 #[component]
-fn UploadButton(pkgbase: String, on_changed: EventHandler<()>) -> Element {
+fn UploadButton(pkgbase: String, primary: bool, on_changed: EventHandler<()>) -> Element {
     let action = use_action();
     // Renewed on every pick, which mounts a fresh file input: one that kept
     // the last selection would not report the same files picked again, after
@@ -364,7 +370,7 @@ fn UploadButton(pkgbase: String, on_changed: EventHandler<()>) -> Element {
                 span { class: "text-xs text-error", "{message}" }
             }
             label {
-                class: "btn btn-ghost btn-sm",
+                class: if primary { "btn btn-primary btn-sm" } else { "btn btn-ghost btn-sm" },
                 title: "Publish package files built elsewhere as a build of this package",
                 if action.busy() {
                     span { class: "loading loading-spinner loading-xs" }
@@ -472,6 +478,17 @@ mod tests {
     fn the_header_offers_an_upload_beside_the_rebuild() {
         let html = render_header(&package());
         assert!(html.contains("Rebuild"), "{html}");
+        assert!(html.contains("Upload"), "{html}");
+    }
+
+    /// Nothing here builds an uploaded package: it offers an upload instead
+    /// of a rebuild that could only be refused.
+    #[test]
+    fn an_uploaded_package_offers_an_upload_and_no_rebuild() {
+        let mut pkg = package();
+        pkg.package_source = PackageSource::Upload(aurcache_client::UploadPackage {});
+        let html = render_header(&pkg);
+        assert!(!html.contains("Rebuild"), "{html}");
         assert!(html.contains("Upload"), "{html}");
     }
 

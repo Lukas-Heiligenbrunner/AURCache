@@ -370,8 +370,8 @@ impl AurCacheClient {
         .await
     }
 
-    /// Publishes package files built elsewhere as a build of the package
-    /// `pkgbase`.
+    /// Publishes package files built elsewhere as a build of `pkgbase`,
+    /// creating it as an uploaded package when there is none.
     ///
     /// `files` are the package files of one build and any detached `.sig`
     /// beside them, streamed from disk. `platform` is needed only when every

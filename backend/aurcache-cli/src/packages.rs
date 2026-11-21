@@ -366,22 +366,34 @@ fn print_uploaded(uploaded: &UploadedBuild) {
         platform,
         version,
         status,
+        created,
     } = uploaded;
+    if *created {
+        println!("created {pkgbase} as an uploaded package");
+    }
     println!(
         "{pkgbase}/{number}: {version} for {platform}, {}",
         status.label()
     );
 }
 
-/// Fail when the upload's build did, pointing at its log, which says why.
+/// Fail when the upload's build did, pointing at its log, which says why,
+/// and at removing the package when the upload created it.
 fn upload_result(uploaded: &UploadedBuild) -> Result<()> {
+    let UploadedBuild {
+        pkgbase,
+        number,
+        created,
+        ..
+    } = uploaded;
     match uploaded.status {
+        BuildState::Failed if *created => bail!(
+            "publishing {pkgbase}/{number} failed; `aurcli builds output {pkgbase}/{number}` \
+             says why. The upload created {pkgbase}: upload again, or remove it with \
+             `aurcli pkg rm {pkgbase}`"
+        ),
         BuildState::Failed => bail!(
-            "publishing {}/{} failed; `aurcli builds output {}/{}` says why",
-            uploaded.pkgbase,
-            uploaded.number,
-            uploaded.pkgbase,
-            uploaded.number
+            "publishing {pkgbase}/{number} failed; `aurcli builds output {pkgbase}/{number}` says why"
         ),
         _ => Ok(()),
     }
@@ -733,5 +745,25 @@ mod tests {
             ])
             .contains("twice")
         );
+    }
+
+    /// A failed upload that created its package says how to remove it.
+    #[test]
+    fn a_failed_first_upload_says_how_to_remove_the_package() {
+        let uploaded = |created: bool| UploadedBuild {
+            pkgbase: "demo".to_string(),
+            number: 1,
+            platform: "x86_64".to_string(),
+            version: "1.0-1".to_string(),
+            status: BuildState::Failed,
+            created,
+        };
+        let failure = |created: bool| upload_result(&uploaded(created)).unwrap_err().to_string();
+        assert!(
+            failure(true).contains("`aurcli pkg rm demo`"),
+            "{}",
+            failure(true)
+        );
+        assert!(!failure(false).contains("pkg rm"), "{}", failure(false));
     }
 }

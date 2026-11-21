@@ -273,6 +273,11 @@ pub(crate) async fn resync_graph(
     services: &Services,
     pkg_model: &packages::Model,
 ) -> anyhow::Result<()> {
+    // An uploaded package has no source, so no edges to derive from one; its
+    // uploads record what it builds.
+    if !pkg_model.source_data.is_buildable() {
+        return Ok(());
+    }
     let SourceFacts { deps, .. } = pkg_deps(
         &services.store,
         &pkg_model.source_data,
@@ -297,6 +302,12 @@ async fn package_update_inner(
 ) -> anyhow::Result<Update> {
     if !visited.insert(pkg_model.id) {
         return Ok(Update::Queued(Vec::new()));
+    }
+    if !pkg_model.source_data.is_buildable() {
+        bail!(
+            "{} is built elsewhere and uploaded, not built here: upload its new version instead",
+            pkg_model.name
+        );
     }
 
     // The cached source snapshot is only refreshed by the periodic version
@@ -497,8 +508,17 @@ pub async fn edit_package(
     original: &packages::Model,
     proposed: &packages::Model,
 ) -> anyhow::Result<()> {
+    // An uploaded package has no source to patch, and no dependency graph
+    // for a platform change to touch.
+    let buildable = original.source_data.is_buildable();
+    if !buildable && proposed.patch != original.patch {
+        bail!(
+            "{} is uploaded, not built here: it has no source to patch",
+            original.name
+        );
+    }
     let graph_changed =
-        original.patch != proposed.patch || original.platforms != proposed.platforms;
+        buildable && (original.patch != proposed.patch || original.platforms != proposed.platforms);
     let former = direct_dependees(&services.db, original.id).await?;
     let graph = if graph_changed {
         let SourceFacts { deps, .. } = pkg_deps(
@@ -753,8 +773,13 @@ async fn prepare_dependencies_for_platform(
         .await?
         .is_some();
 
-        // A dependency whose last build failed is not auto-retried.
-        if !has_pending_build && dep_info.package.status != BuildState::Failed {
+        // A dependency whose last build failed is not auto-retried, and one
+        // that is uploaded cannot be built at all: the dependent waits for
+        // its next upload.
+        if !has_pending_build
+            && dep_info.package.status != BuildState::Failed
+            && dep_info.package.source_data.is_buildable()
+        {
             let results = package_update_inner(
                 services,
                 dep_info.package.clone(),

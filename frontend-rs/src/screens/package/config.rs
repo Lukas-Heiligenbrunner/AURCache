@@ -7,7 +7,9 @@ use crate::platforms::PlatformChecklist;
 use crate::routes::Route;
 use crate::screens::package_scope::use_scoped_package;
 use crate::widgets::Modal;
-use aurcache_client::{ExtendedPackage, PackagePatch, Setting, SettingSource, SettingsEntry};
+use aurcache_client::{
+    ExtendedPackage, PackagePatch, PackageSource, Setting, SettingSource, SettingsEntry,
+};
 use aurcache_common::build_flags::{OFFERED, Offered};
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
@@ -22,6 +24,29 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
             .await
             .map_err(|error| error.to_string())
     }));
+    // An uploaded package is never built here: what it has is the platforms
+    // its uploads may be for and how large one may be, and none of what
+    // configures a build.
+    if matches!(pkg.package_source, PackageSource::Upload(_)) {
+        return rsx! {
+            div { class: "card bg-base-100 shadow-xl",
+                div { class: "card-body",
+                    h2 { class: "card-title text-base", "Upload config" }
+                    PlatformField {
+                        pkgbase: pkg.name.clone(),
+                        selected: pkg.selected_platforms.clone(),
+                        on_changed,
+                    }
+                    PackageValueField {
+                        key: "artifact-{pkg.name}",
+                        pkgbase: pkg.name,
+                        entry,
+                        which: PackageValue::ArtifactSize,
+                    }
+                }
+            }
+        };
+    }
     let saved_for = pkg.name.clone();
     rsx! {
         div { class: "card bg-base-100 shadow-xl",

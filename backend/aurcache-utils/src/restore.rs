@@ -34,6 +34,7 @@ use aurcache_common::api::dump::{
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
+use aurcache_common::source::SourceData;
 use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
 use flate2::read::GzDecoder;
@@ -227,13 +228,25 @@ pub async fn preview(
 ) -> anyhow::Result<Vec<RestoreEntry>> {
     let mut entries = Vec::new();
     for pkgbase in dump.packages.keys() {
-        let existing = package_row(db, pkgbase).await?;
+        // `--clear` removes every package first, so none of them is there.
+        let existing = if options.clear {
+            None
+        } else {
+            package_row(db, pkgbase).await?
+        };
         let dump_patch = dump.patches.get(pkgbase);
         entries.push(RestoreEntry {
             pkgbase: pkgbase.clone(),
             outcome: match (existing, options.on_existing) {
                 (None, _) => RestoreOutcome::Imported,
                 (Some(_), ExistingPackagePolicy::Skip) => RestoreOutcome::Skipped,
+                (Some(row), ExistingPackagePolicy::Overwrite)
+                    if becomes_uploaded(&row.source_data, &dump.packages[pkgbase]) =>
+                {
+                    RestoreOutcome::Failed {
+                        error: BECOMES_UPLOADED.to_string(),
+                    }
+                }
                 (Some(_), ExistingPackagePolicy::Overwrite) => RestoreOutcome::Overwritten,
                 (Some(row), ExistingPackagePolicy::MergePatches) => {
                     match patch_decision(row.patch.as_deref(), dump_patch.map(String::as_str)) {
@@ -248,6 +261,18 @@ pub async fn preview(
         });
     }
     Ok(entries)
+}
+
+/// Said the same way wherever it is reported, so a dry run and a refused
+/// import give the operator the same sentence.
+const BECOMES_UPLOADED: &str = "this instance builds this package, and the dump has it \
+     uploaded; overwriting would leave its queued builds and dependencies to a package \
+     nothing builds: remove it first, or import with --on-existing skip";
+
+/// Whether overwriting a package that has `current` as its source with the
+/// dump's `package` would turn one built here into one only ever uploaded.
+fn becomes_uploaded(current: &SourceData, package: &DumpPackage) -> bool {
+    current.is_buildable() && !package.source_data.is_buildable()
 }
 
 /// Said the same way wherever it is reported, so a dry run and a refused import
@@ -518,7 +543,9 @@ pub async fn write_rows(
     // Every conflict, before anything is written. Reporting them one at a time
     // would make an operator fix one, re-run, and meet the next; and a refusal
     // that has already applied half the dump is the state this whole design
-    // exists to avoid.
+    // exists to avoid. Read before the repository lock and the transaction, as
+    // the dry run reads them: a package changed in between is a race an
+    // import accepts.
     if options.on_existing == ExistingPackagePolicy::MergePatches {
         let mut conflicts = Vec::new();
         for pkgbase in dump.packages.keys() {
@@ -533,6 +560,20 @@ pub async fn write_rows(
         }
         if !conflicts.is_empty() {
             anyhow::bail!("{PATCH_CONFLICT}: {}", conflicts.join(", "));
+        }
+    }
+    // `--clear` removes every package first, so none is overwritten.
+    if !options.clear && options.on_existing == ExistingPackagePolicy::Overwrite {
+        let mut kinds = Vec::new();
+        for (pkgbase, package) in &dump.packages {
+            if let Some(row) = package_row(db, pkgbase).await?
+                && becomes_uploaded(&row.source_data, package)
+            {
+                kinds.push(pkgbase.clone());
+            }
+        }
+        if !kinds.is_empty() {
+            anyhow::bail!("{BECOMES_UPLOADED}: {}", kinds.join(", "));
         }
     }
 
@@ -810,7 +851,13 @@ async fn insert_row<C: sea_orm::ConnectionTrait>(
         ..Default::default()
     };
     apply_config(&mut active, package, patch);
-    Ok(active.insert(db).await?.id)
+    let id = active.insert(db).await?.id;
+    // An uploaded package is never queued, so its status is derived from its
+    // builds -- none -- rather than left as the queued one written above.
+    if !package.source_data.is_buildable() {
+        aurcache_db::helpers::builds::refresh_package_status(db, id).await?;
+    }
+    Ok(id)
 }
 
 /// Settings, keyed back from pkgbase onto row ids.
@@ -870,6 +917,11 @@ async fn fill_source_facts(
     let Some(row) = package_row(db, pkgbase).await? else {
         return Ok(());
     };
+    // An uploaded package has no source to read; its uploads record what it
+    // builds.
+    if !row.source_data.is_buildable() {
+        return Ok(());
+    }
     let SourceFacts { sourceinfo, deps } = pkg_deps(
         store,
         &row.source_data,

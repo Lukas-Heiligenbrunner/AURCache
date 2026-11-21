@@ -1,16 +1,23 @@
-//! Uploading packages built elsewhere as builds of existing packages: what is
-//! accepted, and what it becomes.
+//! Uploading packages built elsewhere: what is accepted, what it becomes, and
+//! that nothing about an uploaded package ever reaches a worker.
 
 use aurcache_activitylog::activity_utils::ActivityLog;
+use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_common::build_state::{BuildState, BuildTrigger};
+use aurcache_common::source::SourceData;
 use aurcache_db::lists::JsonList;
 use aurcache_db::prelude::{Builds, Files, Packages};
 use aurcache_db::testing::{build, depend, memory_db, package};
 use aurcache_db::{builds, packages};
+use aurcache_deps::AurClient;
+use aurcache_utils::package::enqueue::enqueue_missing_buildable_packages;
+use aurcache_utils::package::update::{Rebuild, package_update};
 use aurcache_utils::repository::Repository;
+use aurcache_utils::services::Services;
+use aurcache_utils::snapshot::SnapshotStore;
 use aurcache_utils::upload::{Received, UploadError, UploadRequest, publish_upload};
 use pacman_mirrors::platforms::Platform;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,6 +57,15 @@ impl Pkg<'_> {
 
     fn bytes(&self) -> Vec<u8> {
         zstd::stream::encode_all(self.tar().as_slice(), 0).unwrap()
+    }
+
+    /// The package with its archive cut short after the `.PKGINFO`: what it
+    /// says it is reads fine, and the archive as a whole does not.
+    fn truncated_bytes(&self) -> Vec<u8> {
+        let mut tar = self.tar();
+        tar.truncate(tar.len() - 1024);
+        tar.extend_from_slice(&[b'x'; 512]);
+        zstd::stream::encode_all(tar.as_slice(), 0).unwrap()
     }
 
     fn tar(&self) -> Vec<u8> {
@@ -190,7 +206,7 @@ impl Env {
         platform: Option<Platform>,
         files: Vec<File>,
     ) -> Result<aurcache_common::api::package::UploadedBuild, UploadError> {
-        let mut received = self.received(pkgbase).await;
+        let mut received = self.received(pkgbase).await?;
         for file in files {
             let incoming = received.accept(&file.name)?;
             std::fs::write(incoming.path, file.bytes).unwrap();
@@ -198,26 +214,28 @@ impl Env {
         self.publish(pkgbase, platform, received).await
     }
 
-    /// Start receiving an upload to the package `pkgbase`.
-    async fn received(&self, pkgbase: &str) -> Received {
-        let pkg = self.package(pkgbase).await.expect("the package exists");
-        Received::new(&self.repo, &pkg, 1 << 20).await.unwrap()
+    /// Start receiving an upload to `pkgbase`, which need not exist, as the
+    /// API does: [`package_for`] first.
+    async fn received(&self, pkgbase: &str) -> Result<Received, UploadError> {
+        let pkg = aurcache_utils::upload::package_for(&self.db, pkgbase).await?;
+        Ok(Received::new(&self.repo, pkgbase, pkg.as_ref(), 1 << 20)
+            .await
+            .unwrap())
     }
 
-    /// Publish what `received` holds as a build of the package `pkgbase`.
+    /// Publish what `received` holds as a build of `pkgbase`.
     async fn publish(
         &self,
         pkgbase: &str,
         platform: Option<Platform>,
         received: Received,
     ) -> Result<aurcache_common::api::package::UploadedBuild, UploadError> {
-        let pkg = self.package(pkgbase).await.expect("the package exists");
         publish_upload(
             &self.db,
             &self.repo,
             &ActivityLog::discarding(),
             UploadRequest {
-                pkg,
+                pkgbase: pkgbase.to_string(),
                 platform,
                 uploader: Some("alice".to_string()),
             },
@@ -230,6 +248,14 @@ impl Env {
         Packages::find()
             .filter(packages::Column::Name.eq(name))
             .one(&self.db)
+            .await
+            .unwrap()
+    }
+
+    async fn packages_named(&self, name: &str) -> Vec<packages::Model> {
+        Packages::find()
+            .filter(packages::Column::Name.eq(name))
+            .all(&self.db)
             .await
             .unwrap()
     }
@@ -294,6 +320,18 @@ impl Env {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         read()
+    }
+
+    fn services(&self) -> Services {
+        Services {
+            db: self.db.clone(),
+            store: Arc::new(SnapshotStore::with_checkout_root(
+                tempfile::tempdir().unwrap().keep(),
+            )),
+            client: Arc::new(AurClient::with_urls("http://127.0.0.1:9")),
+            repo: Arc::clone(&self.repo),
+            activity: ActivityLog::discarding(),
+        }
     }
 }
 
@@ -376,7 +414,7 @@ async fn a_signature_travels_with_its_package() {
     let signed = pkg("signed", "signed", "1.0-1", "x86_64");
     let signature = signature();
 
-    let mut stray = env.received("signed").await;
+    let mut stray = env.received("signed").await.unwrap();
     let incoming = stray.accept(&signed.filename()).unwrap();
     std::fs::write(incoming.path, signed.bytes()).unwrap();
     let incoming = stray
@@ -386,7 +424,7 @@ async fn a_signature_travels_with_its_package() {
     let result = env.publish("signed", None, stray).await;
     assert!(refused(result).contains("signed-docs-1.0-1"));
 
-    let mut received = env.received("signed").await;
+    let mut received = env.received("signed").await.unwrap();
     let incoming = received.accept(&signed.filename()).unwrap();
     assert_eq!(incoming.limit, 1 << 20);
     std::fs::write(incoming.path, signed.bytes()).unwrap();
@@ -447,7 +485,7 @@ async fn an_armored_signature_fails_the_build() {
 async fn an_upload_takes_only_what_its_source_builds_as_it_arrives() {
     let env = env().await;
     package("fine").insert(&env.db).await;
-    let mut received = env.received("fine").await;
+    let mut received = env.received("fine").await.unwrap();
     received.accept("fine-1.0-1-x86_64.pkg.tar.zst").unwrap();
     for name in [
         "-rf-1.0-1-x86_64.pkg.tar.zst",
@@ -521,7 +559,7 @@ async fn an_upload_that_cannot_be_staged_fails_its_build() {
 
     let env = env().await;
     aur_package(&env, "unstaged", &["unstaged"]).await;
-    let mut received = env.received("unstaged").await;
+    let mut received = env.received("unstaged").await.unwrap();
     let file = File::from(&pkg("unstaged", "unstaged", "1.0-1", "x86_64"));
     let incoming = received.accept(&file.name).unwrap();
     std::fs::write(incoming.path, file.bytes).unwrap();
@@ -617,7 +655,7 @@ async fn an_upload_for_a_platform_the_package_is_not_built_for_is_refused() {
     // A file that says one arch in its name and another inside is taken by
     // its name, and fails its build when publishing reads it, as a worker's
     // would.
-    let mut received = env.received("narrow").await;
+    let mut received = env.received("narrow").await.unwrap();
     let incoming = received.accept("narrow-1.0-1-x86_64.pkg.tar.zst").unwrap();
     std::fs::write(
         incoming.path,
@@ -814,7 +852,7 @@ async fn a_package_tracked_under_another_name_takes_its_own_pkgbase() {
 async fn an_interrupted_upload_is_discarded_at_startup() {
     let env = env().await;
     package("cut").insert(&env.db).await;
-    let mut received = env.received("cut").await;
+    let mut received = env.received("cut").await.unwrap();
     let incoming = received.accept("cut-1.0-1-x86_64.pkg.tar.zst").unwrap();
     std::fs::write(&incoming.path, b"half a package").unwrap();
     // What a process that died mid-upload leaves: the holding directory,
@@ -842,7 +880,7 @@ async fn an_upload_to_a_package_removed_meanwhile_is_contended() {
     let env = env().await;
     package("gone").insert(&env.db).await;
     let gone = pkg("gone", "gone", "1.0-1", "x86_64");
-    let mut received = env.received("gone").await;
+    let mut received = env.received("gone").await.unwrap();
     let incoming = received.accept(&gone.filename()).unwrap();
     std::fs::write(incoming.path, gone.bytes()).unwrap();
     let pkg = env.package("gone").await.unwrap();
@@ -853,7 +891,7 @@ async fn an_upload_to_a_package_removed_meanwhile_is_contended() {
         &env.repo,
         &ActivityLog::discarding(),
         UploadRequest {
-            pkg,
+            pkgbase: "gone".to_string(),
             platform: None,
             uploader: None,
         },
@@ -865,6 +903,10 @@ async fn an_upload_to_a_package_removed_meanwhile_is_contended() {
         "{result:?}"
     );
     assert!(env.builds().await.is_empty());
+    assert!(
+        env.packages_named("gone").await.is_empty(),
+        "nor re-created"
+    );
     assert!(env.staged().await.is_empty(), "the held files are gone");
 }
 
@@ -920,4 +962,357 @@ async fn an_upload_recorded_but_never_staged_fails_its_build() {
     let log = std::fs::read_to_string(aurcache_common::fs::build_log_path("crashed", build.number))
         .unwrap();
     assert!(log.contains("no artifacts were uploaded"), "{log}");
+}
+
+/// A new package's name is checked before any of its files arrive.
+#[tokio::test]
+async fn a_new_pkgbase_is_checked_before_the_upload_arrives() {
+    use aurcache_utils::upload::package_for;
+    let env = env().await;
+    let two = package("two").insert(&env.db).await;
+    assert_eq!(
+        package_for(&env.db, "two").await.unwrap().map(|pkg| pkg.id),
+        Some(two.id)
+    );
+    assert!(package_for(&env.db, "new").await.unwrap().is_none());
+    let reason = refused(package_for(&env.db, "New").await);
+    assert!(reason.contains("not a package name"), "{reason}");
+}
+
+#[tokio::test]
+async fn an_upload_creates_an_uploaded_package_and_publishes_it() {
+    let env = env().await;
+    let uploaded = env
+        .upload(
+            "fresh",
+            None,
+            &[
+                pkg("fresh", "fresh", "1.0-1", "x86_64"),
+                pkg("fresh-docs", "fresh", "1.0-1", "any"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert!(uploaded.created);
+    assert_eq!(uploaded.status, BuildState::Successful);
+    assert_eq!(uploaded.platform, "x86_64");
+    assert_eq!(uploaded.version, "1.0-1");
+
+    let pkg = env.package("fresh").await.unwrap();
+    assert_eq!(pkg.source_data, SourceData::Upload {});
+    assert_eq!(pkg.status, BuildState::Successful);
+    assert!(pkg.platforms.contains(Platform::X86_64));
+    assert_eq!(
+        JsonList::entries(pkg.split_packages.as_ref()),
+        ["fresh", "fresh-docs"]
+    );
+    assert_eq!(
+        JsonList::entries(pkg.provides.as_ref()),
+        ["fresh-virtual", "fresh-docs-virtual"]
+    );
+    assert_eq!(pkg.source_description.as_deref(), Some("fresh for tests"));
+
+    let builds = env.builds().await;
+    assert_eq!(builds.len(), 1);
+    assert_eq!(builds[0].number, uploaded.number);
+    assert_eq!(builds[0].trigger, BuildTrigger::Upload);
+    assert_eq!(builds[0].worker_id, None);
+    assert_eq!(builds[0].version, "1.0-1");
+
+    assert_eq!(
+        env.filenames().await,
+        [
+            "fresh-1.0-1-x86_64.pkg.tar.zst",
+            "fresh-docs-1.0-1-any.pkg.tar.zst"
+        ]
+    );
+    assert_eq!(env.listed("x86_64"), ["fresh-1.0-1", "fresh-docs-1.0-1"]);
+    assert!(env.staged().await.is_empty(), "nothing is left staged");
+
+    let log = std::fs::read_to_string(aurcache_common::fs::build_log_path(
+        "fresh",
+        uploaded.number,
+    ))
+    .unwrap();
+    assert!(log.starts_with("Uploaded by alice:\n"), "{log}");
+    assert!(log.contains("fresh-docs-1.0-1-any.pkg.tar.zst"), "{log}");
+}
+
+#[tokio::test]
+async fn an_uploaded_package_is_never_queued_or_claimed() {
+    let env = env().await;
+    env.upload(
+        "elsewhere",
+        None,
+        &[pkg("elsewhere", "elsewhere", "1.0-1", "x86_64")],
+    )
+    .await
+    .unwrap();
+    // A platform with no build yet: what the startup scan would fill.
+    let pkg = env.package("elsewhere").await.unwrap();
+    sea_orm::ActiveModelTrait::update(
+        packages::ActiveModel {
+            id: Set(pkg.id),
+            platforms: Set("x86_64;aarch64".parse().unwrap()),
+            ..Default::default()
+        },
+        &env.db,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        enqueue_missing_buildable_packages(&env.db, &ActivityLog::discarding())
+            .await
+            .unwrap(),
+        0
+    );
+    let pkg = env.package("elsewhere").await.unwrap();
+    assert!(
+        package_update(&env.services(), pkg, Rebuild::Always, BuildTrigger::User)
+            .await
+            .is_err(),
+        "a rebuild of an uploaded package is refused"
+    );
+    let builds = env.builds().await;
+    assert_eq!(builds.len(), 1, "only the upload: {builds:?}");
+
+    // A worker that would take anything finds nothing.
+    env.db
+        .execute_unprepared(&format!(
+            "INSERT INTO workers (id, name, status, cert_fingerprint, arches, \
+             package_affinity, priority, concurrency, last_seen, settings_declaration) \
+             VALUES (1, 'w1', '{}', 'fp1', 'x86_64,aarch64', '', 0, 4, {}, '[]')",
+            ApprovalStatus::Approved,
+            aurcache_db::helpers::time::now_secs()
+        ))
+        .await
+        .unwrap();
+    let claimed = aurcache_db::helpers::worker_jobs::claim_job(&env.db, 1, 60, 0, 600)
+        .await
+        .unwrap();
+    assert!(claimed.is_none(), "claimed {claimed:?}");
+
+    // The same worker does take a package it can build: it was idle, not
+    // unable.
+    let other = package("other").insert(&env.db).await;
+    build(&other)
+        .status(BuildState::Enqueued)
+        .with(|row| row.end_time = Set(None))
+        .insert(&env.db)
+        .await;
+    let claimed = aurcache_db::helpers::worker_jobs::claim_job(&env.db, 1, 60, 0, 600)
+        .await
+        .unwrap();
+    assert_eq!(claimed.map(|b| b.pkg_id), Some(other.id));
+}
+
+/// A name another package publishes is refused before anything is recorded:
+/// `repo.db` would list two packages of one name.
+#[tokio::test]
+async fn a_name_another_package_publishes_is_refused() {
+    let env = env().await;
+    package("openssh").insert(&env.db).await;
+    env.upload(
+        "openssh",
+        None,
+        &[pkg("openssh", "openssh", "9.9-1", "x86_64")],
+    )
+    .await
+    .unwrap();
+    let reason = refused(
+        env.upload(
+            "claimer",
+            None,
+            &[
+                pkg("claimer", "claimer", "1.0-1", "x86_64"),
+                pkg("openssh", "claimer", "1.0-1", "x86_64"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        reason.contains("'openssh' is already published by the package 'openssh'"),
+        "{reason}"
+    );
+    assert!(env.package("claimer").await.is_none());
+
+    // A name another package only builds, and does not publish, is no one's
+    // yet: whichever publishes it first has it.
+    package("unpublished")
+        .with(|row| row.split_packages = Set(Some(JsonList::new(["unpublished", "spare"]))))
+        .insert(&env.db)
+        .await;
+    let spare = env
+        .upload("spare", None, &[pkg("spare", "spare", "1.0-1", "x86_64")])
+        .await
+        .unwrap();
+    assert_eq!(spare.status, BuildState::Successful);
+}
+
+/// An upload that is refused while publishing leaves the package's names as
+/// they were: a name it still publishes cannot be taken by another package.
+#[tokio::test]
+async fn a_failed_upload_keeps_the_names_the_package_publishes() {
+    let env = env().await;
+    env.upload(
+        "kept",
+        None,
+        &[
+            pkg("kept", "kept", "1.0-1", "x86_64"),
+            pkg("kept-docs", "kept", "1.0-1", "any"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let newer = pkg("kept", "kept", "1.1-1", "x86_64");
+    let failed = env
+        .upload_files(
+            "kept",
+            None,
+            vec![File {
+                name: newer.filename(),
+                bytes: newer.truncated_bytes(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, BuildState::Failed);
+    let kept = env.package("kept").await.unwrap();
+    assert_eq!(
+        JsonList::entries(kept.split_packages.as_ref()),
+        ["kept", "kept-docs"]
+    );
+    assert_eq!(env.listed("x86_64"), ["kept-1.0-1", "kept-docs-1.0-1"]);
+
+    let reason = refused(
+        env.upload(
+            "thief",
+            Some(Platform::X86_64),
+            &[pkg("kept-docs", "thief", "2.0-1", "any")],
+        )
+        .await,
+    );
+    assert!(reason.contains("kept-docs"), "{reason}");
+
+    // Once an upload without it is published, the name is free again.
+    env.upload("kept", None, &[pkg("kept", "kept", "1.2-1", "x86_64")])
+        .await
+        .unwrap();
+    assert_eq!(
+        JsonList::entries(env.package("kept").await.unwrap().split_packages.as_ref()),
+        [] as [String; 0]
+    );
+}
+
+#[tokio::test]
+async fn a_new_pkgbase_must_be_a_package_name() {
+    let env = env().await;
+    for name in ["a/b", "Upper", "-dash"] {
+        let reason = refused(
+            env.upload(name, None, &[pkg("x", name, "1.0-1", "x86_64")])
+                .await,
+        );
+        assert!(reason.contains("not a package name"), "{reason}");
+    }
+    assert!(env.builds().await.is_empty());
+}
+
+/// Two first uploads of different packages publishing one name at once:
+/// both pass the check made before they are recorded, and publishing, under
+/// the repository lock, fails the second.
+#[tokio::test]
+async fn two_uploads_cannot_both_publish_a_name() {
+    let env = env().await;
+    let left_files = [pkg("shared", "left", "1.0-1", "x86_64")];
+    let right_files = [pkg("shared", "right", "1.0-1", "x86_64")];
+    let (left, right) = tokio::join!(
+        env.upload("left", None, &left_files),
+        env.upload("right", None, &right_files),
+    );
+    let published: Vec<BuildState> = [&left, &right]
+        .into_iter()
+        .filter_map(|result| result.as_ref().ok().map(|uploaded| uploaded.status))
+        .collect();
+    assert_eq!(
+        published
+            .iter()
+            .filter(|status| **status == BuildState::Successful)
+            .count(),
+        1,
+        "{left:?} / {right:?}"
+    );
+    assert_eq!(env.listed("x86_64"), ["shared-1.0-1"]);
+}
+
+/// An uploaded package with no build to go by -- its only one deleted, or
+/// restored without its files -- reads as failed rather than queued: nothing
+/// will build it.
+#[tokio::test]
+async fn an_uploaded_package_without_builds_reads_failed() {
+    let env = env().await;
+    let pkg = package("bare")
+        .source(SourceData::Upload {})
+        .status(BuildState::Enqueued)
+        .insert(&env.db)
+        .await;
+    aurcache_db::helpers::builds::refresh_package_status(&env.db, pkg.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        env.package("bare").await.unwrap().status,
+        BuildState::Failed
+    );
+}
+
+/// A name an AUR package's source no longer builds is still its own while it
+/// publishes a file of that name: an uploaded package taking it would put two
+/// packages of one name in the repository. The files say, not the names its
+/// source builds.
+#[tokio::test]
+async fn a_name_another_package_still_publishes_is_refused() {
+    let env = env().await;
+    aur_package(&env, "keeper", &["keeper", "dropped"]).await;
+    env.upload(
+        "keeper",
+        None,
+        &[
+            pkg("keeper", "keeper", "1.0-1", "x86_64"),
+            pkg("dropped", "keeper", "1.0-1", "x86_64"),
+        ],
+    )
+    .await
+    .unwrap();
+    // Its source drops `dropped`; no build without it has been published.
+    let keeper = env.package("keeper").await.unwrap();
+    sea_orm::ActiveModelTrait::update(
+        packages::ActiveModel {
+            id: Set(keeper.id),
+            split_packages: Set(Some(JsonList::new(["keeper"]))),
+            ..Default::default()
+        },
+        &env.db,
+    )
+    .await
+    .unwrap();
+
+    let reason = refused(
+        env.upload(
+            "dropped",
+            None,
+            &[pkg("dropped", "dropped", "2.0-1", "x86_64")],
+        )
+        .await,
+    );
+    assert!(
+        reason.contains("'dropped' is already published by the package 'keeper'"),
+        "{reason}"
+    );
+    assert!(
+        env.package("dropped").await.is_none(),
+        "nothing was created"
+    );
+    assert_eq!(env.listed("x86_64"), ["dropped-1.0-1", "keeper-1.0-1"]);
 }

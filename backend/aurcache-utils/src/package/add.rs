@@ -335,7 +335,9 @@ pub(crate) async fn resolve_source_pkgbase(
             )
         }
         SourceData::Git { spec } => SourceData::Git { spec },
-        SourceData::Upload { .. } => bail!("Upload sources are not yet supported"),
+        SourceData::Upload { .. } => bail!(
+            "an uploaded package is added by uploading its files (POST /api/package/<pkgbase>/upload)"
+        ),
     })
 }
 

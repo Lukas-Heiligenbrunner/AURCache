@@ -714,7 +714,9 @@ impl SnapshotStore {
                 git_ref: spec.r#ref.clone(),
                 subfolder: spec.subfolder.clone(),
             }),
-            SourceData::Upload { .. } => anyhow::bail!("Upload sources are not yet supported"),
+            SourceData::Upload { .. } => {
+                anyhow::bail!("an uploaded package has no source here to fetch")
+            }
         }
     }
 }

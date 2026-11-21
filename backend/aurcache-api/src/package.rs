@@ -11,6 +11,7 @@ use aurcache_common::api::package::{
 use aurcache_common::api::package::{
     AddPackages, AurNotFoundPackage, AurPackage, BulkAddAccepted, BulkAddEntry, BulkAddOutcome,
     BulkAddProgress, ExtendedPackage, PackageDependency, PackageFile, PackageSource, SimplePackage,
+    UploadPackage,
 };
 use aurcache_common::api::package::{DependencyOptions, ReplaceDependency};
 use aurcache_common::build_state::{BuildState, BuildTrigger};
@@ -63,6 +64,27 @@ pub(crate) async fn package_by_pkgbase(
         .one(db)
         .await?
         .ok_or_else(|| err(Status::NotFound, format!("no package '{pkgbase}'")))
+}
+
+/// [`package_by_pkgbase`], for a route about the package's source. An
+/// uploaded package has none, and asking for it is the caller's mistake.
+async fn package_with_source(
+    db: &DatabaseConnection,
+    pkgbase: &str,
+) -> Result<packages::Model, ApiError> {
+    let pkg = package_by_pkgbase(db, pkgbase).await?;
+    if !pkg.source_data.is_buildable() {
+        return Err(no_source(pkgbase));
+    }
+    Ok(pkg)
+}
+
+/// The answer for a source that does not exist: an uploaded package's.
+fn no_source(what: &str) -> ApiError {
+    err(
+        Status::BadRequest,
+        format!("{what} is uploaded, not built here: it has no source"),
+    )
 }
 
 /// Resolve a package by its row id, for the routes that reach it through a
@@ -338,6 +360,14 @@ pub async fn patch_package(
     // different order) does not trigger a needless source checkout. Validated like the add endpoints: storing an
     // unknown name would fail every later build that reads the set.
     let requested_platforms = parse_platforms(input.platforms.clone())?.map(Platforms::new);
+    // An uploaded package has no source for a patch to set or clear, which
+    // `edit_package` would otherwise refuse as a server error.
+    if input.patch.is_some() && !pkg.source_data.is_buildable() {
+        return Err(err(
+            Status::BadRequest,
+            format!("{pkgbase} is uploaded, not built here: it has no source to patch"),
+        ));
+    }
     // Stored as a `SourcePatch`; a value that is not one would fail every
     // later read of the package's source.
     if let Some(Some(patch)) = &input.patch {
@@ -385,7 +415,7 @@ pub async fn list_source_files(
 ) -> Result<Json<SourceFileList>, ApiError> {
     let db = db.inner();
 
-    let pkg = package_by_pkgbase(db, pkgbase).await?;
+    let pkg = package_with_source(db, pkgbase).await?;
 
     let files = store.list_files(&pkg.source_data).await?;
     // A patch that no longer parses marks nothing here; opening the file is
@@ -419,7 +449,7 @@ pub async fn get_source_file(
 ) -> Result<Json<SourceFileContent>, ApiError> {
     let db = db.inner();
 
-    let pkg = package_by_pkgbase(db, pkgbase).await?;
+    let pkg = package_with_source(db, pkgbase).await?;
 
     store
         .read_file_with_patch_status(&pkg.source_data, pkg.patch.as_deref(), &path)
@@ -446,7 +476,7 @@ pub async fn put_source_file(
     let db = &services.db;
     let input = input.into_inner();
 
-    let pkg = package_by_pkgbase(db, pkgbase).await?;
+    let pkg = package_with_source(db, pkgbase).await?;
 
     // Diff against the pristine (unpatched) file, not the currently effective
     // one, so re-saving the same edit twice is idempotent.
@@ -491,6 +521,9 @@ pub async fn preview_source_files(
     input: Json<SourcePreviewRequest>,
     _a: Authenticated,
 ) -> Result<Json<SourceFileList>, ApiError> {
+    if !input.source.is_buildable() {
+        return Err(no_source("an uploaded package"));
+    }
     let files = store.list_files(&input.source).await?;
 
     Ok(Json(SourceFileList {
@@ -511,6 +544,9 @@ pub async fn preview_source_file(
     _a: Authenticated,
 ) -> Result<Json<SourceFileContent>, ApiError> {
     let input = input.into_inner();
+    if !input.source.is_buildable() {
+        return Err(no_source("an uploaded package"));
+    }
     let original_content = store
         .read_file(&input.source, None, &input.path)
         .await
@@ -767,7 +803,7 @@ pub async fn get_package(
 
     let has_patch = pkg.patch.is_some();
 
-    let package_source = package_source(&pkg)?;
+    let package_source = package_source(&pkg);
 
     let split_packages: Option<Vec<String>> = pkg
         .split_packages
@@ -809,20 +845,17 @@ pub async fn get_package(
 /// mirrors what it needs onto the row, and `package::add` fills it in
 /// immediately. An AUR call here would be ~128ms of a ~130ms response, and one
 /// of the AUR's 4000 daily calls per page view.
-fn package_source(pkg: &packages::Model) -> Result<PackageSource, ApiError> {
+fn package_source(pkg: &packages::Model) -> PackageSource {
     match &pkg.source_data {
         // The last check did not find it in the AUR. Its page still renders --
         // the metadata comes from the checkout -- but it says the package is
         // gone from upstream.
         SourceData::Aur { .. } if pkg.aur_missing == Some(true) => {
-            Ok(PackageSource::AurNotFound(AurNotFoundPackage {}))
+            PackageSource::AurNotFound(AurNotFoundPackage {})
         }
-        SourceData::Aur { .. } => Ok(PackageSource::Aur(aur_source(pkg))),
-        SourceData::Git { spec } => Ok(PackageSource::Git(spec.clone())),
-        SourceData::Upload { .. } => Err(err(
-            Status::NotImplemented,
-            "Upload sources are not yet supported",
-        )),
+        SourceData::Aur { .. } => PackageSource::Aur(aur_source(pkg)),
+        SourceData::Git { spec } => PackageSource::Git(spec.clone()),
+        SourceData::Upload { .. } => PackageSource::Upload(UploadPackage {}),
     }
 }
 
