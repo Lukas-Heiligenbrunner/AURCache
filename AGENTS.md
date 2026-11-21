@@ -82,8 +82,8 @@ cd docs && yarn install --frozen-lockfile && yarn build
 ./scripts/test-build-agent.sh
 
 # the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker,
-# ssh-keygen; ~20 min and ~10 GB, so point TMPDIR or E2E_SCRATCH at a disk
-# with room)
+# jq, curl, cargo, python3, ssh-keygen and pkill; ~20 min and ~10 GB, so
+# point TMPDIR or E2E_SCRATCH at a disk with room)
 ./tests/e2e/topologies/kube/run.sh hello
 E2E_BIG=0 ./tests/e2e/topologies/kube/run.sh      # without the 2 GiB package
 KEEP=1 ./tests/e2e/topologies/kube/run.sh         # leave the cluster up, then:

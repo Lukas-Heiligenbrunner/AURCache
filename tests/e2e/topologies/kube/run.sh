@@ -18,29 +18,29 @@
 #      peak memory figure and disk use;
 #   4. a package whose dependency only AURCache's repository has builds
 #      against it, and both install with pacman from a pod;
-#   4b. a package fetches a source over git+ssh with the dispatcher's SSH
+#   5. a package fetches a source over git+ssh with the dispatcher's SSH
 #      key (never mounted into a build pod) and reaches the server again
 #      from build(); it and a dependency of it from AURCache's repository,
 #      whose install script runs as root in the pod, look for the key and
 #      ask the agent for a signature that is not a login: neither finds a
 #      key, where each finds the canary it planted, and both get the
 #      signature, as ssh-agent signs what it is asked to;
-#   5. a build is cancelled, and its pod is gone within a minute;
-#   6. the worker is killed while a build runs; the new process deletes the
+#   6. a build is cancelled, and its pod is gone within a minute;
+#   7. the worker is killed while a build runs; the new process deletes the
 #      build pod, and the server ends the build and queues a new one;
-#   7. the worker's pod is deleted while a build runs; it stops within its
+#   8. the worker's pod is deleted while a build runs; it stops within its
 #      grace period, having deleted the build pod and handed the build back,
 #      and the server queues a new one;
-#   8. with a RuntimeClass whose handler the node lacks, a build pod never
+#   9. with a RuntimeClass whose handler the node lacks, a build pod never
 #      starts: the build is handed back as the worker's once the schedule
 #      timeout has passed, and builds again once the worker is put right;
-#   9. a package of 2 GiB (tests/fixtures/packages/big) builds and is published; the
+#  10. a package of 2 GiB (tests/fixtures/packages/big) builds and is published; the
 #      relay's throughput and the worker container's peak memory are printed,
 #      and the run fails if that memory reached 64 MiB;
-#  10. build pods in user namespaces, where the cluster's nodes run one;
+#  11. build pods in user namespaces, where the cluster's nodes run one;
 #      skipped, saying why, where they do not;
-#  11. without the NetworkPolicy, the worker says it is not enforced, and the
-#      server hears it.
+#  12. without the NetworkPolicy, the worker says it is not enforced, and the
+#      server hears it; with it back, the worker says it is enforced again.
 #
 #   tests/e2e/topologies/kube/run.sh [package] [timeout]
 #
@@ -65,7 +65,7 @@
 #                         by the node otherwise
 #   E2E_SKIP_BUILD=1      use the images already built under the prefix
 #   E2E_BIG=0             skip the 2 GiB package
-#   E2E_USER_NAMESPACES   auto (default): run step 10 where the node can;
+#   E2E_USER_NAMESPACES   auto (default): run step 11 where the node can;
 #                         1: fail where it cannot; 0: skip it
 #   E2E_MAX_WORKER_MEMORY the worker's peak memory the run fails at, in bytes
 #                         (default 64 MiB; it has measured 12 to 18 MiB, and
@@ -775,7 +775,7 @@ EOF
 }
 
 check_ssh_key() {
-    log "=== 4b. A source over git+ssh with the dispatcher's key, and a dependency that hunts for it ==="
+    log "=== 5. A source over git+ssh with the dispatcher's key, and a dependency that hunts for it ==="
     CURRENT_BUILD_REF=
     build_package kube-e2e-thief "$GIT_URL/kube-e2e-thief.git" --ref master \
         --wait --wait-timeout "$BUILD_TIMEOUT" \
@@ -952,7 +952,7 @@ EOF
 running_build() { build_said "$1" "kube-e2e-slow: sleeping"; }
 
 check_cancel() {
-    log "=== 5. Cancelling a build ==="
+    log "=== 6. Cancelling a build ==="
     CURRENT_BUILD_REF=
     local before ref started
     before=$(latest_build_ref kube-e2e-slow)
@@ -977,7 +977,7 @@ build_over() {
 }
 
 check_restart() {
-    log "=== 6. The worker dies under a build ==="
+    log "=== 7. The worker dies under a build ==="
     local before ref pod uid since
     before=$(latest_build_ref kube-e2e-slow)
     aurcache_cli builds retry "$before" | sed 's/^/    /'
@@ -1019,7 +1019,7 @@ dispatcher_pod_gone() { ! k -n aurcache get pod "$1" >/dev/null 2>&1; }
 process_gone() { ! kill -0 "$1" 2>/dev/null; }
 
 check_stop() {
-    log "=== 7. The worker is stopped under a build ==="
+    log "=== 8. The worker is stopped under a build ==="
     local before ref pod uid old said took
     before=$(latest_build_ref kube-e2e-slow)
     aurcache_cli builds retry "$before" | sed 's/^/    /'
@@ -1105,7 +1105,7 @@ unstick() {
 }
 
 check_stuck() {
-    log "=== 8. A build pod that cannot start ==="
+    log "=== 9. A build pod that cannot start ==="
     local since before ref
     since=$(now)
     # A RuntimeClass whose handler the node does not have, through a pod
@@ -1170,7 +1170,7 @@ EOF
 ref_moved() { [ "$(latest_build_ref "$1")" != "$2" ]; }
 
 check_big() {
-    log "=== 9. A package of 2 GiB ==="
+    log "=== 10. A package of 2 GiB ==="
     if [ "${E2E_BIG:-1}" = 0 ]; then
         result "skipped: the 2 GiB package (E2E_BIG=0)"
         return
@@ -1229,7 +1229,7 @@ check_big() {
 userns_off() { k -n aurcache set env deploy/aurcache-kube-worker WORKER_KUBE_USER_NAMESPACES- >/dev/null; }
 
 check_user_namespaces() {
-    log "=== 10. Build pods in user namespaces ==="
+    log "=== 11. Build pods in user namespaces ==="
     if [ "${E2E_USER_NAMESPACES:-auto}" = 0 ]; then
         result "skipped: user namespaces (E2E_USER_NAMESPACES=0)"
         return
@@ -1317,7 +1317,7 @@ policies_back() {
 }
 
 check_open_policy() {
-    log "=== 11. Without the NetworkPolicy ==="
+    log "=== 12. Without the NetworkPolicy ==="
     local since
     # The SSH leg's policy selects build pods too, and would keep them fenced.
     RESTORE=policies_back

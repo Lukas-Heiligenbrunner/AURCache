@@ -5,8 +5,10 @@ name: E2E (nightly)
 # flaky in ways no diff can fix, so it runs once a night instead of on every
 # push -- and only when something actually landed since the last slot.
 #
-# To run it on a pull request on demand, add the `run-e2e` label; the job
-# removes it when done, so re-adding it re-runs the suite.
+# To run it on a pull request on demand, add the `run-e2e` label; a job of its
+# own takes it off once the run is over, pass or fail, so re-adding it re-runs
+# the suite. A fork's pull request gets a token that cannot, and keeps the
+# label until someone takes it off.
 on:
   schedule:
     - cron: '17 3 * * *'

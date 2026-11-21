@@ -7,8 +7,10 @@ name: E2E (Kubernetes)
 # and the Arch mirrors; like the other end-to-end suite it runs once a night,
 # when something landed, rather than on every push.
 #
-# To run it on a pull request, add the `run-e2e-kube` label; the job removes it
-# when done, so adding it again runs the suite again.
+# To run it on a pull request, add the `run-e2e-kube` label; a job of its own
+# takes it off once the run is over, pass or fail, so adding it again runs the
+# suite again. A fork's pull request gets a token that cannot, and keeps the
+# label until someone takes it off.
 on:
   schedule:
     - cron: '47 3 * * *'
