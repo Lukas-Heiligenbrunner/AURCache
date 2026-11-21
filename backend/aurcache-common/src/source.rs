@@ -90,6 +90,10 @@ pub enum Transport {
     /// a "host" with a slash in it, a port that is not a number, a scheme
     /// libgit2 has no transport for. Nothing can check that host's key.
     UnreadableSsh,
+    /// Over SSH, in git's bracketed scp-like form (`[user@host:port]:path`),
+    /// which is not read: written as `ssh://user@host:port/path` instead, it
+    /// names the same remote.
+    BracketedScp,
     /// Not over SSH: `https://`, `git://`, `file://`, a local path.
     Other,
 }
@@ -106,7 +110,9 @@ const OTHER_SCHEMES: [&str; 4] = ["git://", "http://", "https://", "file://"];
 /// `[user@]host:path`, but also `./a:b`, which git would take for a local
 /// path, and a scheme it has no transport for. What it sends over SSH is
 /// [`Transport::Ssh`] when the host and port it connects to can be named --
-/// read as it reads them -- and [`Transport::UnreadableSsh`] otherwise.
+/// read as it reads them -- [`Transport::BracketedScp`] in the bracketed
+/// scp-like form, which is not read, and [`Transport::UnreadableSsh`]
+/// otherwise.
 ///
 /// `url` is read exactly as given, untrimmed: libgit2 reads a leading space
 /// as part of the account or the host, and a host named here from a trimmed
@@ -129,7 +135,7 @@ pub fn transport(url: &str) -> Transport {
     if has_scheme(url) {
         return Transport::UnreadableSsh;
     }
-    ssh(scp_remote(url))
+    scp_transport(url)
 }
 
 /// The SSH remote `url` names, or `None` when libgit2 reaches it some other
@@ -143,7 +149,7 @@ pub fn transport(url: &str) -> Transport {
 pub fn ssh_remote(url: &str) -> Option<SshRemote> {
     match transport(url) {
         Transport::Ssh(remote) => Some(remote),
-        Transport::UnreadableSsh | Transport::Other => None,
+        Transport::UnreadableSsh | Transport::BracketedScp | Transport::Other => None,
     }
 }
 
@@ -189,167 +195,52 @@ fn url_remote(rest: &str) -> Option<SshRemote> {
     remote(user, host, port)
 }
 
-/// git's scp-like form, read as libgit2's `git_net_url_parse_scp` reads it.
+/// git's scp-like form, `[user@]host:path` or `[user@][v6-literal]:path`.
 ///
-/// That is a state machine, and this is the same one, state for state, so
-/// the host and port named here are the ones libgit2 connects to. It takes
-/// `user@host:path`, an IPv6 literal (`git@[::1]:path`), and brackets around
-/// the account and the host, inside which a port may follow the host:
-/// `[git@host:2222]:path` connects to port 2222, so its host key is
-/// `[host]:2222`'s. Where libgit2 refuses the URL, so does this.
-fn scp_remote(given: &str) -> Option<SshRemote> {
-    #[derive(Clone, Copy)]
-    enum State {
-        Start,
-        User,
-        HostStart,
-        Host,
-        HostEnd,
-        Ipv6,
-        Ipv6End,
-        PortStart,
-        Port,
-        PortEnd,
-        PathStart,
+/// libgit2 reads the account up to the first `@` that comes before the
+/// first colon, and the host up to that colon; an IPv6 literal is
+/// bracketed. Its parser also takes brackets around the account and the host,
+/// inside which a port may follow the host (`[git@host:2222]:path`), but that
+/// is a state machine whose every corner would have to be mirrored for the
+/// port judged here to be the one connected to. Any bracket other than an
+/// IPv6 literal's is [`Transport::BracketedScp`] instead, and refused.
+fn scp_transport(given: &str) -> Transport {
+    // libgit2 refuses a URL that starts with either.
+    if given.starts_with(['@', ':']) {
+        return Transport::UnreadableSsh;
     }
-    let bytes = given.as_bytes();
-    let mut state = State::Start;
-    // Brackets opened and not yet closed; libgit2 takes up to two.
-    let mut brackets = 0u8;
-    // Where the piece being read began.
-    let mut mark = 0;
-    let (mut user, mut host, mut port, mut path) = (None, None, None, None);
-    for (i, &c) in bytes.iter().enumerate() {
-        match state {
-            State::Start => match c {
-                b'@' | b':' => return None,
-                b'[' if is_ipv6(&bytes[i..]) => {
-                    state = State::Ipv6;
-                    mark = i;
-                }
-                b'[' => {
-                    if brackets > 1 {
-                        return None;
-                    }
-                    brackets += 1;
-                }
-                _ => {
-                    state = if has_at(&bytes[i..]) {
-                        State::User
-                    } else {
-                        State::Host
-                    };
-                    mark = i;
-                }
-            },
-            State::User => {
-                if c == b'@' {
-                    user = Some(&given[mark..i]);
-                    state = State::HostStart;
-                }
-            }
-            State::HostStart => {
-                state = if c == b'[' { State::Ipv6 } else { State::Host };
-                mark = i;
-            }
-            State::Host => match c {
-                b':' => {
-                    host = Some(&given[mark..i]);
-                    state = if brackets > 0 {
-                        State::PortStart
-                    } else {
-                        State::PathStart
-                    };
-                }
-                b']' => {
-                    brackets = brackets.checked_sub(1)?;
-                    host = Some(&given[mark..i]);
-                    state = State::HostEnd;
-                }
-                _ => {}
-            },
-            State::HostEnd | State::PortEnd => {
-                if c != b':' {
-                    return None;
-                }
-                state = State::PathStart;
-            }
-            State::Ipv6 => {
-                if c == b']' {
-                    state = State::Ipv6End;
-                }
-            }
-            State::Ipv6End => {
-                if c != b':' {
-                    return None;
-                }
-                host = Some(&given[mark..i]);
-                state = if brackets > 0 {
-                    State::PortStart
-                } else {
-                    State::PathStart
-                };
-            }
-            State::PortStart => {
-                mark = i;
-                state = State::Port;
-            }
-            State::Port => {
-                if c == b']' {
-                    brackets = brackets.checked_sub(1)?;
-                    port = Some(&given[mark..i]);
-                    state = State::PortEnd;
-                }
-            }
-            State::PathStart => {
-                path = Some(&given[i..]);
-                break;
-            }
-        }
-    }
-    // Nothing after the colon is no path, which libgit2 refuses.
-    path?;
-    let host = host?;
-    // libgit2 keeps an IPv6 literal's brackets in the host; a known_hosts
-    // name does not.
-    let host = host
+    let (user, rest) = match given.split_once('@') {
+        Some((user, rest)) if !user.contains(':') => (Some(user), rest),
+        _ => (None, given),
+    };
+    let ipv6 = rest
         .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    if host.contains('/') {
-        return None;
-    }
-    let port = match port {
-        Some(port) => Some(parse_port(port)?),
-        None => None,
+        .and_then(|bracketed| bracketed.split_once("]:"))
+        .filter(|(literal, _)| is_ipv6(literal));
+    let (host, path) = match ipv6 {
+        Some(split) => split,
+        None => match rest.split_once(':') {
+            Some(split) => split,
+            None => return Transport::UnreadableSsh,
+        },
     };
-    remote(user, host, port)
+    let bracketed = |text: &str| text.contains(['[', ']']);
+    if user.is_some_and(bracketed) || (ipv6.is_none() && bracketed(host)) {
+        return Transport::BracketedScp;
+    }
+    // Nothing after the colon is no path, which libgit2 refuses; a "host"
+    // with a slash in it is a local path.
+    if path.is_empty() || host.contains('/') {
+        return Transport::UnreadableSsh;
+    }
+    remote(user, host, None).map_or(Transport::UnreadableSsh, Transport::Ssh)
 }
 
-/// libgit2's `is_ipv6`: a `[`, then hex digits and at least two colons up to
-/// a `]`.
-fn is_ipv6(text: &[u8]) -> bool {
-    let Some((b'[', rest)) = text.split_first() else {
-        return false;
-    };
-    let mut colons = 0;
-    for &c in rest {
-        if c == b':' {
-            colons += 1;
-        }
-        if c == b']' {
-            return colons > 1;
-        }
-        if c != b':' && !c.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    false
-}
-
-/// libgit2's `has_at`: whether an `@` comes before the first colon.
-fn has_at(text: &[u8]) -> bool {
-    text.iter().take_while(|&&c| c != b':').any(|&c| c == b'@')
+/// libgit2's `is_ipv6`, for what is inside the brackets: hex digits and at
+/// least two colons.
+fn is_ipv6(literal: &str) -> bool {
+    literal.bytes().all(|c| c == b':' || c.is_ascii_hexdigit())
+        && literal.bytes().filter(|&c| c == b':').count() > 1
 }
 
 /// A port in decimal digits and nothing else -- no sign, no space, no service
@@ -547,42 +438,38 @@ mod tests {
         );
     }
 
-    /// Brackets around the account and host may hold a port, and libgit2
-    /// connects to it: the host is judged by that port's name.
+    /// git's brackets around the account and host may hold a port, which
+    /// libgit2 connects to. That form is refused, whatever is inside, rather
+    /// than read: `ssh://` says the same.
     #[test]
-    fn a_port_in_scp_brackets_is_read() {
-        assert_eq!(
-            ssh_remote("[git@host:2222]:repo.git"),
-            Some(ssh(Some("git"), "host", Some(2222)))
-        );
-        assert_eq!(
-            ssh_remote("[host:2222]:repo.git"),
-            Some(ssh(None, "host", Some(2222)))
-        );
-        assert_eq!(
-            ssh_remote("[git@host]:repo.git"),
-            Some(ssh(Some("git"), "host", None))
-        );
-        assert_eq!(ssh_remote("[host]:repo.git"), Some(ssh(None, "host", None)));
-        // An IPv6 literal inside the brackets.
-        assert_eq!(
-            ssh_remote("[[::1]:2222]:repo.git"),
-            Some(ssh(None, "::1", Some(2222)))
-        );
-        let name = |url| ssh_remote(url).unwrap().known_hosts_name();
-        assert_eq!(name("[git@host:2222]:repo.git"), "[host]:2222");
-        assert_eq!(name("[host:2222]:repo.git"), "[host]:2222");
-        assert_eq!(name("[git@host:22]:repo.git"), "host");
+    fn the_bracketed_scp_form_is_refused() {
+        for url in [
+            "[git@host:2222]:repo.git",
+            "[host:2222]:repo.git",
+            "[git@host]:repo.git",
+            "[host]:repo.git",
+            "[[::1]:2222]:repo.git",
+            "[git@host:2222]",
+            "[git@host:2222]x:repo",
+            "[host]x:repo",
+            "host]:repo",
+            "[[[host]:repo",
+            "[host:ssh]:repo",
+            "git@[host:2222]:repo",
+            "git@[host]:repo",
+            "[::1]x:repo",
+            // A leading space is part of the account to libgit2, which then
+            // connects to port 22; refused all the same.
+            " [git@host:2222]:repo.git",
+        ] {
+            assert_eq!(transport(url), Transport::BracketedScp, "{url}");
+        }
     }
 
-    /// Read untrimmed, as libgit2 reads it: a leading space is part of the
-    /// account, so the bracket after it opens nothing, and the port is 22.
+    /// Read untrimmed, as libgit2 reads it: leading space is part of the
+    /// account, trailing space part of the path.
     #[test]
     fn a_url_is_read_as_given() {
-        assert_eq!(
-            ssh_remote(" [git@host:2222]:repo.git"),
-            Some(ssh(Some(" [git"), "host", None))
-        );
         assert_eq!(
             ssh_remote("  git@gitlab.com:group/repo.git\n"),
             Some(ssh(Some("  git"), "gitlab.com", None))
@@ -603,6 +490,15 @@ mod tests {
         assert_eq!(
             ssh_remote("git@[::1]:repo.git"),
             Some(ssh(Some("git"), "::1", None))
+        );
+        assert_eq!(
+            ssh_remote("[2001:db8::1]:repo.git"),
+            Some(ssh(None, "2001:db8::1", None))
+        );
+        // The account ends at the first `@` before the first colon.
+        assert_eq!(
+            ssh_remote("a@b@host:repo.git"),
+            Some(ssh(Some("a"), "b@host", None))
         );
         assert_eq!(
             ssh_remote("git@gitlab.com:group/sub/repo.git"),
@@ -666,17 +562,10 @@ mod tests {
             "ssh:///repo",
             "ssh://host:+22/repo",
             "@:repo",
-            // libgit2 refuses each of these.
+            // libgit2 refuses this.
             "host:",
-            "[git@host:2222]",
-            "[git@host:2222]x:repo",
-            "[host]x:repo",
-            "host]:repo",
-            "[[[host]:repo",
-            // Not ports, even where the resolver might read one.
-            "[host:ssh]:repo",
-            "[host:+22]:repo",
-            "[host:99999]:repo",
+            // Brackets other than an IPv6 literal's.
+            "[git@host:2222]:repo",
         ] {
             assert_eq!(ssh_remote(url), None, "{url}");
         }

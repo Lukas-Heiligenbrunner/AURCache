@@ -157,11 +157,16 @@ Hosts are named as OpenSSH names them (`host`, or `[host]:port` off port 22),
 from the URL rather than from libgit2. The certificate callback is told the
 host but not the port, so the URL has to be read exactly as libgit2 reads it,
 or a key could be judged under one port's name while another is connected to.
-`aurcache_common::source` mirrors libgit2 1.9: the scp-like form through a
-copy of `git_net_url_parse_scp`'s state machine, brackets included
-(`[git@host:2222]:repo` connects to port 2222), and the URL untrimmed. The
-callback still refuses a host other than the one parsed, which catches what a
-divergence in the host alone would cause.
+`aurcache_common::source` reads it as libgit2 1.9 does, untrimmed: an
+`ssh://` authority from its end, and the scp-like form as `user@host:path` or
+`user@[v6]:path`, which carry no port. libgit2 also takes brackets around the
+account and host, inside which a port may follow (`[git@host:2222]:repo`
+connects to port 2222). Reading that form exactly would take a copy of
+`git_net_url_parse_scp`'s state machine, every corner of which decides a
+port; instead any bracket other than an IPv6 literal's is
+`Transport::BracketedScp`, refused before connecting with the `ssh://`
+spelling of the same remote. The callback still refuses a host other than the
+one parsed, which catches what a divergence in the host alone would cause.
 
 libgit2 also decides *whether* a URL is reached over SSH: by prefix, ignoring
 case, and for anything else with a colon in it, including `./a:b` and schemes

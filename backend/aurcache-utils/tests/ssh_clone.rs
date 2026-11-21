@@ -291,18 +291,19 @@ fn a_pinned_known_hosts_is_the_whole_list() {
 }
 
 /// git's bracketed scp form, `[user@host:port]:path`, names a port, and
-/// libgit2 connects to it. The host key is judged as that port's: an entry
-/// for the host on port 22 does not vouch for it, and first use records it
-/// under `[host]:port`.
+/// libgit2 connects to it. It is refused before connecting, so no host key
+/// is judged or recorded under a name another port's entry could vouch for;
+/// the same remote written as `ssh://` is judged as that port's.
 #[test]
-fn a_port_in_the_bracketed_scp_form_is_the_one_judged() {
+fn the_bracketed_scp_form_is_refused_and_ssh_urls_judge_their_port() {
     let Some(sshd) = Sshd::start() else { return };
     let state = tempfile::tempdir().unwrap();
     let key = state.path().join("ssh/id_ed25519");
     let pinned = state.path().join("known_hosts");
     let host_key = std::fs::read_to_string(sshd.dir.path().join("host_ed25519.pub")).unwrap();
     // The right key, under the name of port 22 only.
-    std::fs::write(&pinned, format!("127.0.0.1 {}\n", host_key.trim())).unwrap();
+    let port_22 = format!("127.0.0.1 {}\n", host_key.trim());
+    std::fs::write(&pinned, &port_22).unwrap();
     let access = SshAccess::new(SshConfig {
         key: KeySource::Generated(key.clone()),
         passphrase_file: None,
@@ -310,8 +311,15 @@ fn a_port_in_the_bracketed_scp_form_is_the_one_judged() {
     });
     sshd.authorize(&public_key(&access));
     let repo = bare_repo(state.path(), "1.0");
-    let url = format!("[{}@127.0.0.1:{}]:{}", sshd.user, sshd.port, repo.display());
+    let bracketed = format!("[{}@127.0.0.1:{}]:{}", sshd.user, sshd.port, repo.display());
 
+    let refused = ls_remote(&bracketed, "HEAD", Access::Server(&access)).unwrap_err();
+    let refused = format!("{refused:#}");
+    assert!(refused.contains("ssh://user@host:port/path"), "{refused}");
+
+    // The same remote over `ssh://` is judged as its port's, which the
+    // port-22 entry does not vouch for.
+    let url = sshd.url(&repo);
     let refused = ls_remote(&url, "HEAD", Access::Server(&access)).unwrap_err();
     let refused = format!("{refused:#}");
     assert!(
@@ -321,23 +329,17 @@ fn a_port_in_the_bracketed_scp_form_is_the_one_judged() {
         )),
         "{refused}"
     );
+    assert_eq!(std::fs::read_to_string(&pinned).unwrap(), port_22);
 
-    // Listed under its port's name, it is trusted.
-    std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
-    ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
-
+    // With trust on first use, the bracketed form records nothing.
     let first_use = state.path().join("first-use/known_hosts");
     let access = SshAccess::new(SshConfig {
         key: KeySource::Generated(key),
         passphrase_file: None,
         hosts: HostKeySource::TrustOnFirstUse(first_use.clone()),
     });
-    ls_remote(&url, "HEAD", Access::Server(&access)).unwrap();
-    let recorded = std::fs::read_to_string(&first_use).unwrap();
-    assert!(
-        recorded.starts_with(&format!("[127.0.0.1]:{} ssh-ed25519 ", sshd.port)),
-        "{recorded}"
-    );
+    assert!(ls_remote(&bracketed, "HEAD", Access::Server(&access)).is_err());
+    assert!(!first_use.exists());
 }
 
 /// A supplied key protected by a passphrase is opened with the one in

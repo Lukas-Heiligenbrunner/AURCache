@@ -124,6 +124,11 @@ fn route<'a>(url: &str, access: Access<'a>) -> anyhow::Result<Route<'a>> {
              host key against. Write it as `ssh://[user@]host[:port]/path` or \
              `[user@]host:path`; a local path is `file:///path`"
         ),
+        Transport::BracketedScp => bail!(
+            "this URL is in git's bracketed scp-like form (`[user@host:port]:path`), which \
+             the server does not read: write it as `ssh://user@host:port/path`, with `/~/` \
+             before a path relative to the account's home"
+        ),
         Transport::Ssh(remote) => remote,
     };
     // Named by host rather than by URL: a URL can carry a password.
@@ -663,6 +668,20 @@ mod tests {
                 assert!(error.contains("no host can be read"), "{url}: {error}");
                 assert!(!error.contains(url), "the URL is repeated: {error}");
             }
+        }
+    }
+
+    /// git's bracketed scp form is refused before connecting, whoever asks,
+    /// saying how to write the same remote.
+    #[test]
+    fn the_bracketed_scp_form_is_refused_saying_what_to_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let access = server_access(dir.path());
+        let url = "[git@host:2222]:repo.git";
+        for access in [Access::Server(&access), Access::Anonymous] {
+            let error = route(url, access).unwrap_err().to_string();
+            assert!(error.contains("ssh://user@host:port/path"), "{error}");
+            assert!(!error.contains(url), "the URL is repeated: {error}");
         }
     }
 

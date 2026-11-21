@@ -13,11 +13,13 @@ aurcli pkg add ssh://git@git.example.com:2222/srv/pkg.git --ref main
 ```
 
 The add dialog takes the same URLs. Both spellings git accepts work: `ssh://`
-URLs (also `git+ssh://`), and the scp-like `user@host:path`, which takes a
-port inside brackets: `[git@git.example.com:2222]:srv/pkg.git`. A URL that
-names no account logs in as `git`, which is what every forge expects. Host
-aliases from an `ssh_config` are not read: write the real host and port in the
-URL.
+URLs (also `git+ssh://`), and the scp-like `user@host:path` (`git@[::1]:path`
+for an IPv6 address). The scp-like form has no port; git's bracketed spelling
+with one, `[git@git.example.com:2222]:srv/pkg.git`, is refused: write
+`ssh://git@git.example.com:2222/~/srv/pkg.git` instead (`/~/` keeps the path
+relative to the account's home, as the scp-like form has it). A URL that names
+no account logs in as `git`, which is what every forge expects. Host aliases
+from an `ssh_config` are not read: write the real host and port in the URL.
 
 The server's git library reaches any URL with a colon in it over SSH unless it
 starts with a scheme it knows (`https://`, `git://`, `file://`; schemes are
