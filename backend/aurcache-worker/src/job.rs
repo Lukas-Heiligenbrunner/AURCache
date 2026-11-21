@@ -328,9 +328,10 @@ async fn prepare_bind_mounts(
         access: Access::ReadWrite,
     });
 
-    // Operator-configured mounts, then this job's private pacman cache. Ours
-    // land last on the systemd-nspawn command line, which is what lets the
-    // per-job cache override arch-nspawn's own bind of the shared one.
+    // Operator-configured mounts, then this job's private pacman cache. The
+    // build gets all of these; the containers before it only the cache bind,
+    // which overrides arch-nspawn's bind of `/var/cache/pacman/pkg` (see
+    // packaging/patch-makechrootpkg.py).
     //
     // The build credential is deliberately *not* here. `makepkg` fetches
     // sources on the worker before the chroot is entered, so the key is never
