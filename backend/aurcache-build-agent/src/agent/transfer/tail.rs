@@ -116,17 +116,24 @@ mod tests {
     use aurcache_build_agent::layout::Work;
     use std::io::Write;
 
-    fn setup() -> (tempfile::TempDir, Work) {
+    /// A work directory with `log/` and `out/`, removed when this is
+    /// dropped.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        work: Work,
+    }
+
+    fn setup() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let work = Work::new(dir.path());
         std::fs::create_dir_all(work.log().parent().unwrap()).unwrap();
         std::fs::create_dir_all(work.out()).unwrap();
-        (dir, work)
+        Fixture { _dir: dir, work }
     }
 
     #[test]
     fn follows_appends_from_the_offset_until_the_report() {
-        let (_dir, work) = setup();
+        let Fixture { _dir, work } = setup();
         let mut follower = Follower::new(&work, 3);
         let mut out = Vec::new();
         assert_eq!(follower.pass(&mut out).unwrap(), Pass::Waiting);
@@ -146,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_build_that_never_logged_still_ends_the_tail() {
-        let (_dir, work) = setup();
+        let Fixture { _dir, work } = setup();
         std::fs::write(work.report(), b"{}").unwrap();
         let mut out = Vec::new();
         assert_eq!(Follower::new(&work, 0).pass(&mut out).unwrap(), Pass::Over);
