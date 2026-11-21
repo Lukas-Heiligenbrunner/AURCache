@@ -129,8 +129,10 @@ impl Cluster for KubeCluster {
             ..PostParams::default()
         };
         match self.pods.create(&params, pod).await {
-            Ok(pod) => Admission::Admitted { pod: Box::new(pod) },
-            Err(err) => admission(&err),
+            Ok(stored) => Admission::Admitted {
+                pod: Box::new(stored),
+            },
+            Err(err) => admission(&err, pod),
         }
     }
 
@@ -289,22 +291,23 @@ fn rejection(err: &kube::Error) -> Rejection {
     }
 }
 
-/// How an API error answers whether the cluster would admit a pod.
+/// How an API error answers whether the cluster would admit `asked`.
 ///
 /// Whatever the API server itself answers with, other than a taken name,
 /// is what a pod created now would get too: not only admission's refusals,
 /// but a namespace that is not there (404), a webhook the server must ask
-/// and cannot (5xx), and a server shedding load (429). A question that
-/// reached no server says a create would reach none either.
-fn admission(err: &kube::Error) -> Admission {
+/// and cannot (5xx), and a server shedding load (429). A taken name judges
+/// nothing, and leaves the pod admitted as asked. A question that reached no
+/// server says a create would reach none either.
+fn admission(err: &kube::Error, asked: &Pod) -> Admission {
     let kube::Error::Api(status) = err else {
         return Admission::Unreached {
             message: err.to_string(),
         };
     };
     match status.code {
-        409 => Admission::Unjudged {
-            message: "a pod of that name exists, so the dry run could not judge it".to_owned(),
+        409 => Admission::Admitted {
+            pod: Box::new(asked.clone()),
         },
         400..=599 => Admission::Refused {
             message: describe(status),
@@ -586,7 +589,7 @@ mod tests {
             (503, "ServiceUnavailable", "the server is currently unable"),
         ] {
             assert_eq!(
-                admission(&api(code, reason, message)),
+                admission(&api(code, reason, message), &Pod::default()),
                 Admission::Refused {
                     message: message.to_owned()
                 },
@@ -596,13 +599,17 @@ mod tests {
     }
 
     #[test]
-    fn a_taken_name_is_not_judged_and_no_server_is_not_reached() {
+    fn a_taken_name_admits_the_pod_as_asked_and_no_server_is_not_reached() {
+        let mut asked = Pod::default();
+        asked.metadata.name = Some("probe".to_owned());
+        assert_eq!(
+            admission(&api(409, "AlreadyExists", "exists"), &asked),
+            Admission::Admitted {
+                pod: Box::new(asked.clone())
+            }
+        );
         assert!(matches!(
-            admission(&api(409, "AlreadyExists", "exists")),
-            Admission::Unjudged { .. }
-        ));
-        assert!(matches!(
-            admission(&kube::Error::LinesCodecMaxLineLengthExceeded),
+            admission(&kube::Error::LinesCodecMaxLineLengthExceeded, &asked),
             Admission::Unreached { .. }
         ));
     }
