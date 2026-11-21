@@ -155,6 +155,11 @@ mod tests {
             dir_name: dir_name.to_string(),
             desc: format!("%FILENAME%\n{filename}\n"),
             files: "%FILES%\nusr/bin/x".to_string(),
+            meta: crate::PackageMeta {
+                pkgname: dir_name.to_string(),
+                version: String::new(),
+                arch: None,
+            },
         }
     }
 

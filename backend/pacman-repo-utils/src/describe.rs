@@ -28,6 +28,29 @@ pub struct PackageEntry {
     pub(crate) desc: String,
     /// The `files` file only `repo.files` carries.
     pub(crate) files: String,
+    /// What its `.PKGINFO` says it is.
+    pub meta: PackageMeta,
+}
+
+/// What a package's `.PKGINFO` says it is, of the fields that decide where
+/// it belongs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageMeta {
+    pub pkgname: String,
+    /// `[epoch:]pkgver-pkgrel`, the way a filename spells it.
+    pub version: String,
+    /// `None` when the `.PKGINFO` names none.
+    pub arch: Option<String>,
+}
+
+impl From<&Pkginfo> for PackageMeta {
+    fn from(pkginfo: &Pkginfo) -> Self {
+        Self {
+            pkgname: pkginfo.pkgname.clone(),
+            version: pkginfo.pkgver.clone(),
+            arch: Some(pkginfo.arch.clone()).filter(|arch| !arch.is_empty()),
+        }
+    }
 }
 
 /// The largest tar extension header -- a GNU long name or long link, a pax
@@ -236,6 +259,7 @@ fn describe(pkgfile: &Path, limits: &Limits) -> anyhow::Result<PackageEntry> {
         .to_string();
 
     let dir_name = format!("{}-{}", pkginfo.pkgname, pkginfo.pkgver);
+    let meta = PackageMeta::from(&pkginfo);
 
     let mut desc = Desc::from(pkginfo);
     desc.filename.clone_from(&filename);
@@ -248,6 +272,7 @@ fn describe(pkgfile: &Path, limits: &Limits) -> anyhow::Result<PackageEntry> {
         dir_name,
         desc: desc.to_string(),
         files,
+        meta,
     })
 }
 

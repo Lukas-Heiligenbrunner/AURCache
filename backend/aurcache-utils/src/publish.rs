@@ -20,7 +20,7 @@ use aurcache_db::helpers::time::now_secs;
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, dependencies, files, packages};
 use pacman_mirrors::platforms::Platform;
-use pacman_repo_utils::PackageEntry;
+use pacman_repo_utils::{PackageEntry, PackageMeta};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
     QueryFilter, QuerySelect, Set,
@@ -274,8 +274,8 @@ struct Staged {
 struct Upload {
     path: PathBuf,
     filename: String,
-    /// The version its filename says it is.
-    version: String,
+    /// What its filename says it is.
+    named: ParsedPkg,
 }
 
 /// One published file, as its `files` row will hold it.
@@ -310,17 +310,23 @@ async fn publish(
     let platform = build.platform;
     let staged = read_staging(repo, build, &pkg).await?;
     let packages = staged.len();
-    let version = staged[0].version.clone();
+    let version = staged[0].named.version.clone();
 
     // The slow part, and private: every archive read in full, before anything
     // is locked or changed.
     let mut described = Vec::with_capacity(staged.len());
-    for Upload { path, filename, .. } in staged {
+    for Upload {
+        path,
+        filename,
+        named,
+    } in staged
+    {
         let size = i64::try_from(tokio::fs::metadata(&path).await?.len()).unwrap_or(i64::MAX);
         let entry = repo
             .describe(path.clone())
             .await
             .map_err(|e| e.context(format!("reading {filename}")))?;
+        check_contents(&filename, &named, &entry.meta)?;
         described.push(Staged {
             path,
             filename,
@@ -416,10 +422,10 @@ async fn read_staging(
                 )
                 .await;
             }
-            Artifact::Package(parsed) => names.push(Upload {
+            Artifact::Package(named) => names.push(Upload {
                 path: entry.path(),
                 filename,
-                version: parsed.version,
+                named,
             }),
         }
     }
@@ -641,15 +647,19 @@ pub fn expected_pkgnames(pkg: &packages::Model) -> Vec<String> {
     names
 }
 
-#[derive(Debug, Clone)]
+/// What a package's filename says it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedPkg {
     name: String,
+    /// `[epoch:]pkgver-pkgrel`.
     version: String,
+    arch: String,
 }
 
-/// Parse an Arch package filename into its name and version.
+/// Parse an Arch package filename into its name, version and architecture.
 ///
-/// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version `2.12.1-1`.
+/// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version
+/// `2.12.1-1`, arch `x86_64`.
 fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     let (base, _) = filename
         .rsplit_once(".pkg.tar.")
@@ -660,6 +670,7 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
         bail!("Invalid pkg filename format: {filename}");
     }
 
+    let arch = parts[parts.len() - 1];
     let pkgrel = parts[parts.len() - 2];
     let pkgver = parts[parts.len() - 3];
     let name = parts[..parts.len() - 3].join("-");
@@ -667,7 +678,39 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     Ok(ParsedPkg {
         name,
         version: format!("{pkgver}-{pkgrel}"),
+        arch: arch.to_string(),
     })
+}
+
+/// Check that a package is what its filename says: the same pkgname, version
+/// and architecture in its `.PKGINFO`.
+///
+/// The filename is what is checked against the package names a build may
+/// produce, but the `repo.db` entry is made from the `.PKGINFO`. Without this,
+/// `hello-1.0-1-x86_64.pkg.tar.zst` holding `pkgname = openssh` would publish
+/// an `openssh` entry under `hello`'s name. An architecture the `.PKGINFO`
+/// does not state is not held against it.
+fn check_contents(filename: &str, named: &ParsedPkg, meta: &PackageMeta) -> anyhow::Result<()> {
+    ensure!(
+        meta.pkgname == named.name,
+        "{filename} holds pkgname '{}', not '{}'",
+        meta.pkgname,
+        named.name
+    );
+    ensure!(
+        meta.version == named.version,
+        "{filename} holds version '{}', not '{}'",
+        meta.version,
+        named.version
+    );
+    if let Some(arch) = &meta.arch {
+        ensure!(
+            *arch == named.arch,
+            "{filename} holds arch '{arch}', not '{}'",
+            named.arch
+        );
+    }
+    Ok(())
 }
 
 /// What a staged package file is to publishing.
@@ -724,6 +767,28 @@ mod tests {
         let p = parse_arch_pkg("hello-2.12.1-1-x86_64.pkg.tar.zst").unwrap();
         assert_eq!(p.name, "hello");
         assert_eq!(p.version, "2.12.1-1");
+        assert_eq!(p.arch, "x86_64");
+    }
+
+    fn meta(pkgname: &str, version: &str, arch: Option<&str>) -> PackageMeta {
+        PackageMeta {
+            pkgname: pkgname.to_string(),
+            version: version.to_string(),
+            arch: arch.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn contents_must_match_the_filename() {
+        let filename = "hello-1:2.0-1-x86_64.pkg.tar.zst";
+        let named = parse_arch_pkg(filename).unwrap();
+        assert!(
+            check_contents(filename, &named, &meta("hello", "1:2.0-1", Some("x86_64"))).is_ok()
+        );
+        assert!(check_contents(filename, &named, &meta("hello", "1:2.0-1", None)).is_ok());
+        assert!(check_contents(filename, &named, &meta("openssh", "1:2.0-1", None)).is_err());
+        assert!(check_contents(filename, &named, &meta("hello", "2.0-1", None)).is_err());
+        assert!(check_contents(filename, &named, &meta("hello", "1:2.0-1", Some("any"))).is_err());
     }
 
     #[test]
