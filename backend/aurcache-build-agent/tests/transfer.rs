@@ -641,8 +641,15 @@ fn measure(command: &mut Command, mut sink: impl FnMut(&[u8])) -> Measured {
 /// the runtime, never a file's worth.
 const RSS_LIMIT: u64 = 16 << 20;
 
+/// A work directory holding one package, removed when this is dropped.
+struct Packaged {
+    dir: tempfile::TempDir,
+    /// The package's name in `pkg/`.
+    name: String,
+}
+
 /// A sparse package of `size` zero bytes, in a fresh work directory.
-fn sparse_package(size: u64) -> (tempfile::TempDir, String) {
+fn sparse_package(size: u64) -> Packaged {
     let dir = tempfile::tempdir().unwrap();
     let work = Work::new(dir.path());
     fs::create_dir_all(work.pkg()).unwrap();
@@ -651,7 +658,7 @@ fn sparse_package(size: u64) -> (tempfile::TempDir, String) {
         .unwrap()
         .set_len(size)
         .unwrap();
-    (dir, name)
+    Packaged { dir, name }
 }
 
 /// `manifest` hashes a file in bounded memory: here 1 GiB of zeros.
@@ -660,7 +667,7 @@ fn manifest_hashes_a_large_package_in_bounded_memory() {
     const SIZE: u64 = 1 << 30;
     // `head -c 1073741824 /dev/zero | sha256sum`
     const DIGEST: &str = "49bc20df15e412a64472421e13fe86ff1c5165e18b2afccf160d4dc19fe68a14";
-    let (dir, name) = sparse_package(SIZE);
+    let Packaged { dir, name } = sparse_package(SIZE);
     let mut manifest = Vec::new();
     let measured = measure(agent(["manifest", "--work"]).arg(dir.path()), |piece| {
         manifest.extend_from_slice(piece);
@@ -687,7 +694,7 @@ fn manifest_hashes_a_large_package_in_bounded_memory() {
 fn send_streams_a_multi_gigabyte_package_in_bounded_memory() {
     const SIZE: u64 = 3 << 30;
     let zeros = vec![0_u8; 1 << 20];
-    let (dir, name) = sparse_package(SIZE);
+    let Packaged { dir, name } = sparse_package(SIZE);
     let mut count = 0_u64;
     let mut all_zero = true;
     let measured = measure(
