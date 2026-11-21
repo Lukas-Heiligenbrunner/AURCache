@@ -1,11 +1,11 @@
-//! The settings the Docker worker's executor declares, beside the protocol
-//! ones every worker has.
+//! The settings the Docker worker declares, beside the protocol ones every
+//! worker has.
 //!
 //! Its own, in its own units: `CPU_LIMIT` in milli-CPUs and `MEMORY_LIMIT` in
-//! MB, read under their pre-worker names with their pre-worker meanings. The
-//! chroot executor's `build_cpus` and `build_memory_max` say the same kind of
-//! thing differently, and the server does not translate one into the other --
-//! each worker tells it what it accepts.
+//! MB, under the names deployments already set. The chroot executor's
+//! `build_cpus` and `build_memory_max` say the same kind of thing differently,
+//! and the server does not translate one into the other -- each worker tells
+//! it what it accepts.
 //!
 //! What a build may *reach* is not declared. The builder image (`BUILDER_IMAGE`)
 //! decides the user and the privileges a build runs with, and the build
@@ -21,9 +21,9 @@ pub mod keys {
     pub const MEMORY_LIMIT: &str = "memory_limit";
 }
 
-/// Unlimited, as the pre-worker default was.
+/// Unlimited.
 pub const DEFAULT_CPU_LIMIT: i64 = 0;
-/// Unlimited, as the pre-worker default was: any negative value.
+/// Unlimited: any negative value is.
 pub const DEFAULT_MEMORY_LIMIT: i64 = -1;
 
 /// The settings this executor accepts, on top of the protocol ones.
