@@ -87,6 +87,11 @@ cd docs && yarn install --frozen-lockfile && yarn build
 ./scripts/build-images.sh <registry> --push --toolchain-repo 'http://host:8081/$arch'
 ./scripts/build-images.sh --images server --platforms linux/amd64 <registry>
 ./scripts/build-images.sh --packages-dir /tmp/pkgs <registry>   # also keep a host copy of the AURCache packages the images built (host arch; replayed from the build cache, not rebuilt)
+
+# build the prebuilt `aurcli` release archives (aurcli-<target>.tar.gz + .sha256),
+# what release-binaries.yml attaches to a GitHub release. Linux targets are static
+# musl through cargo-zigbuild (needs zig and cargo-zigbuild); macOS ones build on a Mac.
+./scripts/build-cli-binaries.sh --target aarch64-unknown-linux-musl   # default: every target this host builds
 ```
 
 ### Which end-to-end suite to run
@@ -278,7 +283,8 @@ defect this frontend has had was of that kind.
   `aurcache-client` 0.7. A CLI release publishes the libraries with it when they changed since
   their last release, bumping their two `version` lines and the two requirements. Nothing they
   build or test may depend on a file outside their crate directory; CI's `publishDryRun` job
-  packages each and builds it from the tarball. The CLI links no database driver.
+  packages each and builds it from the tarball. The CLI links no database driver. Its
+  `[package.metadata.binstall]` URL must match the assets `release-binaries.yml` attaches.
 - The repo includes multiple containerized workflows (all under `compose/`): `compose/docker-compose.hostmode.dev.yaml` mounts the host
   Docker socket for builds, `compose/docker-compose.dindmode.dev.yaml` is the simpler dev setup, and
   `scripts/test-e2e.sh` exercises `compose/docker-compose.e2e.yaml` end to end.

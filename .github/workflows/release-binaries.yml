@@ -1,0 +1,233 @@
+name: Release CLI binaries
+
+# Prebuilt `aurcli` for machines that are not Arch -- a macOS laptop, an Ubuntu
+# CI runner -- attached to the CLI's GitHub release as `aurcli-<target>.tar.gz`
+# plus a `.sha256` beside each. Those names are a published contract: install
+# instructions download them by name, and the cargo-binstall metadata in
+# backend/aurcache-cli/Cargo.toml names the same files, so the two change
+# together. scripts/build-cli-binaries.sh, which makes them, is the one place
+# that decides what an archive holds.
+#
+# Pushing a CLI release tag, `aurcache-cli-v<version>`, builds them and
+# attaches them to that tag's release. Every binary must report exactly the
+# tag's version, or nothing is uploaded.
+#
+# When the tag has no release yet, this run creates one as a draft, attaches
+# the assets, and only then publishes it, so it is never public without them.
+# A version with a pre-release part (`-rc.1`) makes a pre-release. Either way
+# the release is never marked the repository's latest: that stays the
+# product's. A release a maintainer made for the tag is left as they made it,
+# draft or published, and only gets the assets. Under GitHub's immutable
+# releases, one they published before this run reached it refuses them.
+#
+# A transient failure is retried with "Re-run failed jobs". A broken workflow
+# is fixed on master and the CLI released again under a patch tag, whose run
+# uses the fixed workflow.
+#
+# A pull request that changes the build or the CLI builds every target and
+# uploads nothing.
+on:
+  push:
+    tags:
+      - aurcache-cli-v*
+  pull_request:
+    branches:
+      - master
+    paths:
+      - .github/workflows/release-binaries.yml
+      - scripts/build-cli-binaries.sh
+      - scripts/lib/common.sh
+      - backend/Cargo.lock
+      - backend/Cargo.toml
+      - backend/aurcache-cli/**
+      - backend/aurcache-client/**
+      - LICENSE
+      # Not backend/aurcache-common/**, which most server changes touch; its
+      # musl and macOS builds are covered when the CLI is released.
+
+permissions:
+  contents: read
+
+# Spelled out, GitHub runs `bash --noprofile --norc -eo pipefail`: a failing
+# command anywhere in a pipeline fails the step, not only the last one.
+defaults:
+  run:
+    shell: bash
+
+# One run per tag at a time: two would race to replace the same assets.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The tag a release run builds; empty for a pull request.
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The musl targets are static, and all cross-compile from one x86_64
+          # runner through cargo-zigbuild.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: armv7-unknown-linux-musleabihf
+            runner: ubuntu-latest
+          # Both macOS targets build on the Apple Silicon runner; Apple's
+          # toolchain compiles for Intel from there too.
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+    steps:
+      # Before anything is built: the trigger's pattern also matches tags that
+      # name no version. The smoke test holds the binary to the version read
+      # here.
+      - name: Check the release tag
+        if: env.RELEASE_TAG != ''
+        run: |
+          re='^aurcache-cli-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$'
+          if [[ ! $RELEASE_TAG =~ $re ]]; then
+            echo "::error::'$RELEASE_TAG' is not a CLI release tag (aurcache-cli-v<version>)"
+            exit 1
+          fi
+          echo "RELEASE_VERSION=${BASH_REMATCH[1]}" >>"$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --target "$TARGET"
+
+      # zig is the C compiler and linker for the musl targets: aws-lc-sys is C,
+      # and zig carries a musl libc for every architecture. Both are pinned,
+      # to a zig this cargo-zigbuild supports; move them together.
+      # No cache: a release build should not depend on what an earlier run
+      # left behind.
+      - name: Install zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.1
+          use-cache: false
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.1
+
+      - name: Build
+        run: scripts/build-cli-binaries.sh --target "$TARGET" --out-dir dist
+
+      # Runs every binary built, which is why the foreign ones need help: qemu
+      # through binfmt for the ARM Linux binaries (static, so no sysroot), and
+      # Rosetta for the Intel macOS one.
+      - name: Set up QEMU
+        if: runner.os == 'Linux'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Install Rosetta
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      # From the archive rather than the build directory, so the layout and the
+      # checksum are checked along with the binary. A release's binary must
+      # report exactly the version its tag names.
+      - name: Smoke test
+        run: |
+          cd dist
+          archive=aurcli-$TARGET.tar.gz
+          shasum -a 256 -c "$archive.sha256"
+          entries=$(tar -tzf "$archive" | LC_ALL=C sort | tr '\n' ' ')
+          if [[ $entries != "LICENSE README.md aurcli " ]]; then
+            echo "::error::$archive holds '$entries', not exactly LICENSE, README.md and aurcli"
+            exit 1
+          fi
+          mkdir smoke
+          tar -C smoke -xzf "$archive"
+          version=$(smoke/aurcli --version)
+          echo "$version"
+          smoke/aurcli completions bash >/dev/null
+          if [[ -n $RELEASE_TAG && $version != "aurcli $RELEASE_VERSION" ]]; then
+            echo "::error::the binary reports '$version', but the tag is $RELEASE_TAG"
+            exit 1
+          fi
+          rm -r smoke
+
+      # Only this target's archive and checksum, so the upload job can attach
+      # whatever it collects.
+      - name: Keep the archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: aurcli-${{ matrix.target }}
+          path: dist/aurcli-${{ matrix.target }}.tar.gz*
+          if-no-files-found: error
+
+  # The only job that can write to the repository, and it runs no code from the
+  # checkout: it attaches what this run's build jobs produced, every one of
+  # which passed its smoke test. A pull request never reaches it, so a fork's
+  # code never runs beside a token that can write.
+  upload:
+    name: Attach to the release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # This run's artifacts only, each checked against the digest its build
+      # job recorded.
+      - name: Collect the archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: aurcli-*
+          path: dist
+          merge-multiple: true
+
+      # A release that already exists for the tag, draft or published, is a
+      # maintainer's: it gets the assets and is otherwise left as it is. A
+      # draft made in the web UI with a new tag creates the tag only when it
+      # is published, so its run starts then and finds it published; a draft
+      # made for a tag already pushed is found as a draft.
+      #
+      # Otherwise `gh release create` makes the release: with assets given, it
+      # creates it as a draft, uploads them and only then publishes it, so it
+      # is never public without them, and it deletes that draft if the upload
+      # or the publish fails. A failed run then leaves nothing behind, unless
+      # that delete fails too, and "Re-run failed jobs" starts over. It
+      # refuses when a published release exists, so one a maintainer
+      # publishes after the view fails this step, and a re-run attaches the
+      # assets to it. A draft made in that window, rarely, ends up beside the
+      # new release.
+      - name: Attach the archives
+        run: |
+          err=$(mktemp)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>"$err"; then
+            echo "$RELEASE_TAG already has a release, which only gets the assets"
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          elif grep -qx 'release not found' "$err"; then
+            version=${RELEASE_TAG#aurcache-cli-v}
+            flags=(--verify-tag --latest=false)
+            # A pre-release part comes before any build metadata (`+...`).
+            if [[ ${version%%+*} == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" dist/* "${flags[@]}" \
+              --title "aurcache-cli $version" \
+              --notes "Prebuilt \`aurcli\` for Linux and macOS: see https://lukas-heiligenbrunner.github.io/AURCache/docs/cli#installing"
+          else
+            cat "$err" >&2
+            exit 1
+          fi

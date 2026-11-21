@@ -346,11 +346,13 @@ interface only grows, and the packages that use it declare
 | `aurcache-server-v*` | `aurcache-server` (`docker-build.yml`); `aurcache` hybrid (it bundles the server) |
 | `aurcache-worker-v*` | `aurcache-worker`; `aurcache-demo-worker` |
 | `aurcache-worker-docker-v*` | `aurcache` hybrid (it bundles the container worker); `aurcache-builder-v2` |
+| `aurcache-cli-v*` | static `aurcli` archives on the tag's GitHub release (`release-binaries.yml`); no image |
 
 Each image is tagged with its component's version and `latest`.
 `docker-worker-publish.yml` splits into one job per image, each filtered on
 its tag pattern. The rule that every image comes from one commit goes away,
-because the protocol check replaces it.
+because the protocol check replaces it. Until that split, both image
+workflows build on every tag except `aurcache-cli-v*`, which they exclude.
 
 `latest` is a release's, and the weekly cron that refreshes Arch images
 rebuilds the default branch as `git` only, so nothing unreleased reaches a
@@ -375,6 +377,9 @@ their next breaking version: it bumps their two `version` lines and the two
 requirements on them in `[workspace.dependencies]`.
 
 - **Images:** built by the workflows above.
+- **CLI binaries:** an `aurcache-cli-v*` tag runs `release-binaries.yml`,
+  which builds static `aurcli` archives and attaches them to the tag's GitHub
+  release, creating it if needed (never marked latest).
 - **AUR:** a workflow on the same tag patterns runs in an `archlinux`
   container and does the following:
   1. Work out the package and version from the tag.
