@@ -551,6 +551,34 @@ already trust the primary key, but have to import the key again to know the
 subkey. During that backfill `repo.db` lists a mix of old and new signatures
 (batches), which only matters to a client that trusts one of the two keys.
 
+### Replacing the key while the server runs
+
+**Built** as the step a restore of a dump with secrets needs, with no caller
+of its own yet: `Repository::replace_key` swaps in another key without a
+restart. It is not rotation -- the key is still one signing subkey, replaced
+whole -- and the same rule holds: clients have to trust the new key first.
+
+- It holds the repository lock, so no update is between reading the key --
+  which it does once it holds the lock -- and finishing with it. It puts the
+  key file in place under that lock too (a `persist` closure) and swaps only
+  once that succeeded, so what is on disk and what signs are one key, even
+  with two replacements at once.
+- What the swap did is judged by what signs (`KeyReplacement`): another
+  primary key (`Replaced`), the same one with another subkey signing
+  (`SignerChanged`, which clients have to import again to know), or neither
+  (`Unchanged`, which leaves the repository signed).
+- Every swap wakes the backfill (`Repository::key_replaced`), which first
+  recovers any recorded plan, then lists: everything the old key signed is
+  listed when it looks, and is signed again. A run the replacement made fail
+  starts again with the new key, reporting nothing, and a replacement during
+  its backoff cuts the wait short. `mark_signed` counts only the very key it
+  was handed out as (`Arc` identity), so a run with a key swapped since never
+  marks the repository signed; `backfilling` is true until one with the
+  current key has.
+- A package *described* under the old key and committed after the swap is
+  refused by its update before anything is staged (`SignedWithReplacedKey`),
+  and publishing treats that as a retry, which signs it again.
+
 Still to build, as a follow-up: `aurcli repo rotate-key` (admin-only, with a
 warning), which generates the new key or subkey, certifies it with the old
 one so a client that looks can see the chain, publishes it ahead of use, and
@@ -594,7 +622,15 @@ Built:
 - `aurcache-utils/tests/publish.rs`: a signing server publishes a build with
   its signature, in its entry and beside it, and a signed database; once it
   no longer signs, a rebuild under the same file name takes the old `.sig`
-  away.
+  away; a key replaced between describing a build and committing it makes
+  publication retry, its staging kept, and the retry signs with the new key.
+- Replacing the key (`aurcache-utils::repository`, the scheduler): a package
+  signed with a replaced key refused until signed again, one with no
+  signature failing rather than retried; a replaced key backfilled before it
+  counts as signed; the same key swapped in again is the one that signs; a
+  key that could not be persisted not swapped in; a key replaced while an
+  update holds the lock waits for it, and the backfill re-signs what it
+  published; a run the replacement made fail restarts quietly.
 - `scripts/test-signed-repo.sh`, with its fixture
   `aurcache-utils/tests/signed_repository.rs` (ignored by `cargo test`).
 
