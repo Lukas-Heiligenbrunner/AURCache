@@ -88,7 +88,7 @@ async fn write_a_signed_repository() {
         Backfiller::default().run(&db, &repo).await.unwrap(),
         Backfill::Complete {
             signed: 1,
-            missing: Vec::new(),
+            skipped: Vec::new(),
         }
     );
     publish(&db, &repo, 2, "signed-now").await;
