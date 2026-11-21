@@ -51,8 +51,8 @@ pub struct DockerExecutor {
     network: NetworkPlan,
     /// The agent binary each build directory gets a copy of.
     agent: PathBuf,
-    /// This worker's own part of its containers' names (see
-    /// [`aurcache_worker_container::tag`]).
+    /// This worker's own part of the names of its containers and build
+    /// directories (see [`aurcache_worker_container::tag`]).
     tag: String,
 }
 
@@ -117,9 +117,11 @@ impl DockerExecutor {
         })
     }
 
-    /// Local and container-visible paths for one build's directory.
-    fn job_dirs(cfg: &Config, build_id: i32) -> BuildDirs {
-        let name = build_id.to_string();
+    /// Local and container-visible paths for one build's directory, named
+    /// like its container: another instance may share `BUILD_ARTIFACT_DIR`,
+    /// with builds of the same numbers.
+    fn job_dirs(&self, cfg: &Config, build_id: i32) -> BuildDirs {
+        let name = dir_name(&self.tag, build_id);
         BuildDirs {
             host: cfg.dirs.host.join(&name),
             local: cfg.dirs.local.join(&name),
@@ -181,7 +183,7 @@ impl DockerExecutor {
         let Some(platform) = arch::platform(&job.arch) else {
             bail!("unknown architecture {:?}: refusing the job", job.arch);
         };
-        let dirs = Self::job_dirs(cfg, job.build_id);
+        let dirs = self.job_dirs(cfg, job.build_id);
         let target = Target {
             name: container_name(&self.tag, job.build_id),
             platform,
@@ -397,10 +399,6 @@ impl DockerExecutor {
     }
 }
 
-/// The name of a build's container: this worker's tag, then the build. The
-/// engine may be shared with a worker of another server, whose build ids are
-/// the same numbers, and a container found under a build's name is removed
-/// as a leftover.
 /// Make the directory builds go in when it is not there, and warn when
 /// others can reach into it.
 fn check_root(dir: &Path) {
@@ -441,8 +439,19 @@ async fn read_report(dir: &Path, sources: &[JobVcsSource]) -> Report {
     Report::Written(vetted.report)
 }
 
+/// The name of a build's container: this worker's tag, then the build. The
+/// engine may be shared with a worker of another server, whose build ids are
+/// the same numbers, and a container found under a build's name is removed
+/// as a leftover.
 fn container_name(tag: &str, build_id: i32) -> String {
     format!("aurcache_build_{tag}_{build_id}")
+}
+
+/// The name of a build's directory under `BUILD_ARTIFACT_DIR`: this worker's
+/// tag, then the build, for the reason [`container_name`] has them. One found
+/// under that name is cleared as a leftover.
+fn dir_name(tag: &str, build_id: i32) -> String {
+    format!("{tag}_{build_id}")
 }
 
 /// What this worker decides about a build beside what the job says.
@@ -496,7 +505,7 @@ impl Executor for DockerExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::container_name;
+    use super::{container_name, dir_name};
 
     /// Two workers on one engine, building the same build number of two
     /// servers, do not share a container name.
@@ -506,5 +515,13 @@ mod tests {
         let other = container_name("fedcba9876543210", 7);
         assert_eq!(one, "aurcache_build_0123456789abcdef_7");
         assert_ne!(one, other);
+    }
+
+    /// Nor a build directory, when they share `BUILD_ARTIFACT_DIR` too.
+    #[test]
+    fn a_build_directorys_name_is_its_workers_and_its_builds() {
+        let one = dir_name("0123456789abcdef", 7);
+        assert_eq!(one, "0123456789abcdef_7");
+        assert_ne!(one, dir_name("fedcba9876543210", 7));
     }
 }
