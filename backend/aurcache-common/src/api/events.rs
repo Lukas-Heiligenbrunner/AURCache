@@ -552,6 +552,12 @@ events! {
     /// Not everything published could be signed yet, so a client requiring
     /// signatures refuses what is left; it is tried again later.
     RepoSigningIncomplete => ("repo.signing_incomplete", "Server and repository", "Signing incomplete") { error: String },
+
+    /// The server's signing key stops signing soon -- said at start, or once
+    /// that is close while it runs; from then on, every repository change
+    /// fails until it has one that signs. `primary` names the primary key
+    /// when its expiry is what ends `signer`'s signing.
+    RepoKeyExpiring => ("repo.key_expiring", "Server and repository", "Signing key expiring") { signer: String, on: String, primary: Option<String> },
 }
 
 /// One kind, as a person picking it from a list would read it.
@@ -813,7 +819,8 @@ impl Event {
             | Self::OfficialReposRefreshFailed { .. }
             | Self::RepoCommitRetried { .. }
             | Self::RepoSweepFailed { .. }
-            | Self::RepoSigningIncomplete { .. } => Severity::Warning,
+            | Self::RepoSigningIncomplete { .. }
+            | Self::RepoKeyExpiring { .. } => Severity::Warning,
             Self::UpdateQueueFailed { .. }
             | Self::DependentsTriggerFailed { .. }
             | Self::BuildMarkFailed { .. }
@@ -1283,6 +1290,24 @@ impl Event {
             Self::RepoSigningIncomplete { error } => vec![text(format!(
                 "not every published package is signed yet, trying again later: {error}"
             ))],
+            Self::RepoKeyExpiring {
+                signer,
+                on,
+                primary,
+            } => {
+                // The primary key's expiry, when it is what ends the signing,
+                // is the one to extend.
+                let because = primary.as_ref().map_or_else(String::new, |primary| {
+                    format!(", when its {primary} expires")
+                });
+                let extend = primary.as_deref().unwrap_or("it");
+                vec![text(format!(
+                    "the repository's signing {signer} stops signing on {on}{because}, and every \
+                     repository change fails from then on: extend {extend}, restart the server \
+                     with the extended key, then have every client import it again from \
+                     /api/repo/key before {on}"
+                ))]
+            }
         }
     }
 
@@ -1563,6 +1588,11 @@ mod tests {
             Event::RepoSweepFailed { error: error() },
             Event::RepoSigned { packages: 12 },
             Event::RepoSigningIncomplete { error: error() },
+            Event::RepoKeyExpiring {
+                signer: "subkey 0123456789ABCDEF0123456789ABCDEF01234567".to_string(),
+                on: "2026-12-01".to_string(),
+                primary: Some("primary key 89ABCDEF0123456789ABCDEF0123456789ABCDEF".to_string()),
+            },
         ]
     }
 

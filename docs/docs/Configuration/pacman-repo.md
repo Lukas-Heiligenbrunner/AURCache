@@ -189,15 +189,21 @@ elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
   primary key does, whichever comes first: pacman takes every signature
   under an expired primary key for an expired one, the subkeys' included,
   and `gpg --quick-gen-key` gives a primary key three years by default. The
-  server refuses to start with a key that stops signing within **30 days**,
-  or whose primary key has expired or is revoked, and says when its key stops
-  signing at every start. A server that runs on past that stops signing, and
-  publishing fails until it has a key that signs. Extending the subkey or the
-  primary key (`gpg --quick-set-expire`) changes the public key: have every
-  client import the key again *before* the old expiry
-  (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`), then give the
-  server the new key file and restart it — pacman checks a signature against
-  the key as it imported it.
+  server says when its key stops signing at every start, and warns — in its
+  log and in the activity log — once that is within **30 days**, at a start
+  or while it runs, naming the key to extend. It refuses
+  to start only with a key that has stopped signing already, or whose primary
+  key is revoked. A server that runs on past the expiry stops signing, and
+  since every write of the databases is signed, every repository change
+  fails — publishing, removing a package, a restore, the signing backfill —
+  until it is restarted with a key that signs. Extending the subkey or the
+  primary key (`gpg --quick-set-expire`) changes the public key, and pacman
+  checks a signature against the key as it imported it: give the server the
+  extended key's file and restart it, then have every client import the key
+  again *before* the old expiry
+  (`curl -fsSL …/api/repo/key | sudo pacman-key --add -`) — the server serves
+  the key it loaded, and the copy clients hold verifies what it signs until
+  the old expiry.
 - Some unprotected Ed25519 keys GnuPG exports — about one in 256 — are
   refused with a message saying the library the server reads keys with
   refuses their checksum ([rPGP #901](https://github.com/rpgp/rpgp/issues/901)).

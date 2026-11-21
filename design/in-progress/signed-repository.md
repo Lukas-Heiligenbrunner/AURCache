@@ -3,7 +3,7 @@
 Status: **In progress** (server-side signing of packages and databases, the
 backfill and key publication done; the CLI's and web UI's trust flow, rotation,
 workers verifying, a keyring package and a staged rollout open — see [What is
-left](#what-is-left)) · Last updated: 2026-11-20
+left](#what-is-left)) · Last updated: 2026-11-21
 
 Upstream issue: Lukas-Heiligenbrunner/AURCache#274 ("Feature: Signed packages &
 repo"). It asks for three things:
@@ -234,15 +234,23 @@ old subkeys have expired signs with its one current one, and a key exported
 with `gpg --export-secret-subkeys` (a stub where the primary's secret was)
 signs with its subkey. The choice is made when the key is loaded
 (`choose`), and refused there, saying which, for a key in which nothing
-signs, a key with **several** current signing subkeys -- the refusal says to
-export only the one to use (`gpg --export-secret-subkeys <subkey>!`) -- and a
-key whose signer stops signing within **`MIN_VALIDITY_DAYS` (30) days**. An
-expiry is then something an operator deals with at a restart, weeks ahead,
-rather than something clients find by refusing what was signed; a server that
-runs on past it stops signing (`InstanceKey::sign` refuses), so publishing
-fails rather than publish signatures clients reject. Thirty days is the
-notice the previous design gave before an expiry, and longer than most
-servers go between restarts.
+signs, and a key with **several** current signing subkeys -- the refusal
+says to export only the one to use (`gpg --export-secret-subkeys
+<subkey>!`). A key whose signer stops signing within
+**`EXPIRY_WARNING_DAYS` (30) days** loads, with a warning in the log and a
+`repo.key_expiring` activity event (`InstanceKey::expiring`) -- and a
+server started earlier gives the same warning once the expiry is that close,
+if it is still running then (`signing_expiry`, `InstanceKey::warns_in`). When
+it is the primary key's expiry that ends a subkey's signing, the warning
+names the primary key as the one to extend. Refusing such a key
+would turn a routine restart weeks ahead of the expiry into an outage of the
+API, the repository's file server and every build. Only a key that has
+stopped signing already is refused. A server that runs on past the expiry
+stops signing (`InstanceKey::sign` refuses), and since every database write
+is signed (`stage_databases`), every repository change fails -- publishing,
+removals, `restore --clear`, the backfill -- rather than publish signatures
+clients reject. Thirty days is the notice the previous design gave before an
+expiry, and longer than most servers go between restarts.
 
 Moving from one signing subkey to the next while the server runs -- a
 handover a day before the old one expires, and the backfill signing
@@ -257,7 +265,7 @@ GnuPG, and pacman through it, takes a subkey's signature under an expired
 primary key for an expired one, and under a revoked primary for a revoked
 one, whatever the subkey's own binding says. So a key whose primary key has
 expired or is revoked is refused, saying which, and a subkey's signing ends
-when its primary key expires if that comes first -- which the 30-day check
+when its primary key expires if that comes first -- which the 30-day warning
 counts, naming the primary key. The primary key's expiry is read from its
 newest self-signature that says one: a direct-key signature or a user ID
 certification (types 0x10–0x13 and 0x1F), never a revocation. **Finding:** a
@@ -537,9 +545,9 @@ own change.
 ## Rotation
 
 Not supported yet. The server signs with one subkey for as long as it runs,
-and refuses a key with several, or one about to expire (see [Where it
-lives](#where-it-lives)), so nothing moves from one signing key to another
-under it.
+and refuses a key with several (see [Where it lives](#where-it-lives)), so
+nothing moves from one signing key to another under it; one about to expire
+loads with a warning, and stops signing when it expires.
 
 Replacing the key is a restart with another one -- a new `signing-key.asc`,
 or a supplied key -- after which the backfill signs everything again with it,
@@ -572,7 +580,8 @@ Built:
   files left alone, `Debug` without secrets, GnuPG verification and trust
   (above), GnuPG-exported keys, GnuPG keys whose primary key has expired, is
   revoked, or expires before its signing subkey, keys with two signing
-  subkeys or one that stops signing within 30 days, a key past its expiry
+  subkeys refused, one that stops signing within 30 days loading with a
+  warning that names what ends it, a key past its expiry
   making no signature, and a key rPGP misreads refused with the way around
   it, which a GnuPG check then follows.
 - `pacman-repo-utils`: `%PGPSIG%` round-trips from a sidecar through the
