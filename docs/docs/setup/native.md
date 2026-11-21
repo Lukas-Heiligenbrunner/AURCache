@@ -160,6 +160,14 @@ it with your `devtools` version.
 Nothing is installed into `/usr/local`, and nothing shadows `makechrootpkg` for
 other users: running it yourself gets the packaged one.
 
+Those two sites, and the worker's own `makepkg --printsrcinfo` that reads the
+dependencies a build installs, may read everything but the paths listed in
+`/etc/aurcache/sandbox-protected`, the worker's own secrets. The sandbox reads
+that file as the build user, so keep it readable by everyone: it lists paths,
+not secrets. A file that exists but cannot be read, such as one at `0600
+root`, anything but a regular file, or a symlink to nothing or a path reached
+through one, refuses every build. Only a missing file means "protect nothing".
+
 ## Both on one machine
 
 Install both packages. They share the `aurcache` user and their state

@@ -9,6 +9,9 @@
 # sibling on the way down, never the path itself". Everything not listed here
 # stays readable, which is the intended trade: the list of secrets is short and
 # known, while the set of files a build legitimately reads is neither.
+#
+# Keep this file readable by the build user, which the sandbox reads it as: it
+# lists paths, not secrets, and one that user cannot read refuses every build.
 
 # Build credentials: the SSH key used to fetch authenticated sources, which
 # the worker generates and keeps in `ssh/`. Nothing writes `secrets/`, but a
