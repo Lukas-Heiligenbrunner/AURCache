@@ -1148,11 +1148,7 @@ async fn no_claim_while_the_ssh_key_cannot_be_read() {
         known_hosts: hosts.clone(),
     });
     let cluster = support::FakeCluster::new(Script::default());
-    let executor = aurcache_worker_kube::executor::KubeExecutor::new(
-        cfg,
-        Arc::clone(&cluster),
-        "agent:1".to_string(),
-    );
+    let executor = aurcache_worker_kube::executor::KubeExecutor::new(cfg, Arc::clone(&cluster));
     assert!(!executor.ready_for_work(0).await, "no key file");
     assert!(
         cluster.calls().is_empty(),

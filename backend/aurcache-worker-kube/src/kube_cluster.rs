@@ -17,7 +17,7 @@ use crate::pod;
 use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
 use futures::future::BoxFuture;
-use k8s_openapi::api::core::v1::{Container, Pod};
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status as ExitStatus;
 use kube::api::{
     Api, AttachParams, AttachedProcess, DeleteParams, ListParams, LogParams, PostParams,
@@ -50,7 +50,6 @@ const REWATCH: Duration = Duration::from_secs(5);
 /// The builds' namespace through one client, and the watch on this
 /// dispatcher's pods in it.
 pub struct KubeCluster {
-    client: kube::Client,
     pods: Api<Pod>,
     namespace: String,
     /// What labels this dispatcher's pods.
@@ -83,7 +82,7 @@ impl KubeCluster {
         let client = kube::Client::try_default()
             .await
             .context("connecting to the Kubernetes API")?;
-        let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+        let pods: Api<Pod> = Api::namespaced(client, namespace);
         let selector = pod::selector(dispatcher);
         // The watch retries a refused list for ever; one plain list first
         // turns a missing permission into an error here instead.
@@ -99,7 +98,6 @@ impl KubeCluster {
             .await
             .context("the watch on pods stopped before it listed them")?;
         Ok(Self {
-            client,
             pods,
             namespace: namespace.to_owned(),
             selector,
@@ -107,16 +105,6 @@ impl KubeCluster {
             generation,
             _watch: Watch(task),
         })
-    }
-
-    /// The image a pod runs, by digest where its status has a pullable one.
-    pub async fn image_of(&self, namespace: &str, pod: &str) -> Result<String> {
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
-        let found = pods
-            .get(pod)
-            .await
-            .with_context(|| format!("reading pod {namespace}/{pod}"))?;
-        running_image(&found)
     }
 }
 
@@ -331,57 +319,6 @@ fn describe(status: &Status) -> String {
     }
 }
 
-/// The image of this worker's own container in `pod`, by the digest it was
-/// pulled at when its status has one that can be pulled again.
-fn running_image(pod: &Pod) -> Result<String> {
-    let own = pod
-        .spec
-        .as_ref()
-        .and_then(|spec| own_container(&spec.containers))
-        .context("the pod has no containers")?;
-    let pulled = pod
-        .status
-        .as_ref()
-        .and_then(|status| status.container_statuses.as_ref())
-        .and_then(|statuses| statuses.iter().find(|status| status.name == own.name))
-        .and_then(|status| pullable(&status.image_id));
-    match pulled {
-        Some(image) => Ok(image),
-        None => own
-            .image
-            .clone()
-            .with_context(|| format!("container {} names no image", own.name)),
-    }
-}
-
-/// This worker's container among a pod's: the one told which pod it is in,
-/// which is how it came to ask, and the first where none is, so that a
-/// sidecar listed before it is not taken for it.
-fn own_container(containers: &[Container]) -> Option<&Container> {
-    let told = |container: &&Container| {
-        container
-            .env
-            .iter()
-            .flatten()
-            .any(|var| var.name == crate::config::POD_NAME)
-    };
-    containers.iter().find(told).or_else(|| containers.first())
-}
-
-/// `image_id` as a reference that pulls the same image: `<repository>@<digest>`.
-/// `None` for an id that is only a digest or a local image.
-fn pullable(image_id: &str) -> Option<String> {
-    let id = image_id
-        .strip_prefix("docker-pullable://")
-        .unwrap_or(image_id);
-    let (repository, digest) = id.split_once('@')?;
-    let (algorithm, hex) = digest.split_once(':')?;
-    let named = !repository.is_empty() && !repository.contains("://");
-    let digested =
-        !algorithm.is_empty() && !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
-    (named && digested).then(|| id.to_owned())
-}
-
 /// The ends of an exec this module keeps or hands on.
 struct Streams {
     stdin: Option<WriteHalf<SimplexStream>>,
@@ -572,7 +509,6 @@ fn finished(status: &ExitStatus, stderr: &str) -> ExecEnd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{ContainerStatus, PodSpec, PodStatus};
 
     fn api(code: u16, reason: &str, message: &str) -> kube::Error {
         kube::Error::Api(Box::new(Status::failure(message, reason).with_code(code)))
@@ -713,109 +649,6 @@ mod tests {
                 message: "command terminated with non-zero exit code: exit code 3".to_owned()
             }
         );
-    }
-
-    const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-    fn with_images(image: &str, statuses: &[(&str, &str)]) -> Pod {
-        Pod {
-            spec: Some(PodSpec {
-                containers: vec![
-                    Container {
-                        name: "first".to_owned(),
-                        image: Some(image.to_owned()),
-                        ..Container::default()
-                    },
-                    Container {
-                        name: "second".to_owned(),
-                        image: Some("other:1".to_owned()),
-                        ..Container::default()
-                    },
-                ],
-                ..PodSpec::default()
-            }),
-            status: Some(PodStatus {
-                container_statuses: Some(
-                    statuses
-                        .iter()
-                        .map(|(name, id)| ContainerStatus {
-                            name: (*name).to_owned(),
-                            image_id: (*id).to_owned(),
-                            ..ContainerStatus::default()
-                        })
-                        .collect(),
-                ),
-                ..PodStatus::default()
-            }),
-            ..Pod::default()
-        }
-    }
-
-    #[test]
-    fn a_registry_digest_is_the_image() {
-        let id = format!("ghcr.io/x/worker@{DIGEST}");
-        let pod = with_images("ghcr.io/x/worker:latest", &[("first", &id)]);
-        assert_eq!(running_image(&pod).unwrap(), id);
-    }
-
-    #[test]
-    fn dockers_pullable_prefix_is_stripped() {
-        let pod = with_images(
-            "busybox",
-            &[("first", &format!("docker-pullable://busybox@{DIGEST}"))],
-        );
-        assert_eq!(running_image(&pod).unwrap(), format!("busybox@{DIGEST}"));
-    }
-
-    #[test]
-    fn a_bare_or_local_id_falls_back_to_the_spec() {
-        for id in [
-            DIGEST.to_owned(),
-            format!("docker://{DIGEST}"),
-            String::new(),
-            "busybox@latest".to_owned(),
-        ] {
-            let pod = with_images("local/worker:dev", &[("first", &id)]);
-            assert_eq!(
-                running_image(&pod).unwrap(),
-                "local/worker:dev",
-                "for {id:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_first_containers_status_is_found_by_name() {
-        let id = format!("docker.io/library/busybox@{DIGEST}");
-        let pod = with_images(
-            "busybox",
-            &[
-                ("second", "docker.io/library/other@sha256:ff"),
-                ("first", &id),
-            ],
-        );
-        assert_eq!(running_image(&pod).unwrap(), id);
-    }
-
-    /// A sidecar listed first is not this worker.
-    #[test]
-    fn the_container_told_its_pods_name_is_this_workers() {
-        let id = format!("ghcr.io/x/worker@{DIGEST}");
-        let mut pod = with_images("proxy:1", &[("first", "proxy@sha256:ff"), ("second", &id)]);
-        let containers = &mut pod.spec.as_mut().unwrap().containers;
-        containers[1].env = Some(vec![k8s_openapi::api::core::v1::EnvVar {
-            name: "WORKER_KUBE_POD_NAME".to_owned(),
-            ..Default::default()
-        }]);
-        assert_eq!(running_image(&pod).unwrap(), id);
-    }
-
-    #[test]
-    fn a_pod_without_status_runs_its_spec() {
-        let mut pod = with_images("busybox:1.37", &[]);
-        pod.status = None;
-        assert_eq!(running_image(&pod).unwrap(), "busybox:1.37");
-        assert!(running_image(&Pod::default()).is_err());
     }
 
     #[test]
@@ -1092,8 +925,6 @@ mod live {
         let cluster = connect(&dispatcher).await;
         let name = unique("sleep");
         running(&cluster, &dispatcher, &name).await;
-        let image = cluster.image_of(&namespace(), &name).await.unwrap();
-        assert!(image.contains("busybox@sha256:"), "{image}");
 
         // stdin in, stdout back, and a dropped stdin is its end.
         let sent: Vec<u8> = (0..4 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();

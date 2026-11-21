@@ -21,8 +21,6 @@ const DEFAULT_NAMESPACE: &str = "aurcache-builds";
 const DEFAULT_BUILDER_IMAGE: &str = "ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest";
 /// The pull policies Kubernetes knows.
 const PULL_POLICIES: [&str; 3] = ["Always", "IfNotPresent", "Never"];
-/// The variable naming the dispatcher's own pod, for reading its image.
-pub const POD_NAME: &str = "WORKER_KUBE_POD_NAME";
 
 /// What every worker reads, advertising the dispatcher's own architecture
 /// unless `WORKER_ARCHES` says otherwise.
@@ -44,22 +42,15 @@ pub struct Config {
     /// The pull policy of every image a pod of this worker's runs: the
     /// builder's, and the agent's.
     pub pull_policy: String,
-    pub agent_image: AgentImage,
+    /// The image of the `stage` and `hold` containers, which the build agent
+    /// comes from (`WORKER_KUBE_AGENT_IMAGE`).
+    pub agent_image: String,
     /// The SSH key builds fetch their sources with, which the dispatcher
     /// holds and answers for (`WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS`).
     pub credential: Option<CredentialFiles>,
     pub user_namespaces: bool,
     pub extras: PodExtras,
     pub tunables: Tunables,
-}
-
-/// Where the `stage` and `hold` containers' image comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AgentImage {
-    /// Named by `WORKER_KUBE_AGENT_IMAGE`.
-    Given(String),
-    /// The image the dispatcher's own pod runs.
-    OwnPod { namespace: String, name: String },
 }
 
 /// What each build takes from the declared settings.
@@ -142,8 +133,7 @@ impl Config {
     /// # Errors
     ///
     /// When a variable has no valid reading, the pod template cannot be read
-    /// or has a field outside the allowed ones, or neither the agent image nor
-    /// the dispatcher's own pod is named.
+    /// or has a field outside the allowed ones, or no agent image is named.
     pub fn from_env(settings: &WorkerSettings, fingerprint: &str) -> Result<Self> {
         Self::from_vars(settings, fingerprint, env_opt)
     }
@@ -162,18 +152,10 @@ impl Config {
                 PULL_POLICIES.join(", ")
             );
         }
-        let agent_image = match (
-            var("WORKER_KUBE_AGENT_IMAGE"),
-            var(POD_NAME),
-            var("WORKER_KUBE_POD_NAMESPACE"),
-        ) {
-            (Some(image), _, _) => AgentImage::Given(image),
-            (None, Some(name), Some(namespace)) => AgentImage::OwnPod { namespace, name },
-            _ => bail!(
-                "no agent image: set WORKER_KUBE_AGENT_IMAGE, or WORKER_KUBE_POD_NAME and \
-                 WORKER_KUBE_POD_NAMESPACE so the dispatcher can read its own image"
-            ),
-        };
+        let agent_image = var("WORKER_KUBE_AGENT_IMAGE").context(
+            "WORKER_KUBE_AGENT_IMAGE is not set: name the image build pods take the build agent \
+             from, this worker's own",
+        )?;
         Ok(Self {
             namespace: var("WORKER_KUBE_NAMESPACE").unwrap_or_else(|| DEFAULT_NAMESPACE.into()),
             dispatcher: aurcache_worker_container::tag::of(fingerprint)?,
@@ -234,25 +216,16 @@ mod tests {
         Config::from_vars(&declared(), FINGERPRINT, |k| vars.get(k).cloned())
     }
 
-    const OWN_POD: [(&str, &str); 2] = [
-        ("WORKER_KUBE_POD_NAME", "w-0"),
-        ("WORKER_KUBE_POD_NAMESPACE", "aurcache"),
-    ];
+    const AGENT: [(&str, &str); 1] = [("WORKER_KUBE_AGENT_IMAGE", "reg/agent:1")];
 
     #[test]
     fn defaults() {
-        let cfg = read(&OWN_POD).unwrap();
+        let cfg = read(&AGENT).unwrap();
         assert_eq!(cfg.namespace, "aurcache-builds");
         assert_eq!(cfg.dispatcher, "abcdef0123456789");
         assert_eq!(cfg.builder_image, DEFAULT_BUILDER_IMAGE);
         assert_eq!(cfg.pull_policy, "Always");
-        assert_eq!(
-            cfg.agent_image,
-            AgentImage::OwnPod {
-                namespace: "aurcache".into(),
-                name: "w-0".into()
-            }
-        );
+        assert_eq!(cfg.agent_image, "reg/agent:1");
         assert_eq!(cfg.credential, None);
         assert!(!cfg.user_namespaces);
         assert_eq!(cfg.extras, PodExtras::default());
@@ -269,25 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn a_given_agent_image_wins_over_the_own_pod() {
-        let mut vars = OWN_POD.to_vec();
-        vars.push(("WORKER_KUBE_AGENT_IMAGE", "reg/agent:1"));
-        assert_eq!(
-            read(&vars).unwrap().agent_image,
-            AgentImage::Given("reg/agent:1".into())
-        );
-    }
-
-    #[test]
-    fn no_agent_image_at_all_is_an_error() {
+    fn no_agent_image_is_an_error_naming_its_variable() {
         let message = read(&[]).unwrap_err().to_string();
         assert!(message.contains("WORKER_KUBE_AGENT_IMAGE"), "{message}");
-        assert!(read(&[("WORKER_KUBE_POD_NAME", "w-0")]).is_err());
     }
 
     #[test]
     fn the_machines_choices() {
-        let mut vars = OWN_POD.to_vec();
+        let mut vars = AGENT.to_vec();
         vars.extend([
             ("WORKER_KUBE_NAMESPACE", "b"),
             ("WORKER_KUBE_IMAGE_PULL_POLICY", "IfNotPresent"),
@@ -316,7 +278,7 @@ mod tests {
             // A key without the hosts it may be used with.
             ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
         ] {
-            let mut vars = OWN_POD.to_vec();
+            let mut vars = AGENT.to_vec();
             vars.push(bad);
             assert!(read(&vars).is_err(), "{bad:?}");
         }
@@ -328,7 +290,7 @@ mod tests {
         let path = dir.path().join("template.json");
         let write = |json: &str| std::fs::write(&path, json).unwrap();
         let with_template = |path: &std::path::Path| {
-            let mut vars = OWN_POD.to_vec();
+            let mut vars = AGENT.to_vec();
             vars.push(("WORKER_KUBE_POD_TEMPLATE", path.to_str().unwrap()));
             read(&vars)
         };
@@ -384,7 +346,7 @@ mod tests {
 
     #[test]
     fn new_settings_replace_only_the_tunables() {
-        let cfg = read(&OWN_POD).unwrap();
+        let cfg = read(&AGENT).unwrap();
         let set = declared().with_snapshot(&snapshot(&[("build_cpus", "4")]));
         let next = cfg.with_settings(&set);
         assert_eq!(next.tunables.cpus, Some(4.0));
