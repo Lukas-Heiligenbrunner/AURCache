@@ -428,9 +428,11 @@ worker, not discovery; unset, it is the dispatcher's own architecture. Each
 job's pod gets
 `nodeSelector: {kubernetes.io/os: linux, kubernetes.io/arch: <arch>}`, mapped
 as the Docker worker maps platforms (`x86_64` → `amd64`, `aarch64` →
-`arm64`, `armv7h` → `arm`, `riscv64` → `riscv64`; the `arm` label carries no
-variant). The dispatcher never narrows the list on its own, since a node pool
-scaled to zero is still capacity; a job for an architecture no node has ends
+`arm64`, `armv7h` → `arm`; the `arm` label carries no variant). The
+dispatcher refuses to start advertising an architecture its image is not
+built for, `riscv64` among them: the agent in every build pod comes from it.
+The dispatcher never narrows the list on its own, since a node pool scaled to
+zero is still capacity; a job for an architecture no node has ends
 at the schedule timeout. Emulated builds (binfmt on the nodes) stay the
 operator's business: the protocol carries one arch list and nothing about how
 a worker builds it (`RegisterRequest::arches`).

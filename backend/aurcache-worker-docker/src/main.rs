@@ -30,7 +30,6 @@ async fn main() -> Result<()> {
     aurcache_worker_core::init_tracing();
 
     let core = config::core_from_env();
-    aurcache_worker_container::arch::check(&core.arches)?;
     let cfg = Config::from_env(&core.settings)?.ok_or_else(|| {
         anyhow!(
             "BUILD_ARTIFACT_DIR is not set. The Docker worker binds a host directory into each \
