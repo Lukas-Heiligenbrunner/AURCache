@@ -1,7 +1,6 @@
 //! The lifecycle of one build: a claimed job becomes a pod, a build log,
 //! streamed packages and one report.
 //!
-//! `kubernetes-executor.md` describes it, from "Shape" to "How a build ended".
 //! In order: the pod is created; the job is handed in once its `stage`
 //! container runs; the log is followed while the build container runs; when
 //! that container has ended, what it left is read and each package is

@@ -1,7 +1,7 @@
 //! The dispatcher's configuration: its environment, and what each build
 //! takes from the declared settings.
 //!
-//! The variables are in `kubernetes-executor-plan.md`, section 4.6.
+//! Each variable is documented in `docs/docs/workers/kubernetes.md`.
 
 use crate::settings::{DEFAULT_SCHEDULE_TIMEOUT, keys};
 use anyhow::{Context, Result, bail};
