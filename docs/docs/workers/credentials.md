@@ -9,117 +9,20 @@ The AUR's `unreal-engine`, for example, clones
 `git+ssh://git@github.com/EpicGames/UnrealEngine`, which only works for a GitHub
 account that has joined the Epic Games organisation.
 
-A worker can hold an SSH key for such builds. Two settings decide which builds
-may use it:
+A worker holds SSH keys for such builds:
 
-- on the server, **Build SSH key** (`build_ssh_key`) names the key a package's
-  builds may use. It is off by default: no build is offered a key.
-- on the worker, `WORKER_GIT_SSH_PACKAGES` optionally lists the only packages
-  that worker will offer its key to, whatever the server asks.
+- **its default key**, which every build it runs is offered, unless the
+  build's package names another;
+- **named keys**, each offered only to the builds whose package names it with
+  the **Build SSH key** setting.
 
-A build gets the key only when both allow it.
+Because every build is offered the default key, it should reach nothing
+private. Put private access on a named key, set on the packages that need it,
+and route those packages to the worker that holds it.
 
-## Naming the key a package may use
+## The default key
 
-Each worker holds one key, named `default`: the key `WORKER_GIT_SSH_KEY` points
-at, or the one the worker generates (see below). Set **Build SSH key** to
-`default` for the packages that need it:
-
-- for one package, on its page under **Build config**;
-- for every package, on the **Settings** page, or with `BUILD_SSH_KEY=default`
-  on the server. A package's own value overrides it, and an empty one gives that
-  package no key.
-
-Until the setting names a key, no build is offered one, including on a worker
-configured with `WORKER_GIT_SSH_KEY`. A deployment whose packages fetch over
-SSH must set it after upgrading the server, globally or per package, or those
-builds fail at the source download; see
-[Upgrading](../overview/upgrading.md#from-0-6).
-
-A name is a label, never a path: a lowercase letter or digit, then up to 63
-more of those, `_` or `-`. Only the name reaches the worker; the key itself
-never leaves it. The server refuses to store anything else, and a
-`BUILD_SSH_KEY` in its environment that is no name names no key, with a
-warning in its log.
-
-A build whose package names a key its worker does not hold goes ahead without
-one, and its log says so before anything else:
-
-```
-[worker] this worker holds no SSH key named "gitlab", which the build_ssh_key setting names for hello; building without one
-```
-
-A package that fetches nothing over SSH builds as usual. One that does fails at
-that fetch, with this line above the failure.
-
-## Limiting a worker's key to some packages
-
-`WORKER_GIT_SSH_PACKAGES` is a ceiling set on the worker itself: exact pkgbase
-names, comma or space separated, matched as `WORKER_PACKAGES` matches them —
-whole names, case-sensitive, no wildcards.
-
-| `WORKER_GIT_SSH_PACKAGES` | Builds offered the key |
-|---|---|
-| unset | every build the server's setting allows |
-| `unreal-engine,epic-tools` | only builds of those packages, when the setting allows them |
-| set but empty | none |
-
-Set but empty lists no package, so an empty value never widens who gets the
-key. To leave it unset, leave the variable out: in a compose file, a line such
-as `WORKER_GIT_SSH_PACKAGES=${SSH_PACKAGES:-}` sets it empty when
-`SSH_PACKAGES` is unset, and the worker then offers its key to no build.
-
-It is read from the worker's environment, and is not one of the settings the
-server can change for a worker: the server can narrow who gets the key, by not
-naming it for a package, but never widen it past this list.
-
-A build that is not offered the key runs without it, and its log says why:
-
-```
-[worker] no SSH key offered: hello is not in this worker's WORKER_GIT_SSH_PACKAGES
-```
-
-Its sources are still fetched, without SSH; a source that needs the key then
-fails there, after that line. A package whose **Build SSH key** names no key
-gets no such line: that is most packages, which fetch nothing over SSH.
-
-### A key for a few packages only
-
-For a key meant for specific packages, give the worker that holds it the same
-list in both variables:
-
-```yaml
-services:
-  worker:
-    environment:
-      WORKER_PACKAGES: unreal-engine
-      WORKER_GIT_SSH_PACKAGES: unreal-engine
-```
-
-`WORKER_PACKAGES` makes those packages build only on this worker (see
-[Routing](./routing.md)); `WORKER_GIT_SSH_PACKAGES` makes them the only builds
-here that are offered the key. Set **Build SSH key** to `default` on those
-packages too.
-
-:::warning
-`WORKER_GIT_SSH_PACKAGES` takes a kernel whose Landlock can restrict UNIX
-sockets: Linux 7.1 or later (Landlock ABI 9). On an older kernel nothing keeps
-the packages it leaves out from the key's agent while their PKGBUILD code runs
-outside the chroot (see [What a build can do with the
-key](#what-a-build-can-do-with-the-key)), so a worker with the variable set
-holds no key there at all, and says why when it starts:
-
-```
-ERROR WORKER_GIT_SSH_PACKAGES is set, but builds could not be kept from the SSH agent outside their chroot, because this kernel's Landlock cannot restrict UNIX sockets (that takes Landlock ABI 9, Linux 7.1 or later): this worker holds no SSH key, so builds go ahead without an SSH key, and a source that needs one fails at its fetch
-```
-
-It does the same when `/etc/aurcache/sandbox-protected` does not list its
-agent's directory. To use a key on an older kernel, leave
-`WORKER_GIT_SSH_PACKAGES` unset, and keep that worker to the packages you
-would trust with the key: any build it runs can reach it.
-:::
-
-## The default: a key per worker
+### Generated: a key per worker
 
 On first start a worker generates an ed25519 keypair and logs the public half:
 
@@ -128,15 +31,6 @@ INFO Build SSH key: /var/lib/aurcache-worker/ssh/id_ed25519
     Add this public key to the account that may fetch restricted sources:
     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... aurcache-worker
 ```
-
-Onboarding is then:
-
-1. Start the worker and approve it on the Workers page.
-2. Copy the public key from its log.
-3. Add it to the GitHub account (**Settings → SSH and GPG keys**) that has
-   access to the sources.
-4. Set `WORKER_PACKAGES` and `WORKER_GIT_SSH_PACKAGES` for the packages that
-   need it, and **Build SSH key** to `default` on them.
 
 This suits GitHub: a public key may be attached to only one account, but an
 account can hold many keys. One key per worker is the shape GitHub expects, and
@@ -149,7 +43,7 @@ if the directory is lost the worker generates a new key that the remote will
 reject — with no obvious sign of why.
 :::
 
-## Supplying your own key
+### Supplying your own
 
 When the credential is issued centrally, or you want deployment to need no
 follow-up action, point the worker at a key:
@@ -159,8 +53,6 @@ services:
   worker:
     environment:
       WORKER_GIT_SSH_KEY: /run/secrets/build_key
-      WORKER_PACKAGES: unreal-engine
-      WORKER_GIT_SSH_PACKAGES: unreal-engine
     secrets:
       - build_key
 
@@ -188,9 +80,166 @@ Do **not** pass the key through an environment variable. It would be visible in
 you commit. A mount is both safer and less trouble.
 
 The worker reads the key once, when it starts, into an ssh-agent, and no build
-is ever given the file. The file only has to be readable by the worker's user,
-and ssh's own checks on a key file's mode never see it. Replacing the key takes
-effect when the worker restarts.
+is ever given the file. Replacing the key takes effect when the worker
+restarts.
+
+### Keep the file from builds
+
+A key's file must be one no build can read. Builds run PKGBUILD code on the
+worker, outside their chroot, as the build user, and a file that user can read
+it can copy and keep, while the agent only ever signs. So the file must be
+**the worker's own, mode `0600` or `0400`**: a regular file owned by the user
+the worker runs as, which is not the build user (`aurcache` in the images:
+`docker compose exec worker id -u` prints its uid). A symlink is judged by the
+file it leads to. The generated key is already such a file.
+
+Only the owner and mode are checked, so keep a key on a local filesystem: an
+NFSv4 ACL (ZFS with `acltype=nfsv4`, for one), a FUSE mount without
+`default_permissions` or a CIFS mount with `noperm` can let a build read a
+file its mode keeps out, and the worker cannot see that. A POSIX ACL is seen:
+its mask shows in the group bits.
+
+The worker checks when it starts. A default key a build could read is warned
+of, since every build is offered that key anyway; a named one stops the worker
+from starting (see [Named keys](#named-keys)):
+
+```
+WARN A build can read the default SSH key's file itself, not only use the key through its agent, and so keep the key: /run/secrets/build_key belongs to uid 1000 and has mode 0644: it is not the worker's own (uid 973). To keep it from builds, make it a regular file of the worker's own, with mode 0600 or 0400
+```
+
+A secret mounted root-owned and readable by everyone, as a Kubernetes secret
+volume is by default, fails this, and rightly: every build could read it. Nor
+can a secret volume be made to pass: its files stay root's whatever the
+volume's mode, and `defaultMode: 0400` only makes them root's alone, which is
+still not the worker's own. Copy the key into the data volume instead, as a
+file of the worker's own (below; an init container can do it), and then do not
+mount the secret volume in the worker's container. A compose secret given by
+`file:` is a bind mount of that file, with the owner and mode it has on the
+host: Docker Compose ignores a secret's `uid`, `gid` and `mode` outside Swarm.
+So set them on the host, to the worker's uid in the container:
+
+```sh
+sudo chown 973 ./secrets/id_ed25519   # the uid `id -u` printed in the worker
+sudo chmod 0600 ./secrets/id_ed25519
+```
+
+Under Swarm (`docker stack deploy`), the long syntax sets them instead:
+
+```yaml
+    secrets:
+      - source: build_key
+        uid: "973"
+        mode: 0400
+```
+
+Or copy the key into the worker's data volume, owned by the worker's uid with
+mode `0600`, and point the worker at the copy. Mount the original nowhere in
+the worker then: left mounted and readable, it is as readable to builds as
+before.
+
+## Named keys
+
+A key that only some packages may use is named on the worker, and the
+packages name it on the server.
+
+On the worker, `WORKER_GIT_SSH_KEYS` lists `name:path` pairs, comma separated:
+
+```yaml
+services:
+  worker:
+    environment:
+      WORKER_GIT_SSH_KEYS: epic:/run/secrets/epic_key
+      WORKER_PACKAGES: unreal-engine
+    secrets:
+      - epic_key
+```
+
+Each file must be kept from builds as the default key's is (see [Keep the
+file from builds](#keep-the-file-from-builds)): here, `./secrets/epic_key` on
+the host owned by the worker's uid, mode `0600`. Otherwise every build could
+read the key, not only those whose package names it, and the worker refuses to
+start:
+
+```
+Error: refusing to start: a build could read the file of a key WORKER_GIT_SSH_KEYS names, and so keep the key, whichever package it is for. SSH key "epic": /run/secrets/epic_key belongs to uid 1000 and has mode 0644: it is not the worker's own (uid 973). For each, make it a regular file of the worker's own, with mode 0600 or 0400
+```
+
+On the server, set **Build SSH key** to `epic` for the packages that may use
+it: on each package's page under **Build config**. A global value, on the
+**Settings** page or with `BUILD_SSH_KEY` on the server, applies to every
+package without one of its own. Empty, at either level, means "what applies
+anyway": the global value for a package, `default` for the server.
+
+Onboarding a named key is then:
+
+1. Add `name:path` to `WORKER_GIT_SSH_KEYS` on the worker, with the file kept
+   from builds, and restart it.
+2. Add the key's public half to the account that has access to the sources.
+3. Set **Build SSH key** to that name on the packages that need it.
+4. Set `WORKER_PACKAGES` on that worker to the same packages, so their builds
+   are routed to it. See [Routing](./routing.md).
+
+`WORKER_PACKAGES` matters: a package that names a key builds on whichever
+worker claims it, and a worker that does not hold the key builds it without
+one. Its log says so before anything else:
+
+```
+[worker] this worker holds no SSH key named "epic", which the build_ssh_key setting names for unreal-engine; building without one
+```
+
+A package that fetches nothing over SSH builds as usual. One that does fails at
+that fetch, with this line above the failure.
+
+A name is a label, never a path: a lowercase letter or digit, then up to 63
+more of those, `_` or `-`. `default` is the default key's, and cannot be
+named in `WORKER_GIT_SSH_KEYS`. An entry the worker cannot use — no such name,
+`default`, a name given twice, or no path — is dropped with a warning when it
+starts. Only the name reaches the worker; the key itself never leaves it. The
+server refuses to store anything that is no name, and a `BUILD_SSH_KEY` in its
+environment that is no name reads as `default`, with a warning in its log.
+
+`WORKER_GIT_SSH_KEYS` is read from the worker's environment, and is not one of
+the settings the server can change for a worker. Each key is read once, when
+the worker starts: replacing one takes effect at the next restart.
+
+:::warning
+Named keys take a kernel whose Landlock can restrict UNIX sockets: Linux 7.1 or
+later (Landlock ABI 9). On an older kernel nothing keeps a build from another
+key's agent while its PKGBUILD code runs outside the chroot (see [What a build
+can do with a key](#what-a-build-can-do-with-a-key)), so the worker holds no
+named key there at all, only its default one, and says why when it starts:
+
+```
+ERROR WORKER_GIT_SSH_KEYS names SSH keys, but builds could not be kept from their agents outside their chroot, because aurcache-sandbox, asked as the build user, says it would not: kernel (this kernel's Landlock cannot restrict UNIX sockets: that takes Landlock ABI 9, Linux 7.1 or later): this worker holds none of them, only its default key, and a build whose package names one goes ahead without it
+```
+
+The worker does not judge this itself. It asks the sandbox builds run under,
+as the build user:
+
+```sh
+aurcache-sandbox --capabilities --agent-dir <WORKER_DATA_DIR>/agent
+```
+
+It holds named keys only when the answer is `resolve-unix`. The sandbox
+answers `no-resolve-unix:` and its reason instead on an older kernel, and
+also when:
+
+- the build user cannot read `/etc/aurcache/sandbox-protected`, or the file
+  names a path under a directory that does not exist. Either way no build
+  starts at all, not only those naming a key. Keep the file readable by
+  everyone: it lists paths, not secrets.
+- that file is missing, lists nothing, or does not list the agents'
+  directory, `<WORKER_DATA_DIR>/agent`.
+
+The log says which. It also says when the sandbox could not be asked: an
+`aurcache-sandbox` too old to know the question (update the package), one
+that is not installed, or `sudo` refusing to run it as the build user. Where
+the worker holds named keys, it says:
+
+```
+INFO Builds are refused the agents of the SSH keys they are not offered outside their chroot as well (Landlock)
+```
+:::
 
 ## Host keys
 
@@ -212,7 +261,7 @@ system's `/etc/ssh/ssh_known_hosts`, any `KnownHostsCommand` and host keys
 published in DNS, and never to accept a host on first use, in options that win
 over any `ssh_config`.
 
-Before each build offered the key the worker copies the file to
+Before each build offered a key the worker copies the file to
 `<WORKER_DATA_DIR>/ssh-known-hosts/known_hosts`, so the original only has to be
 readable by the worker; a `0600` secret is fine. A replaced file takes effect at
 the next build. The copy is the worker's own file, which builds can read and the
@@ -221,77 +270,82 @@ same path, for a PKGBUILD that clones in `prepare()`. Each build gets a fresh
 copy renamed over the last, so nothing a build leaves at that path reaches a
 later build.
 
-If the file cannot be read, every build offered the key fails until it can,
+If the file cannot be read, every build offered a key fails until it can,
 with an error naming `WORKER_SSH_KNOWN_HOSTS`: the worker never falls back to
 accepting hosts on first use.
 
-## What a build can do with the key
+## What a build can do with a key
 
-Builds never hold the key. The worker loads it into an ssh-agent that runs as
-the build user, and what a build can reach is that agent, never the key:
+Builds never hold a key. The worker loads each key into an ssh-agent of its
+own, which runs as the build user, and what a build can reach is the one agent
+it is offered, never a key:
 
-- **The key file never enters the chroot**, for any build. It stays on the
-  worker, which reads it once into the agent; a generated key stays in the
-  worker's data directory, which the build user cannot read.
-- **A build offered the key reaches the agent inside its chroot**, as well as
-  for the source download outside it. The agent's directory is bound read-only
-  into the chroot at the same path, and `SSH_AUTH_SOCK` in the build's
-  `makepkg.conf` names its socket, so `prepare()`, `build()` and `package()`
-  can have the agent sign SSH logins: a PKGBUILD that clones from an
-  authenticated remote in `prepare()`, rather than declaring it in `source=()`,
-  works. Declared sources are still the better path — they are what gets
-  checksummed, and what gets fetched before any package code runs. The agent
-  signs; it never hands the key back.
+- **No key file ever enters the chroot**, for any build. Each stays on the
+  worker, which reads it once into its agent; a generated key stays in the
+  worker's data directory, which the build user cannot read, and a supplied
+  one must be kept from that user too ([Keep the file from
+  builds](#keep-the-file-from-builds)).
+- **A build reaches the agent it is offered inside its chroot**, as well as
+  for the source download outside it. That agent's directory is bound
+  read-only into the chroot at the same path, and `SSH_AUTH_SOCK` in the
+  build's `makepkg.conf` names its socket, so `prepare()`, `build()` and
+  `package()` can have the agent sign SSH logins: a PKGBUILD that clones from
+  an authenticated remote in `prepare()`, rather than declaring it in
+  `source=()`, works. Declared sources are still the better path — they are
+  what gets checksummed, and what gets fetched before any package code runs.
+  The agent signs; it never hands the key back.
 - **The bind is read-only**, so a build can connect to the socket but cannot
   remove or replace it for the next build: root in the build's container runs
   without `CAP_SYS_ADMIN` and cannot remount it writable, and a user namespace
   a build makes for itself cannot either.
-- **A build that is not offered the key gets no bind of the agent's directory
-  and no `SSH_AUTH_SOCK`**, in its `makepkg.conf` or its environment. Its
-  sources are fetched without a key.
+- **Every other agent stays out of the chroot.** Each has a directory of its
+  own, and only the offered one is bound. A build offered no key, as one whose
+  package names a key the worker does not hold, gets no bind and no
+  `SSH_AUTH_SOCK`, in its `makepkg.conf` or its environment.
 
 What this guarantees:
 
-- The private key never leaves the worker. It is not sent to the server, not
+- A private key never leaves the worker. It is not sent to the server, not
   stored there, and not in any job; only the key's name travels.
-- Builds get only the agent, which signs SSH logins and nothing else. Nothing a
+- Builds get only an agent, which signs SSH logins and nothing else. Nothing a
   build captures outlives it.
-- A build that is not offered the key cannot reach the agent by its path
-  either. Every build runs as the same build user, which the agent belongs
-  to, so file permissions cannot keep one build from it; the sandbox around
-  the PKGBUILD code that runs outside the chroot does. It refuses a connection
-  to any UNIX socket beneath the paths the worker keeps private, the agent's
-  among them, and lets a build offered the key connect to the agent's socket
-  alone. This holds while other builds are using the agent.
+- A build cannot reach another key's agent by its path either. Every build
+  runs as the same build user, which the agents belong to, so file permissions
+  cannot keep one build from them; the sandbox around the PKGBUILD code that
+  runs outside the chroot does. It refuses a connection to any UNIX socket
+  beneath the paths the worker keeps private, the agents' directory among
+  them, and lets a build connect to the socket of the agent it is offered
+  alone. This holds while other builds are using the agents.
 
 The last point takes Landlock's `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (Landlock
-ABI 9, Linux 7.1 and later). On an older kernel the sandbox cannot restrict
-sockets, so **any build on a worker holding a key can reach it**: the agent
-still stays out of every chroot that is not offered it, but PKGBUILD code running
-outside the chroot reaches the agent by its path, whatever **Build SSH key**
-says for its package. A worker with `WORKER_GIT_SSH_PACKAGES` set therefore
-holds no key on such a kernel, since it could not keep that list. The worker
-says which applies when it starts:
-
-```
-INFO Builds not offered the SSH key are refused its agent outside their chroot as well (Landlock)
-```
-
-The sandbox reads the paths it keeps private from
-`/etc/aurcache/sandbox-protected`, which names the agent's directory under the
-default `WORKER_DATA_DIR`. A worker whose data directory is elsewhere is in the
-older kernel's position until its `agent` directory is added to that file: it
-warns at startup, and with `WORKER_GIT_SSH_PACKAGES` set it holds no key.
+ABI 9, Linux 7.1 and later), an `aurcache-sandbox` that has the rule, and a
+sandbox policy the build user can read that lists the agents' directory. On
+an older kernel, with an older sandbox, or without that entry, sockets are not
+restricted. With a policy the build user cannot read, every build is refused.
+Either way the worker holds no named key there.
 
 What it does not:
 
-- While a package that is offered the key builds, its code can log in with the
-  key to any host the key can reach. Offer it only to packages whose PKGBUILDs
-  you trust with that access, and whoever can edit them on the server: changing
-  such a package's source, or a patch to its PKGBUILD, changes what runs with
-  the key.
-- A worker that does not read the key name a job carries offers its key to
-  every build it runs, whatever the server's setting says.
+- While a build runs, its code can log in with the key it is offered to any
+  host that key can reach. With the default key that is every build, so give
+  it access to nothing you would not trust every package with. Name a key
+  only on packages whose PKGBUILDs you trust with its access, and whoever can
+  edit them on the server: changing such a package's source, or a patch to
+  its PKGBUILD, changes what runs with the key.
+- Trusting a package with a key also means trusting the dependencies of it
+  that AURCache builds. Their binaries, and whatever their install
+  scriptlets leave in its chroot, such as an `/etc/profile.d` script, run
+  there while it builds, with the agent bound. So they can use the key as
+  well as its own PKGBUILD can.
+- What a key fetches is cached for the next build, in the worker's source
+  cache (`srcdest/<pkgbase>` in the `cache` subvolume of its storage pool).
+  The PKGBUILD code of every other build on that worker can read it, while
+  it runs outside its chroot. Give packages that name a key a worker of their
+  own, where nothing you would not show those sources builds:
+  [`WORKER_PACKAGES`](./routing.md) sends such a package to that worker, but
+  does not keep other packages off it.
+- A worker that does not read the key name a job carries offers its default
+  key to every build it runs, whatever the server's setting says.
 
 ## Other credentials
 
@@ -302,6 +356,6 @@ For credentials that are not SSH — a `.netrc`, an API token, a licence file �
 WORKER_BIND_MOUNTS=/etc/aurcache-worker/licence:/opt/licence
 ```
 
-Unlike the SSH key these **are** readable by package code, and by every build on
+Unlike the SSH keys these **are** readable by package code, and by every build on
 the worker. Use them only for credentials you are willing to expose to all the
 packages that worker builds.
