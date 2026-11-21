@@ -170,6 +170,13 @@ would reach over SSH with no host this can name (`Transport::UnreadableSsh`)
 is refused before connecting, with either `Access`: without our callbacks,
 libgit2 would connect checking only its own idea of `~/.ssh/known_hosts`.
 
+All of that is decided on the URL as given, but libgit2 applies git config's
+`url.<base>.insteadOf` (the repository's, the user's, the system's) when it
+creates or loads a remote, and connects to the result. `git.rs` refuses a
+remote whose effective URL is not the one routed, before connecting, rather
+than routing a second time: a rewrite on a server is a misconfiguration to
+report, and one URL judged is simpler than two.
+
 The file is parsed with `ssh-key`;
 hashed names (`|1|salt|hash`, HMAC-SHA1), comma lists, `*`/`?` globs and `!`
 negations match as in OpenSSH. `@revoked` refuses the key wherever it appears;

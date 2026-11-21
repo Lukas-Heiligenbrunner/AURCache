@@ -23,7 +23,9 @@ The server's git library reaches any URL with a colon in it over SSH unless it
 starts with a scheme it knows (`https://`, `git://`, `file://`; schemes are
 read ignoring case). One that names no host the server can check, such as a
 local path with a colon in it, is refused before anything connects: write a
-local path as `file:///path`.
+local path as `file:///path`. So is a URL that the server's git configuration
+rewrites (`url.<base>.insteadOf`), since the host it would reach is not the one
+the URL names: add the source by the URL it is rewritten to.
 
 ## The server's key
 

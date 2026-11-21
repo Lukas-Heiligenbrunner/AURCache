@@ -260,6 +260,27 @@ fn same_host(connected: &str, parsed: &str) -> bool {
     bare(connected) == bare(parsed)
 }
 
+/// Refuse `remote` when git's configuration gave it another URL than `url`.
+///
+/// libgit2 applies `url.<base>.insteadOf`, from the repository's, the
+/// user's and the system's git configuration, when it creates or loads a
+/// remote. The route -- which key is offered, whose host key is checked,
+/// whether SSH is reached with this module's callbacks at all -- was chosen
+/// for `url`, so a remote that connects to another URL is not reached.
+fn check_not_rewritten(remote: &git2::Remote<'_>, url: &str) -> anyhow::Result<()> {
+    if remote.url_bytes() == url.as_bytes() {
+        return Ok(());
+    }
+    // Neither URL is repeated: either can carry a password.
+    bail!(
+        "git's configuration rewrites this URL to another (`url.<base>.insteadOf`), \
+         so it would not be reached where its key and host-key checks were chosen \
+         for. Remove the rewrite from the server's git configuration (the \
+         repository's, `~/.gitconfig` or `/etc/gitconfig`), or add the source by \
+         the URL it is rewritten to"
+    )
+}
+
 /// Fetch options for `route`.
 fn fetch_options<'a>(route: &Route<'a>, refusal: &Refusal) -> FetchOptions<'a> {
     let mut options = FetchOptions::new();
@@ -436,6 +457,7 @@ pub fn checkout_or_fetch_repo_ref(
                 repo.remote_set_url("origin", git_repo)?;
                 remote = repo.find_remote("origin")?;
             }
+            check_not_rewritten(&remote, git_repo)?;
             // Fetch using the remote's default refspecs (branches/tags) so that
             // `git_ref` can later be resolved by `revparse_ext`. Also try to fetch
             // `git_ref` directly, to cover the case of a raw commit SHA that isn't
@@ -452,7 +474,14 @@ pub fn checkout_or_fetch_repo_ref(
         repo
     } else {
         std::fs::create_dir_all(path)?;
+        let creation_refusal = refusal.clone();
         git2::build::RepoBuilder::new()
+            .remote_create(move |repo, name, url| {
+                let remote = repo.remote(name, url)?;
+                check_not_rewritten(&remote, url)
+                    .map_err(|e| creation_refusal.refuse(format!("{e:#}")))?;
+                Ok(remote)
+            })
             .fetch_options(fetch_options(&route, &refusal))
             .clone(git_repo, path)
             .map_err(|e| refusal.explain(e))?
@@ -507,6 +536,7 @@ pub fn ls_remote(git_repo: &str, git_ref: &str, access: Access<'_>) -> anyhow::R
     let dir = tempfile::tempdir()?;
     let repo = Repository::init_bare(dir.path())?;
     let mut remote = repo.remote_anonymous(git_repo)?;
+    check_not_rewritten(&remote, git_repo)?;
     let refusal = Refusal::default();
     remote
         .connect_auth(Direction::Fetch, Some(callbacks(&route, &refusal)), None)
@@ -647,6 +677,65 @@ mod tests {
             error.contains("AURCACHE_GIT_SSH_KEY points at /nope"),
             "{error}"
         );
+    }
+
+    /// A URL git's configuration rewrites is refused before connecting: it
+    /// would be reached somewhere other than the route was chosen for -- an
+    /// SSH host other than the one whose key is checked, or SSH where none
+    /// was expected.
+    #[test]
+    fn a_url_rewritten_by_insteadof_is_refused_before_connecting() {
+        /// `url`, which the checkout's own config rewrites: `base` instead of
+        /// `prefix`.
+        struct Rewrite<'a> {
+            url: &'a str,
+            prefix: &'a str,
+            base: &'a str,
+            access: Access<'a>,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let access = server_access(dir.path());
+        for rewrite in [
+            // Another SSH host than the one whose key would be checked.
+            Rewrite {
+                url: "git@github.com:user/repo.git",
+                prefix: "git@github.com:",
+                base: "git@evil.example.com:",
+                access: Access::Server(&access),
+            },
+            // SSH, where the route has no callbacks to check a host key with.
+            Rewrite {
+                url: "/srv/git/repo.git",
+                prefix: "/srv/git/",
+                base: "git@evil.example.com:",
+                access: Access::Anonymous,
+            },
+        ] {
+            let path = dir.path().join("checkout");
+            let repo = Repository::init(&path).unwrap();
+            repo.remote("origin", rewrite.url).unwrap();
+            repo.config()
+                .unwrap()
+                .set_str(&format!("url.{}.insteadOf", rewrite.base), rewrite.prefix)
+                .unwrap();
+            let rewritten = repo
+                .find_remote("origin")
+                .unwrap()
+                .url()
+                .unwrap()
+                .to_string();
+            assert!(
+                rewritten.starts_with(rewrite.base),
+                "the test's rewrite does not apply: {rewritten}"
+            );
+
+            let error = checkout_or_fetch_repo_ref(rewrite.url, "HEAD", &path, rewrite.access)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("insteadOf"), "{}: {error}", rewrite.url);
+            assert!(!error.contains(rewrite.url), "the URL is repeated: {error}");
+            std::fs::remove_dir_all(&path).unwrap();
+        }
     }
 
     fn commit(repo: &Repository, pkgver: &str) {
