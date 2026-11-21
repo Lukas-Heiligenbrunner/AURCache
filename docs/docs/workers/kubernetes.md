@@ -177,8 +177,7 @@ because they decide what a build may reach.
 | `WORKER_KUBE_NAMESPACE` | `aurcache-builds` | Namespace build pods are created in. The Role and NetworkPolicy in the manifests are for this namespace: change them together. |
 | `WORKER_KUBE_BUILDER_IMAGE` | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` | The image each build runs in. |
 | `WORKER_KUBE_IMAGE_PULL_POLICY` | `Always` | Pull policy for the images of a build pod, the builder's and the agent's: `Always`, `IfNotPresent` or `Never`; anything else is an error at startup. `Always` picks up a new image; use `IfNotPresent` for images you loaded onto the nodes by hand. |
-| `WORKER_KUBE_AGENT_IMAGE` | none; the manifest sets it to the dispatcher's own image | Image build pods take the build agent from. |
-| `WORKER_KUBE_POD_NAME`, `WORKER_KUBE_POD_NAMESPACE` | none | The other way to name the agent image: the dispatcher's own pod, which it then reads to use the image of its own container, by digest where the cluster reports one. It needs `get` on pods in its namespace, which the manifests do not grant, because that also lets it read the server's pod. With neither these nor `WORKER_KUBE_AGENT_IMAGE`, the dispatcher refuses to start. |
+| `WORKER_KUBE_AGENT_IMAGE` | none, and required; the manifest sets it to the dispatcher's own image | Image build pods take the build agent from. Without it the dispatcher refuses to start. |
 | `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | The SSH key builds fetch private sources with, and the host keys of the servers it is used with: files in the dispatcher's own pod. Both or neither. See [Build credentials](#build-credentials). |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | `true` or `false`. Run build pods in user namespaces. See [User namespaces](#user-namespaces). |
 | `WORKER_KUBE_POD_TEMPLATE` | none | Path of a JSON file adding scheduling fields to every build pod. See [Architectures and scheduling](#architectures-and-scheduling). |
@@ -586,9 +585,7 @@ a fetch that still needed the key fails. See
 **The dispatcher will not start.** It names the problem: a yes/no variable that
 is not `true` or `false`, a pull policy outside the three, a pod template that
 cannot be read or has a field outside the allowed list, an SSH key without its
-`known_hosts` or one it cannot use, or no agent image (set
-`WORKER_KUBE_AGENT_IMAGE`, or both `WORKER_KUBE_POD_NAME` and
-`WORKER_KUBE_POD_NAMESPACE`).
+`known_hosts` or one it cannot use, or no `WORKER_KUBE_AGENT_IMAGE`.
 
 **A build fails with `out of disk: the build passed its ephemeral-storage
 limit`.** Its pod was evicted for passing `build_disk_max`

@@ -54,7 +54,6 @@ const NODE_ARCH: &str = "kubernetes.io/arch";
 /// What a build pod is rendered from.
 pub struct PodInputs<'a> {
     pub cfg: &'a Config,
-    pub agent_image: &'a str,
     pub job: &'a JobDescriptor,
     pub timeout: Option<Duration>,
 }
@@ -206,7 +205,7 @@ pub fn helper_resources() -> ResourceRequirements {
 fn stage(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: STAGE.to_string(),
-        image: Some(inputs.agent_image.to_string()),
+        image: Some(inputs.cfg.agent_image.clone()),
         image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(
             [&agent_path(), "stage", "--work", WORK, "--tools", TOOLS]
@@ -248,7 +247,7 @@ fn build(inputs: &PodInputs<'_>) -> Container {
 fn hold(inputs: &PodInputs<'_>) -> Container {
     Container {
         name: HOLD.to_string(),
-        image: Some(inputs.agent_image.to_string()),
+        image: Some(inputs.cfg.agent_image.clone()),
         image_pull_policy: Some(inputs.cfg.pull_policy.clone()),
         command: Some(vec![agent_path(), "hold".to_string()]),
         security_context: Some(unprivileged()),
@@ -350,7 +349,7 @@ pub fn render(inputs: &PodInputs<'_>) -> Result<Pod> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AgentImage, Tunables};
+    use crate::config::Tunables;
     use aurcache_common::worker::MirrorlistOffer;
     use serde_json::{Value, json};
 
@@ -360,7 +359,7 @@ mod tests {
             dispatcher: "abcdef0123456789".into(),
             builder_image: "reg/builder:1".into(),
             pull_policy: "Always".into(),
-            agent_image: AgentImage::Given("reg/agent@sha256:1".into()),
+            agent_image: "reg/agent@sha256:1".into(),
             credential: None,
             user_namespaces: false,
             extras: PodExtras::default(),
@@ -396,7 +395,6 @@ mod tests {
     fn render_with(cfg: &Config, build_id: i32, arch: &str, timeout: Option<u64>) -> Result<Pod> {
         render(&PodInputs {
             cfg,
-            agent_image: "reg/agent@sha256:1",
             job: &job(build_id, arch),
             timeout: timeout.map(Duration::from_secs),
         })

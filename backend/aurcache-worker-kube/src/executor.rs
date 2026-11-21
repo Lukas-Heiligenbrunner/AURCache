@@ -85,7 +85,6 @@ pub struct KubeExecutor<C: Cluster> {
     /// reported under another.
     cfg: Live<Config>,
     cluster: Arc<C>,
-    agent_image: String,
     /// What the last readiness check found, so that a change is logged once.
     readiness: Mutex<Readiness>,
     /// The builds this executor is seeing through now. A pod of any other
@@ -223,11 +222,10 @@ enum Awaited {
 }
 
 impl<C: Cluster> KubeExecutor<C> {
-    pub fn new(cfg: Config, cluster: Arc<C>, agent_image: String) -> Self {
+    pub fn new(cfg: Config, cluster: Arc<C>) -> Self {
         Self {
             cfg: Live::new(cfg),
             cluster,
-            agent_image,
             readiness: Mutex::new(Readiness::Ready),
             held: Mutex::new(HashSet::new()),
             deleted: Mutex::new(HashSet::new()),
@@ -277,7 +275,6 @@ impl<C: Cluster> KubeExecutor<C> {
     fn render(&self, cfg: &Config, claimed: &ClaimedJob) -> Result<Pod> {
         pod::render(&PodInputs {
             cfg,
-            agent_image: &self.agent_image,
             job: &claimed.job,
             timeout: claimed.timeout.map(|timeout| timeout.limit),
         })
@@ -725,7 +722,6 @@ impl<C: Cluster> KubeExecutor<C> {
         };
         pod::render(&PodInputs {
             cfg,
-            agent_image: &self.agent_image,
             job: &job,
             timeout: Some(PROBE_TIMEOUT),
         })
@@ -1077,7 +1073,7 @@ pub async fn leave<C: Cluster>(cluster: &C) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AgentImage, PodExtras, Tunables};
+    use crate::config::{PodExtras, Tunables};
 
     fn cfg(credential: Option<CredentialFiles>) -> Config {
         Config {
@@ -1085,7 +1081,7 @@ mod tests {
             dispatcher: "0123456789abcdef".to_string(),
             builder_image: "builder:1".to_string(),
             pull_policy: "Always".to_string(),
-            agent_image: AgentImage::Given("agent:1".to_string()),
+            agent_image: "agent:1".to_string(),
             credential,
             user_namespaces: false,
             extras: PodExtras::default(),
@@ -1136,7 +1132,7 @@ mod tests {
                 unreachable!()
             }
         }
-        KubeExecutor::new(cfg.clone(), Arc::new(Unused), "agent:1".to_string())
+        KubeExecutor::new(cfg.clone(), Arc::new(Unused))
             .representative(cfg)
             .unwrap()
     }

@@ -22,9 +22,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use std::io::Write;
 use std::sync::Arc;
 use support::server::Server;
-use support::{
-    AGENT_IMAGE, Content, FakeCluster, Package, Script, config, pod_name, report, status,
-};
+use support::{Content, FakeCluster, Package, Script, config, pod_name, report, status};
 
 /// The size of the package that must pass without being held.
 const LARGE: u64 = 256 << 20;
@@ -90,7 +88,7 @@ async fn a_build_is_published(server: &Server) {
         chunk: 97,
         ..Script::default()
     });
-    let executor = KubeExecutor::new(config(), Arc::clone(&cluster), AGENT_IMAGE.to_string());
+    let executor = KubeExecutor::new(config(), Arc::clone(&cluster));
 
     let options = SpecOptions {
         cpus: None,

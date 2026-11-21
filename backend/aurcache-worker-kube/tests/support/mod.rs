@@ -21,7 +21,7 @@ use aurcache_worker_container::input::Packed;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
 use aurcache_worker_kube::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin, Sweep};
-use aurcache_worker_kube::config::{AgentImage, Config, PodExtras, Tunables};
+use aurcache_worker_kube::config::{Config, PodExtras, Tunables};
 use aurcache_worker_kube::executor::{Build, KubeExecutor};
 use aurcache_worker_kube::transfer::Uploads;
 use futures::FutureExt;
@@ -1109,7 +1109,7 @@ pub fn config() -> Config {
         dispatcher: DISPATCHER.to_string(),
         builder_image: "registry.example/builder:latest".to_string(),
         pull_policy: "Always".to_string(),
-        agent_image: AgentImage::Given(AGENT_IMAGE.to_string()),
+        agent_image: AGENT_IMAGE.to_string(),
         credential: None,
         user_namespaces: false,
         extras: PodExtras::default(),
@@ -1204,7 +1204,7 @@ impl Rig {
     pub fn configured(script: Script, sink: Sink, cfg: Config) -> Self {
         let cluster = FakeCluster::new(script);
         Self {
-            executor: KubeExecutor::new(cfg, Arc::clone(&cluster), AGENT_IMAGE.to_string()),
+            executor: KubeExecutor::new(cfg, Arc::clone(&cluster)),
             cluster,
             sink,
             ssh: None,
