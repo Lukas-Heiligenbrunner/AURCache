@@ -457,6 +457,11 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
     // that is still the package on screen: never with one package's draft
     // under another's name.
     let mut editing = use_signal(|| None::<String>);
+    // A save closes the dialog before the package is fetched again, and until
+    // that fetch lands `flags` is still the list from before. What the server
+    // took stands in for it meanwhile, for the chips and for a dialog opened
+    // again at once alike.
+    let mut accepted = use_signal(|| None::<Accepted>);
     // Leaving that package forgets it, so coming back finds the dialog
     // closed, however it was left: a save cut short included. The check
     // below hides the dialog in the same render; this runs after it.
@@ -469,6 +474,25 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
             editing.set(None);
         }
     }));
+    // Once `flags` moves on, or the package does, the accepted list is done
+    // with: it is not kept to come back should `flags` return to its old
+    // value later.
+    use_effect(use_reactive(
+        &(pkgbase.clone(), flags.clone()),
+        move |(pkgbase, flags): (String, Vec<String>)| {
+            if accepted
+                .peek()
+                .as_ref()
+                .is_some_and(|accepted| !accepted.stands_in(&pkgbase, &flags))
+            {
+                accepted.set(None);
+            }
+        },
+    ));
+    let shown = match &*accepted.read() {
+        Some(accepted) if accepted.stands_in(&pkgbase, &flags) => accepted.flags.clone(),
+        _ => flags.clone(),
+    };
     let mut edit_button = use_signal(|| None::<Rc<MountedData>>);
     // However the dialog closes, focus goes back to the button that opened it.
     let mut close = move || {
@@ -481,15 +505,16 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
     };
     let open = editing.read().as_deref() == Some(pkgbase.as_str());
     let opening = pkgbase.clone();
+    let saving = pkgbase.clone();
 
     rsx! {
         div { class: "flex gap-2 py-1 text-sm",
             span { class: "opacity-60 w-24 shrink-0", "Flags" }
             div { class: "min-w-0 flex-1 flex flex-wrap items-center gap-1",
-                if flags.is_empty() {
+                if shown.is_empty() {
                     span { class: "opacity-60 text-xs", "makepkg defaults" }
                 } else {
-                    for flag in flags.iter() {
+                    for flag in shown.iter() {
                         span { key: "{flag}", class: "badge badge-outline font-mono text-xs", "{flag}" }
                     }
                 }
@@ -507,14 +532,39 @@ fn BuildFlagsField(pkgbase: String, flags: Vec<String>, on_changed: EventHandler
         if open {
             BuildFlagsDialog {
                 pkgbase,
-                saved: flags,
+                saved: shown,
                 on_close: move |()| close(),
-                on_saved: move |()| {
+                on_saved: move |saved: Vec<String>| {
+                    accepted.set(Some(Accepted {
+                        pkgbase: saving.clone(),
+                        over: flags.clone(),
+                        flags: saved,
+                    }));
                     close();
                     on_changed.call(());
                 },
             }
         }
+    }
+}
+
+/// A list the server took from [`BuildFlagsDialog`], shown in place of the
+/// package's flags as they were when it was saved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Accepted {
+    pkgbase: String,
+    /// The package's flags as the page had them when the save went through.
+    over: Vec<String>,
+    /// The flags saved.
+    flags: Vec<String>,
+}
+
+impl Accepted {
+    /// Whether this is still newer than `flags`, the page's flags for
+    /// `pkgbase`: they are the ones it was saved over. Any others came from
+    /// a fetch made since, and are newer than it.
+    fn stands_in(&self, pkgbase: &str, flags: &[String]) -> bool {
+        self.pkgbase == pkgbase && self.over == flags
     }
 }
 
@@ -528,10 +578,18 @@ fn BuildFlagsDialog(
     saved: Vec<String>,
     /// Dismissed without saving.
     on_close: EventHandler<()>,
-    /// The server took the new list.
-    on_saved: EventHandler<()>,
+    /// The server took this list.
+    on_saved: EventHandler<Vec<String>>,
 ) -> Element {
-    let draft = use_signal(|| Draft::new(&saved));
+    let mut draft = use_signal(|| Draft::new(&saved));
+    // Saved flags that change while the dialog is open, with a refresh say,
+    // are taken in by a draft nobody has edited; an edit is kept as it is.
+    use_effect(use_reactive(&saved, move |saved: Vec<String>| {
+        let fresh = Draft::new(&saved);
+        if !draft.peek().edited() && *draft.peek() != fresh {
+            draft.set(fresh);
+        }
+    }));
     let action = use_action();
     let busy = action.busy();
     let changed = draft.read().differs(&saved);
@@ -541,6 +599,7 @@ fn BuildFlagsDialog(
         move |_| {
             let pkgbase = pkgbase.clone();
             async move {
+                let flags = draft.read().flags();
                 let patch = draft.read().patch();
                 let saved = action
                     .run(async {
@@ -551,7 +610,7 @@ fn BuildFlagsDialog(
                     })
                     .await;
                 if saved.is_some() {
-                    on_saved.call(());
+                    on_saved.call(flags);
                 }
             }
         }
@@ -659,14 +718,19 @@ fn checkbox_id(flag: &str) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Draft {
     ticked: BTreeSet<String>,
+    /// The list it started from, as it would save it.
+    seeded: Vec<String>,
 }
 
 impl Draft {
     /// A draft with the saved flags ticked.
     fn new(saved: &[String]) -> Self {
-        Self {
+        let mut draft = Self {
             ticked: saved.iter().cloned().collect(),
-        }
+            seeded: Vec::new(),
+        };
+        draft.seeded = draft.flags();
+        draft
     }
 
     /// Tick `flag`, or untick it.
@@ -705,11 +769,16 @@ impl Draft {
     fn differs(&self, saved: &[String]) -> bool {
         self.flags() != saved
     }
+
+    /// Whether it would save something other than the list it started from.
+    fn edited(&self) -> bool {
+        self.differs(&self.seeded)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildFlagsDialog, BuildFlagsField, Draft, OFFERED};
+    use super::{Accepted, BuildFlagsDialog, BuildFlagsField, Draft, OFFERED};
     use dioxus::prelude::*;
 
     fn flags(list: &[&str]) -> Vec<String> {
@@ -778,6 +847,55 @@ mod tests {
         assert!(draft.flags().is_empty());
     }
 
+    /// An edit is what keeps a draft from following the saved flags, and
+    /// undoing it is no edit.
+    #[test]
+    fn a_draft_is_edited_only_while_it_would_save_something_new() {
+        let mut draft = Draft::new(&flags(&["--nocheck"]));
+        assert!(!draft.edited());
+
+        draft.set("--holdver", true);
+        assert!(draft.edited());
+
+        draft.set("--holdver", false);
+        assert!(!draft.edited(), "ticked and unticked again");
+    }
+
+    /// A stored flag that is no longer offered is not an edit: the draft has
+    /// never held it.
+    #[test]
+    fn a_fresh_draft_over_an_unoffered_flag_is_not_edited() {
+        assert!(!Draft::new(&flags(&["--bogus", "--holdver"])).edited());
+    }
+
+    fn accepted() -> Accepted {
+        Accepted {
+            pkgbase: "hello".to_string(),
+            over: flags(&[]),
+            flags: flags(&["--holdver"]),
+        }
+    }
+
+    /// Until the package is fetched again, the page still has the flags the
+    /// save replaced, and the saved list is shown instead of them.
+    #[test]
+    fn a_saved_list_stands_in_for_the_flags_it_replaced() {
+        assert!(accepted().stands_in("hello", &flags(&[])));
+    }
+
+    /// The fetch after the save brings the saved list, and from then on the
+    /// page's flags are the newer: whatever they are, another change included.
+    #[test]
+    fn a_saved_list_gives_way_to_any_flags_fetched_since() {
+        assert!(!accepted().stands_in("hello", &flags(&["--holdver"])));
+        assert!(!accepted().stands_in("hello", &flags(&["--nocheck"])));
+    }
+
+    #[test]
+    fn a_saved_list_stands_in_only_for_its_own_package() {
+        assert!(!accepted().stands_in("yay", &flags(&[])));
+    }
+
     #[component]
     fn Dialog(saved: Vec<String>) -> Element {
         rsx! {
@@ -785,7 +903,7 @@ mod tests {
                 pkgbase: "hello",
                 saved,
                 on_close: move |()| {},
-                on_saved: move |()| {},
+                on_saved: move |_| {},
             }
         }
     }
