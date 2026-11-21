@@ -125,8 +125,6 @@ mod tests {
             "WORKER_KUBE_BUILDER_IMAGE",
             "WORKER_KUBE_IMAGE_PULL_POLICY",
             "WORKER_KUBE_AGENT_IMAGE",
-            "WORKER_KUBE_POD_NAME",
-            "WORKER_KUBE_POD_NAMESPACE",
             "WORKER_GIT_SSH_KEY",
             "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_KUBE_USER_NAMESPACES",

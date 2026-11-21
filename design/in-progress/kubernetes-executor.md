@@ -592,11 +592,9 @@ Notes on the choices:
   `stage` init container. The builder image is then the stock
   `aurcache-builder-v2`, untouched, and the agent is always the dispatcher's
   own: the manifests name it in `WORKER_KUBE_AGENT_IMAGE`, kept equal to the
-  dispatcher's image by the kustomization. The dispatcher can read it from
-  its own pod's status instead, by digest (`WORKER_KUBE_POD_NAME` and
-  `WORKER_KUBE_POD_NAMESPACE`, from the downward API), but that takes `get`
-  on the pods of its namespace, the server's among them, so the manifests do
-  not grant it. The
+  dispatcher's image by the kustomization, and the dispatcher does not start
+  without it. Reading it from the dispatcher's own pod instead would take
+  `get` on the pods of its namespace, the server's among them. The
   agent refuses a job written for another interface number, so a mismatch is
   an error message and not a misread field.
 - **The builder image's `sudo` grants are inert** under
@@ -1391,12 +1389,10 @@ for each advertised architecture (it needs `list` on nodes, a ClusterRole).
   user namespace is unverified.
 - **One node, one architecture.** Nothing has run on a cluster with several
   nodes, where the agent image is pulled per node, or on arm.
-- **The agent image is named, not read.** The manifests set
-  `WORKER_KUBE_AGENT_IMAGE` to the dispatcher's own image and grant no role
-  in the dispatcher's namespace: reading its own pod took `get` on every pod
-  there, the server's included. Reading it is still possible
-  (`WORKER_KUBE_POD_NAME`), by digest, and that path has unit tests only.
-  With a tag that moves, the agent a node pulls may be another build than the
+- **The agent image is named, not read.** `WORKER_KUBE_AGENT_IMAGE` is
+  required, the manifests set it to the dispatcher's own image, and they
+  grant no role in the dispatcher's namespace: reading its own pod would take
+  `get` on every pod there, the server's included. With a tag that moves, the agent a node pulls may be another build than the
   dispatcher; the interface number is what keeps the two honest.
 - CI has run none of this: the `buildAgentTest` job, the kube-worker image's
   publishing step and the `e2e-kube.yml` workflow are new.

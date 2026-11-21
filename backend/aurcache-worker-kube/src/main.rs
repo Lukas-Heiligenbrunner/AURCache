@@ -1,22 +1,21 @@
 //! `aurcache-worker-kube`: the Kubernetes worker's dispatcher.
 //!
 //! Enrolls and claims jobs like every worker, and builds each one in a pod of
-//! its own. In order: the configuration, the cluster, the image build pods
-//! take the agent from, the pods a previous run left, enrollment, and the
-//! runner.
+//! its own. In order: the configuration, the cluster, the pods a previous
+//! run left, enrollment, and the runner.
 //!
 //! Told to stop (SIGTERM, SIGINT), it claims nothing more, stops the builds
 //! it holds, reports each to the server as interrupted, and deletes whatever
 //! pod of its own is left. Told twice, it stops at once.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use aurcache_worker_core::enroll;
 use aurcache_worker_core::executor::Executor;
 use aurcache_worker_core::identity::Identity;
 use aurcache_worker_core::runner::Runner;
 use aurcache_worker_core::shutdown::{self, StopSignals, WoundDown};
 use aurcache_worker_kube::cluster::Cluster;
-use aurcache_worker_kube::config::{self, AgentImage, Config};
+use aurcache_worker_kube::config::{self, Config};
 use aurcache_worker_kube::executor::{self, KubeExecutor};
 use aurcache_worker_kube::kube_cluster::KubeCluster;
 use std::sync::Arc;
@@ -85,10 +84,10 @@ async fn start() -> Result<Started> {
     }
 
     let cluster = Arc::new(KubeCluster::connect(&cfg.namespace, &cfg.dispatcher).await?);
-    let agent_image = agent_image(&cluster, &cfg).await?;
     tracing::info!(
-        "Build pods go to namespace {} and take the build agent from {agent_image}",
-        cfg.namespace
+        "Build pods go to namespace {} and take the build agent from {}",
+        cfg.namespace,
+        cfg.agent_image
     );
     if !cfg.user_namespaces {
         tracing::warn!(
@@ -97,7 +96,7 @@ async fn start() -> Result<Started> {
         );
     }
 
-    let executor = KubeExecutor::new(cfg.clone(), Arc::clone(&cluster), agent_image.clone());
+    let executor = KubeExecutor::new(cfg, Arc::clone(&cluster));
     // Before enrolling: the first heartbeat gives up every build a previous
     // run held, and their pods are nobody's from then on.
     executor.sweep().await?;
@@ -116,17 +115,4 @@ async fn leave<C: Cluster>(cluster: &C) -> Result<()> {
         tracing::info!("Deleted {left} pod(s) still there as this worker stopped");
     }
     Ok(())
-}
-
-/// The image the `stage` and `hold` containers run: the one named, or the
-/// one this dispatcher's own pod runs, by digest, so the agent in a build pod
-/// is this worker's own build.
-async fn agent_image(cluster: &KubeCluster, cfg: &Config) -> Result<String> {
-    match &cfg.agent_image {
-        AgentImage::Given(image) => Ok(image.clone()),
-        AgentImage::OwnPod { namespace, name } => cluster
-            .image_of(namespace, name)
-            .await
-            .context("finding the image this worker's own pod runs, for the build agent"),
-    }
 }
