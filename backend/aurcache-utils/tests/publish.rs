@@ -359,6 +359,30 @@ async fn a_wrong_named_artifact_fails_the_build() {
     assert!(listed(tmp.path()).is_empty());
 }
 
+/// A file named for this package but holding another is refused too: the
+/// `repo.db` entry would be made from what it holds.
+#[tokio::test]
+async fn an_artifact_holding_another_package_fails_the_build() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    let dir = repo.staging_dir(1);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(filename("hello", "1.0-1")),
+        fake_pkg_zst("openssh", "1.0-1"),
+    )
+    .unwrap();
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    assert!(Files::find().all(&db).await.unwrap().is_empty());
+    assert!(listed(tmp.path()).is_empty());
+}
+
 /// A restart mid-publish leaves the build `PUBLISHING` with its upload staged;
 /// publishing it again from there completes it.
 #[tokio::test]

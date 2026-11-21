@@ -198,6 +198,11 @@ mod tests {
             sha256sum: String::new(),
             desc: format!("%FILENAME%\n{filename}\n"),
             files: "%FILES%\nusr/bin/x".to_string(),
+            meta: crate::PackageMeta {
+                pkgname: dir_name.to_string(),
+                version: String::new(),
+                arch: None,
+            },
         }
     }
 
@@ -357,6 +362,7 @@ mod tests {
                 "%FILENAME%\nfoo-1.0-1-x86_64.pkg.tar.zst\n\n%SHA256SUM%\nabc\n\n%PGPSIG%\nc2ln\n\n"
                     .to_string(),
             files: "%FILES%\nusr/bin/foo".to_string(),
+            meta: entry("foo-1.0-1-x86_64.pkg.tar.zst", "foo-1.0-1").meta,
         };
         update(
             tmp.path(),
