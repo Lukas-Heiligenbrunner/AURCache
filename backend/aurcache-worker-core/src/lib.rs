@@ -30,6 +30,7 @@ pub mod report;
 pub mod runner;
 /// What a worker declares it can be configured with, and how it resolves one.
 pub mod settings;
+pub mod shutdown;
 
 /// Log to stderr at `info`, or what `RUST_LOG` asks for: every worker binary's
 /// first step.
