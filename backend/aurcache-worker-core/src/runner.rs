@@ -3,6 +3,10 @@
 //! server becomes unreachable for longer than the lease TTL, in-flight builds
 //! self-abort (the server will have abandoned them and queued fresh ones).
 //!
+//! A worker that is told to stop ([`Runner::stop`]) claims nothing more, stops
+//! the builds it holds and reports each as interrupted, so the server queues
+//! them again at once instead of waiting out their leases.
+//!
 //! The heartbeat is also how values set on the server reach the worker: its
 //! answer carries a snapshot whenever the worker does not hold the current one,
 //! and the worker takes it in without restarting -- see [`Runner::apply`].
@@ -52,6 +56,22 @@ impl Routing {
     }
 }
 
+/// How often a worker that is stopping looks whether its builds are reported.
+const DRAIN_POLL: Duration = Duration::from_millis(100);
+
+/// The report of a build that ended while its worker was stopping.
+///
+/// A build that the worker stopped for that reason reads as cancelled, though
+/// nobody cancelled it. Reported as interrupted, it is queued again. Any other
+/// ending is the build's own and stands.
+fn wound_down(report: CompleteReport) -> CompleteReport {
+    if report.outcome == BuildOutcome::Canceled {
+        report::interrupted("the worker was stopped while the build ran")
+    } else {
+        report
+    }
+}
+
 /// Shared runtime state for the worker loop.
 pub struct Runner<E: Executor> {
     /// The configuration in force: a loop iteration or a job works with one
@@ -84,6 +104,9 @@ pub struct Runner<E: Executor> {
     /// so a delivery that changes them is followed by registering again -- and
     /// one that fails is retried on the next heartbeat rather than forgotten.
     registered: Mutex<Routing>,
+    /// Tripped by [`Runner::stop`]. Every build's own token is a child of
+    /// this one, so a build claimed while it trips is stopped like the rest.
+    stopping: CancellationToken,
 }
 
 /// A mirrorlist the server sent, kept for the jobs it withholds it from.
@@ -185,6 +208,7 @@ impl<E: Executor> Runner<E> {
             last_contact: AtomicU64::new(now_secs()),
             mirrorlists: Mutex::new(BTreeMap::new()),
             reported_config: Mutex::new(None),
+            stopping: CancellationToken::new(),
         })
     }
 
@@ -202,7 +226,31 @@ impl<E: Executor> Runner<E> {
         Duration::from_secs(now_secs().saturating_sub(self.last_contact.load(Ordering::Relaxed)))
     }
 
-    /// Run forever: heartbeat in the background, claim + build in the foreground.
+    /// Wind the worker down: [`run`](Self::run) claims nothing more, every
+    /// build it holds is stopped and reported as interrupted, and it returns
+    /// once the last of them has been reported.
+    pub fn stop(&self) {
+        self.stopping.cancel();
+    }
+
+    /// Wait `pause` before the next claim, or less when the worker is told
+    /// to stop.
+    async fn idle(&self, pause: Duration) {
+        tokio::select! {
+            () = tokio::time::sleep(pause) => {}
+            () = self.stopping.cancelled() => {}
+        }
+    }
+
+    /// Resolves once no build is held. Only meaningful once nothing claims.
+    async fn drained(&self) {
+        while !self.active.lock().await.is_empty() {
+            tokio::time::sleep(DRAIN_POLL).await;
+        }
+    }
+
+    /// Run until [`stop`](Self::stop): heartbeat in the background, claim +
+    /// build in the foreground.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         // One heartbeat before the first claim, so a worker that has just
         // started runs its server-set values from its first build rather than
@@ -212,7 +260,7 @@ impl<E: Executor> Runner<E> {
         self.beat().await;
 
         let hb = Arc::clone(&self);
-        tokio::spawn(async move { hb.heartbeat_loop().await });
+        let heartbeat = tokio::spawn(async move { hb.heartbeat_loop().await });
 
         let cfg = self.cfg();
         tracing::info!(
@@ -223,9 +271,12 @@ impl<E: Executor> Runner<E> {
             self.executor.describe_self()
         );
 
-        loop {
+        while !self.stopping.is_cancelled() {
             // A place before claiming so we never hold a job we can't run.
-            let permit = self.gate.acquire().await;
+            let permit = tokio::select! {
+                permit = self.gate.acquire() => permit,
+                () = self.stopping.cancelled() => break,
+            };
             // After the wait, not before: the wait can outlast a delivery.
             let cfg = self.cfg();
 
@@ -235,8 +286,14 @@ impl<E: Executor> Runner<E> {
             let claimed = self.active.lock().await.len();
             if !self.executor.ready_for_work(claimed).await {
                 drop(permit);
-                tokio::time::sleep(cfg.tunables.poll_interval).await;
+                self.idle(cfg.tunables.poll_interval).await;
                 continue;
+            }
+            // The readiness check can take a while, and a job claimed once
+            // the worker is stopping would only be handed straight back,
+            // having cost the build an attempt.
+            if self.stopping.is_cancelled() {
+                break;
             }
 
             let claim = ClaimRequest {
@@ -248,7 +305,7 @@ impl<E: Executor> Runner<E> {
                     let claimed = ClaimedJob {
                         mirrorlist: self.job_mirrorlist(&cfg, &job).await,
                         timeout: Timeout::for_job(cfg.tunables.build_timeout, &job),
-                        cancel: CancellationToken::new(),
+                        cancel: self.stopping.child_token(),
                         job,
                     };
                     // Counted here rather than in the task: the next
@@ -267,15 +324,20 @@ impl<E: Executor> Runner<E> {
                 Ok(None) => {
                     self.mark_contact();
                     drop(permit);
-                    tokio::time::sleep(cfg.tunables.poll_interval).await;
+                    self.idle(cfg.tunables.poll_interval).await;
                 }
                 Err(e) => {
                     tracing::warn!("claim failed: {e}");
                     drop(permit);
-                    tokio::time::sleep(cfg.tunables.poll_interval).await;
+                    self.idle(cfg.tunables.poll_interval).await;
                 }
             }
         }
+        // The heartbeat goes on meanwhile: a build stopped here is still
+        // this worker's until its report is in.
+        self.drained().await;
+        heartbeat.abort();
+        Ok(())
     }
 
     /// What to tell the server about mirrorlists on the next claim.
@@ -311,6 +373,30 @@ impl<E: Executor> Runner<E> {
     /// Execute a single job with panic-safe, always-emitted completion.
     async fn run_one(self: &Arc<Self>, claimed: ClaimedJob) {
         let build_id = claimed.job.build_id;
+        // A claim answered once the worker had begun to stop is handed back
+        // before anything is fetched or started for it.
+        let report = if self.stopping.is_cancelled() {
+            tracing::info!(
+                "Handing {} back: the worker is stopping",
+                report::describe(&claimed.job)
+            );
+            report::interrupted("the worker was stopped before the build started")
+        } else {
+            self.execute(claimed).await
+        };
+        let report = if self.stopping.is_cancelled() {
+            wound_down(report)
+        } else {
+            report
+        };
+
+        self.report_completion(build_id, &report).await;
+        self.active.lock().await.remove(&build_id);
+    }
+
+    /// Run a job on the executor: its report, or one made of how it failed.
+    async fn execute(self: &Arc<Self>, claimed: ClaimedJob) -> CompleteReport {
+        let build_id = claimed.job.build_id;
         tracing::info!("Building {}", report::describe(&claimed.job));
 
         // Panic-wrap so a task panic still yields a terminal completion.
@@ -318,7 +404,7 @@ impl<E: Executor> Runner<E> {
         let client = Arc::clone(&self.client);
         let result = tokio::spawn(async move { executor.run_job(client, claimed).await }).await;
 
-        let report = match result {
+        match result {
             Ok(Ok(report)) => report,
             Ok(Err(e)) => {
                 let report = report::from_error(&e);
@@ -327,10 +413,7 @@ impl<E: Executor> Runner<E> {
                 report
             }
             Err(e) => report::interrupted(format!("worker task panicked: {e}")),
-        };
-
-        self.report_completion(build_id, &report).await;
-        self.active.lock().await.remove(&build_id);
+        }
     }
 
     /// Send the terminal completion, retrying briefly so a transient network
@@ -529,8 +612,10 @@ impl<E: Executor> Runner<E> {
 
 #[cfg(test)]
 mod completion_tests {
-    use super::{COMPLETION_ATTEMPTS, Next, after_failure};
+    use super::{COMPLETION_ATTEMPTS, Next, after_failure, wound_down};
     use crate::client::Refused;
+    use crate::report;
+    use aurcache_common::worker::BuildOutcome;
     use reqwest::StatusCode;
     use std::time::Duration;
 
@@ -569,6 +654,25 @@ mod completion_tests {
             after_failure(&refused(StatusCode::INTERNAL_SERVER_ERROR), 2),
             Next::Retry(Duration::from_secs(4))
         );
+    }
+
+    /// A build stopped because its worker is going away is the worker's to
+    /// answer for, so it is queued again; one that ended by itself in the
+    /// meantime keeps its own ending.
+    #[test]
+    fn a_build_stopped_by_a_stopping_worker_is_interrupted() {
+        let stopped = wound_down(report::canceled());
+        assert_eq!(stopped.outcome, BuildOutcome::Interrupted);
+        assert_eq!(
+            stopped.reason.as_deref(),
+            Some("the worker was stopped while the build ran")
+        );
+        assert_eq!(
+            wound_down(report::success()).outcome,
+            BuildOutcome::Succeeded
+        );
+        let failed = report::ended(None, Duration::from_secs(1), report::Exit::Code(2));
+        assert_eq!(wound_down(failed).outcome, BuildOutcome::Failed);
     }
 
     /// No sleep after the last attempt: nothing comes after it.
