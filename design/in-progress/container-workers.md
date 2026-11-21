@@ -425,6 +425,8 @@ What an operator sees change:
   the helper installs dependencies and nothing else, and the container is
   discarded when the build ends, so the worker leaves both out of what
   makepkg is given rather than let it build and then fail at them.
+- **The worker stops its builds when it is told to stop**, and reports them
+  as interrupted, so the server queues them again at once.
 - **The worker names its containers and build directories after itself**,
   so that two instances can share a daemon and a build directory.
 - **A custom builder image** needs pacman, makepkg, gpg and `find`, and no longer
