@@ -360,6 +360,7 @@ mod tests {
             credential: None,
             user_namespaces: false,
             extras: PodExtras::default(),
+            network_probe: true,
             tunables: Tunables {
                 memory: None,
                 cpus: None,

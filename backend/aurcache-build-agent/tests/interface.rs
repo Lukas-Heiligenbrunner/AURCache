@@ -16,7 +16,7 @@
 //! a new interface. A fixture already committed is never rewritten to make
 //! this pass: that is the break it exists to catch.
 
-use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, SetupStep};
+use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, Reach, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use aurcache_common::worker::JobVcsSource;
 use serde::Serialize;
@@ -181,6 +181,23 @@ fn build_report() {
 #[test]
 fn handback() {
     check("handback", &handbacks());
+}
+
+#[test]
+fn reach() {
+    check(
+        "reach",
+        &[
+            Reach {
+                target: "aurcache.aurcache.svc:8083".to_string(),
+                reachable: false,
+            },
+            Reach {
+                target: "169.254.169.254:80".to_string(),
+                reachable: true,
+            },
+        ],
+    );
 }
 
 /// A worker of a later build may add an optional field the agent does not

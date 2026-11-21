@@ -924,10 +924,22 @@ impl Status {
 }
 
 /// Whether `pod`, one of this dispatcher's, is nobody's: a build's that no
-/// build in `held` is. A pod already being deleted is left to that.
+/// build in `held` is, or one of no build (the NetworkPolicy check's) that
+/// has ended. A pod already being deleted is left to that.
 fn orphaned(pod: &Pod, held: &HashSet<i32>) -> bool {
-    pod.metadata.deletion_timestamp.is_none()
-        && pod::build_id(pod).is_some_and(|build_id| !held.contains(&build_id))
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    match pod::build_id(pod) {
+        Some(build_id) => !held.contains(&build_id),
+        None => {
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref());
+            matches!(phase, Some("Succeeded" | "Failed"))
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1074,6 +1086,7 @@ mod tests {
             credential,
             user_namespaces: false,
             extras: PodExtras::default(),
+            network_probe: false,
             tunables: Tunables {
                 memory: Some(4 << 30),
                 cpus: Some(2.5),

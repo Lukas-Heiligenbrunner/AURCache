@@ -1,6 +1,6 @@
 //! What the agent hands back: how the build ended and what it measured, and,
 //! for a worker that reaches the container only through `exec`, the packages
-//! it left.
+//! it left and what a reachability probe found.
 //!
 //! Within one [`INTERFACE`](crate::spec::INTERFACE) these types only gain
 //! optional fields; anything else is the next interface.
@@ -69,4 +69,11 @@ pub struct Handback {
 pub struct Artifact {
     pub name: String,
     pub size: u64,
+}
+
+/// One line of what `probe` prints.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reach {
+    pub target: String,
+    pub reachable: bool,
 }
