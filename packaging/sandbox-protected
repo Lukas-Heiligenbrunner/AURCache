@@ -16,6 +16,13 @@
 /var/lib/aurcache-worker/ssh
 /var/lib/aurcache-worker/secrets
 
+# The ssh-agent holding that key. Its socket belongs to the build user, as
+# every build does, so file permissions cannot keep one build from it; this
+# entry can. Where the kernel's Landlock restricts connecting to UNIX sockets
+# (ABI 9), a build may connect to nothing beneath a protected path, and a build
+# offered the key is granted the agent's socket alone.
+/var/lib/aurcache-worker/agent
+
 # The worker's mTLS identity. Stealing it allows impersonating this worker to
 # the server, so it is protected here as well as by file ownership.
 #

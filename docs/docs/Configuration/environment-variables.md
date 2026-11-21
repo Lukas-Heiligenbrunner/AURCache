@@ -51,6 +51,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | RETIRED_PACKAGE_GRACE  | Duration      | How long a package file stays downloadable after a newer build or a removal takes it out of the repository database (`1d`, `12h`, or seconds), so clients that synced just before can still fetch it | `1d` |
 | ACTIVITY_RETENTION     | Duration      | How long an entry stays in the **Logs** page (`90d`, `4w`, or seconds). `0` keeps everything | `90d` |
 | PARSE_NETWORK          | Boolean       | Let a PKGBUILD reach the network while the server parses it; also a setting, global | false |
+| BUILD_SSH_KEY          | String        | Name of the worker-held SSH key builds use: `default` is the worker's own key, any other a key the worker holds in `WORKER_GIT_SSH_KEYS`. Empty sets nothing: the global setting applies, or `default` when none is stored. A value that is no key name reads as `default`, with a warning in the log. Also a setting, per package or global; see [Build credentials](../workers/credentials.md) | `default` |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
 | AURCACHE_REPO_NAME     | String        | Pacman section and database filename prefix; see [Repository name](#repository-name) | `repo` |
 | AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081`. One that names no port means `AURCACHE_REPO_PORT` | `http://localhost:<AURCACHE_REPO_PORT>` |

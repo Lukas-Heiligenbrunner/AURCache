@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 use aurcache_common::worker::BuildOutcome;
+use aurcache_worker_core::ssh_key::SshKeys;
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build;
@@ -28,7 +29,8 @@ pub async fn build_once(cfg: &Config, path: &Path, flags: &[String]) -> Result<(
     // repositories are the right ones. `makepkg.conf` is still left to the
     // chroot's own, matching what a served build gets.
     let pacman_conf = existing("/etc/pacman.conf")?;
-    let shared = Shared::new(cfg);
+    // No key: a local build starts no agent.
+    let shared = Shared::new(cfg, SshKeys::default(), None);
     let chroots = &shared.chroots;
     chroots.open().await?;
     chroots

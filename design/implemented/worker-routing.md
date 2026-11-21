@@ -346,6 +346,174 @@ A generic `WORKER_BIND_MOUNTS=host:chroot,…` appending extra `-d` pairs (or `-
 for read-only, where the installed devtools supports it) covers the same need for
 credentials that are not SSH — a `.netrc`, an API token, a licence file.
 
+### Which key a build is offered
+
+Every build is offered the worker's default key unless its package names
+another. The server decides which name; the worker maps the name to a key it
+holds.
+
+**The server names the key: `build_ssh_key`.** A package setting
+(`BUILD_SSH_KEY` in the environment, a global value, a per-package override,
+resolved `Package -> Env -> Global -> Default` like the others) whose value is
+the *name* of a worker-held key. Its built-in default is `default`, the key
+`WORKER_GIT_SSH_KEY` names or the one the worker generates, so a build gets the
+key it got before the setting existed. There is no "none": an empty value, at
+any level, says nothing and is passed over, so the value comes from the next
+level down (`Setting::empty_inherits`).
+
+The job carries the name in an optional field, `JobDescriptor::ssh_key:
+Option<String>`:
+
+| On the wire | Means | The worker |
+|---|---|---|
+| no `ssh_key` | the default key | offers `default` if it holds it, silently if not |
+| `"ssh_key": "epic"` | that key | offers it if it holds it, and says so in the build log if not |
+
+The server leaves the field out for `default`, which is also what a server that
+names no keys sends, and sends any other name. That is what lets a worker
+without a default key (one whose agent did not start) build quietly: only a
+name a package set on purpose earns a line in the build log when it is
+missing. There is no "no key" on the wire, as there is none in the setting.
+Protocol 1 gains only this optional field, with a fixture of its own; the
+committed fixtures, which lack it, still decode, as "absent".
+
+A name is an abstract label, `[a-z0-9][a-z0-9_-]{0,63}`
+(`aurcache_common::ssh_key::validate_name`), checked when the setting is
+stored and again by the worker before any lookup. It is never a path: the
+worker maps it to a key through its own configuration alone, and opens
+nothing derived from what the server sent. The key itself never travels.
+
+**The worker holds the keys: `WORKER_GIT_SSH_KEYS`.** Beside the default key,
+`name:path` pairs, comma separated, in the worker's own environment and among
+the variables it must never declare (`settings.rs`), like
+`WORKER_GIT_SSH_KEY`. An entry whose name is no name, is `default`, repeats an
+earlier one or has no path is dropped with a warning. Keeping a package that
+names a key on the worker that holds it is `WORKER_PACKAGES`' job: a worker
+that does not hold the key builds it without one.
+
+**One agent per key.** Each key is loaded into an ssh-agent of its own, its
+socket in `<data_dir>/agent/<name>/`. A build is handed one socket, and only
+that directory is bound into its chroot, so it can use the key it was offered
+and no other, through neither the same agent nor the same mount.
+
+**The decision is shared by every executor.** `aurcache_worker_core::ssh_key`
+holds `SshKeys<K>` (the worker's keys by name, `K` being whatever the executor
+hands a build -- an agent's socket here) and `offer(job, &keys) -> SshOffer`:
+`Offered { name, key }`, `NotHeld { name }` for a name the worker does not
+hold, or `NoKey` for the default on a worker that holds none. An offer and a missing named key each have their own line in
+the build log, written before anything is prepared.
+
+A name the worker does not hold builds without a key. Most builds of a package
+never use the key it names, so failing them for its absence would fail builds
+that need nothing; the one that does need it fails at its fetch, with the line
+saying why above the failure.
+
+The chroot worker withholds every agent but the one offered: no
+`SSH_AUTH_SOCK` export in its `makepkg.conf` for any other, no mount of any
+other agent's directory, no `SSH_AUTH_SOCK` inherited from the worker's
+environment. Its keys are the agents it started, whose sockets `main` hands the
+executor; no socket is published in the worker's own environment, so an
+`SSH_AUTH_SOCK` the worker inherited is never offered.
+
+**Outside the chroot: the sandbox's socket rule.** Inside its chroot, a
+build never sees an agent it is not offered. Outside it, the PKGBUILD code
+`makechrootpkg` runs on the worker -- sourcing the PKGBUILD,
+`makepkg --verifysource` -- runs as the same build user the agents belong to.
+They have to: OpenSSH's ssh-agent serves only its own uid (and root), and the
+build inside the chroot is that uid. So no file permission tells one build
+from another, and a socket's path is no secret either: it is fixed, and
+`/proc/<pid>/environ` shows `SSH_AUTH_SOCK` to every process of the uid.
+
+What does tell them apart is the sandbox both host-side sites already run
+under. Where the kernel's Landlock has `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (ABI
+9, Linux 7.1), `aurcache-sandbox` handles that right and grants it where it
+grants reads: everywhere but the protected paths in
+`/etc/aurcache/sandbox-protected`, which name the agents' directory. The walk
+that keeps secrets unreadable keeps every agent's socket unreachable, while
+the sockets legitimate steps use -- nss-resolve's and nscd's under `/run`, a
+gpg-agent started inside the build -- stay reachable, without enumerating
+them. A build offered a key carries `SSH_AUTH_SOCK` into the sandbox, set by
+the worker before any PKGBUILD code runs (`makechrootpkg` preserves it through
+`sudo`); the sandbox grants that one socket, and only if it is a socket. The
+rule holds for the processes the sandbox starts (git, ssh), and while other
+builds use the agents: the refusal is per Landlock domain, not per path.
+
+On an older kernel the sandbox does not handle the right, so its ruleset stays
+fully enforced and sockets stay unrestricted there; a policy file that does not
+name the agents' directory (a custom `WORKER_DATA_DIR`) leaves the same gap,
+and so does an `aurcache-sandbox` too old to have the rule at all. Any build
+could then reach every agent from its PKGBUILD code, and a key only some
+packages may use would be within reach of all of them. So the worker holds no
+named key there, and says why at startup (`agent::host_side_gate`). It judges
+none of this itself, but asks the sandbox:
+`aurcache-sandbox --capabilities --agent-dir <data dir>/agent`, run as the
+build user. That is through `sudo` when the worker is someone else, where
+sudo's `PATH` finds the copy `makechrootpkg` runs, and directly when the
+worker already is the build user, where the worker's own `PATH` does. The
+sandbox answers from the checks a build makes, with that user's rights:
+`resolve-unix` only when this kernel's Landlock has the right and the policy
+file could be read, protects something, and protects that directory where it
+really is (a directory spelled beneath a protected one, through a symlink or
+`..`, may be anywhere); otherwise `no-resolve-unix: ` and which of those
+failed, which the worker logs. The worker creates the directory before it
+asks, and asks again before each build while it holds named keys: a policy
+edited or a sandbox replaced under it changes the answer. On the first answer
+that is not `resolve-unix`, or a question that fails, the worker stops the
+named keys' agents (`agent::NamedKeysGate` owns them), which removes their
+sockets, and logs why once: withholding a key only from the build that names
+it would leave every other build's PKGBUILD code able to reach its agent by
+path. It holds no named key again until it restarts, and a build whose
+package names one goes ahead without it. Reading the policy as the build user is the point: a policy at
+`0600 root` reads as missing to that user, and a check made with the
+worker's rights would pass while the sandbox saw no policy at all. The
+sandbox also refuses a build outright whenever its policy file exists but
+cannot be read, so such a policy cannot leave builds unconfined, the other
+protected secrets included. The directory is an argument because the
+worker's data directory is its own configuration, which the sandbox, reached
+through `sudo` with the worker's environment gone, never sees. A sandbox from
+before the question refuses it as a usage error, which reads as not having
+the rule. The worker keeps its default key, which every build may have
+anyway. This follows how a
+build limit the machine's own environment sets is treated when the machine
+cannot enforce it, where builds are refused rather than run without it; here
+only the named keys are refused, and builds that name them go ahead without.
+
+`scripts/test-sandbox.sh` holds it to that: under the shipped policy, with two
+agents running, the hostile fixture reaches both by their fixed paths when
+unconfined, is refused both (`EACCES`) when confined and offered none -- while
+another process is using one -- and, offered the default key, reaches its
+agent and is refused the other. With the policy at `0600 root`, the sandbox,
+asked as the build user, answers `no-resolve-unix: bad policy`, and a
+build offered the default key is refused before any of its code runs.
+
+**What it guarantees.** A private key never leaves the worker, and builds only
+get an agent that signs SSH logins. A build reaches no agent but the one it is
+offered: not in its chroot, and, where the worker holds named keys at all, not
+from its PKGBUILD code outside the chroot. **What it does not.** While a build
+runs, its code can log in with the key it is offered to any host the key can
+reach; with the default key that is every build, which is why private access
+belongs on a named key. An agent is not something a build can steal the key
+from: it does not hand it back, and ptrace from the build user is refused
+(Yama, and ssh-agent marks itself non-dumpable).
+
+Two alternatives were set aside. A build user per concurrent build would let
+file permissions do the work, at the cost of reworking how builds, caches and
+chroots are owned. A mount namespace per build around the host-side steps
+would hide the sockets from all but their own build, at the cost of a
+privileged `unshare` in the patched `makechrootpkg`. The socket rule needs
+neither.
+
+A worker that does not read `ssh_key` offers its default key to every build,
+as it did before the field existed.
+
+**Routing by key, later.** Workers could advertise the names they hold in an
+optional `RegisterRequest` field, which older servers ignore, and the server
+could hand a job naming key X only to workers that hold X, the way affinity
+already narrows who may claim a job; until then `WORKER_PACKAGES` does it. A
+worker could report each name's public-key fingerprint there as well, so the
+UI shows which key a name is. None of these change a message a peer already
+reads.
+
 ### Rejected: a key-management API on the worker
 
 The worker today has **zero inbound network surface** — it is a pure outbound

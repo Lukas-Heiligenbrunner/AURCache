@@ -15,6 +15,7 @@ use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
+use aurcache_worker_core::ssh_key::{self, SshKeys, SshOffer};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -87,7 +88,26 @@ async fn run_job_inner(
     shared: &Shared,
 ) -> Result<CompleteReport> {
     let job = &claimed.job;
-    let prepared = prepare_job(cfg, client, job, claimed.mirrorlist.as_deref(), shared).await?;
+    // Decided before anything is prepared and said first in the build log, so
+    // a fetch that fails for want of a key has the reason above it.
+    // Asked before every build, so the named keys' agents are stopped as soon
+    // as builds stop being kept from them.
+    let named_keys_held = shared.named_keys_held().await;
+    let SshDecision { offer: ssh, notice } = ssh_decision(job, &shared.ssh_keys, named_keys_held);
+    tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
+    if let Some(notice) = notice {
+        log(client, job.build_id, &format!("[worker] {notice}\n")).await;
+    }
+    let ssh_agent = ssh.key().map(PathBuf::as_path);
+    let prepared = prepare_job(
+        cfg,
+        client,
+        job,
+        claimed.mirrorlist.as_deref(),
+        shared,
+        ssh_agent,
+    )
+    .await?;
     if claimed.cancel.is_cancelled() {
         return Ok(report::canceled());
     }
@@ -101,6 +121,7 @@ async fn run_job_inner(
         cgroups,
         dropin: &prepared.dropin,
         pacman: &prepared.pacman,
+        ssh_agent,
         lease: &lease,
         chroots: &shared.chroots,
     };
@@ -113,6 +134,41 @@ async fn run_job_inner(
     discard_failed_tree(client, job, &caches.cache, succeeded).await;
     finish_package_cache(client, job, shared, caches).await;
     outcome
+}
+
+/// What a build is offered of its worker's SSH keys, and the line its log
+/// says so with.
+struct SshDecision<'k> {
+    offer: SshOffer<'k, PathBuf>,
+    notice: Option<String>,
+}
+
+/// What `job`'s build is offered of `keys`: what [`ssh_key::offer`] says, but
+/// no named key unless `named_keys_held`.
+fn ssh_decision<'k>(
+    job: &JobDescriptor,
+    keys: &'k SshKeys<PathBuf>,
+    named_keys_held: bool,
+) -> SshDecision<'k> {
+    let offer = ssh_key::offer(job, keys);
+    match &offer {
+        SshOffer::Offered { name, .. }
+            if !named_keys_held && name != aurcache_common::ssh_key::DEFAULT =>
+        {
+            SshDecision {
+                notice: Some(format!(
+                    "SSH key {name:?} withheld: builds are no longer kept from its agent \
+                     outside their chroot, so this worker has stopped it (the worker's log \
+                     says why); building without one"
+                )),
+                offer: SshOffer::NoKey,
+            }
+        }
+        _ => SshDecision {
+            notice: offer.notice(&job.pkgbase),
+            offer,
+        },
+    }
 }
 
 /// Resources prepared for one job, held until reporting and cache cleanup end.
@@ -152,13 +208,15 @@ struct Ended {
     stop: Option<Stop>,
 }
 
-/// Stage the job's configs and caches and prepare its bind mounts.
+/// Stage the job's configs and caches and prepare its bind mounts, with the
+/// build ssh-agent at `ssh_agent` when the build is offered it.
 async fn prepare_job(
     cfg: &Config,
     client: &Arc<WorkerClient>,
     job: &JobDescriptor,
     mirrorlist: Option<&str>,
     shared: &Shared,
+    ssh_agent: Option<&Path>,
 ) -> Result<PreparedJob> {
     let build_id = job.build_id;
     let workdir = &workdir(cfg, build_id);
@@ -230,21 +288,14 @@ async fn prepare_job(
 
     // 2. Stage build credentials, then write per-package configs + ensure base
     //    chroot. The credential is the agent's, which loaded the key at
-    //    worker start; only `known_hosts` is read per job.
+    //    worker start; only `known_hosts` is read per job. None at all for a
+    //    build that is not offered the key.
     let credential = credentials::stage_for_job(
         cfg.ssh_known_hosts.as_deref(),
         &credentials::known_hosts_dir(&cfg.data_dir),
-        agent_socket().as_deref(),
+        ssh_agent,
     )
     .context("staging build credentials")?;
-    if credential.is_some() {
-        log(
-            client,
-            build_id,
-            "[worker] build ssh credential available\n",
-        )
-        .await;
-    }
 
     let cfg_dir = workdir.join("config");
     // The server sends no `[repo]` section; the worker appends one rendered for
@@ -297,7 +348,16 @@ async fn prepare_job(
         log(client, build_id, &format!("[worker] {msg}\n")).await;
     }
 
-    let binds = prepare_bind_mounts(cfg, client, job, shared, &caches, credential.as_ref()).await;
+    let binds = prepare_bind_mounts(
+        cfg,
+        client,
+        job,
+        shared,
+        &caches,
+        credential.as_ref(),
+        ssh_agent,
+    )
+    .await;
     Ok(PreparedJob {
         caches,
         dropin,
@@ -306,7 +366,8 @@ async fn prepare_job(
     })
 }
 
-/// Plan operator and per-job mounts, reclaiming persistent trees before use.
+/// Plan operator and per-job mounts, reclaiming persistent trees before use,
+/// and the build ssh-agent's directory when the build is offered it.
 /// `credential` is what [`credentials::stage_for_job`] staged for this job.
 async fn prepare_bind_mounts(
     cfg: &Config,
@@ -315,6 +376,7 @@ async fn prepare_bind_mounts(
     shared: &Shared,
     caches: &JobCaches,
     credential: Option<&StagedCredential>,
+    ssh_agent: Option<&Path>,
 ) -> Vec<BindMount> {
     let cache = &caches.cache;
     // Private writable pacman cache for this job. Concurrent builds otherwise
@@ -397,13 +459,14 @@ async fn prepare_bind_mounts(
     // of a build remains possible and accepted, as it already was for source
     // fetching on the worker.
     //
-    // Bound at the same path inside, because `SSH_AUTH_SOCK` is inherited from
-    // the worker and has to name something that exists in both.
+    // Bound at the same path inside, because the one `SSH_AUTH_SOCK` has to
+    // name something that exists in both.
     //
     // Read-only: connecting to a socket needs no write access to the mount it
-    // is on, and the directory is shared by every build. The build user owns
-    // the socket and can write the directory, so bound read-write a build
-    // could remove or replace the socket the next build connects to. Root in
+    // is on, and the directory is shared by every build offered that key. The
+    // build user owns the socket and can write the directory, so bound
+    // read-write a build could remove or replace the socket the next build
+    // offered the key connects to. Root in
     // the build's container cannot either (see `known_hosts_bind`).
     //
     // The clone `unreal-engine` needs is in `prepare()`, not `source=`: makepkg
@@ -411,13 +474,10 @@ async fn prepare_bind_mounts(
     // packages of that shape do their own clone inside the chroot. Assuming
     // authenticated fetches only ever happen through `source=` was what left
     // that unbuildable.
-    if let Some(dir) = agent_socket().as_deref().and_then(Path::parent) {
-        binds.push(BindMount {
-            host: dir.to_path_buf(),
-            chroot: dir.to_path_buf(),
-            access: Access::ReadOnly,
-        });
-    }
+    //
+    // Only for a build offered the key: one that is not never sees the
+    // agent's directory inside the chroot.
+    binds.extend(agent_bind(ssh_agent));
     binds.extend(credential.and_then(known_hosts_bind));
 
     binds
@@ -434,6 +494,18 @@ async fn prepare_bind_mounts(
 /// path, but renames a fresh copy over it (see `credentials::stage_known_hosts`).
 fn known_hosts_bind(credential: &StagedCredential) -> Option<BindMount> {
     let dir = credential.known_hosts.as_deref()?.parent()?;
+    Some(BindMount {
+        host: dir.to_path_buf(),
+        chroot: dir.to_path_buf(),
+        access: Access::ReadOnly,
+    })
+}
+
+/// The bind mount of the ssh-agent's directory, read-only at the same path
+/// inside, for a build offered the agent at `ssh_agent`; none for one that is
+/// not.
+fn agent_bind(ssh_agent: Option<&Path>) -> Option<BindMount> {
+    let dir = ssh_agent?.parent()?;
     Some(BindMount {
         host: dir.to_path_buf(),
         chroot: dir.to_path_buf(),
@@ -730,16 +802,6 @@ async fn make_source_writable(pkgdir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The build ssh-agent's socket, if this worker started one.
-///
-/// Read from the environment because that is where the worker publishes it at
-/// startup, and it is the same value the bind mount and the chroot's
-/// `makepkg.conf` drop-in both have to name.
-fn agent_socket() -> Option<PathBuf> {
-    let sock = PathBuf::from(std::env::var_os("SSH_AUTH_SOCK")?);
-    sock.exists().then_some(sock)
-}
-
 /// What this worker brings to a build, as against what the job describes.
 ///
 /// Grouped because they travel together and are both "how this machine builds"
@@ -757,6 +819,8 @@ struct WorkerContext<'a> {
     dropin: &'a Path,
     /// The configurations the build script syncs, upgrades and builds with.
     pacman: &'a devtools::PacmanConfs,
+    /// The build ssh-agent's socket, when this build is offered the key.
+    ssh_agent: Option<&'a Path>,
 }
 
 /// The completed process and its resource report, ready for artifact handling.
@@ -899,6 +963,13 @@ async fn execute_build_process(
         // What the script installs before the build, which then cannot
         // become root to install anything itself; see `build_deps`.
         cmd.env("AURCACHE_BUILD_DEPS", &deps);
+        // The agent, for a build offered it: `makechrootpkg` carries it to the
+        // source download, whose sandbox grants that one socket. Every other
+        // build has it removed, so none inherits one from the worker.
+        match ctx.ssh_agent {
+            Some(socket) => cmd.env("SSH_AUTH_SOCK", socket),
+            None => cmd.env_remove("SSH_AUTH_SOCK"),
+        };
         cmd.spawn()
     };
 
@@ -1217,6 +1288,114 @@ async fn kill_process_group(child: &mut tokio::process::Child) -> std::io::Resul
 mod tests {
     use super::*;
 
+    /// A job of `hello` asking for `ssh_key`.
+    fn job_asking_for(ssh_key: Option<&str>) -> JobDescriptor {
+        JobDescriptor {
+            build_id: 1,
+            pkgbase: "hello".to_string(),
+            arch: "x86_64".to_string(),
+            build_flags: Vec::new(),
+            persistent_builddir: false,
+            makepkg_conf: String::new(),
+            pacman_conf: String::new(),
+            mirrorlist: aurcache_common::worker::MirrorlistOffer::Nothing,
+            pgp_keys: Vec::new(),
+            vcs_sources: Vec::new(),
+            expected_packages: Vec::new(),
+            timeout_secs: None,
+            expected_version: "1-1".to_string(),
+            ssh_key: ssh_key.map(str::to_string),
+        }
+    }
+
+    /// Whether a build from a job of `ssh_key`, on a worker whose default
+    /// agent is at `socket`, reaches the agent: through its `makepkg.conf` and
+    /// through a mount into its chroot. Both or neither; asserted here.
+    fn reaches_agent(socket: &Path, ssh_key: Option<&str>) -> bool {
+        let job = job_asking_for(ssh_key);
+        let mut keys = ssh_key::SshKeys::default();
+        keys.insert(aurcache_common::ssh_key::DEFAULT, socket.to_path_buf());
+        let ssh = ssh_key::offer(&job, &keys);
+        let agent = ssh.key().map(PathBuf::as_path);
+        let staged =
+            credentials::stage_for_job(None, &socket.with_extension("secrets"), agent).unwrap();
+        let conf = credentials::augment_makepkg_conf("PKGDEST=/output", staged.as_ref());
+        let exported = conf.contains("SSH_AUTH_SOCK");
+        let mounted = agent_bind(agent).is_some();
+        assert_eq!(exported, mounted, "{conf}");
+        exported
+    }
+
+    /// A build gets the default agent unless its job names another key, and
+    /// one naming a key this worker does not hold gets nothing of it.
+    #[test]
+    fn a_build_reaches_the_agent_of_the_key_it_is_offered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("agent").join("agent.sock");
+
+        assert!(reaches_agent(&socket, None));
+        assert!(reaches_agent(&socket, Some("default")));
+        assert!(!reaches_agent(&socket, Some("gitlab")));
+    }
+
+    /// A build offered a named key has that key's agent bound into its chroot,
+    /// and not the default's beside it; one naming nothing has the default's.
+    #[test]
+    fn a_named_key_binds_its_own_agent_only() {
+        let data = Path::new("/var/lib/aurcache-worker");
+        let mut keys = ssh_key::SshKeys::default();
+        for name in ["default", "gitlab"] {
+            keys.insert(name, crate::agent::key_dir(data, name).join("agent.sock"));
+        }
+        let bound = |ssh_key| {
+            let job = job_asking_for(ssh_key);
+            let ssh = ssh_key::offer(&job, &keys);
+            agent_bind(ssh.key().map(PathBuf::as_path)).map(|bind| bind.host)
+        };
+        let gitlab = bound(Some("gitlab"));
+        assert_eq!(gitlab, Some(crate::agent::key_dir(data, "gitlab")));
+        assert_eq!(bound(None), Some(crate::agent::key_dir(data, "default")));
+    }
+
+    /// Once the named keys are no longer held, a build whose package names
+    /// one is offered nothing, and its log says why; the default key is
+    /// offered as before.
+    #[test]
+    fn no_named_key_is_offered_once_they_are_not_held() {
+        let data = Path::new("/var/lib/aurcache-worker");
+        let mut keys = ssh_key::SshKeys::default();
+        for name in ["default", "gitlab"] {
+            keys.insert(name, crate::agent::key_dir(data, name).join("agent.sock"));
+        }
+        let gitlab = job_asking_for(Some("gitlab"));
+        assert!(ssh_decision(&gitlab, &keys, true).offer.key().is_some());
+
+        let withheld = ssh_decision(&gitlab, &keys, false);
+        assert_eq!(withheld.offer, SshOffer::NoKey);
+        assert!(withheld.notice.unwrap().contains("withheld"));
+        let default = ssh_decision(&job_asking_for(None), &keys, false);
+        assert_eq!(
+            default.offer.key(),
+            Some(&crate::agent::key_dir(data, "default").join("agent.sock"))
+        );
+    }
+
+    /// The mount is the agent's directory, read-only at the same path, and only
+    /// that.
+    #[test]
+    fn the_agent_is_mounted_where_it_is() {
+        let socket = Path::new("/var/lib/aurcache-worker/agent/default/agent.sock");
+        assert_eq!(
+            agent_bind(Some(socket)),
+            Some(BindMount {
+                host: PathBuf::from("/var/lib/aurcache-worker/agent/default"),
+                chroot: PathBuf::from("/var/lib/aurcache-worker/agent/default"),
+                access: Access::ReadOnly,
+            })
+        );
+        assert_eq!(agent_bind(None), None);
+    }
+
     #[tokio::test]
     async fn an_aborted_job_wipes_its_private_caches() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1254,7 +1433,7 @@ mod tests {
         let dir = credentials::known_hosts_dir(Path::new("/var/lib/aurcache-worker"));
         let mut credential = StagedCredential {
             git_ssh_command: credentials::git_ssh_command(None),
-            agent_socket: PathBuf::from("/var/lib/aurcache-worker/agent/agent.sock"),
+            agent_socket: PathBuf::from("/var/lib/aurcache-worker/agent/default/agent.sock"),
             known_hosts: None,
         };
         assert_eq!(known_hosts_bind(&credential), None);

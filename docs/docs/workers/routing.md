@@ -86,14 +86,17 @@ worker-fast:
     WORKER_PRIORITY: "10"
     WORKER_CONCURRENCY: "16"
 
-# holds the Epic Games SSH key
+# holds the Epic Games SSH key, which unreal-engine names
 worker-epic:
   environment:
     WORKER_PRIORITY: "10"
     WORKER_PACKAGES: "unreal-engine"
+    WORKER_GIT_SSH_KEYS: "epic:/run/secrets/epic_key"
 ```
 
-`unreal-engine` only ever goes to `worker-epic`. Everything else prefers the
+`unreal-engine` only ever goes to `worker-epic`, the one worker holding the
+key its **Build SSH key** setting names (see [Build
+credentials](./credentials.md#named-keys)). Everything else prefers the
 fast workers and falls to `worker-fallback` when they are busy or absent — with
 no delay in either case, because the fallback only waits while a faster worker
 is genuinely able to take the job.

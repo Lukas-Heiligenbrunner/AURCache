@@ -295,6 +295,55 @@ pub fn parse_bind_mounts(raw: &str) -> Vec<BindMount> {
         .collect()
 }
 
+/// A key `WORKER_GIT_SSH_KEYS` names: the key at `path`, offered to the
+/// builds whose package's `build_ssh_key` setting is `name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedKey {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Parse `WORKER_GIT_SSH_KEYS` (`name:path,name:path`).
+///
+/// An entry is dropped, and reported, when its name is not a key name (see
+/// [`aurcache_common::ssh_key::validate_name`]), when it is `default` -- the
+/// key `WORKER_GIT_SSH_KEY` names, or the generated one, which this cannot
+/// redefine -- when an earlier entry has the name already, or when it has no
+/// path. A key the operator meant and the worker does not hold is otherwise
+/// only discovered as a build that fails at its fetch.
+#[must_use]
+pub fn parse_named_keys(raw: &str) -> Vec<NamedKey> {
+    let mut keys: Vec<NamedKey> = Vec::new();
+    for entry in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let Some((name, path)) = entry
+            .split_once(':')
+            .map(|(name, path)| (name.trim(), path.trim()))
+            .filter(|(_, path)| !path.is_empty())
+        else {
+            tracing::warn!("ignoring WORKER_GIT_SSH_KEYS entry {entry:?} (expected name:path)");
+            continue;
+        };
+        let refusal = if let Err(e) = aurcache_common::ssh_key::validate_name(name) {
+            Some(e)
+        } else if name == aurcache_common::ssh_key::DEFAULT {
+            Some("`default` is the key WORKER_GIT_SSH_KEY names, or the generated one".to_string())
+        } else if keys.iter().any(|key| key.name == name) {
+            Some(format!("an earlier entry names {name:?} already"))
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            tracing::warn!("ignoring WORKER_GIT_SSH_KEYS entry {entry:?}: {why}");
+            continue;
+        }
+        keys.push(NamedKey {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        });
+    }
+    keys
+}
+
 /// Stage the build credentials for one job into `dir`, returning the
 /// `GIT_SSH_COMMAND` to export; `None` when there is no credential to use.
 ///
@@ -376,6 +425,48 @@ fn stage_known_hosts(src: &Path, dir: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn named(name: &str, path: &str) -> NamedKey {
+        NamedKey {
+            name: name.to_string(),
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[test]
+    fn named_keys_are_name_path_pairs() {
+        assert_eq!(
+            parse_named_keys(
+                "gitlab:/etc/aurcache-worker/gitlab_ed25519, epic : /run/secrets/epic,"
+            ),
+            vec![
+                named("gitlab", "/etc/aurcache-worker/gitlab_ed25519"),
+                named("epic", "/run/secrets/epic"),
+            ]
+        );
+        assert_eq!(parse_named_keys(""), Vec::new());
+    }
+
+    /// Only the first `:` separates, so a path may hold one.
+    #[test]
+    fn a_named_keys_path_may_hold_a_colon() {
+        assert_eq!(
+            parse_named_keys("gitlab:/keys/a:b"),
+            vec![named("gitlab", "/keys/a:b")]
+        );
+    }
+
+    /// What is no key name, `default`, a name given twice and an entry
+    /// without a path are dropped; the rest are kept.
+    #[test]
+    fn a_named_key_that_cannot_be_one_is_dropped() {
+        assert_eq!(
+            parse_named_keys(
+                "default:/k/d,Gitlab:/k/g,../x:/k/x,gitlab,epic:,gitlab:/k/1,gitlab:/k/2"
+            ),
+            vec![named("gitlab", "/k/1")]
+        );
+    }
 
     fn cfg_with(key: Option<&str>, data_dir: &str) -> Config {
         let mut cfg = Config::from_process_env();
@@ -526,14 +617,16 @@ mod tests {
     /// while a worker without an agent is still left alone.
     #[test]
     fn the_export_names_the_socket_and_is_guarded_on_it() {
-        let cred = credential("/var/lib/aurcache-worker/agent/agent.sock");
+        let cred = credential("/var/lib/aurcache-worker/agent/default/agent.sock");
         let conf = augment_makepkg_conf("PKGDEST=/output", Some(&cred));
 
-        assert!(conf.contains("export SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/agent.sock"));
+        assert!(
+            conf.contains("export SSH_AUTH_SOCK=/var/lib/aurcache-worker/agent/default/agent.sock")
+        );
         assert!(conf.trim_end().ends_with("fi"));
         // The guard must wrap both exports, not sit beside them.
         let guard = conf
-            .find("if [ -S /var/lib/aurcache-worker/agent/agent.sock ]")
+            .find("if [ -S /var/lib/aurcache-worker/agent/default/agent.sock ]")
             .expect("guard names the socket");
         let sock = conf.find("export SSH_AUTH_SOCK").expect("socket export");
         let git = conf.find("export GIT_SSH_COMMAND").expect("git export");

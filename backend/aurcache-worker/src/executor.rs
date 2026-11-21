@@ -12,9 +12,12 @@ use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
 use aurcache_worker_core::live::Live;
 use aurcache_worker_core::settings::WorkerSettings;
+use aurcache_worker_core::ssh_key::SshKeys;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::NamedKeysGate;
 use crate::cache::{Cache, CacheLimits};
 use crate::cgroup::{BuildLimits, Hierarchy};
 use crate::chroots::Chroots;
@@ -58,12 +61,23 @@ pub struct Shared {
     cache: Cache,
     /// The repository databases fetched so far, for conditional fetches.
     pub repo_dbs: RepoDbs,
+    /// The SSH keys this worker holds for builds, by name: the socket of the
+    /// agent it started, as the default key, or none.
+    pub ssh_keys: SshKeys<PathBuf>,
+    /// Asked before each build when some of those are named keys, which a
+    /// build is offered only while it holds.
+    pub named_keys_gate: Option<NamedKeysGate>,
 }
 
 impl Shared {
-    /// Set up, with nothing open yet: see [`Chroots::open`].
+    /// Set up, with nothing open yet (see [`Chroots::open`]), holding
+    /// `ssh_keys` for builds, the named ones behind `named_keys_gate`.
     #[must_use]
-    pub fn new(cfg: &Config) -> Self {
+    pub fn new(
+        cfg: &Config,
+        ssh_keys: SshKeys<PathBuf>,
+        named_keys_gate: Option<NamedKeysGate>,
+    ) -> Self {
         let tunables = &cfg.tunables;
         Self {
             srcdest: SrcdestLocks::new(),
@@ -75,6 +89,18 @@ impl Shared {
             ),
             cache: Cache::new(&cfg.cache_dir, tunables.cache),
             repo_dbs: RepoDbs::default(),
+            ssh_keys,
+            named_keys_gate,
+        }
+    }
+
+    /// Whether a build may be offered a named key now: always, unless the
+    /// gate has closed, the sandbox, asked again, no longer keeping builds
+    /// from the agents or not answering.
+    pub async fn named_keys_held(&self) -> bool {
+        match &self.named_keys_gate {
+            None => true,
+            Some(gate) => gate.holds().await,
         }
     }
 
@@ -107,10 +133,18 @@ impl ChrootExecutor {
     /// Async because it settles how chroots are made before any job arrives:
     /// the answer needs a real mount to be sure of, and finding out per build
     /// would mean a warning per build on a filesystem that cannot do it.
-    pub async fn new(cfg: Config) -> Self {
+    ///
+    /// Builds are offered only `ssh_keys`, never an agent this process's
+    /// environment names, and the named ones only while `named_keys_gate`
+    /// holds.
+    pub async fn new(
+        cfg: Config,
+        ssh_keys: SshKeys<PathBuf>,
+        named_keys_gate: Option<NamedKeysGate>,
+    ) -> Self {
         let cgroups = prepare_cgroups(&cfg.tunables);
         log_limits(&cfg.tunables, cgroups.is_some());
-        let shared = Arc::new(Shared::new(&cfg));
+        let shared = Arc::new(Shared::new(&cfg, ssh_keys, named_keys_gate));
         // Before anything can claim work: no build of ours is running yet, so
         // whatever a build left in the pool belongs to a run that is over.
         if shared.chroots.open().await.is_ok() {

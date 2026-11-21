@@ -294,6 +294,7 @@ mod tests {
             "WORKER_POOL",
             "WORKER_DISK_RESERVE",
             "WORKER_GIT_SSH_KEY",
+            "WORKER_GIT_SSH_KEYS",
             "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_DATA_DIR",
             "AURCACHE_URL",

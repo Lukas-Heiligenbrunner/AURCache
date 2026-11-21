@@ -229,6 +229,7 @@ mod tests {
             expected_packages: vec!["hello".into()],
             timeout_secs,
             expected_version: "1-1".into(),
+            ssh_key: None,
         }
     }
 

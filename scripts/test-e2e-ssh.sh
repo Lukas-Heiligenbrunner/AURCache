@@ -14,16 +14,17 @@ set -euo pipefail
 # server that authorises it — so this runs in CI wherever Docker does, with no
 # secret committed or configured.
 #
-# Four phases, in order:
+# Every build is offered the worker's `default` key unless its package's
+# `build_ssh_key` names another. Five phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
 #      agent key picked up).
-#   2. authorised — the worker is pointed at the key the server accepts. The
-#      build must succeed AND the payload's marker must appear in the installed
-#      package twice, proving both fetches really happened: the `source=` one
-#      on the worker, and the `prepare()` clone inside the chroot, through the
-#      agent's socket bound in there.
+#   2. authorised — the worker's default key is the one the server accepts.
+#      The build must succeed AND the payload's marker must appear in the
+#      installed package twice, proving both fetches really happened: the
+#      `source=` one on the worker, and the `prepare()` clone inside the
+#      chroot, through the agent's socket bound in there.
 #   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
@@ -32,6 +33,19 @@ set -euo pipefail
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
 #      on first use.
+#   5. a named key — the default key is generated, so unauthorised, and the
+#      accepted one is held as `gitssh` in `WORKER_GIT_SSH_KEYS`. Built on
+#      the default, the fixture MUST fail: it is not offered the `gitssh`
+#      key. (That it cannot reach that agent by its path outside the chroot
+#      either is `test-sandbox.sh`'s to show.) Its package then names a key
+#      the worker lacks, and the build MUST fail with its log saying so.
+#      Named `gitssh`, it must succeed.
+#
+# Where the sandbox, asked as the build user, says it would not restrict UNIX
+# sockets (an older kernel's Landlock, a policy that user cannot read, or an
+# older aurcache-sandbox), the worker holds no named key, which it says at
+# startup: the build naming `gitssh` then MUST fail, saying that key is not
+# here.
 #
 #   ./scripts/test-e2e-ssh.sh [timeout]
 
@@ -65,7 +79,7 @@ trap cleanup EXIT
 # Bring the stack up and drive one build to a terminal state, leaving what it
 # came to in `phase_result`: `success`, `failed`, or why it came to neither.
 run_phase() {
-    local phase="$1" key="$2" known_hosts="${3-}" output
+    local phase="$1" key="$2" known_hosts="${3-}" named_keys="${4-}" output
     log "=== Phase: $phase ==="
     dc down -v --remove-orphans >/dev/null 2>&1 || true
     fresh_worker_data >/dev/null
@@ -78,17 +92,27 @@ run_phase() {
     else
         unset WORKER_SSH_KNOWN_HOSTS
     fi
+    if [ -n "$named_keys" ]; then
+        export WORKER_GIT_SSH_KEYS="$named_keys"
+    else
+        unset WORKER_GIT_SSH_KEYS
+    fi
     dc up -d --build >/dev/null
 
     wait_for_service || { dump_logs_on_failure; exit 1; }
     wait_for_worker || { dump_logs_on_failure; exit 1; }
 
     log "    adding the fixture package"
-    # The exit status is the outcome. A failure is told apart from a timeout or
-    # a stalled queue by what `--wait` says, since phase 1 wants exactly a
-    # failed build and nothing else.
-    if output=$(pkg_add "git://gitssh/pkg.git" --ref master \
-        --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
+    settle pkg_add "git://gitssh/pkg.git" --ref master
+}
+
+# Run a build-triggering CLI command under `--wait` and leave what the build
+# came to in `phase_result`. The exit status is the outcome. A failure is told
+# apart from a timeout or a stalled queue by what `--wait` says, since several
+# phases want exactly a failed build and nothing else.
+settle() {
+    local output
+    if output=$("$@" --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
         phase_result=success
     elif [[ $output == *"build failed:"* ]]; then
         phase_result=failed
@@ -97,6 +121,24 @@ run_phase() {
     fi
     printf '%s\n' "$output" | sed 's/^/    /'
     CURRENT_BUILD_REF=$(latest_build_ref "$FIXTURE")
+}
+
+# Set the fixture's `build_ssh_key` to `$1` and build it again.
+rebuild_naming() {
+    log "    the fixture's build_ssh_key is now $1"
+    aurcache_cli raw PATCH "/package/$FIXTURE/settings/build_ssh_key" \
+        --body "{\"value\": \"$1\"}" >/dev/null
+    settle aurcache_cli builds retry "$CURRENT_BUILD_REF"
+}
+
+# Fail the run unless the log of the last build has `$1` in it.
+expect_in_log() {
+    if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "$1"; then
+        log "ERROR: the build log of $CURRENT_BUILD_REF does not say why it had no key"
+        log "       (expected: $1)"
+        dump_logs_on_failure
+        exit 1
+    fi
 }
 
 E2E_TOOLS+=(ssh-keygen)
@@ -188,6 +230,58 @@ if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "Hos
     exit 1
 fi
 log "    build refused the unknown host at host-key verification"
+
+# ---- Phase 5: a named key goes to the package that names it, and only it ---
+run_phase "named key, built on the default (expect failure)" "" "" "gitssh:/keys/id_ed25519"
+if [ "$phase_result" != "failed" ]; then
+    log "ERROR: build was '$phase_result' on the default key, with the authorised key"
+    log "       held only as gitssh"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    build on the default key failed: it was not offered the gitssh key"
+log "    (that it cannot reach that agent by its path is test-sandbox.sh's to show)"
+
+# Named keys need the sandbox to keep builds from the agents of the keys they
+# are not offered, outside their chroot; where it cannot, the worker holds none.
+if dc logs builder 2>&1 | grep -q "outside their chroot as well (Landlock)"; then
+    named_held=yes
+    log "    named keys held: the sandbox keeps builds from the other agents (Landlock)"
+elif dc logs builder 2>&1 | grep -q "WORKER_GIT_SSH_KEYS names SSH keys, but builds could not be kept"; then
+    named_held=no
+    log "    named keys not held here; the build naming gitssh must fail"
+else
+    log "ERROR: the worker did not say whether it holds its named keys"
+    dump_logs_on_failure
+    exit 1
+fi
+
+rebuild_naming missing
+if [ "$phase_result" != "failed" ]; then
+    log "ERROR: build was '$phase_result' naming a key the worker does not hold"
+    dump_logs_on_failure
+    exit 1
+fi
+expect_in_log 'this worker holds no SSH key named "missing"'
+log "    build naming a key the worker lacks failed, and its log says why"
+
+rebuild_naming gitssh
+if [ "$named_held" = yes ]; then
+    if [ "$phase_result" != "success" ]; then
+        log "ERROR: build was '$phase_result' naming the authorised key, gitssh"
+        dump_logs_on_failure
+        exit 1
+    fi
+    log "    build naming gitssh succeeded"
+else
+    if [ "$phase_result" != "failed" ]; then
+        log "ERROR: build was '$phase_result' naming gitssh on a worker that holds no named key"
+        dump_logs_on_failure
+        exit 1
+    fi
+    expect_in_log 'this worker holds no SSH key named "gitssh"'
+    log "    build naming gitssh failed, as the worker holds no named key here"
+fi
 
 log "=== SSH credential test complete ==="
 log "    markers: ${found//$'\n'/, }"

@@ -282,6 +282,17 @@ pub struct JobDescriptor {
     /// for a VCS package is not known until it runs, and publishing takes it
     /// from the archives' names.
     pub expected_version: String,
+    /// Which of the worker's SSH keys this build may use, by name: the
+    /// package's `build_ssh_key` setting, in the form
+    /// [`ssh_key::validate_name`](crate::ssh_key::validate_name) accepts.
+    ///
+    /// Absent for the [`ssh_key::DEFAULT`](crate::ssh_key::DEFAULT) key, and
+    /// from a server that does not send it: a worker then offers its default
+    /// key to the build. Only the name travels: the key itself never leaves
+    /// the worker, which maps the name to a key through its own configuration
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_key: Option<String>,
 }
 
 /// One `git+` source of a build, as the worker needs to find it.
@@ -459,6 +470,7 @@ mod tests {
             expected_packages: vec!["hello".into(), "hello-docs".into()],
             timeout_secs: Some(3600),
             expected_version: "1.0-1".into(),
+            ssh_key: Some("gitlab".into()),
             pgp_keys: vec!["ABCDEF".into()],
             vcs_sources: vec![JobVcsSource {
                 source_url: "git+https://example.test/repo.git".into(),
@@ -473,6 +485,7 @@ mod tests {
         assert_eq!(job.mirrorlist, back.mirrorlist);
         assert_eq!(job.expected_packages, back.expected_packages);
         assert_eq!(job.expected_version, back.expected_version);
+        assert_eq!(job.ssh_key, back.ssh_key);
     }
 
     fn range(min: u32, max: u32) -> ProtocolRange {

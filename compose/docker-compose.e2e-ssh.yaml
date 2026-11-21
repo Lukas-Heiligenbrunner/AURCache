@@ -11,7 +11,9 @@
 #
 # `WORKER_GIT_SSH_KEY` is set by the test rather than here: the first phase
 # deliberately runs *without* it, to prove the fixture genuinely requires
-# authentication and the test cannot pass for the wrong reason.
+# authentication and the test cannot pass for the wrong reason. So is
+# `WORKER_GIT_SSH_KEYS`, which names the worker's other keys for the phase
+# that needs one.
 services:
   gitssh:
     build:
@@ -33,5 +35,6 @@ services:
       # Passed through only when the test sets it: unset, the worker accepts a
       # host key on first use.
       - WORKER_SSH_KNOWN_HOSTS
+      - WORKER_GIT_SSH_KEYS
     volumes:
       - ${SSH_TEST_KEYS:?set SSH_TEST_KEYS to the generated keypair directory}:/keys:ro

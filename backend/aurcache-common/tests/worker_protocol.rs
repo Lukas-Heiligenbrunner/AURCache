@@ -186,6 +186,17 @@ fn job_descriptor(mirrorlist: MirrorlistOffer) -> JobDescriptor {
         // Protocol 1's fixture predates it; absent, it is what it was then.
         timeout_secs: None,
         expected_version: "2.12.1-2".to_string(),
+        // Likewise: absent is what a server that names no key sends.
+        ssh_key: None,
+    }
+}
+
+/// A job naming its SSH key.
+fn job_with_ssh_key(name: &str) -> JobDescriptor {
+    JobDescriptor {
+        timeout_secs: Some(3600),
+        ssh_key: Some(name.to_string()),
+        ..job_descriptor(MirrorlistOffer::Keep)
     }
 }
 
@@ -241,6 +252,7 @@ fn protocol_1_messages_still_decode() {
             job_descriptor(MirrorlistOffer::Nothing),
         ],
     );
+    check("1", "job_descriptor_ssh_key", &[job_with_ssh_key("gitlab")]);
     check(
         "1",
         "heartbeat",
@@ -318,6 +330,23 @@ fn registration_messages_still_decode() {
             heartbeat_interval_secs: 15,
         }],
     );
+}
+
+/// A job from a server that sends no `ssh_key` reads as naming nothing, which
+/// tells a worker to offer its default key.
+#[test]
+fn a_job_without_an_ssh_key_field_reads_as_absent() {
+    let text = std::fs::read_to_string(fixtures("1").join("job_descriptor.json")).unwrap();
+    let jobs: Vec<JobDescriptor> = serde_json::from_str(&text).unwrap();
+    assert!(!jobs.is_empty());
+    for job in jobs {
+        assert_eq!(job.ssh_key, None);
+    }
+
+    let text = std::fs::read_to_string(fixtures("1").join("job_descriptor_ssh_key.json")).unwrap();
+    let jobs: Vec<JobDescriptor> = serde_json::from_str(&text).unwrap();
+    let names: Vec<_> = jobs.into_iter().map(|job| job.ssh_key).collect();
+    assert_eq!(names, vec![Some("gitlab".to_string())]);
 }
 
 /// The fixtures cover every protocol this crate speaks.
