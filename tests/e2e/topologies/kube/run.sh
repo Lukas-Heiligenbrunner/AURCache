@@ -130,6 +130,11 @@ FORWARD_PID=
 ADD_PID=
 FOLLOW_PID=
 CLUSTER_CREATED=0
+# What the leg running has changed in the cluster, as the function that puts
+# it back: the leg calls `restore` when done with it, and the cleanup does
+# for a leg that did not get there, so that a cluster left up is as the next
+# run against it (REUSE=1) expects.
+RESTORE=
 RESULTS=()
 
 k() { "$KUBECTL" "$@"; }
@@ -166,6 +171,14 @@ wait_for() {
 }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Put back what the leg running changed, if it changed anything.
+restore() {
+    [ -n "$RESTORE" ] || return 0
+    local undo=$RESTORE
+    RESTORE=
+    "$undo"
+}
 
 # =============================================================================
 # The worker's log
@@ -835,6 +848,8 @@ check_ssh_key() {
     result "$ref fetched over git+ssh through the dispatcher, from build() too; no key in the pod, and the agent signs what it is asked to: $found"
 }
 
+lift_quota() { k -n aurcache-builds delete quota kube-e2e-full --ignore-not-found >/dev/null; }
+
 check_quota_then_build() {
     log "=== 3. A full quota holds claims back; then $PACKAGE builds ==="
     local since pid ref
@@ -842,6 +857,7 @@ check_quota_then_build() {
     before=$(latest_build_ref "$PACKAGE")
     since=$(now)
     k -n aurcache-builds delete quota kube-e2e-full --ignore-not-found >/dev/null
+    RESTORE=lift_quota
     k -n aurcache-builds create quota kube-e2e-full --hard=pods=0 >/dev/null
     build_in_background "$SCRATCH/add-$PACKAGE.log" "$PACKAGE" "$PACKAGE" --platform x86_64 \
         --wait --wait-timeout "$BUILD_TIMEOUT" --wait-stall-after 600
@@ -857,7 +873,7 @@ check_quota_then_build() {
     result "quota full: the worker said so and $ref stayed queued"
 
     since=$(now)
-    k -n aurcache-builds delete quota kube-e2e-full >/dev/null
+    restore
     expect_said "Claiming builds again" "$since" 120
     if ! wait "$pid"; then
         ADD_PID=
@@ -1079,12 +1095,23 @@ build_succeeded() { [ "$(build_status "$1")" = 1 ]; }
 # Whether the newest build of package `$1` succeeded.
 newest_succeeded() { build_succeeded "$(latest_build_ref "$1")"; }
 
+# The worker as it was before the stuck leg, and the cluster without what
+# that leg made.
+unstick() {
+    k -n aurcache set env deploy/aurcache-kube-worker \
+        WORKER_KUBE_POD_TEMPLATE- WORKER_KUBE_SCHEDULE_TIMEOUT- >/dev/null
+    k -n aurcache delete configmap kube-e2e-stuck-template --ignore-not-found >/dev/null
+    k delete runtimeclass kube-e2e-no-such-handler --ignore-not-found >/dev/null
+}
+
 check_stuck() {
     log "=== 8. A build pod that cannot start ==="
     local since before ref
     since=$(now)
-    # A RuntimeClass whose handler the node does not have, through the pod
-    # template: the pod is scheduled, and its sandbox is never made.
+    # A RuntimeClass whose handler the node does not have, through a pod
+    # template in the ConfigMap the suite's worker mounts (worker.yaml): the
+    # pod is scheduled, and its sandbox is never made.
+    RESTORE=unstick
     k apply -f - >/dev/null <<EOF
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
@@ -1100,13 +1127,6 @@ metadata:
 data:
   pod-template.json: '{"runtimeClassName": "kube-e2e-no-such-handler"}'
 EOF
-    # A strategic merge: the volume and its mount are named, so a cluster
-    # this ran in before takes the same patch again and changes nothing.
-    k -n aurcache patch deploy/aurcache-kube-worker --type strategic -p '{"spec": {"template": {"spec": {
-      "volumes": [{"name": "stuck-template", "configMap": {"name": "kube-e2e-stuck-template"}}],
-      "containers": [{"name": "worker", "volumeMounts": [
-        {"name": "stuck-template", "mountPath": "/etc/kube-e2e-stuck", "readOnly": true}]}]
-    }}}}' >/dev/null
     k -n aurcache set env deploy/aurcache-kube-worker \
         WORKER_KUBE_POD_TEMPLATE=/etc/kube-e2e-stuck/pod-template.json \
         WORKER_KUBE_SCHEDULE_TIMEOUT=30s >/dev/null
@@ -1132,8 +1152,7 @@ EOF
     result "$ref: its pod never started, and the build was handed back as the worker's"
 
     since=$(now)
-    k -n aurcache set env deploy/aurcache-kube-worker \
-        WORKER_KUBE_POD_TEMPLATE- WORKER_KUBE_SCHEDULE_TIMEOUT- >/dev/null
+    restore
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout="$ROLLOUT" \
         || fail "the worker did not start again"
     expect_said "take the build agent from" "$since" 120
@@ -1207,6 +1226,8 @@ check_big() {
     result "the worker container's peak memory: $((peak / 1024 / 1024)) MiB (limit for the run $((MAX_WORKER_MEMORY / 1024 / 1024)) MiB)"
 }
 
+userns_off() { k -n aurcache set env deploy/aurcache-kube-worker WORKER_KUBE_USER_NAMESPACES- >/dev/null; }
+
 check_user_namespaces() {
     log "=== 10. Build pods in user namespaces ==="
     if [ "${E2E_USER_NAMESPACES:-auto}" = 0 ]; then
@@ -1243,6 +1264,7 @@ EOF
 
     local since ref uid hostusers=
     since=$(now)
+    RESTORE=userns_off
     k -n aurcache set env deploy/aurcache-kube-worker WORKER_KUBE_USER_NAMESPACES=true >/dev/null
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout="$ROLLOUT" \
         || fail "the worker did not start again with user namespaces"
@@ -1266,7 +1288,7 @@ EOF
     [ "$hostusers" = false ] || fail "the build pod of $ref did not ask for a user namespace (hostUsers: '$hostusers')"
     result "$ref built in a pod with hostUsers: false"
     # As it was, for the legs after this one and for a run after this one.
-    k -n aurcache set env deploy/aurcache-kube-worker WORKER_KUBE_USER_NAMESPACES- >/dev/null
+    restore
     k -n aurcache rollout status deploy/aurcache-kube-worker --timeout="$ROLLOUT" \
         || fail "the worker did not start again without user namespaces"
     wait_for 120 "the worker to be approved again" worker_approved || fail "the worker did not come back"
@@ -1288,10 +1310,17 @@ server_logged() {
     grep -qF -- "$2" <<<"$text"
 }
 
+# The builds' policies, the shipped one and the SSH git server's.
+policies_back() {
+    k apply -f "$PROJECT_DIR/kubernetes/kube-worker/networkpolicy.yaml" >/dev/null
+    k apply -f "$FIXTURE/gitssh-policy.yaml" >/dev/null
+}
+
 check_open_policy() {
     log "=== 11. Without the NetworkPolicy ==="
     local since
     # The SSH leg's policy selects build pods too, and would keep them fenced.
+    RESTORE=policies_back
     k -n aurcache-builds delete networkpolicy aurcache-builds kube-e2e-builds-to-gitssh \
         --ignore-not-found >/dev/null
     since=$(now)
@@ -1305,8 +1334,7 @@ check_open_policy() {
     result "the server's log has it at error severity"
     # Put back, and the worker started once more so that what it last said of
     # the policy is true of the cluster as it is left.
-    k apply -f "$PROJECT_DIR/kubernetes/kube-worker/networkpolicy.yaml" >/dev/null
-    k apply -f "$FIXTURE/gitssh-policy.yaml" >/dev/null
+    restore
     since=$(now)
     crash_dispatcher
     expect_said "The builds' NetworkPolicy is enforced" "$since" 180
@@ -1364,6 +1392,10 @@ cleanup() {
     stop_background
 
     if [ "$do_cleanup" = 0 ]; then
+        if [ -n "$RESTORE" ]; then
+            log "=== Putting back what the last leg changed ($RESTORE) ==="
+            restore || log "    could not: a run against this cluster may trip on it"
+        fi
         echo "=== Leaving the cluster up (exit $exit_code) ==="
         echo "    Logs:       $LOG_FILE"
         echo "    Cluster:    export KUBECONFIG=$KUBECONFIG"
