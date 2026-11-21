@@ -712,9 +712,11 @@ impl Repository {
         tokio::task::spawn_blocking(move || sort_signatures(&key, &dir, listed)).await?
     }
 
-    /// Whether both of `platform`'s databases carry a signature beside them
-    /// that the key made, told as [`Self::unsigned`] tells a package's. A
-    /// repository that does not sign has nothing to sign them with.
+    /// Whether both of `platform`'s databases carry the key's signature over
+    /// them, beside them. Checked against the databases themselves, not by
+    /// the issuer alone: a signature left from another write of a database
+    /// names the same key and still fails pacman. A repository that does not
+    /// sign has nothing to sign them with.
     pub async fn databases_signed(&self, platform: Platform) -> anyhow::Result<bool> {
         let Some(key) = self.key_handle() else {
             return Ok(true);
@@ -723,10 +725,15 @@ impl Repository {
         let name = self.name.clone();
         tokio::task::spawn_blocking(move || {
             for archive in ["db", "files"] {
-                let signature = dir.join(format!("{name}.{archive}.tar.gz.sig"));
-                match read_if_there(&signature)? {
-                    Some(signature) if key.issued(&signature) => {}
-                    _ => return Ok(false),
+                let database = dir.join(format!("{name}.{archive}.tar.gz"));
+                let signature = with_suffix(&database, ".sig");
+                let (Some(signature), Some(database)) =
+                    (read_if_there(&signature)?, read_if_there(&database)?)
+                else {
+                    return Ok(false);
+                };
+                if !key.verifies(&signature, &database) {
+                    return Ok(false);
                 }
             }
             Ok(true)
@@ -2538,6 +2545,30 @@ mod tests {
             "the package is not signed by this"
         );
         assert!(next_files_left(&repo).is_empty());
+    }
+
+    /// A database signature the key made over something else -- what a
+    /// database written again without its signature leaves -- is not taken
+    /// for the database's.
+    #[tokio::test]
+    async fn a_database_signature_over_something_else_is_not_its_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let repo = signing_repo(tmp.path());
+        repo.init().unwrap();
+        let mut update = repo.begin(&db).await.unwrap();
+        update.rewrite_databases(Platform::X86_64);
+        update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
+        assert!(repo.databases_signed(Platform::X86_64).await.unwrap());
+
+        let signature = with_suffix(&archive(&repo, DB_ARCHIVE), ".sig");
+        let elsewhere = repo.key().unwrap().sign(&b"another database"[..]).unwrap();
+        std::fs::remove_file(&signature).unwrap();
+        std::fs::write(&signature, elsewhere).unwrap();
+        assert!(!repo.databases_signed(Platform::X86_64).await.unwrap());
     }
 
     /// An entry that carries the key's signature, and the same signature
