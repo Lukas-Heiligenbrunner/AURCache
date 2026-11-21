@@ -35,7 +35,6 @@ pub fn repo_info(
         name: services.repo.name().to_string(),
         public_url: crate::worker::public_repo_url(port),
         listen_port: Some(port),
-        signing: services.repo.signing_info(),
     })
 }
 
@@ -72,8 +71,8 @@ pub struct PublicKey {
 ///
 /// Unauthenticated, like `GET /repo/key`: pacman refuses a signed repository
 /// whose key it does not trust, so a client writing its `pacman.conf` needs to
-/// know before it has any token. `GET /repo/info` says the same, with the
-/// rest of how the repository is published.
+/// know before it has any token. The one place that says it, with or without
+/// a token.
 #[utoipa::path(
     responses(
             (status = 200, description = "The key the repository is signed with, or null", body = Option<SigningInfo>),

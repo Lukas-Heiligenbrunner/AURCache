@@ -264,7 +264,6 @@ mod tests {
             name: DEFAULT_REPO_NAME.to_string(),
             public_url: public_url.to_string(),
             listen_port,
-            signing: None,
         }
     }
 
