@@ -9,7 +9,7 @@ mod support;
 
 use aurcache_build_agent::report::{Ended, SetupStep};
 use aurcache_common::worker::BuildOutcome;
-use aurcache_worker_core::executor::Executor;
+use aurcache_worker_core::executor::{Executor, Serving};
 use aurcache_worker_core::settings::WorkerSettings;
 use aurcache_worker_kube::cluster::{Admission, CreateError, Sweep};
 use aurcache_worker_kube::config::Config;
@@ -895,6 +895,53 @@ async fn no_claim_while_a_pod_is_unschedulable() {
     // A pod that is only starting does not hold claims back.
     rig.cluster.set_status(&pod_name(3), status::building());
     assert!(rig.executor.ready_for_work(1).await);
+}
+
+/// A claim cannot name an architecture. One without nodes is taken out of
+/// what the worker registers for, and from then on its waiting pod no longer
+/// holds back the builds of the others; it comes back one schedule timeout
+/// after the last pod of it waited.
+#[tokio::test(start_paused = true)]
+async fn an_architecture_without_nodes_does_not_hold_back_the_others() {
+    let all = ["x86_64".to_string(), "aarch64".to_string()];
+    let rig = Rig::new(Script::default());
+    assert_eq!(rig.executor.serving(&all), Serving::All);
+    rig.cluster.leave_for(
+        &pod_name(3),
+        "aarch64",
+        status::unschedulable("0/3 nodes are available: 3 node(s) didn't match the selector"),
+    );
+    // The server still offers aarch64: no claim, as another would wait too.
+    assert!(!rig.executor.ready_for_work(1).await);
+    assert_eq!(
+        rig.executor.serving(&all),
+        Serving::Only(vec!["x86_64".to_string()])
+    );
+    assert!(!rig.executor.ready_for_work(1).await);
+    // Registered without it: x86_64 goes on.
+    rig.executor.registered(&["x86_64".to_string()]);
+    assert!(rig.executor.ready_for_work(1).await);
+
+    // The pod is gone (handed back at its timeout); aarch64 stays out for
+    // one schedule timeout more, then is offered again.
+    rig.cluster.set_status(&pod_name(3), status::building());
+    assert_eq!(
+        rig.executor.serving(&all),
+        Serving::Only(vec!["x86_64".to_string()])
+    );
+    tokio::time::advance(Duration::from_secs(601)).await;
+    assert_eq!(rig.executor.serving(&all), Serving::All);
+    rig.executor.registered(&all);
+    assert!(rig.executor.ready_for_work(0).await);
+
+    // With every architecture waiting there is nothing to narrow to: the
+    // answer is all of them, and the pods hold claims back.
+    rig.cluster
+        .leave_for(&pod_name(4), "x86_64", status::unschedulable("no node"));
+    rig.cluster
+        .leave_for(&pod_name(5), "aarch64", status::unschedulable("no node"));
+    assert_eq!(rig.executor.serving(&all), Serving::All);
+    assert!(!rig.executor.ready_for_work(2).await);
 }
 
 #[tokio::test(start_paused = true)]
