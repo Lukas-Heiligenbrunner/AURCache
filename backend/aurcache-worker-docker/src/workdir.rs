@@ -288,6 +288,7 @@ mod tests {
             vcs_sources: vec![],
             cpus: None,
             scratch: "/var/lib/aurcache-build".into(),
+            ssh: None,
         }
     }
 

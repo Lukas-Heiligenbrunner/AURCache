@@ -128,6 +128,7 @@ fn spec() -> BuildSpec {
         vcs_sources: vec![],
         cpus: Some(2.0),
         scratch: SCRATCH.into(),
+        ssh: None,
     }
 }
 
@@ -425,5 +426,143 @@ async fn what_root_leaves_in_the_build_directory_is_not_followed() {
 
     clear(&setup, &dirs, &name).await;
     assert!(host_only.join("secret-1-1-x86_64.pkg.tar.zst").exists());
+    std::fs::remove_dir_all(&stage).unwrap();
+}
+
+/// A package that asks the agent it is given three things: at its top level
+/// and in `build()`, which keys it has; and in `build()`, for a signature
+/// that is not a login (an SSHSIG, as `ssh-keygen -Y sign` makes), which
+/// ssh-agent makes like any other.
+const LINK_PKGBUILD: &str = r#"pkgname=aurcache-link-test
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="The Docker worker's SSH link, from inside"
+arch=('x86_64' 'aarch64' 'armv7h')
+license=('GPL-3.0-or-later')
+if [[ -n ${SSH_AUTH_SOCK:-} ]]; then
+  ssh-add -L | sed 's/^/listed: /'
+fi
+build() {
+  echo "in build: ${SSH_AUTH_SOCK:-no socket named}"
+  ssh-add -L | sed 's/^/listed in build: /'
+  ssh-add -L >"$srcdir/key.pub"
+  if echo payload | ssh-keygen -Y sign -f "$srcdir/key.pub" -n file >/dev/null 2>&1; then
+    echo "in build: a signature that is no login was made"
+  else
+    echo "in build: a signature that is no login was refused"
+  fi
+}
+package() {
+  :
+}
+"#;
+
+/// The link the worker opens with `docker exec` reaches the key for the
+/// whole build: the build has it sign, a login or not, and is given no key.
+#[tokio::test]
+#[ignore = "needs Docker and a static agent: AURCACHE_DOCKER_TESTS=1"]
+async fn the_ssh_link_serves_the_build_from_the_workers_ssh_agent() {
+    use aurcache_build_agent::spec::SshAccess;
+    use aurcache_worker_container::ssh::agent::Agent;
+    use aurcache_worker_container::ssh::link::LinkEnd;
+    use std::sync::Arc;
+
+    let Some(setup) = setup() else { return };
+    let dirs = dirs("link");
+    let stage = dirs.local.with_extension("stage");
+    let _ = std::fs::remove_dir_all(&stage);
+    let tree = stage.join("aurcache-link-test");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("PKGBUILD"), LINK_PKGBUILD).unwrap();
+    let archive = stage.join("source.tar.gz");
+    assert!(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage)
+            .arg("aurcache-link-test")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let key_file = stage.join("key");
+    assert!(
+        Command::new("ssh-keygen")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "aurcache-link-test",
+                "-f"
+            ])
+            .arg(&key_file)
+            .status()
+            .expect("ssh-keygen")
+            .success()
+    );
+    let agent = Arc::new(Agent::start(&key_file).await.unwrap());
+    let mut spec = spec();
+    spec.pkgbase = "aurcache-link-test".into();
+    spec.ssh = Some(SshAccess {
+        known_hosts: "example.test ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n".into(),
+    });
+    workdir::prepare(
+        &dirs.local,
+        &setup.agent,
+        &spec,
+        &std::fs::read(&archive).unwrap(),
+    )
+    .unwrap();
+
+    let name = format!("{}-docker-link", setup.prefix);
+    let id = start(&setup, &name, &dirs).await;
+    let link = tokio::spawn(aurcache_worker_docker::link::serve(
+        setup.docker.clone(),
+        id.clone(),
+        Arc::clone(&agent),
+    ));
+    let status = wait(&setup.docker, &id).await;
+    let served = tokio::time::timeout(Duration::from_secs(10), link)
+        .await
+        .expect("the link ends with the container")
+        .unwrap();
+    let logs = Command::new("docker").args(["logs", &id]).output().unwrap();
+    let said = String::from_utf8_lossy(&logs.stdout).into_owned();
+    cleanup::remove_container(&setup.docker, &id).await;
+
+    assert_eq!(status, Some(0), "{said}");
+    assert_eq!(served.end, LinkEnd::Closed, "{said}");
+    // The agent lists the key as its `.pub` file has it.
+    let public = std::fs::read_to_string(key_file.with_extension("pub")).unwrap();
+    let key_line = public.trim();
+    let listed: Vec<&str> = said
+        .lines()
+        .filter_map(|line| line.strip_prefix("listed: "))
+        .map(str::trim)
+        .collect();
+    assert!(!listed.is_empty(), "makepkg did not list the key:\n{said}");
+    assert!(listed.iter().all(|line| *line == key_line), "{said}");
+    // The same in `build()`, to the end of makepkg.
+    assert!(said.contains("in build: /"), "{said}");
+    assert!(
+        said.contains(&format!("listed in build: {key_line}")),
+        "{said}"
+    );
+    assert!(
+        said.contains("in build: a signature that is no login was made"),
+        "{said}"
+    );
+    assert!(served.signed >= 1, "{served:?}");
+    assert_eq!(served.unanswered, None, "{served:?}");
+    // What the build was given names the hosts and holds no key.
+    let given = std::fs::read_to_string(Work::new(&dirs.local).spec()).unwrap();
+    assert!(given.contains("known_hosts"), "{given}");
+    assert!(!given.contains("PRIVATE KEY"), "{given}");
+
+    clear(&setup, &dirs, &name).await;
     std::fs::remove_dir_all(&stage).unwrap();
 }

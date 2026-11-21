@@ -2,9 +2,9 @@
 #
 # `scripts/test-build-agent.sh` builds this with `aurcache-build-agent build`
 # in a container under the flags a worker gives one. `build()` runs as the build
-# user and tries what a hostile package would: becoming root, writing the
-# report, and getting root's pacman helper to do anything but install named
-# dependencies. It prints one `probe name=value`
+# user and tries what a hostile package would: becoming root, finding the
+# worker's SSH key, writing the report, and getting root's pacman helper to do
+# anything but install named dependencies. It prints one `probe name=value`
 # line per attempt, and the script asserts each of them.
 #
 # Both polarities: the same build shows what must work. `tree` is not in the
@@ -15,6 +15,14 @@
 # `aurcache-agent-thief`, from the test's own repository, whose install
 # scriptlet runs as root, and reports whether the image's upgrade saw that
 # repository.
+#
+# With AURCACHE_TEST_GITSSH set to the address of the test's git server, it
+# also fetches a source over git+ssh and reaches the server again from
+# build(), which works only through the worker's SSH link; it asks the agent
+# for a signature that is not a login, which ssh-agent makes; and it reports
+# what the thief's scriptlet, which does the same hunt as root, found. Then
+# it asks the script to look at the container from outside and waits for it,
+# holding a canary the look must find.
 #
 # It expects what the script sets up: the work directory at /work, and a
 # repository at /srv/aurcache-agent-test/upstream.git.
@@ -30,6 +38,14 @@ source=("fixture::git+file:///srv/aurcache-agent-test/upstream.git")
 sha256sums=('SKIP')
 if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
   makedepends+=('aurcache-agent-thief')
+fi
+if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+  source+=("payload::git+ssh://git@${AURCACHE_TEST_GITSSH}/srv/git/payload.git")
+  sha256sums+=('SKIP')
+  # Run as makepkg reads this file: the agent is there from the start.
+  if [[ -n ${SSH_AUTH_SOCK:-} ]] && ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
+    printf 'probe toplevel-agent-key=listed\n'
+  fi
 fi
 
 _work=/work
@@ -113,6 +129,19 @@ build() {
   _attempt write-passwd _append /etc/passwd
   _attempt write-pacman-conf _append /etc/pacman.conf
 
+  # The worker's key: in no file here, not in the job, not in what the build
+  # was started with. Its agent is there, and signs what it is asked to.
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  _probe key-files "$(grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home \
+    /srv /run /opt /mnt 2>/dev/null | grep -vc "^$_thief/")"
+  _probe key-given "$(grep -alsF -e "$armour" "$_work/in/spec.json" /proc/self/environ \
+    /proc/$$/environ 2>/dev/null | wc -l)"
+  if ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
+    _probe agent-key listed
+  else
+    _probe agent-key missing
+  fi
   if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
     # The upgrade of the image saw the job's repositories and not the one
     # this build's dependency came from.
@@ -124,6 +153,47 @@ build() {
       _probe upgrade-bait left
     fi
     _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
+  fi
+  if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+    if [[ -f $srcdir/payload/marker.txt ]]; then
+      _probe payload fetched
+    else
+      _probe payload missing
+    fi
+    # A PKGBUILD that fetches from its functions, which no source list shows.
+    if git ls-remote "ssh://git@${AURCACHE_TEST_GITSSH}/srv/git/payload.git" >/dev/null 2>&1; then
+      _probe ssh-in-build reached
+    else
+      _probe ssh-in-build failed
+    fi
+    # A signature that is no login: ssh-agent makes it like any other.
+    ssh-add -L >"$srcdir/agent.pub" 2>/dev/null
+    if echo payload | ssh-keygen -Y sign -f "$srcdir/agent.pub" -n file >/dev/null 2>&1; then
+      _probe sshsig signed
+    else
+      _probe sshsig refused
+    fi
+    # What the thief's root scriptlet found.
+    _probe thief-keys "$(if [[ -f $_thief/keys ]]; then wc -l <"$_thief/keys"; else echo none; fi)"
+    _probe thief-procs "$(if [[ -f $_thief/procs ]]; then wc -l <"$_thief/procs"; else echo none; fi)"
+    _probe thief-relays "$(wc -l <"$_thief/relays" 2>/dev/null)"
+    _probe thief-agents "$(wc -l <"$_thief/agents" 2>/dev/null)"
+    _probe thief-sshsig "$(sort -u "$_thief/sshsig" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    # Looked at from outside, with the agent still there. The canary is in
+    # this file, in this shell's memory and in the environment of what it
+    # starts: a look that does not find it finds nothing.
+    export AURCACHE_TEST_CANARY=aurcache-agent-test-canary-5d1f0c7a
+    : >/var/tmp/aurcache-scan-me
+    local _looked=timeout
+    for _ in $(seq 240); do
+      if [[ -e /var/tmp/aurcache-scanned ]]; then
+        _looked=looked
+        break
+      fi
+      sleep 0.5
+    done
+    _probe outside-scan "$_looked"
+    unset AURCACHE_TEST_CANARY
   fi
 
   # The work directory is root's: nothing beside `out/`, nothing in it, and

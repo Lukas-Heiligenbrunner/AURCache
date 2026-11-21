@@ -2,11 +2,52 @@
 # scripts/test-build-agent.sh. NOT a real package.
 #
 # It runs as root in the build container when a build installs the package
-# as a dependency, from the test's own repository, and leaves a mark in
-# /var/tmp/aurcache-thief for the build to report.
+# as a dependency, while the build has its SSH agent, and does what a hostile
+# dependency would to take the key away with it: look for it in every file
+# and in every process (the relay that leads to the worker among them). It
+# also asks every socket that answers as an agent for a signature that is
+# not a login. Using the agent is not kept from it, for a login or for
+# anything else: the build has that for as long as it runs, and ssh-agent
+# signs what it is asked to. What it finds is left in
+# /var/tmp/aurcache-thief, for the build to report.
 post_install() {
   local out=/var/tmp/aurcache-thief
   mkdir -p "$out"
   echo yes >"$out/ran"
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
+    2>/dev/null | grep -v "^$out/" >"$out/keys"
+
+  # What each process was started with, and its environment. A process whose
+  # parent is outside the container was exec'd into it: the relay.
+  : >"$out/procs"
+  : >"$out/relays"
+  local entry pid
+  for entry in /proc/[0-9]*; do
+    pid=${entry#/proc/}
+    if grep -aqsF -e "$armour" "$entry/environ" "$entry/cmdline"; then
+      echo "$pid" >>"$out/procs"
+    fi
+    if [[ $pid != 1 && $(awk '$1 == "PPid:" { print $2 }' "$entry/status" 2>/dev/null) == 0 ]]; then
+      echo "$pid" >>"$out/relays"
+    fi
+  done
+
+  # Every socket that answers as an agent, asked for an SSHSIG.
+  : >"$out/agents"
+  : >"$out/sshsig"
+  local socket
+  for socket in $(find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null); do
+    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L >"$out/pub" 2>/dev/null || continue
+    grep -q '^ssh-' "$out/pub" || continue
+    echo "$socket" >>"$out/agents"
+    if echo payload | SSH_AUTH_SOCK=$socket timeout 10 \
+      ssh-keygen -Y sign -f "$out/pub" -n file >/dev/null 2>&1; then
+      echo signed >>"$out/sshsig"
+    else
+      echo refused >>"$out/sshsig"
+    fi
+  done
   chmod -R a+rX "$out"
 }
