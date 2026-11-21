@@ -39,6 +39,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 
@@ -352,6 +353,12 @@ const RESOLVE_UNIX: &str = "resolve-unix";
 /// The answer of one that would not, followed by `: ` and why not.
 const NO_RESOLVE_UNIX: &str = "no-resolve-unix";
 
+/// How long the sandbox has to answer. It reads one file and resolves a few
+/// paths, which takes milliseconds; a question still unanswered after this --
+/// a `sudo` waiting on something, a path on a network mount that is gone --
+/// is given up on, as every build start waits for it.
+const QUESTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Whether a build is kept from the agents of the keys it is not offered, on
 /// this machine.
 ///
@@ -463,12 +470,24 @@ impl NamedKeysGate {
 /// The sandbox answers with success whatever its answer, so a failure is its
 /// own or that of `sudo` running it, given as the status and what it printed.
 /// One that predates the question refuses it as a usage error, status 2.
+/// One that does not answer within [`QUESTION_TIMEOUT`] gives no answer.
 pub async fn host_side_gate(query: Command) -> HostSideGate {
-    let out = match query_output(query).await {
-        Ok(out) => out,
-        Err(e) => {
+    host_side_gate_within(query, QUESTION_TIMEOUT).await
+}
+
+/// [`host_side_gate`], with `within` for the sandbox to answer. Given up on,
+/// the question is dropped, which kills it.
+async fn host_side_gate_within(query: Command, within: Duration) -> HostSideGate {
+    let out = match tokio::time::timeout(within, query_output(query)).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
             return HostSideGate::Unanswered {
                 why: format!("{SANDBOX} {CAPABILITIES_ARG} could not run: {e}"),
+            };
+        }
+        Err(_) => {
+            return HostSideGate::Unanswered {
+                why: format!("{SANDBOX} {CAPABILITIES_ARG} did not answer within {within:?}"),
             };
         }
     };
@@ -618,6 +637,21 @@ mod tests {
             matches!(&missing, HostSideGate::Unanswered { why } if why.contains("could not run")),
             "{missing:?}"
         );
+    }
+
+    /// A question that does not answer in time gives no answer to go by,
+    /// so a build start does not wait on it.
+    #[tokio::test]
+    async fn a_question_that_hangs_is_unanswered() {
+        let mut query = Command::new("sh");
+        query.args(["-c", "exec sleep 600"]);
+        let started = std::time::Instant::now();
+        let gate = host_side_gate_within(query, Duration::from_millis(200)).await;
+        assert!(
+            matches!(&gate, HostSideGate::Unanswered { why } if why.contains("did not answer")),
+            "{gate:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(60));
     }
 
     /// A stand-in for a named key's agent: a process of its own group, and a
