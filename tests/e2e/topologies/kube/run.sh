@@ -23,8 +23,8 @@
 #      from build(); it and a dependency of it from AURCache's repository,
 #      whose install script runs as root in the pod, look for the key and
 #      ask the agent for a signature that is not a login: neither finds a
-#      key, and both get the signature, as ssh-agent signs what it is asked
-#      to;
+#      key, where each finds the canary it planted, and both get the
+#      signature, as ssh-agent signs what it is asked to;
 #   5. a build is cancelled, and its pod is gone within a minute;
 #   6. the worker is killed while a build runs; the new process deletes the
 #      build pod, and the server ends the build and queues a new one;
@@ -797,16 +797,18 @@ check_ssh_key() {
     grep -qE "\[worker\] the SSH link closed: [1-9][0-9]* signature" <<<"$output" \
         || fail "the log of $ref says no SSH link closed having signed"
     # The build has the agent for as long as it runs, and its dependency's
-    # root script reaches it too. Neither finds the key. Both can have it
-    # sign what is no login: ssh-agent signs what it is asked to, which is
-    # why the key must not be trusted as a signing key anywhere.
-    local built
+    # root script reaches it too. Neither finds the key, where each finds the
+    # canary it planted in a file and in an environment, so that finding no
+    # key says something. Both can have it sign what is no login: ssh-agent
+    # signs what it is asked to, which is why the key must not be trusted as
+    # a signing key anywhere.
+    local built canary='canary-files=[1-9][0-9]*\ canary-environs=[1-9][0-9]*'
     built=$(grep -oE "kube-e2e-ssh: build .*" <<<"$output" | tail -n 1)
-    [[ $built =~ ^kube-e2e-ssh:\ build\ ssh=reached\ keys=0\ sshsig=signed[[:space:]]*$ ]] \
-        || fail "the build's report in $ref is not 'reached the server, no key, an SSHSIG made': $built"
+    [[ $built =~ ^kube-e2e-ssh:\ build\ ssh=reached\ keys=0\ $canary\ sshsig=signed[[:space:]]*$ ]] \
+        || fail "the build's report in $ref is not 'reached the server, no key, its canary found, an SSHSIG made': $built"
     found=$(grep -oE "kube-e2e-ssh: thief .*" <<<"$output" | tail -n 1)
-    [[ $found =~ ^kube-e2e-ssh:\ thief\ ran=yes\ keys=0\ agents=[1-9][0-9]*\ sshsig=signed[[:space:]]*$ ]] \
-        || fail "the thief's report in $ref is not 'ran, no key, reached the agent, an SSHSIG made': $found"
+    [[ $found =~ ^kube-e2e-ssh:\ thief\ ran=yes\ keys=0\ $canary\ agents=[1-9][0-9]*\ sshsig=signed[[:space:]]*$ ]] \
+        || fail "the thief's report in $ref is not 'ran, no key, its canary found, reached the agent, an SSHSIG made': $found"
     # No Secret reaches the pod: not as a volume, not as a projected source
     # (a service account token is one), not in an environment.
     [ -n "$pods" ] || fail "no build pod of $ref was seen while it ran"
