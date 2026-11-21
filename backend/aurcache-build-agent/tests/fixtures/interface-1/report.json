@@ -121,5 +121,17 @@
     "oom_kills": null,
     "disk_bytes": null,
     "vcs_commits": {}
+  },
+  {
+    "interface": 1,
+    "ended": {
+      "how": "setup",
+      "step": "credential",
+      "message": "error: failed retrieving file 'core.db'"
+    },
+    "peak_memory_bytes": null,
+    "oom_kills": null,
+    "disk_bytes": null,
+    "vcs_commits": {}
   }
 ]

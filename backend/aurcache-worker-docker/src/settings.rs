@@ -87,6 +87,8 @@ mod tests {
             "BUILDER_IMAGE",
             "BUILD_ARTIFACT_DIR",
             "BUILD_ARTIFACT_DIR_LOCAL",
+            "WORKER_GIT_SSH_KEY",
+            "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_DATA_DIR",
             "AURCACHE_URL",
             "AURCACHE_ENROLLMENT_TOKEN",

@@ -25,7 +25,7 @@
 
 use anyhow::{Context, Result};
 use aurcache_common::fs::write_public;
-use aurcache_common::shell::quote_argument;
+use aurcache_common::shell::{pinned_ssh_command, quote_argument};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -165,20 +165,6 @@ async fn generate(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What ssh is told beside a configured `known_hosts`, so that no other source
-/// of host keys can admit a host the file does not name: no other
-/// `known_hosts` (the system's `/etc/ssh/ssh_known_hosts` included), no
-/// `KnownHostsCommand`, no key from DNS, and no host accepted on first use.
-///
-/// Options on ssh's command line win over every `ssh_config`, the system's and
-/// the build user's, so none of them can turn any of this back on.
-const PINNED: [&str; 4] = [
-    "GlobalKnownHostsFile=/dev/null",
-    "KnownHostsCommand=none",
-    "VerifyHostKeyDNS=no",
-    "StrictHostKeyChecking=yes",
-];
-
 /// The `GIT_SSH_COMMAND` a build should use.
 ///
 /// The key is **not** named here, and `IdentitiesOnly` is deliberately absent:
@@ -194,27 +180,16 @@ const PINNED: [&str; 4] = [
 /// so nothing it steals outlives the build.
 ///
 /// With a `known_hosts`, that file is the only say in which hosts are trusted
-/// ([`PINNED`]).
+/// ([`pinned_ssh_command`]).
 #[must_use]
 pub fn git_ssh_command(known_hosts: Option<&Path>) -> String {
-    let mut cmd = String::from("ssh");
     match known_hosts {
-        Some(path) => {
-            // Quoted for the shell git runs this through: an unquoted path
-            // with a space would split into two ssh arguments.
-            cmd.push_str(" -o UserKnownHostsFile=");
-            cmd.push_str(&quote_argument(&path.display().to_string()));
-            for option in PINNED {
-                cmd.push_str(" -o ");
-                cmd.push_str(option);
-            }
-        }
+        Some(path) => pinned_ssh_command(path),
         // Without a known_hosts file ssh would prompt, which hangs a
         // non-interactive build forever; accept-new records on first contact
         // and still fails on a *changed* key.
-        None => cmd.push_str(" -o StrictHostKeyChecking=accept-new"),
+        None => "ssh -o StrictHostKeyChecking=accept-new".to_string(),
     }
-    cmd
 }
 
 /// Append worker-local exports to the server-rendered `makepkg.conf`.
@@ -452,57 +427,6 @@ mod tests {
         assert!(without.contains("StrictHostKeyChecking=accept-new"));
     }
 
-    /// The pin holds against an `ssh_config` that trusts more: another
-    /// `known_hosts`, a `KnownHostsCommand`, DNS, or any host on first use.
-    /// Asked by `ssh -G`, which prints the configuration ssh would connect
-    /// with and connects to nothing.
-    #[test]
-    fn a_pinned_known_hosts_wins_over_any_ssh_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = tmp.path().join("ssh_config");
-        std::fs::write(
-            &config,
-            "Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /elsewhere\n  \
-             GlobalKnownHostsFile /etc/ssh/ssh_known_hosts\n  \
-             KnownHostsCommand /bin/cat /elsewhere\n  VerifyHostKeyDNS yes\n",
-        )
-        .unwrap();
-        let pinned = tmp.path().join(KNOWN_HOSTS_FILE);
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "{} -F {} -G example.invalid",
-                git_ssh_command(Some(&pinned)),
-                quote_argument(&config.display().to_string())
-            ))
-            .output()
-            .expect("sh should run");
-        assert!(
-            out.status.success(),
-            "ssh -G failed (is openssh installed?): {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let effective = String::from_utf8_lossy(&out.stdout);
-        let lines: Vec<&str> = effective.lines().collect();
-        for expected in [
-            format!("userknownhostsfile {}", pinned.display()),
-            "globalknownhostsfile /dev/null".to_string(),
-            "stricthostkeychecking true".to_string(),
-            "verifyhostkeydns false".to_string(),
-        ] {
-            assert!(
-                lines.contains(&expected.as_str()),
-                "{expected}: {effective}"
-            );
-        }
-        assert!(
-            !lines
-                .iter()
-                .any(|line| line.starts_with("knownhostscommand")),
-            "{effective}"
-        );
-    }
-
     #[test]
     fn makepkg_conf_gains_the_export_only_when_a_credential_exists() {
         let base = "PKGDEST=/output";
@@ -565,29 +489,6 @@ mod tests {
             assert!(out.status.success(), "shell rejected {hostile:?}");
             assert_eq!(String::from_utf8_lossy(&out.stdout), hostile);
         }
-    }
-
-    /// The known-hosts path travels inside `GIT_SSH_COMMAND`, which git
-    /// splits on spaces: it must arrive there as one shell word.
-    #[test]
-    fn a_spaced_known_hosts_path_stays_one_ssh_argument() {
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "printf '<%s>' {}",
-                git_ssh_command(Some(Path::new("/my dir/known hosts")))
-            ))
-            .output()
-            .expect("sh should run");
-        assert!(out.status.success());
-        // The path one word, intact: the shell consumed the quotes while
-        // splitting, which is exactly what protects the spaces.
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            "<ssh><-o><UserKnownHostsFile=/my dir/known hosts>\
-             <-o><GlobalKnownHostsFile=/dev/null><-o><KnownHostsCommand=none>\
-             <-o><VerifyHostKeyDNS=no><-o><StrictHostKeyChecking=yes>"
-        );
     }
 
     /// No agent means no credential, and no exports at all, so a worker

@@ -706,6 +706,7 @@ dependencies = [
 name = "aurcache-build-agent"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "aurcache-common",
  "clap",
  "flate2",
@@ -942,6 +943,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

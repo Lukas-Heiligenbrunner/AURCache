@@ -11,6 +11,7 @@ pub mod config;
 pub mod container;
 pub mod ending;
 pub mod executor;
+pub mod link;
 pub mod network;
 /// What this executor declares it can be configured with.
 pub mod settings;
