@@ -62,6 +62,12 @@ built before still build, but some things change:
 - **Builds report what they used.** Each build reports its disk use, its VCS
   commits and, where the engine's cgroup allows it, its peak memory. An
   out-of-memory failure says so and names `MEMORY_LIMIT`.
+- **The worker stops its builds when it is stopped.** On `SIGTERM` it removes
+  their containers and reports them, and the server queues them again at
+  once. It needs up to 30 seconds for that, more than `docker stop` gives by
+  default; see [the Docker worker](../workers/docker.md#how-it-builds). The
+  hybrid image stops its server alongside, so its builds are queued again
+  only once the server notices.
 - **`/dev/shm` follows the memory limit.** It is as large as `MEMORY_LIMIT`, or
   2 GiB when no limit is set, where Docker's default is 64 MiB.
 - **A custom `BUILDER_IMAGE`** needs pacman, makepkg, gpg and `find`. It no longer needs
