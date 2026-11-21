@@ -105,6 +105,24 @@ worker](../workers/docker.md#other-architectures).
 The hybrid image is for keeping an existing setup running. When convenient,
 move to a server and a separate worker; see [Migrating](../workers/hybrid.md#migrating).
 
+## One package per package name
+
+A package name in the repository is published by one package at a time. A
+build that would publish a name another package publishes on that platform
+fails, and its log names that package -- whichever kind of package either one
+is, and whatever versions their files are. Earlier releases published both
+whenever their versions differed, so `repo.db` could list the name twice.
+
+Packages that already share a name when you upgrade are left to go on: each
+of them may keep publishing the name it already publishes, and only a package
+that does not yet publish it is refused. The log names every such name at
+each start (`'x' is published on x86_64 by more than one package`), until
+all but one of those packages are removed.
+
+A dependency may take a name over from a package that depends on it once that
+package's own source no longer builds it -- a split package moved from one to
+the other -- and the dependent's file of it then leaves the repository.
+
 ## Going back to an earlier release
 
 Restoring the backup taken before upgrading is the way back from any release.
