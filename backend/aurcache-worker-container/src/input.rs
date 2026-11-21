@@ -46,6 +46,7 @@ mod tests {
             vcs_sources: vec![],
             cpus: Some(2.0),
             scratch: "/scratch".into(),
+            ssh: None,
         }
     }
 

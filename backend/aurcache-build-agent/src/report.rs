@@ -49,4 +49,6 @@ pub enum SetupStep {
     Source,
     /// Importing the job's PGP keys.
     Keys,
+    /// Loading the SSH credential into the build user's agent.
+    Credential,
 }

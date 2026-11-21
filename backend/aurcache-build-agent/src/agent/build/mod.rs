@@ -5,16 +5,19 @@
 //! order is what makes it safe:
 //!
 //! 1. as root, before the build user has any process: take the work
-//!    directory, write pacman's configuration, upgrade the image with AURCache's
+//!    directory, listen for the worker's SSH link when the job has its key,
+//!    write pacman's configuration, upgrade the image with AURCache's
 //!    repository out of sight, make the build user and its directories,
 //!    open the helper's socket;
 //! 2. as the build user, through [`user::BuildUser::command`] and nothing
-//!    else: unpack the source, fetch the keys; run makepkg, which reaches
-//!    root only through [`helper`];
+//!    else: unpack the source, fetch the keys; with the worker's SSH key,
+//!    take the link and open the socket that reaches it ([`relay`]); run
+//!    makepkg, which reaches root only through [`helper`]; close the link;
 //! 3. as root again, once every other process is dead: measure, write the
 //!    report, hand the directory back.
 
 mod children;
+mod credential;
 mod dirs;
 mod handback;
 mod helper;
@@ -23,23 +26,25 @@ mod keys;
 mod makepkg;
 mod measure;
 mod output;
+mod relay;
 mod run;
 mod source;
 mod user;
 mod vcs;
 
 use aurcache_build_agent::layout::{Scratch, Work};
-use aurcache_build_agent::makepkg_conf::{self, Rendering};
+use aurcache_build_agent::makepkg_conf::{self, Rendering, Ssh};
 use aurcache_build_agent::pacman_conf;
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
-use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
+use aurcache_build_agent::spec::{BuildSpec, INTERFACE, SshAccess};
 use children::Quiet;
 use helper::Helper;
 use output::Output;
+use relay::{LinkEnd, Listening, Relay};
 use run::Keep;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +52,11 @@ use user::BuildUser;
 
 /// How long the build's processes have to die once they are killed.
 const ENDING: Duration = Duration::from_secs(60);
+
+/// How long the worker's SSH link may still take to come once makepkg is
+/// about to run. The worker opens it as the container starts, so it is
+/// normally there long before.
+const LINK_WAIT: Duration = Duration::from_secs(120);
 
 /// What root finds programs through when it was started with nothing set.
 const ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
@@ -238,12 +248,22 @@ fn make_with(
     let root = spec.scratch.as_path();
     let scratch = Scratch::new(root);
 
-    // As root, with no process of the build user's anywhere.
+    // As root, with no process of the build user's anywhere. The link is
+    // listened for first, as the worker opens it once the container runs.
+    let listening = spec
+        .ssh
+        .as_ref()
+        .map(|_| Listening::open(&scratch))
+        .transpose()
+        .map_err(at(SetupStep::Credential))?;
     configure_pacman(spec).map_err(at(SetupStep::Config))?;
     output.say("preparing pacman's keyring");
     init_keyring(output).map_err(at(SetupStep::Keyring))?;
     output.say("upgrading the image");
     upgrade(output).map_err(at(SetupStep::Sync))?;
+    if spec.ssh.is_some() {
+        credential::provide(output, Path::new(UPGRADE_CONF)).map_err(at(SetupStep::Credential))?;
+    }
     let agent = std::env::current_exe().map_err(at(SetupStep::User))?;
     dirs::lay_out(root, &scratch, work).map_err(at(SetupStep::User))?;
     let user = BuildUser::ensure(&scratch.home()).map_err(at(SetupStep::User))?;
@@ -265,8 +285,55 @@ fn make_with(
         keys::import(&spec.pgp_keys, &spec.keyserver, &user, output)
             .map_err(at(SetupStep::Keys))?;
     }
-    let made = run_makepkg(spec, work, &scratch, &agent, &user, output);
+    // With the worker's SSH key: the socket that reaches it, from here to the
+    // end of makepkg.
+    let linked = match (&spec.ssh, listening) {
+        (Some(ssh), Some(listening)) => Some(link(ssh, listening, spec, &scratch)?),
+        _ => None,
+    };
+    let made = run_makepkg(spec, work, &scratch, &agent, linked.as_ref(), &user, output);
+    if let Some(linked) = linked
+        && let LinkEnd::Broken { message } = linked.relay.close()
+    {
+        // Not the build's failure by itself: makepkg has said so already if
+        // it needed the key after the link was gone.
+        output.say(&format!(
+            "the SSH link to the worker broke during the build: {message}"
+        ));
+    }
     made.map(|status| Made { status, user })
+}
+
+/// The build user's way to the worker's SSH key.
+struct Linked {
+    relay: Relay,
+    /// The agent socket the build's ssh is pointed at.
+    socket: PathBuf,
+    /// The hosts' keys the build's ssh trusts, and no others.
+    known_hosts: PathBuf,
+}
+
+/// Take the worker's link and open the build user's socket on it.
+fn link(
+    ssh: &SshAccess,
+    listening: Listening,
+    spec: &BuildSpec,
+    scratch: &Scratch,
+) -> Result<Linked, Failed> {
+    let link = listening
+        .accept(LINK_WAIT)
+        .map_err(at(SetupStep::Credential))?;
+    let known_hosts = credential::known_hosts(
+        &ssh.known_hosts,
+        &spec.scratch.join(credential::KNOWN_HOSTS),
+    )
+    .map_err(at(SetupStep::Credential))?;
+    let relay = Relay::start(link, scratch).map_err(at(SetupStep::Credential))?;
+    Ok(Linked {
+        relay,
+        socket: scratch.ssh_socket(),
+        known_hosts,
+    })
 }
 
 /// Write the build's configuration and run makepkg to its end.
@@ -275,6 +342,7 @@ fn run_makepkg(
     work: &Work,
     scratch: &Scratch,
     agent: &Path,
+    linked: Option<&Linked>,
     user: &BuildUser,
     output: &Output,
 ) -> Result<ExitStatus, Failed> {
@@ -285,6 +353,10 @@ fn run_makepkg(
         scratch,
         cpus: spec.cpus,
         agent,
+        ssh: linked.map(|linked| Ssh {
+            socket: &linked.socket,
+            known_hosts: &linked.known_hosts,
+        }),
     });
     std::fs::write(&conf, rendered).map_err(at(SetupStep::Config))?;
     output.say("running makepkg");

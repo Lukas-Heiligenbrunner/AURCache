@@ -247,7 +247,8 @@ ARG TARGETPLATFORM
 # The server, the sandbox it parses PKGBUILDs through, and the Docker worker.
 # pacman pulls alpm-pkgbuild-bridge as an ordinary dependency. Podman (with
 # crun and fuse-overlayfs, as upstream's image had) is what DinD mode builds
-# in.
+# in. OpenSSH is for the worker's ssh-agent, which holds the SSH key builds
+# fetch private sources with.
 #
 # No /etc/localtime of its own is left: the base has none, and the `rm` below
 # keeps it so. A host's file bind-mounted there then replaces nothing, rather
@@ -256,7 +257,7 @@ ARG TARGETPLATFORM
 RUN --mount=type=cache,target=/var/cache/pacman/pkg,id=pacman-runtime-${TARGETPLATFORM} \
     --mount=type=bind,from=packager,source=/pkg,target=/tmp/pkg \
     aurcache-install-packages /tmp/pkg aurcache-sandbox aurcache-server aurcache-worker-docker \
-        -- podman crun fuse-overlayfs \
+        -- podman crun fuse-overlayfs openssh \
     && rm -f /etc/localtime /etc/timezone
 
 ENV WORKER_DATA_DIR=/var/lib/aurcache-worker

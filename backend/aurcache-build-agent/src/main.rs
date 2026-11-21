@@ -3,7 +3,8 @@
 //!
 //! This file is the command line and nothing else: each subcommand is one
 //! function in [`agent`]. `build` (and the two subcommands it runs itself,
-//! `pacman-request` and `unpack`) is in [`agent::build`].
+//! `pacman-request` and `unpack`) is in [`agent::build`]; the subcommand a
+//! worker runs through `exec` is in [`agent::transfer`].
 
 mod agent;
 
@@ -52,6 +53,13 @@ enum Command {
         #[arg(long)]
         into: PathBuf,
     },
+    /// Carry the SSH link: connect to the agent's link socket and copy
+    /// between it and stdin and stdout.
+    #[command(hide = true)]
+    SshLink {
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -68,6 +76,7 @@ fn main() -> ExitCode {
         Command::Build { work, log_file } => agent::build::run(&work, log_file.as_deref()),
         Command::PacmanRequest { argv } => agent::build::pacman_request(argv),
         Command::Unpack { archive, into } => agent::build::unpack(&archive, &into),
+        Command::SshLink { socket } => agent::transfer::ssh_link(&socket),
     }
 }
 
