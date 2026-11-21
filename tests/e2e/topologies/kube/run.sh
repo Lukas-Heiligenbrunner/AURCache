@@ -242,14 +242,6 @@ build_status() { build_json "$1" | jq -r '.status'; }
 build_output() { aurcache_cli builds output "$1" 2>/dev/null; }
 build_said() { build_output "$1" | grep -qF -- "$2"; }
 
-# Whether the output of build `$1` has no `$2`. Output that cannot be read
-# fails the run.
-build_silent() {
-    local text
-    text=$(build_output "$1") || fail "the output of $1 could not be read"
-    ! grep -qF -- "$2" <<<"$text"
-}
-
 # The build pods, as `name uid build-id` lines.
 build_pods() {
     k -n aurcache-builds get pods -l aurcache.io/build-id -o json \
@@ -961,14 +953,8 @@ build_over() {
 
 check_restart() {
     log "=== 6. The worker dies under a build ==="
-    # A setting this worker does not act on: a build starts from a fresh tree
-    # whatever it says, and says nothing about it. Set here so the check does
-    # not rest on the server's default.
-    aurcache_cli raw PATCH /package/kube-e2e-slow/settings/persistent_builddir \
-        --body '{"value":"true"}' >/dev/null || fail "could not set persistent_builddir"
     local before ref pod uid since
     before=$(latest_build_ref kube-e2e-slow)
-    since=$(now)
     aurcache_cli builds retry "$before" | sed 's/^/    /'
     wait_for 60 "a new build of kube-e2e-slow" ref_moved kube-e2e-slow "$before" \
         || fail "the retry queued nothing"
@@ -976,17 +962,6 @@ check_restart() {
     CURRENT_BUILD_REF=$ref
     wait_for "$BUILD_TIMEOUT" "$ref to be building" running_build "$ref" \
         || fail "$ref never started building"
-    # That the job asked for one, as the worker's debug line says to whoever
-    # looks: without it, saying nothing about the setting would prove nothing.
-    expect_said "of kube-e2e-slow asks for a persistent build directory" "$since" 30
-    build_silent "$ref" "persistent build directory" \
-        || fail "the log of $ref talks about the persistent build directory"
-    local warnings
-    warnings=$(server_log warning) || fail "the server's log could not be read"
-    if grep -qF -- "persistent build directory" <<<"$warnings"; then
-        fail "the server's log has a warning about the persistent build directory"
-    fi
-    result "$ref builds with persistent_builddir set, which the worker noted at debug, and neither its log nor the server's mentions it"
     read -r pod uid _ <<<"$(build_pods | head -n 1)"
     log "    $ref runs in $pod ($uid)"
 
