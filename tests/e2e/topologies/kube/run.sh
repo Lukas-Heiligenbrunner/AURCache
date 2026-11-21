@@ -765,7 +765,11 @@ check_ssh_key() {
         --wait --wait-timeout "$BUILD_TIMEOUT" \
         | sed 's/^/    /' || fail "kube-e2e-thief did not build"
     # The build's pod goes with the build, so what it is made of is read while
-    # it is there: every build pod seen, the first time there is one.
+    # it is there: every build pod seen, the first time there is one. The
+    # thief's pod may still be going, and is waited for so that it is not
+    # the one seen.
+    wait_for 60 "the pod of kube-e2e-thief to go" no_build_pods \
+        || fail "the pod of kube-e2e-thief outlived its build by a minute"
     local pid pods=''
     build_in_background "$SCRATCH/add-kube-e2e-ssh.log" kube-e2e-ssh \
         "$GIT_URL/kube-e2e-ssh.git" --ref master --wait --wait-timeout "$BUILD_TIMEOUT"
