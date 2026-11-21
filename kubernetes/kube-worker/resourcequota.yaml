@@ -11,7 +11,8 @@
 # worker's disk limit (WORKER_BUILD_DISK_MAX). A pod count needs nothing.
 #
 # Beside the build, each pod asks for 10m of CPU and 16Mi of memory (limits:
-# one CPU, 64Mi) for the container that hands the packages back.
+# one CPU, 64Mi) for the container that hands the packages back, and so does
+# the pod of the NetworkPolicy check.
 apiVersion: v1
 kind: ResourceQuota
 metadata:

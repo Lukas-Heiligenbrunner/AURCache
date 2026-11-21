@@ -6,8 +6,9 @@
 # One image serves both. Its default entrypoint is the dispatcher; the build
 # pods start it again with `/usr/local/bin/aurcache-build-agent` as their
 # command: the `stage` init container copies the agent into the pod, the
-# `hold` container keeps the pod up while packages are read out. So it exists
-# for every architecture builds run on, and runs on every node that builds.
+# `hold` container keeps the pod up while packages are read out, and the
+# network probe's pod runs `probe`. So it exists for every architecture builds
+# run on, and runs on every node that builds.
 #
 # What the binaries report as their version (see aurcache-common's build
 # script): the commit, except on release builds, which name the tag instead.
