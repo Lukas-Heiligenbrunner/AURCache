@@ -128,6 +128,7 @@ jobs:
               owner, repo, workflow_id: WORKFLOW, event: 'pull_request',
               head_sha: sha, per_page: 100
             })).filter(run =>
+              run.head_sha === sha &&
               run.head_repository?.full_name === pr.head.repo.full_name &&
               run.head_branch === pr.head.ref);
             if (runs.length === 0) {
@@ -277,9 +278,9 @@ jobs:
             core.setOutput('digest', `sha256:${hex}`);
 
       # skopeo reads the layout directly: no PR-controlled tar archive is
-      # unpacked and nothing in it is run. `--all` pushes every architecture under the one index, and
-      # `--preserve-digests` refuses to push anything but the exact index
-      # annotated above.
+      # unpacked and nothing in it is run. `--all` pushes every
+      # architecture under the one index, and `--preserve-digests` refuses
+      # to push anything but the exact index annotated above.
       - name: Push the image to the preview package
         if: steps.build.outputs.publish == 'true'
         shell: bash
