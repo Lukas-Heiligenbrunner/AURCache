@@ -3,11 +3,11 @@
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::ManuallyDrop;
 use std::os::fd::{FromRawFd, OwnedFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 /// How much of a file is in memory at once.
@@ -19,25 +19,6 @@ pub enum Opened {
     /// A directory, a device, a pipe, a socket: anything but a file, or a
     /// symbolic link, which is never followed.
     Other,
-}
-
-/// Open `path` for reading if it is a regular file.
-///
-/// The open itself neither follows a symbolic link nor waits on a pipe nor
-/// takes a terminal, so a name the build made into any of those cannot hold
-/// the agent up or point it elsewhere.
-pub fn open_regular(path: &Path) -> io::Result<Opened> {
-    let opened = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
-        .open(path);
-    let file = match opened {
-        Ok(file) => file,
-        // ELOOP: the last component is a symbolic link.
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(Opened::Other),
-        Err(error) => return Err(error),
-    };
-    regular(file)
 }
 
 /// A directory directly in the work directory, opened as itself.
@@ -72,8 +53,11 @@ pub fn open_dir_in(root: &Path, name: &str) -> io::Result<OpenedDir> {
 }
 
 impl Beneath {
-    /// The regular file `name` in this directory, opened as [`open_regular`]
-    /// opens a path.
+    /// The regular file `name` in this directory, if it is one.
+    ///
+    /// The open itself neither follows a symbolic link nor waits on a pipe
+    /// nor takes a terminal, so a name the build made into any of those
+    /// cannot hold the agent up or point it elsewhere.
     pub fn regular(&self, name: &str) -> io::Result<Opened> {
         let flags =
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
@@ -137,7 +121,7 @@ pub fn stdout() -> ManuallyDrop<File> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CHUNK, Opened, OpenedDir, open_dir_in, open_regular, pump};
+    use super::{CHUNK, Opened, OpenedDir, open_dir_in, pump};
     use std::io::Cursor;
     use std::os::unix::fs::symlink;
 
@@ -184,26 +168,5 @@ mod tests {
         }
         let missing = open_dir_in(root.path(), "missing").err().unwrap();
         assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn open_regular_takes_files_only() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f"), b"x").unwrap();
-        std::fs::create_dir(dir.path().join("d")).unwrap();
-        symlink("f", dir.path().join("l")).unwrap();
-        assert!(matches!(
-            open_regular(&dir.path().join("f")).unwrap(),
-            Opened::Regular(_)
-        ));
-        assert!(matches!(
-            open_regular(&dir.path().join("d")).unwrap(),
-            Opened::Other
-        ));
-        assert!(matches!(
-            open_regular(&dir.path().join("l")).unwrap(),
-            Opened::Other
-        ));
-        assert!(open_regular(&dir.path().join("missing")).is_err());
     }
 }
