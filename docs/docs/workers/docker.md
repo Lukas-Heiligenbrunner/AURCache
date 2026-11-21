@@ -9,9 +9,10 @@ image, against a Docker or Podman socket it is given. It is for hosts that
 already run a container engine and have no use for a `devtools` chroot, and it
 is the builder the [hybrid image](./hybrid.md) embeds.
 
-It builds in a reused image rather than a clean chroot, so it supports neither
-the source and package caches nor [build credentials](./credentials.md). The
-[chroot worker](./split-chroot.md) offers both.
+It builds in a reused image rather than a clean chroot, so it does not support
+the source and package caches; the [chroot worker](./split-chroot.md) does. It
+does support an SSH key for private sources: see
+[Build credentials](#build-credentials).
 
 ## How it builds
 
@@ -124,6 +125,9 @@ dropped except the seven the agent's first step needs (`CHOWN`, `DAC_OVERRIDE`,
 `no-new-privileges`, so nothing in it can gain more. Package code runs as the
 unprivileged build user, with none of them. The build directory is the
 container's only bind mount, and the Docker socket is never given to a build.
+The worker turns off the builder image's health check: each run of it would
+be one more process started in the container from outside, which the agent
+kills like any other.
 
 The build user is uid 1001 inside the container. Unless the engine remaps
 user ids, that is uid 1001 on the host as well, and a host user with that uid
@@ -144,6 +148,71 @@ instead. Nothing here firewalls a build.
 `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest`) is pulled before
 each build. An image of your own needs pacman, makepkg, gpg and `find`; it needs
 neither `sudo` nor a build user, which the agent adds.
+
+### Build credentials
+
+`WORKER_GIT_SSH_KEY` names an SSH key for packages whose sources are in private
+repositories, and `WORKER_SSH_KNOWN_HOSTS` the host keys of the servers it is
+used with; set both or neither, as the worker refuses to start with a key and
+no host keys. The key is any private key `ssh-add` loads, without a
+passphrase, since there is no one to enter it. Nothing is generated, unlike
+on the chroot worker.
+
+It is the worker's default key, which a build is offered unless its package's
+**Build SSH key** names another. The Docker worker holds no [named
+keys](./credentials.md#named-keys), so a build whose package names one is
+offered no key at all, and its log says so.
+
+**The key never enters a build container.** For each build, the worker loads
+it into an OpenSSH `ssh-agent` of its own, beside the worker and not in the
+container, and ssh in the container reaches that agent through `docker exec`.
+The build has that while makepkg runs (not while its dependencies are being
+worked out and installed), so a package that clones over SSH in `prepare()`
+or `build()`, and not only through `source=`, works here as it does on the
+[chroot worker](./split-chroot.md). The worker needs OpenSSH for
+this: the [hybrid image](./hybrid.md) has it, and beside a worker installed
+from the package you install `openssh`.
+
+**A build cannot take the key away, but it can use it while it runs.** The
+key is in no file, variable or process of the container, and nothing that a
+build can ask the agent for returns it. But `ssh-agent` signs whatever it is
+asked to, so the PKGBUILD, or anything that a dependency's install script
+(which runs as root before the build) left for the build to run, can:
+
+- log in as the key to any host that accepts it, also for a connection opened
+  somewhere else, which stays open after the build ends;
+- sign anything else with it, such as a git commit or a file
+  (`ssh-keygen -Y sign`).
+
+The [threat model](https://github.com/Lukas-Heiligenbrunner/AURCache/blob/master/design/in-progress/container-workers.md#the-ssh-link)
+has the rest. So:
+
+- **Use a key made for builds, and for nothing else**: a deploy key that
+  reaches only what the packages need, read-only where the host allows it.
+  Use [routing](./routing.md) to send those packages to this worker.
+- **Do not register that key as a signing key anywhere**, on GitHub, GitLab
+  or in an `allowed_signers` file. Where nobody trusts the key's signatures,
+  a signature that a build made with it is worth nothing.
+
+**Which hosts it trusts.** The ssh that git runs in the build
+(`GIT_SSH_COMMAND`) trusts the hosts that `WORKER_SSH_KNOWN_HOSTS` names and
+no others, whatever the image's `ssh_config` says. That pins git's ssh, and
+nothing more: a PKGBUILD can run `ssh` itself without these options, and a
+dependency's install script could replace `ssh`. Since a build can log in as
+the key anywhere already, that adds no reach; a fetch made that way is just
+not checked against your host keys.
+
+A build fetches such sources with `git` and `ssh`, which the builder image
+has. A `BUILDER_IMAGE` of your own needs `openssh` too, or every build that
+is given the key fails, saying so.
+
+:::note Upgrading
+The Docker worker ignored `WORKER_GIT_SSH_KEY` before; it now acts on it, and
+a worker with the key set refuses to start without `WORKER_SSH_KNOWN_HOSTS`,
+without OpenSSH installed beside it, or with a key protected by a passphrase
+(remove it with `ssh-keygen -p -N '' -f <key>`). The same is true of the
+embedded worker in the [hybrid image](./hybrid.md).
+:::
 
 ### Build trees are not kept
 
@@ -176,6 +245,7 @@ variables: [Connecting to AURCache](./split-chroot.md#connecting-to-aurcache),
 | `BUILDER_IMAGE` | The image builds run in | `ghcr.io/lukas-heiligenbrunner/aurcache-builder-v2:latest` |
 | `AURCACHE_BUILDER_NETWORK` | The Docker network build containers join, or `host` | the network namespace of the worker's own container |
 | `WORKER_BUILD_AGENT` | The build agent the worker copies into each build | `/usr/lib/aurcache/bin/aurcache-build-agent` |
+| `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | An SSH key for private sources, and the host keys it is used with: see [Build credentials](#build-credentials) | none |
 
 Set both directory variables, to the same path when the worker and the daemon
 run on one host. `BUILD_ARTIFACT_DIR_LOCAL` does not default to
