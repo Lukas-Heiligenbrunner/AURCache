@@ -50,6 +50,7 @@ pub struct Config {
     pub credential: Option<CredentialFiles>,
     pub user_namespaces: bool,
     pub extras: PodExtras,
+    pub network_probe: bool,
     pub tunables: Tunables,
 }
 
@@ -170,6 +171,11 @@ impl Config {
                 false,
             )?,
             extras: PodExtras::load(var("WORKER_KUBE_POD_TEMPLATE").as_deref())?,
+            network_probe: flag(
+                "WORKER_KUBE_NETWORK_PROBE",
+                var("WORKER_KUBE_NETWORK_PROBE"),
+                true,
+            )?,
             tunables: Tunables::from_settings(settings),
         })
     }
@@ -228,6 +234,7 @@ mod tests {
         assert_eq!(cfg.agent_image, "reg/agent:1");
         assert_eq!(cfg.credential, None);
         assert!(!cfg.user_namespaces);
+        assert!(cfg.network_probe);
         assert_eq!(cfg.extras, PodExtras::default());
         assert_eq!(
             cfg.tunables,
@@ -256,6 +263,7 @@ mod tests {
             ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
             ("WORKER_SSH_KNOWN_HOSTS", "/etc/aurcache/ssh/known_hosts"),
             ("WORKER_KUBE_USER_NAMESPACES", "TRUE"),
+            ("WORKER_KUBE_NETWORK_PROBE", "false"),
         ]);
         let cfg = read(&vars).unwrap();
         assert_eq!(cfg.namespace, "b");
@@ -268,6 +276,7 @@ mod tests {
             })
         );
         assert!(cfg.user_namespaces);
+        assert!(!cfg.network_probe);
     }
 
     #[test]
@@ -275,6 +284,7 @@ mod tests {
         for bad in [
             ("WORKER_KUBE_IMAGE_PULL_POLICY", "Sometimes"),
             ("WORKER_KUBE_USER_NAMESPACES", "yes"),
+            ("WORKER_KUBE_NETWORK_PROBE", "1"),
             // A key without the hosts it may be used with.
             ("WORKER_GIT_SSH_KEY", "/etc/aurcache/ssh/ssh-privatekey"),
         ] {

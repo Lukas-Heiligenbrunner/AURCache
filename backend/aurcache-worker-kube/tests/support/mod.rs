@@ -514,6 +514,23 @@ impl FakeCluster {
         self.shared.bump();
     }
 
+    /// [`Self::leave`], made `age` ago.
+    pub fn leave_aged(&self, name: &str, status: PodStatus, age: Duration) {
+        let mut pod = Pod::default();
+        pod.metadata.name = Some(name.to_string());
+        let created = k8s_openapi::jiff::Timestamp::now()
+            - k8s_openapi::jiff::SignedDuration::try_from(age).unwrap();
+        pod.metadata.creation_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(created),
+        );
+        pod.status = Some(status);
+        self.shared
+            .state()
+            .pods
+            .insert(name.to_string(), Arc::new(pod));
+        self.shared.bump();
+    }
+
     /// Put a pod labelled `labels` in the builds' namespace that is not this
     /// dispatcher's, so that its watch does not show it.
     pub fn leave_stranger(&self, name: &str, labels: &[(&str, &str)]) {
@@ -1089,6 +1106,7 @@ pub fn config() -> Config {
         credential: None,
         user_namespaces: false,
         extras: PodExtras::default(),
+        network_probe: false,
         tunables: Tunables {
             memory: Some(4 << 30),
             cpus: None,

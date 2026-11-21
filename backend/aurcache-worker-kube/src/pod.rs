@@ -124,8 +124,10 @@ fn resources(cfg: &Config) -> Option<ResourceRequirements> {
     })
 }
 
-/// What `stage` and `hold` run as: nobody, with nothing.
-fn unprivileged() -> SecurityContext {
+/// What `stage` and `hold` run as: nobody, with nothing. The `restricted`
+/// Pod Security level's container settings.
+#[must_use]
+pub fn unprivileged() -> SecurityContext {
     SecurityContext {
         run_as_user: Some(NOBODY),
         run_as_group: Some(NOBODY),
@@ -360,6 +362,7 @@ mod tests {
             credential: None,
             user_namespaces: false,
             extras: PodExtras::default(),
+            network_probe: true,
             tunables: Tunables {
                 memory: None,
                 cpus: None,

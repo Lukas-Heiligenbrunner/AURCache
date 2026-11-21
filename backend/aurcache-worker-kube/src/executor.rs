@@ -11,6 +11,7 @@ use crate::cluster::{Admission, Cluster, CreateError, PROMPT, Sweep};
 use crate::config::Config;
 use crate::outcome::{self, BuildEnd, Observed};
 use crate::pod::{self, BUILD, PodInputs};
+use crate::probe;
 use crate::transfer::{Agent, Lines, Uploads};
 use anyhow::{Context, Result, anyhow, bail};
 use aurcache_build_agent::layout::Scratch;
@@ -38,6 +39,7 @@ use aurcache_worker_core::settings::WorkerSettings;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::jiff::Timestamp;
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::path::{Path, PathBuf};
@@ -308,7 +310,7 @@ impl<C: Cluster> KubeExecutor<C> {
     /// Delete the pods of this dispatcher that no build holds: one whose
     /// delete failed when its build ended, one created by a request that was
     /// answered after its build had given up on it, and a pod with no build
-    /// that has ended. A pod left standing holds its requests and its place
+    /// that has ended or that the NetworkPolicy check no longer uses. A pod left standing holds its requests and its place
     /// in a quota until its deadline, and a pod that ended keeps its place in
     /// a quota on objects for good. A pod its own build deleted is left to
     /// that delete.
@@ -321,7 +323,7 @@ impl<C: Cluster> KubeExecutor<C> {
             deleted.retain(|build| pods.iter().any(|pod| pod::build_id(pod) == Some(*build)));
             pods.iter()
                 .filter(|pod| pod::build_id(pod).is_none_or(|build| !deleted.contains(&build)))
-                .filter(|pod| orphaned(pod, &held))
+                .filter(|pod| orphaned(pod, &held, Timestamp::now()))
                 .filter_map(|pod| pod.metadata.name.clone())
                 .collect()
         };
@@ -923,11 +925,24 @@ impl Status {
     }
 }
 
-/// Whether `pod`, one of this dispatcher's, is nobody's: a build's that no
-/// build in `held` is. A pod already being deleted is left to that.
-fn orphaned(pod: &Pod, held: &HashSet<i32>) -> bool {
-    pod.metadata.deletion_timestamp.is_none()
-        && pod::build_id(pod).is_some_and(|build_id| !held.contains(&build_id))
+/// Whether `pod`, one of this dispatcher's, is nobody's as of `now`: a
+/// build's that no build in `held` is, or one of no build (the NetworkPolicy
+/// check's) that has ended or that the check no longer uses
+/// ([`probe::abandoned`]). A pod already being deleted is left to that.
+fn orphaned(pod: &Pod, held: &HashSet<i32>, now: Timestamp) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    match pod::build_id(pod) {
+        Some(build_id) => !held.contains(&build_id),
+        None => {
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|status| status.phase.as_deref());
+            matches!(phase, Some("Succeeded" | "Failed")) || probe::abandoned(pod, now)
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1074,6 +1089,7 @@ mod tests {
             credential,
             user_namespaces: false,
             extras: PodExtras::default(),
+            network_probe: false,
             tunables: Tunables {
                 memory: Some(4 << 30),
                 cpus: Some(2.5),

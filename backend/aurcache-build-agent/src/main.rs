@@ -13,6 +13,7 @@ use aurcache_build_agent::spec::INTERFACE;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -94,6 +95,15 @@ enum Command {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Try a TCP connection to each target, and print which answered.
+    Probe {
+        /// Seconds to give each connection.
+        #[arg(long)]
+        timeout: u64,
+        /// A `host:port` to try; repeatable.
+        #[arg(long = "connect", required = true, num_args = 1..)]
+        targets: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -117,6 +127,9 @@ fn main() -> ExitCode {
         Command::Manifest { work } => agent::transfer::manifest(&work),
         Command::Send { work, name } => agent::transfer::send(&work, &name),
         Command::SshLink { socket } => agent::transfer::ssh_link(&socket),
+        Command::Probe { timeout, targets } => {
+            agent::transfer::probe(&targets, Duration::from_secs(timeout))
+        }
     }
 }
 
@@ -158,6 +171,26 @@ mod tests {
                 "tree>=2"
             ]
         );
+    }
+
+    #[test]
+    fn probe_takes_several_targets() {
+        let cli = Cli::try_parse_from([
+            "aurcache-build-agent",
+            "probe",
+            "--timeout",
+            "5",
+            "--connect",
+            "a:1",
+            "--connect",
+            "b:2",
+        ])
+        .unwrap();
+        let Some(Command::Probe { timeout, targets }) = cli.command else {
+            panic!("not probe");
+        };
+        assert_eq!(timeout, 5);
+        assert_eq!(targets, ["a:1", "b:2"]);
     }
 
     #[test]

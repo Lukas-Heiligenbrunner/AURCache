@@ -212,6 +212,13 @@ impl<E: Executor> Runner<E> {
         })
     }
 
+    /// The client this worker talks to the server through, for what a worker
+    /// has to say outside a build.
+    #[must_use]
+    pub fn client(&self) -> Arc<WorkerClient> {
+        Arc::clone(&self.client)
+    }
+
     /// The configuration in force now.
     fn cfg(&self) -> Arc<CoreConfig> {
         self.cfg.current()

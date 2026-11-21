@@ -2,11 +2,12 @@
 //! directories, judged by their stdout, stderr and exit status.
 
 use aurcache_build_agent::layout::Work;
-use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
+use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback, Reach};
 use aurcache_build_agent::spec::INTERFACE;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -608,6 +609,63 @@ fn send_ends_with_an_error_when_its_reader_goes_away() {
         .unwrap();
     drop(child.stdout.take());
     assert!(!finish(&mut child).success());
+}
+
+// ---- probe ------------------------------------------------------------------
+
+#[test]
+fn probe_reports_an_open_port_reachable_and_a_closed_one_not() {
+    let open = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    let open = open.local_addr().unwrap().to_string();
+    let ran = run(&mut agent([
+        "probe",
+        "--timeout",
+        "5",
+        "--connect",
+        &open,
+        "--connect",
+        &closed,
+    ]));
+    assert!(ran.status.success(), "{}", ran.stderr);
+    let reach: Vec<Reach> = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(
+        reach,
+        [
+            Reach {
+                target: open,
+                reachable: true
+            },
+            Reach {
+                target: closed,
+                reachable: false
+            },
+        ]
+    );
+}
+
+#[test]
+fn probe_exits_zero_and_gives_up_on_what_does_not_answer() {
+    // A documentation address (RFC 5737) that nothing routes: the connection
+    // hangs or is refused at once, and either way is not reachable.
+    let started = Instant::now();
+    let ran = run(&mut agent([
+        "probe",
+        "--timeout",
+        "1",
+        "--connect",
+        "192.0.2.1:9",
+        "--connect",
+        "nonsense",
+    ]));
+    assert!(ran.status.success(), "{}", ran.stderr);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let reach: Vec<Reach> = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(reach.len(), 2);
+    assert!(reach.iter().all(|r| !r.reachable));
 }
 
 // ---- bounded memory ---------------------------------------------------------
