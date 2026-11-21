@@ -250,11 +250,19 @@ not advertise an architecture the cluster has no node for. Builds under
 emulation (binfmt on the nodes) are the operator's business: the worker only
 advertises what it is told.
 
-A worker cannot ask the server for a build of one architecture, so while any
-pod of a dispatcher's has no node to go to, it claims nothing: the next build
-might wait for a node too. Run one dispatcher per architecture: its builds
-never wait behind those of an architecture the cluster is short of. Each needs
-a builds namespace of its own (see [One replica only](#one-replica-only)).
+A worker cannot ask the server for a build of one architecture. So while a pod
+of one architecture has no node to go to, a dispatcher that builds several
+tells the server it takes none of that architecture for now, and goes on with
+the others; the Workers page shows it with the shorter list meanwhile. It
+takes the architecture back one schedule timeout after its last pod stopped
+waiting. Its log says `No node takes pod <name> (...); taking no builds for
+<arch> until <seconds>s pass without a pod of it waiting for a node`, and
+later `Taking builds for <arch> again`: it tries the architecture again then,
+whether or not a node has come, and sets it aside again if the next pod waits
+too. Each change registers the dispatcher again, as a changed concurrency
+does, and the server's activity log records each as the worker checking in.
+A dispatcher that builds one architecture, or whose every architecture has a
+pod waiting, claims nothing until a pod finds a node.
 
 The dispatcher's image must exist for every architecture you build for, since
 part of each pod runs from it. It is built for `x86_64`, `aarch64` and

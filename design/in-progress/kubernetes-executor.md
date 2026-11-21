@@ -98,13 +98,14 @@ startup sweep takes every build pod in it.
 ### Claiming only what the cluster can start
 
 A claimed job holds a lease the server expects progress on. So the
-dispatcher claims nothing while any of its pods is unschedulable, since
-another claim would only queue behind it, or while a server-side dry run of
-the pod it would create is refused: a job claimed into a cluster that
-refuses its pod would spend an attempt for nothing. Any answer the API
-server gives is taken as its answer for a real pod, and no answer holds
-claims back too: an API server away for minutes would otherwise spend every
-attempt of every package offered meanwhile.
+dispatcher claims nothing while any of its pods is unschedulable and the
+server may hand out another build of that pod's architecture, since another
+claim would only queue behind it, or while a server-side dry run of the pod
+it would create is refused: a job claimed into a cluster that refuses its
+pod would spend an attempt for nothing. Any answer the API server gives is
+taken as its answer for a real pod, and no answer holds claims back too: an
+API server away for minutes would otherwise spend every attempt of every
+package offered meanwhile.
 
 A pod without a node after `WORKER_KUBE_SCHEDULE_TIMEOUT` is reported
 `Interrupted`, so another worker may take the build. A scheduled pod gets
@@ -115,14 +116,20 @@ up shows only in events and would otherwise be blamed on the package.
 
 The arch list is configuration (`WORKER_ARCHES`), not discovery. The
 dispatcher refuses an architecture its own image is not built for, since
-every pod's agent comes from it, and never narrows the list itself: a node
-pool scaled to zero is still capacity. A claim cannot name an architecture
+every pod's agent comes from it, and never drops one for good: a node pool
+scaled to zero is still capacity. A claim cannot name an architecture
 (protocol 1 carries the list at registration only), so a pod waiting for a
-node holds back every architecture's builds. A dispatcher is therefore
-meant to build one; one per architecture, each with its builds namespace,
-keeps an architecture the cluster is short of from stopping the others.
-The operator's pod template is read as scheduling fields only, so it cannot
-add a volume, a container or a security context.
+node would hold back every architecture's builds. Instead the executor tells
+the runner which architectures it serves now (`Executor::serving`), and the
+runner registers again when that changes, as it does for a changed
+concurrency. An architecture with a pod no node takes is left out until one
+schedule timeout after its last such pod; once registered without it, that
+pod holds no claim back. With nothing left to serve (one architecture, or
+all of them waiting), the list stays whole and waiting pods hold claims
+back. The cost is one build of that architecture handed back per schedule
+timeout and cool-down while it has no node, instead of every other
+architecture stopped. The operator's pod template is read as scheduling
+fields only, so it cannot add a volume, a container or a security context.
 
 ### Restarts, stopping and orphans
 
