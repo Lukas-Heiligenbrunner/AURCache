@@ -1,8 +1,8 @@
 //! Follow the build log from a given byte, until the build is over.
 
-use super::file::{Opened, open_regular, pump, stdout};
+use super::file::{Opened, OpenedDir, open_dir_in, pump, stdout};
 use anyhow::{Context, Result, bail};
-use aurcache_build_agent::layout::Work;
+use aurcache_build_agent::layout::{LOG_DIR, LOG_FILE, Work};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
@@ -25,6 +25,8 @@ enum Pass {
 
 /// Where the log is, how far it was written, and what ends the following.
 struct Follower {
+    /// The work directory, which the log is opened in.
+    root: PathBuf,
     log: PathBuf,
     report: PathBuf,
     /// The log, once it exists, positioned at the next byte to write.
@@ -35,6 +37,7 @@ struct Follower {
 impl Follower {
     fn new(work: &Work, from: u64) -> Self {
         Self {
+            root: work.root().to_path_buf(),
             log: work.log(),
             report: work.report(),
             file: None,
@@ -64,10 +67,15 @@ impl Follower {
 
     /// The log at the offset, or `None` while it does not exist yet.
     ///
-    /// The agent writes a regular file. A pipe or a link at its place would
-    /// hold this up or lead it elsewhere, and is refused.
+    /// The agent writes a regular file in a directory of its own. A pipe or
+    /// a link at either place would hold this up or lead it elsewhere, and is
+    /// refused.
     fn open(&self) -> Result<Option<File>> {
-        let mut file = match open_regular(&self.log) {
+        let opened = open_dir_in(&self.root, LOG_DIR).and_then(|dir| match dir {
+            OpenedDir::Dir(dir) => dir.regular(LOG_FILE),
+            OpenedDir::Other => Ok(Opened::Other),
+        });
+        let mut file = match opened {
             Ok(Opened::Regular(file)) => file,
             Ok(Opened::Other) => bail!("{} is not a file", self.log.display()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -149,6 +157,19 @@ mod tests {
         std::fs::write(work.report(), b"{}").unwrap();
         assert_eq!(follower.pass(&mut out).unwrap(), Pass::Over);
         assert_eq!(out, b"defghi");
+    }
+
+    /// A `log/` that is a link to elsewhere is not followed.
+    #[test]
+    fn a_linked_log_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("build.log"), b"elsewhere").unwrap();
+        let work = Work::new(dir.path());
+        std::os::unix::fs::symlink(elsewhere.path(), work.log().parent().unwrap()).unwrap();
+        let mut out = Vec::new();
+        assert!(Follower::new(&work, 0).pass(&mut out).is_err());
+        assert!(out.is_empty());
     }
 
     #[test]
