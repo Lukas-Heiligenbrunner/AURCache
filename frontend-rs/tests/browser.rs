@@ -2036,7 +2036,7 @@ async fn a_saved_build_flag_shows_before_the_package_is_fetched_again(session: &
         "Save was offered with nothing changed"
     );
 
-    release_held_fetch(session).await;
+    release_held_fetch(session, None).await;
     session.settle().await;
     // The fetch landing takes a render; give it time to before saying it
     // changed nothing.
@@ -2070,7 +2070,7 @@ async fn a_refresh_reaches_a_build_flags_draft_only_while_untouched(session: &Se
     session.click("#build-flag-holdver").await;
     save_build_flags(session).await;
     open_build_flags(session).await;
-    release_held_fetch_over(session, &["--nodeps"]).await;
+    release_held_fetch(session, Some(&["--nodeps"])).await;
     session
         .wait_for_script(
             "the fetched flag to reach the draft",
@@ -2095,7 +2095,7 @@ async fn a_refresh_reaches_a_build_flags_draft_only_while_untouched(session: &Se
     save_build_flags(session).await;
     open_build_flags(session).await;
     session.click("#build-flag-noprepare").await;
-    release_held_fetch_over(session, &["--nocheck"]).await;
+    release_held_fetch(session, Some(&["--nocheck"])).await;
     session
         .wait_for_script(
             "the fetched flag to reach the chips",
@@ -2146,21 +2146,14 @@ async fn hold_fetch_after_patch(session: &Session) {
     );
 }
 
-/// Let the fetch [`HOLD_FETCH_AFTER_PATCH`] holds go, and wait for its
-/// answer.
-async fn release_held_fetch(session: &Session) {
-    let_held_fetch_go(session, "undefined").await;
-}
-
-/// Store `flags` for the package behind the page's back, then let the held
-/// fetch go and wait for its answer.
-async fn release_held_fetch_over(session: &Session, flags: &[&str]) {
-    let flags = serde_json::to_string(flags).expect("a JSON list");
-    let_held_fetch_go(session, &flags).await;
-}
-
-/// Call `window.releaseHeldFetch` with `argument`, once the fetch is held.
-async fn let_held_fetch_go(session: &Session, argument: &str) {
+/// Let the fetch [`HOLD_FETCH_AFTER_PATCH`] holds go, once it is held, and
+/// wait for its answer. Given `flags`, they are first stored for the package
+/// behind the page's back, so that answer brings them.
+async fn release_held_fetch(session: &Session, flags: Option<&[&str]>) {
+    let argument = match flags {
+        Some(flags) => serde_json::to_string(flags).expect("a JSON list"),
+        None => "undefined".to_string(),
+    };
     session
         .wait_for_script(
             "the package to be fetched again",
