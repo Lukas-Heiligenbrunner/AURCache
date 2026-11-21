@@ -93,8 +93,8 @@ async fn run(client: &AurCacheClient, format: OutputFormat, command: ApiCommand)
         ApiCommand::Doctor => doctor::run_doctor(client, format).await,
         ApiCommand::UserInfo => render_user_info(client, format).await,
         ApiCommand::Ssh {
-            command: SshCommand::Key { name },
-        } => render_ssh_key(client, format, &name).await,
+            command: SshCommand::Key,
+        } => render_ssh_key(client, format).await,
         ApiCommand::Ssh {
             command: SshCommand::Hosts,
         } => render_ssh_hosts(client, format).await,
@@ -212,24 +212,17 @@ async fn render_user_info(client: &AurCacheClient, format: OutputFormat) -> Resu
     render(format, &user, print_user_info)
 }
 
-/// One of the server's SSH keys; a failure when it is not usable, so a
-/// script notices.
-async fn render_ssh_key(client: &AurCacheClient, format: OutputFormat, name: &str) -> Result<()> {
+/// The server's SSH key; a failure when it is not usable, so a script
+/// notices.
+async fn render_ssh_key(client: &AurCacheClient, format: OutputFormat) -> Result<()> {
     let info = client.ssh_info().await?;
-    let Some(named) = info.keys.iter().find(|k| k.name == name) else {
-        let names: Vec<&str> = info.keys.iter().map(|k| k.name.as_str()).collect();
-        anyhow::bail!(
-            "the server has no SSH key named '{name}'; it has: {}",
-            names.join(", ")
-        );
-    };
-    render(format, named, |named| {
-        println!("{}", format_ssh_key(&named.key, info.host_keys));
+    render(format, &info.key, |key| {
+        println!("{}", format_ssh_key(key, info.host_keys));
     })?;
-    match &named.key {
+    match &info.key {
         SshKey::Ready { .. } => Ok(()),
         SshKey::Unavailable { reason } => {
-            anyhow::bail!("the server's SSH key '{name}' is not usable: {reason}")
+            anyhow::bail!("the server's SSH key is not usable: {reason}")
         }
     }
 }

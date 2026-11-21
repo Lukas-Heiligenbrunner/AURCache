@@ -94,11 +94,11 @@ The public half is logged at start, returned by `GET /api/ssh`, shown on the
 settings page and in the add dialog once the entry is an SSH remote, and
 printed by `aurcli ssh key` (the key alone on the first line).
 
-`SshInfo` holds a list of named keys (public key, fingerprint, origin) and the
-host-key policy. There is one key today, named `default`. It is a list so that
-keys chosen per repository (see "Not covered") can join it without the
-response changing shape, and `aurcli ssh key [NAME]` is a subcommand of an
-`ssh` group for the same reason.
+`SshInfo` holds the key (public key, fingerprint, origin), the host-key policy
+and the trusted host keys. One key serves every remote. Keys chosen per
+repository (GitHub binds a deploy key to one) would join it as an optional
+field, without changing what is there, and `aurcli ssh` is a group so that
+commands for them can sit beside `ssh key` and `ssh hosts`.
 
 ### Keeping it
 

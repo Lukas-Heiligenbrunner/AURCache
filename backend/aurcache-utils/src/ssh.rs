@@ -41,7 +41,7 @@ use anyhow::{Context, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
 use aurcache_common::api::ssh::{
-    DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey, TrustedHost, TrustedHosts,
+    HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
 use aurcache_common::server_env::{
     AURCACHE_GIT_SSH_KEY, AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE, AURCACHE_SSH_KNOWN_HOSTS,
@@ -308,10 +308,7 @@ impl SshAccess {
             },
         };
         SshInfo {
-            keys: vec![NamedKey {
-                name: DEFAULT_KEY.to_string(),
-                key,
-            }],
+            key,
             host_keys: self.hosts.policy(),
             trusted_hosts: self.hosts.trusted(),
         }
@@ -875,7 +872,6 @@ mod tests {
             user: Some("git".to_string()),
             host: host.to_string(),
             port,
-            path: "/srv/repo.git".to_string(),
         }
     }
 
@@ -1168,7 +1164,7 @@ mod tests {
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
         });
-        let Some(SshKey::Unavailable { reason }) = access.info().key(DEFAULT_KEY).cloned() else {
+        let SshKey::Unavailable { reason } = access.info().key else {
             panic!("a missing key loaded");
         };
         assert!(reason.contains("does not exist"), "{reason}");
@@ -1188,7 +1184,7 @@ mod tests {
             hosts: HostKeySource::Pinned(dir.path().join("known_hosts")),
         });
         let info = access.info();
-        let Some(SshKey::Ready { origin, .. }) = info.key(DEFAULT_KEY) else {
+        let SshKey::Ready { origin, .. } = &info.key else {
             panic!("{info:?}");
         };
         assert_eq!(*origin, KeyOrigin::Provided);
@@ -1288,8 +1284,8 @@ mod tests {
     }
 
     fn unavailable(access: &SshAccess) -> String {
-        match access.info().key(DEFAULT_KEY).cloned() {
-            Some(SshKey::Unavailable { reason }) => reason,
+        match access.info().key {
+            SshKey::Unavailable { reason } => reason,
             other => panic!("the key loaded: {other:?}"),
         }
     }
@@ -1303,10 +1299,10 @@ mod tests {
             "correct horse",
             "correct horse\n",
         ));
-        let Some(SshKey::Ready {
+        let SshKey::Ready {
             passphrase_protected,
             ..
-        }) = access.info().key(DEFAULT_KEY).cloned()
+        } = access.info().key
         else {
             panic!("{:?}", access.info());
         };

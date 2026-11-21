@@ -41,7 +41,7 @@ pub use aurcache_common::api::package::{SourceFileContent, SourceFileList, Sourc
 pub use aurcache_common::api::repo::RepoInfo;
 pub use aurcache_common::api::settings::{SchedulePreview, SettingResponse, SettingValue};
 pub use aurcache_common::api::ssh::{
-    DEFAULT_KEY, HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey, TrustedHost, TrustedHosts,
+    HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
 pub use aurcache_common::api::stats::{
     ApiTokenResponse, DashboardView, GraphDataPoint, ListStats, LongBuild, OutOfDateSlice,

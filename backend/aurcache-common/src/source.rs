@@ -65,10 +65,6 @@ pub struct SshRemote {
     pub host: String,
     /// The port, when the URL gives one.
     pub port: Option<u16>,
-    /// The repository on that host, as the URL writes it: absolute after an
-    /// `ssh://` authority (`/srv/repo.git`), relative to the account's home in
-    /// the scp-like form (`user/repo.git`). Empty when the URL names none.
-    pub path: String,
 }
 
 impl SshRemote {
@@ -175,10 +171,9 @@ fn has_scheme(url: &str) -> bool {
 /// colon -- and so is it read here. A host it would percent-decode is not
 /// named: the name checked would not be the one connected to.
 fn url_remote(rest: &str) -> Option<SshRemote> {
-    let (authority, path) = match rest.find('/') {
-        Some(slash) => rest.split_at(slash),
-        None => (rest, ""),
-    };
+    let authority = rest
+        .split_once('/')
+        .map_or(rest, |(authority, _)| authority);
     let (user, host_port) = match authority.rsplit_once('@') {
         // A password, if the URL carries one, is not the account.
         Some((userinfo, host)) => (
@@ -191,7 +186,7 @@ fn url_remote(rest: &str) -> Option<SshRemote> {
     if host.contains('%') {
         return None;
     }
-    remote(user, host, port, path)
+    remote(user, host, port)
 }
 
 /// git's scp-like form, read as libgit2's `git_net_url_parse_scp` reads it.
@@ -313,7 +308,7 @@ fn scp_remote(given: &str) -> Option<SshRemote> {
         }
     }
     // Nothing after the colon is no path, which libgit2 refuses.
-    let path = path?;
+    path?;
     let host = host?;
     // libgit2 keeps an IPv6 literal's brackets in the host; a known_hosts
     // name does not.
@@ -328,7 +323,7 @@ fn scp_remote(given: &str) -> Option<SshRemote> {
         Some(port) => Some(parse_port(port)?),
         None => None,
     };
-    remote(user, host, port, path)
+    remote(user, host, port)
 }
 
 /// libgit2's `is_ipv6`: a `[`, then hex digits and at least two colons up to
@@ -395,7 +390,7 @@ fn split_host_port(authority: &str) -> Option<HostPort<'_>> {
     Some(HostPort { host, port })
 }
 
-fn remote(user: Option<&str>, host: &str, port: Option<u16>, path: &str) -> Option<SshRemote> {
+fn remote(user: Option<&str>, host: &str, port: Option<u16>) -> Option<SshRemote> {
     if host.is_empty() {
         return None;
     }
@@ -403,7 +398,6 @@ fn remote(user: Option<&str>, host: &str, port: Option<u16>, path: &str) -> Opti
         user: user.filter(|u| !u.is_empty()).map(str::to_string),
         host: host.to_string(),
         port,
-        path: path.to_string(),
     })
 }
 
@@ -496,12 +490,11 @@ impl Display for SourceData {
 mod tests {
     use super::{SourceData, SshRemote, Transport, looks_like_git_url, ssh_remote, transport};
 
-    fn ssh(user: Option<&str>, host: &str, port: Option<u16>, path: &str) -> SshRemote {
+    fn ssh(user: Option<&str>, host: &str, port: Option<u16>) -> SshRemote {
         SshRemote {
             user: user.map(str::to_string),
             host: host.to_string(),
             port,
-            path: path.to_string(),
         }
     }
 
@@ -509,56 +502,48 @@ mod tests {
     fn ssh_scheme_urls_are_ssh_remotes() {
         assert_eq!(
             ssh_remote("ssh://git@github.com/user/repo.git"),
-            Some(ssh(Some("git"), "github.com", None, "/user/repo.git"))
+            Some(ssh(Some("git"), "github.com", None))
         );
         assert_eq!(
             ssh_remote("ssh://git@git.example.com:2222/srv/repo.git"),
-            Some(ssh(
-                Some("git"),
-                "git.example.com",
-                Some(2222),
-                "/srv/repo.git"
-            ))
+            Some(ssh(Some("git"), "git.example.com", Some(2222)))
         );
         // makepkg's spelling, and the reverse one git also accepts.
         assert_eq!(
             ssh_remote("git+ssh://aur@aur.archlinux.org/paru.git"),
-            Some(ssh(Some("aur"), "aur.archlinux.org", None, "/paru.git"))
+            Some(ssh(Some("aur"), "aur.archlinux.org", None))
         );
         // libgit2 picks the transport ignoring the scheme's case.
         assert_eq!(
             ssh_remote("SSH://git@Host/repo"),
-            Some(ssh(Some("git"), "Host", None, "/repo"))
+            Some(ssh(Some("git"), "Host", None))
         );
         assert_eq!(
             ssh_remote("Git+SSH://host:2222/repo"),
-            Some(ssh(None, "host", Some(2222), "/repo"))
+            Some(ssh(None, "host", Some(2222)))
         );
         assert_eq!(
             ssh_remote("ssh+git://host/repo"),
-            Some(ssh(None, "host", None, "/repo"))
+            Some(ssh(None, "host", None))
         );
         assert_eq!(
             ssh_remote("ssh://git@[2001:db8::1]:2222/repo"),
-            Some(ssh(Some("git"), "2001:db8::1", Some(2222), "/repo"))
+            Some(ssh(Some("git"), "2001:db8::1", Some(2222)))
         );
-        assert_eq!(
-            ssh_remote("ssh://[::1]/repo"),
-            Some(ssh(None, "::1", None, "/repo"))
-        );
+        assert_eq!(ssh_remote("ssh://[::1]/repo"), Some(ssh(None, "::1", None)));
         // The account, not the password beside it; the password starts at
         // the last colon, as libgit2 reads it.
         assert_eq!(
             ssh_remote("ssh://deploy:hunter2@host/repo"),
-            Some(ssh(Some("deploy"), "host", None, "/repo"))
+            Some(ssh(Some("deploy"), "host", None))
         );
         assert_eq!(
             ssh_remote("ssh://a:b:c@host/repo"),
-            Some(ssh(Some("a:b"), "host", None, "/repo"))
+            Some(ssh(Some("a:b"), "host", None))
         );
         assert_eq!(
             ssh_remote("ssh://host:/repo"),
-            Some(ssh(None, "host", None, "/repo"))
+            Some(ssh(None, "host", None))
         );
     }
 
@@ -568,24 +553,21 @@ mod tests {
     fn a_port_in_scp_brackets_is_read() {
         assert_eq!(
             ssh_remote("[git@host:2222]:repo.git"),
-            Some(ssh(Some("git"), "host", Some(2222), "repo.git"))
+            Some(ssh(Some("git"), "host", Some(2222)))
         );
         assert_eq!(
             ssh_remote("[host:2222]:repo.git"),
-            Some(ssh(None, "host", Some(2222), "repo.git"))
+            Some(ssh(None, "host", Some(2222)))
         );
         assert_eq!(
             ssh_remote("[git@host]:repo.git"),
-            Some(ssh(Some("git"), "host", None, "repo.git"))
+            Some(ssh(Some("git"), "host", None))
         );
-        assert_eq!(
-            ssh_remote("[host]:repo.git"),
-            Some(ssh(None, "host", None, "repo.git"))
-        );
+        assert_eq!(ssh_remote("[host]:repo.git"), Some(ssh(None, "host", None)));
         // An IPv6 literal inside the brackets.
         assert_eq!(
             ssh_remote("[[::1]:2222]:repo.git"),
-            Some(ssh(None, "::1", Some(2222), "repo.git"))
+            Some(ssh(None, "::1", Some(2222)))
         );
         let name = |url| ssh_remote(url).unwrap().known_hosts_name();
         assert_eq!(name("[git@host:2222]:repo.git"), "[host]:2222");
@@ -599,11 +581,11 @@ mod tests {
     fn a_url_is_read_as_given() {
         assert_eq!(
             ssh_remote(" [git@host:2222]:repo.git"),
-            Some(ssh(Some(" [git"), "host", None, "2222]:repo.git"))
+            Some(ssh(Some(" [git"), "host", None))
         );
         assert_eq!(
             ssh_remote("  git@gitlab.com:group/repo.git\n"),
-            Some(ssh(Some("  git"), "gitlab.com", None, "group/repo.git\n"))
+            Some(ssh(Some("  git"), "gitlab.com", None))
         );
     }
 
@@ -611,39 +593,21 @@ mod tests {
     fn scp_like_remotes_are_ssh_remotes() {
         assert_eq!(
             ssh_remote("git@github.com:user/repo.git"),
-            Some(ssh(Some("git"), "github.com", None, "user/repo.git"))
+            Some(ssh(Some("git"), "github.com", None))
         );
         assert_eq!(
             ssh_remote("aur@aur.archlinux.org:paru"),
-            Some(ssh(Some("aur"), "aur.archlinux.org", None, "paru"))
+            Some(ssh(Some("aur"), "aur.archlinux.org", None))
         );
-        assert_eq!(
-            ssh_remote("host:repo.git"),
-            Some(ssh(None, "host", None, "repo.git"))
-        );
+        assert_eq!(ssh_remote("host:repo.git"), Some(ssh(None, "host", None)));
         assert_eq!(
             ssh_remote("git@[::1]:repo.git"),
-            Some(ssh(Some("git"), "::1", None, "repo.git"))
+            Some(ssh(Some("git"), "::1", None))
         );
         assert_eq!(
             ssh_remote("git@gitlab.com:group/sub/repo.git"),
-            Some(ssh(Some("git"), "gitlab.com", None, "group/sub/repo.git"))
+            Some(ssh(Some("git"), "gitlab.com", None))
         );
-    }
-
-    /// The path is what tells two repositories on one host apart, which is
-    /// what choosing a key per repository would need.
-    #[test]
-    fn the_repository_path_is_kept_as_written() {
-        let path = |url| ssh_remote(url).unwrap().path;
-        assert_eq!(
-            path("ssh://git@host:2222/srv/git/pkg.git"),
-            "/srv/git/pkg.git"
-        );
-        assert_eq!(path("git@github.com:org/repo.git"), "org/repo.git");
-        assert_eq!(path("ssh://host/~user/repo"), "/~user/repo");
-        assert_eq!(path("git@[::1]:/abs/repo"), "/abs/repo");
-        assert_eq!(path("ssh://host"), "");
     }
 
     /// What libgit2 does not reach over SSH, and what it reaches over SSH

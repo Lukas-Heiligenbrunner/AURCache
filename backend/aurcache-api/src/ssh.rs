@@ -1,5 +1,5 @@
 use aurcache_common::api::ssh::{
-    HostKeyPolicy, KeyOrigin, NamedKey, SshInfo, SshKey, TrustedHost, TrustedHosts,
+    HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
 use aurcache_utils::services::Services;
 use rocket::serde::json::Json;
@@ -11,21 +11,13 @@ use crate::auth::Authenticated;
 #[derive(OpenApi)]
 #[openapi(
     paths(ssh_info),
-    components(schemas(
-        SshInfo,
-        NamedKey,
-        SshKey,
-        KeyOrigin,
-        HostKeyPolicy,
-        TrustedHosts,
-        TrustedHost
-    ))
+    components(schemas(SshInfo, SshKey, KeyOrigin, HostKeyPolicy, TrustedHosts, TrustedHost))
 )]
 pub struct SshApi;
 
 /// The SSH key the server clones package sources with.
 ///
-/// Each key's public half, to add to a private repository as a deploy key,
+/// Its public half, to add to a private repository as a deploy key,
 /// how the server decides which hosts to trust, and the host keys it trusts,
 /// with their fingerprints to check. Never a private key.
 #[utoipa::path(
