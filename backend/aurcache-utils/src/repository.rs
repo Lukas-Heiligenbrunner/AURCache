@@ -249,7 +249,9 @@ impl Update<'_> {
         }
     }
 
-    /// Publish the package file `entry` describes, moving it from `staged`.
+    /// Publish the package file `entry` describes, moving it from `staged`,
+    /// and its detached signature `<staged>.sig` with it. Without one, a
+    /// signature a file of the same name left behind goes.
     pub fn add(&mut self, platform: Platform, staged: PathBuf, entry: PackageEntry) {
         self.changes.add(platform, staged, entry);
     }
@@ -653,6 +655,12 @@ impl Repository {
 struct Finalization {
     moves: Vec<FileMove>,
     retired: Vec<PathBuf>,
+    /// Signatures beside package files the update replaces with unsigned
+    /// ones of the same name, removed once the moves are done. They sign
+    /// what is no longer there, and retiring them would keep them: the sweep
+    /// keeps a signature whose package is listed, and this one's still is.
+    #[serde(default)]
+    removed: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -675,6 +683,7 @@ impl Finalization {
         let mut plan = Self {
             moves: Vec::new(),
             retired: Vec::new(),
+            removed: Vec::new(),
         };
         if let Err(error) = plan.stage_all(root, name, changes) {
             plan.discard();
@@ -689,12 +698,14 @@ impl Finalization {
             let filename = addition.entry.filename.as_str();
             let dir = Repository::platform_dir(root, addition.platform);
             added.insert((addition.platform, filename));
-            let sig = with_suffix(&addition.staged, ".sig");
-            let signature = sig.exists().then(|| (sig, format!("{filename}.sig")));
-            for (source, name) in
-                std::iter::once((addition.staged.clone(), filename.to_string())).chain(signature)
-            {
-                self.stage_file(&source, dir.join(name))?;
+            let package = dir.join(filename);
+            let signature = with_suffix(&package, ".sig");
+            self.stage_file(&addition.staged, package)?;
+            let staged_signature = with_suffix(&addition.staged, ".sig");
+            if staged_signature.exists() {
+                self.stage_file(&staged_signature, signature)?;
+            } else if signature.exists() {
+                self.removed.push(signature);
             }
         }
         for platform in changes.platforms() {
@@ -817,6 +828,27 @@ impl Finalization {
                 }
             }
             if let Some(parent) = movement.destination.parent() {
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        for path in &self.removed {
+            match std::fs::remove_file(path) {
+                // A restart replays the whole plan, including removals done.
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    log.emit(Event::RepoFileFailed {
+                        action: FileAction::Remove,
+                        path: path.display().to_string(),
+                        error: error.to_string(),
+                    });
+                    return Err(error.into());
+                }
+            }
+            // Synced like a move, and on a replay too: until the directory
+            // is, a power loss could bring the file back with no plan left
+            // to remove it.
+            if let Some(parent) = path.parent() {
                 std::fs::File::open(parent)?.sync_all()?;
             }
         }
@@ -1493,6 +1525,84 @@ mod tests {
                 .exists()
         );
         assert_eq!(listed(&repo), ["foo-1.0-1"]);
+    }
+
+    /// Republished at the same name without a signature, a package loses the
+    /// one it had: it signs another file now.
+    #[tokio::test]
+    async fn an_unsigned_replacement_takes_the_old_signature_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Repository::new(tmp.path());
+        let signature = with_suffix(&platform_file(&repo, "foo", "1.0-1"), ".sig");
+
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        std::fs::write(with_suffix(&staged, ".sig"), b"first").unwrap();
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        assert_eq!(std::fs::read(&signature).unwrap(), b"first");
+
+        let (staged, entry) = stage(&repo, 2, "foo", "1.0-1").await;
+        std::fs::write(with_suffix(&staged, ".sig"), b"second").unwrap();
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        assert_eq!(std::fs::read(&signature).unwrap(), b"second");
+
+        let (staged, entry) = stage(&repo, 3, "foo", "1.0-1").await;
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        assert!(!signature.exists());
+        assert!(platform_file(&repo, "foo", "1.0-1").is_file());
+        assert_eq!(listed(&repo), ["foo-1.0-1"]);
+    }
+
+    /// Removing the old signature is part of the recorded plan: one that
+    /// could not be removed is removed when the plan is replayed.
+    #[tokio::test]
+    async fn a_signature_that_would_not_go_is_removed_on_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let repo = Repository::new(tmp.path());
+        let signature = with_suffix(&platform_file(&repo, "foo", "1.0-1"), ".sig");
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        std::fs::write(with_suffix(&staged, ".sig"), b"first").unwrap();
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        // Something that will not be removed as a file, where it is.
+        std::fs::remove_file(&signature).unwrap();
+        std::fs::create_dir(&signature).unwrap();
+        std::fs::write(signature.join("x"), b"").unwrap();
+
+        let (staged, entry) = stage(&repo, 2, "foo", "1.0-1").await;
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, staged, entry);
+        let error = update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<FinalizationPending>().is_some());
+
+        std::fs::remove_dir_all(&signature).unwrap();
+        std::fs::write(&signature, b"first").unwrap();
+        let restarted = Repository::new(tmp.path());
+        restarted.recover(&db).await.unwrap();
+        assert!(!signature.exists());
+        assert!(plan_row::read(&db).await.unwrap().is_none());
+    }
+
+    /// Replayed, a removal already done is no failure: its directory is still
+    /// synced, in case the removal before the restart never reached the disk.
+    #[test]
+    fn a_removal_already_done_replays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = Finalization {
+            moves: Vec::new(),
+            retired: Vec::new(),
+            removed: vec![tmp.path().join("foo-1.0-1-x86_64.pkg.tar.zst.sig")],
+        };
+        plan.finish(&ActivityLog::discarding()).unwrap();
+    }
+
+    /// A plan without a `removed` list reads as removing nothing.
+    #[test]
+    fn a_plan_without_removals_reads() {
+        let plan: Finalization = serde_json::from_str(r#"{"moves":[],"retired":[]}"#).unwrap();
+        assert!(plan.removed.is_empty());
     }
 
     /// Two updates started together on one platform both land: the second
