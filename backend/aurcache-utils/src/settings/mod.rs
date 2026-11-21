@@ -90,17 +90,10 @@ fn env_decides(setting: Setting, pkg_id: Option<i32>) -> bool {
 }
 
 /// `setting`'s value in the environment, if it has one there; an empty one is
-/// none for a setting whose empty value inherits.
+/// none for a setting whose empty value inherits ([`Setting::empty_inherits`]).
 fn env_value(setting: Setting) -> Option<String> {
     let value = std::env::var(setting.meta().env_name?).ok()?;
-    says_something(setting, &value).then_some(value)
-}
-
-/// Whether `value`, stored or in the environment, sets `setting` at all: an
-/// empty value does not, for a setting whose empty value inherits (see
-/// [`Setting::empty_inherits`]).
-fn says_something(setting: Setting, value: &str) -> bool {
-    !(value.is_empty() && setting.empty_inherits())
+    (!(value.is_empty() && setting.empty_inherits())).then_some(value)
 }
 
 /// The values stored for the server and for one package, as one read saw
@@ -151,9 +144,6 @@ impl Stored {
         let mut stored = Self::nothing(pkg_id);
         for row in query.all(db).await? {
             let Some(value) = row.value else { continue };
-            if Setting::from_key(&row.key).is_some_and(|setting| !says_something(setting, &value)) {
-                continue;
-            }
             match settings::package_of(row.pkg_id) {
                 Some(_) => stored.package.insert(row.key, value),
                 None => stored.global.insert(row.key, value),
@@ -296,7 +286,8 @@ pub enum Write {
 ///
 /// All or nothing: a package value for a server-wide setting refuses the
 /// whole set, since nothing would ever read it. Removing one stays allowed --
-/// it is how a stray row goes.
+/// it is how a stray row goes. An empty value for a setting whose empty value
+/// inherits ([`Setting::empty_inherits`]) removes the one stored.
 pub async fn write<C: sea_orm::ConnectionTrait>(
     db: &C,
     changes: impl IntoIterator<Item = Change>,
@@ -321,6 +312,9 @@ pub async fn write<C: sea_orm::ConnectionTrait>(
     } in changes
     {
         let key = setting.meta().key;
+        // Stored, an empty value that inherits would outrank what it means to
+        // inherit; it is the same as none.
+        let value = value.filter(|value| !(value.is_empty() && setting.empty_inherits()));
         match value {
             Some(v) => inserts.push(settings::ActiveModel {
                 key: Set(key.to_string()),
@@ -532,8 +526,9 @@ mod tests {
         assert_eq!(all.source, SettingSource::Package);
     }
 
-    /// An empty value sets nothing: a package's inherits the server's, and
-    /// the server's the default, whether read alone or with every setting.
+    /// An empty value sets nothing: written, it removes the value stored, so
+    /// a package's inherits the server's, and the server's the default,
+    /// whether read alone or with every setting.
     #[tokio::test]
     async fn an_empty_ssh_key_inherits_at_each_level() {
         let db = db().await;
@@ -543,6 +538,9 @@ mod tests {
             value: Some(value.to_string()),
         };
 
+        write(&db, [set(None, "epic"), set(Some(1), "gitlab")])
+            .await
+            .unwrap();
         write(&db, [set(None, ""), set(Some(1), "")]).await.unwrap();
         for entry in [
             get(&db, key::BUILD_SSH_KEY, Some(1)).await.unwrap(),
