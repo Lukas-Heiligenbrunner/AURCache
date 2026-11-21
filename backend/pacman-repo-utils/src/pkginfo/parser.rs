@@ -6,12 +6,25 @@ use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 /// Upper bound on a detached signature, mirroring `repo-add`'s own check.
-const MAX_SIGNATURE_BYTES: usize = 16384;
+pub const MAX_SIGNATURE_BYTES: usize = 16384;
 
 /// Upper bound on a `.PKGINFO`. A real one is a few KiB; this one comes from
 /// an archive whoever built the package controls, and a compressed one can
 /// expand to anything.
 const MAX_PKGINFO_BYTES: u64 = 1 << 20;
+
+/// Read the detached signature `sigfile`, refusing what `repo-add` refuses:
+/// an armored one, or one larger than [`MAX_SIGNATURE_BYTES`].
+pub fn read_signature(sigfile: &Path) -> anyhow::Result<Vec<u8>> {
+    let sigdata = fs::read(sigfile)?;
+    if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
+        bail!("it is armored; a package's signature must be binary");
+    }
+    if sigdata.len() > MAX_SIGNATURE_BYTES {
+        bail!("it is larger than {MAX_SIGNATURE_BYTES} bytes");
+    }
+    Ok(sigdata)
+}
 
 #[derive(Default)]
 pub struct Pkginfo {
@@ -96,17 +109,8 @@ impl Pkginfo {
             return Ok(());
         }
 
-        let sigdata = fs::read(&sigfile)?;
-        if sigdata.starts_with(b"-----BEGIN PGP SIGNATURE-----") {
-            bail!(
-                "Cannot use armored signatures for packages: {}",
-                sigfile.display()
-            );
-        }
-        if sigdata.len() > MAX_SIGNATURE_BYTES {
-            bail!("Package signature file too large: {}", sigfile.display());
-        }
-
+        let sigdata = read_signature(&sigfile)
+            .map_err(|e| e.context(format!("signature {}", sigfile.display())))?;
         self.pgpsig = general_purpose::STANDARD.encode(&sigdata);
         Ok(())
     }

@@ -230,6 +230,9 @@ pub enum BuildTrigger {
     /// Automatic retry of a build the server abandoned.
     #[cfg_attr(feature = "db", sea_orm(num_value = 2))]
     TimeoutRetry = 2,
+    /// Built elsewhere and uploaded: no worker ever held it.
+    #[cfg_attr(feature = "db", sea_orm(num_value = 3))]
+    Upload = 3,
 }
 
 impl BuildTrigger {
@@ -250,6 +253,7 @@ impl BuildTrigger {
             0 => Some(Self::User),
             1 => Some(Self::AutoUpdate),
             2 => Some(Self::TimeoutRetry),
+            3 => Some(Self::Upload),
             _ => None,
         }
     }
@@ -406,6 +410,7 @@ mod tests {
             BuildTrigger::User,
             BuildTrigger::AutoUpdate,
             BuildTrigger::TimeoutRetry,
+            BuildTrigger::Upload,
         ] {
             assert_eq!(BuildTrigger::from_i32(trigger.as_i32()), Some(trigger));
         }
