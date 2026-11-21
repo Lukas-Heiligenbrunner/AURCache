@@ -1938,8 +1938,8 @@ async fn moving_to_another_package_takes_the_build_flags_dialog_away(session: &S
     );
 }
 
-/// Holds the package fetch that follows the page's next PATCH unanswered,
-/// until `window.releaseHeldFetch()` lets it go; `window.heldFetchLanded`
+/// Holds the first package fetch made once the page's next PATCH is answered,
+/// unanswered until `window.releaseHeldFetch()` lets it go; `window.heldFetchLanded`
 /// then says its answer is in. Given a list of flags, the release first stores
 /// them for the package itself, as another operator saving in the meantime
 /// would, so the fetch brings back them rather than what the page saved.
@@ -1954,8 +1954,14 @@ const HOLD_FETCH_AFTER_PATCH: &str = r#"
         if (!(input instanceof Request)) {
             return fetch.apply(this, arguments);
         }
+        // Armed by the answer rather than the request, so a poll made while
+        // the PATCH is in flight goes through, and the fetch held is one the
+        // page started after the save.
         if (input.method === "PATCH") {
-            patched = true;
+            return fetch.apply(this, arguments).then(answer => {
+                patched = true;
+                return answer;
+            });
         }
         if (!patched || input.method !== "GET" || !/\/package\/[^/?]+$/.test(input.url)) {
             return fetch.apply(this, arguments);
