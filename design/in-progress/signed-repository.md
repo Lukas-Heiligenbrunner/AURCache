@@ -463,7 +463,13 @@ a missing signature is.
 **Turning signing off** removes the databases' signatures and links at the
 next start (`remove_signatures`): the databases are written unsigned from
 then on, and a stale signature beside them would be refused even under
-`Optional`. Package signatures stay; they still verify.
+`Optional`. A published package keeps its signature until its package is
+published again, which publishes it unsigned: a rebuild under the same file
+name takes the old `.sig` away with the file it signed (the update's plan
+removes it after the moves), so no signature is left over a file it does not
+sign. The signatures that stay verify only for a client that trusts the key;
+one that never did refuses those packages, even under `Optional`, until they
+are published again.
 
 ---
 
@@ -570,7 +576,9 @@ Built:
   not the file listed are reported once and do not keep it from completing;
   the batch grows with the repository.
 - `aurcache-utils/tests/publish.rs`: a signing server publishes a build with
-  its signature, in its entry and beside it, and a signed database.
+  its signature, in its entry and beside it, and a signed database; once it
+  no longer signs, a rebuild under the same file name takes the old `.sig`
+  away.
 - `scripts/test-signed-repo.sh`, with its fixture
   `aurcache-utils/tests/signed_repository.rs` (ignored by `cargo test`).
 
