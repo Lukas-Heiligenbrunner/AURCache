@@ -243,6 +243,137 @@ fn replace(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Keep what `path` holds beside it, before something replaces it: copied to
+/// [`replaced_path`]`(path, tag)`, owner-only on Unix as [`write_private`]
+/// writes it. A key or a certificate a restore replaces is then still there to
+/// go back to. Where the copy went, or `None` when there is nothing at `path`.
+///
+/// `tag` says what is kept -- a fingerprint, a digest -- so that keeping the
+/// same thing twice writes one file, and a reader can tell copies apart.
+pub fn keep_replaced(path: &Path, tag: &str) -> std::io::Result<Option<PathBuf>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let kept = replaced_path(path, tag)?;
+    write_private(&kept, &contents)?;
+    Ok(Some(kept))
+}
+
+/// Where [`keep_replaced`] keeps `path` under `tag`: beside it, as
+/// `<name>.replaced-<tag>`. Refused for a tag that would lead out of the
+/// directory, or is empty.
+pub fn replaced_path(path: &Path, tag: &str) -> std::io::Result<PathBuf> {
+    if tag.is_empty() || tag.contains(['/', '\\', '\0']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{tag:?} cannot name a file"),
+        ));
+    }
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".replaced-{tag}"));
+    Ok(PathBuf::from(name))
+}
+
+fn parent_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Refuse `path` unless a rename can replace it: it is a regular file, or
+/// nothing yet -- not a directory, not a symlink to something else, and not
+/// mounted in place, as a Docker secret bind-mounted where the file would be
+/// is, which a rename over it fails on (`EBUSY`).
+///
+/// For a change that has to know before it replaces anything that it can
+/// replace all of it.
+pub fn check_replaceable(path: &Path) -> std::io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file, which nothing here replaces",
+            path.display()
+        )));
+    }
+    if is_mount_point(path)? {
+        return Err(std::io::Error::other(format!(
+            "{} is mounted where it is, so it cannot be replaced; \
+             mount it somewhere else and name it there",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Whether something is mounted at `path`, which exists: on another
+/// filesystem than its directory, or listed as a mount point in
+/// `/proc/self/mountinfo` -- a bind mount from the same filesystem keeps its
+/// device, so only the kernel's table tells it.
+fn is_mount_point(path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let parent = fs::metadata(parent_of(path))?;
+        if fs::symlink_metadata(path)?.dev() != parent.dev() {
+            return Ok(true);
+        }
+    }
+    let Ok(table) = fs::read_to_string("/proc/self/mountinfo") else {
+        return Ok(false);
+    };
+    let canonical = fs::canonicalize(path)?;
+    Ok(mount_points(&table).any(|point| point == canonical))
+}
+
+/// The mount points `/proc/self/mountinfo` lists, its octal escapes undone.
+fn mount_points(table: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    table
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(unescape_mount_point)
+}
+
+/// A mountinfo field as the path it names: the kernel writes a space, a
+/// tab, a newline and a backslash as `\040`, `\011`, `\012` and `\134`.
+fn unescape_mount_point(field: &str) -> PathBuf {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|digits| bytes[i] == b'\\' && digits.iter().all(|d| (b'0'..=b'7').contains(d)));
+        match octal {
+            Some(digits) => {
+                let value = digits
+                    .iter()
+                    .fold(0u32, |acc, d| acc * 8 + u32::from(d - b'0'));
+                out.push(u8::try_from(value).unwrap_or(b'?'));
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(out))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +539,93 @@ mod private_file_tests {
             0o644
         );
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// What is replaced is kept beside it, private, under the tag it is
+    /// given; nothing is kept of nothing, and a tag cannot leave the
+    /// directory.
+    #[test]
+    fn a_replaced_file_is_kept_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519");
+        fs::write(&path, "old key").unwrap();
+        let kept = keep_replaced(&path, "abc").unwrap().unwrap();
+        assert_eq!(kept, dir.path().join("id_ed25519.replaced-abc"));
+        assert_eq!(fs::read(&kept).unwrap(), b"old key");
+        assert_eq!(fs::read(&path).unwrap(), b"old key", "the original moved");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            keep_replaced(&dir.path().join("none"), "abc").unwrap(),
+            None
+        );
+        for tag in ["", "../x", "a/b"] {
+            assert!(keep_replaced(&path, tag).is_err(), "{tag:?}");
+        }
+    }
+
+    /// A regular file or none can be replaced; a directory or a symlink
+    /// cannot.
+    #[test]
+    fn only_a_regular_file_is_replaceable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("file");
+        fs::write(&file, "x").unwrap();
+        check_replaceable(&file).unwrap();
+        check_replaceable(&tmp.path().join("missing")).unwrap();
+        assert!(check_replaceable(tmp.path()).is_err());
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(check_replaceable(&link).is_err());
+        }
+    }
+
+    /// A file bind-mounted over another -- a Docker secret where the server
+    /// keeps its own file -- cannot be replaced. Needs a mount namespace
+    /// (`unshare -rm cargo test ...`); skipped elsewhere.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_mounted_in_place_is_not_replaceable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("secret");
+        let target = tmp.path().join("target");
+        fs::write(&secret, "mounted").unwrap();
+        fs::write(&target, "own").unwrap();
+        let mounted = std::process::Command::new("mount")
+            .arg("--bind")
+            .arg(&secret)
+            .arg(&target)
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !mounted.is_ok_and(|status| status.success()) {
+            eprintln!("skipped: cannot bind-mount here");
+            return;
+        }
+        let refused = check_replaceable(&target);
+        let _ = std::process::Command::new("umount").arg(&target).status();
+        let error = refused.unwrap_err().to_string();
+        assert!(error.contains("is mounted where it is"), "{error}");
+    }
+
+    #[test]
+    fn mount_points_are_read_with_their_escapes_undone() {
+        let table = "36 35 98:0 /mnt1 /mnt/with\\040space rw,noatime master:1 - ext3 /dev/root rw\n\
+                     37 35 98:0 /secret /run/ca/signing-key.asc ro - ext4 /dev/sda1 rw\n";
+        let points: Vec<PathBuf> = mount_points(table).collect();
+        assert_eq!(
+            points,
+            [
+                PathBuf::from("/mnt/with space"),
+                PathBuf::from("/run/ca/signing-key.asc")
+            ]
+        );
     }
 }

@@ -114,8 +114,8 @@ commands for them can sit beside `ssh key` and `ssh hosts`.
 
 `pkgbuild::private_state` names `AURCACHE_SSH_DIR`, the key
 `AURCACHE_GIT_SSH_KEY` points at and the passphrase file, so a PKGBUILD parse
-cannot read any of them. On a
-kernel without Landlock the parse sandbox checks file modes instead and refuses
+cannot read any of them. On a kernel without Landlock the parse sandbox checks
+file modes instead and refuses
 to parse while the key is readable by other users -- a world-readable Docker
 secret then stops every parse, with a message saying which file. That is the
 sandbox doing its job (the parse user *could* read it), and the docs say to keep
@@ -198,9 +198,117 @@ did in 2023), and a release carrying a stale key fails closed for every
 deployment until it is upgraded. An operator who wants pinning has
 `AURCACHE_SSH_KNOWN_HOSTS`, filled by one `ssh-keyscan`.
 
+## Dumps
+
+The rule: a dump without secrets has nothing of SSH in it, so it restores
+anywhere and needs no key. A dump with secrets carries what keeps private
+sources cloning after a restore or a migration, so that no key has to be added
+to every repository again. `SshAccess::export`, `plan_restore` and
+`apply_restore` are the whole of it, and the dump and restore code only call
+them; the state is `DumpSecrets::ssh` (`DumpSsh`).
+
+- **Carried, with secrets only:** the key the server uses, generated or
+  supplied, read from its file and written to `ssh/key` byte for byte (an
+  encrypted key stays encrypted), its public half as `ssh/key.pub`, and the
+  trust-on-first-use `known_hosts` as `ssh/known_hosts`. Like the CA, the key
+  is read from the file, never from what is loaded. The passphrase is never
+  carried, and a pinned `AURCACHE_SSH_KNOWN_HOSTS` is the operator's file, so it
+  is not carried either.
+- **Restore** follows the policy shared with the signing key's restore:
+  - *Validate first, and only what will be written.* `SshAccess::plan_restore`
+    changes nothing (it writes only a probe file, which it removes). It checks
+    that the files it would write can be written (`probe_writable`) and
+    replaced: a symlink, or a file mounted in place (a Docker secret at the
+    server's own key file, which a rename fails on with `EBUSY` after the rows
+    have committed), is refused here (`aurcache_common::fs::check_replaceable`,
+    the same check the signing key's restore makes). A key its own file holds
+    already plans no write at all. It also checks that the
+    dump's trusted hosts do not contradict this server's, and that the dump's
+    key is fit for where it goes:
+    - as the key in use, it must open here (a protected key needs this
+      server's passphrase file, and is decrypted to prove it);
+    - beside an operator's key, unused, it is checked against this server's
+      passphrase when there is one, and not made to need one when there is
+      not;
+    - where the operator's key file is the server's own, it is not written,
+      so nothing about it is demanded.
+
+    An unprotected dump key written on a server with a passphrase file is
+    protected with that passphrase first, so a server that keeps its key
+    protected does not end up with one in the clear. Any failure refuses the
+    whole restore before pass 1 ("nothing was imported: …"); the dry run
+    reports the same. `apply_restore` then runs after the rows, and the loaded
+    key, behind a lock, is reloaded. "Installed" is reported only for a key
+    that was checked to open.
+  - *No secrets, no change.* Without `--secrets copy` and without `--clear`,
+    nothing is touched.
+  - *`--secrets copy`:* the key goes to the server's own key file
+    (`AURCACHE_SSH_DIR/id_ed25519`, whatever its type); `known_hosts` is merged,
+    never replaced, so a restore of an older dump cannot drop hosts recorded
+    since. An entry naming a known host with another key of the same type
+    refuses it; another type is merged, as OpenSSH keeps one key per type.
+    Names are compared in lower case, and a hashed entry under each name this
+    server writes plainly, hashed with that entry's salt. A hashed entry that
+    resolves to none of them is added only when this server has no hashed or
+    pattern entries of its own, which could cover the host it names. A pattern entry
+    (`*`, `?`) is compared under each plain name it matches, and left out when
+    this server has hashed or pattern entries it could not list.
+  - *Said before and after:* `SshPlan::expected` is what a plan will leave,
+    and `apply_restore` returns what it left, both as the shared
+    `SshKeyChange` and `KnownHostsChange` (kept, already here, installed with
+    where the replaced key goes, beside the operator's key, left to the
+    operator; kept, merged, replaced, pinned). They are two report lines,
+    `RestoreOutcome::SshKey` and `SshKnownHosts` with an empty `pkgbase`, at
+    the end of a dry run and after a restore's rows, which the restore's
+    counts leave out. A partial failure reports what had changed, then the
+    failure.
+  - *Order:* the host keys are applied before the key, since their merge is
+    checked again under the lock and may still refuse. The key's public half
+    is written before the private key, each replaced whole: a failure up to
+    and including the private key leaves the key as it was (the `.pub` is put
+    back), and the private key is the last file written. A failure after that
+    -- the installed key does not load -- reports the key as installed, since
+    it is, and the reason. `PartialRestore` carries both what the host keys and
+    what the key came to.
+  - *The replaced key is kept:* `aurcache_common::fs::keep_replaced` copies it
+    beside itself, `0600`, as `<file>.replaced-<tag>` -- the key's SHA256
+    fingerprint in URL-safe base64, or a digest of a file that is no key it
+    can read -- and the report and the activity entry say where. The helper
+    is shared so the signing key's restore can keep its own the same way. A key
+    is compared by its public half, not its bytes, so the same key protected
+    again with a new salt is not written, nor kept as replaced.
+  - *Only checkable keys:* a key in an older (PEM) format, encrypted or not,
+    cannot be shown to be a key that opens before it is written -- its `.pub`
+    would be taken on its word -- so a restore refuses it, suggesting
+    `ssh-keygen -p` to convert it. After a key
+    is installed, the server reloads it and reports "installed" only if what
+    it loaded is that key.
+  - *`--clear` takes what the dump carries:* the dump's key and `known_hosts`
+    when it has them, the replaced `known_hosts` kept beside it as a replaced
+    key is. A dump without them leaves this server's key and `known_hosts`, as
+    it leaves the CA: a cleared server that regenerated its key would need it
+    added to every remote again, which a restore exists to avoid.
+  - *Operator paths are never written.* A key named by `AURCACHE_GIT_SSH_KEY`
+    stays in use and untouched, compared by real path so that one mounted at
+    the server's own key file is not written either; the dump's key then goes
+    beside it, or nowhere -- nowhere too when it is the operator's key itself,
+    as in a dump from the same server, so no second copy of it is written --
+    and an activity entry
+    (`restore.ssh_key_superseded`) says when the two differ. A replaced key
+    is `restore.ssh_key_replaced`, with where the old one is kept. A pinned
+    `AURCACHE_SSH_KNOWN_HOSTS` is left alone.
+- **Archive modes:** the SSH key, the CA key and the token hashes are written
+  `0600` in the archive (`append_private`), as the signing key is.
+- **Validation:** SSH files in a dump without the CA are refused, as tokens
+  are -- secrets travel together -- and so is a public key without its private
+  key. The schema version is unchanged: the files are optional, and an older
+  importer reading a newer dump only drops them, which leaves it where it was
+  before this existed.
+
 ## Not covered
 
-- A dump with secrets carries the worker CA, not the SSH key. Restoring onto a
-  new machine therefore generates a new key, which has to be added to the
-  remotes again (or `AURCACHE_GIT_SSH_KEY` points at the old one).
+- One key for every SSH remote. Choosing a key per repository (GitHub's deploy
+  keys are each bound to one) would mean named keys and rules mapping a remote
+  to a key; they could join `SshInfo` as an optional field beside `key`, and
+  the CLI's `ssh` group has room for `aurcli ssh keys`.
 - The VCS check does not resolve SSH sources a PKGBUILD names (see Roles).

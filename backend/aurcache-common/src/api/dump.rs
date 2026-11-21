@@ -37,6 +37,15 @@ pub const CA_CERT_FILE: &str = "ca-cert.pem";
 pub const CA_KEY_FILE: &str = "ca-key.pem";
 /// API token hashes, present only in a dump taken with secrets.
 pub const TOKENS_FILE: &str = "tokens.json";
+/// The SSH key the server clones package sources with, exactly as it was
+/// stored -- still encrypted, if it was. Present only in a dump taken with
+/// secrets, and never with its passphrase.
+pub const SSH_KEY_FILE: &str = "ssh/key";
+/// That key's public half.
+pub const SSH_PUBLIC_KEY_FILE: &str = "ssh/key.pub";
+/// The SSH host keys the server trusted on first contact. Present only in a
+/// dump taken with secrets, and only when the server keeps that file itself.
+pub const SSH_KNOWN_HOSTS_FILE: &str = "ssh/known_hosts";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -48,9 +57,10 @@ pub struct DumpManifest {
     pub aurcache_version: String,
     /// Unix seconds.
     pub created_at: i64,
-    /// Whether the archive carries the CA, worker certificates and token
-    /// hashes. A dump with this set is dangerous to share -- the CA private
-    /// key mints worker identities the server accepts.
+    /// Whether the archive carries the CA, worker certificates, token hashes
+    /// and the SSH key. A dump with this set is dangerous to share -- the CA
+    /// private key mints worker identities the server accepts, and the SSH key
+    /// reads every repository it was added to.
     pub includes_secrets: bool,
 }
 
@@ -151,6 +161,29 @@ pub struct DumpSecrets {
     pub ca_cert_pem: String,
     pub ca_key_pem: String,
     pub tokens: Vec<DumpToken>,
+    pub ssh: DumpSsh,
+}
+
+/// The server's SSH state, so that a restored or migrated instance keeps
+/// cloning from the remotes that know its key, without adding a new one to
+/// each of them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DumpSsh {
+    /// The key in use, generated or supplied, byte for byte as stored.
+    pub key: Option<DumpSshKey>,
+    /// `known_hosts` as trust on first use recorded it.
+    pub known_hosts: Option<String>,
+}
+
+/// A private key file and what is known of its public half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DumpSshKey {
+    /// The file's contents. Encrypted if the key was; the passphrase is
+    /// never carried.
+    pub private_key: String,
+    /// One line, as in a `.pub` file. Absent when the server could read no
+    /// public half, as for a key it could not open.
+    pub public_key: Option<String>,
 }
 
 /// What to do about secrets a dump carries.
@@ -163,7 +196,7 @@ pub struct DumpSecrets {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsPolicy {
-    /// Leave this instance's CA and tokens as they are.
+    /// Leave this instance's CA, tokens and SSH key as they are.
     #[default]
     Ignore,
     /// Take the dump's, replacing what is here.
@@ -264,13 +297,14 @@ pub struct RestoreOptions {
     /// existing package by the time the dump is written.
     #[serde(default)]
     pub clear: bool,
-    /// What to do about the CA, worker certificates and token hashes, when the
-    /// dump carries any. Ignored when it does not.
+    /// What to do about the CA, worker certificates, token hashes and SSH
+    /// key, when the dump carries any. Ignored when it does not.
     #[serde(default)]
     pub secrets: SecretsPolicy,
 }
 
-/// What an import did, or would do, to one package.
+/// What an import did, or would do, to one package -- or, with an empty
+/// `pkgbase`, to the server itself.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case", tag = "outcome")]
@@ -286,6 +320,12 @@ pub enum RestoreOutcome {
     PatchAdopted,
     /// Rejected. The rest of the import still applied.
     Failed { error: String },
+    /// What happens, or happened, to the SSH key package sources are cloned
+    /// with. About the server, not a package.
+    SshKey { change: SshKeyChange },
+    /// What happens, or happened, to the SSH host keys the server trusts.
+    /// About the server, not a package.
+    SshKnownHosts { change: KnownHostsChange },
 }
 
 impl RestoreOutcome {
@@ -298,6 +338,153 @@ impl RestoreOutcome {
             Self::Overwritten => "overwritten",
             Self::PatchAdopted => "patched",
             Self::Failed { .. } => "failed",
+            Self::SshKey { .. } => "ssh key",
+            Self::SshKnownHosts { .. } => "ssh hosts",
+        }
+    }
+
+    /// What happens to the server, for an entry about it rather than about a
+    /// package: the sentence a report line shows.
+    #[must_use]
+    pub fn server_change(&self) -> Option<String> {
+        match self {
+            Self::SshKey { change } => Some(change.sentence()),
+            Self::SshKnownHosts { change } => Some(change.sentence()),
+            Self::Imported
+            | Self::Skipped
+            | Self::Overwritten
+            | Self::PatchAdopted
+            | Self::Failed { .. } => None,
+        }
+    }
+}
+
+/// What a restore does, or did, to the SSH key package sources are cloned
+/// with. Said the same way before and after: a dry run reports what a restore
+/// would leave, and the restore what it left.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SshKeyChange {
+    /// This server's key stays as it is: secrets are not taken, or the dump
+    /// carries no key.
+    Kept,
+    /// The server's own key file holds the dump's key already.
+    AlreadyHere { fingerprint: String },
+    /// The dump's key becomes the one sources are cloned with. The key it
+    /// replaces is kept at `previous`, when there was one.
+    Installed {
+        fingerprint: String,
+        previous: Option<String>,
+    },
+    /// The dump's key goes in the server's own key file, unused: sources are
+    /// still cloned with the key `AURCACHE_GIT_SSH_KEY` names, `configured`.
+    /// The key that file held is kept at `previous`, when there was one.
+    Beside {
+        fingerprint: String,
+        configured: String,
+        previous: Option<String>,
+    },
+    /// Nothing is written: the dump's key is the one `configured` holds
+    /// (`same_key`), or the server's own key file is `configured`. The
+    /// fingerprint is unknown for a dump key that could not be read.
+    LeftToOperator {
+        fingerprint: Option<String>,
+        configured: String,
+        same_key: bool,
+    },
+}
+
+impl SshKeyChange {
+    /// One sentence, as a report line shows it.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        let kept = |previous: &Option<String>| {
+            previous.as_ref().map_or_else(String::new, |previous| {
+                format!("; the key it replaces is kept at {previous}")
+            })
+        };
+        match self {
+            Self::Kept => "kept as it is".to_string(),
+            Self::AlreadyHere { fingerprint } => {
+                format!("the dump's ({fingerprint}) is this server's already")
+            }
+            Self::Installed {
+                fingerprint,
+                previous,
+            } => format!(
+                "the dump's ({fingerprint}) is installed, and sources are cloned with it{}",
+                kept(previous)
+            ),
+            Self::Beside {
+                fingerprint,
+                configured,
+                previous,
+            } => format!(
+                "the dump's ({fingerprint}) goes in the server's own key file, unused: \
+                 sources are still cloned with {configured} (AURCACHE_GIT_SSH_KEY){}",
+                kept(previous)
+            ),
+            Self::LeftToOperator {
+                fingerprint,
+                configured,
+                same_key: true,
+            } => format!(
+                "kept: the dump's ({}) is {configured} (AURCACHE_GIT_SSH_KEY), already in use",
+                fingerprint.as_deref().unwrap_or("unreadable")
+            ),
+            Self::LeftToOperator {
+                fingerprint,
+                configured,
+                same_key: false,
+            } => format!(
+                "kept: the server's own key file is {configured} (AURCACHE_GIT_SSH_KEY), \
+                 which a restore does not write; the dump's ({}) is another key",
+                fingerprint.as_deref().unwrap_or("unreadable")
+            ),
+        }
+    }
+}
+
+/// What a restore does, or did, to the SSH host keys the server trusts.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum KnownHostsChange {
+    /// This server's stay as they are: secrets are not taken, or the dump
+    /// carries none.
+    Kept,
+    /// The dump's entries this server lacks go into `file`: `added` of them.
+    Merged { file: String, added: usize },
+    /// `file` becomes the dump's, as a cleared server's. The one it replaces
+    /// is kept at `previous`, when there was one to keep.
+    Replaced {
+        file: String,
+        previous: Option<String>,
+    },
+    /// The dump's are not taken: the operator pins host keys in `file`.
+    Pinned { file: String },
+}
+
+impl KnownHostsChange {
+    /// One sentence, as a report line shows it.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::Kept => "trusted host keys kept as they are".to_string(),
+            Self::Merged { file, added } => {
+                format!("{added} of the dump's trusted host keys added to {file}")
+            }
+            Self::Replaced { file, previous } => format!(
+                "{file} replaced by the dump's trusted host keys{}",
+                previous.as_ref().map_or_else(String::new, |previous| {
+                    format!("; the ones it replaces are kept at {previous}")
+                })
+            ),
+            Self::Pinned { file } => format!(
+                "the dump's trusted host keys are not taken: {file} (AURCACHE_SSH_KNOWN_HOSTS) \
+                 pins them"
+            ),
         }
     }
 }

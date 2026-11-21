@@ -10,8 +10,11 @@ use std::io::Write;
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR,
-    SETTINGS_FILE, TOKENS_FILE, WORKERS_FILE,
+    SETTINGS_FILE, SSH_KEY_FILE, SSH_KNOWN_HOSTS_FILE, SSH_PUBLIC_KEY_FILE, TOKENS_FILE,
+    WORKERS_FILE,
 };
+
+use crate::ssh::SshAccess;
 use aurcache_common::api::worker::ApprovalStatus;
 use aurcache_db::api_tokens;
 use aurcache_db::helpers::time::now_secs;
@@ -20,6 +23,7 @@ use aurcache_db::{packages, settings, workers};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use std::sync::Arc;
 
 /// Everything a dump carries, before it is packed into an archive.
 ///
@@ -36,15 +40,26 @@ pub struct Dump {
     pub secrets: Option<DumpSecrets>,
 }
 
+/// Where a dump with secrets reads them from.
+#[derive(Clone, Copy)]
+pub struct SecretSources<'a> {
+    /// The worker CA's directory.
+    pub ca_dir: &'a std::path::Path,
+    /// The server's SSH key and host keys.
+    pub ssh: &'a Arc<SshAccess>,
+}
+
 /// Read the authored state out of the database.
 ///
-/// `ca_dir` opts the dump into carrying secrets: the CA, the certificates the
-/// workers hold, and the API token hashes. `None` -- the default everywhere --
-/// produces a dump that is safe to keep beside ordinary backups.
+/// `secrets` opts the dump into carrying them: the CA, the certificates the
+/// workers hold, the API token hashes, and the SSH key with the host keys
+/// trusted on first use. `None` -- the default everywhere -- produces a dump
+/// that is safe to keep beside ordinary backups, and has nothing of SSH in it
+/// at all.
 pub async fn build_dump(
     db: &DatabaseConnection,
     aurcache_version: &str,
-    ca_dir: Option<&std::path::Path>,
+    secrets: Option<SecretSources<'_>>,
 ) -> anyhow::Result<Dump> {
     // Ordered by name so two dumps of the same instance are byte-identical and
     // a dump kept in git shows only real changes.
@@ -77,8 +92,8 @@ pub async fn build_dump(
     }
 
     let settings = build_settings(db, &pkgbase_of_id).await?;
-    let secrets = match ca_dir {
-        Some(dir) => Some(build_secrets(db, dir).await?),
+    let secrets = match secrets {
+        Some(sources) => Some(build_secrets(db, sources).await?),
         None => None,
     };
     let workers = build_workers(db, secrets.is_some()).await?;
@@ -101,16 +116,19 @@ pub async fn build_dump(
     })
 }
 
-/// Read the CA and the token hashes.
+/// Read the CA, the token hashes and the SSH state.
 ///
 /// The CA is read from its files rather than from a loaded `Ca`, deliberately:
 /// there is no method anywhere that hands out the private key of a CA already
 /// in memory, and this does not add one. Export moves files; so does restore.
+/// The SSH key is read the same way (see [`SshAccess::export`]).
 async fn build_secrets(
     db: &DatabaseConnection,
-    ca_dir: &std::path::Path,
+    sources: SecretSources<'_>,
 ) -> anyhow::Result<DumpSecrets> {
-    let ca_dir = ca_dir.to_path_buf();
+    let ssh = Arc::clone(sources.ssh);
+    let ssh = tokio::task::spawn_blocking(move || ssh.export()).await??;
+    let ca_dir = sources.ca_dir.to_path_buf();
     let ca = tokio::task::spawn_blocking(move || aurcache_ca::Ca::load(&ca_dir)).await??;
     let ca_cert_pem = ca.ca_cert_pem().to_owned();
     let ca_key_pem = ca.private_key_pem().to_owned();
@@ -130,6 +148,7 @@ async fn build_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        ssh,
     })
 }
 
@@ -226,8 +245,17 @@ pub fn write_archive(dump: &Dump) -> anyhow::Result<Vec<u8>> {
         }
         if let Some(secrets) = &dump.secrets {
             append(&mut tar, CA_CERT_FILE, &secrets.ca_cert_pem)?;
-            append(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
-            append(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            append_private(&mut tar, CA_KEY_FILE, &secrets.ca_key_pem)?;
+            append_private(&mut tar, TOKENS_FILE, &to_json(&secrets.tokens)?)?;
+            if let Some(key) = &secrets.ssh.key {
+                append_private(&mut tar, SSH_KEY_FILE, &key.private_key)?;
+                if let Some(public) = &key.public_key {
+                    append(&mut tar, SSH_PUBLIC_KEY_FILE, &format!("{public}\n"))?;
+                }
+            }
+            if let Some(known_hosts) = &secrets.ssh.known_hosts {
+                append(&mut tar, SSH_KNOWN_HOSTS_FILE, known_hosts)?;
+            }
         }
         // Finish explicitly: dropping the encoder would swallow a compression
         // error.
@@ -243,10 +271,28 @@ fn to_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
 }
 
 fn append<W: Write>(tar: &mut tar::Builder<W>, path: &str, content: &str) -> anyhow::Result<()> {
+    append_mode(tar, path, content, 0o644)
+}
+
+/// A secret, which `tar -x` should not leave readable by everyone.
+fn append_private<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    append_mode(tar, path, content, 0o600)
+}
+
+fn append_mode<W: Write>(
+    tar: &mut tar::Builder<W>,
+    path: &str,
+    content: &str,
+    mode: u32,
+) -> anyhow::Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_path(path)?;
     header.set_size(content.len() as u64);
-    header.set_mode(0o644);
+    header.set_mode(mode);
     header.set_cksum();
     tar.append(&header, content.as_bytes())?;
     Ok(())

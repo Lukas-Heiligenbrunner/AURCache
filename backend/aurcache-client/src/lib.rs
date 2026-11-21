@@ -11,8 +11,8 @@ use reqwest::Url;
 pub use aurcache_common::api::activity::Severity;
 pub use aurcache_common::api::builds::BuildSummary as Build;
 pub use aurcache_common::api::dump::{
-    ExistingPackagePolicy, RestoreAccepted, RestoreEntry, RestoreOptions, RestoreOutcome,
-    RestoreProgress, SecretsPolicy,
+    ExistingPackagePolicy, KnownHostsChange, RestoreAccepted, RestoreEntry, RestoreOptions,
+    RestoreOutcome, RestoreProgress, SecretsPolicy, SshKeyChange,
 };
 pub use aurcache_common::api::events::{Event, KINDS, Kind, Segment, kind_label};
 pub use aurcache_common::api::info::{ServerInfo, Timezone};

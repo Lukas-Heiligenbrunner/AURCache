@@ -83,9 +83,11 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                     div {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
-                            "The CA private key, the certificates your workers hold, and \
-                             API token hashes. Restoring these makes a move invisible to \
-                             your workers: they reconnect instead of re-enrolling."
+                            "The CA private key, the certificates your workers hold, API \
+                             token hashes, and the SSH key private sources are cloned with. \
+                             Restoring these makes a move invisible to your workers and your \
+                             git remotes: workers reconnect instead of re-enrolling, and no \
+                             key has to be added to a repository again."
                         }
                     }
                 }
@@ -368,7 +370,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else."
+                         instance ends up as the dump describes and nothing else. The \
+                         dump's SSH key and trusted hosts replace this server's when it \
+                         carries them, and the replaced ones are kept beside them; a dump \
+                         without them leaves this server's as they are, as it leaves the CA."
                     }
                 }
             }
@@ -386,7 +391,8 @@ fn RestoreOptionsForm(
                     div { class: "text-xs opacity-60",
                         "Replaces this server's CA with the dump's. Every certificate your \
                          current workers hold was signed by the old one and stops working; \
-                         they re-enrol. Ignored if the dump carries no secrets."
+                         they re-enrol. The dump's SSH key and trusted hosts are taken too. \
+                         Ignored if the dump carries no secrets."
                     }
                 }
             }
@@ -415,7 +421,11 @@ fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
                                 span { class: "badge badge-xs {outcome_class(&entry.outcome)}",
                                     {entry.outcome.label()}
                                 }
-                                span { class: "font-mono text-sm break-all", "{entry.pkgbase}" }
+                                if let Some(change) = entry.outcome.server_change() {
+                                    span { class: "text-sm text-left", "{change}" }
+                                } else {
+                                    span { class: "font-mono text-sm break-all", "{entry.pkgbase}" }
+                                }
                             }
                             if let RestoreOutcome::Failed { error } = &entry.outcome {
                                 span { class: "text-xs opacity-70 text-left", "{error}" }
@@ -434,5 +444,59 @@ fn outcome_class(outcome: &RestoreOutcome) -> &'static str {
         RestoreOutcome::Overwritten => "badge-warning",
         RestoreOutcome::Skipped => "badge-ghost",
         RestoreOutcome::Failed { .. } => "badge-error",
+        RestoreOutcome::SshKey { .. } | RestoreOutcome::SshKnownHosts { .. } => "badge-info",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RestoreReport, RestoreReportProps};
+    use aurcache_client::{KnownHostsChange, RestoreEntry, RestoreOutcome, SshKeyChange};
+    use dioxus::prelude::*;
+
+    /// A dry run says what would happen to the server's SSH key and trusted
+    /// host keys, beside the packages, and where a replaced key would go.
+    #[test]
+    fn a_report_says_what_happens_to_the_ssh_key() {
+        let entries = vec![
+            RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Imported,
+            },
+            RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::SshKey {
+                    change: SshKeyChange::Installed {
+                        fingerprint: "SHA256:abc".to_string(),
+                        previous: Some("/app/data/ssh/id_ed25519.replaced-SHA256-def".to_string()),
+                    },
+                },
+            },
+            RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::SshKnownHosts {
+                    change: KnownHostsChange::Kept,
+                },
+            },
+        ];
+        let mut dom = VirtualDom::new_with_props(
+            RestoreReport,
+            RestoreReportProps {
+                entries,
+                blocked: false,
+            },
+        );
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("hello"), "{html}");
+        assert!(html.contains("ssh key"), "{html}");
+        assert!(
+            html.contains("kept at /app/data/ssh/id_ed25519.replaced-SHA256-def"),
+            "{html}"
+        );
+        assert!(
+            html.contains("trusted host keys kept as they are"),
+            "{html}"
+        );
     }
 }

@@ -100,7 +100,8 @@ in a file:
 
 The file's first line is the passphrase; a trailing newline is not part of it.
 It is read once, at start, so a changed passphrase takes a restart. It is never
-logged, shown or put in a dump. The point is that the key file alone, on the
+logged, shown or put in a dump (see [Backup and
+restore](../cli/maintenance.md) for what a dump with secrets carries of SSH). The point is that the key file alone, on the
 volume or in a backup of it, is no use to whoever holds it: keep the passphrase
 somewhere else.
 

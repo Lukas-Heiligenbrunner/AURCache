@@ -28,9 +28,10 @@ use std::io::Read;
 
 use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
-    DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
-    PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    DumpSecrets, DumpSettings, DumpSsh, DumpSshKey, DumpToken, DumpWorker, ExistingPackagePolicy,
+    MANIFEST_FILE, PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome,
+    SETTINGS_FILE, SSH_KEY_FILE, SSH_KNOWN_HOSTS_FILE, SSH_PUBLIC_KEY_FILE, SecretsPolicy,
+    SshKeyChange, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -46,7 +47,9 @@ use crate::repository::Repository;
 use crate::services::Services;
 use crate::settings::Change;
 use crate::snapshot::SnapshotStore;
+use crate::ssh::{SshAccess, SshPlan, SshRestoreMode, SshRestored};
 use aurcache_activitylog::events::{Event, RestoreStep};
+use std::sync::Arc;
 
 /// A dump that has been read and checked, ready to apply.
 #[derive(Clone, Debug)]
@@ -183,8 +186,15 @@ fn load_secrets(
                      verify them; it was assembled wrongly"
                 );
             }
-            if files.contains_key(TOKENS_FILE) {
-                anyhow::bail!("this dump carries {TOKENS_FILE} but no CA; secrets travel together");
+            for secret in [
+                TOKENS_FILE,
+                SSH_KEY_FILE,
+                SSH_PUBLIC_KEY_FILE,
+                SSH_KNOWN_HOSTS_FILE,
+            ] {
+                if files.contains_key(secret) {
+                    anyhow::bail!("this dump carries {secret} but no CA; secrets travel together");
+                }
             }
             return Ok(None);
         }
@@ -202,7 +212,26 @@ fn load_secrets(
         ca_cert_pem,
         ca_key_pem,
         tokens,
+        ssh: load_ssh(files)?,
     }))
+}
+
+/// The SSH key and host keys, if the archive carries them.
+fn load_ssh(files: &BTreeMap<String, String>) -> anyhow::Result<DumpSsh> {
+    let key = match (files.get(SSH_KEY_FILE), files.get(SSH_PUBLIC_KEY_FILE)) {
+        (Some(private_key), public_key) => Some(DumpSshKey {
+            private_key: private_key.clone(),
+            public_key: public_key.map(|line| line.trim().to_string()),
+        }),
+        (None, Some(_)) => {
+            anyhow::bail!("{SSH_PUBLIC_KEY_FILE} is here but {SSH_KEY_FILE} is not")
+        }
+        (None, None) => None,
+    };
+    Ok(DumpSsh {
+        key,
+        known_hosts: files.get(SSH_KNOWN_HOSTS_FILE).cloned(),
+    })
 }
 
 fn parse<T: serde::de::DeserializeOwned>(
@@ -222,10 +251,25 @@ fn parse<T: serde::de::DeserializeOwned>(
 /// nothing it reports has happened.
 pub async fn preview(
     db: &DatabaseConnection,
+    ssh: &Arc<SshAccess>,
     dump: &LoadedDump,
     options: &RestoreOptions,
 ) -> anyhow::Result<Vec<RestoreEntry>> {
     let mut entries = Vec::new();
+    // The secrets a real restore would refuse on, said up front -- and then
+    // nothing else, since a refused restore imports no package either.
+    let ssh_plan = match plan_ssh(ssh, dump, options).await {
+        Ok(plan) => plan,
+        Err(e) => {
+            entries.push(RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::Failed {
+                    error: format!("nothing would be imported: {e:#}"),
+                },
+            });
+            return Ok(entries);
+        }
+    };
     for pkgbase in dump.packages.keys() {
         let existing = package_row(db, pkgbase).await?;
         let dump_patch = dump.patches.get(pkgbase);
@@ -247,6 +291,9 @@ pub async fn preview(
             },
         });
     }
+    // What the SSH key and the trusted host keys would come to, after the
+    // packages: they are about the server, not one of them.
+    entries.extend(ssh_entries(ssh_plan.expected()));
     Ok(entries)
 }
 
@@ -327,6 +374,15 @@ pub async fn apply(
     let Services {
         store, db, repo, ..
     } = services;
+    // Secrets first, checked and not written: one that cannot be applied
+    // refuses the whole restore while nothing has been touched.
+    let ssh_plan = match plan_ssh(store.ssh(), &dump, &options).await {
+        Ok(plan) => plan,
+        Err(e) => {
+            report_failure(&progress, "", format!("nothing was imported: {e:#}")).await;
+            return;
+        }
+    };
     // PASS 1: rows. One transaction, because a half-applied dump is neither
     // what the instance was nor what the dump describes.
     let applied = match write_rows(db, repo, &dump, &options).await {
@@ -357,6 +413,14 @@ pub async fn apply(
             )
             .await;
         }
+    }
+    if let Err(e) = apply_ssh(services, ssh_plan, &progress).await {
+        report_failure(
+            &progress,
+            "",
+            format!("the packages were imported, but the SSH key was not: {e:#}"),
+        )
+        .await;
     }
 
     // PASS 2: sources. Every imported package's `provides` and split package
@@ -492,6 +556,122 @@ fn write_secrets(
         secrets.ca_key_pem.clone(),
     )?;
     Ok(true)
+}
+
+/// What a restore does with the server's SSH state: nothing unless secrets
+/// are taken, and with `--clear` the dump's where it carries any.
+fn ssh_mode(options: &RestoreOptions) -> SshRestoreMode {
+    if options.clear {
+        SshRestoreMode::Fresh
+    } else if take_secrets(options) {
+        SshRestoreMode::Take
+    } else {
+        SshRestoreMode::Keep
+    }
+}
+
+/// Check what the restore would do with the server's SSH state, writing
+/// nothing. An error refuses the whole restore, before anything is touched.
+pub async fn plan_ssh(
+    ssh: &Arc<SshAccess>,
+    dump: &LoadedDump,
+    options: &RestoreOptions,
+) -> anyhow::Result<SshPlan> {
+    let ssh = Arc::clone(ssh);
+    let carried = dump.secrets.as_ref().map(|s| s.ssh.clone());
+    let mode = ssh_mode(options);
+    tokio::task::spawn_blocking(move || ssh.plan_restore(carried.as_ref(), mode)).await?
+}
+
+/// Carry out an SSH plan, after the rows: files are not something a
+/// rolled-back transaction takes back. What happened is logged, and what an
+/// operator has to act on -- a key the remotes may not know -- is in the
+/// activity log too.
+async fn apply_ssh(
+    services: &Services,
+    plan: SshPlan,
+    progress: &Sender<RestoreEntry>,
+) -> anyhow::Result<()> {
+    let ssh = Arc::clone(services.store.ssh());
+    let applied = tokio::task::spawn_blocking(move || ssh.apply_restore(plan)).await?;
+    // What did change is said as it would be on success, so the failure is
+    // not taken to mean nothing did.
+    let restored = match &applied {
+        Ok(restored) => restored.clone(),
+        Err(partial) => SshRestored {
+            key: partial.key.clone(),
+            known_hosts: partial.known_hosts.clone(),
+        },
+    };
+    report_key(services, &restored.key);
+    tracing::info!(
+        "Restore: SSH host keys: {}",
+        restored.known_hosts.sentence()
+    );
+    for entry in ssh_entries(restored) {
+        let _ = progress.send(entry).await;
+    }
+    applied.map(drop).map_err(|partial| partial.error)
+}
+
+/// The report lines for what the SSH key and the trusted host keys come to.
+fn ssh_entries(restored: SshRestored) -> Vec<RestoreEntry> {
+    vec![
+        RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::SshKey {
+                change: restored.key,
+            },
+        },
+        RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::SshKnownHosts {
+                change: restored.known_hosts,
+            },
+        },
+    ]
+}
+
+/// Log what a restore did with the SSH key, and put in the activity log what
+/// an operator has to act on: a key the remotes may not know.
+fn report_key(services: &Services, key: &SshKeyChange) {
+    tracing::info!("Restore: SSH key: {}", key.sentence());
+    let superseded = |fingerprint: &str, configured: &str| {
+        tracing::warn!(
+            "The dump's SSH key ({fingerprint}) is not the one this server clones with: \
+             AURCACHE_GIT_SSH_KEY names {configured}, a different key, which the restore leaves \
+             alone"
+        );
+        services.activity.emit(Event::RestoreSshKeySuperseded {
+            fingerprint: fingerprint.to_string(),
+            configured: configured.to_string(),
+        });
+    };
+    match key {
+        SshKeyChange::Kept
+        | SshKeyChange::AlreadyHere { .. }
+        | SshKeyChange::LeftToOperator { same_key: true, .. } => {}
+        SshKeyChange::Installed {
+            fingerprint,
+            previous,
+        } => services.activity.emit(Event::RestoreSshKeyReplaced {
+            fingerprint: fingerprint.clone(),
+            previous: previous.clone(),
+        }),
+        SshKeyChange::Beside {
+            fingerprint,
+            configured,
+            ..
+        } => superseded(fingerprint, configured),
+        SshKeyChange::LeftToOperator {
+            fingerprint,
+            configured,
+            same_key: false,
+        } => superseded(
+            fingerprint.as_deref().unwrap_or("an unreadable key"),
+            configured,
+        ),
+    }
 }
 
 /// What pass 1 did.

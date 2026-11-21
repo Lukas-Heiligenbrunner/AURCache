@@ -186,6 +186,7 @@ fn a_package_source_is_cloned_over_ssh_with_the_servers_key() {
     let state = tempfile::tempdir().unwrap();
     let known_hosts = state.path().join("ssh/known_hosts");
     let access = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Generated(state.path().join("ssh/id_ed25519")),
         passphrase_file: None,
         hosts: HostKeySource::TrustOnFirstUse(known_hosts.clone()),
@@ -256,6 +257,7 @@ fn a_pinned_known_hosts_is_the_whole_list() {
     let pinned = state.path().join("known_hosts");
     std::fs::write(&pinned, "").unwrap();
     let access = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Generated(state.path().join("ssh/id_ed25519")),
         passphrase_file: None,
         hosts: HostKeySource::Pinned(pinned.clone()),
@@ -305,6 +307,7 @@ fn the_bracketed_scp_form_is_refused_and_ssh_urls_judge_their_port() {
     let port_22 = format!("127.0.0.1 {}\n", host_key.trim());
     std::fs::write(&pinned, &port_22).unwrap();
     let access = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Generated(key.clone()),
         passphrase_file: None,
         hosts: HostKeySource::Pinned(pinned.clone()),
@@ -334,6 +337,7 @@ fn the_bracketed_scp_form_is_refused_and_ssh_urls_judge_their_port() {
     // With trust on first use, the bracketed form records nothing.
     let first_use = state.path().join("first-use/known_hosts");
     let access = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Generated(key),
         passphrase_file: None,
         hosts: HostKeySource::TrustOnFirstUse(first_use.clone()),
@@ -361,6 +365,7 @@ fn a_passphrase_protected_key_clones_with_its_passphrase_file() {
     std::fs::write(&pinned, format!("{}\n", sshd.known_hosts_line())).unwrap();
 
     let access = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Provided(key.clone()),
         passphrase_file: Some(passphrase.clone()),
         hosts: HostKeySource::Pinned(pinned),
@@ -379,6 +384,7 @@ fn a_passphrase_protected_key_clones_with_its_passphrase_file() {
     // The wrong one is the reason, before anything connects.
     std::fs::write(&passphrase, "battery staple\n").unwrap();
     let wrong = SshAccess::new(SshConfig {
+        dir: state.path().join("ssh"),
         key: KeySource::Provided(key),
         passphrase_file: Some(passphrase),
         hosts: HostKeySource::Pinned(state.path().join("known_hosts")),

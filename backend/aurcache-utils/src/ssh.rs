@@ -35,11 +35,12 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{Context, bail};
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::Event;
+use aurcache_common::api::dump::{DumpSsh, DumpSshKey, KnownHostsChange, SshKeyChange};
 use aurcache_common::api::ssh::{
     HostKeyPolicy, KeyOrigin, SshInfo, SshKey, TrustedHost, TrustedHosts,
 };
@@ -128,6 +129,9 @@ impl HostKeySource {
 /// its passphrase if it has one, and where host keys are judged from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshConfig {
+    /// The server's own SSH directory: where it generates its key and records
+    /// host keys unless told otherwise, and where a restored key goes.
+    pub dir: PathBuf,
     pub key: KeySource,
     pub passphrase_file: Option<PathBuf>,
     pub hosts: HostKeySource,
@@ -138,6 +142,7 @@ impl SshConfig {
     #[must_use]
     pub fn configured() -> Self {
         Self {
+            dir: aurcache_common::fs::ssh_dir(),
             key: KeySource::configured(),
             passphrase_file: AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE
                 .get_os()
@@ -224,7 +229,11 @@ enum Key {
 /// keys it trusts.
 #[derive(Debug)]
 pub struct SshAccess {
-    key: Key,
+    /// What the key was loaded from. `None` for access built without any.
+    config: Option<SshConfig>,
+    /// Behind a lock so that a key a restore put in place is used, and
+    /// reported, without a restart.
+    key: RwLock<Key>,
     hosts: HostKeys,
 }
 
@@ -250,16 +259,10 @@ impl SshAccess {
     /// or its host-key checks.
     #[must_use]
     pub fn new(config: SshConfig) -> Self {
-        let key = match SshBackend::linked().unusable() {
-            Some(reason) => Key::Unavailable(reason),
-            None => match ensure(&config.key, config.passphrase_file.as_deref()) {
-                Ok(identity) => Key::Ready(identity),
-                Err(e) => Key::Unavailable(format!("{e:#}")),
-            },
-        };
         Self {
-            key,
-            hosts: HostKeys::new(config.hosts),
+            key: RwLock::new(load_key(&config)),
+            hosts: HostKeys::new(config.hosts.clone()),
+            config: Some(config),
         }
     }
 
@@ -276,16 +279,23 @@ impl SshAccess {
     #[must_use]
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
-            key: Key::Unavailable(reason.into()),
+            config: None,
+            key: RwLock::new(Key::Unavailable(reason.into())),
             hosts: HostKeys::new(HostKeySource::Pinned(PathBuf::new())),
         }
     }
 
+    fn key(&self) -> std::sync::RwLockReadGuard<'_, Key> {
+        self.key
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The key to offer, or why there is none.
-    pub(crate) fn identity(&self) -> Result<&Identity, &str> {
-        match &self.key {
-            Key::Ready(identity) => Ok(identity),
-            Key::Unavailable(reason) => Err(reason),
+    pub(crate) fn identity(&self) -> Result<Identity, String> {
+        match &*self.key() {
+            Key::Ready(identity) => Ok(identity.clone()),
+            Key::Unavailable(reason) => Err(reason.clone()),
         }
     }
 
@@ -296,7 +306,7 @@ impl SshAccess {
     /// What the API reports: nothing secret.
     #[must_use]
     pub fn info(&self) -> SshInfo {
-        let key = match &self.key {
+        let key = match &*self.key() {
             Key::Ready(identity) => SshKey::Ready {
                 public_key: identity.public_key_line(),
                 fingerprint: identity.fingerprint(),
@@ -315,7 +325,7 @@ impl SshAccess {
     }
 
     fn log(&self) {
-        match &self.key {
+        match &*self.key() {
             Key::Ready(identity) => tracing::info!(
                 "SSH key for package sources: {}\n    \
                  Add this public key to the git remotes AURCache clones over SSH:\n    {}",
@@ -327,6 +337,899 @@ impl SshAccess {
                  fetched: {reason}"
             ),
         }
+    }
+}
+
+/// What a restore does with the server's SSH state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshRestoreMode {
+    /// Secrets are not taken: nothing changes.
+    Keep,
+    /// The dump's secrets are taken into this server as it is.
+    Take,
+    /// The server is cleared first: the dump's SSH state replaces this
+    /// server's where it carries any, and this server's stays where it does
+    /// not, as the CA does.
+    Fresh,
+}
+
+/// What a restore will do with the server's SSH state, checked before
+/// anything is written.
+///
+/// Deliberately not `Debug`: it holds the private key it is to write.
+pub struct SshPlan {
+    key: KeyPlan,
+    known_hosts: HostsPlan,
+}
+
+enum KeyPlan {
+    Keep,
+    /// The server's own key file holds the dump's key already.
+    AlreadyThere {
+        public_key: PublicKey,
+    },
+    /// The dump's key, checked to open, into the server's own key file. The
+    /// key there is to be kept at `replaces`, when there is one.
+    Install {
+        own: PathBuf,
+        private_key: Zeroizing<String>,
+        public_key: PublicKey,
+        replaces: Option<PathBuf>,
+    },
+    /// The dump's key into the server's own key file, while the key in use
+    /// stays the one the operator supplied. The key that file holds is to be
+    /// kept at `replaces`, when there is one.
+    Beside {
+        own: PathBuf,
+        private_key: Zeroizing<String>,
+        public_key: PublicKey,
+        configured: PathBuf,
+        replaces: Option<PathBuf>,
+    },
+    /// Nothing is written: the operator's key file is where the dump's key
+    /// would go, or the dump's key is the operator's, already in use
+    /// (`same_key`). The dump's public half is known only if its key could
+    /// be read.
+    Skip {
+        public_key: Option<PublicKey>,
+        configured: PathBuf,
+        same_key: bool,
+    },
+}
+
+enum HostsPlan {
+    Keep,
+    /// The operator pins host keys in a file of their own.
+    Pinned {
+        file: PathBuf,
+    },
+    /// Add the dump's entries to the server's own file: `added` of them, as
+    /// the file stood when planned.
+    Merge {
+        file: PathBuf,
+        text: String,
+        added: usize,
+    },
+    /// Make the server's own file the dump's, as a cleared server's; the one
+    /// there is to be kept at `replaces`, when there is one.
+    Replace {
+        file: PathBuf,
+        text: String,
+        replaces: Option<PathBuf>,
+    },
+}
+
+impl SshPlan {
+    /// What carrying out this plan will leave, as a dry run reports it.
+    #[must_use]
+    pub fn expected(&self) -> SshRestored {
+        SshRestored {
+            key: self.key.expected(),
+            known_hosts: self.known_hosts.expected(),
+        }
+    }
+}
+
+impl KeyPlan {
+    fn expected(&self) -> SshKeyChange {
+        match self {
+            Self::Keep => SshKeyChange::Kept,
+            Self::AlreadyThere { public_key } => SshKeyChange::AlreadyHere {
+                fingerprint: fingerprint(public_key),
+            },
+            Self::Install {
+                public_key,
+                replaces,
+                ..
+            } => SshKeyChange::Installed {
+                fingerprint: fingerprint(public_key),
+                previous: replaces.as_deref().map(shown),
+            },
+            Self::Beside {
+                public_key,
+                configured,
+                replaces,
+                ..
+            } => SshKeyChange::Beside {
+                fingerprint: fingerprint(public_key),
+                configured: shown(configured),
+                previous: replaces.as_deref().map(shown),
+            },
+            Self::Skip {
+                public_key,
+                configured,
+                same_key,
+            } => SshKeyChange::LeftToOperator {
+                fingerprint: public_key.as_ref().map(fingerprint),
+                configured: shown(configured),
+                same_key: *same_key,
+            },
+        }
+    }
+}
+
+impl HostsPlan {
+    fn expected(&self) -> KnownHostsChange {
+        match self {
+            Self::Keep => KnownHostsChange::Kept,
+            Self::Pinned { file } => KnownHostsChange::Pinned { file: shown(file) },
+            Self::Merge { file, added, .. } => KnownHostsChange::Merged {
+                file: shown(file),
+                added: *added,
+            },
+            Self::Replace { file, replaces, .. } => KnownHostsChange::Replaced {
+                file: shown(file),
+                previous: replaces.as_deref().map(shown),
+            },
+        }
+    }
+}
+
+/// `SHA256:...`, as `ssh-keygen -l` prints it.
+fn fingerprint(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256).to_string()
+}
+
+/// A path as a report shows it.
+fn shown(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// What a restore did with a dump's SSH state, or, from
+/// [`SshPlan::expected`], what it will.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshRestored {
+    pub key: SshKeyChange,
+    pub known_hosts: KnownHostsChange,
+}
+
+/// A restore that failed part of the way: what it had changed already, and
+/// why it stopped.
+#[derive(Debug)]
+pub struct PartialRestore {
+    pub known_hosts: KnownHostsChange,
+    pub key: SshKeyChange,
+    pub error: anyhow::Error,
+}
+
+/// A key restore that stopped: what it had changed already, and why.
+struct KeyFailure {
+    key: SshKeyChange,
+    error: anyhow::Error,
+}
+
+/// What putting a key in the server's own key file did.
+enum Written {
+    /// The file held that key already.
+    Unchanged,
+    /// There was no key file.
+    New,
+    /// The file held another key, now kept at `kept`.
+    Replaced { kept: PathBuf },
+}
+
+impl SshAccess {
+    /// What a dump with secrets carries of SSH: the key in use, generated or
+    /// supplied, byte for byte as it is stored, and the host keys trusted on
+    /// first use.
+    ///
+    /// Read from the files, never from what is loaded: nothing hands out a
+    /// key already in memory. The passphrase is never part of it.
+    pub fn export(&self) -> anyhow::Result<DumpSsh> {
+        let Some(config) = &self.config else {
+            return Ok(DumpSsh::default());
+        };
+        let path = config.key.path();
+        let key = read_optional(path)?.map(|private_key| DumpSshKey {
+            private_key,
+            public_key: match &*self.key() {
+                Key::Ready(identity) => Some(identity.public_key_line()),
+                Key::Unavailable(_) => fs::read_to_string(public_key_path(path))
+                    .ok()
+                    .map(|line| line.trim().to_string()),
+            },
+        });
+        if key.is_some() && self.identity().is_ok_and(|i| i.passphrase.is_none()) {
+            tracing::warn!(
+                "The dump carries the SSH key {} without a passphrase: whoever holds the dump \
+                 can read every repository the key was added to",
+                path.display()
+            );
+        }
+        let known_hosts = match &config.hosts {
+            HostKeySource::TrustOnFirstUse(file) => read_optional(file)?,
+            HostKeySource::Pinned(_) => None,
+        };
+        Ok(DumpSsh { key, known_hosts })
+    }
+
+    /// Check what a restore would do with `dump`'s SSH state, writing
+    /// nothing; or say why it cannot be done, so the restore is refused
+    /// before anything is touched.
+    ///
+    /// The dump's key must open here: a protected key needs this server's
+    /// `AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE` to hold its passphrase. A key
+    /// the operator supplied is never written, even where it is the server's
+    /// own key file. Host keys are merged into the server's own file, and a
+    /// dump that names a host this server knows by another key is refused;
+    /// with [`SshRestoreMode::Fresh`] the file is the dump's. What the dump
+    /// does not carry stays as it is, in every mode.
+    pub fn plan_restore(
+        &self,
+        dump: Option<&DumpSsh>,
+        mode: SshRestoreMode,
+    ) -> anyhow::Result<SshPlan> {
+        let keep = SshPlan {
+            key: KeyPlan::Keep,
+            known_hosts: HostsPlan::Keep,
+        };
+        if mode == SshRestoreMode::Keep {
+            return Ok(keep);
+        }
+        let Some(config) = &self.config else {
+            if dump.is_some_and(|d| d.key.is_some() || d.known_hosts.is_some()) {
+                bail!("this server was started without an SSH configuration to restore into");
+            }
+            return Ok(keep);
+        };
+        let empty = DumpSsh::default();
+        let dump = dump.unwrap_or(&empty);
+        Ok(SshPlan {
+            key: plan_key(config, dump.key.as_ref())?,
+            known_hosts: plan_hosts(config, dump.known_hosts.as_deref(), mode)?,
+        })
+    }
+
+    /// Carry out a plan [`Self::plan_restore`] made, and use the key it put in
+    /// place at once.
+    ///
+    /// The host keys go first: their merge is checked again under the lock
+    /// and may still refuse, and refusing then must leave the key as it was.
+    /// A failure after that says what had changed already.
+    pub fn apply_restore(&self, plan: SshPlan) -> Result<SshRestored, Box<PartialRestore>> {
+        let known_hosts = self.apply_hosts(plan.known_hosts).map_err(|error| {
+            Box::new(PartialRestore {
+                known_hosts: KnownHostsChange::Kept,
+                key: SshKeyChange::Kept,
+                error,
+            })
+        })?;
+        match self.apply_key(plan.key) {
+            Ok(key) => Ok(SshRestored { key, known_hosts }),
+            Err(KeyFailure { key, error }) => Err(Box::new(PartialRestore {
+                known_hosts,
+                key,
+                error,
+            })),
+        }
+    }
+
+    fn apply_hosts(&self, plan: HostsPlan) -> anyhow::Result<KnownHostsChange> {
+        Ok(match plan {
+            HostsPlan::Keep => KnownHostsChange::Kept,
+            HostsPlan::Pinned { file } => KnownHostsChange::Pinned { file: shown(&file) },
+            HostsPlan::Merge { file, text, .. } => KnownHostsChange::Merged {
+                added: self.hosts.merge(&file, &text)?,
+                file: shown(&file),
+            },
+            HostsPlan::Replace { file, text, .. } => KnownHostsChange::Replaced {
+                previous: self.hosts.replace(&file, &text)?.as_deref().map(shown),
+                file: shown(&file),
+            },
+        })
+    }
+
+    fn apply_key(&self, plan: KeyPlan) -> Result<SshKeyChange, KeyFailure> {
+        // Before the key file changes, a failure has changed nothing.
+        let untouched = |error| KeyFailure {
+            key: SshKeyChange::Kept,
+            error,
+        };
+        Ok(match plan {
+            KeyPlan::Keep => SshKeyChange::Kept,
+            KeyPlan::AlreadyThere { public_key } => SshKeyChange::AlreadyHere {
+                fingerprint: fingerprint(&public_key),
+            },
+            KeyPlan::Install {
+                own,
+                private_key,
+                public_key,
+                ..
+            } => {
+                let previous =
+                    match install_key(&own, &private_key, &public_key).map_err(untouched)? {
+                        Written::Unchanged => {
+                            return Ok(SshKeyChange::AlreadyHere {
+                                fingerprint: fingerprint(&public_key),
+                            });
+                        }
+                        Written::New => None,
+                        Written::Replaced { kept } => Some(shown(&kept)),
+                    };
+                // The file is the dump's key from here on, whatever follows:
+                // what is reported has to say so.
+                self.reload();
+                let installed = SshKeyChange::Installed {
+                    fingerprint: fingerprint(&public_key),
+                    previous,
+                };
+                // Checked to open before it was written; said so only once
+                // the server has loaded it as the key it clones with.
+                let error = match self.identity() {
+                    Ok(identity) if identity.public_key.key_data() == public_key.key_data() => {
+                        return Ok(installed);
+                    }
+                    Ok(_) => anyhow::anyhow!(
+                        "the dump's SSH key was written to {}, but the server loaded another \
+                         key from it",
+                        own.display()
+                    ),
+                    Err(reason) => anyhow::anyhow!(
+                        "the dump's SSH key was written to {}, but the server cannot use it: \
+                         {reason}",
+                        own.display()
+                    ),
+                };
+                return Err(KeyFailure {
+                    key: installed,
+                    error,
+                });
+            }
+            KeyPlan::Beside {
+                own,
+                private_key,
+                public_key,
+                configured,
+                ..
+            } => {
+                let previous =
+                    match install_key(&own, &private_key, &public_key).map_err(untouched)? {
+                        Written::Unchanged | Written::New => None,
+                        Written::Replaced { kept } => Some(shown(&kept)),
+                    };
+                SshKeyChange::Beside {
+                    fingerprint: fingerprint(&public_key),
+                    configured: shown(&configured),
+                    previous,
+                }
+            }
+            plan @ KeyPlan::Skip { .. } => plan.expected(),
+        })
+    }
+
+    /// Load the configured key again, as a restore that replaced it needs.
+    fn reload(&self) {
+        let Some(config) = &self.config else { return };
+        let reloaded = load_key(config);
+        *self
+            .key
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reloaded;
+    }
+}
+
+/// What to do with the server's key, given the one a dump carries, when the
+/// dump's secrets are taken.
+fn plan_key(config: &SshConfig, carried: Option<&DumpSshKey>) -> anyhow::Result<KeyPlan> {
+    // Where the server keeps a key of its own. For a generated key that is the
+    // key in use; beside a supplied one it waits, unused.
+    let own = match &config.key {
+        KeySource::Generated(path) => path.clone(),
+        KeySource::Provided(_) => config.dir.join(KEY_FILE),
+    };
+    let configured = match &config.key {
+        KeySource::Provided(path) => Some(path.clone()),
+        KeySource::Generated(_) => None,
+    };
+    // A dump that carries no key leaves this one, whatever the mode: the CA
+    // is kept the same way.
+    let Some(carried) = carried else {
+        return Ok(KeyPlan::Keep);
+    };
+
+    // What is checked is what will be written, and as it will be used.
+    let file = key_file(carried.private_key.as_bytes(), || {
+        match &carried.public_key {
+            Some(line) => PublicKey::from_openssh(line.trim())
+                .context("the dump's SSH public key does not parse"),
+            None => bail!(
+                "the dump's SSH key is not in OpenSSH's format, and the dump carries no public \
+                 half to tell which key it is"
+            ),
+        }
+    });
+
+    // The operator's key file is where the dump's key would go: nothing is
+    // written, so nothing about the dump's key is demanded either.
+    if let Some(configured) = configured.as_ref().filter(|c| same_file(&own, c)) {
+        let public_key = file.ok().map(|f| f.public_key);
+        let in_use = read_key(configured).ok().map(|f| f.public_key);
+        return Ok(KeyPlan::Skip {
+            same_key: matches!((&public_key, &in_use), (Some(a), Some(b)) if a.key_data() == b.key_data()),
+            public_key,
+            configured: configured.clone(),
+        });
+    }
+
+    let file = file?;
+    // The dump's key is the operator's, as on the server it came from: it is
+    // in use already, and a second copy would be one more file holding it.
+    if let Some(configured) = configured.as_ref().filter(|configured| {
+        read_key(configured)
+            .is_ok_and(|key| key.public_key.key_data() == file.public_key.key_data())
+    }) {
+        return Ok(KeyPlan::Skip {
+            public_key: Some(file.public_key),
+            configured: configured.clone(),
+            same_key: true,
+        });
+    }
+    // The server's own key file holds it already: there is nothing to write,
+    // and so nothing to demand of where it would go.
+    if read_key(&own).is_ok_and(|key| key.public_key.key_data() == file.public_key.key_data()) {
+        return Ok(KeyPlan::AlreadyThere {
+            public_key: file.public_key,
+        });
+    }
+    // Only a key in OpenSSH's format can be shown to be a key, and to open,
+    // before it is written. One in an older format would be taken on its
+    // `.pub`'s word, and could replace a working key with nothing usable.
+    if matches!(
+        file.protection,
+        Protection::Legacy | Protection::LegacyEncrypted
+    ) {
+        bail!(
+            "the dump's SSH key is in an older format, which cannot be checked before it is \
+             installed; convert it with `ssh-keygen -p -f <key>` on the server it came from, \
+             and take the dump again"
+        );
+    }
+    let passphrase = config
+        .passphrase_file
+        .as_deref()
+        .map(Passphrase::read)
+        .transpose()?;
+    // A server that protects its key with a passphrase keeps an unprotected
+    // dump key protected with that passphrase, rather than unprotected on disk.
+    let private_key = match (&file.protection, &passphrase) {
+        (Protection::None, Some(passphrase)) => lock(&carried.private_key, passphrase)?,
+        _ => Zeroizing::new(carried.private_key.clone()),
+    };
+    let public_key = file.public_key.clone();
+
+    Ok(match configured {
+        // The key in use from now on: it must open with this server's
+        // passphrase, if it needs one.
+        None => {
+            if !matches!(file.protection, Protection::None) {
+                unlock(
+                    &file,
+                    passphrase,
+                    &"the dump's SSH key",
+                    config.passphrase_file.as_deref(),
+                )?;
+            }
+            probe_writable(&own)?;
+            probe_writable(&public_key_path(&own))?;
+            KeyPlan::Install {
+                replaces: replaced_copy(&own)?,
+                own,
+                private_key,
+                public_key,
+            }
+        }
+        // Written beside the operator's key and not used. The passphrase that
+        // would open it, were it ever the key in use, is this server's; it is
+        // checked when there is one, and not demanded when there is not.
+        Some(configured) => {
+            if passphrase.is_some() && !matches!(file.protection, Protection::None) {
+                unlock(
+                    &file,
+                    passphrase,
+                    &"the dump's SSH key",
+                    config.passphrase_file.as_deref(),
+                )?;
+            }
+            probe_writable(&own)?;
+            probe_writable(&public_key_path(&own))?;
+            KeyPlan::Beside {
+                replaces: replaced_copy(&own)?,
+                own,
+                private_key,
+                public_key,
+                configured,
+            }
+        }
+    })
+}
+
+/// `pem`, an unprotected OpenSSH key, protected with `passphrase`.
+fn lock(pem: &str, passphrase: &Passphrase) -> anyhow::Result<Zeroizing<String>> {
+    let key = PrivateKey::from_openssh(pem).context("reading the dump's SSH key")?;
+    let locked = key
+        .encrypt(&mut ssh_key::rand_core::OsRng, passphrase.as_str())
+        .context("protecting the dump's SSH key with this server's passphrase")?;
+    locked
+        .to_openssh(LineEnding::LF)
+        .context("encoding the dump's SSH key")
+}
+
+/// What to do with the server's `known_hosts`, given the one a dump carries.
+fn plan_hosts(
+    config: &SshConfig,
+    carried: Option<&str>,
+    mode: SshRestoreMode,
+) -> anyhow::Result<HostsPlan> {
+    let file = match &config.hosts {
+        HostKeySource::Pinned(file) => {
+            return Ok(match carried {
+                Some(_) => HostsPlan::Pinned { file: file.clone() },
+                None => HostsPlan::Keep,
+            });
+        }
+        HostKeySource::TrustOnFirstUse(file) => file.clone(),
+    };
+    match (mode, carried) {
+        // A dump that carries none leaves this server's, whatever the mode.
+        (_, None) => Ok(HostsPlan::Keep),
+        (SshRestoreMode::Fresh, Some(text)) => {
+            probe_writable(&file)?;
+            let replaces = match read_optional(&file)? {
+                Some(current) if current != text => {
+                    Some(replaced_path(&file, &digest_tag(current.as_bytes()))?)
+                }
+                _ => None,
+            };
+            Ok(HostsPlan::Replace {
+                file,
+                text: text.to_string(),
+                replaces,
+            })
+        }
+        (_, Some(text)) => {
+            let ours = read_optional(&file)?.unwrap_or_default();
+            let added = mergeable(&read_entries(&file)?, &ours, text)?.len();
+            probe_writable(&file)?;
+            Ok(HostsPlan::Merge {
+                file,
+                text: text.to_string(),
+                added,
+            })
+        }
+    }
+}
+
+/// The lines of `carried` to add to the `known_hosts` `ours` was read from,
+/// or why the two cannot be merged.
+///
+/// An entry naming a host `ours` holds to another key of the same type is
+/// refused: merging it would let a restore move trust backwards. Another
+/// type is no conflict -- OpenSSH keeps one key per type, and GitHub has
+/// several. A pattern entry (`*`, `?`) is compared under each name `ours`
+/// writes plainly that it matches, and left out when `ours` has names it
+/// cannot list. A hashed entry is compared under each name `ours` writes
+/// plainly, hashed with that entry's salt; one that matches none of them names
+/// a host `ours` does not know plainly, which is safe to add only when `ours`
+/// holds no hashed or pattern entries either, since those could cover it.
+/// Otherwise it is left out, as is a line that does not parse.
+fn mergeable(ours: &[Entry], ours_text: &str, carried: &str) -> anyhow::Result<Vec<String>> {
+    let have: std::collections::HashSet<&str> = ours_text.lines().map(str::trim).collect();
+    let plain_names: Vec<String> = ours
+        .iter()
+        .filter_map(|e| match e.host_patterns() {
+            HostPatterns::Patterns(patterns) => Some(patterns),
+            HostPatterns::HashedName { .. } => None,
+        })
+        .flatten()
+        .filter(|p| !p.starts_with('!') && !is_glob(p))
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    let ours_hashed = ours
+        .iter()
+        .any(|e| matches!(e.host_patterns(), HostPatterns::HashedName { .. }));
+    // Names this server holds that cannot be listed: hashed ones, and
+    // patterns of its own.
+    let ours_unlisted = ours_hashed
+        || ours.iter().any(|e| match e.host_patterns() {
+            HostPatterns::Patterns(patterns) => patterns.iter().any(|p| is_glob(p)),
+            HostPatterns::HashedName { .. } => false,
+        });
+
+    let mut lines = Vec::new();
+    for line in carried.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') || have.contains(line) {
+            continue;
+        }
+        let Ok(entry) = line.parse::<Entry>() else {
+            tracing::warn!("Leaving out an entry of the dump's known_hosts that does not parse");
+            continue;
+        };
+        if entry.marker().is_none() {
+            let names: Vec<String> = match entry.host_patterns() {
+                HostPatterns::Patterns(patterns) => {
+                    // A pattern names every host it matches: each this server
+                    // knows is compared. One it cannot list could be among
+                    // them, so then the entry is left out.
+                    if patterns.iter().any(|p| is_glob(p)) && ours_unlisted {
+                        tracing::warn!(
+                            "Leaving out a pattern entry of the dump's known_hosts: this \
+                             server's own hashed or pattern entries cannot be compared with it"
+                        );
+                        continue;
+                    }
+                    let mut names: Vec<String> = patterns
+                        .iter()
+                        .filter(|p| !p.starts_with('!') && !is_glob(p))
+                        .map(|p| p.to_ascii_lowercase())
+                        .collect();
+                    names.extend(
+                        plain_names
+                            .iter()
+                            .filter(|name| self::names(entry.host_patterns(), name))
+                            .cloned(),
+                    );
+                    names
+                }
+                hashed @ HostPatterns::HashedName { .. } => {
+                    let resolved: Vec<String> = plain_names
+                        .iter()
+                        .filter(|name| names(hashed, name))
+                        .cloned()
+                        .collect();
+                    // One that names none of them could name a host only
+                    // this server's hashed or pattern entries cover.
+                    if resolved.is_empty() && ours_unlisted {
+                        tracing::warn!(
+                            "Leaving out a hashed entry of the dump's known_hosts: this \
+                             server's own hashed or pattern entries cannot be compared with it"
+                        );
+                        continue;
+                    }
+                    resolved
+                }
+            };
+            for name in &names {
+                same_type_conflict(ours, name, entry.public_key())?;
+            }
+        }
+        lines.push(line.to_string());
+    }
+    Ok(lines)
+}
+
+/// Whether a `known_hosts` host pattern matches more than one name.
+fn is_glob(pattern: &str) -> bool {
+    pattern.contains(['*', '?'])
+}
+
+/// Refuse `presented` for `name` when `ours` holds another key of the same
+/// type for it, and not this one.
+fn same_type_conflict(ours: &[Entry], name: &str, presented: &PublicKey) -> anyhow::Result<()> {
+    let same_type: Vec<&Entry> = ours
+        .iter()
+        .filter(|e| e.marker().is_none() && names(e.host_patterns(), name))
+        .filter(|e| e.public_key().algorithm() == presented.algorithm())
+        .collect();
+    if same_type.is_empty()
+        || same_type
+            .iter()
+            .any(|e| e.public_key().key_data() == presented.key_data())
+    {
+        return Ok(());
+    }
+    bail!(
+        "the dump trusts {} {} for {name}, but this server trusts another key of that type \
+         for it ({}); remove one of them before restoring",
+        presented.algorithm(),
+        presented.fingerprint(HashAlg::Sha256),
+        same_type
+            .iter()
+            .map(|e| e.public_key().fingerprint(HashAlg::Sha256).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Make `private_key` the key in `own`, with its public half beside it.
+///
+/// Nothing is written when `own` holds that key already, however it is
+/// protected: a key is the same key re-encrypted. A key it held before is
+/// kept beside it first ([`aurcache_common::fs::keep_replaced`]). The public
+/// half goes in before the private key, each replaced whole, so a failure
+/// leaves `own` the key it was: the private key is the last thing written,
+/// and the public half is put back if writing it fails.
+fn install_key(own: &Path, private_key: &str, public_key: &PublicKey) -> anyhow::Result<Written> {
+    let current = read_key(own).ok().map(|file| file.public_key);
+    if current
+        .as_ref()
+        .is_some_and(|key| key.key_data() == public_key.key_data())
+    {
+        return Ok(Written::Unchanged);
+    }
+    create_private_dir(own)?;
+    let tag = replaced_tag(own);
+    let kept_before = match &tag {
+        Some(tag) => replaced_path(own, tag)?.exists(),
+        None => false,
+    };
+    let kept = match &tag {
+        Some(tag) => aurcache_common::fs::keep_replaced(own, tag)
+            .with_context(|| format!("keeping {} before replacing it", own.display()))?,
+        None => None,
+    };
+    // A copy this call made of a key that stays in place is not kept.
+    let forget_copy = || {
+        if let Some(kept) = kept.as_ref().filter(|_| !kept_before) {
+            let _ = fs::remove_file(kept);
+        }
+    };
+    let pub_path = public_key_path(own);
+    let old_public = fs::read(&pub_path).ok();
+    let public = format!("{}\n", public_key.to_openssh()?);
+    if let Err(e) = aurcache_common::fs::write_private(&pub_path, public.as_bytes()) {
+        forget_copy();
+        return Err(e).with_context(|| format!("writing {}", pub_path.display()));
+    }
+    if let Err(e) = aurcache_common::fs::write_private(own, private_key.as_bytes()) {
+        let _ = match old_public {
+            Some(old) => aurcache_common::fs::write_private(&pub_path, &old),
+            None => fs::remove_file(&pub_path),
+        };
+        forget_copy();
+        return Err(e).with_context(|| format!("writing {}", own.display()));
+    }
+    Ok(match kept {
+        Some(kept) => Written::Replaced { kept },
+        None => Written::New,
+    })
+}
+
+/// Where the key file `own` is to be kept when a restore replaces it, or
+/// `None` when there is none to keep.
+fn replaced_copy(own: &Path) -> anyhow::Result<Option<PathBuf>> {
+    replaced_tag(own)
+        .map(|tag| replaced_path(own, &tag))
+        .transpose()
+}
+
+/// What a key file is kept as when it is replaced: its key's fingerprint, or
+/// a digest of a file that is no key this can read; `None` when there is no
+/// file.
+fn replaced_tag(path: &Path) -> Option<String> {
+    match read_key(path) {
+        Ok(file) => Some(fingerprint_tag(&file.public_key)),
+        Err(_) => fs::read(path).ok().map(|bytes| digest_tag(&bytes)),
+    }
+}
+
+/// Where a replaced file is kept, as [`aurcache_common::fs::keep_replaced`]
+/// names it.
+fn replaced_path(own: &Path, tag: &str) -> anyhow::Result<PathBuf> {
+    aurcache_common::fs::replaced_path(own, tag).context("naming the copy of a replaced key")
+}
+
+/// A key's SHA256 fingerprint as a file name can carry it: `SHA256-` and
+/// the digest in URL-safe base64, `/` and `+` written `_` and `-`.
+fn fingerprint_tag(key: &PublicKey) -> String {
+    key.fingerprint(HashAlg::Sha256)
+        .to_string()
+        .replacen("SHA256:", "SHA256-", 1)
+        .replace('/', "_")
+        .replace('+', "-")
+}
+
+/// A tag for a file that is not a key it can read: its content's digest.
+fn digest_tag(bytes: &[u8]) -> String {
+    let digest = aurcache_common::digest::sha256_hex(bytes);
+    format!("sha256-{}", &digest[..16])
+}
+
+/// Whether `a` and `b` are one file, through any symlinks; for a path that
+/// does not exist yet, by its parent directory's real path.
+fn same_file(a: &Path, b: &Path) -> bool {
+    real_path(a) == real_path(b)
+}
+
+fn real_path(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        })
+        .map_or_else(|_| path.to_path_buf(), |dir| dir.join(name)),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Check that `file` can be written, before a restore writes anything: that a
+/// rename can replace it -- it is no directory, no symlink and nothing mounted
+/// in place, as a Docker secret at the server's own key file would be -- and
+/// that the nearest directory on its way that exists takes a file and gives it
+/// back.
+fn probe_writable(file: &Path) -> anyhow::Result<()> {
+    aurcache_common::fs::check_replaceable(file)
+        .with_context(|| format!("{} could not be restored", file.display()))?;
+    let dir = file
+        .ancestors()
+        .skip(1)
+        .map(|d| {
+            if d.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                d
+            }
+        })
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| Path::new("."));
+    let probe = dir.join(format!(".aurcache-restore-probe-{}", std::process::id()));
+    fs::write(&probe, b"")
+        .and_then(|()| fs::remove_file(&probe))
+        .with_context(|| {
+            format!(
+                "{} cannot be written, so {} could not be restored",
+                dir.display(),
+                file.display()
+            )
+        })
+}
+
+/// A file's contents, or `None` when there is no such file.
+fn read_optional(path: &Path) -> anyhow::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Create the directory `file` goes in, closed to other users.
+fn create_private_dir(file: &Path) -> anyhow::Result<()> {
+    let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("closing {} to other users", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// The key `config` names, or why it cannot be used: none at all when the
+/// linked libgit2 could not offer one.
+fn load_key(config: &SshConfig) -> Key {
+    if let Some(reason) = SshBackend::linked().unusable() {
+        return Key::Unavailable(reason);
+    }
+    match ensure(&config.key, config.passphrase_file.as_deref()) {
+        Ok(identity) => Key::Ready(identity),
+        Err(e) => Key::Unavailable(format!("{e:#}")),
     }
 }
 
@@ -355,34 +1258,7 @@ fn ensure(source: &KeySource, passphrase_file: Option<&Path>) -> anyhow::Result<
         KeySource::Generated(_) => {}
     }
     let file = read_key(path)?;
-    let passphrase = match (file.protection, passphrase) {
-        (Protection::Encrypted(key), Some(passphrase)) => {
-            key.decrypt(passphrase.as_str().as_bytes()).map_err(|_| {
-                anyhow::anyhow!(
-                    "the passphrase in {} does not open {}",
-                    passphrase_file.map_or_else(String::new, |p| p.display().to_string()),
-                    path.display()
-                )
-            })?;
-            Some(passphrase)
-        }
-        (Protection::Encrypted(_), None) => bail!(
-            "{} is protected by a passphrase; give it to the server in a file named by \
-             {AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE}",
-            path.display()
-        ),
-        (Protection::None, Some(_)) => {
-            tracing::warn!(
-                "{AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE} is set, but {} has no passphrase; \
-                 ignoring it",
-                path.display()
-            );
-            None
-        }
-        // libssh2 is the one to tell whether the passphrase opens it.
-        (Protection::Unknown, passphrase) => passphrase,
-        (Protection::None, None) => None,
-    };
+    let passphrase = unlock(&file, passphrase, &path.display(), passphrase_file)?;
     Ok(Identity {
         private_key: path.to_path_buf(),
         public_key: file.public_key,
@@ -412,28 +1288,17 @@ fn generate(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create the directory `file` goes in, closed to other users.
-fn create_private_dir(file: &Path) -> anyhow::Result<()> {
-    let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) else {
-        return Ok(());
-    };
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("closing {} to other users", dir.display()))?;
-    }
-    Ok(())
-}
-
 /// Whether a key file needs a passphrase.
 enum Protection {
     None,
     /// Encrypted, in OpenSSH's format: the key to try a passphrase on.
     Encrypted(Box<PrivateKey>),
-    /// In an older format, which only libssh2 reads.
-    Unknown,
+    /// In an older format, which only libssh2 reads, and not marked
+    /// encrypted.
+    Legacy,
+    /// In an older format whose header says it is encrypted. Whether a
+    /// passphrase opens it only libssh2 can tell.
+    LegacyEncrypted,
 }
 
 /// What a private key file says before it is opened.
@@ -445,13 +1310,36 @@ struct KeyFile {
 /// The public half of the private key at `path`, and whether it is
 /// encrypted.
 ///
-/// Read off the private key when it is in OpenSSH's format, which carries the
-/// public key in the clear even when the private half is encrypted. A key in
-/// an older format has its `.pub` beside it read instead.
+/// A key in an older format has its `.pub` beside it read for the public
+/// half.
 fn read_key(path: &Path) -> anyhow::Result<KeyFile> {
     let pem =
         Zeroizing::new(fs::read(path).with_context(|| format!("reading {}", path.display()))?);
-    let file = match PrivateKey::from_openssh(&*pem) {
+    key_file(&pem, || {
+        let pub_path = public_key_path(path);
+        let line = fs::read_to_string(&pub_path).with_context(|| {
+            format!(
+                "{} is not an OpenSSH private key, and there is no {} to read its \
+                 public half from",
+                path.display(),
+                pub_path.display()
+            )
+        })?;
+        PublicKey::from_openssh(line.trim())
+            .with_context(|| format!("{} is not an SSH public key", pub_path.display()))
+    })
+}
+
+/// What the private key `pem` says of itself.
+///
+/// Read off the key when it is in OpenSSH's format, which carries the public
+/// key in the clear even when the private half is encrypted; `public` gives it
+/// for a key in an older format.
+fn key_file(
+    pem: &[u8],
+    public: impl FnOnce() -> anyhow::Result<PublicKey>,
+) -> anyhow::Result<KeyFile> {
+    Ok(match PrivateKey::from_openssh(pem) {
         Ok(key) => KeyFile {
             public_key: key.public_key().clone(),
             protection: if key.is_encrypted() {
@@ -460,24 +1348,52 @@ fn read_key(path: &Path) -> anyhow::Result<KeyFile> {
                 Protection::None
             },
         },
-        Err(_) => {
-            let pub_path = public_key_path(path);
-            let line = fs::read_to_string(&pub_path).with_context(|| {
-                format!(
-                    "{} is not an OpenSSH private key, and there is no {} to read its \
-                     public half from",
-                    path.display(),
-                    pub_path.display()
-                )
-            })?;
-            KeyFile {
-                public_key: PublicKey::from_openssh(line.trim())
-                    .with_context(|| format!("{} is not an SSH public key", pub_path.display()))?,
-                protection: Protection::Unknown,
-            }
+        Err(_) => KeyFile {
+            public_key: public()?,
+            protection: if String::from_utf8_lossy(pem).contains("ENCRYPTED") {
+                Protection::LegacyEncrypted
+            } else {
+                Protection::Legacy
+            },
+        },
+    })
+}
+
+/// The passphrase `file` needs, checked to open it when the format allows;
+/// or why it cannot be opened. `key` names it in the reason.
+fn unlock(
+    file: &KeyFile,
+    passphrase: Option<Passphrase>,
+    key: &dyn std::fmt::Display,
+    passphrase_file: Option<&Path>,
+) -> anyhow::Result<Option<Passphrase>> {
+    match (&file.protection, passphrase) {
+        (Protection::Encrypted(encrypted), Some(passphrase)) => {
+            encrypted
+                .decrypt(passphrase.as_str().as_bytes())
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "the passphrase in {} does not open {key}",
+                        passphrase_file.map_or_else(String::new, |p| p.display().to_string()),
+                    )
+                })?;
+            Ok(Some(passphrase))
         }
-    };
-    Ok(file)
+        (Protection::Encrypted(_) | Protection::LegacyEncrypted, None) => bail!(
+            "{key} is protected by a passphrase; give it to the server in a file named by \
+             {AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE}"
+        ),
+        (Protection::None | Protection::Legacy, Some(_)) => {
+            tracing::warn!(
+                "{AURCACHE_GIT_SSH_KEY_PASSPHRASE_FILE} is set, but {key} has no passphrase; \
+                 ignoring it"
+            );
+            Ok(None)
+        }
+        // libssh2 is the one to tell whether the passphrase opens it.
+        (Protection::LegacyEncrypted, Some(passphrase)) => Ok(Some(passphrase)),
+        (Protection::None | Protection::Legacy, None) => Ok(None),
+    }
 }
 
 /// Public-key path for a private key, by OpenSSH's `.pub` convention.
@@ -528,6 +1444,59 @@ impl HostKeys {
             record: Mutex::new(()),
             log: ActivityLog::discarding(),
         }
+    }
+
+    /// Make the server's own `known_hosts` `text`, as a cleared server's,
+    /// keeping the one it replaces beside it;
+    /// where that went, when there was one to keep.
+    fn replace(&self, file: &Path, text: &str) -> anyhow::Result<Option<PathBuf>> {
+        let _guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = read_optional(file)?;
+        if current.as_deref() == Some(text) {
+            return Ok(None);
+        }
+        create_private_dir(file)?;
+        let previous = match &current {
+            Some(current) => {
+                aurcache_common::fs::keep_replaced(file, &digest_tag(current.as_bytes()))
+                    .with_context(|| format!("keeping {} before replacing it", file.display()))?
+            }
+            None => None,
+        };
+        aurcache_common::fs::write_private(file, text.as_bytes())
+            .with_context(|| format!("writing {}", file.display()))?;
+        Ok(previous)
+    }
+
+    /// Add the lines of `text` the server's own `known_hosts` lacks, keeping
+    /// every entry it has; how many were added.
+    ///
+    /// Checked again for conflicts under the lock, since a host may have been
+    /// recorded since the restore was planned.
+    fn merge(&self, file: &Path, text: &str) -> anyhow::Result<usize> {
+        let _guard = self
+            .record
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut merged = read_optional(file)?.unwrap_or_default();
+        let lines = mergeable(&read_entries(file)?, &merged, text)?;
+        let added = lines.len();
+        for line in lines {
+            if !merged.is_empty() && !merged.ends_with('\n') {
+                merged.push('\n');
+            }
+            merged.push_str(&line);
+            merged.push('\n');
+        }
+        if added > 0 {
+            create_private_dir(file)?;
+            aurcache_common::fs::write_private(file, merged.as_bytes())
+                .with_context(|| format!("writing {}", file.display()))?;
+        }
+        Ok(added)
     }
 
     fn policy(&self) -> HostKeyPolicy {
@@ -1075,6 +2044,7 @@ mod tests {
         let Writer { log, task } = spawn(db.clone());
         let dir = tempfile::tempdir().unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.path().join(KNOWN_HOSTS_FILE)),
@@ -1192,6 +2162,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deploy_key");
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Provided(path.clone()),
             passphrase_file: None,
             hosts: HostKeySource::TrustOnFirstUse(dir.path().join("known_hosts")),
@@ -1211,6 +2182,7 @@ mod tests {
         generate(&path).unwrap();
         let private = fs::read_to_string(&path).unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Provided(path),
             passphrase_file: None,
             hosts: HostKeySource::Pinned(dir.path().join("known_hosts")),
@@ -1248,6 +2220,7 @@ mod tests {
         )
         .unwrap();
         let access = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts: HostKeySource::Pinned(file),
@@ -1279,6 +2252,7 @@ mod tests {
     fn no_file_lists_nothing_and_an_unreadable_one_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let config = |hosts| SshConfig {
+            dir: dir.path().to_path_buf(),
             key: KeySource::Generated(dir.path().join(KEY_FILE)),
             passphrase_file: None,
             hosts,
@@ -1309,6 +2283,7 @@ mod tests {
         let passphrase_file = dir.join("passphrase");
         fs::write(&passphrase_file, written).unwrap();
         SshConfig {
+            dir: dir.to_path_buf(),
             key: KeySource::Provided(path),
             passphrase_file: Some(passphrase_file),
             hosts: HostKeySource::Pinned(dir.join("known_hosts")),
@@ -1393,5 +2368,343 @@ mod tests {
         assert!(identity.passphrase().is_none());
         let key = PrivateKey::from_openssh(fs::read(&path).unwrap()).unwrap();
         assert!(!key.is_encrypted());
+    }
+
+    /// A server whose own key and `known_hosts` are in `dir`.
+    fn server(dir: &Path) -> SshAccess {
+        SshAccess::new(SshConfig {
+            dir: dir.to_path_buf(),
+            key: KeySource::Generated(dir.join(KEY_FILE)),
+            passphrase_file: None,
+            hosts: HostKeySource::TrustOnFirstUse(dir.join(KNOWN_HOSTS_FILE)),
+        })
+    }
+
+    /// What a dump of `access` carries.
+    fn dumped(access: &SshAccess) -> DumpSsh {
+        access.export().unwrap()
+    }
+
+    fn line(name: &str, key: &PublicKey) -> String {
+        let mut key = key.clone();
+        key.set_comment("");
+        format!("{name} {}", key.to_openssh().unwrap())
+    }
+
+    /// `github.com` hashed with a fixed salt, as `ssh-keygen -H` writes it.
+    fn hashed(name: &str, key: &PublicKey) -> String {
+        let salt = [7u8; 20];
+        let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(&salt).unwrap();
+        mac.update(name.as_bytes());
+        let hash = mac.finalize().into_bytes();
+        let key = line("x", key);
+        let (_, key) = key.split_once(' ').unwrap();
+        format!("|1|{}|{} {key}", base64(&salt), base64(&hash))
+    }
+
+    /// Standard base64, enough for a test fixture.
+    fn base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk.iter().fold(0u32, |acc, b| (acc << 8) | u32::from(*b))
+                << (8 * (3 - chunk.len()));
+            for i in 0..=chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            }
+            for _ in chunk.len()..3 {
+                out.push('=');
+            }
+        }
+        out
+    }
+
+    /// Any ECDSA key: generating one needs a curve feature nothing else does.
+    fn ecdsa_key() -> PublicKey {
+        PublicKey::from_openssh(
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFJZp50VMW6Y\
+             sDFDeExBTrPGujgyJ37OJSKFOTA8q5wJPYZI8m1WUR4NvKTKCl/qOPYx3QgAkqXqg0OyrbtEaQU=",
+        )
+        .unwrap()
+    }
+
+    /// A merge that refuses at apply time leaves the key as it was, and the
+    /// failure says nothing had changed.
+    #[test]
+    fn a_host_refused_at_apply_leaves_the_key_alone() {
+        let old = tempfile::tempdir().unwrap();
+        let from = server(old.path());
+        let github = random_key();
+        fs::write(
+            old.path().join(KNOWN_HOSTS_FILE),
+            line("github.com", &github) + "\n",
+        )
+        .unwrap();
+        let dump = dumped(&from);
+
+        let new = tempfile::tempdir().unwrap();
+        let to = server(new.path());
+        let before = fs::read(new.path().join(KEY_FILE)).unwrap();
+        let plan = to.plan_restore(Some(&dump), SshRestoreMode::Take).unwrap();
+        // Recorded between the plan and its application: another key.
+        fs::write(
+            new.path().join(KNOWN_HOSTS_FILE),
+            line("github.com", &random_key()) + "\n",
+        )
+        .unwrap();
+
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a conflicting merge was applied");
+        };
+        assert_eq!(partial.known_hosts, KnownHostsChange::Kept);
+        assert!(format!("{:#}", partial.error).contains("github.com"));
+        assert_eq!(fs::read(new.path().join(KEY_FILE)).unwrap(), before);
+    }
+
+    /// A dump carrying `key`, and its public half.
+    fn carrying(key: &PrivateKey) -> DumpSsh {
+        DumpSsh {
+            key: Some(DumpSshKey {
+                private_key: key.to_openssh(LineEnding::LF).unwrap().to_string(),
+                public_key: Some(key.public_key().to_openssh().unwrap()),
+            }),
+            known_hosts: None,
+        }
+    }
+
+    fn new_key() -> PrivateKey {
+        PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519).unwrap()
+    }
+
+    /// The public half is written before the private key, so one that cannot
+    /// be written leaves the key as it was -- and the report says so. Found
+    /// beforehand, it refuses the plan.
+    #[test]
+    fn a_public_half_that_cannot_be_written_leaves_the_key_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let to = server(dir.path());
+        let own = dir.path().join(KEY_FILE);
+        let before = fs::read(&own).unwrap();
+        let in_use = to.identity().unwrap().fingerprint();
+        let carried = carrying(&new_key());
+        fs::remove_file(public_key_path(&own)).unwrap();
+        fs::create_dir(public_key_path(&own)).unwrap();
+        let Err(refused) = to.plan_restore(Some(&carried), SshRestoreMode::Take) else {
+            panic!("a restore was planned over a .pub it cannot replace");
+        };
+        assert!(
+            format!("{refused:#}").contains("not a regular file"),
+            "{refused:#}"
+        );
+
+        // Made unwritable between the plan and its application.
+        fs::remove_dir(public_key_path(&own)).unwrap();
+        let plan = to
+            .plan_restore(Some(&carried), SshRestoreMode::Take)
+            .unwrap();
+        fs::create_dir(public_key_path(&own)).unwrap();
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a key was installed without its public half");
+        };
+        assert_eq!(partial.key, SshKeyChange::Kept);
+        assert_eq!(fs::read(&own).unwrap(), before);
+        assert_eq!(to.identity().unwrap().fingerprint(), in_use);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains(".replaced-")),
+            "a copy of a key still in place was kept: {names:?}"
+        );
+    }
+
+    /// Once the private key is in place the old one is gone from it: a key
+    /// that then cannot be loaded is reported installed, with where the one
+    /// it replaced is kept, and the settings say why it cannot be used.
+    #[test]
+    fn a_key_that_will_not_load_once_installed_is_reported_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join(KEY_FILE);
+        let passphrase = dir.path().join("passphrase");
+        fs::write(&passphrase, "correct horse\n").unwrap();
+        let mine = new_key()
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap();
+        fs::write(&own, mine.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let to = SshAccess::new(SshConfig {
+            dir: dir.path().to_path_buf(),
+            key: KeySource::Generated(own),
+            passphrase_file: Some(passphrase.clone()),
+            hosts: HostKeySource::TrustOnFirstUse(dir.path().join(KNOWN_HOSTS_FILE)),
+        });
+        let in_use = to.identity().unwrap().public_key;
+
+        // Locked with this server's passphrase as it is planned...
+        let plan = to
+            .plan_restore(Some(&carrying(&new_key())), SshRestoreMode::Take)
+            .unwrap();
+        // ...which has changed by the time the key is loaded.
+        fs::write(&passphrase, "battery staple\n").unwrap();
+        let Err(partial) = to.apply_restore(plan) else {
+            panic!("a key that does not open was reported usable");
+        };
+        let SshKeyChange::Installed {
+            previous: Some(previous),
+            ..
+        } = &partial.key
+        else {
+            panic!("{:?}", partial.key);
+        };
+        assert_eq!(
+            read_key(Path::new(previous)).unwrap().public_key.key_data(),
+            in_use.key_data(),
+            "the replaced key was not kept"
+        );
+        assert!(previous.ends_with(&fingerprint_tag(&in_use)), "{previous}");
+        let SshKey::Unavailable { reason } = to.info().key else {
+            panic!("{:?}", to.info());
+        };
+        assert!(reason.contains("does not open"), "{reason}");
+    }
+
+    /// A key is compared by what it is, not by its bytes: the same key
+    /// encrypted again is not written again, nor kept as a replaced one.
+    #[test]
+    fn the_same_key_encrypted_again_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join(KEY_FILE);
+        let key = new_key();
+        let first = key
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap();
+        fs::write(&own, first.to_openssh(LineEnding::LF).unwrap().as_bytes()).unwrap();
+        let before = fs::read(&own).unwrap();
+        let again = key
+            .encrypt(&mut ssh_key::rand_core::OsRng, "correct horse")
+            .unwrap()
+            .to_openssh(LineEnding::LF)
+            .unwrap();
+        assert_ne!(
+            again.as_bytes(),
+            before.as_slice(),
+            "the salt did not change"
+        );
+        assert!(matches!(
+            install_key(&own, &again, key.public_key()).unwrap(),
+            Written::Unchanged
+        ));
+        assert_eq!(fs::read(&own).unwrap(), before);
+    }
+
+    /// A key encrypted in an older format cannot be shown to open, so a
+    /// restore refuses it rather than install it on the passphrase's word.
+    #[test]
+    fn a_legacy_encrypted_key_is_refused_by_a_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("legacy");
+        let made = std::process::Command::new("ssh-keygen")
+            .args([
+                "-q", "-m", "PEM", "-t", "rsa", "-b", "2048", "-N", "secret", "-f",
+            ])
+            .arg(&key)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ssh-keygen is not installed");
+            return;
+        }
+        let dump = DumpSsh {
+            key: Some(DumpSshKey {
+                private_key: fs::read_to_string(&key).unwrap(),
+                public_key: Some(fs::read_to_string(public_key_path(&key)).unwrap()),
+            }),
+            known_hosts: None,
+        };
+        let passphrase = dir.path().join("passphrase");
+        fs::write(&passphrase, "secret\n").unwrap();
+        let target = dir.path().join("target");
+        let to = SshAccess::new(SshConfig {
+            dir: target.clone(),
+            key: KeySource::Generated(target.join(KEY_FILE)),
+            passphrase_file: Some(passphrase),
+            hosts: HostKeySource::TrustOnFirstUse(target.join(KNOWN_HOSTS_FILE)),
+        });
+        let Err(error) = to.plan_restore(Some(&dump), SshRestoreMode::Take) else {
+            panic!("a legacy encrypted key was planned for");
+        };
+        assert!(format!("{error:#}").contains("older format"), "{error:#}");
+    }
+
+    /// The dump's names are compared as OpenSSH writes them: lower case, and
+    /// a hashed entry under each name this server writes plainly.
+    #[test]
+    fn hashed_and_mixed_case_entries_are_checked_for_conflicts() {
+        let ours_key = random_key();
+        let ours = format!("{}\n", line("github.com", &ours_key));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+
+        let other = random_key();
+        for carried in [line("GitHub.com", &other), hashed("github.com", &other)] {
+            let error = mergeable(&entries, &ours, &carried).unwrap_err();
+            assert!(format!("{error:#}").contains("github.com"), "{error:#}");
+        }
+        // The same key, hashed, is no conflict.
+        assert_eq!(
+            mergeable(&entries, &ours, &hashed("github.com", &ours_key))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Another key type for a known host is merged: OpenSSH keeps one per
+    /// type.
+    #[test]
+    fn another_key_type_for_a_known_host_is_merged() {
+        let ours = format!("{}\n", line("github.com", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+        let carried = line("github.com", &ecdsa_key());
+        assert_eq!(mergeable(&entries, &ours, &carried).unwrap(), vec![carried]);
+    }
+
+    /// A hashed entry that names none of this server's plain names is added
+    /// when this server has no hashed entries -- the host is new to it -- and
+    /// left out when it has, since those cannot be compared.
+    #[test]
+    fn an_unresolved_hashed_entry_is_added_only_when_it_cannot_hide_a_conflict() {
+        let carried = hashed("gitlab.com", &random_key());
+        let plain = format!("{}\n", line("github.com", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&plain).filter_map(Result::ok).collect();
+        assert_eq!(mergeable(&entries, &plain, &carried).unwrap().len(), 1);
+
+        let with_hashed = format!("{}\n", hashed("codeberg.org", &random_key()));
+        let entries: Vec<Entry> = KnownHosts::new(&with_hashed)
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            mergeable(&entries, &with_hashed, &carried)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A hashed entry naming a host this server pins with a pattern is left
+    /// out: merged, it would vouch for another key for that host.
+    #[test]
+    fn a_hashed_entry_cannot_override_a_pattern_this_server_holds() {
+        let ours_key = random_key();
+        let theirs = random_key();
+        let ours = format!("{}\n", line("*.example.com", &ours_key));
+        let entries: Vec<Entry> = KnownHosts::new(&ours).filter_map(Result::ok).collect();
+        let carried = hashed("git.example.com", &theirs);
+        let lines = mergeable(&entries, &ours, &carried).unwrap();
+        assert!(lines.is_empty(), "{lines:?}");
+
+        let merged = format!("{ours}{}", lines.join("\n"));
+        let merged: Vec<Entry> = KnownHosts::new(&merged).filter_map(Result::ok).collect();
+        assert!(matches!(
+            check(&merged, "git.example.com", &theirs),
+            HostKeyCheck::Changed { .. }
+        ));
     }
 }
