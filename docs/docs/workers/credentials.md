@@ -160,10 +160,11 @@ It holds named keys only when the answer is `resolve-unix`. The sandbox
 answers `no-resolve-unix:` and its reason instead on an older kernel, and
 also when:
 
-- the build user cannot read `/etc/aurcache/sandbox-protected`, or the file
-  names a path under a directory that does not exist. Either way no build
-  starts at all, not only those naming a key. Keep the file readable by
-  everyone: it lists paths, not secrets.
+- the build user cannot read `/etc/aurcache/sandbox-protected` (a symlink
+  to nothing, in its place or on the way to it, counts as unreadable rather
+  than missing), or the file names a path under a directory that does not
+  exist. Either way no build starts at all, not only those naming a key.
+  Keep the file readable by everyone: it lists paths, not secrets.
 - that file is missing, lists nothing, or does not protect the agents'
   directory, `<WORKER_DATA_DIR>/agent`, where it really is: listing it, or a
   directory above where it really is, does.

@@ -406,12 +406,9 @@ fn resolve_unix_supported() -> bool {
 fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
     let contents = match std::fs::read_to_string(file) {
         Ok(contents) => contents,
-        // Missing only when there is nothing by its name: a symlink to nothing
-        // is a list that cannot be read.
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                && std::fs::symlink_metadata(file).is_err() =>
-        {
+        // Missing only when there is nothing by its name: a symlink to nothing,
+        // on the way to it or in its place, is a list that cannot be read.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !dangles(file) => {
             return Ok(Vec::new());
         }
         Err(e) => {
@@ -430,6 +427,15 @@ fn protected_paths(file: &Path) -> Result<Vec<PathBuf>, String> {
             .map(PathBuf::from)
             .collect(),
     ))
+}
+
+/// Whether `path`, or a directory on the way to it, is a symlink that cannot
+/// be resolved.
+fn dangles(path: &Path) -> bool {
+    path.ancestors().any(|path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && std::fs::canonicalize(path).is_err()
+    })
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -899,7 +905,8 @@ mod tests {
     /// A list that is there but cannot be read refuses the build rather than
     /// protecting nothing: that is what a policy at `0600 root` looks like to
     /// the build user. A directory in its place stands in for it, as root
-    /// reads any file whatever its mode.
+    /// reads any file whatever its mode. So does a symlink to nothing, in its
+    /// place or on the way to it (`/etc/aurcache -> /nowhere`).
     #[test]
     fn an_unreadable_protected_list_refuses() {
         let dir = std::env::temp_dir().join(format!(
@@ -915,6 +922,7 @@ mod tests {
             dir.join("list"),
             dir.join("file/list"),
             dir.join("dangling"),
+            dir.join("dangling/list"),
         ] {
             let refused = protected_paths(&unreadable).unwrap_err();
             assert!(
