@@ -10,7 +10,9 @@
 
 use aurcache_build_agent::layout::{BIN_NAME, CAPABILITIES};
 use aurcache_worker_container::arch::Platform;
-use bollard::models::{ContainerCreateBody, EndpointSettings, HostConfig, NetworkingConfig};
+use bollard::models::{
+    ContainerCreateBody, EndpointSettings, HealthConfig, HostConfig, NetworkingConfig,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +58,12 @@ pub fn render(build: &Build<'_>) -> ContainerCreateBody {
         attach_stdout: Some(true),
         attach_stderr: Some(true),
         open_stdin: Some(false),
+        // No health check of the image's: it would be one more exec into
+        // the build, and the agent kills every one but the SSH link's.
+        healthcheck: Some(HealthConfig {
+            test: Some(vec!["NONE".to_string()]),
+            ..Default::default()
+        }),
         host_config: Some(HostConfig {
             auto_remove: Some(false),
             privileged: Some(false),
@@ -193,6 +201,12 @@ mod tests {
             host(&body).security_opt.as_deref(),
             Some(&["no-new-privileges".to_string()][..])
         );
+    }
+
+    #[test]
+    fn the_images_health_check_is_turned_off() {
+        let test = rendered().healthcheck.and_then(|health| health.test);
+        assert_eq!(test.as_deref(), Some(&["NONE".to_string()][..]));
     }
 
     /// The agent refuses to run unless it is PID 1.

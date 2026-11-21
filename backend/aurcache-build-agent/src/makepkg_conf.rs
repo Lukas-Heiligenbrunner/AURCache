@@ -1,12 +1,13 @@
 //! The `makepkg.conf` a build runs with.
 //!
 //! The image's own, then the job's assignments, then the agent's, which come
-//! last and so win: `PKGDEST`, `BUILDDIR`, `SRCDEST` and the parallelism for
-//! the build's CPUs.
+//! last and so win: `PKGDEST`, `BUILDDIR`, `SRCDEST`, the parallelism for
+//! the build's CPUs and, for a build given the worker's SSH key, the socket
+//! that reaches it.
 
 use crate::layout::{Scratch, Work};
 use aurcache_common::parallelism;
-use aurcache_common::shell::quote_argument;
+use aurcache_common::shell::{pinned_ssh_command, quote_argument};
 use std::path::Path;
 
 /// The image's configuration, as makepkg itself would have loaded it had it
@@ -26,6 +27,14 @@ pub struct Rendering<'a> {
     pub work: &'a Work,
     pub scratch: &'a Scratch,
     pub cpus: Option<f64>,
+    pub ssh: Option<Ssh<'a>>,
+}
+
+/// The socket that reaches the worker's SSH key, and the hosts it is used
+/// with.
+pub struct Ssh<'a> {
+    pub socket: &'a Path,
+    pub known_hosts: &'a Path,
 }
 
 /// `source /etc/makepkg.conf`, the job's lines, then the agent's.
@@ -38,6 +47,9 @@ pub fn render(rendering: &Rendering<'_>) -> String {
     }
     out.push_str(&layout(rendering.work, rendering.scratch));
     out.push_str(&parallelism::makepkg_lines(rendering.cpus));
+    if let Some(ssh) = &rendering.ssh {
+        out.push_str(&credential(ssh));
+    }
     out
 }
 
@@ -51,6 +63,18 @@ fn layout(work: &Work, scratch: &Scratch) -> String {
     )
 }
 
+/// The agent socket, and git's ssh (`GIT_SSH_COMMAND`), which trusts the
+/// given hosts and no others, whatever the image's `ssh_config` says. An ssh
+/// that the build runs itself is not held to them.
+fn credential(ssh: &Ssh<'_>) -> String {
+    let command = pinned_ssh_command(ssh.known_hosts);
+    format!(
+        "export SSH_AUTH_SOCK={}\nexport GIT_SSH_COMMAND={}\n",
+        quote(ssh.socket),
+        quote_argument(&command),
+    )
+}
+
 /// A path as one shell word.
 fn quote(path: &Path) -> String {
     quote_argument(&path.to_string_lossy())
@@ -58,7 +82,7 @@ fn quote(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rendering, render};
+    use super::{Rendering, Ssh, render};
     use crate::layout::{Scratch, Work};
     use std::process::Command;
 
@@ -68,6 +92,7 @@ mod tests {
             work,
             scratch,
             cpus: None,
+            ssh: None,
         }
     }
 
@@ -129,6 +154,32 @@ mod tests {
                 "/var/lib/aurcache-build/build",
                 "/var/lib/aurcache-build/srcdest",
                 "-j7",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_credential_lines_come_only_with_a_credential() {
+        let (work, scratch) = (Work::new("/work"), Scratch::new("/work/scratch"));
+        let mut rendering = rendering("", &work, &scratch);
+        let without = render(&rendering);
+        assert!(!without.contains("SSH_AUTH_SOCK"));
+        assert!(!without.contains("GIT_SSH_COMMAND"));
+
+        let (socket, known_hosts) = (scratch.ssh_socket(), scratch.known_hosts());
+        let print = "printf '%s\\n' \"$SSH_AUTH_SOCK\" \"$GIT_SSH_COMMAND\"; export -p | grep -c 'SSH_AUTH_SOCK\\|GIT_SSH_COMMAND'";
+        rendering.ssh = Some(Ssh {
+            socket: &socket,
+            known_hosts: &known_hosts,
+        });
+        assert_eq!(
+            evaluate(&render(&rendering), print),
+            [
+                "/work/scratch/ssh/agent.sock",
+                "ssh -o UserKnownHostsFile=/work/scratch/ssh/known_hosts \
+                 -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none \
+                 -o VerifyHostKeyDNS=no -o StrictHostKeyChecking=yes",
+                "2"
             ]
         );
     }

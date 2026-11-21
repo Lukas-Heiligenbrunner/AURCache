@@ -10,8 +10,10 @@
 //! of each is frozen as fixtures under `tests/fixtures/`.
 //!
 //! The `makepkg.conf` the build runs with ([`makepkg_conf`]) lives here too,
-//! where it is tested without a container. Which dependencies a build
-//! installs is `aurcache_common::build_deps`, shared with the chroot worker.
+//! where it is tested without a container, and so does the framing of the
+//! link that a build reaches the worker's SSH key through ([`ssh_link`]).
+//! Which dependencies a build installs is `aurcache_common::build_deps`,
+//! shared with the chroot worker.
 //!
 //! See `design/in-progress/container-workers.md`.
 
@@ -19,3 +21,4 @@ pub mod layout;
 pub mod makepkg_conf;
 pub mod report;
 pub mod spec;
+pub mod ssh_link;

@@ -95,6 +95,14 @@
   {
     "interface": 1,
     "ended": {
+      "how": "setup",
+      "step": "credential",
+      "message": "No such file or directory (os error 2)"
+    }
+  },
+  {
+    "interface": 1,
+    "ended": {
       "how": "exited",
       "code": 0
     },

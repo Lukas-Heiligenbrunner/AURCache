@@ -5,18 +5,24 @@
 //! order is what makes it safe:
 //!
 //! 1. as root, before the build user has any process: take the work
-//!    directory, write pacman's configuration, upgrade the image with
-//!    AURCache's repository out of sight, and end whatever that left
-//!    running; then make the build user, its directories and `makepkg.conf`;
+//!    directory and, for a build given the worker's SSH key, the worker's
+//!    SSH link, before anything of the job runs; write pacman's
+//!    configuration, upgrade the image with AURCache's repository out of
+//!    sight, and end whatever that left running; then make the build user,
+//!    its directories and `makepkg.conf`;
 //! 2. as the build user, through [`user::BuildUser::command`] and nothing
 //!    else: unpack the source, fetch the keys, print the PKGBUILD's
 //!    `.SRCINFO`;
 //! 3. as root, once every other process is dead: install the dependencies
 //!    it names ([`deps`]);
 //! 4. as the build user, for good: makepkg, which has nothing in the
-//!    container to ask root for anything;
+//!    container to ask root for anything, with the socket that reaches the
+//!    worker's SSH key over the link ([`relay`]) while it runs;
 //! 5. as root again, once every other process is dead: measure, write the
 //!    report, hand the directory back.
+//!
+//! "Every other process" is never the SSH link's before the end: the agent
+//! spares the one process that it took the link from ([`children::Spare`]).
 
 mod children;
 mod deps;
@@ -26,16 +32,18 @@ mod init;
 mod keys;
 mod makepkg;
 mod measure;
+mod relay;
 mod run;
 mod source;
 mod user;
 mod vcs;
 
 use aurcache_build_agent::layout::{Scratch, Work};
-use aurcache_build_agent::makepkg_conf::{self, Rendering};
+use aurcache_build_agent::makepkg_conf::{self, Rendering, Ssh};
 use aurcache_build_agent::report::{BuildReport, Ended, SetupStep};
 use aurcache_build_agent::spec::{BuildSpec, INTERFACE};
-use children::Quiet;
+use children::{Quiet, Spare};
+use relay::{Link, Listening, Relay};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -45,6 +53,11 @@ use user::BuildUser;
 
 /// How long the build's processes have to die once they are killed.
 const ENDING: Duration = Duration::from_secs(60);
+
+/// How long the worker's SSH link may take to come once the agent listens
+/// for it, which it does first. The worker opens it as soon as it sees the
+/// container run, so it normally comes within seconds.
+const LINK_WAIT: Duration = Duration::from_secs(120);
 
 /// What root finds programs through when it was started with nothing set.
 const ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
@@ -111,12 +124,12 @@ fn build(work: &Work) -> Result<(), String> {
             message: message.clone(),
         }),
     };
-    clear("the build")?;
+    clear("the build", Spare::Nothing)?;
     let vcs_commits = if let Ok(spec) = &spec
         && let Ok(made) = &made
     {
         let commits = vcs::commits(&spec.vcs_sources, &Scratch::new(&spec.scratch), &made.user);
-        clear("git")?;
+        clear("git", Spare::Nothing)?;
         commits
     } else {
         BTreeMap::new()
@@ -146,12 +159,12 @@ fn build(work: &Work) -> Result<(), String> {
     Ok(())
 }
 
-/// Kill every other process in the container: whatever `what` left
-/// running. Each step that follows is root's or the build user's alone, with
-/// nothing of the other's beside it, and the report is written once nothing
-/// the build started can change what it reads.
-fn clear(what: &str) -> Result<(), String> {
-    match children::kill_all(ENDING) {
+/// Kill every other process in the container but the one `spare` names:
+/// whatever `what` left running. Each step that follows is root's or the
+/// build user's alone, with nothing of the other's beside it, and the report
+/// is written once nothing the build started can change what it reads.
+fn clear(what: &str, spare: Spare) -> Result<(), String> {
+    match children::kill_all(ENDING, spare) {
         Quiet::Alone => Ok(()),
         Quiet::Lingering => Err(format!("a process {what} started outlived being killed")),
     }
@@ -201,22 +214,33 @@ fn make(spec: &BuildSpec, work: &Work) -> Result<Made, Failed> {
     let root = spec.scratch.as_path();
     let scratch = Scratch::new(root);
 
-    // As root, with no process of the build user's anywhere.
+    // As root, with no process of the build user's anywhere. The link is
+    // taken first, before anything of the job's runs, so whatever connects
+    // is the worker's exec.
+    let link = spec.ssh.as_ref().map(|_| take_link(&scratch)).transpose()?;
+    let spare = link
+        .as_ref()
+        .map_or(Spare::Nothing, |link| Spare::Link { pid: link.pid });
     configure_pacman(spec).map_err(at(SetupStep::Config))?;
     run::say("preparing pacman's keyring");
     init_keyring().map_err(at(SetupStep::Keyring))?;
     run::say("upgrading the image");
     upgrade().map_err(at(SetupStep::Sync))?;
     // pacman-key's gpg-agent, for one, outlives the root step.
-    clear("the root step").map_err(at(SetupStep::Sync))?;
+    clear("the root step", spare).map_err(at(SetupStep::Sync))?;
     dirs::lay_out(root, &scratch, work).map_err(at(SetupStep::User))?;
     let user = BuildUser::ensure(&scratch.home()).map_err(at(SetupStep::User))?;
     let conf = scratch.makepkg_conf();
+    let (socket, known_hosts) = (scratch.ssh_socket(), scratch.known_hosts());
     let rendered = makepkg_conf::render(&Rendering {
         job: &spec.makepkg_conf,
         work,
         scratch: &scratch,
         cpus: spec.cpus,
+        ssh: link.as_ref().map(|_| Ssh {
+            socket: &socket,
+            known_hosts: &known_hosts,
+        }),
     });
     std::fs::write(&conf, rendered).map_err(at(SetupStep::Config))?;
 
@@ -234,12 +258,46 @@ fn make(spec: &BuildSpec, work: &Work) -> Result<Made, Failed> {
         place: &place,
         arch: &spec.arch,
         flags: &spec.build_flags,
+        spare,
     };
     deps::install(&needs, &user).map_err(at(SetupStep::Dependencies))?;
 
+    let relay = match (link, &spec.ssh) {
+        (Some(link), Some(ssh)) => Some(
+            Relay::start(link, &scratch, &ssh.known_hosts).map_err(at(SetupStep::Credential))?,
+        ),
+        _ => None,
+    };
     run::say("running makepkg");
-    let status = makepkg::run(&place, &spec.build_flags, &user).map_err(at(SetupStep::Makepkg))?;
-    Ok(Made { status, user })
+    let status = makepkg::run(&place, &spec.build_flags, &user).map_err(at(SetupStep::Makepkg));
+    if let Some(relay) = relay {
+        relay.close();
+    }
+    Ok(Made {
+        status: status?,
+        user,
+    })
+}
+
+/// Listen for the worker's link and take it, once the image is known to
+/// have the ssh that the build's git runs.
+fn take_link(scratch: &Scratch) -> Result<Link, Failed> {
+    let has_ssh = user::PATH
+        .split(':')
+        .any(|dir| Path::new(dir).join("ssh").is_file());
+    if !has_ssh {
+        return Err(Failed {
+            step: SetupStep::Credential,
+            message: "the builder image has no ssh, which builds given the worker's SSH key \
+                      need: use an image with openssh (a newer aurcache-builder-v2, or install \
+                      it in BUILDER_IMAGE)"
+                .to_string(),
+        });
+    }
+    Listening::open(scratch)
+        .map_err(at(SetupStep::Credential))?
+        .accept(LINK_WAIT)
+        .map_err(at(SetupStep::Credential))
 }
 
 /// Write the job's pacman configuration into `/etc`: the whole of it as
