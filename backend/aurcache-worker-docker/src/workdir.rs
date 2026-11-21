@@ -19,11 +19,15 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 
 use crate::container::BIN_DIR;
 
 /// The most a report may be: a few lines, and a commit per VCS source.
 pub const REPORT_LIMIT: u64 = 1 << 20;
+/// The most of `rm`'s first complaint that is kept.
+const SAID_LIMIT: u64 = 4096;
 
 /// What the agent left at `out/report.json`.
 #[derive(Debug, PartialEq)]
@@ -35,13 +39,15 @@ pub enum Report {
 }
 
 /// What removing a build directory as this worker's own user came to.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Removal {
     /// It is gone, or was never there.
     Removed,
-    /// Something in it is not this worker's to remove: a build that was
-    /// stopped leaves the directory root's.
-    NotPermitted,
+    /// Some of it is still there, for the first reason `rm` gave. What is
+    /// usually left is a directory the build user made in `pkg/` and put
+    /// something in, which the agent leaves as it is; and whatever root made
+    /// its own, which is the whole directory when the build was stopped.
+    Left(String),
 }
 
 /// Who besides its owner can reach what is in a directory.
@@ -119,14 +125,50 @@ pub fn report(dir: &Path) -> Report {
     }
 }
 
-/// Remove `dir` as this worker's own user.
-pub fn remove(dir: &Path) -> Result<Removal> {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(Removal::Removed),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Removal::Removed),
-        Err(e) if e.kind() == ErrorKind::PermissionDenied => Ok(Removal::NotPermitted),
-        Err(e) => Err(e).with_context(|| format!("removing {}", dir.display())),
+/// Remove `dir` as this worker's own user, with `rm`: it follows no link,
+/// walks a tree of any depth without running out of descriptors, and runs
+/// off this process, so a large tree does not hold the async runtime up.
+pub async fn remove(dir: &Path) -> Removal {
+    let spawned = tokio::process::Command::new("rm")
+        .args(["-rf", "--"])
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let mut rm = match spawned {
+        Ok(rm) => rm,
+        Err(e) => return Removal::Left(format!("running rm: {e}")),
+    };
+    let said = match rm.stderr.take() {
+        Some(stderr) => first_line(stderr).await,
+        None => String::new(),
+    };
+    match rm.wait().await {
+        Ok(status) if status.success() => Removal::Removed,
+        Ok(status) if said.is_empty() => Removal::Left(format!("rm {}: {status}", dir.display())),
+        Ok(_) => Removal::Left(said),
+        Err(e) => Removal::Left(format!("waiting for rm: {e}")),
     }
+}
+
+/// The first line of `stderr`, at most [`SAID_LIMIT`] bytes of it, read to
+/// its end.
+///
+/// `rm` says why for each name it could not remove, and the build decides how
+/// many there are and how long their paths: kept whole, that could be
+/// gigabytes. The rest is read and dropped, so `rm` never waits on a full
+/// pipe.
+async fn first_line(stderr: impl AsyncRead + Unpin) -> String {
+    let mut stderr = tokio::io::BufReader::new(stderr);
+    let mut line = Vec::new();
+    let _ = (&mut stderr)
+        .take(SAID_LIMIT)
+        .read_until(b'\n', &mut line)
+        .await;
+    let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+    String::from_utf8_lossy(&line).trim_end().to_string()
 }
 
 /// Whether `dir`, or the nearest directory above it that exists, is on a
@@ -415,13 +457,91 @@ mod tests {
         set_mode(&root, 0o700).unwrap();
     }
 
-    #[test]
-    fn removing_what_is_not_there_is_done() {
+    #[tokio::test]
+    async fn removing_what_is_not_there_is_done() {
         let scratch = Scratch::new("remove");
         let dir = scratch.0.join("7");
         fs::create_dir_all(dir.join("pkg")).unwrap();
-        assert_eq!(remove(&dir).unwrap(), Removal::Removed);
+        assert!(matches!(remove(&dir).await, Removal::Removed));
         assert!(!dir.exists());
-        assert_eq!(remove(&dir).unwrap(), Removal::Removed);
+        assert!(matches!(remove(&dir).await, Removal::Removed));
+    }
+
+    /// Files, links and directories go; what a link points at stays.
+    #[tokio::test]
+    async fn removing_a_tree_follows_no_link() {
+        let scratch = Scratch::new("remove-links");
+        let elsewhere = scratch.0.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("kept"), b"x").unwrap();
+        let dir = scratch.0.join("7");
+        fs::create_dir_all(dir.join("pkg/a/b")).unwrap();
+        fs::write(dir.join("pkg/a/b/file"), b"x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("pkg/link")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent", dir.join("dangling")).unwrap();
+
+        assert!(matches!(remove(&dir).await, Removal::Removed));
+        assert!(!dir.exists());
+        assert!(elsewhere.join("kept").is_file());
+    }
+
+    /// However much `rm` says, one line of it is kept, and no more of that
+    /// than [`SAID_LIMIT`].
+    #[tokio::test]
+    async fn only_the_start_of_what_rm_says_is_kept() {
+        let said = [b"first\n".as_slice(), &[b'x'; 1 << 20]].concat();
+        assert_eq!(first_line(said.as_slice()).await, "first");
+        let long = vec![b'y'; 1 << 20];
+        assert_eq!(first_line(long.as_slice()).await.len() as u64, SAID_LIMIT);
+    }
+
+    /// A directory the build filled with more names than this worker may
+    /// remove makes `rm` complain about each; the reason is still one line.
+    #[tokio::test]
+    async fn a_tree_rm_says_much_about_is_left_with_one_line() {
+        let scratch = Scratch::new("remove-loud");
+        let dir = scratch.0.join("7");
+        let locked = dir.join("pkg/locked");
+        fs::create_dir_all(&locked).unwrap();
+        let long = "n".repeat(200);
+        for number in 0..2000 {
+            fs::write(locked.join(format!("{long}{number}")), b"").unwrap();
+        }
+        set_mode(&locked, 0o500).unwrap();
+        if fs::remove_file(locked.join(format!("{long}0"))).is_ok() {
+            // Run as root, which may remove anything: nothing to test.
+            set_mode(&locked, 0o700).unwrap();
+            return;
+        }
+        let removal = remove(&dir).await;
+        set_mode(&locked, 0o700).unwrap();
+        match removal {
+            Removal::Left(why) => {
+                assert!(why.contains(&long), "{why}");
+                assert!(!why.contains('\n'), "{why}");
+                assert!(why.len() as u64 <= SAID_LIMIT, "{} bytes", why.len());
+            }
+            Removal::Removed => panic!("a directory it could not empty was removed"),
+        }
+    }
+
+    /// What this worker's user may not remove is left, with `rm`'s reason.
+    #[tokio::test]
+    async fn what_cannot_be_removed_is_left_with_why() {
+        let scratch = Scratch::new("remove-left");
+        let dir = scratch.0.join("7");
+        fs::create_dir_all(dir.join("locked/inner")).unwrap();
+        set_mode(&dir.join("locked"), 0o500).unwrap();
+        if fs::remove_dir(dir.join("locked/inner")).is_ok() {
+            // Run as root, which may remove anything: nothing to test.
+            return;
+        }
+        let removal = remove(&dir).await;
+        set_mode(&dir.join("locked"), 0o700).unwrap();
+        match removal {
+            Removal::Left(why) => assert!(why.contains("inner"), "{why}"),
+            Removal::Removed => panic!("a directory it could not empty was removed"),
+        }
+        assert!(dir.exists());
     }
 }

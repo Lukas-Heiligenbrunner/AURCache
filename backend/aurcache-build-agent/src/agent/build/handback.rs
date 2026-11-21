@@ -7,15 +7,17 @@
 //! changed through the handle.
 
 use super::dirs::{self, Owner};
-use aurcache_build_agent::layout::Work;
+use aurcache_build_agent::layout::{OUT_DIR, Work};
 use aurcache_build_agent::report::BuildReport;
 use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, fchown};
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, fchown};
+use std::path::{Path, PathBuf};
 
 /// The report while it is being written, beside where it will be.
 const PARTIAL: &str = ".report.json.partial";
+/// The start of the names what was at `out/` is moved aside under.
+const SET_ASIDE: &str = ".out.old.";
 
 /// What is done with what is not a regular file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,15 +37,15 @@ enum Others {
 ///
 /// It appears whole or not at all: a worker that waits for the file never
 /// reads half of it. Root in the container (a dependency's scriptlet) could
-/// have left anything at either name, so the partial file is made anew,
-/// never opened: a pipe there would hold the open up for ever. The rename
-/// replaces whatever is at the report's place.
+/// have left anything at `out/` and in it, so `out/` is made anew first, and
+/// the partial file is made anew, never opened: a pipe there would hold the
+/// open up for ever. The rename replaces whatever is at the report's place.
+///
+/// What still keeps a report from being written is a full filesystem: the
+/// build can fill the one its work directory is on.
 pub fn write(work: &Work, report: &BuildReport) -> io::Result<()> {
+    remake_out(work)?;
     let partial = work.out().join(PARTIAL);
-    match std::fs::remove_file(&partial) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-    }
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -53,6 +55,42 @@ pub fn write(work: &Work, report: &BuildReport) -> io::Result<()> {
     file.write_all(b"\n")?;
     file.sync_all()?;
     std::fs::rename(&partial, work.report())
+}
+
+/// Make `out/` again as an empty directory of root's, moving aside, without
+/// following any link, whatever is there that is not an empty directory.
+///
+/// The `out/` the build was given is empty, and is removed as it is. The
+/// work directory is root's, so only root in the container can have
+/// replaced it: with a file or a link, which the report could not be
+/// written into, or a directory holding anything. What was there is renamed
+/// into a directory made for it, never walked: a tree deeper than the
+/// descriptors this process may hold open could not be removed here. It is
+/// left with the rest of the work directory, which whoever gave it removes.
+/// Run once every other process is dead, so nothing changes it in between.
+fn remake_out(work: &Work) -> io::Result<()> {
+    let out = work.out();
+    // Removes an empty directory, and nothing else: not a link, not a file.
+    match std::fs::remove_dir(&out) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => std::fs::rename(&out, set_aside(work)?.join(OUT_DIR))?,
+    }
+    std::fs::DirBuilder::new().mode(0o755).create(&out)
+}
+
+/// A new, empty directory of root's in the work directory, under a name
+/// nothing else has: what was at `out/` is moved into it.
+fn set_aside(work: &Work) -> io::Result<PathBuf> {
+    let mut number = 0u64;
+    loop {
+        let path = work.root().join(format!("{SET_ASIDE}{number}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => number += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Give the work directory, and `pkg/`, `log/` and `out/` with the regular
@@ -158,6 +196,13 @@ mod tests {
         assert_eq!(names, ["report.json"]);
         let mode = std::fs::metadata(work.report()).unwrap().mode();
         assert_eq!(mode & 0o444, 0o444, "{mode:o}");
+        // The empty `out/` the build had is not set aside: nothing of root's
+        // is left beside it for whoever gave the directory to remove.
+        let beside: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(beside, ["out"]);
     }
 
     /// What root in the container may have left at the two names, a pipe
@@ -180,18 +225,104 @@ mod tests {
             disk_bytes: None,
             vcs_commits: BTreeMap::new(),
         };
+        // A write held up by a pipe never ends; a slow machine only takes
+        // its time, so the wait is generous.
         let (send, receive) = std::sync::mpsc::channel();
         let writing = work.clone();
         let written = report.clone();
         std::thread::spawn(move || send.send(write(&writing, &written).is_ok()));
         let wrote = receive
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv_timeout(std::time::Duration::from_secs(120))
             .expect("the report is written without waiting");
         assert!(wrote);
         assert!(std::fs::symlink_metadata(work.report()).unwrap().is_file());
         let read: BuildReport =
             serde_json::from_slice(&std::fs::read(work.report()).unwrap()).unwrap();
         assert_eq!(read, report);
+    }
+
+    /// Root in the container may have replaced `out/` itself: with a file, a
+    /// link to nowhere, or a link to a directory elsewhere. The report is
+    /// written into a new `out/` all the same, and nothing a link pointed at
+    /// is written to.
+    #[test]
+    fn the_report_is_written_whatever_replaced_out() {
+        let report = BuildReport {
+            interface: INTERFACE,
+            ended: Ended::Exited { code: 0 },
+            peak_memory_bytes: None,
+            oom_kills: None,
+            disk_bytes: None,
+            vcs_commits: BTreeMap::new(),
+        };
+        /// What is left at `out/`'s place.
+        #[derive(Debug)]
+        enum Plant {
+            File,
+            DanglingLink,
+            LinkToDirectory,
+        }
+        let elsewhere = tempfile::tempdir().unwrap();
+        for plant in [Plant::File, Plant::DanglingLink, Plant::LinkToDirectory] {
+            let tmp = tempfile::tempdir().unwrap();
+            let work = Work::new(tmp.path());
+            match plant {
+                Plant::File => std::fs::write(work.out(), "x").unwrap(),
+                Plant::DanglingLink => symlink("/nonexistent/aurcache-out", work.out()).unwrap(),
+                Plant::LinkToDirectory => symlink(elsewhere.path(), work.out()).unwrap(),
+            }
+            write(&work, &report).unwrap_or_else(|e| panic!("over {plant:?}: {e}"));
+            assert!(
+                std::fs::symlink_metadata(work.out()).unwrap().is_dir(),
+                "{plant:?}"
+            );
+            let read: BuildReport =
+                serde_json::from_slice(&std::fs::read(work.report()).unwrap()).unwrap();
+            assert_eq!(read, report, "{plant:?}");
+        }
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
+    /// A tree under `out/` is moved aside whole, never walked, under the
+    /// first name not taken, and the report written into a new `out/`. The
+    /// tree is deep because that is what the rename is for: whether a walk
+    /// could remove it depends on the descriptors this process may open.
+    #[test]
+    fn a_deep_tree_at_out_is_set_aside_under_a_free_name() {
+        const DEPTH: usize = 1100;
+        let tmp = tempfile::tempdir().unwrap();
+        let work = Work::new(tmp.path());
+        // Each step wraps the tree in one more level, so no path is long.
+        std::fs::create_dir(work.out()).unwrap();
+        let wrap = tmp.path().join("wrap");
+        for _ in 0..DEPTH {
+            std::fs::create_dir(&wrap).unwrap();
+            std::fs::rename(work.out(), wrap.join("d")).unwrap();
+            std::fs::rename(&wrap, work.out()).unwrap();
+        }
+        // Taken already: the tree goes under another name.
+        std::fs::write(tmp.path().join(format!("{}0", super::SET_ASIDE)), "x").unwrap();
+        let report = BuildReport {
+            interface: INTERFACE,
+            ended: Ended::Exited { code: 0 },
+            peak_memory_bytes: None,
+            oom_kills: None,
+            disk_bytes: None,
+            vcs_commits: BTreeMap::new(),
+        };
+
+        write(&work, &report).unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(work.out())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["report.json"]);
+        let aside = tmp
+            .path()
+            .join(format!("{}1", super::SET_ASIDE))
+            .join("out");
+        assert!(std::fs::symlink_metadata(aside.join("d")).unwrap().is_dir());
     }
 
     /// A link in `pkg/` is never followed: what it points at keeps its mode,
