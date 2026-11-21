@@ -28,8 +28,8 @@ pub struct ClaimedJob {
     /// How long the build may run: the shorter of this worker's limit and
     /// the job's, as they stood when it was claimed.
     pub timeout: Option<Timeout>,
-    /// Tripped when the build has to stop: the server asked, or it has been
-    /// out of reach past the lease.
+    /// Tripped when the build has to stop: the server asked, it has been out
+    /// of reach past the lease, or the worker itself is stopping.
     pub cancel: CancellationToken,
 }
 

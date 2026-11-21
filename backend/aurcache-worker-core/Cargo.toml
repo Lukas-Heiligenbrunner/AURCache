@@ -33,3 +33,10 @@ rustix = { version = "1.1", features = ["fs"] }
 # Paused time, for the stop and log-batching timers.
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+# The real worker listener, started in-process by the stop test.
+aurcache-activitylog = { path = "../aurcache-activitylog" }
+aurcache-api = { path = "../aurcache-api" }
+aurcache-db = { path = "../aurcache-db", features = ["testing"] }
+aurcache-ca = { path = "../aurcache-ca" }
+aurcache-utils = { path = "../aurcache-utils" }
+sea-orm = { workspace = true }
