@@ -7,7 +7,8 @@ use crate::api::{LoadError, client};
 use crate::listing::ViewParams;
 use crate::routes::Route;
 use crate::status::StatusBadge;
-use aurcache_client::{ExtendedPackage, PackageSource};
+use aurcache_client::{ExtendedPackage, PackageSource, UploadFile};
+use dioxus::html::FileData;
 use dioxus::prelude::*;
 
 /// The package a page is about, as [`PackageScope`] fetched it.
@@ -222,7 +223,8 @@ pub fn PackageHeader(
                     // so the button sits with the package — in the header every
                     // package-scoped page shares — instead of beside the builds
                     // list on one of them.
-                    div { class: "shrink-0",
+                    div { class: "shrink-0 flex items-center gap-2",
+                        UploadButton { pkgbase: pkgbase.clone(), on_changed: on_rebuilt }
                         RebuildButton { pkgbase, on_changed: on_rebuilt }
                     }
                 }
@@ -303,6 +305,80 @@ fn RebuildButton(pkgbase: String, on_changed: EventHandler<()>) -> Element {
                     span { class: "loading loading-spinner loading-xs" }
                 }
                 "Rebuild"
+            }
+        }
+    }
+}
+
+/// Publish package files built elsewhere as a build of this package, and land
+/// on the build they became.
+///
+/// The files are the package files of one build and any `.sig` beside them,
+/// picked together; the server checks them and says what is wrong with one.
+/// Read into the page before sending, which is all a browser offers: a package
+/// too large for that goes through `aurcli pkg upload`, which streams it.
+#[component]
+fn UploadButton(pkgbase: String, on_changed: EventHandler<()>) -> Element {
+    let action = use_action();
+    // Renewed on every pick, which mounts a fresh file input: one that kept
+    // the last selection would not report the same files picked again, after
+    // fixing whatever the server refused.
+    let mut picks = use_signal(|| 0_u32);
+    let upload = move |files: Vec<FileData>| {
+        let pkgbase = pkgbase.clone();
+        async move {
+            picks += 1;
+            if files.is_empty() {
+                return;
+            }
+            let uploaded = action
+                .run(async move {
+                    let mut read = Vec::with_capacity(files.len());
+                    for file in files {
+                        let filename = file.name();
+                        let contents = file
+                            .read_bytes()
+                            .await
+                            .map_err(|e| format!("{filename} could not be read: {e}"))?;
+                        read.push(UploadFile { filename, contents });
+                    }
+                    client()?
+                        .upload_package_files(&pkgbase, None, read)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+            if let Some(uploaded) = uploaded {
+                on_changed.call(());
+                navigator().push(Route::Build {
+                    pkgbase: uploaded.pkgbase,
+                    number: uploaded.number,
+                });
+            }
+        }
+    };
+
+    rsx! {
+        div { class: "flex items-center gap-2",
+            if let Some(message) = action.error() {
+                span { class: "text-xs text-error", "{message}" }
+            }
+            label {
+                class: "btn btn-ghost btn-sm",
+                title: "Publish package files built elsewhere as a build of this package",
+                if action.busy() {
+                    span { class: "loading loading-spinner loading-xs" }
+                }
+                "Upload"
+                input {
+                    key: "{picks}",
+                    r#type: "file",
+                    class: "hidden",
+                    multiple: true,
+                    accept: ".zst,.xz,.sig",
+                    disabled: action.busy(),
+                    onchange: move |e| upload(e.files()),
+                }
             }
         }
     }
@@ -389,6 +465,14 @@ mod tests {
         for pkg in [package(), aur_package()] {
             assert!(render_header(&pkg).contains("Rebuild"), "{pkg:?}");
         }
+    }
+
+    /// A package can be rebuilt here or take a build done elsewhere.
+    #[test]
+    fn the_header_offers_an_upload_beside_the_rebuild() {
+        let html = render_header(&package());
+        assert!(html.contains("Rebuild"), "{html}");
+        assert!(html.contains("Upload"), "{html}");
     }
 
     /// Each page under the package says where it is after the package's name;
