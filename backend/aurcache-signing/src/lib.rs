@@ -16,6 +16,7 @@
 //! here hands the secret key out, and its `Debug` shows the fingerprint only.
 
 use anyhow::{Context, anyhow, bail};
+use aurcache_common::fs::REPO_ROOT;
 use aurcache_common::server_env;
 use aurcache_common::settings::parse_boolean;
 use pgp::composed::{
@@ -31,7 +32,7 @@ use pgp::types::{
     Timestamp,
 };
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The key's file name in the server's CA directory, where it is kept unless
 /// `AURCACHE_SIGNING_KEY_FILE` names another.
@@ -110,11 +111,37 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
         .get_os()
         .map(|path| read_passphrase(Path::new(&path)))
         .transpose()?;
-    let key = match server_env::AURCACHE_SIGNING_KEY_FILE.get_os() {
-        Some(path) => InstanceKey::load(Path::new(&path), passphrase.as_deref()),
-        None => InstanceKey::load_or_create(&ca_dir.join(KEY_FILE), passphrase.as_deref()),
+    let supplied = server_env::AURCACHE_SIGNING_KEY_FILE
+        .get_os()
+        .map(PathBuf::from);
+    let path = supplied.clone().unwrap_or_else(|| ca_dir.join(KEY_FILE));
+    let key = match supplied {
+        Some(_) => InstanceKey::load(&path, passphrase.as_deref()),
+        None => InstanceKey::load_or_create(&path, passphrase.as_deref()),
     }?;
+    if is_inside(&path, Path::new(REPO_ROOT)) {
+        tracing::warn!(
+            "The repository signing key {} is inside the repository directory {REPO_ROOT}: \
+             whatever else serves, mirrors or syncs that directory hands it out with the \
+             packages. Keep it elsewhere: the CA directory on a volume of its own \
+             ({}), or a key supplied with {}",
+            path.display(),
+            server_env::AURCACHE_CA_DIR,
+            server_env::AURCACHE_SIGNING_KEY_FILE,
+        );
+    }
     Ok(Some(key))
+}
+
+/// Whether `path` is inside `dir`, both followed through symlinks where
+/// they exist.
+fn is_inside(path: &Path, dir: &Path) -> bool {
+    let resolve = |path: &Path| {
+        std::fs::canonicalize(path)
+            .or_else(|_| std::path::absolute(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    resolve(path).starts_with(resolve(dir))
 }
 
 /// What a key is refused with when rPGP refuses its checksum: see
@@ -1474,6 +1501,29 @@ mod tests {
         let key = InstanceKey::load(&path, Some("correct horse")).unwrap();
         assert_eq!(key.fingerprint(), fingerprint);
         assert!(key.verifies(&key.sign(CONTENT).unwrap(), CONTENT));
+    }
+
+    /// A key kept in the repository directory, as the hybrid image's CA in
+    /// `repo/.ca` is, is told apart from one kept beside it, a symlink to
+    /// it included.
+    #[test]
+    fn a_key_inside_the_repository_is_told_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".ca")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("data/ca")).unwrap();
+        let inside = repo.join(".ca").join(KEY_FILE);
+        let outside = tmp.path().join("data/ca").join(KEY_FILE);
+        std::fs::write(&inside, "").unwrap();
+        std::fs::write(&outside, "").unwrap();
+        assert!(is_inside(&inside, &repo));
+        assert!(!is_inside(&outside, &repo));
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("linked.asc");
+            std::os::unix::fs::symlink(&inside, &link).unwrap();
+            assert!(is_inside(&link, &repo));
+        }
     }
 
     /// Run `test` with a throwaway GnuPG home in a temporary directory, or

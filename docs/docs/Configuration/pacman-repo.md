@@ -152,6 +152,18 @@ It is kept as `signing-key.asc` in the CA directory (`AURCACHE_CA_DIR`,
 `./data/ca` by default), readable by the server's user only. Back it up with
 the CA: losing it means a new key, which every client has to trust again.
 
+:::warning Keep the key out of the repository directory
+A container whose only volume is the repository, as a 0.5 compose file has
+it, keeps the CA inside the repository, as `repo/.ca` — and the signing key
+with it. AURCache's own file server never serves it, but whatever else serves,
+mirrors or syncs that directory hands out the key with the packages, and with
+it the power to sign anything clients will install. The server warns at every
+start when its key is inside the repository. Move it out: put the CA directory
+on a volume of its own, which the server moves the CA to at its next start
+([Hybrid image](../workers/hybrid.md#migrating)), or supply the key from
+elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
+:::
+
 - `AURCACHE_SIGNING_KEY_FILE` points at a key you supply instead — a Docker
   secret, a separate mount. The server reads it and never writes it. It may be
   armored or binary, and needs exactly one current signing subkey, or a
