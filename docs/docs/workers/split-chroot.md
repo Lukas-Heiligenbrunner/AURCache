@@ -310,8 +310,8 @@ See [Mirrorlist](../Configuration/mirrorlist.md) for the server side.
 
 | Variable | Type | Description | Default |
 |---|---|---|---|
-| `WORKER_GIT_SSH_KEY` | Path | SSH key for authenticated sources. When set, no key is generated | generate one |
-| `WORKER_GIT_SSH_PACKAGES` | String | The only pkgbases this worker offers its SSH key to, comma or space separated; set but empty is none. Read from the environment only, never set by the server. Takes Linux 7.1 or later (Landlock ABI 9): on an older kernel a worker with this set holds no key, and any build on a worker that holds one can reach it | every package the server's **Build SSH key** setting names a key for |
+| `WORKER_GIT_SSH_KEY` | Path | The default SSH key, offered to every build whose package names no other. When set, no key is generated. A file a build could read is warned of at startup: see [Build credentials](./credentials.md#keep-the-file-from-builds) | generate one |
+| `WORKER_GIT_SSH_KEYS` | String | Named SSH keys, `name:path` comma separated, each offered only to the builds whose package's **Build SSH key** names it. The worker refuses to start with one whose file a build could read: see [Build credentials](./credentials.md#keep-the-file-from-builds). Read from the environment only, never set by the server. Takes Linux 7.1 or later (Landlock ABI 9), an `aurcache-sandbox` of the same release, and a sandbox policy the build user can read that lists the agents' directory: where the sandbox, asked as the build user, says it would not keep builds from them, the worker holds none of them | none |
 | `WORKER_SSH_KNOWN_HOSTS` | Path | `known_hosts` naming the only hosts to trust when fetching sources. A build fails while it cannot be read | accept on first use |
 | `WORKER_BIND_MOUNTS` | String | Extra `host:chroot` mounts, comma separated | empty |
 

@@ -9,19 +9,6 @@ several releases is each of their sections in turn, oldest first.
 
 ## From 0.6 {#from-0-6}
 
-- **A worker's SSH key goes only to the builds a setting names it for.** On
-  0.6.0 every build was offered its worker's key (`WORKER_GIT_SSH_KEY`, or the
-  key the worker generates). The **Build SSH key** setting (`build_ssh_key`,
-  or `BUILD_SSH_KEY` in the server's environment) now names the key a
-  package's builds may use, and it is off by default. If any package fetches
-  its sources over SSH, set it to `default` once the server is upgraded: on
-  the **Settings** page or with `BUILD_SSH_KEY=default` for every package, or
-  under **Build config** on each package that needs it. Until then those
-  builds fail at the source download, as a fetch refused for want of a key.
-- **Upgrade the workers too.** A 0.6.0 worker does not read the setting, and
-  goes on offering its key to every build it runs. A worker can also limit its
-  key to some packages with `WORKER_GIT_SSH_PACKAGES`, which takes Linux 7.1
-  or later. See [Build credentials](../workers/credentials.md).
 - **A sandbox policy the build user cannot read refuses every build.** On
   0.6.0 a `/etc/aurcache/sandbox-protected` that exists but cannot be read by
   the build user (`0600 root`, say), or that is reached through a symlink to
