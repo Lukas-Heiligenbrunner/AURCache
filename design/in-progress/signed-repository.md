@@ -27,7 +27,7 @@ fits into `Repository`.
   it writes, and the plan moves each signature in right after what it signs.
   `init` links `repo.db.sig`/`repo.files.sig`, or removes them when the
   repository no longer signs.
-- `aurcache_utils::signing::Backfiller::run` and the background job that runs
+- `aurcache_utils::signing::backfill` and the background job that runs
   it (`aurcache-scheduler/src/signing_backfill.rs`): packages published
   unsigned, or under another key, signed through `Update::resign`, and
   databases no update has signed since, through `Update::rewrite_databases`.
@@ -366,7 +366,7 @@ grace period, as they are.
 
 ### Backfill
 
-**Built** (`aurcache_utils::signing::Backfiller::run`), signing every entry
+**Built** (`aurcache_utils::signing::backfill`), signing every entry
 that does not carry the key's signature: published before signing, or under
 another key (`Repository::unsigned`). An entry counts as signed when its
 `%PGPSIG%` names the component key that signs as its issuer and the `.sig`
@@ -408,17 +408,32 @@ the plan, as every update signs them.
 The job (`aurcache-scheduler`) runs it at start, and again after 1 minute,
 doubling to an hour, while it leaves anything unsigned; each run records
 `repo.signed` and `repo.signing_incomplete` events. `/repo/info` reports
-`backfilling: true` until a run finds nothing left (`Repository::mark_signed`).
+`backfilling: true` until a run finds nothing left that a client can install
+(`Repository::mark_signed`).
 
-A listed file that can never be signed does not keep it going: one not on
-disk -- what `Finalization::finish` leaves when a staged file was lost before
-its move -- one that cannot be read as a package, one that is not the file
-its entry describes, and an entry with no `%SHA256SUM%` to tell. Signing it
-again would fail the same way, and no client could install it either. The
-backfill reports each once (a `repo.file_failed` event, action `sign`) and
-does not count it as unfinished, so it neither keeps the job retrying hourly
-nor keeps `backfilling` true and clients off `Required`. **Finding:** a
-missing file used to do both, for good, and so would a damaged one.
+A listed file can be one that can never be signed: signing it again would
+fail the same way. Every run reports each (a `repo.file_failed` event,
+action `sign`). What it does to the backfill depends on whether a client
+could install it anyway (`Unsignable::installable`):
+
+- **No client can**: one not on disk -- what `Finalization::finish` leaves
+  when a staged file was lost before its move -- or one that is not the file
+  its entry describes, by `%SHA256SUM%` (checked first, when the copy cannot
+  be read as a package, so a file overwritten with something else is told
+  as changed). It does not count as unfinished, so it neither keeps
+  `backfilling` true nor clients off `Required`, which lose nothing by it.
+  **Finding:** a missing file used to do both, for good.
+- **A client not requiring signatures can**: an entry with no `%SHA256SUM%`
+  to check a signature's file against, or a file that is the one listed but
+  that the server cannot read as a package (a compression it does not
+  support). The run is incomplete: `backfilling` stays true, and the job
+  keeps retrying at its slowest, until rebuilding the package publishes it
+  again. **Finding:** counting these as complete told clients `Required`
+  was safe, and `Required` refuses exactly these packages.
+
+The report is not deduplicated between runs: a job that retries hourly at
+worst reports each such file hourly, which an operator reading the log a
+day later sees as still there rather than as fixed.
 
 **Open question resolved:** the backfill runs automatically. Turning signing
 on already breaks untrusting clients at once (above), so holding signatures
@@ -572,8 +587,10 @@ Built:
   and leaves the packages untouched, replaces another key's signatures, does
   not give a file replaced after its copy the copy's entry, and is a no-op
   for an unsigned repository; signs databases nothing else would, once; a
-  listed file missing from disk, one that is not a package and one that is
-  not the file listed are reported once and do not keep it from completing;
+  listed file missing from disk and one that is not the file listed, as a
+  package or not, are reported at every run and do not keep it from
+  completing, while one a client can still install keeps it incomplete;
+  the database signatures are checked over the databases;
   the batch grows with the repository.
 - `aurcache-utils/tests/publish.rs`: a signing server publishes a build with
   its signature, in its entry and beside it, and a signed database; once it
