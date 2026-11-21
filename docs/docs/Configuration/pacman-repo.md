@@ -81,16 +81,29 @@ without a token too (`GET /api/repo/signing`). If it is, the stanza says
 `SigLevel = Required`, the commands to trust the key are printed with it, and
 `--install` first offers to run them: it shows the key's fingerprint and asks
 before adding the key to pacman's keyring and locally signing it (through
-`sudo` unless run as root). Answering no, or running without a terminal to ask
-on, leaves the keyring alone, prints the commands, and does not write the
-section either — pacman would refuse it, even with signatures optional, until
-the key is trusted. Run it again once the key is trusted, or pass `--siglevel`
-to write the section regardless. A section already in `pacman.conf` is left as
-it is, its `SigLevel` included: change that one yourself.
+`sudo` unless run as root). The fingerprint comes over the same connection as
+the key, so compare it with the one the server's Settings page or log shows
+before saying yes. A key pacman already trusts is added again without asking,
+which takes a new expiry or subkey into the keyring, and not signed again.
+Whether it is trusted is read from `/etc/pacman.d/gnupg`; with `GPGDir` set
+elsewhere in `pacman.conf` the key is asked about each time. Answering no, or
+running without a terminal to ask on, leaves the keyring alone, prints the
+commands, and does not write the section either — pacman would refuse it, even with
+signatures optional, until the key is trusted. Run it again once the key is
+trusted, or pass `--siglevel` to write the section regardless. A section
+already in `pacman.conf` is left as it is, its `SigLevel` included: change
+that one yourself.
 
-While the server is still signing what it published before, the stanza says
-`SigLevel = Optional TrustAll` instead, and both the printed instructions and
-`--install` say to set `SigLevel = Required` in the section once that is done.
+`--offline` asks nothing, so it cannot tell a signed repository either: it
+writes `SigLevel = Optional TrustAll` and trusts no key. Against a signed
+repository pacman refuses that section until the key is trusted by hand
+([Turning it on](#turning-it-on)).
+
+While the server has not signed everything clients can install — it is still
+signing what it published before, or some package cannot be signed until it
+is rebuilt (below) — the stanza says `SigLevel = Optional TrustAll` instead,
+and both the printed instructions and `--install` say to set `SigLevel =
+Required` in the section once that is done.
 `aurcli repo config` prints `Required` from then on, and `--install` run again
 on a section it wrote optional says to make that change.
 

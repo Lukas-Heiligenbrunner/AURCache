@@ -517,9 +517,18 @@ A signature is only as useful as the client's way of knowing the key.
   given, since pacman would refuse it even under `Optional`. `pacman-key
   --add` is given `-` for the pipe: with no argument at all, pacman-key 7.1
   refuses. It always asks `/repo/signing`, with a token or without. The
-  fingerprint comes over the same connection as the key; the prompt is what makes
-  `--lsign` a decision, and lsigning by the reported fingerprint means a
-  served key that is not that one is never trusted.
+  fingerprint comes over the same connection as the key; the prompt is what
+  makes `--lsign` a decision, so it says to compare the fingerprint with the
+  server's Settings page or log, and lsigning by the reported fingerprint
+  means a served key that is not that one is never trusted. A reported
+  fingerprint that is not 40 hex digits is refused before it reaches a
+  command run as root. A key pacman's keyring already holds with full
+  validity and not disabled (`gpg --with-colons --list-keys` on
+  `/etc/pacman.d/gnupg`, which needs no root; a `GPGDir` elsewhere is not
+  read, so such a key is only asked about again) is not asked about or
+  signed again, but is added again: pacman checks a signature against the key
+  as imported, so a new expiry or subkey reaches the keyring that way. `--offline` asks nothing: it writes `Optional
+  TrustAll` and trusts no key.
 - **The web UI** (built): a *Repository signing* section on the Settings page
   with the fingerprint, the backfill state, the commands and a link to the
   key. There is no repository page to put it on. `test-frontend.sh` runs its

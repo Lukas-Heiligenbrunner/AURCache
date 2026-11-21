@@ -178,6 +178,7 @@ async fn run_repo_config(
     if !args.install {
         return render(format, &config, repo::print_repo_config);
     }
+    let conf = repo::read_pacman_conf(&args.pacman_conf)?;
     // The key before the stanza: a pacman.conf naming a signed repository
     // whose key pacman does not trust fails every sync -- even with
     // signatures optional, since pacman checks every one it finds. So an
@@ -188,7 +189,7 @@ async fn run_repo_config(
     };
     if let (Some(repo::KeyTrust::NotTrusted), Some(key)) = (key, &config.key)
         && !explicit_siglevel
-        && !repo::is_configured(&args.pacman_conf, &config.name)?
+        && !repo::has_section(&conf, &config.name)
     {
         let commands = repo::trust_commands(key);
         bail!(
@@ -201,14 +202,10 @@ async fn run_repo_config(
             commands.lsign
         );
     }
-    let outcome = repo::install_stanza(&args.pacman_conf, &config)?;
+    let outcome = repo::install_stanza(&args.pacman_conf, &conf, &config)?;
     // What the section says now: the one written, or the one found there.
     let configured = match outcome {
-        repo::Install::AlreadyPresent => {
-            let conf = std::fs::read_to_string(&args.pacman_conf)
-                .with_context(|| format!("failed to read {}", args.pacman_conf.display()))?;
-            repo::section_siglevel(&conf, &config.name)
-        }
+        repo::Install::AlreadyPresent => repo::section_siglevel(&conf, &config.name),
         repo::Install::Appended | repo::Install::AppendedWithSudo => Some(config.siglevel.clone()),
     };
     let installed = repo::Installed {
@@ -246,16 +243,27 @@ async fn run_repo_config(
 
 /// Have pacman trust the repository's key, once the user has seen its
 /// fingerprint and said yes. The fingerprint comes over the same connection
-/// as the key, so the yes is what makes trusting it a decision: compare it
-/// with what the server's log or web UI shows.
+/// as the key, so the yes is what makes trusting it a decision: the prompt
+/// says to compare it with what the server's log or Settings page shows. A
+/// key pacman trusts already is added again without asking -- pacman checks
+/// a signature against the key as it imported it, so a new expiry or subkey
+/// reaches the keyring only that way -- and not signed again.
 async fn trust_repo_key(api_url: &str, name: &str, key: &repo::RepoKey) -> Result<repo::KeyTrust> {
+    if repo::is_trusted(key.fingerprint()) {
+        repo::add_key(&fetch_repo_key(api_url).await?)?;
+        return Ok(repo::KeyTrust::AlreadyTrusted);
+    }
     if !config::is_interactive() {
         eprintln!("Not trusting the repository's key without asking; nobody is here to ask.");
         return Ok(repo::KeyTrust::NotTrusted);
     }
     eprintln!(
         "[{name}] is signed with key {}. Trusting it lets pacman install whatever it signs.",
-        key.fingerprint
+        key.fingerprint()
+    );
+    eprintln!(
+        "That fingerprint came over the same connection as the key: before saying yes, \
+         compare it with the one on the server's Settings page or in its log."
     );
     let trust = dialoguer::Confirm::new()
         .with_prompt("Add it to pacman's keyring and trust it?")
@@ -265,13 +273,17 @@ async fn trust_repo_key(api_url: &str, name: &str, key: &repo::RepoKey) -> Resul
     if !trust {
         return Ok(repo::KeyTrust::NotTrusted);
     }
-    // Served without authentication, like the repository itself.
-    let armored = AurCacheClient::new(api_url.to_string(), None)?
+    repo::trust_key(&fetch_repo_key(api_url).await?, key.fingerprint())?;
+    Ok(repo::KeyTrust::Trusted)
+}
+
+/// The repository's key, armored, served without authentication like the
+/// repository itself.
+async fn fetch_repo_key(api_url: &str) -> Result<String> {
+    AurCacheClient::new(api_url.to_string(), None)?
         .repo_key()
         .await
-        .context("failed to fetch the repository's key")?;
-    repo::trust_key(&armored, &key.fingerprint)?;
-    Ok(repo::KeyTrust::Trusted)
+        .context("failed to fetch the repository's key")
 }
 
 fn run_completions(shell: clap_complete::Shell) {

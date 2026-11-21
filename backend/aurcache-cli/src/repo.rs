@@ -44,16 +44,46 @@ pub struct RepoConfig {
     pub key: Option<RepoKey>,
 }
 
-/// The key a signed repository is signed with, and where to get it.
+/// The key a signed repository is signed with, as the server reports it, and
+/// where to get it.
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoKey {
-    /// As `pacman-key --lsign-key` takes it.
-    pub fingerprint: String,
+    /// Its fingerprint, checked to be one ([`RepoKey::new`]), and whether
+    /// the instance has signed all it publishes yet: until it has, the
+    /// stanza keeps signatures optional.
+    #[serde(flatten)]
+    pub signing: SigningInfo,
     /// Where the armored public key is served, without authentication.
     pub url: String,
-    /// Whether the instance is still signing what it published before it
-    /// signed. Until it is done, the stanza keeps signatures optional.
-    pub backfilling: bool,
+}
+
+impl RepoKey {
+    /// The key `signing` reports, served by the API at `api_url`. Refused
+    /// unless its fingerprint is one -- 40 hex digits -- since it goes into
+    /// the commands printed and run as root.
+    pub fn new(signing: &SigningInfo, api_url: &str) -> Result<Self> {
+        if !is_fingerprint(&signing.fingerprint) {
+            bail!(
+                "the server reported {:?} as its signing key's fingerprint, which is not one",
+                signing.fingerprint
+            );
+        }
+        Ok(Self {
+            signing: signing.clone(),
+            url: aurcache_common::repo::key_url(api_url),
+        })
+    }
+
+    /// As `pacman-key --lsign-key` takes it.
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.signing.fingerprint
+    }
+}
+
+/// Whether `text` is an OpenPGP v4 fingerprint: 40 hex digits.
+fn is_fingerprint(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The `Server =` value for the repository published by the instance at
@@ -121,11 +151,9 @@ pub fn repo_config(
         (None, Some(published)) => server_url_from_public(published, api_url)?,
         (port, _) => repo_server_url(api_url, port.unwrap_or(AURCACHE_REPO_PORT))?,
     };
-    let key = signing.map(|signing| RepoKey {
-        fingerprint: signing.fingerprint.clone(),
-        url: aurcache_common::repo::key_url(api_url),
-        backfilling: signing.backfilling,
-    });
+    let key = signing
+        .map(|signing| RepoKey::new(signing, api_url))
+        .transpose()?;
     let name = name.unwrap_or_else(|| {
         published
             .map_or(DEFAULT_REPO_NAME, |info| info.name.as_str())
@@ -134,7 +162,7 @@ pub fn repo_config(
     aurcache_common::repo::validate_name(&name).map_err(anyhow::Error::msg)?;
     let siglevel = siglevel.unwrap_or_else(|| {
         match &key {
-            Some(key) if !key.backfilling => SIGNED_SIGLEVEL,
+            Some(key) if !key.signing.backfilling => SIGNED_SIGLEVEL,
             _ => DEFAULT_SIGLEVEL,
         }
         .to_string()
@@ -185,8 +213,10 @@ pub fn section_siglevel(conf: &str, name: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "advice")]
 pub enum SigLevelAdvice {
-    /// Signatures stay optional while the server signs what it published
-    /// before; `Required` is for once it is done.
+    /// Signatures stay optional while the server has not signed everything
+    /// a client can install -- what it published before, still being
+    /// signed, or a package it cannot sign until it is rebuilt; `Required`
+    /// is for once it has.
     WaitForBackfill,
     /// The server has signed everything: `Required` in place of the
     /// optional level set now.
@@ -201,7 +231,7 @@ pub fn siglevel_advice(key: &RepoKey, configured: &str) -> Option<SigLevelAdvice
     if configured != DEFAULT_SIGLEVEL {
         return None;
     }
-    Some(if key.backfilling {
+    Some(if key.signing.backfilling {
         SigLevelAdvice::WaitForBackfill
     } else {
         SigLevelAdvice::Require
@@ -211,22 +241,34 @@ pub fn siglevel_advice(key: &RepoKey, configured: &str) -> Option<SigLevelAdvice
 /// On stderr, what `advice` asks of the `[name]` section of the pacman
 /// configuration `conf` names.
 pub fn print_siglevel_advice(advice: &SigLevelAdvice, name: &str, conf: &str) {
+    eprintln!("{}", siglevel_advice_text(advice, name, conf));
+}
+
+/// What [`print_siglevel_advice`] says.
+fn siglevel_advice_text(advice: &SigLevelAdvice, name: &str, conf: &str) -> String {
     match advice {
-        SigLevelAdvice::WaitForBackfill => eprintln!(
-            "The server is still signing packages it published before, so [{name}] keeps              SigLevel = {DEFAULT_SIGLEVEL} for now. Once it is done -- `aurcli repo config`              then prints SigLevel = {SIGNED_SIGLEVEL} -- set SigLevel = {SIGNED_SIGLEVEL} in              the [{name}] section of {conf}."
+        SigLevelAdvice::WaitForBackfill => format!(
+            "The server has not signed everything it publishes yet, so [{name}] keeps \
+             SigLevel = {DEFAULT_SIGLEVEL} for now. Once it has -- `aurcli repo config` \
+             then prints SigLevel = {SIGNED_SIGLEVEL} -- set SigLevel = {SIGNED_SIGLEVEL} in \
+             the [{name}] section of {conf}."
         ),
-        SigLevelAdvice::Require => eprintln!(
-            "Everything the server publishes is signed: set SigLevel = {SIGNED_SIGLEVEL} in              the [{name}] section of {conf}, in place of {DEFAULT_SIGLEVEL}."
+        SigLevelAdvice::Require => format!(
+            "Everything the server publishes is signed: set SigLevel = {SIGNED_SIGLEVEL} in \
+             the [{name}] section of {conf}, in place of {DEFAULT_SIGLEVEL}."
         ),
     }
 }
 
-/// Whether the pacman configuration at `path` already declares `[name]`. A
-/// file that is not there declares nothing.
-pub fn is_configured(path: &Path, name: &str) -> Result<bool> {
+/// The pacman configuration at `path`, read once for everything `--install`
+/// decides. A file that is not there is an error: there is nowhere to add a
+/// section.
+pub fn read_pacman_conf(path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
-        Ok(conf) => Ok(has_section(&conf, name)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Ok(conf) => Ok(conf),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            bail!("{} does not exist; is this an Arch system?", path.display())
+        }
         Err(e) => {
             Err(anyhow::Error::new(e)).with_context(|| format!("failed to read {}", path.display()))
         }
@@ -251,29 +293,19 @@ pub fn append_stanza(conf: &str, block: &str) -> String {
     out
 }
 
-/// Write the stanza into `path`, elevating only if we have to.
+/// Write the stanza into `path`, whose content is `existing`
+/// ([`read_pacman_conf`]), elevating only if we have to.
 ///
 /// Tries the unprivileged write first: running as root, or against a file the
 /// user owns, then never prompts for a password. Only a `PermissionDenied`
 /// falls back to `sudo`, which prompts on the terminal — a process cannot raise
 /// its own privileges, but it can hand the work to one that has them.
-pub fn install_stanza(path: &Path, config: &RepoConfig) -> Result<Install> {
-    let existing = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            bail!("{} does not exist; is this an Arch system?", path.display())
-        }
-        Err(e) => {
-            return Err(anyhow::Error::new(e))
-                .with_context(|| format!("failed to read {}", path.display()));
-        }
-    };
-
-    if has_section(&existing, &config.name) {
+pub fn install_stanza(path: &Path, existing: &str, config: &RepoConfig) -> Result<Install> {
+    if has_section(existing, &config.name) {
         return Ok(Install::AlreadyPresent);
     }
 
-    let updated = append_stanza(&existing, &config.block);
+    let updated = append_stanza(existing, &config.block);
     match fs::write(path, &updated) {
         Ok(()) => Ok(Install::Appended),
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {
@@ -372,7 +404,7 @@ pub fn print_repo_config(config: &RepoConfig) {
 pub fn print_trust_instructions(key: &RepoKey) {
     eprintln!(
         "The repository is signed with key {}. pacman checks every signature it finds,",
-        key.fingerprint
+        key.fingerprint()
     );
     eprintln!("so trust that key first:");
     for command in trust_commands(key).iter() {
@@ -383,17 +415,67 @@ pub fn print_trust_instructions(key: &RepoKey) {
 /// The commands that make pacman trust `key`, as one would type them.
 #[must_use]
 pub fn trust_commands(key: &RepoKey) -> KeyTrustCommands {
-    KeyTrustCommands::new(&key.url, &key.fingerprint)
+    KeyTrustCommands::new(&key.url, key.fingerprint())
 }
 
 /// What `--install` did about the repository's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyTrust {
+    /// pacman's keyring trusted it already: added again without asking, so
+    /// the keyring takes a new expiry or subkey, and not signed again.
+    AlreadyTrusted,
     /// Added to pacman's keyring and locally signed.
     Trusted,
     /// Left alone: declined at the prompt, or there was no one to ask.
     NotTrusted,
+}
+
+/// Where pacman keeps its keyring by default. A `GPGDir` set in
+/// `pacman.conf` is not read: a key trusted only in a keyring elsewhere reads
+/// as untrusted here, which only means it is asked about, and `pacman-key`
+/// then adds and signs it where `pacman.conf` says.
+const PACMAN_KEYRING: &str = "/etc/pacman.d/gnupg";
+
+/// Whether pacman's keyring already trusts the key `fingerprint`: holds it
+/// with full or ultimate validity, as `pacman-key --lsign-key` leaves it,
+/// and not disabled.
+///
+/// Asked of `gpg` directly, which reads the keyring without root. Anything
+/// that goes wrong reads as not trusted, which only means asking.
+#[must_use]
+pub fn is_trusted(fingerprint: &str) -> bool {
+    if !is_fingerprint(fingerprint) {
+        return false;
+    }
+    Command::new("gpg")
+        .args([
+            "--homedir",
+            PACMAN_KEYRING,
+            "--no-permission-warning",
+            "--batch",
+        ])
+        .args(["--with-colons", "--list-keys", fingerprint])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && listed_as_trusted(&String::from_utf8_lossy(&output.stdout))
+        })
+}
+
+/// Whether `listing`, `gpg --with-colons --list-keys` of one key, gives it
+/// full (`f`) or ultimate (`u`) validity and does not list it as disabled
+/// (`D` among its capabilities, the twelfth field).
+fn listed_as_trusted(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        fields.first() == Some(&"pub")
+            && matches!(fields.get(1), Some(&("f" | "u")))
+            && !fields
+                .get(11)
+                .is_some_and(|capabilities| capabilities.contains('D'))
+    })
 }
 
 /// Add `armored` -- the key the server served -- to pacman's keyring, and
@@ -401,8 +483,28 @@ pub enum KeyTrust {
 /// unless already root.
 ///
 /// The signing is by the fingerprint the server reported, so a served key
-/// that is not that one is added but never trusted, and this fails.
+/// that is not that one is added but never trusted, and this fails. A
+/// fingerprint that is not 40 hex digits is refused before anything runs.
 pub fn trust_key(armored: &str, fingerprint: &str) -> Result<()> {
+    if !is_fingerprint(fingerprint) {
+        bail!("{fingerprint:?} is not a key fingerprint");
+    }
+    add_key(armored)?;
+    let signed = pacman_key()
+        .args(["--lsign-key", fingerprint])
+        .status()
+        .map_err(spawn_error)?;
+    if !signed.success() {
+        bail!("pacman-key --lsign-key {fingerprint} failed; is that the key the server served?");
+    }
+    Ok(())
+}
+
+/// Add `armored` to pacman's keyring with `pacman-key --add`, through `sudo`
+/// unless already root, trusting nothing: a key the keyring holds already
+/// takes whatever the copy adds, a new expiry or subkey, which only the
+/// key's own signatures can make.
+pub fn add_key(armored: &str) -> Result<()> {
     // `-` for the pipe: `pacman-key --add` with no file refuses outright.
     let mut add = pacman_key()
         .args(["--add", "-"])
@@ -416,13 +518,6 @@ pub fn trust_key(armored: &str, fingerprint: &str) -> Result<()> {
         .context("failed to send the key to pacman-key")?;
     if !add.wait().context("waiting for pacman-key")?.success() {
         bail!("pacman-key --add did not add the repository's key");
-    }
-    let signed = pacman_key()
-        .args(["--lsign-key", fingerprint])
-        .status()
-        .map_err(spawn_error)?;
-    if !signed.success() {
-        bail!("pacman-key --lsign-key {fingerprint} failed; is that the key the server served?");
     }
     Ok(())
 }
@@ -457,9 +552,10 @@ fn spawn_error(error: std::io::Error) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_REPO_NAME, DEFAULT_SIGLEVEL, Install, SIGNED_SIGLEVEL, SigLevelAdvice,
-        append_stanza, has_section, install_stanza, is_configured, repo_config, repo_server_url,
-        section_siglevel, siglevel_advice, trust_commands,
+        DEFAULT_REPO_NAME, DEFAULT_SIGLEVEL, Install, RepoKey, SIGNED_SIGLEVEL, SigLevelAdvice,
+        append_stanza, has_section, install_stanza, is_fingerprint, listed_as_trusted,
+        read_pacman_conf, repo_config, repo_server_url, section_siglevel, siglevel_advice,
+        siglevel_advice_text, trust_commands, trust_key,
     };
     use aurcache_common::api::repo::{RepoInfo, SigningInfo};
 
@@ -631,7 +727,11 @@ mod tests {
 
         let config =
             repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
-        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
+        let existing = read_pacman_conf(&path).unwrap();
+        assert_eq!(
+            install_stanza(&path, &existing, &config).unwrap(),
+            Install::Appended
+        );
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("[repo]"), "{written}");
         assert!(
@@ -649,11 +749,15 @@ mod tests {
 
         let config =
             repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
-        assert_eq!(install_stanza(&path, &config).unwrap(), Install::Appended);
-        let once = std::fs::read_to_string(&path).unwrap();
+        let existing = read_pacman_conf(&path).unwrap();
+        assert_eq!(
+            install_stanza(&path, &existing, &config).unwrap(),
+            Install::Appended
+        );
+        let once = read_pacman_conf(&path).unwrap();
 
         assert_eq!(
-            install_stanza(&path, &config).unwrap(),
+            install_stanza(&path, &once, &config).unwrap(),
             Install::AlreadyPresent
         );
         assert_eq!(once, std::fs::read_to_string(&path).unwrap());
@@ -766,9 +870,7 @@ mod tests {
     #[test]
     fn a_missing_pacman_conf_is_a_clear_error() {
         let dir = tempfile::tempdir().unwrap();
-        let config =
-            repo_config("http://localhost:8080/api", None, None, None, None, None).unwrap();
-        let err = install_stanza(&dir.path().join("nope.conf"), &config).unwrap_err();
+        let err = read_pacman_conf(&dir.path().join("nope.conf")).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err}");
     }
 
@@ -780,7 +882,10 @@ mod tests {
         let signed = repo_config(api, None, None, None, None, Some(&signing(false))).unwrap();
         assert_eq!(signed.siglevel, SIGNED_SIGLEVEL);
         let key = signed.key.unwrap();
-        assert_eq!(key.fingerprint, "0123456789ABCDEF0123456789ABCDEF01234567");
+        assert_eq!(
+            key.fingerprint(),
+            "0123456789ABCDEF0123456789ABCDEF01234567"
+        );
         assert_eq!(key.url, "http://192.168.1.5:8080/api/repo/key");
 
         let unsigned =
@@ -804,7 +909,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.siglevel, DEFAULT_SIGLEVEL);
-        assert!(config.key.unwrap().backfilling);
+        assert!(config.key.unwrap().signing.backfilling);
     }
 
     #[test]
@@ -843,16 +948,59 @@ mod tests {
         );
     }
 
-    /// What decides whether `--install` may write a stanza naming a key
-    /// pacman does not trust: a section that is already there is not written.
+    /// A fingerprint the server reports goes into commands run as root, so
+    /// anything but 40 hex digits is refused before it gets there.
     #[test]
-    fn a_configured_section_is_seen_and_a_missing_file_declares_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pacman.conf");
-        assert!(!is_configured(&path, "repo").unwrap());
-        std::fs::write(&path, "[options]\n\n[repo]\nServer = x\n").unwrap();
-        assert!(is_configured(&path, "repo").unwrap());
-        assert!(!is_configured(&path, "other").unwrap());
+    fn only_a_fingerprint_is_taken_for_one() {
+        assert!(is_fingerprint("0123456789ABCDEF0123456789ABCDEF01234567"));
+        assert!(is_fingerprint("0123456789abcdef0123456789abcdef01234567"));
+        for not in [
+            "",
+            "0123456789ABCDEF0123456789ABCDEF0123456",
+            "0123456789ABCDEF0123456789ABCDEF012345678",
+            "0123456789ABCDEF0123456789ABCDEF0123456G",
+            "--homedir=/tmp/x 0123456789ABCDEF01234567",
+            "0123456789ABCDEF0123456789ABCDEF0123456 ",
+        ] {
+            assert!(!is_fingerprint(not), "{not:?}");
+            let reported = SigningInfo {
+                fingerprint: not.to_string(),
+                backfilling: false,
+            };
+            assert!(RepoKey::new(&reported, "http://localhost:8080/api").is_err());
+            assert!(trust_key("", not).is_err());
+        }
+    }
+
+    /// The advice is one sentence per line on a terminal: no run of spaces
+    /// left from wrapping its source.
+    #[test]
+    fn the_siglevel_advice_reads_as_prose() {
+        for advice in [SigLevelAdvice::WaitForBackfill, SigLevelAdvice::Require] {
+            let text = siglevel_advice_text(&advice, "repo", "/etc/pacman.conf");
+            assert!(!text.contains("  "), "{text:?}");
+            assert!(text.contains("SigLevel = Required"), "{text:?}");
+        }
+    }
+
+    /// A key gpg lists with full or ultimate validity is trusted; one it
+    /// lists otherwise, or disabled, or not at all, is not.
+    #[test]
+    fn a_key_is_trusted_by_its_validity() {
+        let listing = |validity: &str, capabilities: &str| {
+            format!(
+                "tru::1:1793064215:1798709647:3:1:5\n\
+                 pub:{validity}:255:22:0123456789ABCDEF:1700000000:::-:::{capabilities}::::::23::0:\n\
+                 fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n"
+            )
+        };
+        assert!(listed_as_trusted(&listing("f", "scSC")));
+        assert!(listed_as_trusted(&listing("u", "scSC")));
+        for validity in ["-", "q", "m", "e", "r", "n"] {
+            assert!(!listed_as_trusted(&listing(validity, "scSC")), "{validity}");
+        }
+        assert!(!listed_as_trusted(&listing("f", "scSCD")));
+        assert!(!listed_as_trusted(""));
     }
 
     /// The `SigLevel` of one section, not of the one before or after it, and
