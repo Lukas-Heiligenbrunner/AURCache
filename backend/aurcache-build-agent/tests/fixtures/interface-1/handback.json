@@ -1,0 +1,33 @@
+[
+  {
+    "interface": 1,
+    "report": {
+      "interface": 1,
+      "ended": {
+        "how": "exited",
+        "code": 0
+      },
+      "peak_memory_bytes": 121000000,
+      "oom_kills": 0,
+      "disk_bytes": 52428800,
+      "vcs_commits": {
+        "git+https://example.test/repo.git#branch=main": "6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f"
+      }
+    },
+    "artifacts": [
+      {
+        "name": "hello-1.0-1-x86_64.pkg.tar.zst",
+        "size": 4096
+      },
+      {
+        "name": "hello-docs-1.0-1-any.pkg.tar.zst",
+        "size": 0
+      }
+    ]
+  },
+  {
+    "interface": 1,
+    "report": null,
+    "artifacts": []
+  }
+]

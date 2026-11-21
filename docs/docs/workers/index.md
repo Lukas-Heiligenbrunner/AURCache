@@ -13,6 +13,7 @@ on another machine, or on another architecture.
 |---|---|---|
 | [Split chroot worker](./split-chroot.md) | Each package in its own `devtools` chroot | Supported |
 | [Docker worker](./docker.md) | Each package in a container from a builder image | Supported |
+| [Kubernetes worker](./kubernetes.md) | Each package in its own pod | Supported |
 | [Demo worker](./demo.md) | Completes every job with synthetic packages | Demo instance only |
 | [Hybrid image](./hybrid.md) | Server *and* a Docker worker in one container | Compatibility image for single-container compose files |
 

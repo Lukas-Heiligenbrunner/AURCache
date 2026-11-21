@@ -18,6 +18,7 @@ members = [
     "aurcache-worker-core",
     "aurcache-worker-demo",
     "aurcache-worker-docker",
+    "aurcache-worker-kube",
     "aurcache-worker-container",
     "aurcache-build-agent",
     "aurcache-sandbox",

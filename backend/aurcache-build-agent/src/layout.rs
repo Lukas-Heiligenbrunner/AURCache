@@ -23,6 +23,8 @@ pub const INPUT_SOURCE: &str = "source.tar.gz";
 pub const PKG_DIR: &str = "pkg";
 pub const OUT_DIR: &str = "out";
 pub const REPORT_FILE: &str = "report.json";
+pub const LOG_DIR: &str = "log";
+pub const LOG_FILE: &str = "build.log";
 /// The variable makepkg's environment carries the helper's socket in.
 pub const PACMAN_SOCKET_VAR: &str = "AURCACHE_PACMAN_SOCKET";
 
@@ -58,6 +60,13 @@ impl Work {
         self.input().join(INPUT_SOURCE)
     }
 
+    /// `<root>/in/ready`: present once both inputs are complete, holding
+    /// the id of the process that received them.
+    #[must_use]
+    pub fn ready(&self) -> PathBuf {
+        self.input().join("ready")
+    }
+
     /// `<root>/pkg`: makepkg's `PKGDEST`, what the worker collects.
     #[must_use]
     pub fn pkg(&self) -> PathBuf {
@@ -67,7 +76,7 @@ impl Work {
     /// `<root>/log/build.log`.
     #[must_use]
     pub fn log(&self) -> PathBuf {
-        self.0.join("log").join("build.log")
+        self.0.join(LOG_DIR).join(LOG_FILE)
     }
 
     /// `<root>/out`: root's, until the build is over.
@@ -174,6 +183,7 @@ mod tests {
         assert_eq!(work.input(), Path::new("/work/in"));
         assert_eq!(work.spec(), Path::new("/work/in/spec.json"));
         assert_eq!(work.source(), Path::new("/work/in/source.tar.gz"));
+        assert_eq!(work.ready(), Path::new("/work/in/ready"));
         assert_eq!(work.pkg(), Path::new("/work/pkg"));
         assert_eq!(work.log(), Path::new("/work/log/build.log"));
         assert_eq!(work.out(), Path::new("/work/out"));
