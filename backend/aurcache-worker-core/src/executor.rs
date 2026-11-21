@@ -41,6 +41,17 @@ impl ClaimedJob {
     }
 }
 
+/// Which of the architectures a worker is configured for its executor takes
+/// builds for now ([`Executor::serving`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Serving {
+    /// Every one of them.
+    All,
+    /// These, and no others. Never empty: an executor that takes builds for
+    /// none says [`Serving::All`] and holds claims back.
+    Only(Vec<String>),
+}
+
 /// Builds one claimed job to completion.
 pub trait Executor: Send + Sync + 'static {
     /// Stable identifier for this build strategy, reported at registration so
@@ -88,6 +99,29 @@ pub trait Executor: Send + Sync + 'static {
     fn ready_for_work(&self, claimed: usize) -> impl Future<Output = bool> + Send {
         let _ = claimed;
         async { true }
+    }
+
+    /// The architectures, of those the worker is configured for (`arches`),
+    /// that this executor takes builds for right now.
+    ///
+    /// All of them, unless an executor says otherwise. A claim cannot name
+    /// an architecture, so an executor that for a while cannot start builds
+    /// for one of several says so here: the worker registers again without
+    /// it, and the server offers it none of that architecture until this
+    /// names it again. An executor with nothing it can build answers
+    /// [`Serving::All`] and holds claims back through
+    /// [`Self::ready_for_work`] instead.
+    ///
+    /// Asked at every heartbeat, so it should be cheap.
+    fn serving(&self, arches: &[String]) -> Serving {
+        let _ = arches;
+        Serving::All
+    }
+
+    /// Told each time the server has accepted a registration made after
+    /// enrollment, with the architectures it carried.
+    fn registered(&self, arches: &[String]) {
+        let _ = arches;
     }
 
     /// One-line summary of the executor, logged when the worker comes online,

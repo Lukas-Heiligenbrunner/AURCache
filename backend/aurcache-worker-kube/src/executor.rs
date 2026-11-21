@@ -30,7 +30,7 @@ use aurcache_worker_container::ssh::link::Served;
 use aurcache_worker_container::ssh::{self, Credential, CredentialFiles};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
-use aurcache_worker_core::executor::{ClaimedJob, Executor};
+use aurcache_worker_core::executor::{ClaimedJob, Executor, Serving};
 use aurcache_worker_core::live::Live;
 use aurcache_worker_core::protocol::{self, PackagesRefused, Stop, StopWatch};
 use aurcache_worker_core::report;
@@ -39,7 +39,7 @@ use aurcache_worker_core::ssh_key;
 use futures::FutureExt;
 use futures::future::{BoxFuture, Fuse, FusedFuture};
 use k8s_openapi::api::core::v1::Pod;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -93,11 +93,42 @@ pub struct KubeExecutor<C: Cluster> {
     /// The builds that deleted their own pod on their way out, while the
     /// watch may still show it as it was: that pod is not left for `reap`.
     deleted: Mutex<HashSet<i32>>,
+    /// The architectures no node takes a pod for at the moment.
+    withheld: Mutex<Withheld>,
+}
+
+/// The architectures builds are not taken for: each has, or lately had, a
+/// pod no node would take.
+///
+/// A claim cannot name an architecture. So that one without nodes does not
+/// hold back the builds of another, the worker registers without it for as
+/// long as it is here ([`Executor::serving`]), and a pod waiting for a node
+/// holds claims back only while the server still offers its architecture.
+#[derive(Default)]
+struct Withheld {
+    /// Until when each is withheld: one schedule timeout past the last time
+    /// a pod of it was seen without a node.
+    until: HashMap<String, Instant>,
+    /// What the server holds registered, from the first registration made
+    /// after enrollment; `None` until then, when it holds every
+    /// architecture.
+    registered: Option<HashSet<String>>,
+}
+
+impl Withheld {
+    /// Whether the server may still hand out a build for `arch`.
+    fn offered(&self, arch: &str) -> bool {
+        self.registered
+            .as_ref()
+            .is_none_or(|registered| registered.contains(arch))
+    }
 }
 
 /// A pod of this dispatcher's that no node takes.
 struct Waiting {
     pod: String,
+    /// `None` for a pod that is no build's.
+    arch: Option<String>,
     message: String,
 }
 
@@ -225,18 +256,54 @@ impl<C: Cluster> KubeExecutor<C> {
             readiness: Mutex::new(Readiness::Ready),
             held: Mutex::new(HashSet::new()),
             deleted: Mutex::new(HashSet::new()),
+            withheld: Mutex::new(Withheld::default()),
         }
     }
 
-    /// A pod of this dispatcher's that no node takes, if there is one.
-    fn waiting(&self) -> Option<Waiting> {
-        self.cluster.pods().into_iter().find_map(|pod| {
-            let message = outcome::unschedulable(&pod)?;
-            Some(Waiting {
-                pod: pod.metadata.name.clone().unwrap_or_default(),
-                message,
+    /// The pods of this dispatcher that no node takes.
+    fn waiting(&self) -> Vec<Waiting> {
+        self.cluster
+            .pods()
+            .into_iter()
+            .filter_map(|pod| {
+                let message = outcome::unschedulable(&pod)?;
+                Some(Waiting {
+                    pod: pod.metadata.name.clone().unwrap_or_default(),
+                    arch: pod::arch(&pod).map(str::to_string),
+                    message,
+                })
             })
-        })
+            .collect()
+    }
+
+    /// Withhold the architectures of the `waiting` pods for `patience` from
+    /// now, and offer again those whose time has passed.
+    fn withhold(&self, waiting: &[Waiting], patience: Duration) {
+        let now = Instant::now();
+        let mut withheld = lock(&self.withheld);
+        for found in waiting {
+            let Some(arch) = &found.arch else { continue };
+            if withheld
+                .until
+                .insert(arch.clone(), now + patience)
+                .is_none()
+            {
+                tracing::warn!(
+                    "No node takes pod {} ({}); taking no builds for {arch} until {}s pass \
+                     without a pod of it waiting for a node",
+                    found.pod,
+                    found.message,
+                    patience.as_secs()
+                );
+            }
+        }
+        withheld.until.retain(|arch, until| {
+            let keep = *until > now;
+            if !keep {
+                tracing::info!("Taking builds for {arch} again");
+            }
+            keep
+        });
     }
 
     /// Delete every build pod in the builds' namespace, whichever dispatcher
@@ -673,10 +740,21 @@ impl<C: Cluster> KubeExecutor<C> {
                 message: format!("{error:#}"),
             };
         }
-        // A pod without a node holds claims back: a claim cannot name an
-        // architecture, and the next build would wait for a node too. One
-        // architecture per dispatcher keeps that true.
-        if let Some(found) = self.waiting() {
+        // A pod without a node holds claims back for as long as the server
+        // may hand out another build of its architecture: once the worker
+        // is registered without it, the other architectures go on.
+        let waiting = self.waiting();
+        self.withhold(&waiting, cfg.tunables.schedule_timeout);
+        let holding = {
+            let withheld = lock(&self.withheld);
+            waiting.into_iter().find(|found| {
+                found
+                    .arch
+                    .as_deref()
+                    .is_none_or(|arch| withheld.offered(arch))
+            })
+        };
+        if let Some(found) = holding {
             return Readiness::Unschedulable {
                 pod: found.pod,
                 message: found.message,
@@ -824,6 +902,28 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
         let found = self.readiness(&cfg).await;
         self.note(&found);
         found == Readiness::Ready
+    }
+
+    /// Every architecture but those no node takes a pod for. With none
+    /// left, all of them: the waiting pods then hold claims back themselves.
+    fn serving(&self, arches: &[String]) -> Serving {
+        let cfg = self.cfg.current();
+        self.withhold(&self.waiting(), cfg.tunables.schedule_timeout);
+        let withheld = lock(&self.withheld);
+        let only: Vec<String> = arches
+            .iter()
+            .filter(|arch| !withheld.until.contains_key(*arch))
+            .cloned()
+            .collect();
+        if only.is_empty() || only.len() == arches.len() {
+            Serving::All
+        } else {
+            Serving::Only(only)
+        }
+    }
+
+    fn registered(&self, arches: &[String]) {
+        lock(&self.withheld).registered = Some(arches.iter().cloned().collect());
     }
 
     fn describe_self(&self) -> String {

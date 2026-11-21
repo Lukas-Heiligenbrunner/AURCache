@@ -90,6 +90,13 @@ pub fn build_id(pod: &Pod) -> Option<i32> {
     pod.metadata.labels.as_ref()?.get(LABEL_BUILD)?.parse().ok()
 }
 
+/// The architecture a pod of this worker's builds for, as the job named it;
+/// `None` for a pod that is no build's.
+#[must_use]
+pub fn arch(pod: &Pod) -> Option<&str> {
+    Some(pod.metadata.labels.as_ref()?.get(LABEL_ARCH)?.as_str())
+}
+
 fn quantity(text: impl Into<String>) -> Quantity {
     Quantity(text.into())
 }

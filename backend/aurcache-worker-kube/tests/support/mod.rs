@@ -502,6 +502,20 @@ impl FakeCluster {
         self.shared.state().pods.contains_key(name)
     }
 
+    /// Put a pod in the cluster that builds for `arch`.
+    pub fn leave_for(&self, name: &str, arch: &str, status: PodStatus) {
+        self.leave(name, status);
+        let mut state = self.shared.state();
+        let pod = state.pods.get_mut(name).unwrap();
+        let mut labelled = (**pod).clone();
+        labelled.metadata.labels = Some(
+            [("aurcache.io/arch".to_string(), arch.to_string())]
+                .into_iter()
+                .collect(),
+        );
+        *pod = Arc::new(labelled);
+    }
+
     /// Put a pod in the cluster as if an earlier run had left it.
     pub fn leave(&self, name: &str, status: PodStatus) {
         let mut pod = Pod::default();
