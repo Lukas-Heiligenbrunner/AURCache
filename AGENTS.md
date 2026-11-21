@@ -81,6 +81,14 @@ cd docs && yarn install --frozen-lockfile && yarn build
 # container's flags (docker, ~3 min; needs python3, git and OpenSSH)
 ./scripts/test-build-agent.sh
 
+# the Kubernetes worker in a throwaway kind cluster (kind, kubectl, docker,
+# jq, curl, cargo, python3, ssh-keygen and pkill; ~20 min and ~10 GB, so
+# point TMPDIR or E2E_SCRATCH at a disk with room)
+./tests/e2e/topologies/kube/run.sh hello
+E2E_BIG=0 ./tests/e2e/topologies/kube/run.sh      # without the 2 GiB package
+KEEP=1 ./tests/e2e/topologies/kube/run.sh         # leave the cluster up, then:
+REUSE=1 E2E_LEGS="cancel stop" ./tests/e2e/topologies/kube/run.sh   # rerun some legs against it
+
 # build the Arch packages from this tree (and optionally install them)
 ./scripts/build-packages.sh --install
 ./scripts/build-packages.sh --packages aurcache-server
@@ -113,6 +121,19 @@ they cover, rather than running all of them as a matter of course:
   host's Docker socket: for changes to how the builder shares its build
   directory with a daemon outside the container. `E2E_BUILD_DIR` names that
   directory, which is under `/tmp` otherwise.
+- `tests/e2e/topologies/kube/run.sh`, the kind suite — for changes to
+  `aurcache-worker-kube`, the manifests in
+  `kubernetes/kube-worker/`, the kube-worker image, or the agent's transfer
+  subcommands. It builds the server and worker images, starts a kind cluster
+  from the shipped manifests, and builds in real pods: enrollment, the
+  NetworkPolicy, a quota, the repository, a source over the SSH link,
+  cancel, a crash, a stop, a pod that cannot start, a 2 GiB relay. Build pods
+  in user namespaces are not covered where it runs in kind, CI included: a
+  kind node cannot start one, and the leg is skipped. The executor's
+  lifecycle against a fake cluster is in `cargo test`
+  (`aurcache-worker-kube/tests/`), so most changes there need no cluster; the
+  `#[ignore]`d tests in `kube_cluster.rs` and `tests/live.rs` run against one
+  with `AURCACHE_KUBE_TESTS=1`.
 - `test-sandbox.sh` — only for changes to `aurcache-sandbox`, the PKGBUILD
   sourcing path, or how the patched makechrootpkg upgrades a build's system.
 - `test-kernel.sh` — for changes to `aurcache-chroot`, the worker's pool or
@@ -123,10 +144,11 @@ they cover, rather than running all of them as a matter of course:
 
 CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
 `test-kernel.sh`, `test-sandbox.sh` and `test-build-agent.sh` on every push;
-`test-e2e.sh` runs nightly instead, and only when something landed that day.
-The nightly cannot cover a pool on a block device or zvol, or an image on ZFS;
-the runner has neither. Add the `run-e2e` label to a pull request to run the
-e2e suite there on demand. Neither hybrid suite runs in CI.
+`test-e2e.sh` and the kind suite run nightly instead, and only when
+something landed that day. The nightly cannot cover a pool on a block device or
+zvol, or an image on ZFS; the runner has neither. Add the `run-e2e` label to a
+pull request to run the e2e suite there on demand, and `run-e2e-kube` for the
+Kubernetes one. Neither hybrid suite runs in CI.
 
 Unit and integration tests are cheap (backend ~8s, frontend <1s) and should be
 the reflex. They render components directly, though, so they cannot see whether

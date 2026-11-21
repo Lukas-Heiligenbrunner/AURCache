@@ -1,0 +1,18 @@
+# A build that runs until it is stopped: for cancelling a build, and for
+# restarting the worker under one.
+pkgname=kube-e2e-slow
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a build that waits to be stopped"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+
+build() {
+  echo "kube-e2e-slow: sleeping"
+  sleep 3600
+}
+
+package() {
+  install -d "${pkgdir}/usr/share/kube-e2e-slow"
+}

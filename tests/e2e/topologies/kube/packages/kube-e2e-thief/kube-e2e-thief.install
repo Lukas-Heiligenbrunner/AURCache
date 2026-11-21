@@ -1,0 +1,57 @@
+# Print every place that holds `$1`: each file but this script's own report
+# in `$2`, and every process's environment, which grep -I skips: it is
+# NUL-separated.
+_hunt() {
+  grep -rlsIF -e "$1" /etc /root /var /tmp /work /aurcache /home /srv /run /opt /mnt \
+    2>/dev/null | grep -v "^$2/" || true
+  local environ
+  for environ in /proc/[0-9]*/environ; do
+    if tr '\0' '\n' 2>/dev/null <"$environ" | grep -qF -e "$1"; then
+      echo "$environ"
+    fi
+  done
+}
+
+# Wait, for a few seconds at most, until process `$1` has `$2` in its
+# environment: until then it is the shell that started it, without it.
+_started() {
+  for _ in $(seq 50); do
+    tr '\0' '\n' 2>/dev/null <"/proc/$1/environ" | grep -qxF -e "$2" && return
+    sleep 0.1
+  done
+}
+
+post_install() {
+  local out=/var/tmp/kube-e2e-thief socket
+  mkdir -p "$out"
+  echo yes >"$out/ran"
+  # The armour line, and a canary to find where the key is looked for, put
+  # together here so that this file holds neither.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  local canary="kube-e2e-thief-""canary-8c0d5a27"
+  # The canary, in a file and in a process's environment: a hunt that does
+  # not find it there finds nothing anywhere.
+  echo "$canary" >"$out.canary"
+  KUBE_E2E_CANARY=$canary sleep 300 >/dev/null 2>&1 &
+  local holder=$!
+  _started "$holder" "KUBE_E2E_CANARY=$canary"
+  _hunt "$armour" "$out" >"$out/keys"
+  _hunt "$canary" "$out" >"$out/canary"
+  kill "$holder" 2>/dev/null || true
+  # Every socket that answers as an agent, asked for an SSHSIG: a signature
+  # that is no login, which ssh-agent makes like any other.
+  : >"$out/agents"
+  : >"$out/sshsig"
+  for socket in $(find / \( -path /proc -o -path /sys \) -prune -o -type s -print 2>/dev/null); do
+    SSH_AUTH_SOCK=$socket timeout 5 ssh-add -L >"$out/pub" 2>/dev/null || continue
+    grep -q '^ssh-' "$out/pub" || continue
+    echo "$socket" >>"$out/agents"
+    if echo payload | SSH_AUTH_SOCK=$socket timeout 10 \
+      ssh-keygen -Y sign -f "$out/pub" -n file >/dev/null 2>&1; then
+      echo signed >>"$out/sshsig"
+    else
+      echo refused >>"$out/sshsig"
+    fi
+  done
+  chmod -R a+rX "$out"
+}

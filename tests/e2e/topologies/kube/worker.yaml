@@ -1,0 +1,29 @@
+# What the test changes on the shipped worker: the dispatcher's own crates log
+# at debug; every image is taken from the node when it is there, which is
+# where the test loads them; and the pod template of the stuck leg is
+# mounted, from a ConfigMap that is only there while that leg runs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurcache-kube-worker
+  namespace: aurcache
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info,aurcache_worker_kube=debug,aurcache_worker_core=debug
+            - name: WORKER_KUBE_IMAGE_PULL_POLICY
+              value: IfNotPresent
+          volumeMounts:
+            - name: stuck-template
+              mountPath: /etc/kube-e2e-stuck
+              readOnly: true
+      volumes:
+        - name: stuck-template
+          configMap:
+            name: kube-e2e-stuck-template
+            optional: true

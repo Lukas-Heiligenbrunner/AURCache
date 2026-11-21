@@ -1,0 +1,80 @@
+# The Kubernetes suite's SSH key check: a source fetched over git+ssh with
+# the dispatcher's key, the same server reached again from build(), and a
+# build dependency (kube-e2e-thief, from AURCache's repository) whose root
+# install script hunts for that key in the build pod. build() hunts too, and
+# says what both found, and that each hunt found the canary it planted.
+pkgname=kube-e2e-ssh
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Kubernetes worker test: a private source, and a dependency that hunts for its key"
+arch=('x86_64' 'aarch64' 'armv7h')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('git' 'kube-e2e-thief')
+source=('payload::git+ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git')
+sha256sums=('SKIP')
+
+_thief=/var/tmp/kube-e2e-thief
+
+# Print every place that holds `$1`: each file but the thief's own report,
+# and each environment this build may read, which is NUL-separated and so a
+# binary file to grep -I.
+_hunt() {
+  grep -rlsIF -e "$1" /etc /var /tmp /work /aurcache /home /run 2>/dev/null \
+    | grep -v "^$_thief/" || true
+  local environ
+  for environ in /proc/[0-9]*/environ; do
+    if tr '\0' '\n' 2>/dev/null <"$environ" | grep -qF -e "$1"; then
+      echo "$environ"
+    fi
+  done
+}
+
+# Wait, for a few seconds at most, until process `$1` has `$2` in its
+# environment: until then it is the shell that started it, without it.
+_started() {
+  for _ in $(seq 50); do
+    tr '\0' '\n' 2>/dev/null <"/proc/$1/environ" | grep -qxF -e "$2" && return
+    sleep 0.1
+  done
+}
+
+build() {
+  local reached=failed sshsig=refused
+  # The armour line, and a canary to find where the key is looked for, put
+  # together here so that this file holds neither.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  local canary="kube-e2e-ssh-""canary-3b9e61d4"
+  echo "kube-e2e-ssh: payload $(cat "$srcdir/payload/marker.txt")"
+  # A fetch from a function, which no source list shows.
+  if git ls-remote ssh://git@kube-e2e-gitssh.kube-e2e.svc/srv/git/payload.git >/dev/null 2>&1; then
+    reached=reached
+  fi
+  ssh-add -L >"$srcdir/agent.pub" 2>/dev/null
+  if echo payload | ssh-keygen -Y sign -f "$srcdir/agent.pub" -n file >/dev/null 2>&1; then
+    sshsig=signed
+  fi
+  # The canary, in a file and in a process's environment: a hunt that does
+  # not find it there finds nothing anywhere.
+  echo "$canary" >"$srcdir/canary"
+  KUBE_E2E_CANARY=$canary sleep 300 >/dev/null 2>&1 &
+  local holder=$! keys found
+  _started "$holder" "KUBE_E2E_CANARY=$canary"
+  keys=$(_hunt "$armour" | wc -l)
+  found=$(_hunt "$canary")
+  kill "$holder" 2>/dev/null || true
+  echo "kube-e2e-ssh: build ssh=$reached keys=$keys" \
+    "canary-files=$(grep -cv -e '^/proc/' -e '^$' <<<"$found" || true)" \
+    "canary-environs=$(grep -c '^/proc/' <<<"$found" || true)" \
+    "sshsig=$sshsig"
+  echo "kube-e2e-ssh: thief ran=$(cat "$_thief/ran" 2>/dev/null || echo no)" \
+    "keys=$(wc -l <"$_thief/keys")" \
+    "canary-files=$(grep -cv -e '^/proc/' -e '^$' "$_thief/canary" || true)" \
+    "canary-environs=$(grep -c '^/proc/' "$_thief/canary" || true)" \
+    "agents=$(wc -l <"$_thief/agents")" \
+    "sshsig=$(sort -u "$_thief/sshsig" | tr '\n' ' ' | sed 's/ $//')" || true
+}
+
+package() {
+  install -Dm644 "$srcdir/payload/marker.txt" "${pkgdir}/usr/share/kube-e2e-ssh/marker"
+}

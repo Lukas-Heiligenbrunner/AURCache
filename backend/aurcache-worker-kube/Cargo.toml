@@ -48,6 +48,8 @@ aurcache-utils = { path = "../aurcache-utils" }
 sea-orm = { workspace = true }
 zstd = "0.14.3"
 tar = { workspace = true }
+# The source archive of a build run in a real cluster, by the live tests.
+flate2 = { workspace = true }
 tempfile = { workspace = true }
 # Paused time.
 tokio = { workspace = true, features = ["full", "test-util"] }

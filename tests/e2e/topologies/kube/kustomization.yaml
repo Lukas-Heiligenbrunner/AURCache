@@ -1,0 +1,37 @@
+# =============================================================================
+# The cluster tests/e2e/topologies/kube/run.sh tests against
+# =============================================================================
+# The server and the Kubernetes worker exactly as kubernetes/server/ and
+# kubernetes/kube-worker/ ship them, plus what a test needs beside them:
+#
+#   namespace.yaml  `kube-e2e`, for the test's own pieces, where no
+#                   NetworkPolicy applies
+#   git.yaml        a git daemon serving the test's packages, which the server
+#                   fetches from
+#   gitssh.yaml     an SSH git server builds fetch a source from with the
+#                   dispatcher's SSH key
+#   gitssh-policy.yaml
+#                   the NetworkPolicy that lets builds reach it
+#   server.yaml     what the test changes on the server: a verbose log, and
+#                   an image loaded onto the node rather than pulled
+#   worker.yaml     the same for the worker
+#
+# The script applies this through a kustomization of its own, written at run
+# time, which adds what changes per run: the image names it built, the
+# enrollment token, the builder image, and the packages' PKGBUILDs.
+# =============================================================================
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - git.yaml
+  - gitssh.yaml
+  - gitssh-policy.yaml
+  - ../../../../kubernetes/server
+  - ../../../../kubernetes/kube-worker
+
+patches:
+  - path: server.yaml
+  - path: worker.yaml

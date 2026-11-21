@@ -1,0 +1,73 @@
+# An SSH git server for the SSH build key check: docker/git-ssh.Dockerfile,
+# serving `payload.git` over ssh to the key the dispatcher holds, at
+# kube-e2e-gitssh.kube-e2e.svc. Builds fetch from it, and only through the
+# dispatcher's SSH link, since the key is in no build pod; they reach it
+# through the policy in gitssh-policy.yaml.
+#
+# The authorised key and the server's host key come from the Secret
+# `kube-e2e-gitssh`, which the test's run-time kustomization generates, so
+# the dispatcher's `known_hosts` can name the host key before the server
+# runs.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-e2e-gitssh
+  namespace: kube-e2e
+  labels:
+    app.kubernetes.io/name: kube-e2e-gitssh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-e2e-gitssh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-e2e-gitssh
+    spec:
+      containers:
+        - name: gitssh
+          image: aurcache-gitssh
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: ssh
+              containerPort: 22
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            periodSeconds: 2
+          volumeMounts:
+            - name: keys
+              mountPath: /keys/id_ed25519.pub
+              subPath: id_ed25519.pub
+              readOnly: true
+            - name: keys
+              mountPath: /etc/ssh/ssh_host_ed25519_key
+              subPath: ssh_host_ed25519_key
+              readOnly: true
+            - name: keys
+              mountPath: /etc/ssh/ssh_host_ed25519_key.pub
+              subPath: ssh_host_ed25519_key.pub
+              readOnly: true
+      volumes:
+        - name: keys
+          secret:
+            secretName: kube-e2e-gitssh
+            # sshd refuses a host key anyone else can read.
+            defaultMode: 0600
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-e2e-gitssh
+  namespace: kube-e2e
+  labels:
+    app.kubernetes.io/name: kube-e2e-gitssh
+spec:
+  selector:
+    app.kubernetes.io/name: kube-e2e-gitssh
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: ssh
