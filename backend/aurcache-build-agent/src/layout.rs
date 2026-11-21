@@ -119,6 +119,33 @@ impl Scratch {
     pub fn makepkg_conf(&self) -> PathBuf {
         self.0.join("makepkg.conf")
     }
+
+    /// `<root>/ssh`: what the build reaches the worker's SSH key with, root's
+    /// and entered by the build group alone.
+    #[must_use]
+    pub fn ssh_dir(&self) -> PathBuf {
+        self.0.join("ssh")
+    }
+
+    /// `<root>/ssh/agent.sock`: the socket that reaches the worker's SSH key,
+    /// while makepkg runs.
+    #[must_use]
+    pub fn ssh_socket(&self) -> PathBuf {
+        self.ssh_dir().join("agent.sock")
+    }
+
+    /// `<root>/ssh/known_hosts`: the hosts that the build's git trusts.
+    #[must_use]
+    pub fn known_hosts(&self) -> PathBuf {
+        self.ssh_dir().join("known_hosts")
+    }
+
+    /// `<root>/ssh-link/link.sock`: where the agent waits for the worker's
+    /// `ssh-link`, in a directory of root's alone.
+    #[must_use]
+    pub fn ssh_link(&self) -> PathBuf {
+        self.0.join("ssh-link").join("link.sock")
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +174,9 @@ mod tests {
         assert_eq!(scratch.srcdest(), Path::new("/s/srcdest"));
         assert_eq!(scratch.home(), Path::new("/s/home"));
         assert_eq!(scratch.makepkg_conf(), Path::new("/s/makepkg.conf"));
+        assert_eq!(scratch.ssh_dir(), Path::new("/s/ssh"));
+        assert_eq!(scratch.ssh_socket(), Path::new("/s/ssh/agent.sock"));
+        assert_eq!(scratch.known_hosts(), Path::new("/s/ssh/known_hosts"));
+        assert_eq!(scratch.ssh_link(), Path::new("/s/ssh-link/link.sock"));
     }
 }

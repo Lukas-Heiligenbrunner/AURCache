@@ -5,8 +5,9 @@
 # twice: sourced by `makepkg --printsrcinfo`, which the agent reads its
 # dependencies from before root installs them, and in `build()`. Both times it
 # tries what a hostile package would: becoming root, finding something of
-# root's to talk to, writing the report. It prints one `probe name=value` line
-# per attempt, and the script asserts each of them.
+# root's to talk to, writing the report; `build()` also looks for the worker's
+# SSH key. It prints one `probe name=value` line per attempt, and the script
+# asserts each of them.
 #
 # Both polarities: the same build shows what must work. `tree` is not in the
 # builder image, so it is only there if root installed it before the build;
@@ -22,6 +23,14 @@
 # scriptlet runs as root, and reports whether the image's upgrade saw that
 # repository.
 #
+# With AURCACHE_TEST_GITSSH set to the address of the test's git server, it
+# also fetches a source over git+ssh and reaches the server again from
+# build(), which works only through the worker's SSH link; it asks the agent
+# for a signature that is not a login, which ssh-agent makes; and it reports
+# what the thief's scriptlet, which does the same hunt as root, found. The
+# script execs `sleep 3601` into the container from outside; build() reports
+# whether it still runs: the agent spares the link alone.
+#
 # It expects what the script sets up: the work directory at /work, and a
 # repository at /srv/aurcache-agent-test/upstream.git.
 pkgname=aurcache-agent-hostile
@@ -36,6 +45,15 @@ source=("fixture::git+file:///srv/aurcache-agent-test/upstream.git")
 sha256sums=('SKIP')
 if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
   makedepends+=('aurcache-agent-thief')
+fi
+if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+  source+=("payload::git+ssh://git@${AURCACHE_TEST_GITSSH}/srv/git/payload.git")
+  sha256sums+=('SKIP')
+  # Run as makepkg reads this file for the build: the agent is there from
+  # its start, and not yet while the dependencies are read.
+  if [[ -n ${SSH_AUTH_SOCK:-} ]] && ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
+    printf 'probe toplevel-agent-key=listed\n'
+  fi
 fi
 
 _work=/work
@@ -84,16 +102,22 @@ _make_evil_package() { # where
   )
 }
 
-# Root's processes but the agent, by pid; `none` when there is none.
+# Root's processes but the agent, and but what the engine started in the
+# container from outside (the worker's SSH link, whose parent is not in this
+# PID namespace), by pid; `none` when there is none.
 _root_processes() {
-  ps -e -o uid=,pid= | awk '$1 == 0 && $2 != 1 { print $2 }' | paste -sd, | grep . || echo none
+  ps -e -o uid=,pid=,ppid= | awk '$1 == 0 && $2 != 1 && $3 != 0 { print $2 }' |
+    paste -sd, | grep . || echo none
 }
 
 # Listening unix sockets this user could connect to and does not own, which
-# root could be behind: an abstract one, or one it may write to.
+# root could be behind: an abstract one, or one it may write to. Not the SSH
+# agent socket a build given the worker's key has, which the agent answers
+# only by passing on to the worker's ssh-agent.
 _foreign_listeners() {
   local path count=0
   while read -r path; do
+    [[ -n ${SSH_AUTH_SOCK:-} && $path == "$SSH_AUTH_SOCK" ]] && continue
     if [[ $path == @* ]] || { [[ -w $path ]] && [[ ! -O $path ]]; }; then
       count=$((count + 1))
     fi
@@ -153,7 +177,27 @@ build() {
   else
     _probe srcinfo-lingerer "${lingerer:+gone}"
   fi
+  # Another exec from outside, which has no parent here either: the agent
+  # spares the link's process, and kills this one.
+  if ps -e -o args= | grep -qx 'sleep 3601'; then
+    _probe outside-exec alive
+  else
+    _probe outside-exec gone
+  fi
 
+  # The worker's key: in no file here, not in the job, not in what the build
+  # was started with. Its agent is there, and signs what it is asked to.
+  # The armour line, put together here so that this file does not hold it.
+  local armour="-----BEGIN OPENSSH ""PRIVATE KEY-----"
+  _probe key-files "$(grep -rlsIF -e "$armour" /etc /root /var /tmp /work /aurcache /home \
+    /srv /run /opt /mnt 2>/dev/null | grep -vc "^$_thief/")"
+  _probe key-given "$(grep -alsF -e "$armour" "$_work/in/spec.json" /proc/self/environ \
+    /proc/$$/environ 2>/dev/null | wc -l)"
+  if ssh-add -L 2>/dev/null | grep -q '^ssh-ed25519 '; then
+    _probe agent-key listed
+  else
+    _probe agent-key missing
+  fi
   if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
     # The upgrade of the image saw the job's repositories and not the one
     # this build's dependency came from.
@@ -166,6 +210,32 @@ build() {
     fi
     _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
     _probe thief-mem "$(cat "$_thief/mem" 2>/dev/null || echo unknown)"
+  fi
+  if [[ -n ${AURCACHE_TEST_GITSSH:-} ]]; then
+    if [[ -f $srcdir/payload/marker.txt ]]; then
+      _probe payload fetched
+    else
+      _probe payload missing
+    fi
+    # A PKGBUILD that fetches from its functions, which no source list shows.
+    if git ls-remote "ssh://git@${AURCACHE_TEST_GITSSH}/srv/git/payload.git" >/dev/null 2>&1; then
+      _probe ssh-in-build reached
+    else
+      _probe ssh-in-build failed
+    fi
+    # A signature that is no login: ssh-agent makes it like any other.
+    ssh-add -L >"$srcdir/agent.pub" 2>/dev/null
+    if echo payload | ssh-keygen -Y sign -f "$srcdir/agent.pub" -n file >/dev/null 2>&1; then
+      _probe sshsig signed
+    else
+      _probe sshsig refused
+    fi
+    # What the thief's root scriptlet found.
+    _probe thief-keys "$(if [[ -f $_thief/keys ]]; then wc -l <"$_thief/keys"; else echo none; fi)"
+    _probe thief-procs "$(if [[ -f $_thief/procs ]]; then wc -l <"$_thief/procs"; else echo none; fi)"
+    _probe thief-relays "$(wc -l <"$_thief/relays" 2>/dev/null)"
+    _probe thief-agents "$(sort "$_thief/agents" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    _probe thief-sshsig "$(sort -u "$_thief/sshsig" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
   fi
 
   # The work directory is root's: nothing beside `out/`, nothing in it, and

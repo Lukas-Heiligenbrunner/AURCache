@@ -267,6 +267,7 @@ mod tests {
     #[test]
     fn steps_are_named_as_the_report_spells_them() {
         assert_eq!(step_name(SetupStep::Keys), "keys");
+        assert_eq!(step_name(SetupStep::Credential), "credential");
     }
 
     const GIB: u64 = 1 << 30;

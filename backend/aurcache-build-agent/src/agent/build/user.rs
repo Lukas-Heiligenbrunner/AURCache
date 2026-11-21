@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 const NAME: &str = "aurbuild";
 
 /// What a build finds programs through before its login shell adds to it.
-const PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
+pub(super) const PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/bin";
 
 const PASSWD: &str = "/etc/passwd";
 const GROUP: &str = "/etc/group";
