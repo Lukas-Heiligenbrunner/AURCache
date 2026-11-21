@@ -6,6 +6,10 @@
 //! holding the files until they are known to be complete, and deciding whether
 //! they may be published under the package at all.
 //!
+//! An upload to a pkgbase that does not exist creates it as an uploaded
+//! package (`SourceData::Upload`), which nothing here ever builds: it is
+//! published from its uploads alone, and what it publishes is what they say.
+//!
 //! The files are held under the staging root, in a directory of their own,
 //! until every one has arrived and passed. Only then is the build row written
 //! (straight into `PUBLISHING`) and the directory renamed into that build's
@@ -16,7 +20,7 @@
 use crate::build_logger::append_build_output;
 use crate::publish::{
     Artifact, PublicationOutcome, artifact, check_contents, expected_pkgnames, parse_arch_pkg,
-    publish_build, publish_with_recovery,
+    publish_build, publish_with_recovery, published_by_another,
 };
 use crate::repository::Repository;
 use anyhow::anyhow;
@@ -25,14 +29,19 @@ use aurcache_activitylog::events::Event;
 use aurcache_common::api::log::BuildRef;
 use aurcache_common::api::package::UploadedBuild;
 use aurcache_common::build_state::BuildState;
+use aurcache_common::source::SourceData;
 use aurcache_common::upload::{FileKind, Names};
 use aurcache_db::helpers::build_enqueue::{UploadSlot, record_upload};
 use aurcache_db::helpers::time::now_secs;
+use aurcache_db::lists::{BuildFlags, Platforms};
 use aurcache_db::packages;
 use aurcache_db::prelude::{Builds, Packages};
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::PackageMeta;
-use sea_orm::{DatabaseConnection, EntityTrait, QuerySelect};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter,
+    QuerySelect, Set, SqlErr,
+};
 use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -57,8 +66,8 @@ pub enum UploadError {
     /// A build of the package on that platform has not settled yet, and an
     /// upload does not overtake it.
     Busy(BuildRef),
-    /// Another request removed the package while this one was being
-    /// checked.
+    /// Another request created or removed the package while this one was
+    /// being checked; sending it again decides it against what is there now.
     Contended(String),
     /// The server's own failure.
     Internal(anyhow::Error),
@@ -116,6 +125,30 @@ fn package_of(filename: &str) -> &str {
     filename.strip_suffix(".sig").unwrap_or(filename)
 }
 
+/// Whether `name` may name a package: what the AUR allows one, lowercase
+/// letters, digits and `@._+-`, not starting with `-` or `.`.
+///
+/// An uploaded package's names come from its uploads rather than a source
+/// that makepkg already held to this rule. Its name becomes a directory of
+/// build logs and part of every URL the package is reached by, and every
+/// name it publishes is one pacman installs by.
+#[must_use]
+pub fn valid_pkgname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with(['-', '.'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"@._+-".contains(&b))
+}
+
+fn not_a_name(name: &str) -> String {
+    format!(
+        "'{name}' is not a package name: lowercase letters, digits and @._+- only, \
+         not starting with - or ."
+    )
+}
+
 /// Whether `version` is `[epoch:]pkgver-pkgrel` as makepkg writes one: the
 /// epoch digits, the pkgver printable ASCII without whitespace, `/`, `:` or
 /// `-`, the pkgrel digits with at most one `.` among them.
@@ -141,6 +174,36 @@ pub fn valid_version(version: &str) -> bool {
             .all(|b| b.is_ascii_graphic() && !b"/:-".contains(&b))
 }
 
+/// The package an upload to `pkgbase` is for, `None` for one the upload
+/// would create.
+///
+/// Asked before any of its files arrive, so that a new package whose name is
+/// not one is refused before it is sent. Whether the upload is taken is
+/// decided once they are in, in the transaction that records it.
+///
+/// # Errors
+/// [`UploadError::Refused`] for a new package whose name is not one.
+pub async fn package_for<C: ConnectionTrait>(
+    db: &C,
+    pkgbase: &str,
+) -> Result<Option<packages::Model>, UploadError> {
+    match package_named(db, pkgbase).await? {
+        None if !valid_pkgname(pkgbase) => Err(refused(not_a_name(pkgbase))),
+        found => Ok(found),
+    }
+}
+
+/// The package named `pkgbase`, if there is one.
+async fn package_named<C: ConnectionTrait>(
+    db: &C,
+    pkgbase: &str,
+) -> Result<Option<packages::Model>, UploadError> {
+    Ok(Packages::find()
+        .filter(packages::Column::Name.eq(pkgbase))
+        .one(db)
+        .await?)
+}
+
 fn not_configured(pkg: &packages::Model, platform: Platform) -> UploadError {
     refused(format!(
         "{} is not configured for {platform}; add the platform to it first",
@@ -156,11 +219,14 @@ fn not_configured(pkg: &packages::Model, platform: Platform) -> UploadError {
 pub struct Received {
     /// `None` once kept, or while being dropped.
     dir: Option<tempfile::TempDir>,
-    names: Names,
+    filenames: Names,
     artifact_limit: u64,
-    /// The package the upload is for, and the names its source builds.
+    /// The package the upload is for: its name, its id when it exists, and
+    /// the names its source builds -- `None` for an uploaded or a new
+    /// package, which builds whatever its uploads say.
     pkgbase: String,
-    expected: Vec<String>,
+    pkg_id: Option<i32>,
+    expected: Option<Vec<String>>,
 }
 
 /// Where one arriving file is to be written, and how large it may be.
@@ -170,14 +236,16 @@ pub struct Incoming {
 }
 
 impl Received {
-    /// Start holding the files of an upload to `pkg`, each package at most
-    /// `artifact_limit` bytes.
+    /// Start holding the files of an upload to `pkgbase`, each package at
+    /// most `artifact_limit` bytes. `pkg` is the package, `None` for one the
+    /// upload would create.
     ///
     /// # Errors
     /// The staging root cannot be written.
     pub async fn new(
         repo: &Repository,
-        pkg: &packages::Model,
+        pkgbase: &str,
+        pkg: Option<&packages::Model>,
         artifact_limit: u64,
     ) -> std::io::Result<Self> {
         let root = repo.staging_root();
@@ -191,37 +259,54 @@ impl Received {
         .map_err(std::io::Error::other)??;
         Ok(Self {
             dir: Some(dir),
-            names: Names::default(),
+            filenames: Names::default(),
             artifact_limit,
-            pkgbase: pkg.name.clone(),
-            expected: expected_pkgnames(pkg),
+            pkgbase: pkgbase.to_string(),
+            pkg_id: pkg.map(|pkg| pkg.id),
+            expected: pkg
+                .filter(|pkg| pkg.source_data.is_buildable())
+                .map(expected_pkgnames),
         })
     }
 
     /// Accept a file named `filename` into the upload, and say where to write
     /// it.
     ///
-    /// Each package must be one the package's source builds, as a worker's
-    /// artifact must (makepkg's `-debug` packages of them included, which
-    /// publishing leaves out), and each signature one of such a package. The
-    /// names are held to what [`Names`] holds them to, as a client checks
-    /// them before sending.
+    /// For a package with a source, each package must be one it builds, as
+    /// a worker's artifact must (makepkg's `-debug` packages of them
+    /// included, which publishing leaves out). For an uploaded or a new one,
+    /// each must be a package name ([`valid_pkgname`]). A signature is held to
+    /// the same as the package it signs. The names are held to what [`Names`]
+    /// holds them to, as a client checks them before sending.
     ///
     /// # Errors
     /// [`UploadError::Refused`] for a name [`file_kind`] refuses, a package
-    /// the source does not build, or one [`Names`] refuses: a name already
-    /// received, or one file more than
+    /// the source does not build or that is not a package name, or one
+    /// [`Names`] refuses: a name already received, or one file more than
     /// [`MAX_FILES`](aurcache_common::upload::MAX_FILES).
     pub fn accept(&mut self, filename: &str) -> Result<Incoming, UploadError> {
         let kind = file_kind(filename)?;
-        if artifact(&self.expected, package_of(filename)).is_err() {
-            return Err(refused(format!(
-                "{filename} is not among the packages {}'s source builds: {}",
-                self.pkgbase,
-                self.expected.join(", ")
-            )));
+        match &self.expected {
+            Some(expected) if artifact(expected, package_of(filename)).is_err() => {
+                return Err(refused(format!(
+                    "{filename} is not among the packages {}'s source builds: {}",
+                    self.pkgbase,
+                    expected.join(", ")
+                )));
+            }
+            Some(_) => {}
+            None => {
+                let named =
+                    parse_arch_pkg(package_of(filename)).map_err(|e| refused(e.to_string()))?;
+                if !valid_pkgname(&named.name) {
+                    return Err(refused(format!(
+                        "'{filename}' is for {}",
+                        not_a_name(&named.name)
+                    )));
+                }
+            }
         }
-        self.names.take(filename).map_err(refused)?;
+        self.filenames.take(filename).map_err(refused)?;
         Ok(Incoming {
             path: self.path().join(filename),
             limit: match kind {
@@ -231,10 +316,27 @@ impl Received {
         })
     }
 
+    /// The package names the upload may publish: its source's, or for an
+    /// uploaded or a new package, its pkgbase and whatever its files name.
+    fn names(&self) -> Vec<String> {
+        if let Some(expected) = &self.expected {
+            return expected.clone();
+        }
+        let mut names = vec![self.pkgbase.clone()];
+        for filename in self.filenames.taken() {
+            if let Ok(named) = parse_arch_pkg(package_of(filename))
+                && !names.contains(&named.name)
+            {
+                names.push(named.name);
+            }
+        }
+        names
+    }
+
     /// The files accepted so far, in the order they arrived.
     #[must_use]
     pub fn files(&self) -> &[String] {
-        self.names.taken()
+        self.filenames.taken()
     }
 
     /// Where the files are held.
@@ -291,8 +393,8 @@ pub async fn discard_abandoned(repo: &Repository) -> usize {
 /// What an upload is for, besides its files.
 #[derive(Clone, Debug)]
 pub struct UploadRequest {
-    /// The package it is a build of.
-    pub pkg: packages::Model,
+    /// The package it is a build of; created when there is none.
+    pub pkgbase: String,
     /// The platform it is for, when its files do not say: an upload of only
     /// `arch = any` packages.
     pub platform: Option<Platform>,
@@ -319,13 +421,17 @@ struct Contents {
 /// makepkg's `-debug` packages are not read: publishing leaves them out, as
 /// it does of a worker's build, since the repository does not carry them and
 /// `makechrootpkg` writes them by default.
+///
+/// An uploaded or a new package has no source to bound its names, so every
+/// file must name it as its pkgbase: its name is all there is to go by.
 async fn inspect(received: &Received) -> Result<Contents, UploadError> {
+    let names = received.names();
     let mut packages = Vec::new();
     let mut signatures = Vec::new();
     for filename in received.files() {
         match file_kind(filename)? {
             FileKind::Package => {
-                if let Ok(Artifact::Package(_)) = artifact(&received.expected, filename) {
+                if let Ok(Artifact::Package(_)) = artifact(&names, filename) {
                     packages.push(filename.clone());
                 }
             }
@@ -348,7 +454,11 @@ async fn inspect(received: &Received) -> Result<Contents, UploadError> {
     let read = tokio::task::spawn_blocking(move || read_files(&dir, packages, &signatures))
         .await
         .map_err(|e| UploadError::Internal(e.into()))??;
-    check(read)
+    let pkgbase = received
+        .expected
+        .is_none()
+        .then_some(received.pkgbase.as_str());
+    check(read, pkgbase)
 }
 
 /// Read an upload's files in `dir`: each signature checked to be one, as
@@ -379,14 +489,23 @@ fn read_files(
 }
 
 /// Check that `packages` are one build, each what its name says: each
-/// package once, one version and one platform.
-fn check(packages: Vec<Inspected>) -> Result<Contents, UploadError> {
+/// package once, one version and one platform, and every one a build of
+/// `pkgbase` when that is given.
+fn check(packages: Vec<Inspected>, pkgbase: Option<&str>) -> Result<Contents, UploadError> {
     let mut version: Option<String> = None;
     let mut arch: Option<Platform> = None;
     let mut pkgnames = HashSet::new();
     for Inspected { filename, meta } in &packages {
         let named = parse_arch_pkg(filename).map_err(|e| refused(e.to_string()))?;
         check_contents(filename, &named, meta).map_err(|e| refused(e.to_string()))?;
+        if let Some(expected) = pkgbase {
+            let file_base = meta.pkgbase.as_deref().unwrap_or_default();
+            if file_base != expected {
+                return Err(refused(format!(
+                    "{filename} is a build of '{file_base}', not of '{expected}'"
+                )));
+            }
+        }
         if !pkgnames.insert(meta.pkgname.clone()) {
             return Err(refused(format!(
                 "the upload carries '{}' more than once",
@@ -447,14 +566,15 @@ fn platform(
         (None, None) => match configured {
             [only] => Ok(*only),
             _ => Err(refused(
-                "every file is 'arch = any', and the package is built for several platforms: \
-                 name the one the upload is for (aurcli pkg upload --platform)",
+                "every file is 'arch = any', so the files do not say which platform the \
+                 upload is for: name it (aurcli pkg upload --platform)",
             )),
         },
     }
 }
 
-/// Publish an upload as a build of `request.pkg`.
+/// Publish an upload as a build of `request.pkgbase`, creating the package
+/// when there is none.
 ///
 /// Waits for the first attempt to publish it, and answers with where that
 /// left it; a recoverable failure carries on in the background, as for a
@@ -463,8 +583,8 @@ fn platform(
 /// # Errors
 /// [`UploadError::Refused`] when the files cannot be published under the
 /// package, [`UploadError::Busy`] when a build of it has not settled on that
-/// platform, [`UploadError::Contended`] when another request removed the
-/// package meanwhile; in each case nothing is recorded.
+/// platform, [`UploadError::Contended`] when another request created or
+/// removed the package meanwhile; in each case nothing is recorded.
 pub async fn publish_upload(
     db: &DatabaseConnection,
     repo: &Arc<Repository>,
@@ -472,11 +592,38 @@ pub async fn publish_upload(
     request: UploadRequest,
     received: Received,
 ) -> Result<UploadedBuild, UploadError> {
-    let pkg = &request.pkg;
+    let pkgbase = request.pkgbase.as_str();
+    let existing = package_named(db, pkgbase).await?;
+    // The files were held to the package as it was when they arrived.
+    if existing.as_ref().map(|pkg| pkg.id) != received.pkg_id {
+        return Err(UploadError::Contended(format!(
+            "{pkgbase} was created or removed by another request meanwhile; send the upload again"
+        )));
+    }
+    if existing.is_none() && !valid_pkgname(pkgbase) {
+        return Err(refused(not_a_name(pkgbase)));
+    }
     let contents = inspect(&received).await?;
-    let platform = platform(&contents, request.platform, pkg.platforms.as_slice())?;
-    if !pkg.platforms.contains(platform) {
+    let configured = existing
+        .as_ref()
+        .map_or(&[][..], |pkg| pkg.platforms.as_slice());
+    let platform = platform(&contents, request.platform, configured)?;
+    if let Some(pkg) = &existing
+        && !pkg.platforms.contains(platform)
+    {
         return Err(not_configured(pkg, platform));
+    }
+    // Publishing decides this, under the repository lock; asked here too, so
+    // that the common case is refused rather than recorded and failed.
+    let staged: Vec<&str> = contents
+        .packages
+        .iter()
+        .map(|p| p.filename.as_str())
+        .collect();
+    if let Some(taken) =
+        published_by_another(db, existing.as_ref().map(|pkg| pkg.id), platform, &staged).await?
+    {
+        return Err(refused(taken.to_string()));
     }
 
     // From the build row on, the upload is seen through even when whoever
@@ -486,6 +633,7 @@ pub async fn publish_upload(
         request,
         received,
         contents,
+        existing,
         platform,
     };
     let (db, repo, activity) = (db.clone(), Arc::clone(repo), activity.clone());
@@ -499,6 +647,8 @@ struct Accepted {
     request: UploadRequest,
     received: Received,
     contents: Contents,
+    /// The package it is for, `None` for one it creates.
+    existing: Option<packages::Model>,
     platform: Platform,
 }
 
@@ -514,10 +664,12 @@ impl Accepted {
             request,
             received,
             contents,
+            existing,
             platform,
         } = self;
-        let pkgbase = request.pkg.name.as_str();
-        let build = record(db, &request.pkg, platform, &contents).await?;
+        let pkgbase = request.pkgbase.as_str();
+        let Recorded { build, created } =
+            record(db, existing.as_ref(), pkgbase, platform, &contents).await?;
         let named = BuildRef {
             pkgbase: pkgbase.to_string(),
             number: build.number,
@@ -546,6 +698,14 @@ impl Accepted {
             ));
         }
 
+        if created {
+            activity.emit_by(
+                Event::PackageAdded {
+                    pkg: pkgbase.into(),
+                },
+                request.uploader.clone(),
+            );
+        }
         activity.emit_by(
             Event::BuildUploaded {
                 build: named.clone(),
@@ -572,39 +732,77 @@ impl Accepted {
             platform: platform.to_string(),
             version: contents.version,
             status,
+            created,
         })
     }
 }
 
-/// Record the upload's build, in one transaction with the package's status.
+/// The build an upload was recorded as.
+struct Recorded {
+    build: aurcache_db::builds::Model,
+    /// Whether the package was created for it.
+    created: bool,
+}
+
+/// Record the upload's build, and the package when it creates one, in one
+/// transaction with the package's status.
 ///
-/// The package row is read again inside it, locked, so one removed since the
-/// upload was checked is told apart from a failure of the server's own.
+/// The package row is read again inside it, locked, so one created or
+/// removed since the upload was checked is told apart from a failure of the
+/// server's own. A new package starts with no split package names: what it
+/// builds is what it publishes, which publishing records.
 async fn record(
     db: &DatabaseConnection,
-    pkg: &packages::Model,
+    existing: Option<&packages::Model>,
+    pkgbase: &str,
     platform: Platform,
     contents: &Contents,
-) -> Result<aurcache_db::builds::Model, UploadError> {
+) -> Result<Recorded, UploadError> {
     let txn = aurcache_db::helpers::txn::begin_write(db).await?;
-    if Packages::find_by_id(pkg.id)
+    let current = Packages::find()
+        .filter(packages::Column::Name.eq(pkgbase))
         .lock_exclusive()
         .one(&txn)
-        .await?
-        .is_none()
-    {
+        .await?;
+    if current.as_ref().map(|pkg| pkg.id) != existing.map(|pkg| pkg.id) {
         return Err(UploadError::Contended(format!(
-            "{} was removed by another request meanwhile",
-            pkg.name
+            "{pkgbase} was created or removed by another request meanwhile; send the upload again"
         )));
     }
-    match record_upload(&txn, pkg.id, platform, &contents.version, now_secs()).await? {
+    let (pkg_id, created) = match current {
+        Some(pkg) => (pkg.id, false),
+        None => {
+            let inserted = packages::ActiveModel {
+                name: Set(pkgbase.to_string()),
+                status: Set(BuildState::Publishing),
+                out_of_date: Set(false),
+                upstream_version: Set(Some(contents.version.clone())),
+                build_flags: Set(BuildFlags::default()),
+                platforms: Set(Platforms::new([platform])),
+                source_data: Set(SourceData::Upload {}),
+                directly_requested: Set(true),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await;
+            match inserted {
+                Ok(inserted) => (inserted.id, true),
+                Err(e) if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) => {
+                    return Err(UploadError::Contended(format!(
+                        "{pkgbase} was created by another request meanwhile; send the upload again"
+                    )));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+    match record_upload(&txn, pkg_id, platform, &contents.version, now_secs()).await? {
         UploadSlot::Recorded(build) => {
             txn.commit().await?;
-            Ok(build)
+            Ok(Recorded { build, created })
         }
         UploadSlot::Busy(build) => Err(UploadError::Busy(BuildRef {
-            pkgbase: pkg.name.clone(),
+            pkgbase: pkgbase.to_string(),
             number: build.number,
         })),
     }
@@ -671,18 +869,58 @@ mod tests {
             filename: filename.to_string(),
             meta: PackageMeta {
                 pkgname: pkgname.to_string(),
+                pkgbase: Some("demo".to_string()),
                 version: named.version,
                 arch: Some(arch.to_string()),
+                description: None,
+                url: None,
+                licenses: Vec::new(),
+                provides: Vec::new(),
             },
         }
     }
 
     #[test]
+    fn a_pkgname_follows_the_aur_rule() {
+        for good in [
+            "gcc13",
+            "lib32-foo",
+            "c++utils",
+            "foo@bar",
+            "py3.12-x",
+            "a_b",
+        ] {
+            assert!(valid_pkgname(good), "{good}");
+        }
+        for bad in ["", "a/b", "../x", "-x", ".x", "Foo", "a b", "a\nb"] {
+            assert!(!valid_pkgname(bad), "{bad:?}");
+        }
+    }
+
+    /// A package with no source is bounded by its name alone: every file is
+    /// a build of it.
+    #[test]
+    fn an_uploaded_package_takes_only_builds_of_itself() {
+        let files = || vec![inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64")];
+        assert!(check(files(), Some("demo")).is_ok());
+        let reason = match check(files(), Some("other")) {
+            Err(UploadError::Refused(reason)) => reason,
+            Err(other) => panic!("expected a refusal, got {other:?}"),
+            Ok(_) => panic!("accepted"),
+        };
+        assert!(reason.contains("not of 'other'"), "{reason}");
+        assert!(check(files(), None).is_ok(), "a source bounds it instead");
+    }
+
+    #[test]
     fn split_packages_are_one_build() {
-        let contents = check(vec![
-            inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
-            inspected("demo-docs-1.0-1-any.pkg.tar.zst", "demo-docs", "any"),
-        ])
+        let contents = check(
+            vec![
+                inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
+                inspected("demo-docs-1.0-1-any.pkg.tar.zst", "demo-docs", "any"),
+            ],
+            None,
+        )
         .unwrap();
         assert_eq!(contents.arch, Some(Platform::X86_64));
         assert_eq!(contents.version, "1.0-1");
@@ -690,41 +928,61 @@ mod tests {
 
     #[test]
     fn one_upload_is_one_build() {
-        let two_arches = check(vec![
-            inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
-            inspected("demo-x-1.0-1-aarch64.pkg.tar.zst", "demo-x", "aarch64"),
-        ]);
+        let two_arches = check(
+            vec![
+                inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
+                inspected("demo-x-1.0-1-aarch64.pkg.tar.zst", "demo-x", "aarch64"),
+            ],
+            None,
+        );
         assert!(matches!(two_arches, Err(UploadError::Refused(_))));
 
-        let two_versions = check(vec![
-            inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
-            inspected("demo-x-1.0-2-x86_64.pkg.tar.zst", "demo-x", "x86_64"),
-        ]);
+        let two_versions = check(
+            vec![
+                inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
+                inspected("demo-x-1.0-2-x86_64.pkg.tar.zst", "demo-x", "x86_64"),
+            ],
+            None,
+        );
         assert!(matches!(two_versions, Err(UploadError::Refused(_))));
 
-        let twice = check(vec![
-            inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
-            inspected("demo-1.0-1-any.pkg.tar.zst", "demo", "any"),
-        ]);
+        let twice = check(
+            vec![
+                inspected("demo-1.0-1-x86_64.pkg.tar.zst", "demo", "x86_64"),
+                inspected("demo-1.0-1-any.pkg.tar.zst", "demo", "any"),
+            ],
+            None,
+        );
         assert!(matches!(twice, Err(UploadError::Refused(_))));
 
-        let unserved = check(vec![inspected(
-            "demo-1.0-1-riscv64.pkg.tar.zst",
-            "demo",
-            "riscv64",
-        )]);
+        let unserved = check(
+            vec![inspected(
+                "demo-1.0-1-riscv64.pkg.tar.zst",
+                "demo",
+                "riscv64",
+            )],
+            None,
+        );
         assert!(matches!(unserved, Err(UploadError::Refused(_))));
     }
 
     #[test]
     fn an_all_any_upload_needs_a_platform() {
-        let contents = check(vec![inspected("demo-1.0-1-any.pkg.tar.zst", "demo", "any")]).unwrap();
+        let contents = check(
+            vec![inspected("demo-1.0-1-any.pkg.tar.zst", "demo", "any")],
+            None,
+        )
+        .unwrap();
         let both = [Platform::X86_64, Platform::Aarch64];
         let reason = match platform(&contents, None, &both) {
             Err(UploadError::Refused(reason)) => reason,
             other => panic!("expected a refusal, got {other:?}"),
         };
         assert!(reason.contains("--platform"), "{reason}");
+        assert!(
+            platform(&contents, None, &[]).is_err(),
+            "a new package has none"
+        );
         assert_eq!(
             platform(&contents, Some(Platform::Aarch64), &both).unwrap(),
             Platform::Aarch64

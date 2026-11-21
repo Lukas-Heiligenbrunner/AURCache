@@ -1,11 +1,11 @@
-use crate::builds;
 use crate::helpers::builds::refresh_package_status;
-use crate::prelude::Builds;
+use crate::prelude::{Builds, Packages};
+use crate::{builds, packages};
 use aurcache_common::build_state::{BuildState, BuildTrigger};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::TransactionSession;
 use sea_orm::sea_query::{Expr, ExprTrait, Func, OnConflict, Query};
-use sea_orm::{ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect};
 
 /// The pending build for a `(package, platform)`, and how it came to be.
 pub struct EnqueueBuildResult {
@@ -73,6 +73,10 @@ fn next_build_number_expr(pkg_id: i32) -> Expr {
 ///
 /// If a pending build already exists the insert is skipped ([`Queued::Existing`]) and the
 /// existing row is returned, regardless of its status.
+///
+/// A package that is only ever uploaded ([`packages::uploaded`]) is
+/// refused: no worker could build it. Every queueing path comes through here,
+/// so this holds for one that forgot to ask, too.
 pub async fn enqueue_build_if_missing<C: ConnectionTrait + sea_orm::TransactionTrait>(
     db: &C,
     pkg_id: i32,
@@ -84,6 +88,11 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait + sea_orm::TransactionT
     // column, so every creation path has to say.
     trigger: BuildTrigger,
 ) -> Result<EnqueueBuildResult, DbErr> {
+    if is_uploaded(db, pkg_id).await? {
+        return Err(DbErr::Custom(format!(
+            "package {pkg_id} is built elsewhere and uploaded; no build of it can be queued"
+        )));
+    }
     let txn = crate::helpers::txn::begin_write(db).await?;
     // Two conflicts can stop this insert, and they mean opposite things.
     //
@@ -147,6 +156,17 @@ pub async fn enqueue_build_if_missing<C: ConnectionTrait + sea_orm::TransactionT
         "Could not assign a build number for package {pkg_id} on platform {platform} \
          after {NUMBER_RACE_ATTEMPTS} attempts"
     )))
+}
+
+/// Whether package `pkg_id` is only ever uploaded ([`packages::uploaded`]).
+async fn is_uploaded<C: ConnectionTrait>(db: &C, pkg_id: i32) -> Result<bool, DbErr> {
+    let stored: Option<Option<String>> = Packages::find_by_id(pkg_id)
+        .select_only()
+        .column(packages::Column::SourceData)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(packages::uploaded(stored.flatten().as_deref()))
 }
 
 /// What [`record_upload`] did.
@@ -334,11 +354,68 @@ mod build_number_tests {
 mod transaction_tests {
     use super::*;
 
+    async fn uploaded_package(db: &sea_orm::DatabaseConnection) {
+        db.execute_unprepared(
+            "INSERT INTO packages (id, name, platforms, source_data) \
+             VALUES (1, 'hello', 'x86_64', '{\"type\":\"upload\"}')",
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An uploaded source that also carries an `archive` field is just as
+    /// uploaded.
+    #[tokio::test]
+    async fn an_uploaded_package_in_any_spelling_is_never_queued() {
+        let db = crate::testing::memory_db().await;
+        db.execute_unprepared(
+            "INSERT INTO packages (id, name, platforms, source_data) \
+             VALUES (1, 'hello', 'x86_64', '{\"type\":\"upload\",\"archive\":[]}')",
+        )
+        .await
+        .unwrap();
+        assert!(
+            enqueue_build_if_missing(
+                &db,
+                1,
+                Platform::X86_64,
+                "1-1",
+                100,
+                Pending::Enqueued,
+                BuildTrigger::User
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_package_is_never_queued() {
+        let db = crate::testing::memory_db().await;
+        uploaded_package(&db).await;
+        for pending in [Pending::Enqueued, Pending::WaitingForDeps] {
+            assert!(
+                enqueue_build_if_missing(
+                    &db,
+                    1,
+                    Platform::X86_64,
+                    "1-1",
+                    100,
+                    pending,
+                    BuildTrigger::User
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert!(Builds::find().one(&db).await.unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn an_upload_is_recorded_publishing_and_a_second_waits() {
         let db = crate::testing::memory_db().await;
-        let pkg = crate::testing::package("hello").insert(&db).await;
-        let UploadSlot::Recorded(build) = record_upload(&db, pkg.id, Platform::X86_64, "1-1", 100)
+        uploaded_package(&db).await;
+        let UploadSlot::Recorded(build) = record_upload(&db, 1, Platform::X86_64, "1-1", 100)
             .await
             .unwrap()
         else {
@@ -348,23 +425,25 @@ mod transaction_tests {
         assert_eq!(build.trigger, BuildTrigger::Upload);
         assert_eq!(build.number, 1);
         assert_eq!(build.worker_id, None);
-        let status = crate::prelude::Packages::find_by_id(build.pkg_id)
+        let status: BuildState = Packages::find_by_id(1)
+            .select_only()
+            .column(packages::Column::Status)
+            .into_tuple()
             .one(&db)
             .await
             .unwrap()
-            .unwrap()
-            .status;
+            .unwrap();
         assert_eq!(status, BuildState::Publishing);
 
         assert_eq!(
-            record_upload(&db, pkg.id, Platform::X86_64, "1-2", 101)
+            record_upload(&db, 1, Platform::X86_64, "1-2", 101)
                 .await
                 .unwrap(),
             UploadSlot::Busy(build)
         );
         // Another platform is another slot.
         assert!(matches!(
-            record_upload(&db, pkg.id, Platform::Aarch64, "1-1", 102)
+            record_upload(&db, 1, Platform::Aarch64, "1-1", 102)
                 .await
                 .unwrap(),
             UploadSlot::Recorded(_)

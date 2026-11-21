@@ -9,6 +9,7 @@
 //! finalization and dependent-promotion failures are retried by the server.
 
 use crate::build_logger::append_build_output;
+use crate::package::source_facts::{provides_json, split_packages_json};
 use crate::repository::{PublishedFile, Repository, Update};
 use anyhow::{anyhow, bail, ensure};
 use aurcache_activitylog::activity_utils::ActivityLog;
@@ -17,6 +18,7 @@ use aurcache_common::api::log::BuildRef;
 use aurcache_common::build_state::BuildState;
 use aurcache_db::helpers::builds::{Transition, refresh_package_status, transition};
 use aurcache_db::helpers::time::now_secs;
+use aurcache_db::lists::{JsonList, Licenses};
 use aurcache_db::prelude::{Builds, Dependencies, Files, Packages};
 use aurcache_db::{builds, dependencies, files, packages};
 use pacman_mirrors::platforms::Platform;
@@ -297,6 +299,41 @@ struct Plan {
     stale: Vec<PublishedFile>,
     version: String,
     total_size: i64,
+    /// For an uploaded package, what its packages say about it.
+    described: Option<Described>,
+}
+
+/// What an uploaded package says about itself, from the packages it
+/// publishes: it has no source to read this from. Recorded with the build,
+/// so a publication that fails changes none of it.
+#[derive(Clone)]
+struct Described {
+    provides: Option<JsonList>,
+    description: Option<String>,
+    url: Option<String>,
+    licenses: Option<Licenses>,
+}
+
+impl Described {
+    /// From the packages of a build of `pkg`: what they all provide, and the
+    /// description of the one named after the package, or else the first.
+    fn of(pkg: &packages::Model, described: &[Staged]) -> Option<Self> {
+        let primary = described
+            .iter()
+            .find(|staged| staged.entry.meta.pkgname == pkg.name)
+            .or_else(|| described.first())?;
+        let provides: Vec<String> = described
+            .iter()
+            .flat_map(|staged| staged.entry.meta.provides.iter().cloned())
+            .collect();
+        let meta = &primary.entry.meta;
+        Some(Self {
+            provides: provides_json(&provides),
+            description: meta.description.clone(),
+            url: meta.url.clone(),
+            licenses: (!meta.licenses.is_empty()).then(|| Licenses::new(&meta.licenses)),
+        })
+    }
 }
 
 async fn publish(
@@ -387,14 +424,15 @@ async fn settle(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Resul
 ///
 /// Detached signatures are left out -- the repository moves them with their
 /// package -- and so are makepkg's `-debug` packages (see
-/// [`Artifact::Debug`]). What remains must be named for this package.
+/// [`Artifact::Debug`]). What remains must be named for this package: one
+/// its source builds, or for an uploaded package, which has no source, any
+/// its upload carried (the upload was held to that when it arrived).
 async fn read_staging(
     repo: &Repository,
     build: &builds::Model,
     pkg: &packages::Model,
 ) -> anyhow::Result<Vec<Upload>> {
-    let expected = expected_pkgnames(pkg);
-    let mut names = Vec::new();
+    let mut staged = Vec::new();
     let mut entries = match tokio::fs::read_dir(repo.staging_dir(build.id)).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -413,6 +451,21 @@ async fn read_staging(
         {
             continue;
         }
+        staged.push(entry.path());
+    }
+    let mut expected = expected_pkgnames(pkg);
+    if !pkg.source_data.is_buildable() {
+        for path in &staged {
+            let name = parse_arch_pkg(&file_name(path))?.name;
+            if !expected.contains(&name) {
+                expected.push(name);
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    for path in staged {
+        let filename = file_name(&path);
         match artifact(&expected, &filename)? {
             Artifact::Debug => {
                 log(
@@ -424,7 +477,7 @@ async fn read_staging(
                 .await;
             }
             Artifact::Package(named) => names.push(Upload {
-                path: entry.path(),
+                path,
                 filename,
                 named,
             }),
@@ -435,6 +488,13 @@ async fn read_staging(
     }
     names.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(names)
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Decide who owns each file and what goes stale, from what `update` reads.
@@ -508,6 +568,9 @@ async fn plan(
         stale,
         version,
         total_size: described.iter().map(|staged| staged.size).sum(),
+        described: (!pkg.source_data.is_buildable())
+            .then(|| Described::of(pkg, described))
+            .flatten(),
     })
 }
 
@@ -687,6 +750,37 @@ pub async fn shared_names<C: ConnectionTrait>(db: &C) -> Result<Vec<SharedName>,
     Ok(shared)
 }
 
+/// The first package name of the files `staged` that a package other than
+/// `pkg_id` publishes on `platform` and does not give up to it (see
+/// [`standing`]), read without the repository lock.
+///
+/// For refusing an upload before it is recorded; what decides is publishing,
+/// under the lock. `pkg_id` is `None` for a package not created yet.
+pub(crate) async fn published_by_another<C: ConnectionTrait>(
+    db: &C,
+    pkg_id: Option<i32>,
+    platform: Platform,
+    staged: &[&str],
+) -> Result<Option<Taken>, DbErr> {
+    let pkgnames: Vec<String> = staged
+        .iter()
+        .filter_map(|filename| parse_arch_pkg(filename).ok())
+        .map(|parsed| parsed.name)
+        .collect();
+    let rows = crate::repository::files_named(db, platform, &pkgnames).await?;
+    let named: Vec<NamedFile<'_>> = rows
+        .iter()
+        .map(|row| NamedFile {
+            package_id: row.package_id,
+            filename: &row.filename,
+        })
+        .collect();
+    Ok(match standing(db, pkg_id, staged, &named).await? {
+        Standing::Taken(taken) => Some(taken),
+        Standing::Clear { .. } => None,
+    })
+}
+
 /// The one database transaction: the files, the build's result and what it
 /// means for the package, together.
 ///
@@ -757,7 +851,65 @@ async fn record(
         .filter(packages::Column::Id.eq(pkg.id))
         .exec(txn)
         .await?;
+    if let Some(described) = &plan.described {
+        describe_uploaded(txn, pkg, platform, described).await?;
+    }
     refresh_package_status(txn, pkg.id).await?;
+    Ok(())
+}
+
+/// Record what an uploaded package now is: the names of every package it
+/// publishes, on any platform, and what this build says about it.
+///
+/// Its names are read back from its files rather than from this build alone:
+/// a name it still publishes on another platform stays its own. What it
+/// provides is this build's, together with what it provided already while it
+/// publishes anything on another platform.
+async fn describe_uploaded(
+    txn: &sea_orm::DatabaseTransaction,
+    pkg: &packages::Model,
+    platform: Platform,
+    described: &Described,
+) -> anyhow::Result<()> {
+    let published: Vec<files::Model> = Files::find()
+        .filter(files::Column::PackageId.eq(pkg.id))
+        .all(txn)
+        .await?;
+    let mut names: Vec<String> = Vec::new();
+    for file in &published {
+        if let Ok(parsed) = parse_arch_pkg(&file.filename)
+            && !names.contains(&parsed.name)
+        {
+            names.push(parsed.name);
+        }
+    }
+    names.sort();
+
+    let mut provides: Vec<String> = Vec::new();
+    if published.iter().any(|file| file.platform != platform) {
+        let current = Packages::find_by_id(pkg.id)
+            .one(txn)
+            .await?
+            .ok_or_else(|| anyhow!("the package is gone"))?;
+        provides.extend(JsonList::entries(current.provides.as_ref()).iter().cloned());
+    }
+    for provided in JsonList::entries(described.provides.as_ref()) {
+        if !provides.contains(provided) {
+            provides.push(provided.clone());
+        }
+    }
+
+    packages::ActiveModel {
+        id: Set(pkg.id),
+        split_packages: Set(split_packages_json(&pkg.name, &names)),
+        provides: Set(provides_json(&provides)),
+        source_description: Set(described.description.clone()),
+        source_project_url: Set(described.url.clone()),
+        source_licenses: Set(described.licenses.clone()),
+        ..Default::default()
+    }
+    .update(txn)
+    .await?;
     Ok(())
 }
 
@@ -954,8 +1106,13 @@ mod tests {
     fn meta(pkgname: &str, version: &str, arch: Option<&str>) -> PackageMeta {
         PackageMeta {
             pkgname: pkgname.to_string(),
+            pkgbase: None,
             version: version.to_string(),
             arch: arch.map(str::to_string),
+            description: None,
+            url: None,
+            licenses: Vec::new(),
+            provides: Vec::new(),
         }
     }
 

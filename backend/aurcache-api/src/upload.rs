@@ -1,10 +1,8 @@
 //! Uploading packages built elsewhere (see `aurcache_utils::upload`).
 
 use crate::auth::Authenticated;
-use crate::package::package_by_pkgbase;
 use crate::utils::error::{ApiError, err};
 use aurcache_common::api::package::UploadedBuild;
-use aurcache_db::packages;
 use aurcache_utils::services::Services;
 use aurcache_utils::settings;
 use aurcache_utils::upload::{self, Received, UploadError, UploadRequest};
@@ -63,6 +61,11 @@ impl From<UploadError> for ApiError {
 /// dropped, up to 1 GiB, so a client still sending it reads the answer; one
 /// with more left to send is cut off.
 ///
+/// A package that does not exist is created as an uploaded package, which no
+/// worker ever builds; its files must name it as their pkgbase. No package
+/// name an upload publishes may be one another package publishes on that
+/// platform.
+///
 /// Answers once the first attempt to publish has run: `Successful`, or
 /// `Publishing` when it continues in the background, or `Failed` with the
 /// reason in the build's log.
@@ -71,14 +74,13 @@ impl From<UploadError> for ApiError {
     path = "/package/{pkgbase}/upload",
     request_body(content = Vec<u8>, description = "The package files, one multipart part each, named by filename", content_type = "multipart/form-data"),
     params(
-        ("pkgbase", description = "pkgbase of the package, which must exist"),
+        ("pkgbase", description = "pkgbase of the package; created when there is none"),
         ("platform", Query, description = "The platform an upload of only `arch = any` packages is for; otherwise the files say"),
     ),
     responses(
         (status = 200, description = "The build the upload became", body = UploadedBuild),
         (status = 400, description = "A file that cannot be published under this package; the body says which and why"),
-        (status = 404, description = "There is no such package"),
-        (status = 409, description = "A build of the package on that platform has not finished, or another request removed the package meanwhile"),
+        (status = 409, description = "A build of the package on that platform has not finished, or another request created or removed the package meanwhile"),
         (status = 413, description = "A file larger than the package's artifact limit"),
     ),
 )]
@@ -102,7 +104,7 @@ pub async fn upload_package(
         }
     };
     let request = UploadRequest {
-        pkg: arrived.pkg,
+        pkgbase: pkgbase.to_string(),
         platform: arrived.platform,
         uploader: a.username,
     };
@@ -119,7 +121,6 @@ pub async fn upload_package(
 
 /// An upload whose files are all in, about to be checked as a whole.
 struct Arrived {
-    pkg: packages::Model,
     platform: Option<Platform>,
     received: Received,
 }
@@ -147,21 +148,18 @@ async fn arrive(
         .flatten()
         .ok_or_else(|| err(Status::BadRequest, "expected a multipart/form-data body"))?;
 
-    let pkg = package_by_pkgbase(&services.db, pkgbase).await?;
+    let existing = upload::package_for(&services.db, pkgbase).await?;
     // The same backstop a worker's artifacts get, and per package for the
-    // same reason.
-    let limit = settings::get(&services.db, settings::key::MAX_ARTIFACT_SIZE, Some(pkg.id))
+    // same reason; a package that does not exist yet gets the global value.
+    let pkg_id = existing.as_ref().map(|pkg| pkg.id);
+    let limit = settings::get(&services.db, settings::key::MAX_ARTIFACT_SIZE, pkg_id)
         .await?
         .value
         .0;
 
-    let mut received = Received::new(&services.repo, &pkg, limit).await?;
+    let mut received = Received::new(&services.repo, pkgbase, existing.as_ref(), limit).await?;
     receive(body, boundary, &mut received).await?;
-    Ok(Arrived {
-        pkg,
-        platform,
-        received,
-    })
+    Ok(Arrived { platform, received })
 }
 
 /// Read and drop what is left of a refused upload's body, up to

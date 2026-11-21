@@ -524,9 +524,10 @@ pub(crate) enum PackagesCommand {
     Patch(PatchPackageArgs),
     /// Publish packages built elsewhere, e.g. with `makechrootpkg`.
     ///
-    /// The files are one build of an existing package: the package files
-    /// (split packages included) and any detached `.sig` beside them. They
-    /// become a build of the package, published like one a worker built.
+    /// The files are one build: the package files (split packages included)
+    /// and any detached `.sig` beside them. They become a build of the
+    /// package, published like one a worker built. A package that does not
+    /// exist is created as an uploaded package, which is never built here.
     Upload(UploadPackageArgs),
     /// Inspect and repoint a package's dependencies.
     Dep {
@@ -660,9 +661,10 @@ pub(crate) struct UpdatePackageArgs {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct UploadPackageArgs {
-    /// Package name (pkgbase) the files are a build of: an AUR or git
-    /// package already here. Every file must be among the packages its
-    /// source builds.
+    /// Package name (pkgbase) the files are a build of. For an uploaded
+    /// package, or a new one, every file's `.PKGINFO` must name it as its
+    /// pkgbase; for an AUR or git package, every file must be among the
+    /// packages its source builds.
     pub(crate) pkgbase: String,
 
     /// The package files and their signatures.

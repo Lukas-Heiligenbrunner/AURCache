@@ -59,7 +59,10 @@ pub async fn trigger_initial_builds(
         .collect();
 
     for pkgbase in pkgbases {
-        let Some(pkg) = pkgs.get(pkgbase) else {
+        let Some(pkg) = pkgs
+            .get(pkgbase)
+            .filter(|pkg| pkg.source_data.is_buildable())
+        else {
             continue;
         };
         // A leaf can start everywhere; anything else, wherever what it needs
@@ -93,6 +96,9 @@ pub async fn trigger_initial_builds(
 /// - Inserts a new `WAITING_FOR_DEPS` build for packages with no existing build when deps are not
 ///   yet satisfied, so they appear as pending in the UI.
 ///
+/// A package that is only ever uploaded is left alone: it has nothing to build
+/// from, and is published when its next upload arrives.
+///
 /// Returns the number of builds newly promoted or inserted as `ENQUEUED` (i.e. startable).
 pub async fn enqueue_missing_buildable_packages(
     db: &DatabaseConnection,
@@ -101,7 +107,10 @@ pub async fn enqueue_missing_buildable_packages(
     let packages = Packages::find().all(db).await?;
 
     let mut queued = 0;
-    for pkg in packages {
+    for pkg in packages
+        .into_iter()
+        .filter(|pkg| pkg.source_data.is_buildable())
+    {
         for &platform in pkg.platforms.as_slice() {
             let deps_ok = dependencies_satisfied(db, pkg.id, platform).await?;
 

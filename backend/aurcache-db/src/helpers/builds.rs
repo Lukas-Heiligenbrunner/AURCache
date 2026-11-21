@@ -7,8 +7,8 @@ use aurcache_common::build_state::BuildState;
 use pacman_mirrors::platforms::Platform;
 use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, Query};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, Order, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait, Select,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, Order, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, Select,
 };
 use std::collections::BTreeMap;
 
@@ -236,25 +236,38 @@ pub fn combined_status(states: impl IntoIterator<Item = BuildState>) -> Option<B
     states.into_iter().min_by_key(rank)
 }
 
+/// The `packages` columns [`refresh_package_status`] reads.
+#[derive(FromQueryResult)]
+struct StatusRow {
+    /// Optional: a row written before the column had a default holds NULL.
+    platforms: Option<Platforms>,
+    source_data: Option<String>,
+}
+
 /// Bring `pkg_id`'s status in line with its builds; see [`combined_status`].
 ///
 /// The one way `packages.status` is written once a package has builds, so it
 /// cannot disagree with them: every change to a build's status calls this, in
 /// the same transaction. A package with no build on any configured platform is
-/// left as it is.
+/// left as it is -- unless it is only ever uploaded, which then reads
+/// `Failed`: nothing will build it before its next upload.
 pub async fn refresh_package_status<C: ConnectionTrait>(db: &C, pkg_id: i32) -> Result<(), DbErr> {
-    // Optional: a row written before the column had a default holds NULL.
-    let Some(configured) = packages::Entity::find_by_id(pkg_id)
+    let Some(StatusRow {
+        platforms,
+        source_data,
+    }) = packages::Entity::find_by_id(pkg_id)
         .select_only()
         .column(packages::Column::Platforms)
+        .column(packages::Column::SourceData)
         .lock_exclusive()
-        .into_tuple::<Option<Platforms>>()
+        .into_model::<StatusRow>()
         .one(db)
         .await?
     else {
         return Ok(());
     };
-    let configured = configured.unwrap_or_default();
+    let configured = platforms.unwrap_or_default();
+    let uploaded = packages::uploaded(source_data.as_deref());
 
     // The newest build per platform: the one whose number is the highest of
     // that package and platform.
@@ -281,12 +294,17 @@ pub async fn refresh_package_status<C: ConnectionTrait>(db: &C, pkg_id: i32) -> 
         .all(db)
         .await?;
 
+    // With no build to go by, a package that can be built keeps what it was
+    // given -- queued, until its first build is. One that is only ever
+    // uploaded has nothing in the repository and nothing that will build it
+    // until it is uploaded again, which is what failed says.
     let Some(status) = combined_status(
         newest
             .into_iter()
             .filter(|(platform, _)| configured.contains(*platform))
             .map(|(_, status)| status),
-    ) else {
+    )
+    .or_else(|| uploaded.then_some(BuildState::Failed)) else {
         return Ok(());
     };
     packages::Entity::update_many()

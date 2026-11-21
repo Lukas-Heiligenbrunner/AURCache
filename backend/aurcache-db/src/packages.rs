@@ -84,3 +84,29 @@ impl Related<super::builds::Entity> for Entity {
         Relation::Builds.def()
     }
 }
+
+/// Whether a package whose `source_data` column holds `stored`, read as
+/// text, is only ever uploaded ([`SourceData::is_buildable`]).
+///
+/// Parsed here rather than read through the entity, so that a row whose
+/// source does not parse at all is told apart from an uploaded one rather
+/// than failing the query that read it.
+#[must_use]
+pub fn uploaded(stored: Option<&str>) -> bool {
+    stored
+        .and_then(|source| source.parse::<SourceData>().ok())
+        .is_some_and(|source| !source.is_buildable())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_upload_source_is_uploaded() {
+        assert!(uploaded(Some(r#"{"type":"upload"}"#)));
+        assert!(!uploaded(Some(r#"{"type":"aur","name":"hello"}"#)));
+        assert!(!uploaded(Some("not a source")));
+        assert!(!uploaded(None));
+    }
+}

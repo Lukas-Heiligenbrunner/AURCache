@@ -1447,3 +1447,123 @@ async fn a_dependency_only_package_survives_the_restore() {
         "zzz does not depend on the restored mylib: {edges:?}"
     );
 }
+
+/// An uploaded package comes back with no build queued, and failed: a dump
+/// carries none of its files, and nothing will build it before its next
+/// upload, which says again what it publishes.
+#[tokio::test]
+async fn a_restored_uploaded_package_is_not_queued() {
+    let source = aurcache_db::testing::memory_db().await;
+    packages::ActiveModel {
+        name: Set("upl".to_string()),
+        status: Set(BuildState::Successful),
+        out_of_date: Set(false),
+        build_flags: Set(Default::default()),
+        platforms: Set("x86_64".parse().unwrap()),
+        source_data: Set(SourceData::Upload {}),
+        directly_requested: Set(true),
+        split_packages: Set(Some(r#"["upl","upl-docs"]"#.parse().unwrap())),
+        ..Default::default()
+    }
+    .insert(&source)
+    .await
+    .unwrap();
+    let bytes = dump_bytes(&source).await;
+
+    let target = aurcache_db::testing::memory_db().await;
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
+    let TestClient { client, _repos } = client_with_empty_official_repos().await;
+    aurcache_utils::restore::apply(
+        &Services {
+            db: target.clone(),
+            store: Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
+                tempfile::tempdir().unwrap().keep(),
+            )),
+            client: Arc::new(client),
+            repo: Arc::new(test_repo()),
+            activity: ActivityLog::discarding(),
+        },
+        &tempfile::tempdir().unwrap().keep(),
+        load_dump(&bytes).unwrap(),
+        RestoreOptions::default(),
+        progress_tx,
+    )
+    .await;
+    while let Ok(entry) = progress_rx.try_recv() {
+        assert!(
+            !matches!(entry.outcome, RestoreOutcome::Failed { .. }),
+            "{entry:?}"
+        );
+    }
+
+    let restored = Packages::find().one(&target).await.unwrap().unwrap();
+    assert_eq!(restored.source_data, SourceData::Upload {});
+    assert_eq!(
+        restored.split_packages, None,
+        "what it publishes is not dumped"
+    );
+    assert_eq!(restored.status, BuildState::Failed);
+    assert!(
+        aurcache_db::prelude::Builds::find()
+            .all(&target)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Overwriting does not turn a package built here into an uploaded one: its
+/// queued builds and dependency edges would be left to a package nothing
+/// builds. The dry run says so too, and nothing is written.
+#[tokio::test]
+async fn overwrite_does_not_turn_a_built_package_into_an_uploaded_one() {
+    let source = aurcache_db::testing::memory_db().await;
+    let id = package(&source, "turned", true, None).await;
+    packages::ActiveModel {
+        id: Set(id),
+        source_data: Set(SourceData::Upload {}),
+        ..Default::default()
+    }
+    .update(&source)
+    .await
+    .unwrap();
+    let bytes = dump_bytes(&source).await;
+
+    let target = aurcache_db::testing::memory_db().await;
+    package(&target, "turned", true, None).await;
+    let loaded = load_dump(&bytes).unwrap();
+    let overwrite = RestoreOptions {
+        on_existing: ExistingPackagePolicy::Overwrite,
+        ..RestoreOptions::default()
+    };
+
+    let entries = preview(&target, &loaded, &overwrite).await.unwrap();
+    assert!(
+        matches!(&entries[0].outcome, RestoreOutcome::Failed { error } if error.contains("uploaded")),
+        "{entries:?}"
+    );
+    let error = aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &overwrite)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("turned"), "{error}");
+    let row = Packages::find().one(&target).await.unwrap().unwrap();
+    assert!(row.source_data.is_buildable(), "nothing was written");
+
+    // A clear removes what is here first, so nothing is turned: the dry run
+    // agrees with the import.
+    let clear = RestoreOptions {
+        clear: true,
+        ..overwrite
+    };
+    let entries = preview(&target, &loaded, &clear).await.unwrap();
+    assert!(
+        !matches!(&entries[0].outcome, RestoreOutcome::Failed { .. }),
+        "{entries:?}"
+    );
+    aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &clear)
+        .await
+        .unwrap();
+    let row = Packages::find().one(&target).await.unwrap().unwrap();
+    assert_eq!(row.source_data, SourceData::Upload {});
+}
