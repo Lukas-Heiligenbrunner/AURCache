@@ -117,163 +117,39 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
     Ok(Some(key))
 }
 
-/// A secret key, armored or binary -- or one rPGP refuses only for how
-/// GnuPG wrote its checksum ([`gnupg_checksums`]), read with that checksum as
-/// rPGP computes it.
-fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
-    if let Ok((key, _headers)) = SignedSecretKey::from_armor_single(bytes) {
-        return Ok(key);
-    }
-    if let Ok(key) = SignedSecretKey::from_bytes(bytes) {
-        return Ok(key);
-    }
-    let binary = dearmored(bytes).unwrap_or_else(|| bytes.to_vec());
-    if let Some(key) = gnupg_checksums(&binary)
-        .and_then(|repaired| SignedSecretKey::from_bytes(repaired.as_slice()).ok())
-    {
-        return Ok(key);
-    }
-    bail!("not an OpenPGP secret key")
-}
+/// What a key is refused with when rPGP refuses its checksum: see
+/// [`parse_secret`].
+const REFUSED_CHECKSUM: &str = "rPGP, which the server reads keys with, refuses this key's \
+     checksum. Either it is one of the unprotected Ed25519 keys GnuPG exports that rPGP \
+     misreads, about one in 256 (https://github.com/rpgp/rpgp/issues/901), or the key file \
+     is damaged. Lock the key with a passphrase (`gpg --passwd <fingerprint>`), export it \
+     again and give the server that passphrase (AURCACHE_SIGNING_KEY_PASSPHRASE_FILE): rPGP \
+     reads a locked copy of the same key. If that copy is refused too, restore the key from \
+     a backup";
 
-/// The packets in `bytes`, when they are armored.
-fn dearmored(bytes: &[u8]) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    if !text.trim_start().starts_with("-----BEGIN PGP") {
-        return None;
-    }
-    let mut binary = Vec::new();
-    pgp::armor::Dearmor::new(text.trim_start().as_bytes())
-        .read_to_end(&mut binary)
-        .ok()?;
-    Some(binary)
-}
-
-/// The key packets in `binary` with the checksum of each unprotected
-/// Ed25519 secret GnuPG wrote in a way rPGP does not read, made what rPGP
-/// computes; `None` when there is none.
+/// A secret key, armored or binary.
 ///
-/// rPGP (0.21) checks an unprotected secret's checksum over its own,
-/// canonical encoding of the secret rather than over the bytes in the file,
-/// and GnuPG writes a secret whose first byte is zero with a bit count of
-/// 256 -- about one secret in 256 -- so the two sums differ, and rPGP refuses
-/// a key GnuPG reads. Only a checksum right as GnuPG computes it is
-/// changed: a damaged key stays refused. The secret itself is the same.
-fn gnupg_checksums(binary: &[u8]) -> Option<Vec<u8>> {
-    let mut repaired = binary.to_vec();
-    let mut changed = false;
-    let mut at = 0;
-    while at < binary.len() {
-        let packet = packet_at(binary, at)?;
-        // A secret key or secret subkey.
-        if matches!(packet.tag, 5 | 7)
-            && let Some(fix) = eddsa_checksum(&binary[packet.body..packet.end])
-        {
-            let checksum = packet.body + fix.offset;
-            repaired[checksum..checksum + 2].copy_from_slice(&fix.checksum.to_be_bytes());
-            changed = true;
-        }
-        at = packet.end;
-    }
-    changed.then_some(repaired)
-}
-
-/// Where an OpenPGP packet's body is, and its tag.
-struct PacketSpan {
-    tag: u8,
-    body: usize,
-    end: usize,
-}
-
-/// The packet starting at `at` in `bytes`, if its header is one a key file
-/// has: either format, with a definite length.
-fn packet_at(bytes: &[u8], at: usize) -> Option<PacketSpan> {
-    let first = *bytes.get(at)?;
-    if first & 0x80 == 0 {
-        return None;
-    }
-    let be = |from: usize, len: usize| -> Option<usize> {
-        let field = bytes.get(from..from + len)?;
-        Some(field.iter().fold(0, |acc, b| (acc << 8) | usize::from(*b)))
-    };
-    let (tag, len, header) = if first & 0x40 != 0 {
-        let l1 = usize::from(*bytes.get(at + 1)?);
-        let (len, header) = match l1 {
-            0..=191 => (l1, 2),
-            192..=223 => (((l1 - 192) << 8) + be(at + 2, 1)? + 192, 3),
-            255 => (be(at + 2, 4)?, 6),
-            _ => return None,
-        };
-        (first & 0x3f, len, header)
+/// rPGP (0.21) checks an unprotected secret's checksum over its own encoding
+/// of the secret rather than over the bytes in the file, and GnuPG writes an
+/// Ed25519 secret whose first byte is zero with a bit count of 256, so the
+/// two sums differ and rPGP refuses a key GnuPG reads
+/// (<https://github.com/rpgp/rpgp/issues/901>). A damaged key file is refused
+/// the same way, so the refusal names both, and what to try for each.
+fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
+    let armored = std::str::from_utf8(bytes)
+        .is_ok_and(|text| text.trim_start().starts_with("-----BEGIN PGP"));
+    let parsed = if armored {
+        SignedSecretKey::from_armor_single(bytes).map(|(key, _headers)| key)
     } else {
-        let (len, header) = match first & 3 {
-            0 => (be(at + 1, 1)?, 2),
-            1 => (be(at + 1, 2)?, 3),
-            2 => (be(at + 1, 4)?, 5),
-            _ => return None,
-        };
-        ((first >> 2) & 0x0f, len, header)
+        SignedSecretKey::from_bytes(bytes)
     };
-    let body = at + header;
-    let end = body.checked_add(len)?;
-    (end <= bytes.len()).then_some(PacketSpan { tag, body, end })
-}
-
-/// The checksum rPGP expects in an unprotected v4 Ed25519 (legacy EdDSA)
-/// secret key packet's `body`, and where it is, when GnuPG's differs only
-/// for writing the secret with a bit count rPGP does not keep.
-struct ChecksumFix {
-    offset: usize,
-    checksum: u16,
-}
-
-fn eddsa_checksum(body: &[u8]) -> Option<ChecksumFix> {
-    let byte = |i: usize| body.get(i).copied();
-    let u16_at = |i: usize| Some(u16::from_be_bytes([byte(i)?, byte(i + 1)?]));
-    // Version 4, then four bytes of creation time, then the algorithm.
-    if byte(0)? != 4 || byte(5)? != 22 {
-        return None;
+    match parsed {
+        Ok(key) => Ok(key),
+        Err(error) if format!("{error:#}").contains("Invalid checksum") => {
+            bail!(REFUSED_CHECKSUM)
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("not an OpenPGP secret key")),
     }
-    let oid = usize::from(byte(6)?);
-    let point = 7 + oid;
-    let usage = point + 2 + usize::from(u16_at(point)?).div_ceil(8);
-    // Unprotected: the secret follows in the clear, then its checksum.
-    if byte(usage)? != 0 {
-        return None;
-    }
-    let mpi = usage + 1;
-    let declared = usize::from(u16_at(mpi)?);
-    let data = body.get(mpi + 2..mpi + 2 + declared.div_ceil(8))?;
-    let offset = mpi + 2 + data.len();
-    if offset + 2 != body.len() {
-        return None;
-    }
-    let sum = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .fold(0u16, |acc, b| acc.wrapping_add(u16::from(*b)))
-    };
-    if sum(&body[mpi..offset]) != u16_at(offset)? {
-        return None;
-    }
-    let canonical = significant_bits(data);
-    if canonical == declared {
-        return None;
-    }
-    let header = u16::try_from(canonical).ok()?.to_be_bytes();
-    Some(ChecksumFix {
-        offset,
-        checksum: sum(&header).wrapping_add(sum(data)),
-    })
-}
-
-/// How many bits `data`, a big-endian number, takes once its leading zeros
-/// are dropped -- what an MPI's bit count says.
-fn significant_bits(data: &[u8]) -> usize {
-    let Some(first) = data.iter().position(|b| *b != 0) else {
-        return 0;
-    };
-    (data.len() - first - 1) * 8 + (8 - data[first].leading_zeros() as usize)
 }
 
 /// The passphrase in `path`, without the newline an editor or `echo` leaves
@@ -1559,112 +1435,76 @@ mod tests {
 
     /// About one unprotected Ed25519 secret GnuPG exports in 256 -- one
     /// beginning with a zero byte -- is one rPGP refuses ("Invalid checksum"),
-    /// though GnuPG reads it: read here all the same, with only its checksum
-    /// changed, and what it signs is what GnuPG verifies. A protected copy
-    /// of the same key never had the problem.
+    /// though GnuPG reads it. It is refused saying how to get a copy rPGP
+    /// reads, and that way, locked with a passphrase, it loads and signs.
     #[test]
-    fn a_gnupg_key_rpgp_would_refuse_for_its_checksum_signs() {
-        let refused = include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg");
-        assert!(
-            SignedSecretKey::from_bytes(&refused[..]).is_err(),
-            "rPGP reads such keys now; `gnupg_checksums` can go"
-        );
-        let repaired = gnupg_checksums(refused).unwrap();
-        let differing = refused
-            .iter()
-            .zip(&repaired)
-            .filter(|(a, b)| a != b)
-            .count();
-        assert!((1..=2).contains(&differing), "{differing} bytes changed");
-        let generated = InstanceKey::generate(None).unwrap();
-        assert!(gnupg_checksums(&generated.key.to_bytes().unwrap()).is_none());
-
+    fn a_key_rpgp_misreads_is_refused_with_a_way_around() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("unprotected.gpg");
-        std::fs::write(&path, refused).unwrap();
-        let key = InstanceKey::load(&path, None).unwrap();
-        let protected = tmp.path().join("protected.gpg");
-        std::fs::write(
-            &protected,
-            include_bytes!("../testdata/gnupg-protected-leading-zero.gpg"),
-        )
-        .unwrap();
-        assert_eq!(
-            InstanceKey::load(&protected, Some("testpw"))
-                .unwrap()
-                .fingerprint(),
-            key.fingerprint()
+        let misread = include_bytes!("../testdata/gnupg-unprotected-leading-zero.asc");
+        let path = tmp.path().join("misread.asc");
+        std::fs::write(&path, misread).unwrap();
+        let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
+        assert!(
+            error.contains(REFUSED_CHECKSUM),
+            "rPGP reads such keys now, and the refusal can go: {error}"
         );
 
         let Some(gpg) = Gpg::new(tmp.path()) else {
-            eprintln!("skipped the GnuPG check: gpg is not installed");
+            eprintln!("skipped the way around: gpg is not installed");
             return;
         };
-        // A primary key that signs, and a signing subkey under a primary
-        // that only certifies, each with the secret GnuPG wrote that way.
-        let subkey = tmp.path().join("subkey.gpg");
+        let imported = gpg.unattended(&["--import", path.to_str().unwrap()]);
+        assert!(imported.success, "gpg --import: {}", imported.stderr);
+        let fingerprint = imported
+            .status
+            .lines()
+            .find_map(|line| line.strip_prefix("[GNUPG:] IMPORT_OK "))
+            .and_then(|rest| rest.split_whitespace().nth(1))
+            .expect("gpg names the key it imported")
+            .to_string();
+        // With no passphrase yet, `--passwd` asks only for the new one.
+        let locked = gpg.with_passphrase("correct horse", &["--passwd", &fingerprint]);
+        assert!(locked.success, "gpg --passwd: {}", locked.stderr);
+        let path = tmp.path().join("locked.gpg");
         std::fs::write(
-            &subkey,
-            include_bytes!("../testdata/gnupg-unprotected-leading-zero-subkey.gpg"),
+            &path,
+            gpg.export("--export-secret-keys", &fingerprint, "correct horse"),
         )
         .unwrap();
-        let by_subkey = InstanceKey::load(&subkey, None).unwrap();
-        assert_eq!(by_subkey.signer, Signer::Subkey(0));
-        for (key, file) in [(&key, &path), (&by_subkey, &subkey)] {
-            let imported = gpg.unattended(&["--import", file.to_str().unwrap()]);
-            assert!(imported.success, "gpg --import: {}", imported.stderr);
-            let content = tmp.path().join("content");
-            std::fs::write(&content, CONTENT).unwrap();
-            let signature = tmp.path().join("content.sig");
-            std::fs::write(&signature, key.sign_file(&content).unwrap()).unwrap();
-            let verified = gpg.verify([signature.to_str().unwrap(), content.to_str().unwrap()]);
-            assert!(verified.success, "gpg --verify: {}", verified.stderr);
-        }
-    }
-
-    /// What reads a supplied key reads every GnuPG key rPGP refuses for its
-    /// checksum, armored or binary, primary or subkey: the bit count rPGP
-    /// recomputes for the secret is anything from 249 down, so the checksum
-    /// it expects is off by a different amount for each key.
-    #[test]
-    fn every_gnupg_key_rpgp_refuses_for_its_checksum_is_read() {
-        let keys: [(&str, &[u8]); 3] = [
-            (
-                "248 bits once its leading zero is dropped",
-                include_bytes!("../testdata/gnupg-unprotected-leading-zero.gpg"),
-            ),
-            (
-                "247 bits once its leading zero is dropped, armored",
-                include_bytes!("../testdata/gnupg-unprotected-leading-zero.asc"),
-            ),
-            (
-                "a subkey's",
-                include_bytes!("../testdata/gnupg-unprotected-leading-zero-subkey.gpg"),
-            ),
-        ];
-        for (secret, bytes) in keys {
-            let binary = dearmored(bytes).unwrap_or_else(|| bytes.to_vec());
-            assert!(
-                SignedSecretKey::from_bytes(binary.as_slice()).is_err(),
-                "rPGP reads a secret of {secret} now; `gnupg_checksums` can go"
-            );
-            let key = parse_secret(bytes).unwrap_or_else(|e| panic!("a secret of {secret}: {e}"));
-            assert!(
-                key.verify_bindings().is_ok(),
-                "a secret of {secret}: the key's own signatures check"
-            );
-        }
+        let key = InstanceKey::load(&path, Some("correct horse")).unwrap();
+        assert_eq!(key.fingerprint(), fingerprint);
+        assert!(key.verifies(&key.sign(CONTENT).unwrap(), CONTENT));
     }
 
     /// Run `test` with a throwaway GnuPG home in a temporary directory, or
-    /// skip it when GnuPG is not installed.
+    /// skip it when GnuPG is not installed. A run that fails because a key
+    /// GnuPG made is one rPGP misreads ([`REFUSED_CHECKSUM`]) -- about one
+    /// unprotected secret in 256, which no test calling this is about -- is
+    /// run again, with new keys.
     fn with_gnupg(test: impl Fn(&Path, &Gpg)) {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(gpg) = Gpg::new(tmp.path()) else {
-            eprintln!("skipped: gpg is not installed");
-            return;
-        };
-        test(tmp.path(), &gpg);
+        for _ in 0..5 {
+            let tmp = tempfile::tempdir().unwrap();
+            let Some(gpg) = Gpg::new(tmp.path()) else {
+                eprintln!("skipped: gpg is not installed");
+                return;
+            };
+            let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                test(tmp.path(), &gpg);
+            }));
+            let Err(panic) = run else {
+                return;
+            };
+            let said = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or_default();
+            if !said.contains(REFUSED_CHECKSUM) {
+                std::panic::resume_unwind(panic);
+            }
+            eprintln!("GnuPG made a key rPGP misreads; running again with new keys");
+        }
+        panic!("GnuPG made keys rPGP misreads five times running");
     }
 
     /// A throwaway GnuPG home, whose agent is stopped when it is dropped.
