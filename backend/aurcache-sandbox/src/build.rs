@@ -140,7 +140,7 @@ fn run(request: &Request) -> Result<Infallible, Failure> {
     let read = if protected.is_empty() {
         Vec::new()
     } else {
-        crate::read_grants_excluding(&protected, crate::list_dir)
+        crate::read_grants_excluding(&protected, crate::list_dir, crate::leads)
     };
     restrict(&writable_dirs(), &read).map_err(|e| Failure::Unconfined(e.to_string()))?;
 

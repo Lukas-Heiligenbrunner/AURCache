@@ -105,6 +105,13 @@ mkdir -p /var/lib/aurcache-worker/ssh
 echo SSH-KEY-MATERIAL > /var/lib/aurcache-worker/ssh/id_ed25519
 echo MTLS-KEY-MATERIAL > /var/lib/aurcache-worker/worker-key.pem
 chown -R builder: /var/lib/aurcache-worker
+# A secret a deployment keeps under /run, protected by adding it to the
+# shipped list. The walk reaches /var on its way to the worker's directory,
+# and there meets /var/run, a link to /run.
+mkdir -p /run/aurcache-secret && echo RUN-KEY-MATERIAL > /run/aurcache-secret/key
+chown -R builder: /run/aurcache-secret
+grep -qx /run/aurcache-secret /etc/aurcache/sandbox-protected \
+    || echo /run/aurcache-secret >> /etc/aurcache/sandbox-protected
 cp /fixture/PKGBUILD /job/pkg/PKGBUILD
 chown -R builder: /job /shared
 
@@ -273,6 +280,8 @@ echo "workdir=$([ -e /shared/work-other/EVIL_pkgbuild ] && echo written || echo 
 echo "mktemp=$([ -s /job/pkg/mktemp-ok ] && echo works || echo broken)"
 echo "sshkey=$([ -s /job/pkg/stolen-ssh ] && echo read || echo blocked)"
 echo "mtlskey=$([ -s /job/pkg/stolen-mtls ] && echo read || echo blocked)"
+echo "var_run=$(readlink -f /var/run)"
+echo "runkey=$([ -s /job/pkg/stolen-run ] && echo read || echo blocked)"
 # What the build's copy has installed under the stale package's name.
 echo "upgrade=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-stale 2>&1)"
 echo "dep=$(pacman -b /chroot/job1/var/lib/pacman -Qq aurcache-netprobe 2>&1)"
@@ -335,6 +344,7 @@ check "unconfined: writes other srcdest"    pwned   "$(get srcdest  "$unconfined
 check "unconfined: writes other workdir"    written "$(get workdir  "$unconfined")"
 check "unconfined: reads ssh key"          read    "$(get sshkey   "$unconfined")"
 check "unconfined: reads mTLS identity"    read    "$(get mtlskey  "$unconfined")"
+check "unconfined: reads a secret under /run" read  "$(get runkey   "$unconfined")"
 check "unconfined: upgrade takes the bait" aurcache-bait "$(get upgrade "$unconfined")"
 check "unconfined: dependency installed"    aurcache-netprobe "$(get dep "$unconfined")"
 check "unconfined: scriptlet reaches TCP"   reached "$(get scriptlet_tcp "$unconfined")"
@@ -362,6 +372,8 @@ check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")
 check "confined:   other workdir untouched" blocked "$(get workdir  "$confined")"
 check "confined:   ssh key unreadable"     blocked "$(get sshkey   "$confined")"
 check "confined:   mTLS identity unreadable" blocked "$(get mtlskey "$confined")"
+check "confined:   /var/run links to /run"  /run    "$(get var_run  "$confined")"
+check "confined:   secret under /run unreadable" blocked "$(get runkey "$confined")"
 check "confined:   mktemp still works"     works   "$(get mktemp    "$confined")"
 check "confined:   build still succeeds"    0       "$(get build_exit "$confined")"
 check "confined:   upgrade never sees AURCache's repository" aurcache-stale "$(get upgrade "$confined")"

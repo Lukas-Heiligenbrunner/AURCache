@@ -263,7 +263,7 @@ fn restrict_with_landlock(dir: &Path, private: &[PathBuf], network: bool) -> Res
             )
         })?;
 
-    let mut grants = crate::read_grants_excluding(&private, crate::list_dir);
+    let mut grants = crate::read_grants_excluding(&private, crate::list_dir, crate::leads);
     grants.push(dir.to_path_buf());
 
     let mut ruleset = created;
