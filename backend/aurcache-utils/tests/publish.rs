@@ -4,7 +4,9 @@
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
 use aurcache_db::prelude::{Builds, Files, Packages};
-use aurcache_utils::publish::{interrupted, publish_build, publish_with_recovery};
+use aurcache_utils::publish::{
+    PublicationOutcome, interrupted, publish_build, publish_with_recovery,
+};
 use aurcache_utils::repository::Repository;
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
 use std::io::Read;
@@ -235,6 +237,84 @@ async fn a_rebuild_once_signing_is_off_takes_the_old_signature_away() {
     assert_eq!(entries[0].signature, None);
     assert!(!dir.join("repo.db.tar.gz.sig").exists());
     assert!(!dir.join("repo.db.sig").exists());
+}
+
+/// A key replaced between describing a build's packages and committing
+/// them -- a restore while it is being published -- makes its update refuse
+/// what the old key signed. Publication is tried again rather than failed,
+/// its staging kept, and the next attempt signs the package with the new
+/// key.
+#[tokio::test]
+async fn a_key_replaced_during_publication_is_retried_with_the_new_key() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = std::sync::Arc::new(
+        Repository::new(tmp.path())
+            .with_key(aurcache_signing::InstanceKey::generate(None).unwrap()),
+    );
+    package(&db, 1, "hello").await;
+    publishing_build(&db, 1, 1).await;
+    let staged = stage(&repo, 1, "hello", "1.0-1");
+    let mut signature = staged.as_os_str().to_owned();
+    signature.push(".sig");
+    let signature = PathBuf::from(signature);
+
+    // The repository lock held, the replacement waits for it first, and the
+    // publication describes its package with the old key, then waits too.
+    let held = repo.begin(&db).await.unwrap();
+    let swap = tokio::spawn({
+        let repo = std::sync::Arc::clone(&repo);
+        async move {
+            repo.replace_key(
+                aurcache_signing::InstanceKey::generate(None).unwrap(),
+                || Ok(()),
+            )
+            .await
+            .unwrap()
+            .replacement
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!swap.is_finished(), "the key changed without the lock");
+    let publication = tokio::spawn({
+        let repo = std::sync::Arc::clone(&repo);
+        let db = db.clone();
+        async move { publish_build(&db, &repo, &ActivityLog::discarding(), 1).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !signature.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the package is described");
+    let old = repo.key().unwrap();
+    assert!(old.issued(&std::fs::read(&signature).unwrap()));
+    drop(held);
+
+    assert!(matches!(
+        swap.await.unwrap(),
+        aurcache_utils::repository::KeyReplacement::Replaced { .. }
+    ));
+    assert_eq!(publication.await.unwrap(), PublicationOutcome::Retry);
+    assert_eq!(status(&db, 1).await, BuildState::Publishing);
+    assert!(staged.exists(), "staging is kept for the retry");
+    assert!(
+        listed(tmp.path()).is_empty(),
+        "nothing the old key signed is published"
+    );
+
+    assert_eq!(
+        publish_build(&db, &repo, &ActivityLog::discarding(), 1).await,
+        PublicationOutcome::Finished
+    );
+    assert_eq!(status(&db, 1).await, BuildState::Successful);
+    let key = repo.key().unwrap();
+    let entries =
+        pacman_repo_utils::listed_packages(&tmp.path().join("x86_64").join("repo.db.tar.gz"))
+            .unwrap();
+    assert!(key.issued(entries[0].signature.as_deref().unwrap()));
+    assert!(!old.issued(entries[0].signature.as_deref().unwrap()));
 }
 
 /// A new version replaces the old one in the database and the `files` rows at

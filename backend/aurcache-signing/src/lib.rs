@@ -361,6 +361,13 @@ impl InstanceKey {
         Ok(signature.to_bytes()?)
     }
 
+    /// The fingerprint of the component key that signs -- what tells one
+    /// signer from another under the same primary key.
+    #[must_use]
+    pub fn signer_fingerprint(&self) -> String {
+        format!("{:X}", self.issuer().fingerprint)
+    }
+
     /// A detached signature over the file at `path`.
     pub fn sign_file(&self, path: &Path) -> anyhow::Result<Vec<u8>> {
         let file =
@@ -424,6 +431,13 @@ impl InstanceKey {
             }
         }
     }
+}
+
+/// Whether `bytes` read as a detached OpenPGP signature at all, whoever
+/// made it.
+#[must_use]
+pub fn is_signature(bytes: &[u8]) -> bool {
+    DetachedSignature::from_bytes(bytes).is_ok()
 }
 
 /// Why a key is refused, when its primary key is current but nothing in it
@@ -771,6 +785,8 @@ mod tests {
         assert!(!key.verifies(&signature, b"pkgname = hello\npkgver = 1.0-2\n"));
         assert!(key.issued(&signature));
         assert!(!key.issued(b"not a signature"));
+        assert!(is_signature(&signature));
+        assert!(!is_signature(b"not a signature"));
     }
 
     #[test]
@@ -1179,7 +1195,7 @@ mod tests {
             let key = InstanceKey::load(&path, None).unwrap();
             assert_eq!(key.fingerprint(), primary);
             assert_eq!(
-                format!("{:X}", key.issuer().fingerprint),
+                key.signer_fingerprint(),
                 subkeys[1],
                 "the subkey exported is the one that signs"
             );

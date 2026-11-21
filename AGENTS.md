@@ -249,6 +249,9 @@ defect this frontend has had was of that kind.
   another key, are signed by `aurcache_utils::signing::backfill` through `Update::resign`, and
   databases no update has signed through `Update::rewrite_databases`; never write a `.sig` into a
   platform directory any other way. The key is a file beside the CA, never a row and never in a dump.
+  `Repository::replace_key` writes another key's file and swaps it in together, under the repository
+  lock; an update refuses a package signed with a replaced key (`SignedWithReplacedKey`), which
+  publishing retries rather than fails.
 - Workers and the server agree on a numbered worker protocol at registration, never on versions:
   workers are released separately and may come from elsewhere. The types in
   `aurcache-common/src/worker.rs` are that protocol, and within one protocol they only gain optional

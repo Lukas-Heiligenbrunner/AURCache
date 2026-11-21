@@ -73,12 +73,94 @@ pub struct Repository {
 
 /// How the repository signs.
 struct Signing {
-    key: Arc<InstanceKey>,
+    /// The key it signs with, replaced whole when a restore brings another
+    /// ([`Repository::replace_key`]). Whoever signs takes the `Arc` and keeps
+    /// it for that one signature.
+    key: std::sync::RwLock<Arc<InstanceKey>>,
     /// Whether everything the repository lists is known to carry the key's
     /// signature: false until a backfill finds nothing left to sign
-    /// ([`Repository::mark_signed`]).
+    /// ([`Repository::mark_signed`]), and again once what signs changes.
+    /// Set only under `key`'s lock, and only for the key it holds, so it is
+    /// never set for a key that no longer signs.
     complete: AtomicBool,
+    /// Wakes the backfill when the key is swapped. Holds the wake-up when
+    /// nothing is waiting, so a swap during a backfill is not missed.
+    replaced: tokio::sync::Notify,
 }
+
+impl Signing {
+    fn read_key(&self) -> std::sync::RwLockReadGuard<'_, Arc<InstanceKey>> {
+        self.key
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// What swapping in a key does to what the repository signs with
+/// ([`Repository::replace_key`]), judged by what signs: the primary key, by
+/// which clients trust it, and the component key that makes its signatures,
+/// whose signatures alone count as the key's ([`InstanceKey::issued`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyReplacement {
+    /// The repository signs with another key, in place of the one with this
+    /// fingerprint: clients have to trust the new one, and what the old one
+    /// signed is signed again.
+    Replaced { previous: String },
+    /// The same key -- the same primary key -- another of whose component
+    /// keys signs now: clients trust it already, but have to import it again
+    /// to know the subkey that signs, and what the one before signed is
+    /// signed again.
+    SignerChanged,
+    /// The same key, signing with the same component key. It may still
+    /// differ in what does not sign, its other subkeys or its lock, and is
+    /// swapped in all the same, so that what signs is what is on disk.
+    Unchanged,
+    /// It does not sign, so there was nothing to replace.
+    NotSigning,
+}
+
+impl KeyReplacement {
+    /// What putting `new` in place of `current` does.
+    fn of(current: &InstanceKey, new: &InstanceKey) -> Self {
+        if current.fingerprint() != new.fingerprint() {
+            Self::Replaced {
+                previous: current.fingerprint().to_string(),
+            }
+        } else if current.signer_fingerprint() != new.signer_fingerprint() {
+            Self::SignerChanged
+        } else {
+            Self::Unchanged
+        }
+    }
+}
+
+/// What [`Repository::replace_key`] did: what the swap did to what the
+/// repository signs with, and what persisting the key returned.
+#[derive(Debug)]
+pub struct KeySwap<T> {
+    pub replacement: KeyReplacement,
+    pub persisted: T,
+}
+
+/// A package to publish carries a signature made by a key the repository no
+/// longer signs with: the key was replaced after the package was described.
+/// Describing it again signs it with the current key.
+#[derive(Debug)]
+pub struct SignedWithReplacedKey {
+    pub filename: String,
+}
+
+impl std::fmt::Display for SignedWithReplacedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} was signed with a key the repository no longer signs with; it has to be signed again",
+            self.filename
+        )
+    }
+}
+
+impl std::error::Error for SignedWithReplacedKey {}
 
 /// A package file the repository publishes, as its `files` row records it.
 ///
@@ -373,7 +455,9 @@ impl Update<'_> {
             let changes = Arc::clone(&changes);
             let name = self.repo.name.clone();
             let lock = Arc::clone(&self.lock);
-            let key = self.repo.key_handle();
+            // Read under the lock, which a key replacement holds too: the
+            // key cannot change before this update is done with it.
+            let key = self.repo.key();
             tokio::task::spawn_blocking(move || {
                 let _lock = lock;
                 Finalization::stage(&root, &name, &changes, key.as_deref())
@@ -525,41 +609,132 @@ impl Repository {
     #[must_use]
     pub fn with_key(mut self, key: InstanceKey) -> Self {
         self.signing = Some(Signing {
-            key: Arc::new(key),
+            key: std::sync::RwLock::new(Arc::new(key)),
             complete: AtomicBool::new(false),
+            replaced: tokio::sync::Notify::new(),
         });
         self
     }
 
-    /// The key the repository signs with, if it signs.
+    /// The key the repository signs with now, if it signs.
     #[must_use]
-    pub fn key(&self) -> Option<&InstanceKey> {
-        self.signing.as_ref().map(|signing| signing.key.as_ref())
-    }
-
-    /// The key, for a blocking task to take along.
-    fn key_handle(&self) -> Option<Arc<InstanceKey>> {
+    pub fn key(&self) -> Option<Arc<InstanceKey>> {
         self.signing
             .as_ref()
-            .map(|signing| Arc::clone(&signing.key))
+            .map(|signing| Arc::clone(&signing.read_key()))
     }
 
     /// What a client needs to know about the repository's signatures: `None`
     /// when it does not sign.
     #[must_use]
     pub fn signing_info(&self) -> Option<SigningInfo> {
-        self.signing.as_ref().map(|signing| SigningInfo {
-            fingerprint: signing.key.fingerprint().to_string(),
-            backfilling: !signing.complete.load(Ordering::Acquire),
+        self.signing.as_ref().map(|signing| {
+            let key = signing.read_key();
+            SigningInfo {
+                fingerprint: key.fingerprint().to_string(),
+                backfilling: !signing.complete.load(Ordering::Acquire),
+            }
         })
     }
 
-    /// Record that everything the repository lists carries the key's
-    /// signature, which a backfill that found nothing left to sign knows.
-    /// Everything published from then on is signed as it is published.
-    pub fn mark_signed(&self) {
+    /// Record that everything the repository lists carries `key`'s
+    /// signature, which a backfill that found nothing left to sign with it
+    /// knows -- unless `key`, as [`Self::key`] handed it out, has been
+    /// swapped for another since ([`Self::replace_key`]), even the same key
+    /// read again. Everything published from then on is signed as it is
+    /// published.
+    pub fn mark_signed(&self, key: &Arc<InstanceKey>) {
         if let Some(signing) = &self.signing {
-            signing.complete.store(true, Ordering::Release);
+            let current = signing.read_key();
+            if Arc::ptr_eq(&current, key) {
+                signing.complete.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// What swapping in `key` would do to what the repository signs with,
+    /// as things are now ([`Self::replace_key`]).
+    #[must_use]
+    pub fn replacing_with(&self, key: &InstanceKey) -> KeyReplacement {
+        match &self.signing {
+            Some(signing) => KeyReplacement::of(&signing.read_key(), key),
+            None => KeyReplacement::NotSigning,
+        }
+    }
+
+    /// Sign with `key` from now on, in place of the key the repository was
+    /// started with -- what restoring a dump with secrets does -- once
+    /// `persist` has put it where the server loads its key from at its next
+    /// start.
+    ///
+    /// `persist` runs under the repository lock, as the swap does, so what is
+    /// on disk and what signs change together: of two replacements, the one
+    /// that takes the lock last wins both. When `persist` fails, nothing
+    /// changes and its error is returned; when it succeeds, `key` is what
+    /// signs from then on, whatever [`KeyReplacement`] it is, and what
+    /// `persist` returned comes back with it. A repository that does not
+    /// sign only persists.
+    ///
+    /// A caller cancelled while `persist` runs does not stop it: the key it
+    /// writes stays on disk but is not swapped in, so the old key signs until
+    /// the server restarts and loads the new one.
+    ///
+    /// Each swap wakes the backfill. When another key or another of its
+    /// component keys signs now, what the old one signed is signed again by
+    /// that backfill, and until it is done [`Self::signing_info`] reports
+    /// backfilling.
+    ///
+    /// The swap holds the repository lock, so no update is between reading
+    /// the key -- which it does once it holds the lock -- and finishing with
+    /// it: everything signed with the old key is listed, or recorded in a
+    /// plan the backfill recovers, before the backfill looks. A package
+    /// described under the old key and committed afterwards is refused by its
+    /// update ([`SignedWithReplacedKey`]). So nothing the old key signed can
+    /// land after the backfill has passed.
+    pub async fn replace_key<T: Send + 'static>(
+        &self,
+        key: InstanceKey,
+        persist: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<KeySwap<T>> {
+        let lock = self.lock().await;
+        // The task holds the lock too, so a cancelled caller does not let
+        // another change in while the key file is still being written.
+        let task_lock = Arc::clone(&lock);
+        let persisted = tokio::task::spawn_blocking(move || {
+            let _lock = task_lock;
+            persist()
+        })
+        .await??;
+        let Some(signing) = &self.signing else {
+            return Ok(KeySwap {
+                replacement: KeyReplacement::NotSigning,
+                persisted,
+            });
+        };
+        let mut current = signing
+            .key
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let replacement = KeyReplacement::of(&current, &key);
+        *current = Arc::new(key);
+        if replacement != KeyReplacement::Unchanged {
+            signing.complete.store(false, Ordering::Release);
+        }
+        drop(current);
+        signing.replaced.notify_one();
+        Ok(KeySwap {
+            replacement,
+            persisted,
+        })
+    }
+
+    /// Wait until the key is swapped ([`Self::replace_key`]): at once if it
+    /// was since the last wait returned, never for a repository that does
+    /// not sign.
+    pub async fn key_replaced(&self) {
+        match &self.signing {
+            Some(signing) => signing.replaced.notified().await,
+            None => std::future::pending().await,
         }
     }
 
@@ -668,7 +843,7 @@ impl Repository {
     /// carries it as `%PGPSIG%` and the update moves it in with the package.
     /// A file that cannot be read as a package fails with [`NotAPackage`].
     pub async fn describe(&self, staged: PathBuf) -> anyhow::Result<PackageEntry> {
-        let key = self.key_handle();
+        let key = self.key();
         tokio::task::spawn_blocking(move || {
             if let Some(key) = key {
                 sign_staged(&key, &staged)?;
@@ -704,7 +879,7 @@ impl Repository {
     /// file it describes. Read on a blocking thread and without the lock: a
     /// change may land meanwhile, which [`Update::resign`]'s caller checks.
     pub async fn unsigned(&self, platform: Platform) -> anyhow::Result<Unsigned> {
-        let Some(key) = self.key_handle() else {
+        let Some(key) = self.key() else {
             return Ok(Unsigned::default());
         };
         let listed = self.listed(platform).await?;
@@ -718,7 +893,7 @@ impl Repository {
     /// names the same key and still fails pacman. A repository that does not
     /// sign has nothing to sign them with.
     pub async fn databases_signed(&self, platform: Platform) -> anyhow::Result<bool> {
-        let Some(key) = self.key_handle() else {
+        let Some(key) = self.key() else {
             return Ok(true);
         };
         let dir = Self::platform_dir(&self.root, platform);
@@ -938,13 +1113,18 @@ impl Finalization {
     /// in first: a database never lists a file that is not there yet.
     ///
     /// With a `key`, each database is signed as it is written, and its
-    /// signature is moved in right after it.
+    /// signature is moved in right after it -- and every package must already
+    /// carry that key's signature, or nothing is staged
+    /// ([`SignedWithReplacedKey`]).
     fn stage(
         root: &Path,
         name: &str,
         changes: &Changes,
         key: Option<&InstanceKey>,
     ) -> anyhow::Result<Self> {
+        if let Some(key) = key {
+            signed_with(key, changes)?;
+        }
         let mut plan = Self {
             moves: Vec::new(),
             retired: Vec::new(),
@@ -1371,6 +1551,28 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// Refuse `changes` unless every package they add or sign again carries a
+/// signature `key` issued beside its staged file: one described before the
+/// key was replaced does not.
+fn signed_with(key: &InstanceKey, changes: &Changes) -> anyhow::Result<()> {
+    for addition in changes.staged() {
+        // No signature at all is not a key replaced: describing it again
+        // would not change that, so it fails rather than being retried.
+        let path = with_suffix(&addition.staged, ".sig");
+        let signature = std::fs::read(&path)
+            .map_err(|e| anyhow::anyhow!("reading the signature {}: {e}", path.display()))?;
+        if !aurcache_signing::is_signature(&signature) {
+            anyhow::bail!("{} is not a signature", path.display());
+        }
+        if !key.issued(&signature) {
+            return Err(anyhow::Error::new(SignedWithReplacedKey {
+                filename: addition.entry.filename.clone(),
+            }));
+        }
+    }
+    Ok(())
 }
 
 /// Where the signature of a database being written as `next` is written:
@@ -2641,5 +2843,219 @@ mod tests {
             signature_next(Path::new("/r/x86_64/.repo.db.tar.gz.next")),
             Path::new("/r/x86_64/.repo.db.tar.gz.sig.next")
         );
+    }
+
+    /// A package described before the key was replaced is refused by its
+    /// update, so nothing the old key signed can land after the backfill has
+    /// passed; described again, it goes in, signed with the new key.
+    #[tokio::test]
+    async fn a_package_signed_with_a_replaced_key_waits_to_be_signed_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = signing_repo(tmp.path());
+        let db = aurcache_db::testing::memory_db().await;
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        assert!(matches!(
+            repo.replace_key(InstanceKey::generate(None).unwrap(), || Ok(()))
+                .await
+                .unwrap()
+                .replacement,
+            KeyReplacement::Replaced { .. }
+        ));
+
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, staged.clone(), entry);
+        let error = update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<SignedWithReplacedKey>().is_some());
+        assert!(
+            !repo.root().join("x86_64").exists(),
+            "nothing was staged, let alone published"
+        );
+
+        let entry = repo.describe(staged.clone()).await.unwrap();
+        apply(&repo, vec![(staged, entry)], &[]).await.unwrap();
+        assert!(signed(&repo, &platform_file(&repo, "foo", "1.0-1")));
+        assert!(signed(&repo, &archive(&repo, DB_ARCHIVE)));
+    }
+
+    /// A package with no signature beside it, or something that is not one,
+    /// is not taken for one signed with a replaced key -- describing it
+    /// again would not change that, so retrying would never end: its update
+    /// fails instead.
+    #[tokio::test]
+    async fn a_package_without_a_signature_fails_rather_than_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = signing_repo(tmp.path());
+        let db = aurcache_db::testing::memory_db().await;
+        let (staged, entry) = stage(&repo, 1, "foo", "1.0-1").await;
+        let signature = with_suffix(&staged, ".sig");
+        for (written, said) in [
+            (None, "reading the signature"),
+            (Some(&b"not a signature"[..]), "is not a signature"),
+        ] {
+            match written {
+                None => std::fs::remove_file(&signature).unwrap(),
+                Some(bytes) => std::fs::write(&signature, bytes).unwrap(),
+            }
+            let mut update = repo.begin(&db).await.unwrap();
+            update.add(Platform::X86_64, staged.clone(), entry.clone());
+            let error = update
+                .commit(&db, |_| Box::pin(async { Ok(()) }))
+                .await
+                .unwrap_err();
+            assert!(error.downcast_ref::<SignedWithReplacedKey>().is_none());
+            assert!(format!("{error:#}").contains(said), "{error:#}");
+        }
+    }
+
+    /// Replacing the key puts the repository back to backfilling and wakes
+    /// the backfill; only a backfill done with the current key ends that.
+    #[tokio::test]
+    async fn a_replaced_key_is_backfilled_before_it_counts_as_signed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = signing_repo(tmp.path());
+        let old = repo.key().unwrap();
+        repo.mark_signed(&old);
+        assert!(!repo.signing_info().unwrap().backfilling);
+
+        let replaced = InstanceKey::generate(None).unwrap();
+        let previous = KeyReplacement::Replaced {
+            previous: old.fingerprint().to_string(),
+        };
+        assert_eq!(repo.replacing_with(&replaced), previous);
+        assert_eq!(
+            repo.replace_key(replaced, || Ok(()))
+                .await
+                .unwrap()
+                .replacement,
+            previous
+        );
+        assert!(repo.signing_info().unwrap().backfilling);
+        tokio::time::timeout(Duration::from_secs(5), repo.key_replaced())
+            .await
+            .expect("the backfill is woken");
+        repo.mark_signed(&old);
+        assert!(
+            repo.signing_info().unwrap().backfilling,
+            "a backfill with the replaced key does not count"
+        );
+        repo.mark_signed(&repo.key().unwrap());
+        assert!(!repo.signing_info().unwrap().backfilling);
+
+        assert_eq!(
+            Repository::new(tmp.path())
+                .replace_key(InstanceKey::generate(None).unwrap(), || Ok(()))
+                .await
+                .unwrap()
+                .replacement,
+            KeyReplacement::NotSigning
+        );
+    }
+
+    /// The same key swapped in again -- read again from its file -- signs as
+    /// before, so nothing waits to be signed again; it is still the key that
+    /// signs from then on, as it is the one on disk, and a backfill run with
+    /// the one before does not count.
+    #[tokio::test]
+    async fn the_same_key_swapped_in_again_is_the_one_that_signs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("key.asc");
+        let repo =
+            Repository::new(tmp.path()).with_key(InstanceKey::load_or_create(&path, None).unwrap());
+        let old = repo.key().unwrap();
+        repo.mark_signed(&old);
+
+        let again = InstanceKey::load(&path, None).unwrap();
+        let swap = repo.replace_key(again, || Ok("persisted")).await.unwrap();
+        assert_eq!(swap.replacement, KeyReplacement::Unchanged);
+        assert_eq!(swap.persisted, "persisted");
+        assert!(!repo.signing_info().unwrap().backfilling);
+        let new = repo.key().unwrap();
+        assert!(
+            !Arc::ptr_eq(&old, &new),
+            "the key on disk is the one that signs"
+        );
+        assert_eq!(new.fingerprint(), old.fingerprint());
+        tokio::time::timeout(Duration::from_secs(5), repo.key_replaced())
+            .await
+            .expect("the backfill is woken to watch the key now in use");
+
+        repo.replace_key(InstanceKey::load(&path, None).unwrap(), || Ok(()))
+            .await
+            .unwrap();
+        repo.mark_signed(&new);
+        assert!(
+            !repo.signing_info().unwrap().backfilling,
+            "an unchanged signer leaves the repository signed"
+        );
+    }
+
+    /// A key whose file could not be written does not sign either: what is
+    /// on disk and what signs stay one key.
+    #[tokio::test]
+    async fn a_key_that_could_not_be_persisted_is_not_swapped_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = signing_repo(tmp.path());
+        repo.mark_signed(&repo.key().unwrap());
+        let before = repo.key().unwrap().fingerprint().to_string();
+        let error = repo
+            .replace_key(
+                InstanceKey::generate(None).unwrap(),
+                || -> anyhow::Result<()> { anyhow::bail!("the disk is full") },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("the disk is full"));
+        assert_eq!(repo.key().unwrap().fingerprint(), before);
+        assert!(!repo.signing_info().unwrap().backfilling);
+    }
+
+    /// A key replaced while an update is under way waits for it to finish,
+    /// and the backfill then finds what it published with the old key and
+    /// signs it again: nothing the old key signed is left once the repository
+    /// says it is all signed.
+    #[tokio::test]
+    async fn a_key_replaced_during_an_update_waits_and_its_packages_are_signed_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = Arc::new(signing_repo(tmp.path()));
+        let db = aurcache_db::testing::memory_db().await;
+        let (staged, entry) = stage(&repo, 1, "late", "1.0-1").await;
+        let mut update = repo.begin(&db).await.unwrap();
+        update.add(Platform::X86_64, staged, entry);
+
+        let swap = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            async move {
+                repo.replace_key(InstanceKey::generate(None).unwrap(), || Ok(()))
+                    .await
+                    .unwrap()
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!swap.is_finished(), "the key changed under an update");
+        update
+            .commit(&db, |_| Box::pin(async { Ok(()) }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            swap.await.unwrap().replacement,
+            KeyReplacement::Replaced { .. }
+        ));
+
+        assert_eq!(
+            crate::signing::backfill(&db, &repo).await.unwrap(),
+            crate::signing::Backfill::Complete {
+                signed: 1,
+                skipped: Vec::new(),
+            }
+        );
+        let key = repo.key().unwrap();
+        for listed in pacman_repo_utils::listed_packages(&archive(&repo, DB_ARCHIVE)).unwrap() {
+            assert!(key.issued(listed.signature.as_deref().unwrap()));
+        }
+        assert!(signed(&repo, &platform_file(&repo, "late", "1.0-1")));
+        assert!(signed(&repo, &archive(&repo, DB_ARCHIVE)));
     }
 }
