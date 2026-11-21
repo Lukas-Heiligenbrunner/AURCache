@@ -44,7 +44,7 @@ pub fn package(name: &str) -> NewPackage {
         status: Set(BuildState::Successful),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().expect("build flags")),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().expect("platforms")),
         source_data: Set(SourceData::Aur { name: name.into() }),
         directly_requested: Set(true),

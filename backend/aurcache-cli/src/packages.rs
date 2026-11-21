@@ -345,7 +345,7 @@ pub(crate) async fn patch_package_command(
     format: OutputFormat,
     args: PatchPackageArgs,
 ) -> Result<()> {
-    let has_metadata = !args.platforms.is_empty() || !args.build_flags.is_empty();
+    let has_metadata = changes_metadata(&args);
     let has_patches = !args.patches.is_empty();
     if !has_metadata && !has_patches {
         bail!("no changes specified");
@@ -371,10 +371,21 @@ pub(crate) async fn patch_package_command(
     Ok(())
 }
 
-/// The metadata half of a `pkg patch`: the platforms and build flags given.
+/// Whether a `pkg patch` changes the package's metadata, and so sends a
+/// request: `--no-build-flags` alone is a change, though it names no flag.
+pub(crate) fn changes_metadata(args: &PatchPackageArgs) -> bool {
+    !args.platforms.is_empty() || !args.build_flags.is_empty() || args.no_build_flags
+}
+
+/// The metadata half of a `pkg patch`: the platforms and build flags given,
+/// and an empty list of flags for `--no-build-flags`.
 pub(crate) fn patch_request(args: &PatchPackageArgs) -> PackagePatch {
     PackagePatch {
-        build_flags: some_vec(args.build_flags.clone()),
+        build_flags: if args.no_build_flags {
+            Some(Vec::new())
+        } else {
+            some_vec(args.build_flags.clone())
+        },
         platforms: some_vec(args.platforms.clone()),
         ..PackagePatch::default()
     }

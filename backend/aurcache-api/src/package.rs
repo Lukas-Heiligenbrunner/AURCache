@@ -949,7 +949,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "visible-package".into(),
@@ -967,7 +967,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "hidden-dependency".into(),
@@ -1007,7 +1007,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "parent".into(),
@@ -1027,7 +1027,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("2.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "child".into(),
@@ -1070,7 +1070,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "dependency".into(),
@@ -1090,7 +1090,7 @@ mod tests {
             status: Set(BuildState::Successful),
             out_of_date: Set(false),
             upstream_version: Set(Some("2.0.0".to_string())),
-            build_flags: Set("--noconfirm".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "parent".into(),

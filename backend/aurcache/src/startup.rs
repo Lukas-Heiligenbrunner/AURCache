@@ -210,6 +210,21 @@ pub async fn report_untrusted_workers(
     }
 }
 
+/// Reduce every package's stored build flags to the ones a package chooses;
+/// see [`aurcache_utils::package::build_flags::settle`].
+///
+/// At startup rather than in a migration, because it records what it dropped
+/// in the activity log, which does not exist until after the migrations.
+pub async fn settle_build_flags(db: &DatabaseConnection, activity: &ActivityLog) {
+    match aurcache_utils::package::build_flags::settle(db, activity).await {
+        Ok(0) => {}
+        Ok(rewritten) => {
+            info!("Reduced the build flags of {rewritten} package(s) to the offered ones");
+        }
+        Err(e) => warn!("could not reduce the stored build flags to the offered ones: {e}"),
+    }
+}
+
 /// Publish again the builds a restart interrupted while they were being
 /// published. Nothing about them was made public yet, and their uploads are
 /// still staged, so they simply start over.

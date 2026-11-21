@@ -15,7 +15,7 @@ DELETE FROM packages;
 
 INSERT INTO packages (name, status, out_of_date, upstream_version, build_flags, platforms, source_data, directly_requested) VALUES
   ('hello',                  2, 0, '2.12.1-2',  '', 'x86_64', '{"type":"aur","name":"hello"}',                  1),
-  ('neofetch',               1, 1, '7.1.0-2',   '--noconfirm;--nocolor', 'x86_64', '{"type":"aur","name":"neofetch"}', 1),
+  ('neofetch',               1, 1, '7.1.0-2',   '--nocheck', 'x86_64', '{"type":"aur","name":"neofetch"}', 1),
   ('yay',                    0, 0, '12.4.2-1',  '', 'x86_64', '{"type":"aur","name":"yay"}',                    1),
   ('paru',                   2, 0, '2.0.4-1',   '', 'x86_64', '{"type":"aur","name":"paru"}',                   1),
   ('visual-studio-code-bin', 3, 0, '1.92.0-1',  '', 'x86_64', '{"type":"aur","name":"visual-studio-code-bin"}', 1),

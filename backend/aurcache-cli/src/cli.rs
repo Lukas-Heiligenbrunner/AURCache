@@ -623,7 +623,10 @@ pub(crate) struct AddPackageArgs {
     #[arg(long = "platform")]
     pub(crate) platforms: Vec<String>,
 
-    /// Build flag. Repeat for multiple flags.
+    /// Build flag, a makepkg option such as `--nocheck`. Repeat for multiple
+    /// flags. Options a package does not choose (`--noconfirm`, `--clean`,
+    /// ...) are dropped, and ones a build cannot take are refused. Without
+    /// any, makepkg builds as it does by default.
     #[arg(long = "build-flag")]
     pub(crate) build_flags: Vec<String>,
 
@@ -661,9 +664,16 @@ pub(crate) struct PatchPackageArgs {
     #[arg(long = "platform")]
     pub(crate) platforms: Vec<String>,
 
-    /// Build flag selection. Repeat to replace with multiple values.
-    #[arg(long = "build-flag")]
+    /// Build flag selection, makepkg options such as `--nocheck`. Repeat to
+    /// replace the list with multiple values. Options a package does not
+    /// choose (`--noconfirm`, `--clean`, ...) are dropped, and ones a build
+    /// cannot take are refused.
+    #[arg(long = "build-flag", conflicts_with = "no_build_flags")]
     pub(crate) build_flags: Vec<String>,
+
+    /// Clear the build flags, so makepkg builds as it does by default.
+    #[arg(long)]
+    pub(crate) no_build_flags: bool,
 
     /// Patch a source file: either `SOURCE_PATH=LOCAL_FILE` (e.g.
     /// `--patch PKGBUILD=./fixed-PKGBUILD`) or just `LOCAL_FILE`, in which
@@ -962,12 +972,65 @@ mod tests {
             "yay",
             "--platform",
             "x86_64",
-            "--build-flag=--noconfirm",
+            "--build-flag=--nocheck",
         ]);
 
         assert_eq!(parsed.args.packages, vec!["paru", "yay"]);
         assert_eq!(parsed.args.platforms, vec!["x86_64"]);
-        assert_eq!(parsed.args.build_flags, vec!["--noconfirm"]);
+        assert_eq!(parsed.args.build_flags, vec!["--nocheck"]);
+    }
+
+    /// `--no-build-flags` sends an empty list, which clears the package's
+    /// flags; without either option, the flags are left as they are.
+    #[test]
+    fn patch_can_clear_the_build_flags() {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: PatchPackageArgs,
+        }
+        let request = |argv: &[&str]| {
+            let parsed = Wrapper::parse_from(["test", "hello"].iter().chain(argv));
+            crate::packages::patch_request(&parsed.args).build_flags
+        };
+
+        assert_eq!(request(&["--no-build-flags"]), Some(Vec::new()));
+        assert_eq!(
+            request(&["--build-flag=--nocheck"]),
+            Some(vec!["--nocheck".to_string()])
+        );
+        assert_eq!(request(&["--platform", "x86_64"]), None);
+        assert!(
+            Wrapper::try_parse_from([
+                "test",
+                "hello",
+                "--build-flag=--nocheck",
+                "--no-build-flags"
+            ])
+            .is_err(),
+            "a list and no list at once"
+        );
+    }
+
+    /// `--no-build-flags` names no flag, yet on its own it is a change to
+    /// make, not a `pkg patch` with nothing to do.
+    #[test]
+    fn clearing_the_build_flags_is_a_change() {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: PatchPackageArgs,
+        }
+        let changes = |argv: &[&str]| {
+            let parsed = Wrapper::parse_from(["test", "hello"].iter().chain(argv));
+            crate::packages::changes_metadata(&parsed.args)
+        };
+
+        assert!(changes(&["--no-build-flags"]));
+        assert!(changes(&["--build-flag=--nocheck"]));
+        assert!(changes(&["--platform", "x86_64"]));
+        assert!(!changes(&[]));
+        assert!(!changes(&["--patch", "PKGBUILD=./PKGBUILD"]));
     }
 
     /// `--from-installed` supplies the list, so requiring a positional one too

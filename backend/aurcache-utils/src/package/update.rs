@@ -1395,7 +1395,7 @@ mod tests {
         name: &str,
         requested: bool,
     ) -> packages::Model {
-        let pkg = package(name).with(|p| p.build_flags = Set("--noconfirm".parse().unwrap()));
+        let pkg = package(name);
         let pkg = if requested {
             pkg
         } else {

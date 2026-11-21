@@ -47,10 +47,12 @@ a dump and restore.
 
 The log says what it does; nothing needs an answer.
 
-- **The database is converted.** Build flags become `makepkg` flags (`paru`'s
-  are dropped), build logs move out of the database into
-  `/app/repo/.build_logs`, and the CA the worker protocol uses is created in
-  `/app/repo/.ca`.
+- **The database is converted.** Build flags become `makepkg` flags: `paru`'s
+  are dropped, and so are the non-interactive ones every worker now passes
+  itself, so 0.5's default leaves none (see
+  [Build flags](../Configuration/build-flags.md)). Build logs move out of the
+  database into `/app/repo/.build_logs`, and the CA the worker protocol uses
+  is created in `/app/repo/.ca`.
 - **Packages are named after their package base.** 0.5 stored an AUR package
   under the name it was added by; one of a split package's names becomes the
   base it builds from. Where two packages turn out to be one — two names of

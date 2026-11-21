@@ -977,7 +977,7 @@ async fn scenario_j_local_queued_provider_prevents_aur_dependency_addition() {
         status: Set(BuildState::Enqueued),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "local-provider".into(),
@@ -1069,7 +1069,7 @@ async fn scenario_l_settled_states_still_link_as_dependencies() {
             status: Set(status),
             out_of_date: Set(false),
             upstream_version: Set(Some("1.0.0".to_string())),
-            build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+            build_flags: Set(Default::default()),
             platforms: Set("x86_64".parse().unwrap()),
             source_data: Set(SourceData::Aur {
                 name: "local-dep".into(),
@@ -1351,7 +1351,7 @@ async fn scenario_h_queue_missing_buildable_packages_after_migration() {
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "root".into(),
@@ -1371,7 +1371,7 @@ async fn scenario_h_queue_missing_buildable_packages_after_migration() {
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur { name: "mid".into() }),
         directly_requested: Set(false),
@@ -1389,7 +1389,7 @@ async fn scenario_h_queue_missing_buildable_packages_after_migration() {
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "leaf".into(),
@@ -1466,7 +1466,7 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "root".into(),
@@ -1486,7 +1486,7 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur { name: "mid".into() }),
         directly_requested: Set(false),
@@ -1504,7 +1504,7 @@ async fn scenario_i_queue_non_leaf_packages_when_dependencies_are_already_built(
         status: Set(BuildState::Successful),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "leaf".into(),
@@ -1600,7 +1600,7 @@ async fn scenario_j_queue_only_platforms_with_satisfied_dependencies() {
         status: Set(BuildState::Failed),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64;aarch64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "root".into(),
@@ -1620,7 +1620,7 @@ async fn scenario_j_queue_only_platforms_with_satisfied_dependencies() {
         status: Set(BuildState::Successful),
         out_of_date: Set(false),
         upstream_version: Set(Some("1.0.0".to_string())),
-        build_flags: Set("--noconfirm;--noprogressbar".parse().unwrap()),
+        build_flags: Set(Default::default()),
         platforms: Set("x86_64;aarch64".parse().unwrap()),
         source_data: Set(SourceData::Aur {
             name: "leaf".into(),
