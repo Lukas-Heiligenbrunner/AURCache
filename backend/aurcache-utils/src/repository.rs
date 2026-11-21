@@ -520,7 +520,7 @@ impl Repository {
     /// what it signs.
     ///
     /// What was published before is signed by a backfill
-    /// ([`crate::signing::Backfiller`]); until one has found nothing left,
+    /// ([`crate::signing::backfill`]); until one has found nothing left,
     /// [`Self::signing_info`] says so.
     #[must_use]
     pub fn with_key(mut self, key: InstanceKey) -> Self {

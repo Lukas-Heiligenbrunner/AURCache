@@ -8,7 +8,7 @@
 
 use aurcache_signing::{InstanceKey, KEY_FILE};
 use aurcache_utils::repository::Repository;
-use aurcache_utils::signing::{Backfill, Backfiller};
+use aurcache_utils::signing::{Backfill, backfill};
 use pacman_mirrors::platforms::Platform;
 use sea_orm::DatabaseConnection;
 use std::path::{Path, PathBuf};
@@ -85,7 +85,7 @@ async fn write_a_signed_repository() {
         .with_key(key);
     repo.init().unwrap();
     assert_eq!(
-        Backfiller::default().run(&db, &repo).await.unwrap(),
+        backfill(&db, &repo).await.unwrap(),
         Backfill::Complete {
             signed: 1,
             skipped: Vec::new(),

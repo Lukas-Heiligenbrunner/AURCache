@@ -1,17 +1,19 @@
 //! Signing what the repository published before it signed, in the background.
 //!
 //! Started when the server starts with a signing key. Until a run finds
-//! nothing left to sign, the repository reports itself as backfilling, and a
-//! client requiring signatures refuses whatever is still unsigned. A run that
-//! leaves something unsigned is tried again later, less and less often, so a
-//! file that cannot be signed yet neither stops the server nor floods the
-//! log. A listed file that can never be signed -- not on disk, or not the
-//! package its entry describes -- is reported once, and does not keep the
-//! backfill going.
+//! nothing left to sign that a client can install, the repository reports
+//! itself as backfilling, and a client requiring signatures refuses whatever
+//! is still unsigned. A run that leaves something unsigned is tried again
+//! later, less and less often, so a file that cannot be signed yet neither
+//! stops the server nor floods the log. Every run reports each listed file
+//! it cannot sign at all. One no client can install either -- not on disk, or
+//! not the file its entry describes -- does not keep the backfill going; one
+//! that installs where signatures are optional does, until its package is
+//! rebuilt.
 
 use aurcache_activitylog::events::{Event, FileAction};
 use aurcache_utils::repository::Repository;
-use aurcache_utils::signing::{Backfill, Backfiller, Skipped};
+use aurcache_utils::signing::{Backfill, Skipped, backfill};
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,15 +30,15 @@ pub fn start_signing_backfill(db: DatabaseConnection, repo: Arc<Repository>) {
         return;
     }
     tokio::spawn(async move {
-        sign_everything(&db, &repo, &mut Backfiller::default()).await;
+        sign_everything(&db, &repo).await;
     });
 }
 
 /// Run the backfill until a run finds nothing left to sign.
-async fn sign_everything(db: &DatabaseConnection, repo: &Repository, backfiller: &mut Backfiller) {
+async fn sign_everything(db: &DatabaseConnection, repo: &Repository) {
     let mut wait = FIRST_WAIT;
     loop {
-        let error = match backfiller.run(db, repo).await {
+        let error = match backfill(db, repo).await {
             Ok(Backfill::Complete { signed, skipped }) => {
                 record(repo, signed, skipped);
                 repo.mark_signed();
@@ -46,8 +48,15 @@ async fn sign_everything(db: &DatabaseConnection, repo: &Repository, backfiller:
             Ok(Backfill::Incomplete {
                 signed,
                 skipped,
-                problems,
+                mut problems,
             }) => {
+                let installable = skipped.iter().filter(|skip| skip.why.installable()).count();
+                if installable > 0 {
+                    problems.push(format!(
+                        "{installable} listed package file(s) cannot be signed until rebuilt, \
+                         and clients that require signatures refuse them"
+                    ));
+                }
                 record(repo, signed, skipped);
                 problems.join("; ")
             }
