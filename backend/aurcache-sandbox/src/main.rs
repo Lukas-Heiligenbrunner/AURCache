@@ -97,6 +97,33 @@ fn leads(path: &Path) -> Leads {
     }
 }
 
+/// `paths`, each also where it really is when that differs.
+///
+/// The read walk keeps a path unreadable as it is written, so a secret behind
+/// a symlink -- a Kubernetes secret is `key -> ..data/key` -- or under a linked
+/// directory would otherwise stay readable where it really is. A path that does
+/// not exist yet is placed by its parent, so one created later under a linked
+/// directory is covered too.
+fn with_real_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut real: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|path| real_path(path))
+        .filter(|real| !paths.contains(real))
+        .collect();
+    real.sort();
+    real.dedup();
+    paths.into_iter().chain(real).collect()
+}
+
+/// Where `path` really is: resolved if it exists, else its resolved parent
+/// joined with its name. `None` when neither can be resolved.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok().or_else(|| {
+        let name = path.file_name()?;
+        Some(std::fs::canonicalize(path.parent()?).ok()?.join(name))
+    })
+}
+
 /// Expand exclusions into the positive read grants Landlock needs.
 ///
 /// Walks from the filesystem root towards each excluded path, granting every

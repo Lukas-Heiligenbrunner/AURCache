@@ -234,10 +234,7 @@ fn layer_landlock(network: bool) -> Result<(), String> {
 /// but `/dev/null`, TCP is denied unless allowed, and nothing outside the
 /// sandbox can be signalled. All of it or a refusal.
 fn restrict_with_landlock(dir: &Path, private: &[PathBuf], network: bool) -> Result<(), String> {
-    let private: Vec<PathBuf> = private
-        .iter()
-        .map(|path| shallowest_missing(path, Path::exists))
-        .collect();
+    let private = unreadable(private);
 
     // v3 is where `truncate` can be denied -- below it the parse, running as
     // the server's own uid, could empty the database by path -- and v6 where
@@ -283,6 +280,19 @@ fn restrict_with_landlock(dir: &Path, private: &[PathBuf], network: bool) -> Res
         RulesetStatus::FullyEnforced => Ok(()),
         other => Err(format!("Landlock not fully enforced ({other:?})")),
     }
+}
+
+/// What to keep unreadable so that every `--private` path is: each from its
+/// first missing part, and also where that really is
+/// ([`crate::with_real_paths`]), as `--private T/alias/secret` with
+/// `alias -> real` would otherwise leave `T/real` granted whole.
+fn unreadable(private: &[PathBuf]) -> Vec<PathBuf> {
+    crate::with_real_paths(
+        private
+            .iter()
+            .map(|path| shallowest_missing(path, Path::exists))
+            .collect(),
+    )
 }
 
 /// What to keep unreadable so that `path` is, whether or not it exists yet.
@@ -536,6 +546,30 @@ mod tests {
             shallowest_missing(Path::new("/app/data/ca"), all),
             PathBuf::from("/app/data/ca")
         );
+    }
+
+    /// A private path under a linked directory is kept unreadable where it
+    /// really is, existing or not.
+    #[test]
+    fn a_private_path_under_a_linked_directory_is_kept_unreadable_where_it_is() {
+        let dir =
+            std::env::temp_dir().join(format!("aurcache-sandbox-linked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/secret"), "secret").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+        let real = std::fs::canonicalize(dir.join("real")).unwrap();
+
+        assert_eq!(
+            unreadable(&[dir.join("alias/secret"), dir.join("alias/later/ca")]),
+            vec![
+                dir.join("alias/secret"),
+                dir.join("alias/later"),
+                real.join("later"),
+                real.join("secret"),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

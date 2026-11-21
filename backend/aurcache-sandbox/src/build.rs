@@ -211,28 +211,20 @@ fn resolve_writable_dirs(
 /// A missing file means "protect nothing", which is the correct default for a
 /// worker with no secrets on disk. Blank lines and `#` comments are ignored.
 ///
-/// Each listed path that exists is protected at its real path too. The read
-/// walk keeps a path unreadable as it is written, so a secret behind a
-/// symlink -- a Kubernetes secret is `key -> ..data/key` -- or under a linked
-/// directory would otherwise stay readable where it really is.
+/// Each listed path is protected at its real path too, whether or not it
+/// exists yet ([`crate::with_real_paths`]).
 fn protected_paths(file: &Path) -> Vec<PathBuf> {
     let Ok(contents) = std::fs::read_to_string(file) else {
         return Vec::new();
     };
-    let listed: Vec<PathBuf> = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(PathBuf::from)
-        .collect();
-    let mut real: Vec<PathBuf> = listed
-        .iter()
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|real| !listed.contains(real))
-        .collect();
-    real.sort();
-    real.dedup();
-    listed.into_iter().chain(real).collect()
+    crate::with_real_paths(
+        contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -430,6 +422,35 @@ mod tests {
         assert!(
             protected.contains(&std::fs::canonicalize(stamped.join("key")).unwrap()),
             "{protected:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed path not written yet, under a linked directory, is protected
+    /// where it will really be: the walk would otherwise grant it there once
+    /// it is created.
+    #[test]
+    fn a_missing_path_under_a_linked_directory_is_protected_at_its_real_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+        let file = dir.join("list");
+        std::fs::write(&file, format!("{}\n", dir.join("alias/identity").display())).unwrap();
+
+        let protected = protected_paths(&file);
+        assert!(check_parents(&protected).is_ok(), "{protected:?}");
+        assert_eq!(
+            protected,
+            vec![
+                dir.join("alias/identity"),
+                std::fs::canonicalize(dir.join("real"))
+                    .unwrap()
+                    .join("identity"),
+            ]
         );
         std::fs::remove_dir_all(&dir).ok();
     }
