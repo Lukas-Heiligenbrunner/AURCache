@@ -86,6 +86,7 @@ cd docs && yarn install --frozen-lockfile && yarn build
 ./scripts/build-images.sh <registry> --push --toolchain-repo 'http://host:8081/$arch'
 ./scripts/build-images.sh --images server --platforms linux/amd64 <registry>
 ./scripts/build-images.sh --packages-dir /tmp/pkgs <registry>   # also keep a host copy of the AURCache packages the images built (host arch; replayed from the build cache, not rebuilt)
+./scripts/build-images.sh --images server --oci-dir /tmp/oci <registry>   # write an OCI layout (all platforms) instead of pushing: how PR previews hand the build to their publisher
 ```
 
 ### Which end-to-end suite to run
@@ -113,6 +114,9 @@ CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
 nightly instead, and only when something landed that day. It cannot cover a
 pool on a block device or zvol, or an image on ZFS; the runner has neither.
 Add the `run-e2e` label to a pull request to run the e2e suite there on demand.
+Every pull request also builds its server image for each architecture; while
+the `preview-image` label is on, each head commit's image is published to GHCR
+(see `.github/workflows/PR-IMAGES.md`).
 
 Unit and integration tests are cheap (backend ~8s, frontend <1s) and should be
 the reflex. They render components directly, though, so they cannot see whether

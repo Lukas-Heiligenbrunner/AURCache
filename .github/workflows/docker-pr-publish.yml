@@ -1,0 +1,376 @@
+name: Publish PR Docker Images
+
+# Pushes the server image docker-pr-build.yml built for a pull request to
+# GHCR, for PRs a maintainer has labelled `preview-image`. See PR-IMAGES.md.
+#
+# Runs from the default branch with a token that can push packages, so it
+# never checks out, builds or runs PR code: the artifact is the only thing it
+# takes from the build, and only node (the download's unzip, the layout
+# check) and Go (skopeo) read it. Which PR, which commit, where to push and
+# what the image says about its origin all come from GitHub's API.
+on:
+  # A build finished: publish it if its PR is labelled.
+  workflow_run:
+    workflows: [Build PR Docker Images]
+    types: [completed]
+  # A maintainer labelled the PR: publish its head's build if it is done.
+  pull_request_target:
+    branches: [master]
+    types: [labeled]
+
+permissions: {}
+
+# One publisher at a time per PR head branch, so two publishes for one PR
+# never race; a queued run re-reads the PR rather than acting on its event.
+# Runs that cannot publish (a failed build, some other label) get a group of
+# their own: queued behind a publish, they would replace one that can. The
+# condition is the publish job's `if`.
+concurrency:
+  group: >-
+    ${{ ((github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    && github.event.workflow_run.event == 'pull_request')
+    || (github.event_name == 'pull_request_target' && github.event.label.name == 'preview-image'))
+    && format('pr-image-{0}:{1}',
+    github.event.workflow_run.head_repository.full_name || github.event.pull_request.head.repo.full_name,
+    github.event.workflow_run.head_branch || github.event.pull_request.head.ref)
+    || format('pr-image-idle-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'pull_request')
+      || (github.event_name == 'pull_request_target'
+      && github.event.label.name == 'preview-image')
+    # Its image ships skopeo.
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # the build run and its artifact
+      pull-requests: read # the PR, its head and its labels
+      packages: write # the push
+    outputs:
+      publish: ${{ steps.build.outputs.publish }}
+      pr: ${{ steps.build.outputs.pr }}
+      sha: ${{ steps.build.outputs.sha }}
+      image: ${{ steps.build.outputs.image }}
+      tag: ${{ steps.build.outputs.tag }}
+      digest: ${{ steps.layout.outputs.digest }}
+    steps:
+      # Publishes only when all of these hold, read from the API at this
+      # moment: the PR is open against master and carries the label; and the
+      # run is the latest build of the PR's current head commit, from the
+      # PR's own branch, and it succeeded. A build of a commit the PR has
+      # since moved on from is never published, nor one superseded by a
+      # later build of the same commit.
+      - name: Find the PR's build
+        id: build
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LABEL: preview-image
+          WORKFLOW: docker-pr-build.yml
+          ARTIFACT: server-image
+        with:
+          script: |
+            const { LABEL, WORKFLOW, ARTIFACT } = process.env;
+            const { owner, repo } = context.repo;
+            const thisRepo = `${owner}/${repo}`;
+            const skip = message => {
+              core.notice(message);
+              core.setOutput('publish', 'false');
+            };
+
+            let pull_number;
+            const trigger = context.payload.workflow_run;
+            if (trigger) {
+              // A fork's run lists no pull requests: find the PR by its head.
+              const head = trigger.head_repository;
+              if (!head) {
+                return skip(`Run ${trigger.id}'s head repository no longer exists`);
+              }
+              const prs = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', base: 'master',
+                head: `${head.owner.login}:${trigger.head_branch}`, per_page: 100
+              });
+              const matching = prs.filter(pr =>
+                pr.head.repo?.full_name === head.full_name &&
+                pr.head.ref === trigger.head_branch);
+              if (matching.length !== 1) {
+                return skip('No unique open PR for this build');
+              }
+              pull_number = matching[0].number;
+            } else {
+              pull_number = context.payload.pull_request.number;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const sha = pr.head.sha;
+            if (pr.state !== 'open' ||
+                pr.base.repo.full_name !== thisRepo || pr.base.ref !== 'master') {
+              return skip(`PR #${pr.number} is not open against master`);
+            }
+            if (!pr.head.repo) {
+              return skip(`PR #${pr.number}'s head repository no longer exists`);
+            }
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              throw new Error('Unexpected head commit');
+            }
+            if (trigger && trigger.head_sha !== sha) {
+              return skip(`PR #${pr.number} has moved on from ${trigger.head_sha}`);
+            }
+            if (!pr.labels.some(label => label.name === LABEL)) {
+              return skip(`PR #${pr.number} is not labelled ${LABEL}`);
+            }
+
+            // The latest build of the head commit from the PR's own branch.
+            const runs = (await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id: WORKFLOW, event: 'pull_request',
+              head_sha: sha, per_page: 100
+            })).filter(run =>
+              run.head_sha === sha &&
+              run.head_repository?.full_name === pr.head.repo.full_name &&
+              run.head_branch === pr.head.ref);
+            if (runs.length === 0) {
+              return skip(`No build of ${sha} yet; it publishes when it succeeds`);
+            }
+            const build = runs.reduce((a, b) =>
+              Date.parse(b.created_at) > Date.parse(a.created_at) ||
+              (b.created_at === a.created_at && b.id > a.id) ? b : a);
+            if (trigger && trigger.id !== build.id) {
+              return skip(`Run ${build.id} is the latest build of ${sha}`);
+            }
+            if (build.status !== 'completed') {
+              return skip(`The build of ${sha} is still running; it publishes when it succeeds`);
+            }
+            if (build.conclusion !== 'success') {
+              return skip(`The latest build of ${sha} did not succeed`);
+            }
+
+            // Each attempt of a run uploads an artifact of its own: the
+            // newest one is the latest attempt's. download-artifact is given
+            // its id, so what is checked here is what gets downloaded.
+            const artifacts = (await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              owner, repo, run_id: build.id, name: ARTIFACT, per_page: 100
+            })).filter(artifact => artifact.name === ARTIFACT && !artifact.expired);
+            if (artifacts.length === 0) {
+              return skip(`Run ${build.id} has no unexpired ${ARTIFACT} artifact; ` +
+                're-run it to build a new one, which publishes when it succeeds');
+            }
+            const artifact = artifacts.reduce((a, b) => b.id > a.id ? b : a);
+
+            // Fixed here, never taken from the artifact.
+            core.setOutput('publish', 'true');
+            core.setOutput('pr', String(pr.number));
+            core.setOutput('pr_url', pr.html_url);
+            core.setOutput('source', pr.base.repo.html_url);
+            core.setOutput('sha', sha);
+            core.setOutput('run', String(build.id));
+            core.setOutput('artifact', String(artifact.id));
+            core.setOutput('image', `ghcr.io/${thisRepo.toLowerCase()}-preview`);
+            core.setOutput('tag', `pr-${pr.number}-${sha}`);
+            core.setOutput('latest', `pr-${pr.number}`);
+
+      - name: Download the build's image
+        if: steps.build.outputs.publish == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.build.outputs.run }}
+          artifact-ids: ${{ steps.build.outputs.artifact }}
+          path: ${{ runner.temp }}/image
+
+      # The layout is the build's, so it is checked before its JSON is
+      # parsed: only regular files and directories, a small index.json naming
+      # one image, whose index is small and matches its digest. That index is
+      # then rebuilt from its schema version, media type and manifests, with
+      # annotations of its own from the API: those are what say which commit
+      # and PR an image was built from, and nothing else the build wrote at
+      # the top level survives. The platform images and their attestations
+      # keep their digests.
+      - name: Check the layout and annotate its index
+        id: layout
+        if: steps.build.outputs.publish == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LAYOUT: ${{ runner.temp }}/image
+          SHA: ${{ steps.build.outputs.sha }}
+          PR: ${{ steps.build.outputs.pr }}
+          PR_URL: ${{ steps.build.outputs.pr_url }}
+          SOURCE: ${{ steps.build.outputs.source }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+            const { LAYOUT, SHA, PR, PR_URL, SOURCE, RUNNER_TEMP } = process.env;
+            const INDEX = 'application/vnd.oci.image.index.v1+json';
+            // An image index lists a handful of manifests: a few KiB.
+            const MAX_SIZE = 65536;
+
+            const walk = dir => {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.isDirectory()) {
+                  walk(path.join(dir, entry.name));
+                } else if (!entry.isFile()) {
+                  throw new Error('The image layout holds symlinks or special files');
+                }
+              }
+            };
+            const readSmall = (file, what) => {
+              const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+              if (!stat?.isFile() || stat.size > MAX_SIZE) {
+                throw new Error(`${what} is missing or too large`);
+              }
+              return fs.readFileSync(file);
+            };
+            const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
+            walk(LAYOUT);
+            const layoutIndex = JSON.parse(readSmall(path.join(LAYOUT, 'index.json'),
+              "The layout's index.json"));
+            if (!Array.isArray(layoutIndex.manifests) || layoutIndex.manifests.length !== 1) {
+              throw new Error('Expected one image in the layout');
+            }
+            const built = layoutIndex.manifests[0].digest;
+            if (typeof built !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(built)) {
+              throw new Error('Unexpected image digest');
+            }
+            const blobs = path.join(LAYOUT, 'blobs', 'sha256');
+            const builtBytes = readSmall(path.join(blobs, built.slice(7)), 'The image index');
+            if (sha256(builtBytes) !== built.slice(7)) {
+              throw new Error('The image index does not match its digest');
+            }
+            const image = JSON.parse(builtBytes);
+            if (image.schemaVersion !== 2 || image.mediaType !== INDEX ||
+                !Array.isArray(image.manifests)) {
+              throw new Error('Expected an OCI image index');
+            }
+
+            const bytes = Buffer.from(JSON.stringify({
+              schemaVersion: 2,
+              mediaType: INDEX,
+              manifests: image.manifests,
+              annotations: {
+                'org.opencontainers.image.revision': SHA,
+                'org.opencontainers.image.source': SOURCE,
+                'org.opencontainers.image.url': PR_URL,
+                'org.opencontainers.image.description':
+                  `Preview of pull request #${PR} at ${SHA}. Untrusted PR code.`
+              }
+            }));
+            const hex = sha256(bytes);
+            const staged = path.join(RUNNER_TEMP, 'index');
+            fs.writeFileSync(staged, bytes, { flag: 'wx' });
+            // rename(2): a directory already at that path fails the move
+            // rather than receiving the index.
+            fs.renameSync(staged, path.join(blobs, hex));
+            fs.writeFileSync(path.join(LAYOUT, 'index.json'), JSON.stringify({
+              schemaVersion: 2,
+              mediaType: INDEX,
+              manifests: [{
+                mediaType: INDEX,
+                digest: `sha256:${hex}`,
+                size: bytes.length,
+                annotations: { 'org.opencontainers.image.ref.name': 'preview' }
+              }]
+            }));
+            core.setOutput('digest', `sha256:${hex}`);
+
+      # skopeo reads the layout directly: no PR-controlled tar archive is
+      # unpacked and nothing in it is run. `--all` pushes every
+      # architecture under the one index, and `--preserve-digests` refuses
+      # to push anything but the exact index annotated above.
+      - name: Push the image to the preview package
+        if: steps.build.outputs.publish == 'true'
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.repository_owner }}
+          LAYOUT: ${{ runner.temp }}/image
+          IMAGE: ${{ steps.build.outputs.image }}
+          TAG: ${{ steps.build.outputs.tag }}
+          LATEST: ${{ steps.build.outputs.latest }}
+          DIGEST: ${{ steps.layout.outputs.digest }}
+        run: |
+          auth=$RUNNER_TEMP/registry-auth.json
+          printf '%s' "$REGISTRY_TOKEN" | skopeo login --authfile "$auth" \
+            --username "$REGISTRY_USER" --password-stdin ghcr.io
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            "oci:$LAYOUT:preview" "docker://$IMAGE:$TAG"
+          # The PR's latest published commit. Only a build of the PR's
+          # current head gets here, so this never moves backwards.
+          skopeo copy --all --preserve-digests --authfile "$auth" \
+            "docker://$IMAGE:$TAG" "docker://$IMAGE:$LATEST"
+          {
+            echo "Preview image: \`$IMAGE:$TAG\` (also \`$IMAGE:$LATEST\`)"
+            echo
+            echo "Digest: \`$DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    # After the push succeeds, on a runner that never sees the artifact; the
+    # only job that can write to the PR.
+    needs: publish
+    if: needs.publish.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # One comment per PR, edited in place for each published commit.
+      - name: Update the PR's preview image comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ needs.publish.outputs.pr }}
+          SHA: ${{ needs.publish.outputs.sha }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { SHA: sha, IMAGE, TAG, DIGEST } = process.env;
+            if (!/^sha256:[0-9a-f]{64}$/.test(DIGEST)) {
+              throw new Error('Unexpected image digest');
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: issue_number
+            });
+            if (pr.state !== 'open') {
+              core.info(`PR #${issue_number} closed; not commenting`);
+              return;
+            }
+            const marker = '<!-- aurcache-preview-image -->';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              `The preview image for commit \`${sha}\` is ready:`,
+              '',
+              '```',
+              `docker pull ${IMAGE}:${TAG}`,
+              '```',
+              '',
+              `Its digest is \`${DIGEST}\`: pull \`${IMAGE}@${DIGEST}\` to be sure of`,
+              'getting exactly this image.',
+              '',
+              `\`${IMAGE}:pr-${issue_number}\` follows this PR's latest published commit.`,
+              'The image holds amd64, arm64 and armv7; `docker pull` picks the host\'s.',
+              'It contains untrusted PR code.',
+              '',
+              'While the `preview-image` label stays on, every new commit is published',
+              `the same way. ([Publishing run](${runUrl}))`
+            ].join('\n');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+            const existing = comments.find(comment =>
+              comment.user?.login === 'github-actions[bot]' &&
+              comment.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
