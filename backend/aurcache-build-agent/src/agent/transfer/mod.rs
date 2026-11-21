@@ -1,10 +1,10 @@
 //! The other end of each `exec` a worker makes into a build pod: handing the
-//! job in, following the log, handing the packages back, and carrying the
-//! SSH link.
+//! job in, following the log, handing the packages back, probing what a
+//! build can reach, and carrying the SSH link.
 //!
 //! Every subcommand exits 0 when it did what it was asked and 1 otherwise,
 //! saying why on stderr; stdout carries only the payload (`manifest`'s JSON,
-//! `send`'s file, `tail`'s log bytes), so a caller can pass
+//! `send`'s file, `tail`'s log bytes, `probe`'s answer), so a caller can pass
 //! it on untouched. Nothing here holds a package or a log in memory: every
 //! copy goes through one fixed buffer.
 //!
@@ -43,6 +43,7 @@
 mod file;
 mod hold;
 mod manifest;
+mod probe;
 mod receive;
 mod send;
 mod ssh_link;
@@ -52,6 +53,7 @@ mod tail;
 use aurcache_build_agent::layout::{BIN_NAME, Work};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// Copy this executable to `<tools>/aurcache-build-agent`, create
 /// `<work>/in/`, and exit 0 once `<work>/in/ready` exists and the `receive`
@@ -85,6 +87,12 @@ pub fn manifest(work: &Path) -> ExitCode {
 /// Write the bytes of `<work>/pkg/<name>` to stdout, and nothing else.
 pub fn send(work: &Path, name: &str) -> ExitCode {
     finish(send::run(&Work::new(work), name))
+}
+
+/// Try each `host:port` in parallel, for at most `timeout` each, and print
+/// `[Reach]`. Exits 0 whatever it found.
+pub fn probe(targets: &[String], timeout: Duration) -> ExitCode {
+    finish(probe::run(targets, timeout))
 }
 
 /// Connect to the agent's link socket and copy bytes between it and

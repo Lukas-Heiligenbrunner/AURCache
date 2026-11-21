@@ -1080,6 +1080,7 @@ pub fn config() -> Config {
         credential: None,
         user_namespaces: false,
         extras: PodExtras::default(),
+        network_probe: false,
         tunables: Tunables {
             memory: Some(4 << 30),
             cpus: None,

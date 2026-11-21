@@ -805,17 +805,27 @@ async fn the_sweep_on_leaving_takes_only_this_dispatchers_pods() {
 }
 
 /// A pod no build holds is deleted before the next claim: one whose delete
-/// failed.
+/// failed, and one of no build that has ended. A pod of no build that still
+/// runs is somebody's.
 #[tokio::test(start_paused = true)]
 async fn pods_nobody_holds_are_deleted_before_a_claim() {
     let rig = Rig::new(Script::default());
     rig.cluster.leave_build(3, status::built(0, "Completed"));
+    rig.cluster
+        .leave("aurcache-probe-ended", status::evicted("deadline"));
+    rig.cluster.leave("aurcache-probe-asked", status::staged());
     assert!(rig.executor.ready_for_work(0).await);
+    let mut deletions = rig.cluster.deletions();
+    deletions.sort_by_key(|call| format!("{call:?}"));
     let gone = |name: &str| Call::Delete {
         name: name.to_string(),
         grace: aurcache_worker_kube::cluster::PROMPT,
     };
-    assert_eq!(rig.cluster.deletions(), [gone(&pod_name(3))]);
+    assert_eq!(
+        deletions,
+        [gone(&pod_name(3)), gone("aurcache-probe-ended")]
+    );
+    assert!(rig.cluster.has_pod("aurcache-probe-asked"));
 }
 
 /// A pod its own build deleted is not deleted again, nor reported as nobody's,

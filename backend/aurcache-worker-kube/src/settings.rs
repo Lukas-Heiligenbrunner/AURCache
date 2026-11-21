@@ -129,6 +129,7 @@ mod tests {
             "WORKER_SSH_KNOWN_HOSTS",
             "WORKER_KUBE_USER_NAMESPACES",
             "WORKER_KUBE_POD_TEMPLATE",
+            "WORKER_KUBE_NETWORK_PROBE",
             "WORKER_DATA_DIR",
             "AURCACHE_URL",
             "AURCACHE_ENROLLMENT_TOKEN",
