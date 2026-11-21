@@ -71,6 +71,4 @@ pub struct Handback {
 pub struct Artifact {
     pub name: String,
     pub size: u64,
-    /// Lowercase hex.
-    pub sha256: String,
 }

@@ -555,7 +555,7 @@ For the Kubernetes worker, which has no shared directory and reaches the pod
 only through `exec`, the same binary has the other end of each exchange:
 `stage` (install itself into a volume, wait for the job), `receive` (take
 the job from stdin), `tail` (follow the log from an offset), `manifest` (the
-report, and each package's name, size and SHA-256), `send` (one package's
+report, and each package's name and size), `send` (one package's
 bytes), and `hold` (keep the pod up). `kubernetes-executor.md` describes
 them where they are used. The Docker worker uses none of them.
 

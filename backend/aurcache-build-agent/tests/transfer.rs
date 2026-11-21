@@ -4,7 +4,6 @@
 use aurcache_build_agent::layout::Work;
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_build_agent::spec::INTERFACE;
-use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -74,10 +73,6 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 
 fn package(name: &str) -> String {
     format!("{name}-1-1-x86_64.pkg.tar.zst")
-}
-
-fn sha256(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
 }
 
 fn write_report(work: &Work) {
@@ -436,12 +431,10 @@ fn manifest_lists_only_regular_files_with_package_names() {
             Artifact {
                 name: package("alpha"),
                 size: 0,
-                sha256: sha256(b""),
             },
             Artifact {
                 name: package("zed"),
                 size: 9,
-                sha256: sha256(b"zed bytes"),
             },
         ]
     );
@@ -677,12 +670,10 @@ fn sparse_package(size: u64) -> Packaged {
     Packaged { dir, name }
 }
 
-/// `manifest` hashes a file in bounded memory: here 1 GiB of zeros.
+/// `manifest` sizes a large file in bounded memory: here 1 GiB of zeros.
 #[test]
-fn manifest_hashes_a_large_package_in_bounded_memory() {
+fn manifest_sizes_a_large_package_in_bounded_memory() {
     const SIZE: u64 = 1 << 30;
-    // `head -c 1073741824 /dev/zero | sha256sum`
-    const DIGEST: &str = "49bc20df15e412a64472421e13fe86ff1c5165e18b2afccf160d4dc19fe68a14";
     let Packaged { dir, name } = sparse_package(SIZE);
     let mut manifest = Vec::new();
     let measured = measure(agent(["manifest", "--work"]).arg(dir.path()), |piece| {
@@ -695,14 +686,7 @@ fn manifest_hashes_a_large_package_in_bounded_memory() {
         measured.peak_rss
     );
     let handback: Handback = serde_json::from_slice(&manifest).unwrap();
-    assert_eq!(
-        handback.artifacts,
-        [Artifact {
-            name,
-            size: SIZE,
-            sha256: DIGEST.to_owned()
-        }]
-    );
+    assert_eq!(handback.artifacts, [Artifact { name, size: SIZE }]);
 }
 
 /// `send` streams a file past 32-bit sizes, here 3 GiB, without holding it.

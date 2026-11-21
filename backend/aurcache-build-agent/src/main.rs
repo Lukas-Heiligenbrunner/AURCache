@@ -66,7 +66,7 @@ enum Command {
         #[arg(long)]
         from: u64,
     },
-    /// Print the report and the packages' names, sizes and digests, as JSON.
+    /// Print the report and the packages' names and sizes, as JSON.
     Manifest {
         #[arg(long)]
         work: PathBuf,
