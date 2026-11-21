@@ -493,7 +493,13 @@ machine. A real cluster differs, mostly in how fast its API server relays.
   take correspondingly longer.
 - **The dispatcher stays small.** It holds no package in memory or on disk: its
   peak memory during that 2 GiB relay was 12 to 14 MiB, against the manifest's
-  256 MiB limit.
+  256 MiB limit. What it does hold is each running build's source archive (the
+  PKGBUILD's directory, as the server sends it), once, from its download until
+  the pod has taken it, and for a moment twice as the download completes. Its
+  memory limit has to cover about 15 MiB of its own plus
+  `WORKER_CONCURRENCY` + 1 times the largest source, and twice
+  `WORKER_CONCURRENCY` times at worst, when every build's download completes
+  at once; raise it for packages that ship large files beside their PKGBUILD.
 - **A cancelled build's pod is gone in 2 to 17 seconds.** The pod is deleted
   with a five-second grace period; the rest is the kubelet.
 

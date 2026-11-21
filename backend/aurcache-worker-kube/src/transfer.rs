@@ -14,6 +14,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use aurcache_build_agent::report::{Artifact, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::artifact::is_artifact;
+use aurcache_worker_container::input::Packed;
 use aurcache_worker_container::ssh::link::{self, Served};
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::protocol::PackagesRefused;
@@ -82,11 +83,12 @@ pub struct Agent<'a, C: Cluster> {
 }
 
 impl<C: Cluster> Agent<'_, C> {
-    /// Hand the job in: `input` is the tar `receive` reads.
+    /// Hand the job in: `input` is the tar `receive` reads, written a piece
+    /// at a time.
     ///
     /// Not to be tried twice: `receive` refuses a job that was already handed
     /// in, and a build may have started on the first.
-    pub async fn receive(&self, input: &[u8]) -> Result<()> {
+    pub async fn receive(&self, input: &Packed) -> Result<()> {
         let argv = [self.bin, "receive", "--work", WORK];
         let Exec {
             stdin,
@@ -98,7 +100,9 @@ impl<C: Cluster> Agent<'_, C> {
             .await?;
         let mut stdin = stdin.context("the exec gave no stdin to write the job to")?;
         let write = async {
-            stdin.write_all(input).await?;
+            for piece in input.pieces() {
+                stdin.write_all(piece).await?;
+            }
             stdin.shutdown().await
         };
         // Read while writing: a process that says something before it has

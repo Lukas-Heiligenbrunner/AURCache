@@ -99,7 +99,7 @@ async fn a_build_is_published(server: &Server) {
         ssh: None,
     };
     let spec = spec::for_job(&claimed, server.client.repo(), options);
-    let job = input::pack(&spec, b"").unwrap();
+    let job = input::pack(&spec, Vec::new()).unwrap();
     let log = BuildLog::open(Arc::clone(&server.client), 1);
     let build = Build {
         claimed: &claimed,
@@ -112,7 +112,7 @@ async fn a_build_is_published(server: &Server) {
     log.close(Vec::new(), None).await;
 
     assert_eq!(report.outcome, BuildOutcome::Succeeded, "{report:?}");
-    assert_eq!(cluster.received(), [job]);
+    assert_eq!(cluster.received(), [job.pieces().concat()]);
     assert!(!cluster.has_pod(&pod_name(1)));
 
     server.client.complete(1, &report).await.unwrap();
