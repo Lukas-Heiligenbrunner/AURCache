@@ -227,7 +227,12 @@ pub async fn preview(
 ) -> anyhow::Result<Vec<RestoreEntry>> {
     let mut entries = Vec::new();
     for pkgbase in dump.packages.keys() {
-        let existing = package_row(db, pkgbase).await?;
+        // `--clear` removes every package first, so none of them is there.
+        let existing = if options.clear {
+            None
+        } else {
+            package_row(db, pkgbase).await?
+        };
         let dump_patch = dump.patches.get(pkgbase);
         entries.push(RestoreEntry {
             pkgbase: pkgbase.clone(),
@@ -518,8 +523,8 @@ pub async fn write_rows(
     // Every conflict, before anything is written. Reporting them one at a time
     // would make an operator fix one, re-run, and meet the next; and a refusal
     // that has already applied half the dump is the state this whole design
-    // exists to avoid.
-    if options.on_existing == ExistingPackagePolicy::MergePatches {
+    // exists to avoid. Under `--clear` nothing is left to conflict with.
+    if !options.clear && options.on_existing == ExistingPackagePolicy::MergePatches {
         let mut conflicts = Vec::new();
         for pkgbase in dump.packages.keys() {
             let existing = package_row(db, pkgbase).await?;

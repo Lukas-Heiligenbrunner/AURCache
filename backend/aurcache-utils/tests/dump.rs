@@ -1459,3 +1459,32 @@ async fn a_dependency_only_package_survives_the_restore() {
         "zzz does not depend on the restored mylib: {edges:?}"
     );
 }
+
+/// A clear removes every package first, so a patch here conflicts with
+/// nothing: the dry run and the import both take the dump's.
+#[tokio::test]
+async fn a_clear_has_no_patch_to_conflict_with() {
+    let source = aurcache_db::testing::memory_db().await;
+    package(&source, "shared", true, Some("--- from-dump\n")).await;
+    let bytes = dump_bytes(&source).await;
+
+    let target = aurcache_db::testing::memory_db().await;
+    package(&target, "shared", true, Some("--- mine\n")).await;
+    let loaded = load_dump(&bytes).unwrap();
+    let options = RestoreOptions {
+        on_existing: ExistingPackagePolicy::MergePatches,
+        clear: true,
+        ..RestoreOptions::default()
+    };
+
+    let entries = preview(&target, &loaded, &options).await.unwrap();
+    assert!(
+        matches!(&entries[0].outcome, RestoreOutcome::Imported),
+        "{entries:?}"
+    );
+    aurcache_utils::restore::write_rows(&target, &test_repo(), &loaded, &options)
+        .await
+        .unwrap();
+    let row = Packages::find().one(&target).await.unwrap().unwrap();
+    assert_eq!(row.patch.as_deref(), Some("--- from-dump\n"));
+}
