@@ -43,6 +43,66 @@ pub async fn test_api_with_repository(
     repository: impl FnOnce(Repository) -> Repository,
     mount: impl FnOnce(Rocket<Build>) -> Rocket<Build>,
 ) -> TestApi {
+    let TestRocket { rocket, db } = test_rocket(version, repository, mount).await;
+    TestApi {
+        client: Client::tracked(rocket).await.unwrap(),
+        db,
+    }
+}
+
+/// The API as [`test_api`] builds it, served over TCP on a port of its own
+/// on the loopback interface, for what only a real connection shows.
+///
+/// The server runs until the test's runtime ends.
+#[allow(dead_code)]
+pub async fn serve_api(version: &str) -> ServedApi {
+    let TestRocket { rocket, db } = test_rocket(version, |repo| repo, std::convert::identity).await;
+    let (port_tx, port_rx) = tokio::sync::oneshot::channel();
+    let port_tx = std::sync::Mutex::new(Some(port_tx));
+    let rocket = rocket
+        .configure(
+            rocket::Config::figment()
+                .merge(("address", "127.0.0.1"))
+                .merge(("port", 0))
+                .merge(("log_level", "off"))
+                .merge(("shutdown.ctrlc", false)),
+        )
+        .attach(rocket::fairing::AdHoc::on_liftoff("port", move |rocket| {
+            let port = rocket.config().port;
+            Box::pin(async move {
+                if let Some(tx) = port_tx.lock().unwrap().take() {
+                    let _ = tx.send(port);
+                }
+            })
+        }));
+    tokio::spawn(rocket.launch());
+    let port = port_rx.await.expect("the server starts");
+    ServedApi {
+        url: format!("http://127.0.0.1:{port}/api"),
+        db,
+    }
+}
+
+/// A server [`serve_api`] started.
+#[allow(dead_code)]
+pub struct ServedApi {
+    /// Where its API is, as a client's base URL.
+    pub url: String,
+    pub db: DatabaseConnection,
+}
+
+/// The rocket [`test_api`] describes, not yet launched, and its database.
+struct TestRocket {
+    rocket: Rocket<Build>,
+    db: DatabaseConnection,
+}
+
+/// The rocket [`test_api`] describes, not yet launched.
+async fn test_rocket(
+    version: &str,
+    repository: impl FnOnce(Repository) -> Repository,
+    mount: impl FnOnce(Rocket<Build>) -> Rocket<Build>,
+) -> TestRocket {
     let db = aurcache_db::testing::memory_db().await;
 
     let checkouts = tempfile::tempdir().expect("tempdir");
@@ -82,8 +142,5 @@ pub async fn test_api_with_repository(
     // The checkout root only has to outlive Rocket's construction; nothing in
     // these tests fetches sources.
     std::mem::forget(checkouts);
-    TestApi {
-        client: Client::tracked(rocket).await.unwrap(),
-        db,
-    }
+    TestRocket { rocket, db }
 }

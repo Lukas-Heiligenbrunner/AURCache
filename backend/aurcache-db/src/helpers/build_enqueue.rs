@@ -24,13 +24,15 @@ pub enum Queued {
     Existing,
 }
 
-/// The states a new build can be queued in.
+/// The states a new build can be inserted in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pending {
     /// Ready for a worker to claim.
     Enqueued,
     /// Held until what it depends on is built.
     WaitingForDeps,
+    /// Built elsewhere and uploaded: only publishing is left.
+    Publishing,
 }
 
 impl Pending {
@@ -40,6 +42,7 @@ impl Pending {
         match self {
             Self::Enqueued => BuildState::Enqueued,
             Self::WaitingForDeps => BuildState::WaitingForDeps,
+            Self::Publishing => BuildState::Publishing,
         }
     }
 }

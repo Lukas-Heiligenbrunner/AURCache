@@ -927,7 +927,7 @@ async fn enqueue_platform_builds(
                 )
                 .await?
             }
-            Pending::WaitingForDeps => {
+            Pending::WaitingForDeps | Pending::Publishing => {
                 enqueue_build_if_missing(
                     &services.db,
                     request.pkg_model.id,

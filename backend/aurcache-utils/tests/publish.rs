@@ -7,44 +7,13 @@ use aurcache_db::prelude::{Builds, Files, Packages};
 use aurcache_utils::publish::{interrupted, publish_build, publish_with_recovery};
 use aurcache_utils::repository::Repository;
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Build logs go somewhere disposable, the same place for every test in this
-/// process.
-fn quiet_logs() {
-    static LOGS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    LOGS.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap().keep();
-        // SAFETY: set once, before any test reads it, and never changed.
-        unsafe { std::env::set_var("AURCACHE_BUILD_LOG_PATH", &dir) };
-        dir
-    });
-}
-
-/// A minimal valid `.pkg.tar.zst`: a zstd-compressed tar holding a `.PKGINFO`.
-fn fake_pkg_zst(pkgname: &str, pkgver: &str) -> Vec<u8> {
-    pkg_zst(&format!("pkgname = {pkgname}\npkgver = {pkgver}\n"))
-}
-
-/// A `.pkg.tar.zst` holding only `pkginfo`, as its `.PKGINFO`.
-fn pkg_zst(pkginfo: &str) -> Vec<u8> {
-    let mut tar_bytes = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut tar_bytes);
-        let mut header = tar::Header::new_gnu();
-        header.set_path(".PKGINFO").unwrap();
-        header.set_size(pkginfo.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder.append(&header, pkginfo.as_bytes()).unwrap();
-        builder.finish().unwrap();
-    }
-    zstd::stream::encode_all(tar_bytes.as_slice(), 0).unwrap()
-}
+mod common;
+use common::{listed, pkg, pkg_zst, quiet_logs};
 
 fn filename(pkgname: &str, pkgver: &str) -> String {
-    format!("{pkgname}-{pkgver}-x86_64.pkg.tar.zst")
+    pkg(pkgname, pkgver, "x86_64").filename()
 }
 
 async fn db() -> DatabaseConnection {
@@ -78,27 +47,8 @@ fn stage(repo: &Repository, build_id: i32, pkgname: &str, pkgver: &str) -> PathB
     let dir = repo.staging_dir(build_id);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(filename(pkgname, pkgver));
-    std::fs::write(&path, fake_pkg_zst(pkgname, pkgver)).unwrap();
+    std::fs::write(&path, pkg(pkgname, pkgver, "x86_64").bytes()).unwrap();
     path
-}
-
-/// The entry directories `repo.db` lists for x86_64, or none if it has none.
-fn listed(root: &Path) -> Vec<String> {
-    let Ok(mut file) = std::fs::File::open(root.join("x86_64").join("repo.db.tar.gz")) else {
-        return Vec::new();
-    };
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).unwrap();
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(data.as_slice()));
-    let mut dirs: Vec<String> = archive
-        .entries()
-        .unwrap()
-        .flatten()
-        .filter(|e| e.header().entry_type().is_dir())
-        .map(|e| e.path().unwrap().display().to_string())
-        .collect();
-    dirs.sort();
-    dirs
 }
 
 async fn status(db: &DatabaseConnection, build_id: i32) -> BuildState {
@@ -124,7 +74,7 @@ async fn a_database_error_preserves_staging_for_recovery() {
     publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
 
     assert_eq!(std::fs::read(&staged).unwrap(), original);
-    assert!(listed(tmp.path()).is_empty());
+    assert!(listed(tmp.path(), "x86_64").is_empty());
 }
 
 #[tokio::test]
@@ -158,7 +108,7 @@ async fn a_published_build_is_in_the_repository_and_recorded() {
     assert_eq!(rows[0].filename, filename("hello", "2.12.1-1"));
     assert_eq!(rows[0].size, Some(i64::try_from(size).unwrap()));
 
-    assert_eq!(listed(tmp.path()), ["hello-2.12.1-1"]);
+    assert_eq!(listed(tmp.path(), "x86_64"), ["hello-2.12.1-1"]);
     assert!(
         tmp.path()
             .join("x86_64")
@@ -223,7 +173,7 @@ async fn a_rebuild_once_signing_is_off_takes_the_old_signature_away() {
     publishing_build(&db, 2, 1).await;
     let staged = stage(&unsigned, 2, "hello", "2.12.1-1");
     // The same version built again: the same name, other bytes.
-    let rebuilt = pkg_zst("pkgname = hello\npkgver = 2.12.1-1\npkgdesc = rebuilt\n");
+    let rebuilt = pkg_zst("pkgname = hello\npkgver = 2.12.1-1\narch = x86_64\npkgdesc = rebuilt\n");
     std::fs::write(&staged, &rebuilt).unwrap();
     publish_build(&db, &unsigned, &ActivityLog::discarding(), 2).await;
 
@@ -255,7 +205,7 @@ async fn a_new_version_replaces_the_old_one() {
     publish_build(&db, &repo, &ActivityLog::discarding(), 2).await;
 
     assert_eq!(status(&db, 2).await, BuildState::Successful);
-    assert_eq!(listed(tmp.path()), ["hello-1.1-1"]);
+    assert_eq!(listed(tmp.path(), "x86_64"), ["hello-1.1-1"]);
     let rows = Files::find().all(&db).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].filename, filename("hello", "1.1-1"));
@@ -298,7 +248,10 @@ async fn a_file_owned_by_a_live_package_fails_the_build_and_changes_nothing() {
     let rows = Files::find().all(&db).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].package_id, 1, "the other package keeps its file");
-    assert!(listed(tmp.path()).is_empty(), "nothing reached repo.db");
+    assert!(
+        listed(tmp.path(), "x86_64").is_empty(),
+        "nothing reached repo.db"
+    );
     assert!(
         !tmp.path()
             .join("x86_64")
@@ -356,14 +309,19 @@ async fn a_wrong_named_artifact_fails_the_build() {
 
     assert_eq!(status(&db, 1).await, BuildState::Failed);
     assert!(Files::find().all(&db).await.unwrap().is_empty());
-    assert!(listed(tmp.path()).is_empty());
+    assert!(listed(tmp.path(), "x86_64").is_empty());
 }
 
-/// A file named for this package but holding another, or another version, is
-/// refused too: the `repo.db` entry would be made from what it holds.
+/// A file named for this package but holding another, another version or
+/// another arch, is refused too: the `repo.db` entry would be made from what
+/// it holds, in the `repo.db` its name picks.
 #[tokio::test]
 async fn an_artifact_holding_another_package_fails_the_build() {
-    for [pkgname, pkgver] in [["openssh", "1.0-1"], ["hello", "2.0-1"]] {
+    for [pkgname, pkgver, arch] in [
+        ["openssh", "1.0-1", "x86_64"],
+        ["hello", "2.0-1", "x86_64"],
+        ["hello", "1.0-1", "aarch64"],
+    ] {
         let db = db().await;
         let tmp = tempfile::tempdir().unwrap();
         let repo = Repository::new(tmp.path());
@@ -373,7 +331,7 @@ async fn an_artifact_holding_another_package_fails_the_build() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(filename("hello", "1.0-1")),
-            fake_pkg_zst(pkgname, pkgver),
+            pkg(pkgname, pkgver, arch).bytes(),
         )
         .unwrap();
 
@@ -382,10 +340,10 @@ async fn an_artifact_holding_another_package_fails_the_build() {
         assert_eq!(
             status(&db, 1).await,
             BuildState::Failed,
-            "{pkgname} {pkgver}"
+            "{pkgname} {pkgver} {arch}"
         );
         assert!(Files::find().all(&db).await.unwrap().is_empty());
-        assert!(listed(tmp.path()).is_empty());
+        assert!(listed(tmp.path(), "x86_64").is_empty());
     }
 }
 
@@ -407,7 +365,7 @@ async fn an_interrupted_publication_is_resumed_from_staging() {
 
     assert_eq!(status(&db, 1).await, BuildState::Successful);
     assert!(interrupted(&db, &repo).await.unwrap().is_empty());
-    assert_eq!(listed(tmp.path()), ["hello-1.0-1"]);
+    assert_eq!(listed(tmp.path(), "x86_64"), ["hello-1.0-1"]);
 }
 
 /// A build no longer being published -- already done, or cancelled meanwhile --
@@ -431,7 +389,7 @@ async fn a_build_not_publishing_is_left_alone() {
 
     assert_eq!(status(&db, 1).await, BuildState::Failed);
     assert!(staged.exists());
-    assert!(listed(tmp.path()).is_empty());
+    assert!(listed(tmp.path(), "x86_64").is_empty());
 }
 
 #[tokio::test]
@@ -560,7 +518,7 @@ async fn a_background_publication_finishes_after_the_sweep_recovers_its_files() 
         .await
         .unwrap();
     assert!(blocked.is_file());
-    assert!(!listed(tmp.path()).is_empty());
+    assert!(!listed(tmp.path(), "x86_64").is_empty());
 
     tokio::time::timeout(std::time::Duration::from_secs(10), publishing)
         .await
