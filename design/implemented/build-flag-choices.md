@@ -1,11 +1,11 @@
 # Build flags as a set of choices
 
-Status: **Proposed** · Last updated: 2026-11-20
+Status: **Implemented** · Last updated: 2026-11-20
 
-A package's build flags are typed into a text field, one at a time, and the
-server refuses whatever is not on its list of makepkg options. The list is
-fixed now, so a text field only gives people a chance to type something that
-will be refused. Most of the list does nothing on a worker anyway. This
+A package's build flags were typed into a text field, one at a time, and the
+server refused whatever was not on its list of makepkg options. The list is
+fixed, so a text field only gave people a chance to type something that
+would be refused, and most of the list does nothing on a worker anyway. This
 replaces the text field with a dialog: each option a package can choose is
 shown with a line saying what it does, and the package page shows only the
 flags that are set. The flags every build needs stop being stored per package,
@@ -13,7 +13,9 @@ because the worker passes them itself.
 
 ---
 
-## Where things stand
+## Where things stood
+
+Before this change:
 
 - **The list.** `aurcache-common/src/build_flags.rs` names every makepkg 7.1
   option as allowed or refused (with a reason). `canonical` turns flags into
@@ -152,16 +154,34 @@ dropped, and the activity log does not exist yet when it runs.
 ### The UI: a summary and a dialog
 
 On the package page, the *Flags* row shows the set flags as read-only chips in
-`font-mono`, or "makepkg defaults" when there are none, with an *Edit* button.
+`font-mono`, or "makepkg defaults" when there are none, with an *Edit* button
+(`BuildFlagsField`, `frontend-rs/src/screens/package/config.rs`).
 
-*Edit* opens a `Modal` (`widgets.rs`). It has one row per offered option,
-styled like the add-package dialog's search results (`results_list` in
-`package_add.rs`): a checkbox, then the flag in `font-mono` with its summary in
-`text-xs opacity-60` underneath. The whole row is the label, so clicking
-anywhere on it toggles the box. The dialog edits a draft. *Save* sends the
-whole list in one `PATCH` (the endpoint takes the whole list, as it does now);
-*Cancel*, Escape and clicking outside discard the draft. The dialog is locked
-while the request is in flight, and a refusal is shown inside it.
+*Edit* opens a `Modal` (`widgets.rs`), `BuildFlagsDialog`. It has one row per
+offered option, styled like the add-package dialog's search results
+(`results_list` in `package_add.rs`): a checkbox, then the flag in
+`font-mono` with its summary in `text-xs opacity-60` underneath. The whole row
+is the label, so clicking anywhere on it toggles the box; the checkbox is
+named by its flag and described by its summary. The list scrolls inside the
+dialog when it is taller than the screen allows.
+
+The dialog edits a draft, and is mounted only while open, so every opening
+starts from the saved flags. *Save* sends the whole list in one `PATCH` (the
+endpoint takes the whole list, as it does now), in the order of `OFFERED`, and
+is disabled while that list is the one already saved; *Cancel*, Escape and
+clicking outside discard the draft. The dialog is locked while the request is
+in flight, and a refusal is shown inside it, where focus then goes. Opening it
+puts focus on the first box, and closing it, however it closes, puts focus
+back on *Edit*. It shows only while the package it was opened for is the one
+on the page, so moving to another package takes it away, draft and all, in the
+same render, and coming back to the first finds it closed. Building the list
+from the ticked boxes and deciding whether it is a change are plain functions
+(`Draft`), tested on their own.
+
+A save writes the list the server took into the package the page fetched,
+then fetches it again, so the summary and a dialog opened at once show the
+saved list. Flags that change while the dialog is open, with a refresh,
+replace a draft nobody has edited; an edited draft is kept.
 
 There is no tri-state check option: the only choice is `--nocheck` or nothing.
 
