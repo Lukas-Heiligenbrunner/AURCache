@@ -22,9 +22,10 @@ use aurcache_db::{builds, dependencies, files, packages};
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::{PackageEntry, PackageMeta};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QuerySelect, Set,
 };
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -292,7 +293,7 @@ struct FileRow {
 struct Plan {
     rows: Vec<FileRow>,
     /// This package's files on this platform that the build no longer
-    /// produces.
+    /// produces, and another's of a name it takes over (see [`plan`]).
     stale: Vec<PublishedFile>,
     version: String,
     total_size: i64,
@@ -438,9 +439,12 @@ async fn read_staging(
 
 /// Decide who owns each file and what goes stale, from what `update` reads.
 ///
-/// A filename another package already publishes is refused, unless that
-/// package depends on this one (the file moved between them) or no longer
-/// exists (the row is a leftover, not a claim).
+/// A package name another package already publishes on this platform is
+/// refused, whatever its version: `repo.db` would list two packages of one
+/// name (see [`standing`] for when another package gives it up, and when
+/// both keep publishing it). A file of another package's that gives its name
+/// up is taken over when this build stages that very file, and retired
+/// otherwise.
 async fn plan(
     update: &Update<'_>,
     db: &DatabaseConnection,
@@ -449,65 +453,240 @@ async fn plan(
     described: &[Staged],
     version: String,
 ) -> anyhow::Result<Plan> {
-    // What this platform already publishes, in one query rather than one per
-    // staged file (see `Update::published_files`).
-    let known = update
-        .published_files(
-            db,
-            platform,
-            &described
-                .iter()
-                .map(|staged| staged.filename.clone())
-                .collect::<Vec<_>>(),
-        )
+    let pkgnames: Vec<String> = described
+        .iter()
+        .map(|staged| staged.entry.meta.pkgname.clone())
+        .collect();
+    let staged_names: Vec<&str> = described.iter().map(|s| s.filename.as_str()).collect();
+    // What this platform already publishes under these names, in one query
+    // rather than one per staged file (see `Update::published_files_named`).
+    let named = update
+        .published_files_named(db, platform, &pkgnames)
         .await?;
-    let mut rows = Vec::with_capacity(described.len());
-    for staged in described {
-        let existing = known.get(&staged.filename);
-        if let Some(existing) = existing
-            && existing.package_id() != pkg.id
-        {
-            // Counted rather than read: all this needs is whether the row is
-            // there, and loading the model would also have to deserialize
-            // columns like `source_data`.
-            let owner_exists = Packages::find_by_id(existing.package_id())
-                .count(db)
-                .await?
-                > 0;
-            let owner_depends_on_us = Dependencies::find()
-                .filter(dependencies::Column::DependentId.eq(existing.package_id()))
-                .filter(dependencies::Column::DependeeId.eq(pkg.id))
-                .count(db)
-                .await?
-                > 0;
-            if owner_exists && !owner_depends_on_us {
-                bail!(
-                    "File '{}' is already produced by another package",
-                    staged.filename
-                );
-            }
-        }
-        rows.push(FileRow {
-            filename: staged.filename.clone(),
-            existing: existing.map(PublishedFile::id),
-            size: staged.size,
-        });
-    }
+    let files: Vec<NamedFile<'_>> = named
+        .iter()
+        .map(|file| NamedFile {
+            package_id: file.package_id(),
+            filename: file.filename(),
+        })
+        .collect();
+    let yielded = match standing(db, Some(pkg.id), &staged_names, &files).await? {
+        Standing::Taken(taken) => bail!("{taken}"),
+        Standing::Clear { yielded } => yielded,
+    };
 
-    let published: Vec<&str> = described.iter().map(|s| s.filename.as_str()).collect();
-    let stale = update
+    let rows = described
+        .iter()
+        .map(|staged| FileRow {
+            filename: staged.filename.clone(),
+            existing: named
+                .iter()
+                .find(|file| file.filename() == staged.filename)
+                .map(PublishedFile::id),
+            size: staged.size,
+        })
+        .collect();
+
+    let stale: Vec<PublishedFile> = update
         .published_files_of(db, &[pkg.id])
         .await?
         .into_iter()
-        .filter(|file| file.platform() == platform && !published.contains(&file.filename()))
+        .filter(|file| file.platform() == platform && !staged_names.contains(&file.filename()))
+        .chain(
+            named
+                .iter()
+                .filter(|file| {
+                    yielded.iter().any(|name| name == file.filename())
+                        && !staged_names.contains(&file.filename())
+                })
+                .cloned(),
+        )
         .collect();
 
     Ok(Plan {
         rows,
         stale,
         version,
-        total_size: described.iter().map(|s| s.size).sum(),
+        total_size: described.iter().map(|staged| staged.size).sum(),
     })
+}
+
+/// A package name another package publishes, which a build may not publish
+/// as well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Taken {
+    /// The file it publishes it in.
+    pub(crate) filename: String,
+    /// That package.
+    pub(crate) owner: String,
+}
+
+impl std::fmt::Display for Taken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name =
+            parse_arch_pkg(&self.filename).map_or_else(|_| self.filename.clone(), |n| n.name);
+        write!(
+            f,
+            "'{name}' is already published by the package '{}' ({}); \
+             a package name is published by one package at a time",
+            self.owner, self.filename
+        )
+    }
+}
+
+/// One published file, by the package publishing it.
+pub(crate) struct NamedFile<'a> {
+    pub(crate) package_id: i32,
+    pub(crate) filename: &'a str,
+}
+
+/// What the files other packages publish under a build's package names leave
+/// it.
+pub(crate) enum Standing {
+    /// One of those packages keeps the name: the build may not publish it.
+    Taken(Taken),
+    /// None does. The files `yielded` give their names up to the build.
+    Clear { yielded: Vec<String> },
+}
+
+/// Decide whether a build of the package `pkg_id` may publish the names of
+/// the files it stages, `staged`, given `named`: every package's files on its
+/// platform under those names. `pkg_id` is `None` for a package not created
+/// yet.
+///
+/// Another package's file keeps its name from the build, unless:
+/// - that package no longer exists (its row is a leftover, not a claim);
+/// - it depends on this one and its own source no longer builds the name:
+///   the name moved from it to its dependency, and the build takes it over;
+/// - the building package publishes the name too, and the build stages
+///   another file than the other package's: two packages that both publish
+///   a name each keep publishing it while their files differ, while no third
+///   may start. A build of the very file the other publishes is refused.
+pub(crate) async fn standing<C: ConnectionTrait>(
+    db: &C,
+    pkg_id: Option<i32>,
+    staged: &[&str],
+    named: &[NamedFile<'_>],
+) -> Result<Standing, DbErr> {
+    let name_of = |filename: &str| parse_arch_pkg(filename).ok().map(|parsed| parsed.name);
+    let own: Vec<String> = named
+        .iter()
+        .filter(|file| Some(file.package_id) == pkg_id)
+        .filter_map(|file| name_of(file.filename))
+        .collect();
+    let mut yielded = Vec::new();
+    for file in named.iter().filter(|file| Some(file.package_id) != pkg_id) {
+        let Some(name) = name_of(file.filename) else {
+            continue;
+        };
+        if own.contains(&name) && !staged.contains(&file.filename) {
+            continue;
+        }
+        match holder(db, file.package_id, pkg_id, &name).await? {
+            Holder::Holds(owner) => {
+                return Ok(Standing::Taken(Taken {
+                    filename: file.filename.to_string(),
+                    owner,
+                }));
+            }
+            Holder::Yields => yielded.push(file.filename.to_string()),
+        }
+    }
+    Ok(Standing::Clear { yielded })
+}
+
+/// What the package `owner_id`, which publishes `name`, is to a build of
+/// `pkg_id` that would publish it too.
+enum Holder {
+    /// It keeps the name.
+    Holds(String),
+    /// It gives the name up (see [`standing`]).
+    Yields,
+}
+
+async fn holder<C: ConnectionTrait>(
+    db: &C,
+    owner_id: i32,
+    pkg_id: Option<i32>,
+    name: &str,
+) -> Result<Holder, DbErr> {
+    let Some(owner) = Packages::find_by_id(owner_id).one(db).await? else {
+        return Ok(Holder::Yields);
+    };
+    let Some(pkg_id) = pkg_id else {
+        return Ok(Holder::Holds(owner.name));
+    };
+    if expected_pkgnames(&owner).iter().any(|built| built == name) {
+        return Ok(Holder::Holds(owner.name));
+    }
+    let depends_on_us = Dependencies::find()
+        .filter(dependencies::Column::DependentId.eq(owner_id))
+        .filter(dependencies::Column::DependeeId.eq(pkg_id))
+        .count(db)
+        .await?
+        > 0;
+    Ok(if depends_on_us {
+        Holder::Yields
+    } else {
+        Holder::Holds(owner.name)
+    })
+}
+
+/// A package name more than one package publishes on one platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedName {
+    pub name: String,
+    pub platform: Platform,
+    /// The packages publishing it, by name, in order.
+    pub packages: Vec<String>,
+}
+
+/// The package names more than one package publishes on one platform.
+///
+/// Publishing lets none start publishing a name another package does, but
+/// lets the packages already sharing one go on while their files differ
+/// (see [`standing`]): this is how to find them, which only removing all but
+/// one of them resolves.
+///
+/// # Errors
+/// The `files` table could not be read.
+pub async fn shared_names<C: ConnectionTrait>(db: &C) -> Result<Vec<SharedName>, DbErr> {
+    #[derive(FromQueryResult)]
+    struct Row {
+        filename: String,
+        platform: Platform,
+        pkgbase: String,
+    }
+    let rows = Files::find()
+        .select_only()
+        .column(files::Column::Filename)
+        .column(files::Column::Platform)
+        .column_as(packages::Column::Name, "pkgbase")
+        .inner_join(Packages)
+        .into_model::<Row>()
+        .all(db)
+        .await?;
+    let mut publishers: HashMap<(Platform, String), BTreeSet<String>> = HashMap::new();
+    for row in rows {
+        if let Ok(parsed) = parse_arch_pkg(&row.filename) {
+            publishers
+                .entry((row.platform, parsed.name))
+                .or_default()
+                .insert(row.pkgbase);
+        }
+    }
+    let mut shared: Vec<SharedName> = publishers
+        .into_iter()
+        .filter(|(_, packages)| packages.len() > 1)
+        .map(|((platform, name), packages)| SharedName {
+            name,
+            platform,
+            packages: packages.into_iter().collect(),
+        })
+        .collect();
+    shared
+        .sort_by(|a, b| (a.platform.to_string(), &a.name).cmp(&(b.platform.to_string(), &b.name)));
+    Ok(shared)
 }
 
 /// The one database transaction: the files, the build's result and what it
