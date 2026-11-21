@@ -23,6 +23,7 @@ aurcache-db = {path = "../aurcache-db"}
 aurcache-activitylog = {path = "../aurcache-activitylog"}
 aurcache-utils = {path = "../aurcache-utils"}
 aurcache-common = {path = "../aurcache-common"}
+aurcache-signing = {path = "../aurcache-signing"}
 
 serde_json = {workspace = true}
 

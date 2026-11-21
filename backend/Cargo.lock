@@ -854,6 +854,7 @@ dependencies = [
  "aurcache-common",
  "aurcache-db",
  "aurcache-deps",
+ "aurcache-signing",
  "aurcache-utils",
  "git2",
  "jiff 1.0.1",

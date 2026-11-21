@@ -7,9 +7,10 @@
 //!
 //! The server signs with one component key of it, chosen once, when the key
 //! is loaded: its one current signing subkey, or else its primary key if that
-//! signs. A key with several current signing subkeys is refused, and so is
-//! one that stops signing within [`MIN_VALIDITY_DAYS`]: moving from one
-//! signing subkey to the next while the server runs is not supported.
+//! signs. A key with several current signing subkeys is refused: moving
+//! from one signing subkey to the next while the server runs is not
+//! supported. One that stops signing within [`EXPIRY_WARNING_DAYS`] loads,
+//! and says so ([`InstanceKey::expiring`]).
 //!
 //! The key is a file, like the worker CA's, never a database row: the
 //! database is what gets exported, backed up elsewhere and inspected. Nothing
@@ -45,11 +46,10 @@ const USER_ID: &str = "AURCache repository";
 /// What signatures hash with: what GnuPG itself uses with an Ed25519 key.
 const HASH: HashAlgorithm = HashAlgorithm::Sha512;
 
-/// How many days a key has to go on signing, at least, for the server to
-/// load it. A key that stops signing sooner is refused at start, so that an
-/// expiry is dealt with before it is near rather than found by clients
-/// refusing what it signed.
-pub const MIN_VALIDITY_DAYS: u64 = 30;
+/// How many days before a key stops signing the server warns of it -- at
+/// start, or while it runs -- so that an expiry is dealt with before it is reached rather than
+/// found by every repository change failing.
+pub const EXPIRY_WARNING_DAYS: u64 = 30;
 
 const DAY_SECS: u64 = 24 * 60 * 60;
 
@@ -221,9 +221,8 @@ impl InstanceKey {
 
     /// The key in `path`, armored or binary, unlocked with `passphrase`.
     ///
-    /// Refused unless it signs, and goes on signing for
-    /// [`MIN_VALIDITY_DAYS`]: a key that does not unlock, or is about to
-    /// expire, fails here rather than at a publish.
+    /// Refused unless it signs: a key that does not unlock, or has expired,
+    /// fails here rather than at a publish.
     pub fn load(path: &Path, passphrase: Option<&str>) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading the signing key {}", path.display()))?;
@@ -264,14 +263,6 @@ impl InstanceKey {
         key.verify_bindings()
             .context("the key's self-signatures do not verify")?;
         let Choice { signer, expires } = choose(&key, now()).map_err(|why| refusal(&key, why))?;
-        if let Some(at) = expires {
-            tracing::info!(
-                "the repository's signing {} stops signing on {}; from {MIN_VALIDITY_DAYS} days \
-                 before, the server refuses to start with it",
-                describe(&key, signer),
-                date(at)
-            );
-        }
         if is_rsa(signing_algorithm(&key, signer)) {
             tracing::warn!(
                 "the repository's signing {} is an RSA key: it signs, but through an RSA \
@@ -298,7 +289,41 @@ impl InstanceKey {
         if !key.verifies(&probe, b"") {
             bail!("a signature the key made does not verify");
         }
+        if let Some(expiring) = key.expiring() {
+            tracing::warn!("{expiring}");
+        } else if let Some(at) = expires {
+            tracing::info!(
+                "the repository's signing {} stops signing on {}; the server warns \
+                 {EXPIRY_WARNING_DAYS} days before",
+                describe(&key.key, signer),
+                date(at)
+            );
+        }
         Ok(key)
+    }
+
+    /// When the component key that signs stops signing within
+    /// [`EXPIRY_WARNING_DAYS`]: it signs until then, and every repository
+    /// change fails after.
+    #[must_use]
+    pub fn expiring(&self) -> Option<Expiring> {
+        let at = self
+            .expires
+            .filter(|at| *at < now() + EXPIRY_WARNING_DAYS * DAY_SECS)?;
+        let by_primary = self.signer != Signer::Primary
+            && primary_expiry(&self.key, now()).ok().flatten() == Some(at);
+        Some(Expiring {
+            signer: describe(&self.key, self.signer),
+            on: date(at),
+            primary: by_primary.then(|| describe(&self.key, Signer::Primary)),
+        })
+    }
+
+    /// How long until [`Self::expiring`] says the key stops signing soon:
+    /// `None` when it says so already, or the key never stops signing.
+    #[must_use]
+    pub fn warns_in(&self) -> Option<std::time::Duration> {
+        warns_in(self.expires, now())
     }
 
     fn persist(&self, path: &Path) -> anyhow::Result<()> {
@@ -426,6 +451,43 @@ impl InstanceKey {
     }
 }
 
+/// A signing key that stops signing soon, as [`InstanceKey::expiring`]
+/// says it. Its `Display` is the warning an operator reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expiring {
+    /// The component key that signs, as `gpg --list-keys` shows it:
+    /// `subkey <fingerprint>` or `primary key <fingerprint>`.
+    pub signer: String,
+    /// The day it stops signing, `YYYY-MM-DD` in UTC.
+    pub on: String,
+    /// The primary key, named as `signer` is, when it is the primary key's
+    /// expiry that ends the subkey's signing.
+    pub primary: Option<String>,
+}
+
+impl std::fmt::Display for Expiring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            signer,
+            on,
+            primary,
+        } = self;
+        let because = primary.as_ref().map_or_else(String::new, |primary| {
+            format!(", when its {primary} expires")
+        });
+        // The primary key's expiry, when it is what ends the signing, is the
+        // one to extend.
+        let extend = primary.as_deref().unwrap_or("it");
+        write!(
+            f,
+            "the repository's signing {signer} stops signing on {on}{because}, and every \
+             repository change fails from then on: extend {extend} (`gpg --quick-set-expire`), \
+             restart the server with the extended key, then have every client import it again \
+             from /api/repo/key before {on}"
+        )
+    }
+}
+
 /// Why a key is refused, when its primary key is current but nothing in it
 /// signs.
 const NOTHING_SIGNS: &str = "nothing in the signing key signs now: no subkey that signs \
@@ -446,14 +508,6 @@ enum Refusal {
     /// More than one subkey signs and is current, with its secret in the
     /// file: the server signs with one.
     SeveralSigners { count: usize },
-    /// The component key that would sign stops signing at this time, in
-    /// seconds since the epoch, within [`MIN_VALIDITY_DAYS`]; `by_primary`
-    /// when it is its primary key's expiry that ends it.
-    ExpiresSoon {
-        signer: Signer,
-        at: u64,
-        by_primary: bool,
-    },
 }
 
 /// The error a key is refused with, for `why`.
@@ -478,25 +532,6 @@ fn refusal(key: &SignedSecretKey, why: Refusal) -> anyhow::Error {
              one: export the key with only the subkey to sign with \
              (`gpg --export-secret-subkeys <subkey fingerprint>!`, the `!` included)"
         ),
-        Refusal::ExpiresSoon {
-            signer,
-            at,
-            by_primary,
-        } => {
-            let because = if by_primary {
-                format!(", when its primary key {primary:X} expires")
-            } else {
-                String::new()
-            };
-            anyhow!(
-                "the repository's signing {} stops signing on {}{because}, within \
-                 {MIN_VALIDITY_DAYS} days, and the server takes a key only while it has longer: \
-                 extend it (`gpg --quick-set-expire`), then give the server the key again and \
-                 have every client import it again before then",
-                describe(key, signer),
-                date(at)
-            )
-        }
     }
 }
 
@@ -509,6 +544,14 @@ fn date(secs: u64) -> String {
             || secs.to_string(),
             |at| at.strftime("%Y-%m-%d").to_string(),
         )
+}
+
+/// How long after `now` a key that stops signing at `expires` is within
+/// [`EXPIRY_WARNING_DAYS`] of it: a second past the moment, so that
+/// [`InstanceKey::expiring`] says so then. `None` when it is already.
+fn warns_in(expires: Option<u64>, now: u64) -> Option<std::time::Duration> {
+    let from = expires?.checked_sub(EXPIRY_WARNING_DAYS * DAY_SECS)?;
+    (from >= now).then(|| std::time::Duration::from_secs(from - now + 1))
 }
 
 /// The current time, in seconds since the epoch, as key times are kept.
@@ -568,15 +611,10 @@ fn choose(key: &SignedSecretKey, now: u64) -> Result<Choice, Refusal> {
             });
         }
     };
-    let expires = sooner(own, primary);
-    if let Some(at) = expires.filter(|at| *at < now + MIN_VALIDITY_DAYS * DAY_SECS) {
-        return Err(Refusal::ExpiresSoon {
-            signer,
-            at,
-            by_primary: signer != Signer::Primary && primary == Some(at) && own != Some(at),
-        });
-    }
-    Ok(Choice { signer, expires })
+    Ok(Choice {
+        signer,
+        expires: sooner(own, primary),
+    })
 }
 
 /// When `subkey` stops signing by its own signatures (seconds since the
@@ -1187,10 +1225,10 @@ mod tests {
     }
 
     /// A key whose signing subkey stops signing within
-    /// [`MIN_VALIDITY_DAYS`] is refused, saying when; one with longer left
-    /// loads, and signs until then.
+    /// [`EXPIRY_WARNING_DAYS`] loads and says when; one with longer left
+    /// loads without a word. Both sign until then.
     #[test]
-    fn a_key_that_stops_signing_soon_is_refused() {
+    fn a_key_that_stops_signing_soon_loads_and_says_so() {
         with_gnupg(|tmp, gpg| {
             for (lifetime, days) in [("10d", 10), ("60d", 60)] {
                 let user = format!("Expiring {days} <ops@localhost>");
@@ -1205,25 +1243,57 @@ mod tests {
                 assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
                 let path = tmp.join(format!("expiring-{days}.gpg"));
                 std::fs::write(&path, gpg.export("--export-secret-keys", &primary, "")).unwrap();
-                let loaded = InstanceKey::load(&path, None);
-                if days < MIN_VALIDITY_DAYS {
-                    let error = format!("{:#}", loaded.unwrap_err());
-                    assert!(
-                        error.contains(&format!("within {MIN_VALIDITY_DAYS} days")),
-                        "{error}"
-                    );
-                    assert!(!error.contains("primary key"), "{error}");
+                let key = InstanceKey::load(&path, None).unwrap();
+                let expires = key.expires.unwrap();
+                assert!(
+                    (before + days * DAY_SECS..=now() + days * DAY_SECS).contains(&expires),
+                    "{expires}"
+                );
+                assert_eq!(key.signer, Signer::Subkey(0));
+                if days < EXPIRY_WARNING_DAYS {
+                    let expiring = key.expiring().expect("an expiry within the warning");
+                    assert_eq!(expiring.on, date(expires));
+                    assert!(expiring.signer.starts_with("subkey "), "{expiring}");
+                    assert_eq!(expiring.primary, None, "{expiring}");
                 } else {
-                    let key = loaded.unwrap();
-                    let expires = key.expires.unwrap();
-                    assert!(
-                        (before + days * DAY_SECS..=now() + days * DAY_SECS).contains(&expires),
-                        "{expires}"
-                    );
-                    assert_eq!(key.signer, Signer::Subkey(0));
+                    assert_eq!(key.expiring(), None);
                 }
             }
         });
+    }
+
+    /// The warning comes the moment a key is within [`EXPIRY_WARNING_DAYS`]
+    /// of its expiry, and not again for one that is already.
+    #[test]
+    fn the_warning_waits_for_the_expiry_to_be_close() {
+        let warning = EXPIRY_WARNING_DAYS * DAY_SECS;
+        let at = 1_000 * DAY_SECS;
+        assert_eq!(warns_in(None, at), None);
+        assert_eq!(
+            warns_in(Some(at + warning + 60), at),
+            Some(std::time::Duration::from_secs(61))
+        );
+        assert_eq!(
+            warns_in(Some(at + warning), at),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(warns_in(Some(at + warning - 1), at), None);
+        assert_eq!(warns_in(Some(at - 1), at), None);
+        assert_eq!(warns_in(Some(1), at), None);
+
+        let key = InstanceKey::generate(None).unwrap();
+        assert_eq!(key.warns_in(), None, "a key that never expires");
+        let expiring_in = |days: u64| InstanceKey {
+            expires: Some(now() + days * DAY_SECS),
+            ..InstanceKey::generate(None).unwrap()
+        };
+        let later = expiring_in(EXPIRY_WARNING_DAYS + 2);
+        assert_eq!(later.expiring(), None);
+        let wait = later.warns_in().unwrap().as_secs();
+        assert!((DAY_SECS..=2 * DAY_SECS + 1).contains(&wait), "{wait}");
+        let soon = expiring_in(EXPIRY_WARNING_DAYS - 1);
+        assert!(soon.expiring().is_some());
+        assert_eq!(soon.warns_in(), None);
     }
 
     /// A key whose primary key has expired is refused, though its signing
@@ -1319,8 +1389,8 @@ mod tests {
 
     /// A subkey that never expires under a primary key that does stops
     /// signing when the primary key expires -- as GnuPG says of what it
-    /// signed -- so that is when the key is taken to stop signing, and it is
-    /// refused when that is within [`MIN_VALIDITY_DAYS`].
+    /// signed -- so that is when the key is taken to stop signing, and what
+    /// the warning within [`EXPIRY_WARNING_DAYS`] names.
     #[test]
     fn a_primary_key_expiring_first_ends_its_subkeys_signing() {
         with_gnupg(|tmp, gpg| {
@@ -1344,16 +1414,21 @@ mod tests {
                 assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
                 let path = tmp.join(format!("short-lived-{days}.gpg"));
                 std::fs::write(&path, gpg.export("--export-secret-keys", &primary, "")).unwrap();
-                let loaded = InstanceKey::load(&path, None);
-                if days < MIN_VALIDITY_DAYS {
-                    let error = format!("{:#}", loaded.unwrap_err());
+                let key = InstanceKey::load(&path, None).unwrap();
+                if days < EXPIRY_WARNING_DAYS {
+                    let expiring = key.expiring().expect("an expiry within the warning");
+                    let warning = expiring.to_string();
                     assert!(
-                        error.contains(&format!("when its primary key {primary} expires")),
-                        "{error}"
+                        warning.contains(&format!("when its primary key {primary} expires")),
+                        "{warning}"
                     );
-                    continue;
+                    assert!(
+                        warning.contains(&format!("extend primary key {primary}")),
+                        "{warning}"
+                    );
+                } else {
+                    assert_eq!(key.expiring(), None);
                 }
-                let key = loaded.unwrap();
                 assert_eq!(key.signer, Signer::Subkey(0));
                 let expires = key.expires.unwrap();
                 assert!(
