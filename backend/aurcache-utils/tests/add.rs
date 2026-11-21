@@ -3,6 +3,7 @@ mod test_git;
 
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_common::build_state::BuildState;
+use aurcache_db::lists::JsonList;
 use aurcache_db::packages::SourceData;
 use aurcache_db::prelude::{Dependencies, Packages};
 use aurcache_db::{builds, dependencies, packages};
@@ -418,6 +419,34 @@ async fn scenario_a_no_aur_deps() {
 
     let dep_count = Dependencies::find().count(&env.db).await.unwrap();
     assert_eq!(dep_count, 0, "dependencies table should be empty");
+}
+
+/// A package is refused when another package already builds its name, and
+/// nothing is added.
+#[tokio::test]
+async fn adding_a_name_another_package_builds_is_refused() {
+    let env = setup_env().await;
+    mock_rpc_info(
+        &env.server,
+        "no-deps-pkg",
+        rpc_deps_json("no-deps-pkg", "no-deps-pkg", &[], &[], "1.0.0"),
+    )
+    .await;
+    create_aur_git_repo(env.aur_root.path(), "no-deps-pkg", "1.0.0", &[]);
+    aurcache_db::testing::package("other")
+        .with(|row| {
+            row.split_packages = Set(Some(JsonList::new(["other", "no-deps-pkg"])));
+        })
+        .insert(&env.db)
+        .await;
+
+    let err = add_pkg_via_rpc(&env, "no-deps-pkg").await.unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("'no-deps-pkg' is already built by package 'other'"),
+        "{err:#}"
+    );
+    assert_eq!(Packages::find().count(&env.db).await.unwrap(), 1);
 }
 
 #[tokio::test]

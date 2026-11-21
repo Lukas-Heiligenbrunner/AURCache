@@ -6,6 +6,7 @@ use crate::package::error::PackageError;
 use crate::package::metadata::refresh_source_metadata;
 use crate::package::source_facts::{SourceFacts, pkg_deps, provides_json, split_packages_json};
 use crate::patch::SourcePatch;
+use crate::publish::expected_pkgnames;
 use crate::services::Services;
 use crate::snapshot::SnapshotStore;
 use anyhow::{Context, anyhow, bail};
@@ -542,6 +543,7 @@ async fn persist_plan(
             ..Default::default()
         };
         let inserted = model.insert(&txn).await?;
+        crate::publish::ensure_names_free(&txn, inserted.id, &expected_pkgnames(&inserted)).await?;
         ids.insert(pkg.pkgbase.clone(), inserted.id);
         added_order.push(pkg.pkgbase);
     }

@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 
 use crate::package::source_facts::{SourceFacts, pkg_deps, record_source_names};
+use crate::publish::names_rows;
 use crate::repository::{Repository, read_if_there};
 use crate::services::Services;
 use crate::settings::Change;
@@ -698,6 +699,23 @@ pub async fn write_rows(
     // would make an operator fix one, re-run, and meet the next; and a refusal
     // that has already applied half the dump is the state this whole design
     // exists to avoid. Under `--clear` nothing is left to conflict with.
+    if !options.clear {
+        // A concurrent add can still take one of these names; publishing then refuses it.
+        let rows = names_rows(db).await?;
+        let inserted: Vec<String> = dump
+            .packages
+            .keys()
+            .filter(|pkgbase| rows.iter().all(|row| &row.name != *pkgbase))
+            .cloned()
+            .collect();
+        let refusals: Vec<String> = rows
+            .iter()
+            .flat_map(|row| row.refusals(&inserted))
+            .collect();
+        if !refusals.is_empty() {
+            anyhow::bail!("{}", refusals.join("; "));
+        }
+    }
     if !options.clear && options.on_existing == ExistingPackagePolicy::MergePatches {
         let mut conflicts = Vec::new();
         for pkgbase in dump.packages.keys() {

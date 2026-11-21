@@ -1,6 +1,7 @@
 //! What a package's source says about it: its dependencies, and the names it
 //! is built and provided under.
 
+use crate::publish::names_of;
 use crate::snapshot::SnapshotStore;
 use alpm_srcinfo::SourceInfoV1;
 use anyhow::Context;
@@ -8,7 +9,7 @@ use aurcache_db::lists::{JsonList, Platforms};
 use aurcache_db::packages;
 use aurcache_db::packages::SourceData;
 use aurcache_deps::PkgDeps;
-use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection};
 
 /// A package's parsed `.SRCINFO`, and the dependencies it declares.
 pub(crate) struct SourceFacts {
@@ -36,26 +37,32 @@ pub(crate) async fn pkg_deps(
 
 /// Record on package `pkg_id`'s row the names `deps` says it builds and
 /// provides: a build is published only under those, and a dependency finds the
-/// package by them.
+/// package by them. Refused, recording nothing, when another package already
+/// builds one of those names.
 ///
 /// `pkgbase` is the row's name, not the `.SRCINFO`'s: the split names are
 /// recorded as the ones beyond it (see
 /// [`expected_pkgnames`](crate::publish::expected_pkgnames)), and a source can
 /// rename its pkgbase under a row that keeps its own.
-pub(crate) async fn record_source_names<C: ConnectionTrait>(
-    db: &C,
+pub(crate) async fn record_source_names(
+    db: &DatabaseConnection,
     pkg_id: i32,
     pkgbase: &str,
     deps: &PkgDeps,
 ) -> anyhow::Result<()> {
+    let split_packages = split_packages_json(pkgbase, &deps.pkgnames);
+    let txn = aurcache_db::helpers::txn::begin_write(db).await?;
     packages::ActiveModel {
         id: Set(pkg_id),
-        split_packages: Set(split_packages_json(pkgbase, &deps.pkgnames)),
+        split_packages: Set(split_packages.clone()),
         provides: Set(provides_json(&deps.provides)),
         ..Default::default()
     }
-    .update(db)
+    .update(&txn)
     .await?;
+    let names = names_of(pkgbase, split_packages.as_ref());
+    crate::publish::ensure_names_free(&txn, pkg_id, &names).await?;
+    txn.commit().await?;
     Ok(())
 }
 

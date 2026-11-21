@@ -1381,6 +1381,41 @@ async fn two_patches_for_one_package_refuse_the_import() {
     assert_eq!(names, ["shared"], "a refused import wrote something anyway");
 }
 
+/// A package is refused when another package already builds its name, and the
+/// import writes nothing.
+#[tokio::test]
+async fn a_name_another_package_builds_refuses_the_import() {
+    let source = aurcache_db::testing::memory_db().await;
+    package(&source, "foo", true, None).await;
+    let loaded = load_dump(&dump_bytes(&source).await).unwrap();
+
+    let target = aurcache_db::testing::memory_db().await;
+    let bar = package(&target, "bar", true, None).await;
+    let mut row: packages::ActiveModel = Packages::find_by_id(bar)
+        .one(&target)
+        .await
+        .unwrap()
+        .unwrap()
+        .into();
+    row.split_packages = Set(Some(r#"["foo"]"#.parse().unwrap()));
+    row.update(&target).await.unwrap();
+
+    let error = aurcache_utils::restore::write_rows(
+        &target,
+        &test_repo(),
+        &loaded,
+        &RestoreOptions::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("'foo' is already built by package 'bar'"),
+        "{error}"
+    );
+    assert_eq!(Packages::find().all(&target).await.unwrap().len(), 1);
+}
+
 /// A dry run reports the conflict rather than discovering it on the real run,
 /// which is the whole reason to offer one.
 #[tokio::test]

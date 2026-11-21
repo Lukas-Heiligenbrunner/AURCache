@@ -452,9 +452,9 @@ from the first draft's withholding:
   root (so moving a staged file in is a rename), maintained by a second
   `Repository` instance with the same lock, commit and recovery. It records
   its files in `held_artifacts` (build, filename, size, sha256), never in
-  `files`, since an orphaned `files` row reads as "already produced by
-  another package". Release commits the build into the repository, then
-  removes it from `quarantine`; discard only removes it.
+  `files`, since publishing takes a `files` row for its package's `repo.db`
+  entry. Release commits the build into the repository, then removes it from
+  `quarantine`; discard only removes it.
 - **A regular repository, on the same port, opt-in.** The mirror already
   serves any path under the root, so `quarantine/` is a second pacman repository
   with no new serving code, and no credentials: like Arch's testing

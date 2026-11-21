@@ -257,6 +257,25 @@ pub async fn resume_publishing(
     }
 }
 
+/// Warn about every package name that more than one package is expected to
+/// build: their sources' refreshes and their builds of it fail until one of
+/// them no longer builds it, or is removed.
+pub async fn warn_about_shared_names(db: &DatabaseConnection) {
+    match publish::shared_names(db).await {
+        Ok(shared) => {
+            for name in shared {
+                warn!(
+                    "'{}' is built by more than one package ({}); their updates and \
+                     builds fail until one of them no longer builds it, or is removed",
+                    name.name,
+                    name.packages.join(", ")
+                );
+            }
+        }
+        Err(e) => warn!("could not look for package names built twice: {e}"),
+    }
+}
+
 /// See [`operations::close_orphaned`]; this only reports what it did.
 pub async fn close_orphaned_operations(db: &DatabaseConnection) {
     match operations::close_orphaned(db).await {
