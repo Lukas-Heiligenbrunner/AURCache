@@ -17,7 +17,7 @@ use aurcache_worker_core::runner::Runner;
 use aurcache_worker_core::shutdown::{self, StopSignals, WoundDown};
 use aurcache_worker_kube::cluster::Cluster;
 use aurcache_worker_kube::config::{self, AgentImage, Config};
-use aurcache_worker_kube::executor::KubeExecutor;
+use aurcache_worker_kube::executor::{self, KubeExecutor};
 use aurcache_worker_kube::kube_cluster::KubeCluster;
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,13 +105,10 @@ async fn start() -> Result<Started> {
     Ok(Started { runner, cluster })
 }
 
-/// Delete every pod of this worker's that is still there as it stops: one
-/// whose build did not get as far as deleting it.
+/// Delete this worker's build pods still there as it stops: one whose build
+/// did not get as far as deleting it.
 async fn leave<C: Cluster>(cluster: &C) -> Result<()> {
-    let left = cluster
-        .sweep()
-        .await
-        .context("deleting the pods left as this worker stops")?;
+    let left = executor::leave(cluster).await?;
     if left > 0 {
         tracing::info!("Deleted {left} pod(s) still there as this worker stopped");
     }

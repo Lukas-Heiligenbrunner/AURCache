@@ -71,6 +71,13 @@ pub fn selector(dispatcher: &str) -> String {
     format!("{LABEL_DISPATCHER}={dispatcher}")
 }
 
+/// `app.kubernetes.io/managed-by=aurcache-worker-kube`: every pod a
+/// dispatcher made, whichever dispatcher that was.
+#[must_use]
+pub fn managed_selector() -> String {
+    format!("{LABEL_MANAGED_BY}={MANAGED_BY}")
+}
+
 /// Labels every pod of this dispatcher carries, a build's or not.
 #[must_use]
 pub fn labels(dispatcher: &str) -> BTreeMap<String, String> {

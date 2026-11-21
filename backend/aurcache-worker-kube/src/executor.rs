@@ -8,7 +8,7 @@
 //! relayed to the server. Whatever happens on the way, the pod is deleted
 //! before the report is returned.
 
-use crate::cluster::{Admission, Cluster, CreateError, PROMPT};
+use crate::cluster::{Admission, Cluster, CreateError, PROMPT, Sweep};
 use crate::config::Config;
 use crate::outcome::{self, BuildEnd, Observed};
 use crate::pod::{self, BUILD, PodInputs};
@@ -241,21 +241,22 @@ impl<C: Cluster> KubeExecutor<C> {
         })
     }
 
-    /// Delete the pods a previous process of this dispatcher left: the server
-    /// gives up every build that process held as soon as this one says it
-    /// holds none, so nothing will ever collect them otherwise. How many
-    /// there were.
+    /// Delete every build pod in the builds' namespace, whichever dispatcher
+    /// made it: the ones a previous process of this dispatcher left, which the
+    /// server gives up as soon as this one says it holds none, and the ones
+    /// of a dispatcher whose identity is gone, which nobody else will ever
+    /// collect. A builds namespace is one dispatcher's. How many there were.
     pub async fn sweep(&self) -> Result<usize> {
         let swept = self
             .cluster
-            .sweep()
+            .sweep(Sweep::Namespace)
             .await
             .context("deleting the build pods a previous run left")?;
         if swept > 0 {
             tracing::warn!(
-                "Deleted {swept} build pod(s) left by a previous run of this worker; the \
-                 server ends their builds, and queues a new build of each package while it \
-                 has attempts left"
+                "Deleted {swept} build pod(s) left by a previous run of this worker, or of a \
+                 worker with another identity, in its builds namespace; the server ends their \
+                 builds, and queues a new build of each package while it has attempts left"
             );
         }
         Ok(swept)
@@ -1051,6 +1052,16 @@ fn build_runs(pod: &Pod) -> bool {
         })
 }
 
+/// Delete this dispatcher's build pods still there as it stops: those whose
+/// build did not get as far as deleting them. Another dispatcher's are left
+/// alone, though they share the namespace. How many there were.
+pub async fn leave<C: Cluster>(cluster: &C) -> Result<usize> {
+    cluster
+        .sweep(Sweep::Own)
+        .await
+        .context("deleting the pods left as this worker stops")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,7 +1099,7 @@ mod tests {
             async fn delete(&self, _: &str, _: Duration) -> Result<()> {
                 unreachable!()
             }
-            async fn sweep(&self) -> Result<usize> {
+            async fn sweep(&self, _: Sweep) -> Result<usize> {
                 unreachable!()
             }
             fn pod(&self, _: &str) -> Option<Arc<Pod>> {
