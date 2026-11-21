@@ -180,6 +180,14 @@ impl Ca {
         Ok(Some(ca))
     }
 
+    /// Whether the CA in `dir` is the one with certificate `cert_pem`: what a
+    /// restore of a dump taken from this server finds, with nothing to
+    /// replace. A certificate that cannot be read is not that one.
+    #[must_use]
+    pub fn holds(dir: &Path, cert_pem: &str) -> bool {
+        std::fs::read_to_string(cert_path(dir)).is_ok_and(|held| held.trim() == cert_pem.trim())
+    }
+
     /// Get a restored certificate and key ready to replace the CA in `dir`:
     /// checked to be a pair, and every file of it written beside the one it
     /// replaces, which stays as it is until [`StagedCa::install`]. Refused,

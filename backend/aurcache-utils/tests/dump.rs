@@ -2181,6 +2181,74 @@ mod signing_key {
         assert!(refused.is_err());
     }
 
+    /// Restoring the same dump twice replaces nothing the second time: the
+    /// CA is the one in place already, and the key file holds the very bytes
+    /// written again, so neither is reported replaced, and no copy of the
+    /// key is kept. A key locked anew with this server's passphrase is other
+    /// bytes, so what the file held is kept beside it all the same: the same
+    /// key can hold more than the copy written over it.
+    #[tokio::test]
+    async fn the_same_dump_restored_twice_replaces_nothing_the_second_time() {
+        let SourceDump {
+            bytes,
+            ca: _source_ca,
+        } = dump_with_key(SourceKey::Unlocked).await;
+        let target = aurcache_db::testing::memory_db().await;
+        let ca = tempfile::tempdir().unwrap();
+        aurcache_ca::Ca::load_or_create(ca.path()).unwrap();
+        let repo = Arc::new(Repository::new(tempfile::tempdir().unwrap().keep()));
+        let first = restore_with(
+            &target,
+            own(ca.path()),
+            Arc::clone(&repo),
+            &bytes,
+            copy_secrets(),
+        )
+        .await;
+        assert!(failures(&first).is_empty(), "{first:?}");
+        assert_eq!(
+            secret_line(&first, Secret::Ca).change,
+            SecretChange::Replaced
+        );
+        let key_file = std::fs::read(ca.path().join(KEY_FILE)).unwrap();
+        let files = listing(ca.path());
+
+        let second = restore_with(
+            &target,
+            own(ca.path()),
+            Arc::clone(&repo),
+            &bytes,
+            copy_secrets(),
+        )
+        .await;
+        assert!(failures(&second).is_empty(), "{second:?}");
+        assert_eq!(secret_line(&second, Secret::Ca).change, SecretChange::Kept);
+        assert_eq!(
+            secret_line(&second, Secret::SigningKey).change,
+            SecretChange::Kept
+        );
+        assert_eq!(std::fs::read(ca.path().join(KEY_FILE)).unwrap(), key_file);
+        assert_eq!(listing(ca.path()), files, "nothing more is kept");
+
+        let locked = restore_with(
+            &target,
+            with_passphrase(ca.path(), "correct horse"),
+            Arc::clone(&repo),
+            &bytes,
+            copy_secrets(),
+        )
+        .await;
+        assert!(failures(&locked).is_empty(), "{locked:?}");
+        assert_eq!(
+            secret_line(&locked, Secret::SigningKey).change,
+            SecretChange::Replaced
+        );
+        let fingerprint = aurcache_signing::inspect(&key_file).unwrap().fingerprint;
+        let kept = ca.path().join(format!("{KEY_FILE}.replaced-{fingerprint}"));
+        assert_eq!(std::fs::read(&kept).unwrap(), key_file);
+        assert_private(&kept);
+    }
+
     /// A key the operator supplies still signs: the restored one goes to the
     /// server's own location, never to the supplied path, and the restore
     /// says the two differ.

@@ -238,9 +238,10 @@ pub struct KeyFacts {
 /// is not asked -- a key in a dump may have expired since.
 pub fn inspect(bytes: &[u8]) -> anyhow::Result<KeyFacts> {
     let key = parse_secret(bytes)?;
-    let locked = match signing_secret(&key) {
-        Ok(secret) => secret.is_encrypted(),
-        Err(_) => secrets(&key).any(SecretParams::is_encrypted),
+    let signer = choose(&key, now()).ok().map(|choice| choice.signer);
+    let locked = match signer {
+        Some(signer) => signing_params(&key, signer).is_encrypted(),
+        None => secrets(&key).any(SecretParams::is_encrypted),
     };
     Ok(KeyFacts {
         fingerprint: format!("{:X}", key.primary_key.fingerprint()),
@@ -320,10 +321,15 @@ pub fn locked(bytes: &[u8], passphrase: &str) -> anyhow::Result<String> {
 /// and is never the one that signs.
 fn signing_secret(key: &SignedSecretKey) -> anyhow::Result<&SecretParams> {
     let choice = choose(key, now()).map_err(|why| refusal(key, why))?;
-    Ok(match choice.signer {
+    Ok(signing_params(key, choice.signer))
+}
+
+/// The secret of `key`'s component key `signer`.
+fn signing_params(key: &SignedSecretKey, signer: Signer) -> &SecretParams {
+    match signer {
         Signer::Primary => key.primary_key.secret_params(),
         Signer::Subkey(index) => key.secret_subkeys[index].key.secret_params(),
-    })
+    }
 }
 
 /// The key file at `path` as a dump carries it, or `None` when there is

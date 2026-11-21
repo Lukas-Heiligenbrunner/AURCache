@@ -553,13 +553,23 @@ async fn send_all(progress: &Sender<RestoreEntry>, entries: Vec<RestoreEntry>) {
 /// ([`apply_secrets`]). Dropped instead, it removes what it wrote, and
 /// nothing in place was touched.
 pub struct SecretsPlan {
-    /// The dump's CA, checked as a pair and staged, when its secrets are
-    /// taken.
-    ca: Option<StagedCa>,
+    /// What becomes of the worker CA.
+    ca: CaPlan,
     /// What becomes of the repository's signing key.
     signing_key: KeyPlan,
     /// Where the server keeps its key, which the plan was made for.
     location: KeyLocation,
+}
+
+/// What a restore does to the worker CA.
+enum CaPlan {
+    /// Leave it as it is: the dump's secrets are not taken.
+    Keep,
+    /// The dump's is the one in place already -- the same certificate -- so
+    /// there is nothing to write: what restoring the same dump again finds.
+    Same,
+    /// The dump's, checked as a pair and staged to replace the one in place.
+    Replace(StagedCa),
 }
 
 /// What a restore does to the repository's signing key. Whatever the
@@ -620,7 +630,11 @@ impl Previous {
     /// What the server's own key file `own` holds, for a plan that writes
     /// `written` there -- `None` for one that removes it, or writes a new
     /// key -- with what it holds staged to be kept: named for its key's
-    /// fingerprint, or for its contents when it does not read as a key.
+    /// fingerprint, or for its contents when it does not read as a key. Only
+    /// the very bytes being written are not kept again: the same key may
+    /// hold more than the one written over it -- another subkey, a
+    /// certification -- and a copy already kept with the same bytes is not
+    /// written twice ([`aurcache_common::fs::stage_replaced`]).
     fn of(own: &Path, written: Option<&[u8]>) -> anyhow::Result<Self> {
         let held = match std::fs::read(own) {
             Ok(held) => held,
@@ -757,17 +771,18 @@ fn plan(
     let own_is_supplied = matches!(&location, KeyLocation::Supplied(path) if same_file(path, &own));
     // Whether a key in the server's own file is the one it signs with.
     let own_signs = signs && matches!(location, KeyLocation::Own(_));
-    let ca = secrets
-        .as_ref()
-        .map(|secrets| {
+    let ca = match &secrets {
+        None => CaPlan::Keep,
+        Some(secrets) if aurcache_ca::Ca::holds(&ca_dir, &secrets.ca_cert_pem) => CaPlan::Same,
+        Some(secrets) => CaPlan::Replace(
             aurcache_ca::Ca::stage(
                 &ca_dir,
                 secrets.ca_cert_pem.clone(),
                 secrets.ca_key_pem.clone(),
             )
-            .context("the dump's CA cannot be put in place")
-        })
-        .transpose()?;
+            .context("the dump's CA cannot be put in place")?,
+        ),
+    };
     // Read only for a key that is written: a restore that writes none goes
     // through whatever has become of the file.
     let passphrase = || {
@@ -945,6 +960,8 @@ impl SecretsApplied {
 pub enum CaOutcome {
     /// Nothing: the dump's secrets were not taken.
     Kept,
+    /// Nothing: the dump's CA is the one in place already.
+    Same,
     /// The dump's CA is in place; the previous one is not kept. `unsynced`
     /// says why its directory could not be synced after, when it could not:
     /// a crash soon after may bring the previous one back.
@@ -1009,7 +1026,7 @@ pub struct KeyFile {
 pub enum PreviousKey {
     /// Nothing: there was no file.
     Absent,
-    /// What was written in its place, byte for byte.
+    /// The very bytes written in its place: nothing is kept.
     Same,
     /// Something else, kept beside it at `kept`, owner-only: a key with
     /// this `fingerprint`, or `None` for a file that does not read as one.
@@ -1104,8 +1121,9 @@ impl SecretsPlan {
     /// dry run says becomes of the secrets.
     pub async fn expected(&self, repo: &Repository) -> SecretsApplied {
         let ca = match self.ca {
-            None => CaOutcome::Kept,
-            Some(_) => CaOutcome::Replaced { unsynced: None },
+            CaPlan::Keep => CaOutcome::Kept,
+            CaPlan::Same => CaOutcome::Same,
+            CaPlan::Replace(_) => CaOutcome::Replaced { unsynced: None },
         };
         let file = |path: &Path, previous: &Previous| KeyFile {
             path: path.to_path_buf(),
@@ -1173,8 +1191,9 @@ pub async fn apply_secrets(plan: SecretsPlan, repo: &Repository) -> SecretsAppli
         location,
     } = plan;
     let ca = match ca {
-        None => CaOutcome::Kept,
-        Some(staged) => match blocking(move || staged.install()).await {
+        CaPlan::Keep => CaOutcome::Kept,
+        CaPlan::Same => CaOutcome::Same,
+        CaPlan::Replace(staged) => match blocking(move || staged.install()).await {
             Ok(installed) => CaOutcome::Replaced {
                 unsynced: unsynced(installed),
             },
@@ -1367,7 +1386,7 @@ async fn blocking<T: Send + 'static>(
 /// one signing key or another -- and what could not be done.
 fn record_secrets(activity: &ActivityLog, applied: &SecretsApplied) {
     match &applied.ca {
-        CaOutcome::Kept => {}
+        CaOutcome::Kept | CaOutcome::Same => {}
         CaOutcome::Replaced { .. } => activity.emit(Event::RestoreCaReplaced {}),
         CaOutcome::Failed { error } => {
             tracing::error!("a restore could not put the dump's CA in place: {error}");
@@ -1456,6 +1475,12 @@ fn secret_entries(applied: &SecretsApplied) -> Vec<RestoreEntry> {
             Secret::Ca,
             SecretChange::Kept,
             "left as it is: workers keep their certificates".to_string(),
+        ),
+        CaOutcome::Same => line(
+            Secret::Ca,
+            SecretChange::Kept,
+            "the dump's, which is this server's already: workers keep their certificates"
+                .to_string(),
         ),
         CaOutcome::Replaced { unsynced } => line(
             Secret::Ca,
