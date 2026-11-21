@@ -503,6 +503,42 @@ events! {
     /// hold is now worthless, and each has to enroll again.
     RestoreCaReplaced => ("restore.ca_replaced", "Backups", "Worker CA replaced") {},
 
+    /// A restore put the dump's repository signing key in the server's own
+    /// key location, in place of the key with fingerprint `replaced` when the
+    /// server was signing: clients have to trust the restored key, and what
+    /// the replaced one signed is signed again. What the key file held
+    /// before is kept beside it, at `kept`, when it held something else.
+    RestoreSigningKeyInstalled => ("restore.signing_key_installed", "Backups", "Signing key restored") {
+        restored: String,
+        replaced: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<String>,
+    },
+
+    /// A restore did not change what the server signs with: the key
+    /// `AURCACHE_SIGNING_KEY_FILE` supplies, `supplied` (`None` when its
+    /// file cannot be read), is the one it signs with if `signs`, and would
+    /// sign with otherwise -- not the dump's.
+    RestoreSigningKeyUnused => ("restore.signing_key_unused", "Backups", "Restored signing key unused") {
+        restored: String,
+        supplied: Option<String>,
+        signs: bool,
+    },
+
+    /// A restore with `--clear` and no key in the dump left the server as a
+    /// fresh install: its own key file -- with the key `removed`, when it
+    /// could be read -- is gone, and a server that signs with its own key
+    /// signs with a new one, `generated`; one that signs with a key
+    /// `AURCACHE_SIGNING_KEY_FILE` supplies goes on with that, `supplied`.
+    /// What the key file held is kept beside it, at `kept`.
+    RestoreSigningKeyReset => ("restore.signing_key_reset", "Backups", "Signing key reset") {
+        removed: Option<String>,
+        generated: Option<String>,
+        supplied: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<String>,
+    },
+
     // -----------------------------------------------------------------------
     // Mirrors and the repository
     // -----------------------------------------------------------------------
@@ -671,6 +707,14 @@ fn entity(entity: &(impl Clone + Into<EntityRef>)) -> Segment {
     Segment::Entity(entity.clone().into())
 }
 
+/// Where a key a restore replaced or removed is kept, said at the end of the
+/// sentence; nothing when nothing was kept.
+fn kept_note(kept: Option<&str>) -> String {
+    kept.map_or_else(String::new, |kept| {
+        format!("; the key the file held is kept as {kept}")
+    })
+}
+
 /// `a`, `a and b`, `a, b and c`: a list reads as a sentence, and each item
 /// still links.
 fn list<T: Clone + Into<EntityRef>>(items: &[T]) -> Vec<Segment> {
@@ -790,6 +834,9 @@ impl Event {
             | Self::SignInRefused { .. }
             | Self::RestorePackageFailed { .. }
             | Self::RestoreCaReplaced {}
+            | Self::RestoreSigningKeyInstalled { .. }
+            | Self::RestoreSigningKeyUnused { .. }
+            | Self::RestoreSigningKeyReset { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1222,6 +1269,71 @@ impl Event {
             Self::RestoreCaReplaced {} => vec![text(
                 "a restore replaced the worker CA; every worker has to enroll again",
             )],
+            Self::RestoreSigningKeyInstalled {
+                restored,
+                replaced: Some(replaced),
+                kept,
+            } => vec![text(format!(
+                "a restore replaced the repository signing key {replaced} with {restored}; \
+                 clients have to trust {restored}, and what {replaced} signed is signed again{}",
+                kept_note(kept.as_deref())
+            ))],
+            Self::RestoreSigningKeyInstalled {
+                restored,
+                replaced: None,
+                kept,
+            } => vec![text(format!(
+                "a restore put the repository signing key {restored} in place; it signs once \
+                 AURCACHE_SIGN is on{}",
+                kept_note(kept.as_deref())
+            ))],
+            Self::RestoreSigningKeyUnused {
+                restored,
+                supplied,
+                signs,
+            } => {
+                let supplied = supplied.as_deref().unwrap_or("an unreadable key");
+                vec![text(if *signs {
+                    format!(
+                        "a restore did not change the repository signing key: the server signs \
+                         with {supplied}, which AURCACHE_SIGNING_KEY_FILE supplies, not with the \
+                         dump's {restored}"
+                    )
+                } else {
+                    format!(
+                        "a restore did not make the dump's signing key {restored} the one the \
+                         server would sign with: that is {supplied}, which \
+                         AURCACHE_SIGNING_KEY_FILE supplies; it does not sign now"
+                    )
+                })]
+            }
+            Self::RestoreSigningKeyReset {
+                removed,
+                generated,
+                supplied,
+                kept,
+            } => {
+                let removed = removed
+                    .as_ref()
+                    .map_or_else(String::new, |key| format!(" {key}"));
+                let kept = kept_note(kept.as_deref());
+                vec![text(match (generated, supplied) {
+                    (Some(generated), _) => format!(
+                        "a restore with --clear replaced the repository signing key{removed} with \
+                         a new one, {generated}, as a fresh install has; clients have to trust \
+                         it{kept}"
+                    ),
+                    (None, Some(supplied)) => format!(
+                        "a restore with --clear removed the server's own signing key{removed}, as \
+                         a fresh install has none; the server signs with {supplied}, which \
+                         AURCACHE_SIGNING_KEY_FILE supplies{kept}"
+                    ),
+                    (None, None) => format!(
+                        "a restore with --clear removed the server's own signing key{removed}, as \
+                         a fresh install has none; the server does not sign now{kept}"
+                    ),
+                })]
+            }
             Self::MirrorRankFailed { error } => {
                 vec![text(format!("could not rank the mirrors: {error}"))]
             }
@@ -1509,6 +1621,25 @@ mod tests {
                 error: error(),
             },
             Event::RestoreCaReplaced {},
+            Event::RestoreSigningKeyInstalled {
+                restored: "0B05DA40BC50A034F03B4975B4624944991A5056".to_string(),
+                replaced: Some("F9D34ACE12A456EA1702C4D637A35C207FF0D2A6".to_string()),
+                kept: Some(
+                    "data/ca/signing-key.asc.replaced-F9D34ACE12A456EA1702C4D637A35C207FF0D2A6"
+                        .to_string(),
+                ),
+            },
+            Event::RestoreSigningKeyUnused {
+                restored: "0B05DA40BC50A034F03B4975B4624944991A5056".to_string(),
+                supplied: Some("F9D34ACE12A456EA1702C4D637A35C207FF0D2A6".to_string()),
+                signs: true,
+            },
+            Event::RestoreSigningKeyReset {
+                removed: Some("0B05DA40BC50A034F03B4975B4624944991A5056".to_string()),
+                generated: Some("F9D34ACE12A456EA1702C4D637A35C207FF0D2A6".to_string()),
+                supplied: None,
+                kept: None,
+            },
             Event::WorkersUntrusted {
                 workers: vec!["builder-01".to_string()],
             },

@@ -102,9 +102,11 @@ pub(crate) enum ApiCommand {
         /// directory.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Also export the CA private key, worker certificates and API token
-        /// hashes. The file becomes a credential: anyone holding it can mint a
-        /// worker this server accepts. Written owner-readable only.
+        /// Also export the CA private key, worker certificates, API token
+        /// hashes and the repository signing key. The file becomes a
+        /// credential: anyone holding it can mint a worker this server
+        /// accepts, and -- unless the signing key is locked with a passphrase
+        /// -- sign packages clients install. Written owner-readable only.
         #[arg(long)]
         include_secrets: bool,
     },
@@ -135,11 +137,15 @@ pub(crate) struct RestoreArgs {
     #[arg(long, value_enum, default_value_t = OnExisting::Skip)]
     pub(crate) on_existing: OnExisting,
     /// Replace what is here rather than adding to it. Destructive: every
-    /// package, setting and worker this instance has is removed first.
+    /// package, setting and worker this instance has is removed first, and
+    /// the repository's signing key is left as a fresh install has it -- the
+    /// dump's, or none (a new one, on a server that signs), which every client
+    /// then has to trust.
     #[arg(long)]
     pub(crate) clear: bool,
-    /// Take the dump's CA, worker certificates and token hashes. Replacing
-    /// the CA invalidates every certificate this server's workers hold.
+    /// Take the dump's CA, worker certificates, token hashes and signing key.
+    /// Replacing the CA invalidates every certificate this server's workers
+    /// hold; replacing the signing key, every client's trust in this server.
     #[arg(long, value_enum, default_value_t = Secrets::Ignore)]
     pub(crate) secrets: Secrets,
 }

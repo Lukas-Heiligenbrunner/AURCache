@@ -7,7 +7,8 @@
 use crate::screens::settings::Section;
 use crate::widgets::Modal;
 use aurcache_client::{
-    ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretsPolicy,
+    ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretChange,
+    SecretsPolicy,
 };
 use dioxus::html::{FileData, HasFileData};
 use dioxus::prelude::*;
@@ -83,9 +84,10 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                     div {
                         div { class: "text-sm", "Include secrets" }
                         div { class: "text-xs opacity-60",
-                            "The CA private key, the certificates your workers hold, and \
-                             API token hashes. Restoring these makes a move invisible to \
-                             your workers: they reconnect instead of re-enrolling."
+                            "The CA private key, the certificates your workers hold, API \
+                             token hashes and the repository signing key. Restoring these \
+                             makes a move invisible to your workers and to pacman: they \
+                             reconnect instead of re-enrolling, and keep trusting the key."
                         }
                     }
                 }
@@ -98,8 +100,10 @@ fn DumpDialog(open: Signal<bool>) -> Element {
                             div { class: "font-semibold", "This file is a credential." }
                             div { class: "text-xs",
                                 "Anyone holding it can act as a build worker for this \
-                                 server, for as long as this CA lives. Keep it as you \
-                                 would keep a private key."
+                                 server, for as long as this CA lives, and -- unless the \
+                                 signing key is locked with a passphrase -- sign packages \
+                                 its clients install. Keep it as you would keep the \
+                                 signing key."
                             }
                         }
                     }
@@ -368,7 +372,10 @@ fn RestoreOptionsForm(
                     div { class: "text-sm", "Replace everything" }
                     div { class: "text-xs opacity-60",
                         "Remove every package, setting and worker here first, so this \
-                         instance ends up as the dump describes and nothing else."
+                         instance ends up as the dump describes and nothing else. The \
+                         repository's signing key ends up as a fresh install has it: the \
+                         dump's, or a new one, which every client then has to trust. The \
+                         key it replaces is kept beside it, named for its fingerprint."
                     }
                 }
             }
@@ -386,7 +393,10 @@ fn RestoreOptionsForm(
                     div { class: "text-xs opacity-60",
                         "Replaces this server's CA with the dump's. Every certificate your \
                          current workers hold was signed by the old one and stops working; \
-                         they re-enrol. Ignored if the dump carries no secrets."
+                         they re-enrol. The dump's signing key replaces this server's own, \
+                         which is kept beside it, and clients trusting the old one have to \
+                         trust it instead. Ignored \
+                         if the dump carries no secrets."
                     }
                 }
             }
@@ -409,16 +419,16 @@ fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
                     // Indexed as well as named: nothing stops two entries
                     // sharing a package and an outcome, and duplicate keys
                     // make the framework reuse the wrong row.
-                    li { key: "{index}-{entry.pkgbase}-{entry.outcome.label()}",
+                    li { key: "{index}-{entry.subject()}-{entry.outcome.label()}",
                         div { class: "flex flex-col items-start gap-0.5",
                             div { class: "flex items-baseline gap-2",
                                 span { class: "badge badge-xs {outcome_class(&entry.outcome)}",
                                     {entry.outcome.label()}
                                 }
-                                span { class: "font-mono text-sm break-all", "{entry.pkgbase}" }
+                                span { class: subject_class(&entry.outcome), "{entry.subject()}" }
                             }
-                            if let RestoreOutcome::Failed { error } = &entry.outcome {
-                                span { class: "text-xs opacity-70 text-left", "{error}" }
+                            if let Some(detail) = entry.detail() {
+                                span { class: "text-xs opacity-70 text-left", "{detail}" }
                             }
                         }
                     }
@@ -434,5 +444,22 @@ fn outcome_class(outcome: &RestoreOutcome) -> &'static str {
         RestoreOutcome::Overwritten => "badge-warning",
         RestoreOutcome::Skipped => "badge-ghost",
         RestoreOutcome::Failed { .. } => "badge-error",
+        RestoreOutcome::Secret { change, .. } => match change {
+            SecretChange::Kept => "badge-ghost",
+            SecretChange::Restored => "badge-success",
+            // Each changes what workers or clients have to trust.
+            SecretChange::Replaced | SecretChange::Generated | SecretChange::Removed => {
+                "badge-warning"
+            }
+        },
+    }
+}
+
+/// A package is named in monospace, as it is spelled; a secret is a thing
+/// the report describes, in words.
+fn subject_class(outcome: &RestoreOutcome) -> &'static str {
+    match outcome {
+        RestoreOutcome::Secret { .. } => "text-sm font-semibold",
+        _ => "font-mono text-sm break-all",
     }
 }

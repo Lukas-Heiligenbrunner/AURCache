@@ -382,7 +382,11 @@ async fn settle(db: &DatabaseConnection, build: &builds::Model) -> anyhow::Resul
     )
     .await
     .map(|_| ())
-    .map_err(|error| anyhow::Error::new(crate::repository::FinalizationPending(error.into())))
+    .map_err(|error| {
+        anyhow::Error::new(crate::repository::FinalizationPending::committed(
+            error.into(),
+        ))
+    })
 }
 
 /// The staged files that are to be published, by filename.

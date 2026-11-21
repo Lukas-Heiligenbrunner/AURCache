@@ -67,11 +67,12 @@ pub(crate) async fn restore_command(
     restore_result(run.failed)
 }
 
-/// One package of a restore, or of the preview of one.
+/// One line of a restore, or of the preview of one: a package, one of the
+/// server's secrets, or the dump as a whole.
 pub(crate) fn print_restore_entry(entry: &RestoreEntry) {
-    println!("  {:<10} {}", entry.outcome.label(), entry.pkgbase);
-    if let RestoreOutcome::Failed { error } = &entry.outcome {
-        println!("             {error}");
+    println!("  {:<10} {}", entry.outcome.label(), entry.subject());
+    if let Some(detail) = entry.detail() {
+        println!("             {detail}");
     }
 }
 
@@ -126,8 +127,10 @@ pub(crate) async fn dump_command(
         println!("wrote {} ({} bytes)", written.path.display(), written.bytes);
         if include_secrets {
             println!(
-                "This file contains the CA private key. Anyone holding it can \
-                 act as a build worker for this server."
+                "This file contains the CA private key and the repository signing key. \
+                 Anyone holding it can act as a build worker for this server, and, \
+                 unless the signing key is locked with a passphrase, sign packages \
+                 its clients install. Keep it as you keep the signing key."
             );
         }
     })

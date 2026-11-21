@@ -85,6 +85,21 @@ async fn main() {
     // Load (or create on first run) the internal CA used to authenticate remote
     // build workers over mutual TLS. Persisted under the data directory.
     let ca_dir = aurcache_common::fs::ca_dir();
+    // A restore probes the CA directory, and stages the CA, the signing key
+    // and a copy of the key it replaces beside them, before it commits; one
+    // stopped in between leaves its files there, which nothing else would
+    // ever remove.
+    match aurcache_common::fs::remove_staged(&ca_dir) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(
+            "Removed {removed} file(s) an interrupted restore staged in {}",
+            ca_dir.display()
+        ),
+        Err(error) => tracing::warn!(
+            "could not look for files an interrupted restore staged in {}: {error}",
+            ca_dir.display()
+        ),
+    }
     let ca = aurcache_ca::Ca::load_or_create(&ca_dir).expect("failed to initialize internal CA");
     if let Ok(fp) = ca.ca_cert_fingerprint() {
         tracing::info!("Worker CA fingerprint (pin this on workers): {fp}");

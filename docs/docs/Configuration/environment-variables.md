@@ -158,7 +158,7 @@ repository](./pacman-repo.md#signing-the-repository).
 |--------------------------------------|--------------------------------------------------------------------|---------|
 | AURCACHE_SIGN                        | Sign every package and both databases with the instance's key (`true`/`false`) | `false` |
 | AURCACHE_SIGNING_KEY_FILE            | An OpenPGP secret key the operator supplies, armored or binary, which the server reads and never writes | `signing-key.asc` in `AURCACHE_CA_DIR`, created on first use |
-| AURCACHE_SIGNING_KEY_PASSPHRASE_FILE | A file holding the passphrase that locks the key; one final newline is ignored | none: the key is not locked |
+| AURCACHE_SIGNING_KEY_PASSPHRASE_FILE | A file holding the passphrase that locks the key, which stays locked in a dump with secrets; one final newline is ignored | none: the key is not locked |
 
 ## Mirrors
 

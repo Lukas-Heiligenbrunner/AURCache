@@ -9,6 +9,7 @@
 
 use anyhow::{Context, anyhow};
 use aurcache_common::digest::sha256_hex;
+use aurcache_common::fs::Installed;
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DnType, IsCa, Issuer,
     KeyPair, KeyUsagePurpose, PublicKeyData,
@@ -64,6 +65,51 @@ pub struct SignedWorkerCert {
     pub not_after: i64,
     /// SHA-256 fingerprint of the worker's public key.
     pub fingerprint: String,
+}
+
+/// A restored CA written beside the one in place ([`Ca::stage`]), waiting to
+/// replace it. Dropped without [`Self::install`], its files are removed and
+/// the CA in place was never touched.
+#[derive(Debug)]
+pub struct StagedCa {
+    /// The key, the certificate and the identity copy, in that order.
+    files: Vec<aurcache_common::fs::Staged>,
+}
+
+impl StagedCa {
+    /// Rename the restored CA's files over the ones in place: the pair, then
+    /// the identity copy, as [`Ca::load_or_create`] expects. A failure in
+    /// the middle of the pair leaves the copy -- still the previous CA --
+    /// to put the previous pair back at the next start, and is an error: the
+    /// CA was not replaced. A failure on the copy alone leaves the new pair,
+    /// valid and in place, which wins at the next start: the CA was
+    /// replaced, and that is only logged.
+    ///
+    /// The files share one directory, so what the last rename that
+    /// succeeded says of syncing it says it of them all: a CA in place whose
+    /// directory could not be synced is [`Installed::Unsynced`], not an
+    /// error.
+    pub fn install(self) -> anyhow::Result<Installed> {
+        let mut files = self.files.into_iter();
+        let mut last = Installed::Synced;
+        for staged in files.by_ref().take(2) {
+            let target = staged.target().to_path_buf();
+            last = staged
+                .install()
+                .with_context(|| format!("replacing {}", target.display()))?;
+        }
+        for staged in files {
+            let target = staged.target().to_path_buf();
+            match staged.install() {
+                Ok(installed) => last = installed,
+                Err(error) => tracing::warn!(
+                    "the restored CA is in place, but its copy {} could not be updated: {error}",
+                    target.display()
+                ),
+            }
+        }
+        Ok(last)
+    }
 }
 
 impl Ca {
@@ -134,12 +180,33 @@ impl Ca {
         Ok(Some(ca))
     }
 
-    /// Install a restored certificate and key after validating their pairing.
-    pub fn restore(dir: &Path, cert_pem: String, key_pem: String) -> anyhow::Result<Self> {
+    /// Get a restored certificate and key ready to replace the CA in `dir`:
+    /// checked to be a pair, and every file of it written beside the one it
+    /// replaces, which stays as it is until [`StagedCa::install`]. Refused,
+    /// with nothing changed, when they are not a pair or a file cannot be
+    /// written or replaced -- for a restore that refuses before it changes
+    /// anything.
+    pub fn stage(dir: &Path, cert_pem: String, key_pem: String) -> anyhow::Result<StagedCa> {
+        use aurcache_common::fs::{check_replaceable, stage_private};
         let ca = Self { cert_pem, key_pem };
         ca.validate()?;
-        ca.persist(dir)?;
-        Ok(ca)
+        let identity = serde_json::to_vec(&ca)?;
+        // In the order `persist` writes them, which is the order they are
+        // installed in.
+        let files = [
+            (key_path(dir), ca.key_pem.as_bytes()),
+            (cert_path(dir), ca.cert_pem.as_bytes()),
+            (dir.join(IDENTITY_FILE), identity.as_slice()),
+        ];
+        let mut staged = Vec::with_capacity(files.len());
+        for (path, contents) in files {
+            check_replaceable(&path)?;
+            staged.push(
+                stage_private(&path, contents)
+                    .with_context(|| format!("writing beside {}", path.display()))?,
+            );
+        }
+        Ok(StagedCa { files: staged })
     }
 
     /// Explicitly replace the CA, invalidating certificates issued by the old CA.
@@ -338,6 +405,58 @@ pub fn fingerprint_from_spki_der(spki_der: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restored CA replaces the one in place only once it is installed;
+    /// dropped instead, it leaves nothing behind, and a pair that does not
+    /// match is refused before anything is written.
+    #[test]
+    fn a_staged_ca_changes_nothing_until_it_is_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = Ca::load_or_create(tmp.path()).unwrap();
+        let restored = Ca::generate_ca().unwrap();
+        let listing = || {
+            let mut names: Vec<_> = std::fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing();
+
+        let other = Ca::generate_ca().unwrap();
+        assert!(Ca::stage(tmp.path(), restored.cert_pem.clone(), other.key_pem).is_err());
+        assert_eq!(listing(), before);
+
+        let dropped = Ca::stage(
+            tmp.path(),
+            restored.cert_pem.clone(),
+            restored.key_pem.clone(),
+        )
+        .unwrap();
+        assert_eq!(listing().len(), before.len() + 3);
+        drop(dropped);
+        assert_eq!(listing(), before);
+        assert_eq!(
+            Ca::load_or_create(tmp.path()).unwrap().cert_pem,
+            current.cert_pem
+        );
+
+        let installed = Ca::stage(
+            tmp.path(),
+            restored.cert_pem.clone(),
+            restored.key_pem.clone(),
+        )
+        .unwrap()
+        .install()
+        .unwrap();
+        assert!(matches!(installed, Installed::Synced));
+        assert_eq!(listing(), before);
+        assert_eq!(
+            Ca::load_or_create(tmp.path()).unwrap().cert_pem,
+            restored.cert_pem
+        );
+    }
 
     /// SHA-256 fingerprint (hex, lowercase) of the public key in a certificate
     /// PEM, to check an issued certificate against the CSR it was signed from.

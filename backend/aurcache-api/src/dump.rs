@@ -12,6 +12,7 @@ use aurcache_common::api::dump::{
 };
 use aurcache_common::api::operations::OperationProgress;
 use aurcache_db::helpers::operations;
+use aurcache_utils::restore::SecretsConfig;
 use aurcache_utils::services::Services;
 use rocket::FromForm;
 use rocket::data::Data;
@@ -21,6 +22,7 @@ use rocket::serde::json::Json;
 use rocket::{Responder, State, get, post};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 use utoipa::OpenApi;
 
@@ -61,9 +63,10 @@ fn dump_file_name(created_at: i64) -> String {
 /// Export packages, settings and approved workers as a `.tar.gz`.
 ///
 /// Authored state only -- build history, logs and the resolved dependency graph
-/// are rebuilt by the next resolve and are not carried. No secrets: the CA and
-/// worker certificates are deliberately absent, so this is safe to keep
-/// alongside ordinary backups.
+/// are rebuilt by the next resolve and are not carried. No secrets: the CA,
+/// worker certificates and signing key are deliberately absent, so this is
+/// safe to keep alongside ordinary backups. `include_secrets` adds them, and
+/// makes the archive as dangerous as the repository's signing key.
 #[get("/dump?<include_secrets>")]
 pub async fn dump(
     services: &State<Services>,
@@ -77,18 +80,21 @@ pub async fn dump(
         // Logged loudly and by name. The CA private key signs worker
         // identities, so whoever takes a copy can mint a worker this server
         // accepts -- for as long as the CA lives, and regardless of whether
-        // their own access is revoked later. That is worth a line in the log
-        // even when it is entirely legitimate.
+        // their own access is revoked later. The signing key, unless it is
+        // locked, signs what every client trusting the repository installs.
+        // That is worth a line in the log even when it is entirely legitimate.
         warn!(
             "Exporting a dump WITH SECRETS (CA private key, worker certificates, \
-             token hashes), requested by {}",
+             token hashes, repository signing key), requested by {}",
             a.username.as_deref().unwrap_or("an unauthenticated caller")
         );
     }
     let dump = aurcache_utils::dump::build_dump(
         &services.db,
         &version.0,
-        with_secrets.then(|| ca_dir.0.as_path()),
+        with_secrets.then(|| aurcache_utils::dump::SecretSources {
+            ca_dir: ca_dir.0.as_path(),
+        }),
     )
     .await?;
     services.activity.emit_by(
@@ -156,6 +162,7 @@ pub struct RestoreQuery {
     responses(
             (status = 202, description = "Restore started, or for a dry run what it would do", body = RestoreAccepted),
             (status = 400, description = "Not a dump this server can read, or an unknown policy"),
+            (status = 409, description = "Another restore is still running"),
             (status = 413, description = "Larger than any dump this server reads"),
     )
 )]
@@ -196,7 +203,14 @@ pub async fn restore(
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
 
     if options.dry_run {
-        let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
+        let preview = aurcache_utils::restore::preview(
+            &services.db,
+            &services.repo,
+            &loaded,
+            &options,
+            SecretsConfig::from_env(&ca_dir.0, &services.repo),
+        )
+        .await?;
         return Ok(status::Accepted(Json(RestoreAccepted {
             job_id: None,
             total,
@@ -204,21 +218,21 @@ pub async fn restore(
         })));
     }
 
+    let running = Restoring::begin().ok_or_else(|| {
+        err(
+            Status::Conflict,
+            "a restore is already running; wait for it to finish",
+        )
+    })?;
     let services_task = services.inner().clone();
-    let ca_dir_task = ca_dir.inner().clone();
+    let config = SecretsConfig::from_env(&ca_dir.0, &services.repo);
     let job_id = operation::start(
         services,
         operations::KIND_RESTORE,
         total,
         move |progress| async move {
-            aurcache_utils::restore::apply(
-                &services_task,
-                &ca_dir_task.0,
-                loaded,
-                options,
-                progress,
-            )
-            .await;
+            let _running = running;
+            aurcache_utils::restore::apply(&services_task, config, loaded, options, progress).await;
         },
         RestoreRecorder {
             activity: services.activity.clone(),
@@ -234,6 +248,30 @@ pub async fn restore(
         total,
         preview: Vec::new(),
     })))
+}
+
+/// Whether a restore is running in this server.
+static RESTORE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// The one restore this server runs at a time, until it is dropped -- when
+/// the restore ends, however it ends. Two at once would each decide about
+/// the same secrets and rows from what the other is changing.
+struct Restoring;
+
+impl Restoring {
+    /// The restore, or `None` while another runs.
+    fn begin() -> Option<Self> {
+        RESTORE_RUNNING
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for Restoring {
+    fn drop(&mut self) {
+        RESTORE_RUNNING.store(false, Ordering::Release);
+    }
 }
 
 /// Counts a restore's packages, and logs how many it brought in.
@@ -252,11 +290,17 @@ struct RestoreRecorder {
 
 impl Recorder<RestoreEntry> for RestoreRecorder {
     fn record(&mut self, entry: &RestoreEntry) -> Counts {
-        if let RestoreOutcome::Failed { .. } = entry.outcome {
-            self.succeeded.remove(&entry.pkgbase);
-            self.failed.insert(entry.pkgbase.clone());
-        } else {
-            self.succeeded.insert(entry.pkgbase.clone());
+        match entry.outcome {
+            // Not a package: what became of a secret is in the entry and in
+            // the log, and counts as neither.
+            RestoreOutcome::Secret { .. } => {}
+            RestoreOutcome::Failed { .. } => {
+                self.succeeded.remove(&entry.pkgbase);
+                self.failed.insert(entry.pkgbase.clone());
+            }
+            _ => {
+                self.succeeded.insert(entry.pkgbase.clone());
+            }
         }
         Counts {
             completed: i32::try_from(self.succeeded.len()).unwrap_or(i32::MAX),
@@ -299,7 +343,47 @@ pub async fn restore_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::dump_file_name;
+    use super::{RestoreRecorder, Restoring, dump_file_name};
+    use crate::utils::operation::{Counts, Recorder};
+    use aurcache_activitylog::activity_utils::ActivityLog;
+    use aurcache_common::api::dump::{RestoreEntry, RestoreOutcome, Secret, SecretChange};
+    use std::collections::HashSet;
+
+    /// What becomes of a secret is reported beside the packages, and counts
+    /// as neither a package restored nor one that failed.
+    #[test]
+    fn a_secret_line_is_not_counted_as_a_package() {
+        let mut recorder = RestoreRecorder {
+            activity: ActivityLog::discarding(),
+            username: None,
+            succeeded: HashSet::new(),
+            failed: HashSet::new(),
+        };
+        recorder.record(&RestoreEntry {
+            pkgbase: "hello".to_string(),
+            outcome: RestoreOutcome::Imported,
+        });
+        let Counts { completed, failed } = recorder.record(&RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::Secret {
+                secret: Secret::SigningKey,
+                change: SecretChange::Replaced,
+                detail: "the dump's".to_string(),
+            },
+        });
+        assert_eq!(completed, 1);
+        assert_eq!(failed, 0);
+    }
+
+    /// One restore at a time: a second is refused until the first ends.
+    #[test]
+    fn a_second_restore_waits_for_the_first_to_end() {
+        let first = Restoring::begin().expect("nothing else restores in this test binary");
+        assert!(Restoring::begin().is_none());
+        drop(first);
+        let again = Restoring::begin();
+        assert!(again.is_some());
+    }
 
     /// Dated, so a directory of backups sorts chronologically and two dumps
     /// taken on different days do not overwrite each other.

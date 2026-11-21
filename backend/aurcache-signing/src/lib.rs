@@ -11,14 +11,16 @@
 //! one that stops signing within [`MIN_VALIDITY_DAYS`]: moving from one
 //! signing subkey to the next while the server runs is not supported.
 //!
-//! The key is a file, like the worker CA's, never a database row: the
-//! database is what gets exported, backed up elsewhere and inspected. Nothing
-//! here hands the secret key out, and its `Debug` shows the fingerprint only.
+//! The key is a file, like the worker CA's, never a database row. A loaded
+//! [`InstanceKey`] never hands its secret out, and its `Debug` shows the
+//! fingerprint only; the one way the secret leaves the server is the file
+//! itself, read as stored into a dump taken with secrets ([`dump_text`]).
 
 use anyhow::{Context, anyhow, bail};
 use aurcache_common::fs::REPO_ROOT;
 use aurcache_common::server_env;
 use aurcache_common::settings::parse_boolean;
+use pgp::armor::BlockType;
 use pgp::composed::{
     ArmorOptions, Deserializable, DetachedSignature, KeyType, SecretKeyParamsBuilder,
     SignedPublicKey, SignedSecretKey, SignedSecretSubKey, SubkeyParamsBuilder,
@@ -86,8 +88,8 @@ impl std::fmt::Debug for InstanceKey {
 /// The instance key the environment configures, or `None` when the
 /// repository is not signed (`AURCACHE_SIGN` unset or false).
 ///
-/// The key is `AURCACHE_SIGNING_KEY_FILE` when that is set, which is only ever
-/// read; otherwise it is [`KEY_FILE`] in `ca_dir`, created the first time.
+/// The key is where [`KeyLocation::from_env`] says: a supplied one is only
+/// ever read, the server's own is created the first time.
 pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
     let sign = server_env::AURCACHE_SIGN;
     let on = match sign.get() {
@@ -107,19 +109,14 @@ pub fn from_env(ca_dir: &Path) -> anyhow::Result<Option<InstanceKey>> {
         }
         return Ok(None);
     }
-    let passphrase = server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE
-        .get_os()
-        .map(|path| read_passphrase(Path::new(&path)))
-        .transpose()?;
-    let supplied = server_env::AURCACHE_SIGNING_KEY_FILE
-        .get_os()
-        .map(PathBuf::from);
-    let path = supplied.clone().unwrap_or_else(|| ca_dir.join(KEY_FILE));
-    let key = match supplied {
-        Some(_) => InstanceKey::load(&path, passphrase.as_deref()),
-        None => InstanceKey::load_or_create(&path, passphrase.as_deref()),
+    let passphrase = passphrase_from_env()?;
+    let location = KeyLocation::from_env(ca_dir);
+    let key = match &location {
+        KeyLocation::Supplied(path) => InstanceKey::load(path, passphrase.as_deref()),
+        KeyLocation::Own(path) => InstanceKey::load_or_create(path, passphrase.as_deref()),
     }?;
-    if is_inside(&path, Path::new(REPO_ROOT)) {
+    let path = location.path();
+    if is_inside(path, Path::new(REPO_ROOT)) {
         tracing::warn!(
             "The repository signing key {} is inside the repository directory {REPO_ROOT}: \
              whatever else serves, mirrors or syncs that directory hands it out with the \
@@ -179,9 +176,207 @@ fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
     }
 }
 
+/// Where the instance key is kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyLocation {
+    /// The server's own: [`KEY_FILE`] in its CA directory, created there the
+    /// first time, and where a restored key is put.
+    Own(PathBuf),
+    /// One the operator supplies with `AURCACHE_SIGNING_KEY_FILE`, which the
+    /// server reads and never writes.
+    Supplied(PathBuf),
+}
+
+impl KeyLocation {
+    /// Where the environment keeps the key, for a server whose CA directory is
+    /// `ca_dir`: whether or not it signs.
+    #[must_use]
+    pub fn from_env(ca_dir: &Path) -> Self {
+        match server_env::AURCACHE_SIGNING_KEY_FILE.get_os() {
+            Some(path) => Self::Supplied(PathBuf::from(path)),
+            None => Self::Own(ca_dir.join(KEY_FILE)),
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Own(path) | Self::Supplied(path) => path,
+        }
+    }
+}
+
+/// The passphrase `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` holds, when it is set.
+pub fn passphrase_from_env() -> anyhow::Result<Option<String>> {
+    passphrase_file_from_env()
+        .map(|path| read_passphrase(&path))
+        .transpose()
+}
+
+/// The file `AURCACHE_SIGNING_KEY_PASSPHRASE_FILE` names, when it is set,
+/// not read: for whoever needs the passphrase only now and then to read it
+/// then ([`read_passphrase`]), and not depend on the file otherwise.
+#[must_use]
+pub fn passphrase_file_from_env() -> Option<PathBuf> {
+    server_env::AURCACHE_SIGNING_KEY_PASSPHRASE_FILE
+        .get_os()
+        .map(PathBuf::from)
+}
+
+/// What a key file says about itself without being unlocked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyFacts {
+    /// The primary key's fingerprint, as [`InstanceKey::fingerprint`] gives it.
+    pub fingerprint: String,
+    /// Whether a passphrase is needed to unlock it: the secret that signs
+    /// is locked -- or, in a key nothing in which signs now, any it holds.
+    pub locked: bool,
+}
+
+/// Read what `bytes`, a secret key armored or binary, says about itself:
+/// nothing is unlocked, so no passphrase is needed, and whether it signs now
+/// is not asked -- a key in a dump may have expired since.
+pub fn inspect(bytes: &[u8]) -> anyhow::Result<KeyFacts> {
+    let key = parse_secret(bytes)?;
+    let locked = match signing_secret(&key) {
+        Ok(secret) => secret.is_encrypted(),
+        Err(_) => secrets(&key).any(SecretParams::is_encrypted),
+    };
+    Ok(KeyFacts {
+        fingerprint: format!("{:X}", key.primary_key.fingerprint()),
+        locked,
+    })
+}
+
+/// Every secret `key` holds, stubs left out.
+fn secrets(key: &SignedSecretKey) -> impl Iterator<Item = &SecretParams> {
+    std::iter::once(key.primary_key.secret_params())
+        .chain(
+            key.secret_subkeys
+                .iter()
+                .map(|subkey| subkey.key.secret_params()),
+        )
+        .filter(|secret| holds_secret(secret))
+}
+
+/// Check that `passphrase` unlocks every locked secret in `bytes`, a secret
+/// key armored or binary: for a key that is to be kept with that passphrase,
+/// not used now, so whether it signs is not asked.
+pub fn check_passphrase(bytes: &[u8], passphrase: &str) -> anyhow::Result<()> {
+    let key = parse_secret(bytes)?;
+    let password = Password::from(passphrase);
+    let unlocks = |result: pgp::errors::Result<pgp::errors::Result<()>>| {
+        result.and_then(|inner| inner).is_ok()
+    };
+    let primary = &key.primary_key;
+    if holds_secret(primary.secret_params())
+        && primary.secret_params().is_encrypted()
+        && !unlocks(primary.unlock(&password, |_, _| Ok(())))
+    {
+        bail!("the passphrase does not unlock its primary key");
+    }
+    for subkey in &key.secret_subkeys {
+        let secret = subkey.key.secret_params();
+        if holds_secret(secret)
+            && secret.is_encrypted()
+            && !unlocks(subkey.key.unlock(&password, |_, _| Ok(())))
+        {
+            bail!(
+                "the passphrase does not unlock its subkey {:X}",
+                subkey.key.fingerprint()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `bytes`, a secret key armored or binary, armored with every secret it
+/// holds unlocked locked with `passphrase`: how a key that arrives unlocked
+/// is kept by a server that locks its keys. Its self-signatures are over
+/// the public key, and stay as they are.
+pub fn locked(bytes: &[u8], passphrase: &str) -> anyhow::Result<String> {
+    let mut key = parse_secret(bytes)?;
+    let password = Password::from(passphrase);
+    let primary = &mut key.primary_key;
+    if holds_secret(primary.secret_params()) && !primary.secret_params().is_encrypted() {
+        primary
+            .set_password(rand::thread_rng(), &password)
+            .context("locking the primary key")?;
+    }
+    for subkey in &mut key.secret_subkeys {
+        let secret = &mut subkey.key;
+        if holds_secret(secret.secret_params()) && !secret.secret_params().is_encrypted() {
+            secret
+                .set_password(rand::thread_rng(), &password)
+                .context("locking a subkey")?;
+        }
+    }
+    key.to_armored_string(ArmorOptions::default())
+        .context("armoring the signing key")
+}
+
+/// The secret of the component key that signs now: the one a passphrase has
+/// to unlock. A primary key kept offline leaves a stub that looks locked,
+/// and is never the one that signs.
+fn signing_secret(key: &SignedSecretKey) -> anyhow::Result<&SecretParams> {
+    let choice = choose(key, now()).map_err(|why| refusal(key, why))?;
+    Ok(match choice.signer {
+        Signer::Primary => key.primary_key.secret_params(),
+        Signer::Subkey(index) => key.secret_subkeys[index].key.secret_params(),
+    })
+}
+
+/// The key file at `path` as a dump carries it, or `None` when there is
+/// none: as stored when it is armored, and otherwise armored around the very
+/// same bytes. Locked or not, it stays as it is; a passphrase is never added
+/// or removed.
+pub fn dump_text(path: &Path) -> anyhow::Result<Option<String>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::Error::new(error)
+                .context(format!("reading the signing key {}", path.display())));
+        }
+    };
+    // Only something that parses: a dump that cannot be restored is worse
+    // than one that says, here, that it would not be.
+    parse_secret(&bytes).with_context(|| format!("reading the signing key {}", path.display()))?;
+    if let Ok(text) = std::str::from_utf8(&bytes)
+        && text.trim_start().starts_with("-----BEGIN PGP")
+    {
+        return Ok(Some(text.to_string()));
+    }
+    let mut armored = Vec::new();
+    pgp::armor::write(
+        &Verbatim(&bytes),
+        BlockType::PrivateKey,
+        &mut armored,
+        None,
+        true,
+    )
+    .context("armoring the signing key")?;
+    Ok(Some(String::from_utf8(armored)?))
+}
+
+/// Bytes written exactly as they are, so armor can wrap a key file without
+/// parsing and serializing it again.
+struct Verbatim<'a>(&'a [u8]);
+
+impl Serialize for Verbatim<'_> {
+    fn to_writer<W: std::io::Write>(&self, writer: &mut W) -> pgp::errors::Result<()> {
+        writer.write_all(self.0)?;
+        Ok(())
+    }
+
+    fn write_len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// The passphrase in `path`, without the newline an editor or `echo` leaves
 /// at its end.
-fn read_passphrase(path: &Path) -> anyhow::Result<String> {
+pub fn read_passphrase(path: &Path) -> anyhow::Result<String> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading the signing key passphrase {}", path.display()))?;
     let passphrase = text.strip_suffix('\n').map_or(text.as_str(), |line| {
@@ -227,16 +422,26 @@ impl InstanceKey {
     pub fn load(path: &Path, passphrase: Option<&str>) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading the signing key {}", path.display()))?;
-        let key = parse_secret(&bytes)
-            .with_context(|| format!("reading the signing key {}", path.display()))?;
-        if passphrase.is_some() && !key.primary_key.secret_params().is_encrypted() {
-            tracing::warn!(
-                "the signing key {} is not protected by a passphrase; the one configured is not used to unlock it",
-                path.display()
-            );
+        Self::parse(&bytes, passphrase)
+            .with_context(|| format!("using the signing key {}", path.display()))
+    }
+
+    /// The key in `bytes`, armored or binary, unlocked with `passphrase`:
+    /// refused, like [`Self::load`], unless it signs.
+    pub fn parse(bytes: &[u8], passphrase: Option<&str>) -> anyhow::Result<Self> {
+        let key = parse_secret(bytes)?;
+        let locked = signing_secret(&key)?.is_encrypted();
+        match passphrase {
+            None if locked => bail!(
+                "the key is locked with a passphrase, and none is configured \
+                 (AURCACHE_SIGNING_KEY_PASSPHRASE_FILE)"
+            ),
+            Some(_) if !locked => tracing::warn!(
+                "the signing key is not locked with a passphrase; the one configured is not used"
+            ),
+            _ => {}
         }
         Self::new(key, passphrase.map_or_else(Password::empty, Password::from))
-            .with_context(|| format!("using the signing key {}", path.display()))
     }
 
     /// The key in `path`, or a new one written there (owner-only) when there
@@ -306,12 +511,26 @@ impl InstanceKey {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        let written = || format!("writing the signing key {}", path.display());
+        match self.stage(path)?.install().with_context(written)? {
+            aurcache_common::fs::Installed::Synced => Ok(()),
+            aurcache_common::fs::Installed::Unsynced { error } => {
+                Err(anyhow::Error::new(error).context(written()))
+            }
+        }
+    }
+
+    /// The key, armored and locked as it was made, written owner-only beside
+    /// `path` -- whose directory exists -- ready to replace it
+    /// ([`aurcache_common::fs::Staged::install`]): how a key a restore made
+    /// is put in place only once the restore has committed.
+    pub fn stage(&self, path: &Path) -> anyhow::Result<aurcache_common::fs::Staged> {
         let armored = self
             .key
             .to_armored_string(ArmorOptions::default())
             .context("armoring the signing key")?;
-        aurcache_common::fs::write_private(path, armored.as_bytes())
-            .with_context(|| format!("writing the signing key {}", path.display()))
+        aurcache_common::fs::stage_private(path, armored.as_bytes())
+            .with_context(|| format!("writing beside the signing key {}", path.display()))
     }
 
     /// The primary key's fingerprint, as `pacman-key --lsign-key` takes it:
@@ -882,6 +1101,128 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not a key");
     }
 
+    /// A dump carries the key file as stored: an armored one verbatim, locked
+    /// if it was, and none at all where there is no file.
+    #[test]
+    fn a_dump_carries_an_armored_key_as_stored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(KEY_FILE);
+        assert_eq!(dump_text(&path).unwrap(), None);
+
+        let created = InstanceKey::load_or_create(&path, Some("correct horse")).unwrap();
+        let text = dump_text(&path).unwrap().unwrap();
+        assert_eq!(text, std::fs::read_to_string(&path).unwrap());
+        assert_eq!(
+            inspect(text.as_bytes()).unwrap(),
+            KeyFacts {
+                fingerprint: created.fingerprint().to_string(),
+                locked: true,
+            }
+        );
+        assert!(InstanceKey::parse(text.as_bytes(), None).is_err());
+        let restored = InstanceKey::parse(text.as_bytes(), Some("correct horse")).unwrap();
+        assert_eq!(restored.fingerprint(), created.fingerprint());
+    }
+
+    /// An unlocked key locked with a passphrase opens with that one only,
+    /// keeps its fingerprint, and signs once unlocked; a key already locked
+    /// is checked against the passphrase it was locked with.
+    #[test]
+    fn a_key_is_locked_with_a_passphrase_and_checked_against_it() {
+        let key = InstanceKey::generate(None).unwrap();
+        let unlocked = key.key.to_armored_string(ArmorOptions::default()).unwrap();
+        assert!(!inspect(unlocked.as_bytes()).unwrap().locked);
+        check_passphrase(unlocked.as_bytes(), "anything").unwrap();
+
+        let text = locked(unlocked.as_bytes(), "correct horse").unwrap();
+        let facts = inspect(text.as_bytes()).unwrap();
+        assert!(facts.locked);
+        assert_eq!(facts.fingerprint, key.fingerprint());
+        check_passphrase(text.as_bytes(), "correct horse").unwrap();
+        assert!(check_passphrase(text.as_bytes(), "wrong horse").is_err());
+        assert!(InstanceKey::parse(text.as_bytes(), None).is_err());
+        let unlocked_again = InstanceKey::parse(text.as_bytes(), Some("correct horse")).unwrap();
+        assert!(key.verifies(&unlocked_again.sign(CONTENT).unwrap(), CONTENT));
+    }
+
+    /// A key whose signing subkey has expired since -- one in a dump, say --
+    /// still says what it is, though it is refused for signing.
+    #[test]
+    fn an_expired_key_still_says_what_it_is() {
+        with_gnupg(|_, gpg| {
+            let made = gpg.unattended(&[
+                "--faked-system-time",
+                "20200101T000000",
+                "--quick-gen-key",
+                "Expired <ops@localhost>",
+                "ed25519",
+                "cert",
+                "never",
+            ]);
+            let Some(primary) = made.created() else {
+                eprintln!("skipped: gpg could not make a key ({})", made.stderr);
+                return;
+            };
+            let added = gpg.unattended(&[
+                "--faked-system-time",
+                "20200102T000000",
+                "--quick-add-key",
+                &primary,
+                "ed25519",
+                "sign",
+                "1d",
+            ]);
+            assert!(added.success, "gpg --quick-add-key: {}", added.stderr);
+            let bytes = gpg.export("--export-secret-keys", &primary, "");
+
+            let facts = inspect(&bytes).unwrap();
+            assert_eq!(facts.fingerprint, primary);
+            assert!(!facts.locked);
+            let error = format!("{:#}", InstanceKey::parse(&bytes, None).unwrap_err());
+            assert!(error.contains(NOTHING_SIGNS), "{error}");
+        });
+    }
+
+    /// A binary key file -- what `gpg --export-secret-keys` writes without
+    /// `--armor` -- is armored around the very same bytes.
+    #[test]
+    fn a_dump_armors_a_binary_key_around_the_same_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = InstanceKey::generate(None).unwrap();
+        let binary = key.key.to_bytes().unwrap();
+        let path = tmp.path().join("supplied.gpg");
+        std::fs::write(&path, &binary).unwrap();
+
+        let text = dump_text(&path).unwrap().unwrap();
+        assert!(text.starts_with("-----BEGIN PGP PRIVATE KEY BLOCK-----"));
+        let mut dearmored = Vec::new();
+        pgp::armor::Dearmor::new(text.as_bytes())
+            .read_to_end(&mut dearmored)
+            .unwrap();
+        assert_eq!(dearmored, binary);
+        assert_eq!(
+            inspect(text.as_bytes()).unwrap(),
+            KeyFacts {
+                fingerprint: key.fingerprint().to_string(),
+                locked: false,
+            }
+        );
+        assert_eq!(
+            InstanceKey::parse(text.as_bytes(), None)
+                .unwrap()
+                .fingerprint(),
+            key.fingerprint()
+        );
+    }
+
+    #[test]
+    fn a_dump_refuses_a_file_that_is_not_a_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(KEY_FILE);
+        std::fs::write(&path, "not a key").unwrap();
+        assert!(dump_text(&path).is_err());
+    }
+
     /// The key's debug form, which ends up in logs, never carries the secret.
     #[test]
     fn debug_shows_the_fingerprint_only() {
@@ -1114,6 +1455,11 @@ mod tests {
                 let key =
                     InstanceKey::load(&path, Some(passphrase).filter(|p| !p.is_empty())).unwrap();
                 assert!(!holds_secret(key.key.primary_key.secret_params()));
+                // The stub is not a lock: a restore asks for a passphrase
+                // only when the subkey has one.
+                let facts = inspect(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(facts.locked, !passphrase.is_empty());
+                assert_eq!(facts.fingerprint, key.fingerprint());
                 assert_eq!(key.signer, Signer::Subkey(0));
                 let content = tmp.join("content");
                 std::fs::write(&content, CONTENT).unwrap();
