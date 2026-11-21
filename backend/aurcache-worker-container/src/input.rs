@@ -46,6 +46,7 @@ mod tests {
             keyserver: "hkps://keys.example".into(),
             cpus: Some(2.0),
             scratch: "/scratch".into(),
+            ssh: None,
         }
     }
 

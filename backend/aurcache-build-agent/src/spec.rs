@@ -37,4 +37,18 @@ pub struct BuildSpec {
     pub cpus: Option<f64>,
     /// Where the build's own trees go, inside the container.
     pub scratch: PathBuf,
+    /// The worker's SSH key, for the build to fetch its sources with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshAccess>,
+}
+
+/// The use of an SSH key the worker holds: the build asks the worker's
+/// ssh-agent for signatures over the link ([`crate::ssh_link`]) while it
+/// runs, and never sees the key itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SshAccess {
+    /// The hosts' keys, as a `known_hosts` file holds them. The ssh git runs
+    /// (`GIT_SSH_COMMAND`) accepts no other host; an ssh the build runs
+    /// itself reads the image's configuration.
+    pub known_hosts: String,
 }

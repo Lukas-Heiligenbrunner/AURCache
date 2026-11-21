@@ -6,6 +6,7 @@
 //! what the image lacks. What the `.SRCINFO` says is the build's to choose,
 //! so it only ever names targets: every word before `--` is the agent's.
 
+use super::children::Spare;
 use super::makepkg::{self, Place};
 use super::run;
 use super::user::BuildUser;
@@ -25,6 +26,8 @@ pub struct Deps<'a> {
     /// The job's makepkg flags, which say whether any are installed and
     /// whether `checkdepends` are.
     pub flags: &'a [String],
+    /// What the kills before and after the install leave running.
+    pub spare: Spare,
 }
 
 /// Install what the build depends on and the image lacks.
@@ -38,7 +41,7 @@ pub fn install(deps: &Deps<'_>, user: &BuildUser) -> Result<(), String> {
     // Root's pacman, and the scriptlets it runs, run with no process of the
     // build user's beside them. What it wrote stays: the threat model in
     // design/in-progress/container-workers.md says why that is minor.
-    clear("the PKGBUILD")?;
+    clear("the PKGBUILD", deps.spare)?;
     let wanted = from_srcinfo(&srcinfo, deps.arch, checks);
     let lacking = missing(&wanted)?;
     if lacking.is_empty() {
@@ -50,7 +53,7 @@ pub fn install(deps: &Deps<'_>, user: &BuildUser) -> Result<(), String> {
     pacman(&args, "pacman -S --asdeps")?;
     // And the build runs with nothing of root's beside it: a scriptlet may
     // have left a process running.
-    clear("an install scriptlet")
+    clear("an install scriptlet", deps.spare)
 }
 
 /// Which of `deps` no installed package satisfies, as `pacman -T` says.

@@ -133,6 +133,7 @@ mod tests {
             keyserver: "hkps://keys.example".into(),
             cpus: None,
             scratch: "/var/lib/aurcache-build".into(),
+            ssh: None,
         }
     }
 

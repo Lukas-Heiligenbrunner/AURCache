@@ -975,7 +975,9 @@ dependencies = [
  "aurcache-worker-core",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1026,10 +1028,12 @@ dependencies = [
  "aurcache-worker-container",
  "aurcache-worker-core",
  "bollard",
+ "bytes",
  "futures",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

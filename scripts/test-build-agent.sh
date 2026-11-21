@@ -11,13 +11,18 @@
 #      are read from it and from inside build() tries to become root, find
 #      anything of root's to talk to, and write the report. Both polarities:
 #      its dependencies are only there if root installed them before the
-#      build. One of them, docker/testpkg/agent-thief, comes from a
-#      repository of the test's own, which stands for AURCache's: the image
-#      is upgraded without it, so a package there that would upgrade an
-#      installed one is left alone. Then the same package, its
-#      `--printsrcinfo` forged to name a package file and pacman's options:
-#      root's pacman takes them as names it cannot find, and the build fails
-#      before it starts;
+#      build. It fetches a source over git+ssh from a throwaway server
+#      (docker/git-ssh.Dockerfile), and reaches it again from build(), which
+#      works only through the SSH link that a stand-in for the worker serves
+#      from here (ssh-link-serve, over `docker exec -i`). Another exec beside
+#      the link must not live to see the build. The key must be nowhere in the
+#      container: build() looks for it, and so does docker/testpkg/agent-thief,
+#      a dependency whose scriptlet runs as root before the build. The thief
+#      comes from a repository that stands for AURCache's, which the image's
+#      upgrade must not see. Then the same package, its `--printsrcinfo`
+#      forged to name a package file and pacman's options: root's pacman
+#      takes them as names it cannot find, and the build fails before it
+#      starts;
 #   3. a build is killed half-way: no process outlives it and no report is
 #      written;
 #   4. where qemu-aarch64 is registered and the arm64 builder image can be
@@ -73,6 +78,7 @@ cleanup() {
     for name in "${CONTAINERS[@]}"; do
         docker rm -f "$name" >/dev/null 2>&1 || true
     done
+    docker image rm -f "$PREFIX-agent-gitssh" >/dev/null 2>&1 || true
     # A build that was stopped never handed its directory back: it is root's.
     if ! rm -rf "$WORK" 2>/dev/null; then
         docker run --rm --name "$(container cleanup)" --user 0 -v "$WORK:/w" \
@@ -137,6 +143,8 @@ if "vcs" in options:
     )
 if "repo" in options:
     makepkg_conf += "AURCACHE_TEST_REPO=1\n"
+if "gitssh" in options:
+    makepkg_conf += f"AURCACHE_TEST_GITSSH={options['gitssh']}\n"
 if "linger" in options:
     makepkg_conf += f"AURCACHE_TEST_LINGER={options['linger']}\n"
 if "forge" in options:
@@ -156,6 +164,11 @@ spec = {
     "keyserver": "hkps://keyserver.ubuntu.com",
     "cpus": float(options["cpus"]) if "cpus" in options else None,
     "scratch": "/var/lib/aurcache-build",
+    "ssh": (
+        {"known_hosts": open(options["known_hosts"]).read()}
+        if "known_hosts" in options
+        else None
+    ),
 }
 with open(path, "w") as out:
     json.dump(spec, out, indent=2)
@@ -252,6 +265,9 @@ if command -v file >/dev/null; then
     file "$WORK/tools/aurcache-build-agent" | sed 's/^[^:]*: /    /'
 fi
 INTERFACE=$(sed -n 's/^pub const INTERFACE: u32 = \([0-9]*\);$/\1/p' backend/aurcache-build-agent/src/spec.rs)
+echo "==> building the worker's end of the SSH link"
+LINK_SERVE=$(cargo_executable ssh-link-serve build --manifest-path backend/Cargo.toml \
+    -p aurcache-worker-container --example ssh-link-serve)
 for image in "$IMAGE" "$REPO_SERVER_IMAGE"; do
     docker image inspect "$image" >/dev/null 2>&1 || docker pull -q "$image" >/dev/null
 done
@@ -264,7 +280,13 @@ check_hello hello "$status"
 ((FAIL)) && explain hello
 
 echo "==> leg 2/4: a hostile package is contained"
-mkdir "$WORK/repo"
+command -v ssh-keygen >/dev/null && command -v ssh-agent >/dev/null || {
+    echo "error: OpenSSH (ssh-keygen, ssh-agent, ssh-add) is needed for the test credential" >&2
+    exit 2
+}
+# The worker's SSH key, which stays out here, and the server it opens.
+mkdir "$WORK/ssh" "$WORK/repo"
+ssh-keygen -q -t ed25519 -N '' -C aurcache-agent-test -f "$WORK/ssh/id_ed25519"
 # The thief, in a pacman repository of its own: the hostile package depends
 # on it, so root installs it before the build and its scriptlet runs as
 # root.
@@ -310,6 +332,21 @@ docker rm -f "$REPO_SERVER" >/dev/null 2>&1 || true
 docker run -d --name "$REPO_SERVER" -v "$WORK/repo:/srv/repo:ro" "$REPO_SERVER_IMAGE" \
     httpd -f -p 8080 -h /srv/repo >/dev/null
 REPO_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$REPO_SERVER")
+docker build -q -t "$PREFIX-agent-gitssh" -f docker/git-ssh.Dockerfile . >/dev/null
+GITSSH=$(container gitssh)
+CONTAINERS+=("$GITSSH")
+docker rm -f "$GITSSH" >/dev/null 2>&1 || true
+docker run -d --name "$GITSSH" -v "$WORK/ssh/id_ed25519.pub:/keys/id_ed25519.pub:ro" \
+    "$PREFIX-agent-gitssh" >/dev/null
+GITSSH_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$GITSSH")
+for _ in $(seq 60); do
+    ssh-keyscan -t ed25519 "$GITSSH_IP" >"$WORK/ssh/known_hosts" 2>/dev/null && [[ -s $WORK/ssh/known_hosts ]] && break
+    sleep 1
+done
+[[ -s $WORK/ssh/known_hosts ]] || {
+    echo "error: the git server at $GITSSH_IP never answered" >&2
+    exit 1
+}
 # The repository the fixture's source is.
 mkdir -p "$WORK/stage/upstream"
 git init -q -b master "$WORK/stage/upstream"
@@ -321,9 +358,24 @@ git -C "$WORK/stage/upstream" push -q "$WORK/upstream.git" master
 HOSTILE_FLAGS=(-v "$WORK/upstream.git:/srv/aurcache-agent-test/upstream.git:ro")
 
 prepare hostile docker/testpkg/agent-hostile aurcache-agent-hostile "$(uname -m)" vcs=1 \
-    "repo=$REPO_IP"
-status=0
-build run hostile "$IMAGE" "${HOSTILE_FLAGS[@]}" || status=$?
+    "repo=$REPO_IP" "known_hosts=$WORK/ssh/known_hosts" "gitssh=$GITSSH_IP"
+build -d hostile "$IMAGE" "${HOSTILE_FLAGS[@]}"
+# Another exec from outside, as root, which is not the link: the agent kills
+# it with the rest, before the build.
+docker exec --user 0 "$(container hostile)" sleep 3601 >/dev/null 2>&1 &
+outside=$!
+# The worker's side: an ssh-agent with the key, and one exec of ssh-link, as
+# the container starts.
+timeout "$BUILD_TIMEOUT" "$LINK_SERVE" "$WORK/ssh/id_ed25519" -- docker exec -i "$(container hostile)" \
+    "$AGENT" ssh-link --socket /var/lib/aurcache-build/ssh-link/link.sock \
+    >"$WORK/hostile.link" 2>&1 &
+link=$!
+link_status=0
+wait "$link" || link_status=$?
+outside_status=0
+wait "$outside" || outside_status=$?
+status=$(timeout "$BUILD_TIMEOUT" docker wait "$(container hostile)" || echo timeout)
+docker logs "$(container hostile)" >"$WORK/hostile.stdout" 2>"$WORK/hostile.stderr" || true
 before=$FAIL
 check "hostile: the agent exited 0" 0 "$status"
 check "hostile: makepkg exited 0" '{"code": 0, "how": "exited"}' "$(report hostile ended)"
@@ -348,6 +400,10 @@ for at in srcinfo- ""; do
 done
 # What the reading left running did not live on to see root's install.
 check "hostile: what the reading left running was ended" gone "$(probe hostile srcinfo-lingerer)"
+# The link was spared, and an exec beside it was not: it ran, and SIGKILL
+# ended it before the build.
+check "hostile: another exec from outside ran and was killed" 137 "$outside_status"
+check "hostile: and was gone before the build" gone "$(probe hostile outside-exec)"
 # Nothing else it tried worked.
 for attempt in write-report rename-out write-work write-makepkg-conf; do
     check "hostile: $attempt" blocked "$(probe hostile $attempt)"
@@ -374,6 +430,33 @@ fi
 # A dependency from that repository, whose scriptlet runs as root.
 check "hostile: the thief's scriptlet ran as root" yes "$(probe hostile thief-ran)"
 check "hostile: and could not read the agent's memory" refused "$(probe hostile thief-mem)"
+# The worker's key: used through the link for as long as makepkg runs, and
+# itself nowhere in the container.
+check "hostile: makepkg had the agent as it read the PKGBUILD" listed \
+    "$(probe hostile toplevel-agent-key)"
+check "hostile: the git+ssh source was fetched" fetched "$(probe hostile payload)"
+check "hostile: build() reaches the server over SSH too" reached "$(probe hostile ssh-in-build)"
+check "hostile: the agent lists the key in build()" listed "$(probe hostile agent-key)"
+# What it said, if anything, is in $WORK/hostile.link.
+check "hostile: the worker's end of the link ended without an error" 0 "$link_status"
+check "hostile: no key file in the container" 0 "$(probe hostile key-files)"
+check "hostile: no key in the job or in the build's environment" 0 "$(probe hostile key-given)"
+# ssh-agent signs what it is asked to: the build can make a signature that is
+# no login, which is why the key must be trusted for logins only.
+check "hostile: build() can have the key sign what is no login" signed \
+    "$(probe hostile sshsig)"
+# The same from a dependency's scriptlet, as root, before the build.
+check "hostile: the thief found no key file" 0 "$(probe hostile thief-keys)"
+check "hostile: nor a key in any process, the relay's among them" 0 \
+    "$(probe hostile thief-procs)"
+check "hostile: the thief saw the relay" yes \
+    "$( (($(probe hostile thief-relays) > 0)) && echo yes || echo no)"
+# It ran before the build had its agent, and what it left running was ended
+# before the agent was given. It found one agent, its own, which it started
+# for the hunt to find: a hunt that found no socket at all fails here.
+check "hostile: the thief reached no agent but its own" own "$(probe hostile thief-agents)"
+check "hostile: nor had anything signed but by its own" own:signed \
+    "$(probe hostile thief-sshsig)"
 check "hostile: orphaned processes are collected" 0 "$(probe hostile zombies)"
 check "hostile: out/ holds the report and nothing else" report.json \
     "$(find "$WORK/hostile/out" -mindepth 1 -printf '%P\n' | sort | paste -sd' ')"

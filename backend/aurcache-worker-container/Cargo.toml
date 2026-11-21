@@ -19,6 +19,9 @@ aurcache-build-agent = { path = "../aurcache-build-agent" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+zeroize = "1.9.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

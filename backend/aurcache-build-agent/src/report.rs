@@ -47,4 +47,6 @@ pub enum SetupStep {
     Dependencies,
     /// Starting makepkg.
     Makepkg,
+    /// Taking the worker's SSH link, or giving the build its socket.
+    Credential,
 }
