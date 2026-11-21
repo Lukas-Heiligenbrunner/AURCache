@@ -43,8 +43,9 @@ The names its package's source builds: `expected_pkgnames`, the row's name
 plus `split_packages` from the `.SRCINFO` -- the rule `publish::artifact`
 already holds a worker's artifacts to, and the one the upload asks. An upload
 cannot add a name the source does not build, so it claims nothing new and no
-other package's names need checking here; publishing's own "already produced
-by another package" check still applies, as for any build.
+other package's names need checking here; publishing's own check that no
+other package publishes a name the build does still applies, as for any
+build.
 
 The files' `pkgbase` is not checked: a package can be tracked under a name
 that is not its pkgbase, and the names its source builds bound what it may
@@ -149,12 +150,13 @@ Content-Type: multipart/form-data   (one part per file, named by its filename)
    in. A rename that fails is written to the build log, and publishing then
    fails the build as it would after a restart here.
 5. Publishing runs as for a worker's build (`publish_build`): the filename and
-   content checks, the "already produced by another package" check, the
-   repository update through `Repository`, retiring the files the build no
-   longer produces, `PUBLISHING -> SUCCESSFUL`, and `trigger_dependents`. The
-   request waits for that first attempt and answers with the build's number and
-   state; a recoverable failure continues in the background through
-   `publish_with_recovery`, and the answer says `PUBLISHING`.
+   content checks, the check that no other package publishes one of its
+   names, the repository update through `Repository`, retiring the files the
+   build no longer produces, `PUBLISHING -> SUCCESSFUL`, and
+   `trigger_dependents`. The request waits for that first attempt and answers
+   with the build's number and state; a recoverable failure continues in the
+   background through `publish_with_recovery`, and the answer says
+   `PUBLISHING`.
 
 Crash-safety follows from the order: the build row exists only once every file
 is staged and has passed those checks, and a build is `PUBLISHING` only with a

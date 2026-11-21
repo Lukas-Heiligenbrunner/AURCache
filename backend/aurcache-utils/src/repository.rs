@@ -17,6 +17,7 @@ use aurcache_db::prelude::Files;
 use aurcache_signing::InstanceKey;
 use pacman_mirrors::platforms::Platform;
 use pacman_repo_utils::{ListedPackage, PackageEntry};
+use sea_orm::sea_query::LikeExpr;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     QueryFilter, TransactionTrait,
@@ -234,31 +235,73 @@ pub struct Update<'a> {
     changes: Changes,
 }
 
+/// The `files` rows on `platform` of any of the package names `pkgnames`.
+///
+/// A filename is `<pkgname>-<pkgver>-<pkgrel>-<arch>.pkg.tar.*`, so the rows
+/// are found by prefix ([`name_prefix`]) and the name read back from each:
+/// `foo-` is also the start of `foo-bar`'s files, and SQLite's `LIKE` ignores
+/// ASCII case.
+pub(crate) async fn files_named<C: ConnectionTrait>(
+    db: &C,
+    platform: Platform,
+    pkgnames: &[String],
+) -> Result<Vec<files::Model>, sea_orm::DbErr> {
+    if pkgnames.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut prefixes = sea_orm::Condition::any();
+    for name in pkgnames {
+        prefixes = prefixes.add(files::Column::Filename.like(name_prefix(name)));
+    }
+    let rows = Files::find()
+        .filter(files::Column::Platform.eq(platform))
+        .filter(prefixes)
+        .all(db)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            crate::publish::parse_arch_pkg(&row.filename)
+                .is_ok_and(|named| pkgnames.contains(&named.name))
+        })
+        .collect())
+}
+
+/// The `LIKE` pattern for filenames starting `<name>-`, with an explicit
+/// escape character, so that `%` and `_` in the name match only themselves on
+/// every backend, and a backend's default escape (PostgreSQL's `\`) is an
+/// ordinary character.
+fn name_prefix(name: &str) -> LikeExpr {
+    const ESCAPE: char = '!';
+    let mut pattern = String::with_capacity(name.len() + 2);
+    for c in name.chars() {
+        if matches!(c, ESCAPE | '%' | '_') {
+            pattern.push(ESCAPE);
+        }
+        pattern.push(c);
+    }
+    pattern.push_str("-%");
+    LikeExpr::new(pattern).escape(ESCAPE)
+}
+
 impl Update<'_> {
-    /// Which of `filenames` are already published on `platform`, keyed by
-    /// filename.
+    /// The files published on `platform` for any of the package names
+    /// `pkgnames`, whichever package publishes them.
     ///
-    /// One query rather than one per file: a split package publishes several
+    /// One query rather than one per name: a split package publishes several
     /// outputs, and planning runs under the repository lock, where every
     /// round trip lengthens the critical section. Stamped with this update
     /// like the single-file read, so the retire discipline is unchanged.
-    pub async fn published_files<C: ConnectionTrait>(
+    pub async fn published_files_named<C: ConnectionTrait>(
         &self,
         db: &C,
         platform: Platform,
-        filenames: &[String],
-    ) -> anyhow::Result<HashMap<String, PublishedFile>> {
-        if filenames.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let rows = Files::find()
-            .filter(files::Column::Filename.is_in(filenames.iter().map(String::as_str)))
-            .filter(files::Column::Platform.eq(platform))
-            .all(db)
-            .await?;
-        Ok(rows
+        pkgnames: &[String],
+    ) -> anyhow::Result<Vec<PublishedFile>> {
+        Ok(files_named(db, platform, pkgnames)
+            .await?
             .into_iter()
-            .map(|row| (row.filename.clone(), self.published(row)))
+            .map(|row| self.published(row))
             .collect())
     }
 
@@ -1421,6 +1464,49 @@ mod tests {
     use sea_orm::Statement;
     use std::io::Read;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// `%`, `_` and the escape character itself match only themselves, as
+    /// both backends are told.
+    #[test]
+    fn a_name_prefix_escapes_what_like_would_match_otherwise() {
+        use sea_orm::{DbBackend, QueryTrait};
+        for backend in [DbBackend::Sqlite, DbBackend::Postgres] {
+            let sql = Files::find()
+                .filter(files::Column::Filename.like(name_prefix("a_b%c!d")))
+                .build(backend)
+                .to_string();
+            assert!(
+                sql.contains("LIKE 'a!_b!%c!!d-%' ESCAPE '!'"),
+                "{backend:?}: {sql}"
+            );
+        }
+    }
+
+    /// A name with `_` in it finds its own files and not those of a name it
+    /// would match unescaped.
+    #[tokio::test]
+    async fn files_named_matches_names_exactly() {
+        let db = aurcache_db::testing::memory_db().await;
+        let pkg = aurcache_db::testing::package("p").insert(&db).await;
+        for filename in [
+            "a_b-1.0-1-x86_64.pkg.tar.zst",
+            "axb-1.0-1-x86_64.pkg.tar.zst",
+            "a_b-extra-1.0-1-x86_64.pkg.tar.zst",
+        ] {
+            db.execute_unprepared(&format!(
+                "INSERT INTO files (filename, platform, package_id) \
+                 VALUES ('{filename}', 'x86_64', {})",
+                pkg.id
+            ))
+            .await
+            .unwrap();
+        }
+        let found = files_named(&db, Platform::X86_64, &["a_b".to_string()])
+            .await
+            .unwrap();
+        let names: Vec<&str> = found.iter().map(|row| row.filename.as_str()).collect();
+        assert_eq!(names, ["a_b-1.0-1-x86_64.pkg.tar.zst"]);
+    }
 
     /// A minimal valid `.pkg.tar.zst`: a zstd-compressed tar holding a
     /// `.PKGINFO` with a pkgname and pkgver, which is all a database entry needs.

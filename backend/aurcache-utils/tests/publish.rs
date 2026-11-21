@@ -6,6 +6,7 @@ use aurcache_common::build_state::BuildState;
 use aurcache_db::prelude::{Builds, Files, Packages};
 use aurcache_utils::publish::{interrupted, publish_build, publish_with_recovery};
 use aurcache_utils::repository::Repository;
+use pacman_mirrors::platforms::Platform;
 use sea_orm::{ConnectionTrait, DatabaseConnection, EntityTrait};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -615,4 +616,307 @@ async fn a_background_publication_retries_failed_dependent_promotion() {
         .unwrap();
     assert_eq!(status(&db, 2).await, BuildState::Enqueued);
     assert!(!repo.staging_dir(1).exists());
+}
+
+async fn log_of(pkgbase: &str, number: i32) -> String {
+    std::fs::read_to_string(aurcache_common::fs::build_log_path(pkgbase, number))
+        .unwrap_or_default()
+}
+
+/// A package name another package publishes is refused whatever its version:
+/// two files of one name would be two entries of it in `repo.db`. The files
+/// say, not the names a source builds: a split package its source dropped
+/// is its package's for as long as that still publishes it.
+#[tokio::test]
+async fn a_name_another_package_still_publishes_fails_the_build() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    // `keeper` once built `dropped`, and its source no longer does.
+    package(&db, 1, "keeper").await;
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (filename, platform, package_id) VALUES ('{}', 'x86_64', 1)",
+        filename("dropped", "1.0-1")
+    ))
+    .await
+    .unwrap();
+    package(&db, 2, "taker").await;
+    db.execute_unprepared(
+        "UPDATE packages SET split_packages = '[\"taker\",\"dropped\"]' WHERE id = 2",
+    )
+    .await
+    .unwrap();
+    publishing_build(&db, 1, 2).await;
+    stage(&repo, 1, "dropped", "2.0-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("taker", 1).await;
+    assert!(
+        log.contains("'dropped' is already published by the package 'keeper'"),
+        "{log}"
+    );
+    let rows = Files::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].package_id, 1, "the other package keeps its file");
+    assert!(listed(tmp.path()).is_empty(), "nothing reached repo.db");
+}
+
+/// A name that moved to a dependency of the package publishing it is taken
+/// over: the dependent's file of it, another version, leaves the repository
+/// rather than staying beside the new one.
+#[tokio::test]
+async fn a_name_a_dependent_publishes_is_taken_over() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "parent").await;
+    package(&db, 2, "hello").await;
+    db.execute_unprepared(
+        "INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) \
+         VALUES (1, 2, '')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (filename, platform, package_id) VALUES ('{}', 'x86_64', 1)",
+        filename("hello", "1.0-1")
+    ))
+    .await
+    .unwrap();
+    publishing_build(&db, 1, 2).await;
+    stage(&repo, 1, "hello", "2.12.1-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(
+        status(&db, 1).await,
+        BuildState::Successful,
+        "{}",
+        log_of("hello", 1).await
+    );
+    let rows = Files::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].filename, filename("hello", "2.12.1-1"));
+    assert_eq!(rows[0].package_id, 2);
+    assert_eq!(listed(tmp.path()), ["hello-2.12.1-1"]);
+}
+
+/// A name that moved to a dependency, in the very file the dependent
+/// publishes it in, is taken over as it is: the file becomes the
+/// dependency's, and stays in the repository.
+#[tokio::test]
+async fn a_dependents_file_of_a_name_is_taken_over_when_staged_again() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "parent").await;
+    package(&db, 2, "hello").await;
+    db.execute_unprepared(
+        "INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) \
+         VALUES (1, 2, '')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (id, filename, platform, package_id) VALUES (5, '{}', 'x86_64', 1)",
+        filename("hello", "2.12.1-1")
+    ))
+    .await
+    .unwrap();
+    publishing_build(&db, 1, 2).await;
+    stage(&repo, 1, "hello", "2.12.1-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(
+        status(&db, 1).await,
+        BuildState::Successful,
+        "{}",
+        log_of("hello", 1).await
+    );
+    let rows = Files::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].id, 5, "the dependent's row is reassigned");
+    assert_eq!(rows[0].filename, filename("hello", "2.12.1-1"));
+    assert_eq!(rows[0].package_id, 2);
+    assert_eq!(listed(tmp.path()), ["hello-2.12.1-1"]);
+    assert!(
+        tmp.path()
+            .join("x86_64")
+            .join(filename("hello", "2.12.1-1"))
+            .is_file()
+    );
+}
+
+/// One build may not stage two files of one package name, whichever
+/// versions they are: `repo.db` would list both.
+#[tokio::test]
+async fn a_build_staging_a_name_twice_fails() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "twice").await;
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "twice", "1.0-1");
+    stage(&repo, 1, "twice", "2.0-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("twice", 1).await;
+    assert!(
+        log.contains(&format!(
+            "{} and {} are both 'twice'",
+            filename("twice", "1.0-1"),
+            filename("twice", "2.0-1")
+        )),
+        "{log}"
+    );
+    assert!(Files::find().all(&db).await.unwrap().is_empty());
+    assert!(listed(tmp.path()).is_empty(), "nothing reached repo.db");
+}
+
+/// A dependency may not take over a name its dependent's own source still
+/// builds: only a name that moved from the dependent to it.
+#[tokio::test]
+async fn a_dependency_cannot_take_its_dependents_own_name() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "foo").await;
+    package(&db, 2, "bar").await;
+    db.execute_unprepared("UPDATE packages SET split_packages = '[\"bar\",\"foo\"]' WHERE id = 2")
+        .await
+        .unwrap();
+    db.execute_unprepared(
+        "INSERT INTO dependencies (dependent_id, dependee_id, version_constraint) VALUES (1, 2, '')",
+    )
+    .await
+    .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (filename, platform, package_id) VALUES ('{}', 'x86_64', 1)",
+        filename("foo", "1.0-1")
+    ))
+    .await
+    .unwrap();
+    publishing_build(&db, 1, 2).await;
+    stage(&repo, 1, "bar", "1.0-1");
+    stage(&repo, 1, "foo", "9.9-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("bar", 1).await;
+    assert!(
+        log.contains("'foo' is already published by the package 'foo'"),
+        "{log}"
+    );
+    let rows = Files::find().all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].package_id, 1, "foo keeps its file");
+    assert!(listed(tmp.path()).is_empty(), "nothing reached repo.db");
+}
+
+/// Two packages that both publish a name each have their builds of it
+/// refused, whatever version either builds -- another of the other's or the
+/// very file it publishes -- and keep the files they have; the startup
+/// warning names them.
+#[tokio::test]
+async fn packages_sharing_a_name_are_both_refused_it() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    for (id, name) in [(1, "a"), (2, "b")] {
+        package(&db, id, name).await;
+        db.execute_unprepared(&format!(
+            "UPDATE packages SET split_packages = '[\"{name}\",\"x\"]' WHERE id = {id}"
+        ))
+        .await
+        .unwrap();
+    }
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (filename, platform, package_id) VALUES \
+         ('{}', 'x86_64', 1), ('{}', 'x86_64', 2)",
+        filename("x", "1.0-1"),
+        filename("x", "2.0-1")
+    ))
+    .await
+    .unwrap();
+
+    publishing_build(&db, 1, 1).await;
+    stage(&repo, 1, "a", "1.1-1");
+    stage(&repo, 1, "x", "1.1-1");
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+    assert_eq!(status(&db, 1).await, BuildState::Failed);
+    let log = log_of("a", 1).await;
+    assert!(
+        log.contains("'x' is already published by the package 'b'"),
+        "{log}"
+    );
+
+    publishing_build(&db, 2, 2).await;
+    stage(&repo, 2, "b", "1.0-1");
+    stage(&repo, 2, "x", "1.0-1");
+    publish_build(&db, &repo, &ActivityLog::discarding(), 2).await;
+    assert_eq!(status(&db, 2).await, BuildState::Failed);
+    let log = log_of("b", 2).await;
+    assert!(
+        log.contains("'x' is already published by the package 'a'"),
+        "{log}"
+    );
+
+    let rows = Files::find().all(&db).await.unwrap();
+    let x_files_of = |pkg_id: i32| -> Vec<&str> {
+        rows.iter()
+            .filter(|row| row.package_id == pkg_id && row.filename.starts_with("x-"))
+            .map(|row| row.filename.as_str())
+            .collect()
+    };
+    assert_eq!(x_files_of(1), [filename("x", "1.0-1")], "a keeps its own");
+    assert_eq!(x_files_of(2), [filename("x", "2.0-1")], "b keeps its own");
+    assert!(listed(tmp.path()).is_empty(), "nothing reached repo.db");
+    let shared = aurcache_utils::publish::shared_names(&db).await.unwrap();
+    assert_eq!(
+        shared,
+        [aurcache_utils::publish::SharedName {
+            name: "x".to_string(),
+            platform: Platform::X86_64,
+            packages: vec!["a".to_string(), "b".to_string()],
+        }],
+        "the startup warning names them"
+    );
+}
+
+/// The name rule is per platform, as `repo.db` is: a package may publish a
+/// name another package publishes only on another platform.
+#[tokio::test]
+async fn a_name_published_on_another_platform_is_not_taken() {
+    let db = db().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::new(tmp.path());
+    package(&db, 1, "a").await;
+    package(&db, 2, "b").await;
+    db.execute_unprepared("UPDATE packages SET split_packages = '[\"b\",\"a\"]' WHERE id = 2")
+        .await
+        .unwrap();
+    db.execute_unprepared(&format!(
+        "INSERT INTO files (filename, platform, package_id) VALUES ('{}', 'aarch64', 1)",
+        "a-1.0-1-aarch64.pkg.tar.zst"
+    ))
+    .await
+    .unwrap();
+    publishing_build(&db, 1, 2).await;
+    stage(&repo, 1, "b", "1.0-1");
+    stage(&repo, 1, "a", "1.0-1");
+
+    publish_build(&db, &repo, &ActivityLog::discarding(), 1).await;
+
+    assert_eq!(
+        status(&db, 1).await,
+        BuildState::Successful,
+        "{}",
+        log_of("b", 1).await
+    );
 }

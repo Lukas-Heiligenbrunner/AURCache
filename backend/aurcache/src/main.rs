@@ -160,6 +160,7 @@ async fn main() {
 
     // Builds a restart caught mid-publish pick up where they were.
     startup::resume_publishing(&db, &repo, &activity).await;
+    startup::warn_about_shared_names(&db).await;
 
     // What was published before the repository signed, or under another
     // key, is signed in the background; until it is, the repository says so.

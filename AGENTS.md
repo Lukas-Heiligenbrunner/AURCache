@@ -278,7 +278,8 @@ defect this frontend has had was of that kind.
   build logs and the source checkout. It refuses outright while any package outside the set it is given
   still depends on one of them -- all of that goes together or none of it does -- so collecting a chain
   or a cycle passes the whole set at once, as `live_check` does. An orphaned `files` row is not a
-  harmless leak: publishing reads it as "already produced by another package" unless its owner is gone.
+  harmless leak: publishing reads it as that package still publishing the name ("already published by
+  the package ...") unless its owner is gone.
 - Migrations are upstream 0.5.0's seven, then `m20261008_000000_from_0_5`, which takes a 0.5.0
   database to the current schema in one step (it replaced the fork's own chain, which no public
   instance ran). A new migration goes after it. Read and write rows in a migration through explicit

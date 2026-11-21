@@ -256,6 +256,26 @@ pub async fn resume_publishing(
     }
 }
 
+/// Warn about every package name more than one package publishes on a
+/// platform: `repo.db` lists it more than once, and every build of those
+/// packages that publishes it fails until all but one of them are removed.
+pub async fn warn_about_shared_names(db: &DatabaseConnection) {
+    match publish::shared_names(db).await {
+        Ok(shared) => {
+            for name in shared {
+                warn!(
+                    "'{}' is published on {} by more than one package ({}); \
+                     their builds of it fail until all but one of them are removed",
+                    name.name,
+                    name.platform,
+                    name.packages.join(", ")
+                );
+            }
+        }
+        Err(e) => warn!("could not look for package names published twice: {e}"),
+    }
+}
+
 /// See [`operations::close_orphaned`]; this only reports what it did.
 pub async fn close_orphaned_operations(db: &DatabaseConnection) {
     match operations::close_orphaned(db).await {
