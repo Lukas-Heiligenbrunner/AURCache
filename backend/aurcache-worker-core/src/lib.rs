@@ -12,6 +12,7 @@
 //! See `design/implemented/remote-workers.md`.
 
 pub mod artifacts;
+pub mod beneath;
 /// Streaming a build's output into its log.
 pub mod build_log;
 pub mod client;

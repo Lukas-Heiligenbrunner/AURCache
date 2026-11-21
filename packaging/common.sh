@@ -114,5 +114,49 @@ _aurcache_cargo_build() {
     # binutils over a foreign binary.
     export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C strip=symbols"
 
-    cargo build --frozen --release --target "$target" "$@"
+    cargo build --frozen --release --target "$target" "$@" || return 1
+    if _aurcache_ships_agent "$@"; then
+        _aurcache_build_agent "$target" || return 1
+    fi
+}
+
+# Whether the cargo arguments name a package that ships the build agent.
+#
+# The Docker worker copies the agent into each build's container, so its
+# package carries one. The chroot worker runs none.
+_aurcache_ships_agent() {
+    local arg previous=
+    for arg in "$@"; do
+        case $previous:$arg in
+            -p:aurcache-worker-docker | --package:aurcache-worker-docker) return 0 ;;
+        esac
+        case $arg in
+            -paurcache-worker-docker | --package=aurcache-worker-docker) return 0 ;;
+        esac
+        previous=$arg
+    done
+    return 1
+}
+
+# Build the build agent for the target triple `$1`, linked statically against
+# glibc, and leave it in $(_aurcache_release_dir) beside the other binaries.
+# Run from _aurcache_cargo_build, in the environment it set up.
+#
+# Static because it runs inside build containers whose image is not the
+# worker's, so it cannot rely on their libc. `--target` is what keeps
+# `+crt-static` off build scripts and proc macros, which cannot be linked
+# that way.
+#
+# In a target directory of its own: its flags differ from the other
+# binaries', and in a shared one each build would recompile the dependencies
+# both use.
+_aurcache_build_agent() {
+    local target=$1 release
+    release=$(_aurcache_release_dir) || return 1
+
+    CARGO_TARGET_DIR=target/agent \
+        RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+        cargo build --frozen --release --target "$target" -p aurcache-build-agent || return 1
+    install -Dm755 "target/agent/$target/release/aurcache-build-agent" \
+        "$release/aurcache-build-agent"
 }

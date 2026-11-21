@@ -116,9 +116,8 @@ no polling and no blind spot.
 
 **A dash means not reported**, not zero. That happens when:
 
-- the build ran on 0.5, before the upgrade, or on the hybrid image's container
-  builder — Docker exposes no peak figure on cgroup v2, where `max_usage` no
-  longer exists;
+- the build ran on 0.5, before the upgrade, or on a Docker worker that does not
+  build with the build agent yet;
 - the worker could not prepare a cgroup subtree. A container needs
   `privileged`, which `mkarchroot` and `arch-nspawn` already require, so the
   published images qualify. A native install needs `Delegate=yes` on the unit,

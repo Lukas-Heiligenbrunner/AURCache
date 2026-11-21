@@ -45,3 +45,8 @@ test-browser:
 # The storage pool and cgroup tests, as root in a privileged container
 test-kernel:
   ./scripts/test-kernel.sh
+
+# The build agent, statically linked, running builds in the builder image
+# under a build container's flags (docker)
+test-agent:
+  ./scripts/test-build-agent.sh

@@ -88,6 +88,42 @@ pub fn source_label(source: &SourceData) -> String {
     }
 }
 
+/// The refs a name may mean, in the order the server's `ls_remote` prefers them.
+///
+/// It matters that a worker tries them in this order: `git rev-parse` resolves
+/// a bare name by its own rules, which prefer a tag over a branch, while
+/// `ls_remote` walks the remote's advertisement preferring `refs/heads`. A
+/// repository carrying both a branch and a tag of one name would then have the
+/// two ends disagree forever, each rebuild "detecting" a move that never
+/// happened.
+///
+/// There is deliberately no `HEAD` fallback: an unknown ref resolves to
+/// nothing rather than to a mirror's own `HEAD`, which would track the default
+/// branch tip.
+#[must_use]
+pub fn ref_candidates(git_ref: &str) -> Vec<String> {
+    if git_ref == "HEAD" {
+        return vec!["HEAD".to_string()];
+    }
+    let mut candidates = Vec::new();
+    if git_ref.starts_with("refs/") {
+        candidates.push(git_ref.to_string());
+    }
+    candidates.push(format!("refs/heads/{git_ref}"));
+    candidates.push(format!("refs/tags/{git_ref}"));
+    candidates
+}
+
+/// Whether `text` is a git object name: SHA-1 or SHA-256, in hexadecimal.
+///
+/// What an agent-run build reports as a VCS source's commit, and what its
+/// worker passes on to the server: anything else in its place was not git's
+/// answer.
+#[must_use]
+pub fn is_object_name(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl From<GitSourceSpec> for SourceData {
     fn from(spec: GitSourceSpec) -> Self {
         Self::Git { spec }
@@ -142,7 +178,55 @@ impl Display for SourceData {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceData, looks_like_git_url};
+    use super::{SourceData, is_object_name, looks_like_git_url, ref_candidates};
+
+    /// Branches before tags, and the literal only when it is already a full
+    /// ref path -- the order the server resolves in.
+    #[test]
+    fn candidates_prefer_a_branch_the_way_the_server_does() {
+        assert_eq!(
+            ref_candidates("main"),
+            vec!["refs/heads/main".to_string(), "refs/tags/main".to_string()]
+        );
+        assert_eq!(
+            ref_candidates("refs/heads/main")
+                .first()
+                .map(String::as_str),
+            Some("refs/heads/main"),
+            "a fragment that already names a full ref is tried as given"
+        );
+        assert_eq!(
+            ref_candidates("HEAD"),
+            vec!["HEAD".to_string()],
+            "and an unqualified HEAD still ends at the mirror's own HEAD"
+        );
+    }
+
+    /// An unknown ref resolves to nothing rather than to the mirror's HEAD,
+    /// which would make a `#tag=<sha>` pin track the default branch tip.
+    #[test]
+    fn unknown_refs_do_not_fall_back_to_head() {
+        for git_ref in ["6e481d6bf0a69f8c9bd2866eb491e1e4e9b0717f", "no-such-branch"] {
+            assert!(
+                !ref_candidates(git_ref)
+                    .iter()
+                    .any(|candidate| candidate == "HEAD"),
+                "{git_ref} must not resolve to HEAD"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_object_name_is_one() {
+        assert!(is_object_name("9fceb02d0ae598e95dc970b74767f19372d61af8"));
+        assert!(is_object_name(&"a".repeat(64)));
+        assert!(!is_object_name(""));
+        assert!(!is_object_name("9fceb02"));
+        assert!(!is_object_name(
+            "9fceb02d0ae598e95dc970b74767f19372d61af8\nand more"
+        ));
+        assert!(!is_object_name(&"g".repeat(40)));
+    }
 
     #[test]
     fn detects_scp_like_git_urls() {

@@ -4,8 +4,8 @@ version = "0.6.0"
 edition = "2024"
 license.workspace = true
 
-# The Docker worker: a container per build. Its own crate, so the chroot
-# worker never links a Docker client.
+# The Docker worker: a container per build, run by the build agent. Its own
+# crate, so the chroot worker never links a Docker client.
 
 [[bin]]
 name = "aurcache-worker-docker"
@@ -20,5 +20,13 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = "0.3"
 bollard = "0.21"
+bytes = "1.12.1"
+tokio-util = { version = "0.7.20", features = ["io"] }
 aurcache-common = { path = "../aurcache-common" }
 aurcache-worker-core = { path = "../aurcache-worker-core" }
+aurcache-worker-container = { path = "../aurcache-worker-container" }
+aurcache-build-agent = { path = "../aurcache-build-agent" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+libc = "0.2"

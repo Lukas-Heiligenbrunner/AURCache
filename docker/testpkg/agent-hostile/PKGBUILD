@@ -1,0 +1,205 @@
+# Regression fixture for the build agent. NOT a real package.
+#
+# `scripts/test-build-agent.sh` builds this with `aurcache-build-agent build`
+# in a container under the flags a worker gives one. `build()` runs as the build
+# user and tries what a hostile package would: becoming root, writing the
+# report, and getting root's pacman helper to do anything but install named
+# dependencies. It prints one `probe name=value`
+# line per attempt, and the script asserts each of them.
+#
+# Both polarities: the same build shows what must work. `tree` is not in the
+# builder image, so it is only there if the helper installed it; the git
+# source is only cloned if makepkg ran with a working environment.
+#
+# With AURCACHE_TEST_REPO set (by the job's makepkg.conf), it depends on
+# `aurcache-agent-thief`, from the test's own repository, whose install
+# scriptlet runs as root, and reports whether the image's upgrade saw that
+# repository.
+#
+# It expects what the script sets up: the work directory at /work, and a
+# repository at /srv/aurcache-agent-test/upstream.git.
+pkgname=aurcache-agent-hostile
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Hostile fixture for the build agent's container test"
+arch=('any')
+url="https://github.com/Lukas-Heiligenbrunner/AURCache"
+license=('GPL-3.0-or-later')
+makedepends=('tree' 'git')
+source=("fixture::git+file:///srv/aurcache-agent-test/upstream.git")
+sha256sums=('SKIP')
+if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
+  makedepends+=('aurcache-agent-thief')
+fi
+
+_work=/work
+_scratch=/var/lib/aurcache-build
+_thief=/var/tmp/aurcache-thief
+
+_probe() {
+  printf 'probe %s=%s\n' "$1" "$2"
+}
+
+# One line of /proc/self/status.
+_status() {
+  awk -v field="$1:" '$1 == field { print $2 }' /proc/self/status
+}
+
+# Try a command that must fail: `blocked` when it did, `worked` when it did not.
+# makepkg aborts the build on any command that fails outside a condition, so
+# every attempt is made inside one.
+_attempt() {
+  local name=$1
+  shift
+  if "$@" >/dev/null 2>&1; then
+    _probe "$name" worked
+  else
+    _probe "$name" blocked
+  fi
+}
+
+# Ask root's helper for something, the way makepkg does: `refused` when the
+# helper would not run it, `ran:<pacman's status>` when it did.
+_ask() {
+  local name=$1 code=0
+  shift
+  "${PACMAN_AUTH[@]}" "$@" >/dev/null 2>&1 || code=$?
+  if ((code == 126)); then
+    _probe "$name" refused
+  else
+    _probe "$name" "ran:$code"
+  fi
+}
+
+_write() {
+  : >"$1"
+}
+
+_append() {
+  : >>"$1"
+}
+
+# A package whose install script, were root ever to install it, leaves a mark.
+_make_evil_package() {
+  mkdir -p "$srcdir/evil"
+  (
+    cd "$srcdir/evil"
+    printf '%s\n' 'pkgname = aurcache-agent-evil' 'pkgver = 1-1' 'pkgdesc = evil' \
+      'builddate = 0' 'size = 0' 'arch = any' >.PKGINFO
+    printf '%s\n' 'post_install() {' '  touch /aurcache-agent-evil-ran' '}' >.INSTALL
+    bsdtar -cf - .PKGINFO .INSTALL | zstd -q >"$srcdir/aurcache-agent-evil-1-1-any.pkg.tar.zst"
+  )
+}
+
+build() {
+  local evil="$srcdir/aurcache-agent-evil-1-1-any.pkg.tar.zst"
+
+  # What this process is: the build user, with nothing left of root.
+  _probe uid "$(id -u)"
+  _probe gid "$(id -g)"
+  _probe groups "$(id -G)"
+  _probe capeff "$(_status CapEff)"
+  _probe capprm "$(_status CapPrm)"
+  _probe capinh "$(_status CapInh)"
+  _probe capamb "$(_status CapAmb)"
+  _probe nonewprivs "$(_status NoNewPrivs)"
+
+  # No way back to root.
+  _attempt sudo sudo -n true
+  _attempt su su -c true root
+  _attempt kill-init kill -KILL 1
+  _attempt term-init kill -TERM 1
+  _attempt read-init-environment cat /proc/1/environ
+  _attempt write-passwd _append /etc/passwd
+  _attempt write-pacman-conf _append /etc/pacman.conf
+
+  if [[ -n ${AURCACHE_TEST_REPO:-} ]]; then
+    # The upgrade of the image saw the job's repositories and not the one
+    # this build's dependency came from.
+    _probe build-conf-repository "$(grep -c '^\[thief\]' /etc/pacman.conf)"
+    _probe upgrade-conf-repository "$(grep -c '^\[thief\]' /etc/aurcache/pacman-upgrade.conf)"
+    if [[ -e /var/tmp/aurcache-upgrade-bait ]]; then
+      _probe upgrade-bait taken
+    else
+      _probe upgrade-bait left
+    fi
+    _probe thief-ran "$(cat "$_thief/ran" 2>/dev/null || echo no)"
+  fi
+
+  # The work directory is root's: nothing beside `out/`, nothing in it, and
+  # no renaming it away. `pkg/` is where packages go, and is the build's.
+  _attempt write-report _write "$_work/out/report.json"
+  _attempt rename-out mv "$_work/out" "$_work/out.moved"
+  _attempt write-work _write "$_work/planted"
+  _attempt write-log _append "$_work/log/build.log"
+  _attempt remove-log rm -f "$_work/log/build.log"
+  _attempt write-makepkg-conf _append "$(dirname "$BUILDDIR")/makepkg.conf"
+  _attempt remove-helper-socket rm -f "$AURCACHE_PACMAN_SOCKET"
+  _attempt write-pkg _write "$_work/pkg/.probe"
+  rm -f "$_work/pkg/.probe"
+
+  # The helper: `-S --asdeps <names>` and nothing else.
+  _make_evil_package
+  _ask helper-upgrade /usr/bin/pacman -U "$evil"
+  _ask helper-upgrade-noconfirm /usr/bin/pacman --noconfirm -U "$evil"
+  _ask helper-config /usr/bin/pacman --config "$srcdir/pacman.conf" -S --asdeps tree
+  _ask helper-path /usr/bin/pacman -S --asdeps "$evil"
+  _ask helper-relative-path /usr/bin/pacman -S --asdeps ./evil.pkg.tar.zst
+  _ask helper-repo /usr/bin/pacman -S --asdeps extra/tree
+  _ask helper-remove /usr/bin/pacman --noconfirm -Rnu tree
+  _ask helper-explicit /usr/bin/pacman -S tree
+  _ask helper-refresh /usr/bin/pacman -Sy --asdeps tree
+  _ask helper-root /usr/bin/pacman --root "$srcdir/root" -S --asdeps tree
+  _ask helper-dbpath /usr/bin/pacman -S --asdeps tree --dbpath "$srcdir/db"
+  _ask helper-overwrite /usr/bin/pacman -S --asdeps --overwrite '*' tree
+  _ask helper-hookdir /usr/bin/pacman -S --asdeps --hookdir "$srcdir/hooks" tree
+  _ask helper-shell /usr/bin/pacman -S --asdeps 'tree;touch /aurcache-agent-evil-ran'
+  _ask helper-not-pacman /usr/bin/sh -c 'touch /aurcache-agent-evil-ran'
+  _ask helper-nothing
+  # What makepkg itself sends is run.
+  _ask helper-asdeps /usr/bin/pacman --noconfirm --noprogressbar -S --asdeps tree
+  if [[ -e /aurcache-agent-evil-ran ]]; then
+    _probe install-script ran
+  else
+    _probe install-script not-run
+  fi
+
+  # What must have worked for the build to get here.
+  if tree --version >/dev/null 2>&1; then
+    _probe dependency installed
+  else
+    _probe dependency missing
+  fi
+  if [[ -f $srcdir/fixture/README ]]; then
+    _probe source cloned
+  else
+    _probe source missing
+  fi
+
+  # Processes orphaned in here become the agent's children, since it is the
+  # container's first process, and it collects them when they end.
+  for _ in 1 2 3 4 5; do
+    (sleep 0.2 &)
+  done
+  sleep 2
+  _probe zombies "$(ps -e -o stat= | grep -c '^Z')"
+
+  # Things in pkg/ that are not packages: the agent hands back files only,
+  # and follows no link.
+  ln -s /etc/passwd "$_work/pkg/aurcache-agent-link-1-1-any.pkg.tar.zst"
+  mkdir -p "$_work/pkg/not-a-package/inside"
+
+  # Something the build leaves running, holding its output open: the agent
+  # ends it before it reports.
+  (setsid sleep 3600 &)
+
+  # For the legs that stop a build half-way.
+  if [[ -n ${AURCACHE_TEST_LINGER:-} ]]; then
+    _probe lingering "$AURCACHE_TEST_LINGER"
+    sleep "$AURCACHE_TEST_LINGER"
+  fi
+}
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/aurcache-agent-hostile/marker"
+}
