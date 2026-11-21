@@ -57,6 +57,12 @@ impl From<&Pkginfo> for PackageMeta {
 /// record -- an archive may hold. A real one is a path, a few hundred bytes.
 const MAX_EXTENSION_BYTES: u64 = 64 * 1024;
 
+/// How much of an archive, decompressed, [`read_package_meta`] reads looking
+/// for the `.PKGINFO`. makepkg writes only `.BUILDINFO` and `.MTREE` before
+/// it, and the second is compressed: a few MiB even for a package of many
+/// thousands of files.
+const META_SEARCH_BYTES: u64 = 64 << 20;
+
 /// The most memory xz's decoder may take. An xz stream names the dictionary
 /// it needs, up to 1.5 GiB, and the decoder allocates all of it up front; a
 /// real package's is at most `xz -9`'s 64 MiB.
@@ -124,6 +130,13 @@ fn decompress(pkgfile: &Path) -> anyhow::Result<Box<dyn Read>> {
     })
 }
 
+/// Whether [`walk`] goes on to the next member.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    Next,
+    Stop,
+}
+
 /// What the extension headers read since the last member say about the next
 /// one.
 #[derive(Default)]
@@ -180,7 +193,7 @@ fn is_extension(kind: tar::EntryType) -> bool {
 fn walk<R: Read>(
     archive: &mut Archive<R>,
     limits: &Limits,
-    mut visit: impl FnMut(&str, &mut tar::Entry<'_, R>) -> anyhow::Result<()>,
+    mut visit: impl FnMut(&str, &mut tar::Entry<'_, R>) -> anyhow::Result<Walk>,
 ) -> anyhow::Result<()> {
     let mut pending = Pending::default();
     let mut headers: u64 = 0;
@@ -209,9 +222,36 @@ fn walk<R: Read>(
             Some(path) => path,
             None => entry.path()?.display().to_string(),
         };
-        visit(&path, &mut entry)?;
+        if visit(&path, &mut entry)? == Walk::Stop {
+            break;
+        }
     }
     Ok(())
+}
+
+/// Read only a package's `.PKGINFO`, stopping as soon as it is found.
+///
+/// makepkg writes it after `.BUILDINFO` and `.MTREE` and before any of the
+/// package's files, so this reads a small part of an archive however large
+/// the package is -- and no more than [`META_SEARCH_BYTES`] of one that puts
+/// it elsewhere: cheap enough to check a file before deciding to read it in
+/// full with [`describe_package`].
+pub fn read_package_meta(pkgfile: &Path) -> anyhow::Result<PackageMeta> {
+    let mut archive = Archive::new(decompress(pkgfile)?.take(META_SEARCH_BYTES));
+    let mut meta = None;
+    walk(&mut archive, &Limits::DEFAULT, |path, entry| {
+        if path != ".PKGINFO" {
+            return Ok(Walk::Next);
+        }
+        let mut pkginfo = Pkginfo::new();
+        pkginfo.parse(entry)?;
+        if !pkginfo.valid() {
+            bail!("its .PKGINFO names no pkgname or pkgver");
+        }
+        meta = Some(PackageMeta::from(&pkginfo));
+        Ok(Walk::Stop)
+    })?;
+    meta.ok_or_else(|| anyhow!("it has no .PKGINFO before its files"))
 }
 
 /// Read a package file into the entry it gets in `repo.db` and `repo.files`:
@@ -302,7 +342,7 @@ fn read_contents<R: Read>(archive: &mut Archive<R>, limits: &Limits) -> anyhow::
         } else if !path.starts_with('.') {
             listing.push(path)?;
         }
-        Ok(())
+        Ok(Walk::Next)
     })?;
     Ok(Contents {
         pkginfo: pkginfo.unwrap_or_default(),
@@ -532,6 +572,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = write(&tmp, "demo-1.0-1-x86_64.pkg.tar.zst", &bytes);
 
+        let meta = read_package_meta(&path).unwrap_err().to_string();
+        assert!(meta.contains("extension header"), "{meta}");
         let described = describe_package(&path).unwrap_err().to_string();
         assert!(described.contains("extension header"), "{described}");
     }
@@ -583,6 +625,19 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("more than one .PKGINFO"), "{error}");
+    }
+
+    /// makepkg's order: the `.PKGINFO` after `.BUILDINFO` and `.MTREE`.
+    #[test]
+    fn package_meta_is_found_after_the_build_info() {
+        let bytes = archive(&[
+            file(".BUILDINFO", b"format = 2\n"),
+            file(".MTREE", b"\x1f\x8b"),
+            file(".PKGINFO", PKGINFO),
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(&tmp, "demo-1.0-1-x86_64.pkg.tar.zst", &bytes);
+        assert_eq!(read_package_meta(&path).unwrap().pkgname, "demo");
     }
 
     /// A flood of long names, each a path of its own, stops at the listing's
@@ -638,6 +693,8 @@ mod tests {
             error.contains(&format!("decompresses to more than {limit} bytes")),
             "{error}"
         );
+        // What it says it is reads fine: only reading it all is refused.
+        assert_eq!(read_package_meta(&path).unwrap().pkgname, "demo");
     }
 
     /// However well a small package compresses, it may expand to the floor.
@@ -679,6 +736,35 @@ mod tests {
             .to_string();
             assert!(error.contains("path"), "{error}");
         }
+    }
+
+    /// The `.PKGINFO` fields come back as written, and absent optional ones
+    /// as absent rather than empty.
+    #[test]
+    fn package_meta_is_read_as_written() {
+        let bytes = archive(&[file(
+            ".PKGINFO",
+            b"pkgname = demo-docs\npkgbase = demo\npkgver = 1:1.0-2\narch = any\n",
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(&tmp, "demo-docs-1:1.0-2-any.pkg.tar.zst", &bytes);
+
+        let meta = read_package_meta(&path).unwrap();
+        assert_eq!(
+            meta,
+            PackageMeta {
+                pkgname: "demo-docs".to_string(),
+                version: "1:1.0-2".to_string(),
+                arch: Some("any".to_string()),
+            }
+        );
+        assert_eq!(describe_package(&path).unwrap().meta, meta);
+        let bare = write(
+            &tmp,
+            "demo-1.0-1-x86_64.pkg.tar.zst",
+            &archive(&[file(".PKGINFO", PKGINFO)]),
+        );
+        assert_eq!(read_package_meta(&bare).unwrap().arch, None);
     }
 
     /// The streamed checksums are the checksums of the whole file, across

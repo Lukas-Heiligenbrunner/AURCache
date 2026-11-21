@@ -649,18 +649,18 @@ pub fn expected_pkgnames(pkg: &packages::Model) -> Vec<String> {
 
 /// What a package's filename says it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedPkg {
-    name: String,
+pub(crate) struct ParsedPkg {
+    pub(crate) name: String,
     /// `[epoch:]pkgver-pkgrel`.
-    version: String,
-    arch: String,
+    pub(crate) version: String,
+    pub(crate) arch: String,
 }
 
 /// Parse an Arch package filename into its name, version and architecture.
 ///
 /// e.g. `hello-2.12.1-1-x86_64.pkg.tar.zst` -> name `hello`, version
 /// `2.12.1-1`, arch `x86_64`.
-fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
+pub(crate) fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
     let (base, _) = filename
         .rsplit_once(".pkg.tar.")
         .ok_or_else(|| anyhow!("Invalid pkg filename: {filename}"))?;
@@ -690,7 +690,11 @@ fn parse_arch_pkg(filename: &str) -> anyhow::Result<ParsedPkg> {
 /// `hello-1.0-1-x86_64.pkg.tar.zst` holding `pkgname = openssh` would publish
 /// an `openssh` entry under `hello`'s name. An architecture the `.PKGINFO`
 /// does not state is not held against it.
-fn check_contents(filename: &str, named: &ParsedPkg, meta: &PackageMeta) -> anyhow::Result<()> {
+pub(crate) fn check_contents(
+    filename: &str,
+    named: &ParsedPkg,
+    meta: &PackageMeta,
+) -> anyhow::Result<()> {
     ensure!(
         meta.pkgname == named.name,
         "{filename} holds pkgname '{}', not '{}'",
@@ -715,7 +719,7 @@ fn check_contents(filename: &str, named: &ParsedPkg, meta: &PackageMeta) -> anyh
 
 /// What a staged package file is to publishing.
 #[derive(Debug)]
-enum Artifact {
+pub(crate) enum Artifact {
     /// makepkg's split debug package of one of the expected pkgnames
     /// (`<pkgname>-debug`), which the server discards rather than publishing.
     ///
@@ -741,7 +745,7 @@ enum Artifact {
 /// under a job for `hello`); it does **not** and cannot verify the *contents*
 /// of a correctly-named package (see design non-goals). A file that is not a
 /// `*.pkg.tar.*` at all is refused too.
-fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {
+pub(crate) fn artifact(expected: &[String], filename: &str) -> anyhow::Result<Artifact> {
     let parsed = parse_arch_pkg(filename)?;
     if parsed
         .name
