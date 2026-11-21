@@ -274,11 +274,12 @@ impl Setting {
         }
     }
 
-    /// Whether an empty value says nothing: stored for a package, for the
-    /// server or in the environment, it is passed over as if unset, so the
-    /// value comes from the next place down (`Package -> Env -> Global ->
-    /// Default`). For a setting with no "none" of its own, where an empty
-    /// field in a form can only mean "use what applies anyway".
+    /// Whether an empty value says nothing: written for a package or for the
+    /// server, it removes the value stored, and in the environment it is
+    /// passed over as if unset, so the value comes from the next place down
+    /// (`Package -> Env -> Global -> Default`). For a setting with no "none"
+    /// of its own, where an empty field in a form can only mean "use what
+    /// applies anyway".
     #[must_use]
     pub const fn empty_inherits(self) -> bool {
         matches!(self, Self::BuildSshKey)
