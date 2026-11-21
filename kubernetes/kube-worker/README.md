@@ -24,7 +24,7 @@ name them.
   `app.kubernetes.io/name: aurcache` and `app.kubernetes.io/component: server`.
 - A CNI that enforces NetworkPolicy (Calico, Cilium, kube-router, kindnet; not
   flannel alone). Without one, builds can reach whatever a pod in the cluster
-  can.
+  can. The worker tests this when it starts and logs an error if it can.
 - A look at `networkpolicy.yaml` if the cluster runs NodeLocal DNSCache, has
   pods or nodes on public addresses (IPv6 above all), or an API server on a
   public endpoint: the policy cannot know those addresses, and says at each

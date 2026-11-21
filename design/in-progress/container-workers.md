@@ -521,8 +521,9 @@ only through `exec`, the same binary has the other end of each exchange:
 `stage` (install itself into a volume, wait for the job), `receive` (take
 the job from stdin), `tail` (follow the log from an offset), `manifest` (the
 report, and each package's name and size), `send` (one package's
-bytes), and `hold` (keep the pod up). The module docs of the agent's
-`agent/transfer` say what each carries. The Docker worker uses none of them.
+bytes), `hold` (keep the pod up), and `probe` (try addresses a build should
+not reach). The module docs of the agent's `agent/transfer` say what each
+carries. The Docker worker uses none of them.
 
 ---
 

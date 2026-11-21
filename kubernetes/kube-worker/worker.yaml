@@ -200,6 +200,10 @@ spec:
             # - name: WORKER_KUBE_USER_NAMESPACES
             #   value: "true"
             #
+            # Skip the check at startup that the NetworkPolicy is enforced.
+            # - name: WORKER_KUBE_NETWORK_PROBE
+            #   value: "false"
+            #
             # Scheduling for build pods: a JSON file (see below) with any of
             # tolerations, affinity, nodeSelector, priorityClassName,
             # runtimeClassName, imagePullSecrets, schedulerName,

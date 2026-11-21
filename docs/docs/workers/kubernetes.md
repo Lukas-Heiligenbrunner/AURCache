@@ -181,6 +181,7 @@ because they decide what a build may reach.
 | `WORKER_GIT_SSH_KEY`, `WORKER_SSH_KNOWN_HOSTS` | none | The SSH key builds fetch private sources with, and the host keys of the servers it is used with: files in the dispatcher's own pod. Both or neither. See [Build credentials](#build-credentials). |
 | `WORKER_KUBE_USER_NAMESPACES` | `false` | `true` or `false`. Run build pods in user namespaces. See [User namespaces](#user-namespaces). |
 | `WORKER_KUBE_POD_TEMPLATE` | none | Path of a JSON file adding scheduling fields to every build pod. See [Architectures and scheduling](#architectures-and-scheduling). |
+| `WORKER_KUBE_NETWORK_PROBE` | `true` | `true` or `false`. Check at startup that the NetworkPolicy is enforced. |
 
 The two yes/no variables accept `true` or `false` in any case; anything else is
 an error at startup.
@@ -232,8 +233,8 @@ cluster protect itself, not as a guarantee.
   does not state it as asking for none, so it needs the disk limit to limit
   anything. A pod count needs nothing. Beside the build
   itself, each build pod asks for 10m of CPU and 16Mi of memory, with limits of
-  one CPU and 64Mi, for the container that hands the packages back. Count them
-  in.
+  one CPU and 64Mi, for the container that hands the packages back; the pod of
+  the NetworkPolicy check asks for the same. Count them in.
 
 ## Architectures and scheduling
 
@@ -432,26 +433,49 @@ it edited, and `networkpolicy.yaml` has a comment at each place:
   only keeps builds off a cluster that uses private ones. On an IPv6 cluster
   whose pods have globally routable addresses (EKS in IPv6 mode), the rule for
   the IPv6 internet reaches every pod, the server's worker port included. Add
-  the cluster's ranges to the `except` list.
+  the cluster's ranges to the `except` list. The same goes for a server
+  outside the cluster that the dispatcher reaches on a public address, behind
+  a load balancer or an Ingress: add that address.
 - **An API server on a public endpoint**, as managed control planes often
   have. Builds can reach it. They hold no credential for it, so this is
   exposure and not access; add its address to `except` to close it.
 
 A NetworkPolicy has an effect only where the CNI enforces it, and the API does
-not say whether it does. Check that yours does before you rely on it: from a
-pod in the builds' namespace labelled
-`app.kubernetes.io/managed-by: aurcache-worker-kube`, the server's worker port
-and the cloud metadata address (`169.254.169.254`) must not answer, and the
-repository builds are given must. The policy does not cover name resolution
-through NodeLocal DNSCache, nor a mirror on a private address: either shows up
-as failing builds.
+not say whether it does. Once enrolled, the dispatcher therefore starts a short
+pod labelled like a build and has it try four addresses: the server's worker
+port, the cloud metadata address (`169.254.169.254`) and the cluster's API,
+none of which a build should reach, and the repository builds are given, which
+it must. The dispatcher dials the worker port and the API itself each time the
+pod tries them, so either one answering the dispatcher and not the pod, while
+the pod reaches something, shows the policy at work; one that answers neither
+tells nothing. Builds are claimed meanwhile, except while the check's pod
+waits for a node, as for any pod of the dispatcher's. The check usually takes
+under half a minute; its pod has two minutes to start, image pull included,
+before the check gives up. The dispatcher's log then has one of:
 
-A CNI may also put the policy around a pod only some seconds after the pod
-starts: kindnet lets a new pod reach everything for about ten seconds. A
-build's first seconds are then unprotected. A build has normally run no
-package code by then: its pod first waits to be handed the job, and then
-AURCache's own agent prepares pacman and upgrades the image before makepkg
-starts.
+| Log line | Meaning |
+|---|---|
+| `The builds' NetworkPolicy is enforced: ...` (info) | The worker port, the metadata address and the API did not answer, and the repository did. |
+| `The builds' NetworkPolicy is enforced, and lets builds reach <addresses>: ...` (warning) | The worker port or the API answered the dispatcher and not the pod, so the policy is at work, and these answered the pod: addresses it does not shut out, such as a server outside the cluster on a public address or a managed control plane's endpoint. See the public addresses above. |
+| `The builds' NetworkPolicy is not enforced: <addresses> answered from a pod labelled like a build. ...` (error) | One of the addresses that answered the pod is one the policy as shipped shuts builds out of: a private worker port, or the metadata address. Whatever did not answer, the policy in force does not do what the shipped one does. Also sent to the server, so it shows in AURCache's log and on the worker's page. |
+| `Could not check whether the builds' NetworkPolicy is enforced: <reason>` (warning) | The check pod could not run; or neither the worker port nor the API answered the dispatcher itself (the server scaled down, a Service with no ready endpoint, a proxy between the dispatcher and the server), so their silence towards the pod says nothing; or nothing answered at all, the repository included, which is what an enforced policy and a pod with no network have in common, and means builds will not find AURCache's own packages; or the worker port and the API both answered on addresses the policy as shipped may let through. Add those to `except` and the check can tell. |
+| `The builds' NetworkPolicy looks enforced: ...` (info) | The forbidden addresses did not answer, and there was no repository to compare with: builds are given none, or its name does not resolve in the dispatcher's pod. |
+
+Set `WORKER_KUBE_NETWORK_PROBE=false` to skip the check, for example where you
+have confirmed enforcement or accepted the exposure.
+
+Four limits of the check. It does not try name resolution, so a cluster with
+NodeLocal DNSCache and the policy as shipped passes it and fails its builds.
+It does not try your mirror, so a mirror on a private address that the policy
+blocks shows up as failing builds too. The dispatcher dials the worker port
+and the API from its own pod, so a firewall that admits the dispatcher's node
+and not the builds' reads as the policy at work. And a CNI
+may put the policy around a pod only some seconds after the pod starts: kindnet
+lets a new pod reach everything for about ten seconds. The check waits that
+window out before it believes an open answer, but a build pod's first seconds
+are unprotected on such a CNI. A build has normally run no package code by
+then: its pod first waits to be handed the job, and then AURCache's own agent
+prepares pacman and upgrades the image before makepkg starts.
 
 ## Not supported
 
@@ -533,7 +557,8 @@ straight back and cost its package an attempt. Claiming resumes with the first
 answer.
 
 Before each claim the dispatcher also deletes any pod of its own that no build
-of its holds: one whose delete failed earlier. It logs `Deleted pod <name>, which no build of this worker held`.
+of its holds: one whose delete failed earlier, or the NetworkPolicy check's
+after it ended. It logs `Deleted pod <name>, which no build of this worker held`.
 
 **A pod stays `Pending`, then the build is ended and tried again.** No node
 could take it within `WORKER_KUBE_SCHEDULE_TIMEOUT`. Meanwhile the build's log
@@ -592,3 +617,11 @@ limit`.** Its pod was evicted for passing `build_disk_max`
 with `out of memory: ... (WORKER_BUILD_MEMORY_MAX)` passed its memory limit in
 the same way.
 
+**The log reports that the NetworkPolicy is not enforced.** A pod labelled
+like a build reached the server's worker port and the cluster's API, and an
+address the policy shuts builds out of. Builds can reach whatever any pod in
+the cluster can, the server's worker port included. Enable NetworkPolicy
+support in your CNI, or move to one that enforces it. Where the policy is
+yours rather than the one shipped, check that it shuts out the addresses the
+log names. See [What a build can reach](#what-a-build-can-reach) for the other
+lines the check can log.

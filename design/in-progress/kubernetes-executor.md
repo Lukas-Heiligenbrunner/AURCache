@@ -135,7 +135,8 @@ lost with its volume are collected too. **Told to stop**, it reports its
 builds `Interrupted`, so the server queues them again at once, and deletes
 only its own pods (its `aurcache.io/dispatcher` label), never another
 dispatcher's. **Before each claim** it deletes its own pods that no build
-holds, which would otherwise count against a quota until their deadline.
+holds, the network probe's among them, which would otherwise count
+against a quota until their deadline.
 
 That deadline is the build's timeout plus five minutes, the server's
 `REAP_BACKSTOP_GRACE`, after which it refuses what the worker sends. No
@@ -243,10 +244,41 @@ every private range rather than one cluster's needs no knowledge of the
 cluster, and keeps builds off the API server and the cloud metadata
 endpoint, which matters most.
 
-Whether the CNI enforces the policy is not in the API, so the documentation
-says how to check by hand. A CNI may apply it some seconds after a pod
-starts (kindnet, about ten); a build pod spends those seconds waiting for
-the job and in the agent's root step, before any package code runs.
+Whether the CNI enforces the policy is not in the API, so the dispatcher
+asks the network. Once enrolled it starts a pod with the builds' labels,
+which the policy therefore selects, and execs the agent's `probe` in it
+against the server's worker port, the cloud metadata address, the cluster's
+API and the repository builds are given. The worker port and the API are
+the controls: at each asking the dispatcher dials both itself, at the same
+addresses and with the same timeout, since an answer at enrollment says
+nothing of a server since scaled down or a Service with no endpoint left.
+
+- An address the shipped policy shuts out answering the pod (the worker
+  port on a private address, or the metadata address) is not enforced,
+  whatever else did not answer: an error, logged and reported to the
+  server. The API counts for neither, since its address is a Service's and
+  what is behind it may be public.
+- Otherwise, a control that answered the dispatcher and not the pod is a
+  policy at work: the policy shut it out. With the other two silent and the
+  repository answering, it is enforced. What answers beside it is let
+  through, a public address the shipped policy does not except (a server
+  outside the cluster, a managed control plane): a warning naming it.
+- A control that answered neither tells nothing. Neither control answering
+  the dispatcher is inconclusive, as are both answering the pod on
+  addresses the shipped policy may let through.
+- Nothing answering, the repository included, is inconclusive, because a
+  pod that reaches nothing looks exactly like one behind an enforced policy.
+  The repository is the control there.
+
+The pod's name is generated, so one an earlier run left, still going away,
+is never in the way; the startup sweep and the sweep before each claim
+delete it. The probe reports and holds nothing up: builds are claimed meanwhile
+(but see below for a probe pod no node takes), and
+`WORKER_KUBE_NETWORK_PROBE=false` skips it where enforcement is known or the
+exposure accepted. A CNI may apply a policy some seconds after a pod starts
+(kindnet, about ten), so the probe asks again before it believes an open
+answer. A build pod spends those seconds waiting for the job and in the
+agent's root step, before any package code runs.
 
 ### The build environment and caches
 
@@ -285,7 +317,7 @@ not node root, where a compromised chroot worker is host root. Root code in
 a build pod has no host path, `CAP_SYS_ADMIN` or token; an escape needs a
 kernel or runtime bug, and lands as the node's uid 0, or as an unmapped uid
 with user namespaces. Weaker than the chroot worker: a disk limit that
-evicts, a network rule the worker cannot verify, no user namespaces by
+evicts, a network rule the worker can only probe, no user namespaces by
 default. Stronger: no privileged container, build code with no path to
 root, no shared cache or keyring to poison.
 
@@ -323,4 +355,14 @@ and it needs an upload listener of its own on the server.
 - Managed offerings: GKE Autopilot should admit the pod; EKS Fargate's
   NetworkPolicy enforcement and start-up latency are unverified. Whether
   pacman and makepkg run under gVisor or Kata is untested.
+- The probe does not try name resolution, so NodeLocal DNSCache with the
+  policy as shipped passes it and fails its builds; nor a mirror on a
+  private address, which a build finds blocked instead.
+- A probe pod no node takes holds claims back until the probe gives up on
+  it, two minutes at most; the sweep before each claim deletes one whose
+  own delete was lost, once those two minutes are past.
+- The dispatcher dials the controls from its own pod. A firewall or load
+  balancer that filters by source node, or an API that the builders' node
+  pool cannot reach while the dispatcher's can, still reads as the policy's
+  doing.
 - CI has not run the kube-worker image's publishing step, which is new.

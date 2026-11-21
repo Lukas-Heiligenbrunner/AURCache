@@ -11,7 +11,8 @@
 # worker's disk limit (WORKER_BUILD_DISK_MAX). A pod count needs nothing.
 #
 # Beside the build, each pod asks for 10m of CPU and 16Mi of memory (limits:
-# one CPU, 64Mi) for the container that hands the packages back.
+# one CPU, 64Mi) for the container that hands the packages back, and so does
+# the pod of the NetworkPolicy check.
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -24,7 +25,8 @@ spec:
   hard:
     # Builds running at once. `pods` counts the pods that have not ended;
     # `count/pods` would count every pod object, one that failed and was not
-    # yet deleted included.
+    # yet deleted included. The NetworkPolicy check's pod takes one too, for
+    # about half a minute each time the dispatcher starts.
     pods: "8"
     # requests.cpu: "32"
     # requests.memory: 64Gi
