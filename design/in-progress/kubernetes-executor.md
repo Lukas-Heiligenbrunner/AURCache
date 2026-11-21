@@ -456,7 +456,14 @@ cluster is short of from stopping the others.
 When the dispatcher restarts, its first heartbeat lists nothing, and the
 server abandons every build it held. The pods those builds ran in are then
 orphans, and the dispatcher deletes them before it enrolls: one
-`deletecollection` by label selector `aurcache.io/dispatcher=<fingerprint>`.
+`deletecollection` by label selector
+`app.kubernetes.io/managed-by=aurcache-worker-kube`. That is every
+dispatcher's pods in the builds' namespace, not only this one's
+(`aurcache.io/dispatcher=<fingerprint>`): a dispatcher whose data volume was
+replaced comes back under a new identity, and nothing else would ever collect
+the pods of the old one. A builds namespace is one dispatcher's already
+("One builds namespace per dispatcher"), so nobody else's builds are in it.
+The reap before each claim stays with this dispatcher's own pods.
 That loses the progress of builds that were running, which is what every
 worker does on a restart today. Running pods are **not adopted**: resuming
 one would need a way to hand the runner a job it did not claim, which it
@@ -1362,7 +1369,7 @@ for each advertised architecture (it needs `list` on nodes, a ClusterRole).
 | caches | none in the first release |
 | `persistent_builddir`, kept failed builds | not supported: the first builds in a fresh tree and says nothing, the second is not offered |
 | the Docker worker | no longer deprecated, and moved to the same agent, capabilities and privilege drop (`container-workers.md`) |
-| adopting pods across a restart | no; leftover pods are swept by label at startup |
+| adopting pods across a restart | no; at startup every pod labelled `app.kubernetes.io/managed-by: aurcache-worker-kube` in the builds' namespace is swept, whichever dispatcher made it, since a builds namespace is one dispatcher's |
 | concurrency | one total per worker |
 | who is the worker | the dispatcher, alone. Build pods never talk to the server's worker port and hold no credential |
 | limits | the server's recommendation, applied as well as Kubernetes allows; a disk limit that evicts rather than refuses is the stated trade-off |

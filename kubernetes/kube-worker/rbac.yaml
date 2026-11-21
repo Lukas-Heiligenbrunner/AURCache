@@ -33,9 +33,10 @@ metadata:
     app.kubernetes.io/component: kube-worker
 rules:
   # Create a pod per build, watch it, and delete it. `deletecollection` is how
-  # the dispatcher removes every pod of its own that is still there: when it
-  # starts, the ones a previous run left, and when it is told to stop, the
-  # ones it has not already deleted.
+  # the dispatcher removes build pods in bulk: when it starts, every one in
+  # this namespace, which a previous run (or a dispatcher whose identity was
+  # lost) left, and when it is told to stop, those of its own it has not
+  # already deleted.
   - apiGroups: [""]
     resources: [pods]
     verbs: [create, get, list, watch, delete, deletecollection]
