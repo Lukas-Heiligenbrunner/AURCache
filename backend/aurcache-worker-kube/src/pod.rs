@@ -1,8 +1,5 @@
 //! A build pod, rendered from the configuration and a job, with nothing in
 //! between that needs a cluster.
-//!
-//! `kubernetes-executor.md` ("The build pod") is what this renders, field for
-//! field.
 
 use crate::config::{Config, PodExtras};
 use anyhow::{Result, anyhow};
