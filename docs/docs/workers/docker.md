@@ -297,8 +297,7 @@ runs through the host's qemu/binfmt handlers. Without a handler for a
 platform, its builds fail; register one
 (`docker run --privileged --rm tonistiigi/binfmt --install all`) or set
 `WORKER_ARCHES` to the platforms this host can build, comma separated
-(`x86_64`, `aarch64`, `armv7h`). The worker refuses to start with an
-architecture it has no image platform for.
+(`x86_64`, `aarch64`, `armv7h`).
 
 The handler no longer needs the `C` flag. That flag lets qemu run a setuid
 program with the program's own credentials, which builds needed for `sudo`. A

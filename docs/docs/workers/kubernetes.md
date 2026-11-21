@@ -240,11 +240,11 @@ cluster protect itself, not as a guarantee.
 
 The architectures a dispatcher advertises are configuration: `WORKER_ARCHES`,
 or its own architecture when unset. It does not discover them from the nodes,
-and it refuses to start with one it has no Kubernetes name for (anything but
-`x86_64`, `aarch64`, `armv7h` and `riscv64`).
+and it refuses to start with one its image is not built for (anything but
+`x86_64`, `aarch64` and `armv7h`): every build pod runs the agent from it.
 Each build pod is scheduled with `kubernetes.io/os: linux` and
 `kubernetes.io/arch` set for the package's architecture (`x86_64` is `amd64`,
-`aarch64` is `arm64`, `armv7h` is `arm`, `riscv64` is `riscv64`). A build for an
+`aarch64` is `arm64`, `armv7h` is `arm`). A build for an
 architecture no node has waits for a node until the schedule timeout, then is
 handed back to the server, which tries it again while it has attempts left: do
 not advertise an architecture the cluster has no node for. Builds under
@@ -258,9 +258,8 @@ never wait behind those of an architecture the cluster is short of. Each needs
 a builds namespace of its own (see [One replica only](#one-replica-only)).
 
 The dispatcher's image must exist for every architecture you build for, since
-part of each pod runs from it. The published image covers `x86_64`, `aarch64`
-and `armv7h`; for another, build it yourself and name it with
-`WORKER_KUBE_AGENT_IMAGE`.
+part of each pod runs from it. It is built for `x86_64`, `aarch64` and
+`armv7h`, and the dispatcher builds for those alone.
 
 For anything more, `WORKER_KUBE_POD_TEMPLATE` names a JSON file, usually
 mounted from a ConfigMap, with any of these fields and no others:
