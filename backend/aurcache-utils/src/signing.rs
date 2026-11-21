@@ -24,8 +24,10 @@ use std::path::{Path, PathBuf};
 const BATCHES: usize = 8;
 
 /// How many packages an update signs, at least -- all of them, in a smaller
-/// repository. Bounds how much a filesystem without hard links copies at
-/// once, there.
+/// repository, which is then not rewritten [`BATCHES`] times for a few
+/// packages each. A floor, not a cap: where the repository's filesystem has
+/// no hard links, a batch's files are copied, so a backfill needs room for
+/// the larger of this many packages and an eighth of a platform's at once.
 const MIN_BATCH: usize = 64;
 
 /// What a backfill did.
@@ -216,32 +218,49 @@ async fn backfill_platform(
     // can still name it.
     repo.recover(db).await?;
     discard(repo, platform).await;
-    let published = |filename: &str| repo.platform_file(platform, filename);
     for batch in to_sign.chunks(batch_size(to_sign.len())) {
-        let mut staged = Vec::with_capacity(batch.len());
-        for before in batch {
-            match stage(repo, platform, before).await {
-                Ok(Staging::Staged(copy)) => staged.push(copy),
-                Ok(Staging::Unsignable(why)) => pass.skipped.push(Skipped {
-                    path: published(&before.filename),
-                    why,
-                }),
-                Err(e) => pass
-                    .problems
-                    .push(format!("{platform}/{}: {e:#}", before.filename)),
-            }
-        }
-        let resigned = resign(db, repo, key, platform, staged).await?;
-        pass.signed += resigned.signed;
-        pass.problems.extend(resigned.problems);
-        pass.skipped
-            .extend(resigned.unsignable.into_iter().map(|filename| Skipped {
-                path: published(&filename),
-                why: Unsignable::NotTheListedFile,
-            }));
+        sign_batch(db, repo, key, platform, batch, &mut pass).await?;
     }
-    discard(repo, platform).await;
     Ok(pass)
+}
+
+/// Sign the files `batch` lists on `platform`, in one update, and add what
+/// became of each to `pass`.
+///
+/// The batch's copies go once its update has committed, so where they are
+/// copies rather than hard links a pass needs room for one batch's at a time.
+async fn sign_batch(
+    db: &DatabaseConnection,
+    repo: &Repository,
+    key: &InstanceKey,
+    platform: Platform,
+    batch: &[ListedPackage],
+    pass: &mut Pass,
+) -> anyhow::Result<()> {
+    let published = |filename: &str| repo.platform_file(platform, filename);
+    let mut staged = Vec::with_capacity(batch.len());
+    for before in batch {
+        match stage(repo, platform, before).await {
+            Ok(Staging::Staged(copy)) => staged.push(copy),
+            Ok(Staging::Unsignable(why)) => pass.skipped.push(Skipped {
+                path: published(&before.filename),
+                why,
+            }),
+            Err(e) => pass
+                .problems
+                .push(format!("{platform}/{}: {e:#}", before.filename)),
+        }
+    }
+    let resigned = resign(db, repo, key, platform, staged).await?;
+    pass.signed += resigned.signed;
+    pass.problems.extend(resigned.problems);
+    pass.skipped
+        .extend(resigned.unsignable.into_iter().map(|filename| Skipped {
+            path: published(&filename),
+            why: Unsignable::NotTheListedFile,
+        }));
+    discard(repo, platform).await;
+    Ok(())
 }
 
 /// Copy, sign and describe the published file `before` lists.
@@ -657,6 +676,31 @@ mod tests {
             signature,
             "signed databases are not written again"
         );
+    }
+
+    /// A batch's copies are gone once it is signed, before the next batch
+    /// copies its own: a pass holds one batch's at a time.
+    #[tokio::test]
+    async fn a_signed_batch_leaves_no_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = aurcache_db::testing::memory_db().await;
+        let unsigned = Repository::new(tmp.path());
+        unsigned.init().unwrap();
+        publish(&db, &unsigned, 1, "foo", "one").await;
+        publish(&db, &unsigned, 2, "bar", "one").await;
+
+        let repo = Repository::new(tmp.path()).with_key(InstanceKey::generate(None).unwrap());
+        let key = repo.key().unwrap();
+        let Unsigned { to_sign, .. } = repo.unsigned(Platform::X86_64).await.unwrap();
+        assert_eq!(to_sign.len(), 2);
+        let mut pass = Pass::default();
+        sign_batch(&db, &repo, key, Platform::X86_64, &to_sign[..1], &mut pass)
+            .await
+            .unwrap();
+        assert_eq!(pass.signed, 1);
+        assert!(!repo.resign_dir(Platform::X86_64).exists());
+        let path = platform_file(tmp.path(), &to_sign[0].filename);
+        assert!(signed_beside(key, &path));
     }
 
     /// An update signs more than one batch's worth at a time in a larger

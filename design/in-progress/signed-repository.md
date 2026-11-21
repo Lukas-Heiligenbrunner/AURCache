@@ -405,9 +405,12 @@ Each update writes the platform's databases again, whatever it signs, so the
 batch grows with the repository: at least 64 packages, and at most 8 updates
 per platform (`batch_size`). A fixed batch of 64 rewrote `repo.files` once
 per 64 packages, which made the first backfill of a large repository
-quadratic. The floor bounds how much a filesystem without hard links copies
-at once in a small one. Then a platform whose databases do not carry the
-key's signature -- an empty one, or one nothing needed re-signing on -- gets
+quadratic. The floor keeps a small repository from being rewritten eight
+times for a few packages each; it is no cap: where `link_or_copy` copies, a
+backfill needs room for one batch's copies at once -- the larger of 64
+packages and an eighth of a platform's -- and no more, since a batch's copies
+go as soon as its update commits (`sign_batch`). Then a platform whose
+databases do not carry the key's signature -- an empty one, or one nothing needed re-signing on -- gets
 an update that changes nothing and writes them again
 (`Update::rewrite_databases`), so the databases are only ever signed through
 the plan, as every update signs them.
