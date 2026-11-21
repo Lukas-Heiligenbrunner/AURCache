@@ -91,6 +91,9 @@ pub struct KubeExecutor<C: Cluster> {
     /// The builds this executor is seeing through now. A pod of any other
     /// build is nobody's.
     held: Mutex<HashSet<i32>>,
+    /// The builds that deleted their own pod on their way out, while the
+    /// watch may still show it as it was: that pod is not left for `reap`.
+    deleted: Mutex<HashSet<i32>>,
 }
 
 /// A pod of this dispatcher's that no node takes.
@@ -227,6 +230,7 @@ impl<C: Cluster> KubeExecutor<C> {
             agent_image,
             readiness: Mutex::new(Readiness::Ready),
             held: Mutex::new(HashSet::new()),
+            deleted: Mutex::new(HashSet::new()),
         }
     }
 
@@ -291,12 +295,16 @@ impl<C: Cluster> KubeExecutor<C> {
         let build_id = build.claimed.job.build_id;
         let name = pod::name(&cfg.dispatcher, build_id);
         let input = std::mem::take(&mut build.input);
+        lock(&self.deleted).remove(&build_id);
         lock(&self.held).insert(build_id);
         let attended = AssertUnwindSafe(self.attend(cfg, pod, &name, &build, input, &watch))
             .catch_unwind()
             .await;
         match self.cluster.delete(&name, GRACE).await {
-            Ok(()) => tracing::debug!("build {build_id}: deleted pod {name}"),
+            Ok(()) => {
+                tracing::debug!("build {build_id}: deleted pod {name}");
+                lock(&self.deleted).insert(build_id);
+            }
             // Not a reason to change what the build is reported as: once the
             // build is no longer held, `reap` deletes its pod.
             Err(error) => tracing::warn!("{error:#}"),
@@ -308,15 +316,19 @@ impl<C: Cluster> KubeExecutor<C> {
     /// Delete the pods of this dispatcher that no build holds: one whose
     /// delete failed when its build ended, one created by a request that was
     /// answered after its build had given up on it, and a pod with no build
-    /// that has ended (the NetworkPolicy check's). A pod left standing holds
-    /// its requests and its place in a quota until its deadline, and a pod
-    /// that ended keeps its place in a quota on objects for good.
+    /// that has ended. A pod left standing holds its requests and its place
+    /// in a quota until its deadline, and a pod that ended keeps its place in
+    /// a quota on objects for good. A pod its own build deleted is left to
+    /// that delete.
     async fn reap(&self) {
         let orphans: Vec<String> = {
             let held = lock(&self.held);
-            self.cluster
-                .pods()
-                .iter()
+            let mut deleted = lock(&self.deleted);
+            let pods = self.cluster.pods();
+            // Once the watch no longer shows a build's pod, the delete is done.
+            deleted.retain(|build| pods.iter().any(|pod| pod::build_id(pod) == Some(*build)));
+            pods.iter()
+                .filter(|pod| pod::build_id(pod).is_none_or(|build| !deleted.contains(&build)))
                 .filter(|pod| orphaned(pod, &held))
                 .filter_map(|pod| pod.metadata.name.clone())
                 .collect()
