@@ -32,6 +32,9 @@
 # CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
 # filter keeps from mounting.
 #
+# Last, with the protected-path list unreadable to the build user, the
+# sandbox must refuse the build outright rather than read it as no list.
+#
 # Usage: scripts/test-sandbox.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -316,6 +319,23 @@ for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
     echo "build_root_$e=$(cat "/job/pkg/root-escapes/$e" 2>/dev/null || echo missing)"
 done
 [[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
+
+if [[ $mode == confined ]]; then
+    # The policy where the build user cannot read it: the sandbox reads it as
+    # that user, and must refuse the build before any of its code runs rather
+    # than take it for a policy that protects nothing.
+    chmod 600 /etc/aurcache/sandbox-protected
+    mkdir -p /job/pkg2 && cp /fixture/PKGBUILD /job/pkg2/PKGBUILD && chown -R builder: /job/pkg2
+    cd /job/pkg2
+    sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job2 \
+        -- --nocheck >/tmp/build2.log 2>&1
+    rc=$?
+    echo "unreadable_build=$( ((rc)) && echo failed || echo built)"
+    echo "unreadable_refusal=$(grep -q 'cannot read the protected-path list' /tmp/build2.log &&
+        echo refused || echo missing)"
+    echo "unreadable_ssh=$([ -s /job/pkg2/stolen-ssh ] && echo read || echo blocked)"
+    chmod 644 /etc/aurcache/sandbox-protected
+fi
 EOF
 
 docker build -q -t "$IMAGE" "$WORKDIR" >/dev/null
@@ -424,6 +444,11 @@ fi
 check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
+# With the policy unreadable to the build user: the build is refused before
+# any of its code runs.
+check "unreadable: build refused"           failed  "$(get unreadable_build "$confined")"
+check "unreadable: by the sandbox"          refused "$(get unreadable_refusal "$confined")"
+check "unreadable: ssh key unreadable"      blocked "$(get unreadable_ssh "$confined")"
 
 if (( fail )); then
     echo "==> FAILED"
