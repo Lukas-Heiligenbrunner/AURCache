@@ -453,7 +453,7 @@ What changes is inside the build container:
 
 | | was | is |
 |---|---|---|
-| build code as root in the container | one `sudo pacman -U` away | not reachable: no `sudo`, no capabilities, `no_new_privs` |
+| build code as root in the container | one `sudo pacman -U` away | not directly: no `sudo`, no capabilities, `no_new_privs`; but the helper installs any package the synced repositories have, by name, and that package's install scriptlet runs as root |
 | root in the container, when something does run as root (a dependency's install script) | the engine's default capabilities (14 on Docker) | seven |
 | what the build can write that the worker reads | the whole shared directory, world-writable | as the build user, `pkg/` only; as root in the container (a dependency's install script), anything in the directory, while the build runs |
 | how the worker reads it back | by path, following links, waiting on pipes, without a limit | one name at a time from its parent's handle, following no link and waiting on no pipe: the report a regular file of at most 1 MiB, believed only beside an agent that exited 0, with commits only for the job's sources; the packages regular files in a `pkg/` that is a directory of its own, uploaded from the handle they were judged by |
