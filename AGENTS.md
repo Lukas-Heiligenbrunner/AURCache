@@ -181,8 +181,7 @@ defect this frontend has had was of that kind.
   serialized so the explanatory comments survive. `repo config --install` appends to pacman.conf,
   falling back to `sudo` only on a permission error, and asks `GET /repo/info` how the repository is
   published when a token is configured (host substitution shared with the worker template through
-  `aurcache_common::repo`); for a signed repository it first offers, behind a prompt showing the
-  fingerprint, to add and `--lsign-key` the key `GET /repo/key` serves.
+  `aurcache_common::repo`).
 - `backend/aurcache-common` is the shared leaf crate: the API types the server, CLI and browser frontend
   all speak, plus small helpers that would otherwise be duplicated or force a heavy dependency. Everything
   in it is dependency-free or behind a feature — `db` (sea-orm derives) and `fs` (filesystem helpers) are
@@ -253,9 +252,9 @@ defect this frontend has had was of that kind.
   flow: `Repository::describe` signs a staged package before the lock (its `.sig` beside it, and
   `%PGPSIG%` in its entry), the update signs each database it writes beside its `.next`, and the plan
   renames each signature right after what it signs. Packages published before signing, or under
-  another key, are signed by `aurcache_utils::signing::backfill` through `Update::resign`; never write
-  a `.sig` into a platform directory any other way. The key is a file beside the CA, never a row and
-  never in a dump.
+  another key, are signed by `aurcache_utils::signing::Backfiller::run` through `Update::resign`, and
+  databases no update has signed through `Update::rewrite_databases`; never write a `.sig` into a
+  platform directory any other way. The key is a file beside the CA, never a row and never in a dump.
 - Workers and the server agree on a numbered worker protocol at registration, never on versions:
   workers are released separately and may come from elsewhere. The types in
   `aurcache-common/src/worker.rs` are that protocol, and within one protocol they only gain optional
