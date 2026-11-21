@@ -43,6 +43,10 @@ $([ -d /var/lib/aurcache-worker ] && mktemp >> ./mktemp-ok 2>/dev/null)
 # protection.
 $(cat /var/lib/aurcache-worker/ssh/id_ed25519 >> ./stolen-ssh 2>/dev/null)
 $(cat /var/lib/aurcache-worker/worker-key.pem >> ./stolen-mtls 2>/dev/null)
+# A protected path under /run, read where it really is. Arch links /var/run
+# to /run, and the walk that expands the protected list passes that link on
+# its way to the worker's directory under /var.
+$(cat /run/aurcache-secret/key >> ./stolen-run 2>/dev/null)
 
 package() {
     install -Dm644 /dev/null "$pkgdir/usr/share/hostile-fixture/marker"
