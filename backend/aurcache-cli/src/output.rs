@@ -159,7 +159,7 @@ pub(crate) fn print_user_info(user: &UserInfo) {
     println!("has_api_token: {}", user.has_api_token);
 }
 
-/// One of the server's SSH keys: the public key alone on the first line,
+/// The server's SSH key: the public key alone on the first line,
 /// ready to paste into a forge's deploy-key form, and what to know about it
 /// below.
 pub(crate) fn format_ssh_key(key: &SshKey, host_keys: HostKeyPolicy) -> String {
