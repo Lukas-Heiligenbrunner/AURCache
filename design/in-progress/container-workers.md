@@ -429,6 +429,8 @@ What an operator sees change:
   to fail the package. A PGP key that cannot be fetched is not such a
   failure: the build goes on without it. Nor is a dependency that cannot be
   read or installed: that fails the build, as it does on the chroot worker.
+- **The worker stops its builds when it is told to stop**, and reports them
+  as interrupted, so the server queues them again at once.
 - **The worker names its containers and build directories after itself**,
   so that two instances can share a daemon and a build directory.
 - **A custom builder image** needs pacman, makepkg, gpg and `find`, and no longer
