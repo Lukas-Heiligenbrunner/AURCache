@@ -142,6 +142,10 @@ services:
     # is the tightest config that works out of the box. If your host lets you,
     # you can narrow this to specific capabilities + seccomp/apparmor unconfined.
     privileged: true
+    # The host's cgroup namespace, so the worker's network policy can match its
+    # builds' cgroups on a kernel older than 6.11 (or a stable one without the
+    # fix). It gives this privileged container nothing it could not take.
+    cgroup: host
     tmpfs:
       - /run
     networks:
@@ -192,6 +196,7 @@ services:
       - enroll:/enroll
       - worker_data_arm:/var/lib/aurcache-worker
     privileged: true
+    cgroup: host
     tmpfs:
       - /run
     networks:

@@ -76,12 +76,11 @@ It is **not** for:
 Builds share the host's network namespace -- systemd-nspawn runs without
 `--network-*` -- which is why `build_firewall` exists: a crafted PKGBUILD can
 dial anything the host can, `127.0.0.1` included. A control port on localhost
-would be reachable from every build. Guarding it with the same `(uid, port)`
-rule as the worker-protocol port would work when the rule installs, but that
-rule is best-effort by design (`WORKER_BUILD_FIREWALL=0`, hosts without
-iptables), and a failure there would expose "cancel any build, change any
-setting, run a build" rather than "submit a registration that still needs
-approving". A bearer token on top would then be a secret on disk the build user
+would be reachable from every build. The build network policy refuses builds
+the worker's own addresses, loopback included, but it can be turned off
+(`WORKER_BUILD_FIREWALL=0`), and a gap there would expose "cancel any build,
+change any setting, run a build" rather than "submit a registration that still
+needs approving". A bearer token on top would then be a secret on disk the build user
 must not be able to read -- which is the same filesystem permission a socket
 gets for free.
 
