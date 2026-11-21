@@ -195,15 +195,17 @@ fn url_remote(rest: &str) -> Option<SshRemote> {
     remote(user, host, port)
 }
 
-/// git's scp-like form, `[user@]host:path` or `[user@][v6-literal]:path`.
+/// git's scp-like form, `[user@]host:path`.
 ///
 /// libgit2 reads the account up to the first `@` that comes before the
-/// first colon, and the host up to that colon; an IPv6 literal is
-/// bracketed. Its parser also takes brackets around the account and the host,
-/// inside which a port may follow the host (`[git@host:2222]:path`), but that
-/// is a state machine whose every corner would have to be mirrored for the
-/// port judged here to be the one connected to. Any bracket other than an
-/// IPv6 literal's is [`Transport::BracketedScp`] instead, and refused.
+/// first colon, and the host up to that colon. Its parser also takes
+/// brackets around the account and the host, inside which a port may follow
+/// the host (`[git@host:2222]:path`), but that is a state machine whose
+/// every corner would have to be mirrored for the port judged here to be the
+/// one connected to -- and around an IPv6 literal (`git@[::1]:path`) it keeps
+/// the brackets in the host, which then fails to resolve. Any bracket in the
+/// account or the host is [`Transport::BracketedScp`] instead, and refused;
+/// `ssh://git@[::1]/path` reaches an IPv6 literal.
 fn scp_transport(given: &str) -> Transport {
     // libgit2 refuses a URL that starts with either.
     if given.starts_with(['@', ':']) {
@@ -213,19 +215,11 @@ fn scp_transport(given: &str) -> Transport {
         Some((user, rest)) if !user.contains(':') => (Some(user), rest),
         _ => (None, given),
     };
-    let ipv6 = rest
-        .strip_prefix('[')
-        .and_then(|bracketed| bracketed.split_once("]:"))
-        .filter(|(literal, _)| is_ipv6(literal));
-    let (host, path) = match ipv6 {
-        Some(split) => split,
-        None => match rest.split_once(':') {
-            Some(split) => split,
-            None => return Transport::UnreadableSsh,
-        },
+    let Some((host, path)) = rest.split_once(':') else {
+        return Transport::UnreadableSsh;
     };
     let bracketed = |text: &str| text.contains(['[', ']']);
-    if user.is_some_and(bracketed) || (ipv6.is_none() && bracketed(host)) {
+    if user.is_some_and(bracketed) || bracketed(host) {
         return Transport::BracketedScp;
     }
     // Nothing after the colon is no path, which libgit2 refuses; a "host"
@@ -234,13 +228,6 @@ fn scp_transport(given: &str) -> Transport {
         return Transport::UnreadableSsh;
     }
     remote(user, host, None).map_or(Transport::UnreadableSsh, Transport::Ssh)
-}
-
-/// libgit2's `is_ipv6`, for what is inside the brackets: hex digits and at
-/// least two colons.
-fn is_ipv6(literal: &str) -> bool {
-    literal.bytes().all(|c| c == b':' || c.is_ascii_hexdigit())
-        && literal.bytes().filter(|&c| c == b':').count() > 1
 }
 
 /// A port in decimal digits and nothing else -- no sign, no space, no service
@@ -439,7 +426,8 @@ mod tests {
     }
 
     /// git's brackets around the account and host may hold a port, which
-    /// libgit2 connects to. That form is refused, whatever is inside, rather
+    /// libgit2 connects to, and around an IPv6 literal stay in the host
+    /// libgit2 resolves. That form is refused, whatever is inside, rather
     /// than read: `ssh://` says the same.
     #[test]
     fn the_bracketed_scp_form_is_refused() {
@@ -458,6 +446,8 @@ mod tests {
             "git@[host:2222]:repo",
             "git@[host]:repo",
             "[::1]x:repo",
+            "git@[::1]:repo.git",
+            "[2001:db8::1]:repo.git",
             // A leading space is part of the account to libgit2, which then
             // connects to port 22; refused all the same.
             " [git@host:2222]:repo.git",
@@ -487,14 +477,6 @@ mod tests {
             Some(ssh(Some("aur"), "aur.archlinux.org", None))
         );
         assert_eq!(ssh_remote("host:repo.git"), Some(ssh(None, "host", None)));
-        assert_eq!(
-            ssh_remote("git@[::1]:repo.git"),
-            Some(ssh(Some("git"), "::1", None))
-        );
-        assert_eq!(
-            ssh_remote("[2001:db8::1]:repo.git"),
-            Some(ssh(None, "2001:db8::1", None))
-        );
         // The account ends at the first `@` before the first colon.
         assert_eq!(
             ssh_remote("a@b@host:repo.git"),
@@ -564,8 +546,9 @@ mod tests {
             "@:repo",
             // libgit2 refuses this.
             "host:",
-            // Brackets other than an IPv6 literal's.
+            // The bracketed scp-like form.
             "[git@host:2222]:repo",
+            "git@[::1]:repo",
         ] {
             assert_eq!(ssh_remote(url), None, "{url}");
         }

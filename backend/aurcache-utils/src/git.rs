@@ -125,9 +125,10 @@ fn route<'a>(url: &str, access: Access<'a>) -> anyhow::Result<Route<'a>> {
              `[user@]host:path`; a local path is `file:///path`"
         ),
         Transport::BracketedScp => bail!(
-            "this URL is in git's bracketed scp-like form (`[user@host:port]:path`), which \
-             the server does not read: write it as `ssh://user@host:port/path`, with `/~/` \
-             before a path relative to the account's home"
+            "this URL is in git's bracketed scp-like form (`[user@host:port]:path`, \
+             `user@[address]:path`), which the server does not read: write it as \
+             `ssh://user@host:port/path` (an IPv6 address as `ssh://user@[address]/path`), \
+             with `/~/` before a path relative to the account's home"
         ),
         Transport::Ssh(remote) => remote,
     };
@@ -677,11 +678,13 @@ mod tests {
     fn the_bracketed_scp_form_is_refused_saying_what_to_write() {
         let dir = tempfile::tempdir().unwrap();
         let access = server_access(dir.path());
-        let url = "[git@host:2222]:repo.git";
-        for access in [Access::Server(&access), Access::Anonymous] {
-            let error = route(url, access).unwrap_err().to_string();
-            assert!(error.contains("ssh://user@host:port/path"), "{error}");
-            assert!(!error.contains(url), "the URL is repeated: {error}");
+        for url in ["[git@host:2222]:repo.git", "git@[::1]:repo.git"] {
+            for access in [Access::Server(&access), Access::Anonymous] {
+                let error = route(url, access).unwrap_err().to_string();
+                assert!(error.contains("ssh://user@host:port/path"), "{error}");
+                assert!(error.contains("ssh://user@[address]/path"), "{error}");
+                assert!(!error.contains(url), "the URL is repeated: {error}");
+            }
         }
     }
 
