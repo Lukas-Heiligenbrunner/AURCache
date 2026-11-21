@@ -116,8 +116,10 @@ echo "==> starting the server"
 # A long liveness timeout so "is this worker connected" does not depend on how
 # far into the run the check happens: the fixture's online worker last checked
 # in seconds before seeding, and the default timeout is 60.
+# Signing on, so the Settings page shows its signing section in its widest
+# form, commands and all; the key is created beside the work directory's CA.
 ( cd "$WORKDIR" && exec env VERSION_CHECK_INTERVAL=86400 WORKER_LIVENESS_TIMEOUT=3600 \
-    AURCACHE_HTTP_PORT="$API_PORT" \
+    AURCACHE_HTTP_PORT="$API_PORT" AURCACHE_SIGN=true \
     "$SERVER_BIN" > "$WORKDIR/server.log" 2>&1 ) &
 BACKEND_PID=$!
 

@@ -459,7 +459,8 @@ pub(crate) enum RepoCommand {
 pub(crate) struct RepoConfigArgs {
     /// Add the stanza to pacman.conf instead of printing it. Asks for sudo only
     /// if the file is not already writable, and does nothing if the repository
-    /// is already configured.
+    /// is already configured. For a signed repository, first offers to add its
+    /// key to pacman's keyring and trust it, showing the fingerprint.
     #[arg(long)]
     pub(crate) install: bool,
 
@@ -483,8 +484,9 @@ pub(crate) struct RepoConfigArgs {
     #[arg(long)]
     pub(crate) name: Option<String>,
 
-    /// `SigLevel` to write. AURCache does not sign packages, so a stricter
-    /// level than the default refuses everything it serves.
+    /// `SigLevel` to write. By default `Required` for an instance that signs
+    /// its repository, as the server reports, and
+    /// `Optional TrustAll` for one that does not.
     #[arg(long)]
     pub(crate) siglevel: Option<String>,
 }

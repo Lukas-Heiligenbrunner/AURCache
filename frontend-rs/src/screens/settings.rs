@@ -168,6 +168,7 @@ fn SettingsSections(
         }
 
         ApiAccessSection {}
+        RepositorySigningSection {}
         crate::screens::backup::BackupSection {}
         }
     }
@@ -735,6 +736,64 @@ fn ApiAccessSection() -> Element {
                 if let Some(e) = error() {
                     div { class: "alert alert-error text-sm", span { "{e}" } }
                 }
+            }
+        }
+    }
+}
+
+/// Whether the repository is signed, and what a client runs to trust the
+/// key. Set on the server's environment, so there is nothing to change here.
+#[component]
+fn RepositorySigningSection() -> Element {
+    let signing = use_resource(|| async move {
+        crate::api::client()?
+            .repo_signing()
+            .await
+            .map_err(|e| e.to_string())
+    });
+
+    // Unreadable, the section would only say "unknown"; the repository's own
+    // settings are elsewhere.
+    let Some(Ok(signing)) = &*signing.read_unchecked() else {
+        return rsx! {};
+    };
+    let Some(signing) = signing.clone() else {
+        return rsx! {
+            Section { title: "Repository signing",
+                p { class: "py-3 text-xs opacity-60 max-w-prose",
+                    "Packages and the repository databases are not signed. Setting "
+                    code { "AURCACHE_SIGN" }
+                    " on the server signs them with a key of its own."
+                }
+            }
+        };
+    };
+    let key_url = aurcache_common::repo::key_url(&crate::api::api_base());
+    let commands = aurcache_common::repo::KeyTrustCommands::new(&key_url, &signing.fingerprint);
+
+    rsx! {
+        Section { title: "Repository signing",
+            div { class: "py-3 space-y-2",
+                p { class: "text-sm", "Every package and both databases are signed with the key" }
+                code { class: "font-mono text-xs break-all block", "{signing.fingerprint}" }
+                if signing.backfilling {
+                    div { class: "alert alert-info text-sm",
+                        span {
+                            "Packages published before signing began are still being signed; \
+                             until they are, keep signatures optional on clients."
+                        }
+                    }
+                }
+                p { class: "text-xs opacity-60 max-w-prose",
+                    "A signature says this server published the file, not that the package is safe. \
+                     On each client, trust the key, then use SigLevel = Required:"
+                }
+                // Wrapped rather than scrolled: a line as long as these sets
+                // the width of every card in its column on a phone otherwise.
+                pre { class: "font-mono text-xs bg-base-200 rounded p-2 whitespace-pre-wrap break-all",
+                    "{commands.add}\n{commands.lsign}\n"
+                }
+                a { class: "link link-primary text-sm", href: "{key_url}", "Download the public key" }
             }
         }
     }
