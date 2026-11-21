@@ -1251,7 +1251,7 @@ mod tests {
     use super::*;
 
     /// A job of `hello` asking for `ssh_key`.
-    fn job_asking_for(ssh_key: Option<aurcache_common::worker::SshKeyRequest>) -> JobDescriptor {
+    fn job_asking_for(ssh_key: Option<&str>) -> JobDescriptor {
         JobDescriptor {
             build_id: 1,
             pkgbase: "hello".to_string(),
@@ -1266,19 +1266,17 @@ mod tests {
             expected_packages: Vec::new(),
             timeout_secs: None,
             expected_version: "1-1".to_string(),
-            ssh_key,
+            ssh_key: ssh_key.map(str::to_string),
         }
     }
 
     /// Whether a build from a job of `ssh_key`, on a worker whose default
     /// agent is at `socket`, reaches the agent: through its `makepkg.conf` and
     /// through a mount into its chroot. Both or neither; asserted here.
-    fn reaches_agent(
-        socket: &Path,
-        ssh_key: Option<aurcache_common::worker::SshKeyRequest>,
-    ) -> bool {
+    fn reaches_agent(socket: &Path, ssh_key: Option<&str>) -> bool {
         let job = job_asking_for(ssh_key);
-        let keys = ssh_key::SshKeys::with_default(Some(socket.to_path_buf()));
+        let mut keys = ssh_key::SshKeys::default();
+        keys.insert(aurcache_common::ssh_key::DEFAULT, socket.to_path_buf());
         let ssh = ssh_key::offer(&job, &keys);
         let agent = ssh.key().map(PathBuf::as_path);
         let staged =
@@ -1291,30 +1289,21 @@ mod tests {
     }
 
     /// A build gets the default agent unless its job names another key, and
-    /// one naming a key this worker does not hold, or none at all, gets
-    /// nothing of it.
+    /// one naming a key this worker does not hold gets nothing of it.
     #[test]
     fn a_build_reaches_the_agent_of_the_key_it_is_offered() {
-        use aurcache_common::worker::SshKeyRequest;
         let tmp = tempfile::tempdir().unwrap();
         let socket = tmp.path().join("agent").join("agent.sock");
-        let named = |name: &str| {
-            Some(SshKeyRequest {
-                name: Some(name.to_string()),
-            })
-        };
 
         assert!(reaches_agent(&socket, None));
-        assert!(reaches_agent(&socket, named("default")));
-        assert!(!reaches_agent(&socket, named("gitlab")));
-        assert!(!reaches_agent(&socket, Some(SshKeyRequest { name: None })));
+        assert!(reaches_agent(&socket, Some("default")));
+        assert!(!reaches_agent(&socket, Some("gitlab")));
     }
 
     /// A build offered a named key has that key's agent bound into its chroot,
     /// and not the default's beside it; one naming nothing has the default's.
     #[test]
     fn a_named_key_binds_its_own_agent_only() {
-        use aurcache_common::worker::SshKeyRequest;
         let data = Path::new("/var/lib/aurcache-worker");
         let mut keys = ssh_key::SshKeys::default();
         for name in ["default", "gitlab"] {
@@ -1325,9 +1314,7 @@ mod tests {
             let ssh = ssh_key::offer(&job, &keys);
             agent_bind(ssh.key().map(PathBuf::as_path)).map(|bind| bind.host)
         };
-        let gitlab = bound(Some(SshKeyRequest {
-            name: Some("gitlab".to_string()),
-        }));
+        let gitlab = bound(Some("gitlab"));
         assert_eq!(gitlab, Some(crate::agent::key_dir(data, "gitlab")));
         assert_eq!(bound(None), Some(crate::agent::key_dir(data, "default")));
     }

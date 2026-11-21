@@ -14,7 +14,7 @@
 //! log.
 
 use aurcache_common::ssh_key;
-use aurcache_common::worker::{JobDescriptor, SshKeyRequest};
+use aurcache_common::worker::JobDescriptor;
 use std::collections::BTreeMap;
 
 /// The SSH keys a worker holds, by name.
@@ -35,16 +35,6 @@ impl<K> Default for SshKeys<K> {
 }
 
 impl<K> SshKeys<K> {
-    /// `key` as [`ssh_key::DEFAULT`], or no key at all.
-    #[must_use]
-    pub fn with_default(key: Option<K>) -> Self {
-        let mut keys = Self::default();
-        if let Some(key) = key {
-            keys.by_name.insert(ssh_key::DEFAULT.to_string(), key);
-        }
-        keys
-    }
-
     /// Hold `key` as `name`, in place of any key held by that name already.
     pub fn insert(&mut self, name: &str, key: K) {
         self.by_name.insert(name.to_string(), key);
@@ -68,8 +58,7 @@ pub enum SshOffer<'k, K> {
     /// that needed it, with the notice above it in its log.
     NotHeld { name: String },
     /// No key, and nothing to say: the job asks for the default key on a
-    /// worker that holds none, or (`{"name": null}`, which no server sends
-    /// any more) for no key at all.
+    /// worker that holds none.
     NoKey,
 }
 
@@ -111,8 +100,7 @@ pub fn offer<'k, K>(job: &JobDescriptor, keys: &'k SshKeys<K>) -> SshOffer<'k, K
                 name: ssh_key::DEFAULT.to_string(),
                 key,
             }),
-        Some(SshKeyRequest { name: None }) => SshOffer::NoKey,
-        Some(SshKeyRequest { name: Some(name) }) => match keys.get(name) {
+        Some(name) => match keys.get(name) {
             Some(key) => SshOffer::Offered {
                 name: name.clone(),
                 key,
@@ -127,7 +115,7 @@ mod tests {
     use super::*;
     use aurcache_common::worker::MirrorlistOffer;
 
-    fn job(ssh_key: Option<SshKeyRequest>) -> JobDescriptor {
+    fn job(ssh_key: Option<&str>) -> JobDescriptor {
         JobDescriptor {
             build_id: 1,
             pkgbase: "hello".to_string(),
@@ -142,19 +130,15 @@ mod tests {
             expected_packages: Vec::new(),
             timeout_secs: None,
             expected_version: "1-1".to_string(),
-            ssh_key,
-        }
-    }
-
-    fn named(name: &str) -> SshKeyRequest {
-        SshKeyRequest {
-            name: Some(name.to_string()),
+            ssh_key: ssh_key.map(str::to_string),
         }
     }
 
     /// A worker holding one key, the default, behind an agent's socket.
     fn agent() -> SshKeys<&'static str> {
-        SshKeys::with_default(Some("/agent.sock"))
+        let mut keys = SshKeys::default();
+        keys.insert(ssh_key::DEFAULT, "/agent.sock");
+        keys
     }
 
     fn offered(name: &str, key: &'static &'static str) -> SshOffer<'static, &'static str> {
@@ -182,19 +166,9 @@ mod tests {
     fn a_job_naming_the_default_gets_it() {
         let keys = agent();
         assert_eq!(
-            offer(&job(Some(named("default"))), &keys),
+            offer(&job(Some("default")), &keys),
             offered("default", &"/agent.sock")
         );
-    }
-
-    /// A job naming no key at all, as no server sends any more but protocol
-    /// 1 still carries, is offered none, silently.
-    #[test]
-    fn a_job_naming_no_key_is_offered_none() {
-        let keys = agent();
-        let offer = offer(&job(Some(SshKeyRequest { name: None })), &keys);
-        assert_eq!(offer, SshOffer::NoKey);
-        assert_eq!(offer.notice("hello"), None);
     }
 
     /// A name the worker does not hold, or that is no name at all, is never
@@ -204,7 +178,7 @@ mod tests {
     fn a_name_the_worker_does_not_hold_is_built_without() {
         let keys = agent();
         for name in ["gitlab", "../ssh/id_ed25519", "/run/secrets/key", "Default"] {
-            let offer = offer(&job(Some(named(name))), &keys);
+            let offer = offer(&job(Some(name)), &keys);
             assert_eq!(
                 offer,
                 SshOffer::NotHeld {
@@ -214,9 +188,7 @@ mod tests {
             assert_eq!(offer.key(), None);
         }
         assert_eq!(
-            offer(&job(Some(named("gitlab"))), &keys)
-                .notice("hello")
-                .unwrap(),
+            offer(&job(Some("gitlab")), &keys).notice("hello").unwrap(),
             "this worker holds no SSH key named \"gitlab\", which the build_ssh_key \
              setting names for hello; building without one"
         );
@@ -231,7 +203,7 @@ mod tests {
         assert_eq!(offer_default, SshOffer::NoKey);
         assert_eq!(offer_default.notice("hello"), None);
         assert!(matches!(
-            offer(&job(Some(named("gitlab"))), &keys),
+            offer(&job(Some("gitlab")), &keys),
             SshOffer::NotHeld { .. }
         ));
     }
