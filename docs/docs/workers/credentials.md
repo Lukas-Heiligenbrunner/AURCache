@@ -132,6 +132,30 @@ Two consequences:
 - Package code can authenticate with the key, to any host, for as long as its
   build runs. Nothing it captures outlives the build.
 
+## On the Docker worker
+
+The Docker worker takes `WORKER_GIT_SSH_KEY` and `WORKER_SSH_KNOWN_HOSTS`
+too, and keeps the key out of the build the same way: it stays in an
+`ssh-agent` of the worker's own, which a build reaches over a link for as long
+as it runs. A build, or a dependency's install script, can have the key sign
+while the build runs, a login or anything else; it cannot copy the key. So the
+key should be one made for builds, and not registered as a signing key
+anywhere. The differences:
+
+- nothing is generated: a key must be given;
+- `known_hosts` is required, since a container is new for every build and an
+  ssh that trusts the first key it is shown would trust any host.
+
+The ssh git runs in the build (`GIT_SSH_COMMAND`) is given the same options as
+on the chroot worker, so that file alone says which hosts git trusts, whatever
+the builder image's `ssh_config` and `/etc/ssh/ssh_known_hosts` say. That pins
+git's ssh against the image's configuration, and nothing more: a PKGBUILD can
+set `GIT_SSH_COMMAND` itself or run `ssh` directly without these options, and
+a dependency's install script runs as root there and could replace `ssh`
+itself for the rest of the build.
+
+See [Docker worker](./docker.md#build-credentials).
+
 ## Other credentials
 
 For credentials that are not SSH — a `.netrc`, an API token, a licence file —

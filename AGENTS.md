@@ -79,7 +79,7 @@ cd docs && yarn install --frozen-lockfile && yarn build
 ./scripts/test-e2e.sh hello
 
 # the build agent, static, running builds in the builder image under a build
-# container's flags (docker, ~3 min; needs python3 and git)
+# container's flags (docker, ~3 min; needs python3, git and OpenSSH)
 ./scripts/test-build-agent.sh
 
 # build the Arch packages from this tree (and optionally install them)
@@ -175,8 +175,9 @@ defect this frontend has had was of that kind.
   no capabilities, runs makepkg with a helper that installs named dependencies and nothing else, and
   writes a report. Its library half is the interface the workers speak to it (`BuildSpec`, `BuildReport`,
   the work directory's layout), pinned by fixtures under `tests/fixtures/interface-1/`.
-  `backend/aurcache-worker-container` is the worker's side: a claimed job into a spec and its input, and
-  how a container ended into one terminal report.
+  `backend/aurcache-worker-container` is the worker's side: a claimed job into a spec and its input,
+  how a container ended into one terminal report, and the OpenSSH `ssh-agent` it starts for each build that
+  is given the worker's SSH key, with the link a build reaches it over.
   `backend/aurcache-sandbox` confines PKGBUILD code with Landlock, for the server's parse and a build.
 - `backend/aurcache-cli` is a typed CLI for the HTTP API (`cargo run -p aurcache-cli -- ...`); the reusable
   Rust client library backing it lives in `backend/aurcache-client`. It authenticates via
