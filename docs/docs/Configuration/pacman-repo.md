@@ -225,12 +225,16 @@ subkey under the same primary key needs the same import, though the primary
 key's trust carries over.
 
 Turning signing off removes the databases' signatures at the next start, since
-the databases are written unsigned from then on. Packages keep the signatures
-they have, beside them and in `repo.db`, until they are rebuilt — and pacman
-checks every signature it finds, even with signatures optional. So a client
-that trusts the key can go back to `SigLevel = Optional TrustAll`, while one
-that never trusted it keeps refusing those packages until they are rebuilt:
-trust the key there, or set it to `SigLevel = Never` meanwhile.
+the databases are written unsigned from then on. A package already published
+keeps its signature, beside it and in `repo.db`, as long as it stays
+published; publishing its package again — a new version, or a rebuild under
+the same file name — publishes it unsigned and takes the old signature away
+with the file it signed. pacman checks every signature it finds, even with
+signatures optional, and those that stay verify only against the key. So a
+client that trusts the key can go back to `SigLevel = Optional TrustAll`,
+while one that never trusted it refuses each package still signed until that
+package is published again: trust the key there, or set it to `SigLevel =
+Never` meanwhile.
 
 ### Limits
 
