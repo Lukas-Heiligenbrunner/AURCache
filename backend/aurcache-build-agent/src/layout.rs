@@ -23,6 +23,8 @@ pub const INPUT_SOURCE: &str = "source.tar.gz";
 pub const PKG_DIR: &str = "pkg";
 pub const OUT_DIR: &str = "out";
 pub const REPORT_FILE: &str = "report.json";
+pub const LOG_DIR: &str = "log";
+pub const LOG_FILE: &str = "build.log";
 /// The variable makepkg's environment carries the helper's socket in.
 pub const PACMAN_SOCKET_VAR: &str = "AURCACHE_PACMAN_SOCKET";
 
@@ -74,7 +76,7 @@ impl Work {
     /// `<root>/log/build.log`.
     #[must_use]
     pub fn log(&self) -> PathBuf {
-        self.0.join("log").join("build.log")
+        self.0.join(LOG_DIR).join(LOG_FILE)
     }
 
     /// `<root>/out`: root's, until the build is over.
