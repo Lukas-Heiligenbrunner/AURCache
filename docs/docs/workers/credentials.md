@@ -179,9 +179,11 @@ INFO Builds are refused the agents of the SSH keys they are not offered outside 
 ```
 
 It asks again before each build. Should the answer change, as with the
-policy file edited or the sandbox package replaced under a running worker, a
-build whose package names a key goes ahead without it, with a line in its
-log, and the worker's log says why once.
+policy file edited or the sandbox package replaced under a running worker, or
+should the question fail, the worker stops the named keys' agents, so no
+build can reach them, and says why in its log, once. From then on it holds
+only its default key until it restarts: a build whose package names a key
+goes ahead without it, with a line in its log.
 :::
 
 ## Host keys
@@ -263,7 +265,8 @@ ABI 9, Linux 7.1 and later), an `aurcache-sandbox` that has the rule, and a
 sandbox policy the build user can read that lists the agents' directory. On
 an older kernel, with an older sandbox, or without that entry, sockets are not
 restricted. With a policy the build user cannot read, every build is refused.
-Either way the worker holds no named key there.
+Either way the worker holds no named key there, and should that change under a
+running worker, it stops the agents of those it holds.
 
 What it does not:
 

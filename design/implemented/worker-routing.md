@@ -457,9 +457,13 @@ really is (a directory spelled beneath a protected one, through a symlink or
 `..`, may be anywhere); otherwise `no-resolve-unix: ` and which of those
 failed, which the worker logs. The worker creates the directory before it
 asks, and asks again before each build while it holds named keys: a policy
-edited or a sandbox replaced under it changes the answer, and a build whose
-package names a key then goes ahead without it, with the log saying why once
-per change. Reading the policy as the build user is the point: a policy at
+edited or a sandbox replaced under it changes the answer. On the first answer
+that is not `resolve-unix`, or a question that fails, the worker stops the
+named keys' agents (`agent::NamedKeysGate` owns them), which removes their
+sockets, and logs why once: withholding a key only from the build that names
+it would leave every other build's PKGBUILD code able to reach its agent by
+path. It holds no named key again until it restarts, and a build whose
+package names one goes ahead without it. Reading the policy as the build user is the point: a policy at
 `0600 root` reads as missing to that user, and a check made with the
 worker's rights would pass while the sandbox saw no policy at all. The
 sandbox also refuses a build outright whenever its policy file exists but

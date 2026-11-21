@@ -113,17 +113,25 @@ async fn announce_build_credential(cfg: &Config) {
 /// agent by its path, and a key only some packages may use would be within
 /// reach of all of them. The worker then holds none of them, and says why.
 ///
-/// Held for the worker's lifetime: dropping one kills its agent, so no stray
-/// agent outlives the worker holding a credential.
+/// The default key's agent is held for the worker's lifetime, and the named
+/// ones by their gate, which stops them should the sandbox stop keeping builds
+/// from them: dropping one kills its agent, so no stray agent outlives the
+/// worker holding a credential.
 async fn start_agents(core: &CoreConfig, cfg: &Config) -> Agents {
     let mut agents = Agents {
-        running: Vec::new(),
+        default: None,
+        ssh_keys: SshKeys::default(),
         named_keys_gate: None,
     };
     let default = credentials::resolve(cfg);
-    agents
-        .running
-        .extend(start_agent(core, cfg, aurcache_common::ssh_key::DEFAULT, default.path()).await);
+    if let Some(agent) =
+        start_agent(core, cfg, aurcache_common::ssh_key::DEFAULT, default.path()).await
+    {
+        agents
+            .ssh_keys
+            .insert(agent.name(), agent.socket().to_path_buf());
+        agents.default = Some(agent);
+    }
     if cfg.named_ssh_keys.is_empty() {
         return agents;
     }
@@ -135,18 +143,21 @@ async fn start_agents(core: &CoreConfig, cfg: &Config) -> Agents {
     let sandbox = agent::sandbox_capabilities(&cfg.build_user, &core.data_dir);
     match agent::host_side_gate(sandbox).await.gap() {
         None => {
+            let mut named = Vec::new();
             for key in &cfg.named_ssh_keys {
-                agents
-                    .running
-                    .extend(start_agent(core, cfg, &key.name, &key.path).await);
+                if let Some(agent) = start_agent(core, cfg, &key.name, &key.path).await {
+                    agents
+                        .ssh_keys
+                        .insert(agent.name(), agent.socket().to_path_buf());
+                    named.push(agent);
+                }
             }
-            if agents
-                .running
-                .iter()
-                .any(|a| a.name() != aurcache_common::ssh_key::DEFAULT)
-            {
-                agents.named_keys_gate =
-                    Some(agent::NamedKeysGate::new(&cfg.build_user, &core.data_dir));
+            if !named.is_empty() {
+                agents.named_keys_gate = Some(agent::NamedKeysGate::new(
+                    &cfg.build_user,
+                    &core.data_dir,
+                    named,
+                ));
             }
             tracing::info!(
                 "Builds are refused the agents of the SSH keys they are not offered outside \
@@ -162,10 +173,12 @@ async fn start_agents(core: &CoreConfig, cfg: &Config) -> Agents {
     agents
 }
 
-/// The agents a worker started, and, when some hold named keys, the gate
-/// asked again before each build.
+/// The agents a worker started: the default key's, and the named keys' behind
+/// the gate asked again before each build.
 struct Agents {
-    running: Vec<agent::BuildAgent>,
+    default: Option<agent::BuildAgent>,
+    /// The sockets of all of them, by key name, which builds are offered.
+    ssh_keys: SshKeys<PathBuf>,
     named_keys_gate: Option<agent::NamedKeysGate>,
 }
 
@@ -214,7 +227,11 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // After the key is ensured, so a first start has one to load rather than
     // needing a restart. The keys are read once, here: replacing one takes
     // effect at the next restart.
-    let agents = start_agents(&core, &cfg).await;
+    let Agents {
+        default: _default_agent,
+        ssh_keys,
+        named_keys_gate,
+    } = start_agents(&core, &cfg).await;
 
     // Waits out a server that is not up yet; see `enroll::enroll`.
     let client = enroll::enroll(&core, &identity, ChrootExecutor::KIND).await?;
@@ -240,10 +257,6 @@ async fn run(core: CoreConfig, cfg: Config) -> Result<()> {
     // The agents' sockets go to the executor, never into this process's
     // environment: builds are offered the agents this worker started, and
     // never one an inherited `SSH_AUTH_SOCK` names.
-    let mut ssh_keys = SshKeys::default();
-    for agent in &agents.running {
-        ssh_keys.insert(agent.name(), agent.socket().to_path_buf());
-    }
-    let executor = ChrootExecutor::new(cfg, ssh_keys, agents.named_keys_gate).await;
+    let executor = ChrootExecutor::new(cfg, ssh_keys, named_keys_gate).await;
     Runner::new(core, client, executor).run().await
 }

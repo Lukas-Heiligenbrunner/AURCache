@@ -15,7 +15,7 @@ use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{Stop, StopWatch, log, report_warning, upload_artifacts};
-use aurcache_worker_core::ssh_key::{self, SshOffer};
+use aurcache_worker_core::ssh_key::{self, SshKeys, SshOffer};
 use aurcache_worker_core::{artifacts, report};
 
 use crate::build::{self, Access, BindMount};
@@ -90,20 +90,10 @@ async fn run_job_inner(
     let job = &claimed.job;
     // Decided before anything is prepared and said first in the build log, so
     // a fetch that fails for want of a key has the reason above it.
-    let mut ssh = ssh_key::offer(job, &shared.ssh_keys);
-    let mut notice = ssh.notice(&job.pkgbase);
-    // Asked before every build, so the worker's log says at once when the
-    // named keys' agents stop being kept from builds.
-    if !shared.named_keys_held().await
-        && let SshOffer::Offered { name, .. } = &ssh
-        && name != aurcache_common::ssh_key::DEFAULT
-    {
-        notice = Some(format!(
-            "SSH key {name:?} withheld: builds are no longer kept from its agent outside \
-             their chroot (the worker's log says why); building without one"
-        ));
-        ssh = SshOffer::NoKey;
-    }
+    // Asked before every build, so the named keys' agents are stopped as soon
+    // as builds stop being kept from them.
+    let named_keys_held = shared.named_keys_held().await;
+    let SshDecision { offer: ssh, notice } = ssh_decision(job, &shared.ssh_keys, named_keys_held);
     tracing::debug!("build {} of {}: {ssh:?}", job.build_id, job.pkgbase);
     if let Some(notice) = notice {
         log(client, job.build_id, &format!("[worker] {notice}\n")).await;
@@ -144,6 +134,41 @@ async fn run_job_inner(
     discard_failed_tree(client, job, &caches.cache, succeeded).await;
     finish_package_cache(client, job, shared, caches).await;
     outcome
+}
+
+/// What a build is offered of its worker's SSH keys, and the line its log
+/// says so with.
+struct SshDecision<'k> {
+    offer: SshOffer<'k, PathBuf>,
+    notice: Option<String>,
+}
+
+/// What `job`'s build is offered of `keys`: what [`ssh_key::offer`] says, but
+/// no named key unless `named_keys_held`.
+fn ssh_decision<'k>(
+    job: &JobDescriptor,
+    keys: &'k SshKeys<PathBuf>,
+    named_keys_held: bool,
+) -> SshDecision<'k> {
+    let offer = ssh_key::offer(job, keys);
+    match &offer {
+        SshOffer::Offered { name, .. }
+            if !named_keys_held && name != aurcache_common::ssh_key::DEFAULT =>
+        {
+            SshDecision {
+                notice: Some(format!(
+                    "SSH key {name:?} withheld: builds are no longer kept from its agent \
+                     outside their chroot, so this worker has stopped it (the worker's log \
+                     says why); building without one"
+                )),
+                offer: SshOffer::NoKey,
+            }
+        }
+        _ => SshDecision {
+            notice: offer.notice(&job.pkgbase),
+            offer,
+        },
+    }
 }
 
 /// Resources prepared for one job, held until reporting and cache cleanup end.
@@ -1330,6 +1355,29 @@ mod tests {
         let gitlab = bound(Some("gitlab"));
         assert_eq!(gitlab, Some(crate::agent::key_dir(data, "gitlab")));
         assert_eq!(bound(None), Some(crate::agent::key_dir(data, "default")));
+    }
+
+    /// Once the named keys are no longer held, a build whose package names
+    /// one is offered nothing, and its log says why; the default key is
+    /// offered as before.
+    #[test]
+    fn no_named_key_is_offered_once_they_are_not_held() {
+        let data = Path::new("/var/lib/aurcache-worker");
+        let mut keys = ssh_key::SshKeys::default();
+        for name in ["default", "gitlab"] {
+            keys.insert(name, crate::agent::key_dir(data, name).join("agent.sock"));
+        }
+        let gitlab = job_asking_for(Some("gitlab"));
+        assert!(ssh_decision(&gitlab, &keys, true).offer.key().is_some());
+
+        let withheld = ssh_decision(&gitlab, &keys, false);
+        assert_eq!(withheld.offer, SshOffer::NoKey);
+        assert!(withheld.notice.unwrap().contains("withheld"));
+        let default = ssh_decision(&job_asking_for(None), &keys, false);
+        assert_eq!(
+            default.offer.key(),
+            Some(&crate::agent::key_dir(data, "default").join("agent.sock"))
+        );
     }
 
     /// The mount is the agent's directory, read-only at the same path, and only

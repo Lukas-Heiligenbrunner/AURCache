@@ -389,62 +389,71 @@ impl HostSideGate {
     }
 }
 
-/// The sandbox's answer for a worker holding named keys, asked again before
-/// each build: a policy file edited or a sandbox package replaced under a
-/// running worker changes it.
+/// The agents of a worker's named keys, held only while the sandbox keeps
+/// builds from them outside their chroot, asked again before each build: a
+/// policy file edited or a sandbox package replaced under a running worker
+/// changes the answer.
+///
+/// Withholding a named key from the build whose package names it would not
+/// be enough once the answer changes: every other build's PKGBUILD code could
+/// still reach the agent by its path. So on the first answer that is not
+/// [`HostSideGate::Enforced`] -- a question that could not be asked counts --
+/// the gate stops the agents, which removes their sockets, and holds none of
+/// them again until the worker restarts.
 pub struct NamedKeysGate {
     /// The question, as [`sandbox_capabilities`] puts it.
     ask: Box<dyn Fn() -> Command + Send + Sync>,
-    /// The last answer, so the log says when it changes, once.
-    last: std::sync::Mutex<HostSideGate>,
+    /// The named keys' agents; empty once the gate has closed.
+    agents: std::sync::Mutex<Vec<BuildAgent>>,
 }
 
 impl NamedKeysGate {
-    /// For named keys held because the sandbox answered
+    /// For `agents`, started because the sandbox answered
     /// [`HostSideGate::Enforced`] for `build_user`'s builds and the agents
     /// under `data_dir`.
     #[must_use]
-    pub fn new(build_user: &str, data_dir: &Path) -> Self {
+    pub fn new(build_user: &str, data_dir: &Path, agents: Vec<BuildAgent>) -> Self {
         let build_user = build_user.to_string();
         let data_dir = data_dir.to_path_buf();
-        Self::asking(move || sandbox_capabilities(&build_user, &data_dir))
+        Self::asking(move || sandbox_capabilities(&build_user, &data_dir), agents)
     }
 
-    fn asking(ask: impl Fn() -> Command + Send + Sync + 'static) -> Self {
+    fn asking(ask: impl Fn() -> Command + Send + Sync + 'static, agents: Vec<BuildAgent>) -> Self {
         Self {
             ask: Box::new(ask),
-            last: std::sync::Mutex::new(HostSideGate::Enforced),
+            agents: std::sync::Mutex::new(agents),
         }
     }
 
-    /// Whether builds are still kept from the agents outside their chroot,
-    /// asked of the sandbox now. The log says so when the answer is not the
-    /// last one.
+    /// The named keys' agents, locked.
+    fn agents(&self) -> std::sync::MutexGuard<'_, Vec<BuildAgent>> {
+        self.agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether the named keys are still held, asked of the sandbox now; on the
+    /// first answer that builds are no longer kept from their agents, the
+    /// agents are stopped for good, and the log says why, once.
     pub async fn holds(&self) -> bool {
-        let gate = host_side_gate((self.ask)()).await;
-        let changed = {
-            let mut last = self
-                .last
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let changed = *last != gate;
-            last.clone_from(&gate);
-            changed
-        };
-        if changed {
-            match gate.gap() {
-                None => tracing::info!(
-                    "Builds are refused the agents of the SSH keys they are not offered outside \
-                     their chroot again; builds are offered the named keys their packages name"
-                ),
-                Some(gap) => tracing::error!(
-                    "Builds can no longer be kept from the agents of the named SSH keys outside \
-                     their chroot, because {gap}: a build whose package names one goes ahead \
-                     without it until they can"
-                ),
-            }
+        if self.agents().is_empty() {
+            return false;
         }
-        gate == HostSideGate::Enforced
+        let Some(gap) = host_side_gate((self.ask)()).await.gap() else {
+            // Closed meanwhile by another build's question, or still held.
+            return !self.agents().is_empty();
+        };
+        let stopped = std::mem::take(&mut *self.agents());
+        if !stopped.is_empty() {
+            // Dropped, each agent is killed and its socket removed.
+            drop(stopped);
+            tracing::error!(
+                "Builds can no longer be kept from the agents of the named SSH keys outside \
+                 their chroot, because {gap}: this worker has stopped those agents, and a build \
+                 whose package names one goes ahead without it until the worker restarts"
+            );
+        }
+        false
     }
 }
 
@@ -566,9 +575,9 @@ mod tests {
             HostSideGate::Enforced
         );
         assert_eq!(
-            gate("echo 'no-resolve-unix: policy unreadable (Permission denied)'").await,
+            gate("echo 'no-resolve-unix: bad policy (Permission denied)'").await,
             HostSideGate::SandboxDeclines {
-                why: "policy unreadable (Permission denied)".into()
+                why: "bad policy (Permission denied)".into()
             }
         );
         for lacking in ["true", "echo resolve-unix-maybe", "echo other"] {
@@ -596,27 +605,62 @@ mod tests {
         );
     }
 
-    /// Asked again, the gate holds only while the sandbox still answers
-    /// `resolve-unix`, and holds again once it does.
+    /// A stand-in for a named key's agent: a process of its own group, and a
+    /// socket in `dir`.
+    fn stand_in_agent(dir: &Path, name: &str) -> BuildAgent {
+        let socket = dir.join(format!("{name}.sock"));
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let mut spawn = Command::new("sleep");
+        spawn.arg("600").process_group(0).kill_on_drop(true);
+        BuildAgent {
+            name: name.to_string(),
+            socket,
+            child: spawn.spawn().unwrap(),
+        }
+    }
+
+    /// The gate holds while the sandbox answers `resolve-unix`. On the first
+    /// answer that is not, it stops the agents -- their sockets go -- and holds
+    /// none of them again, whatever the sandbox answers after.
     #[tokio::test]
-    async fn the_named_keys_gate_follows_the_latest_answer() {
+    async fn the_named_keys_gate_stops_the_agents_once_it_closes() {
         let dir = tempfile::tempdir().unwrap();
         let answer = dir.path().join("answer");
         let script = answer.clone();
-        let gate = NamedKeysGate::asking(move || {
-            let mut query = Command::new("cat");
-            query.arg(&script);
-            query
-        });
+        let agent = stand_in_agent(dir.path(), "gitlab");
+        let socket = agent.socket().to_path_buf();
+        let gate = NamedKeysGate::asking(
+            move || {
+                let mut query = Command::new("cat");
+                query.arg(&script);
+                query
+            },
+            vec![agent],
+        );
         std::fs::write(&answer, "resolve-unix\n").unwrap();
         assert!(gate.holds().await);
+        assert!(socket.exists());
+
         std::fs::write(&answer, "no-resolve-unix: policy misses the agents (x)\n").unwrap();
         assert!(!gate.holds().await);
-        assert!(!gate.holds().await);
-        std::fs::remove_file(&answer).unwrap();
-        assert!(!gate.holds().await);
+        assert!(!socket.exists());
+
         std::fs::write(&answer, "resolve-unix\n").unwrap();
-        assert!(gate.holds().await);
+        assert!(!gate.holds().await);
+    }
+
+    /// A question that cannot be asked closes the gate too.
+    #[tokio::test]
+    async fn a_failed_question_closes_the_named_keys_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = stand_in_agent(dir.path(), "gitlab");
+        let socket = agent.socket().to_path_buf();
+        let gate = NamedKeysGate::asking(
+            || Command::new("/nonexistent/aurcache-sandbox"),
+            vec![agent],
+        );
+        assert!(!gate.holds().await);
+        assert!(!socket.exists());
     }
 
     /// The question goes to the sandbox builds find, as the build user, and

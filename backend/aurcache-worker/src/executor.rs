@@ -95,7 +95,8 @@ impl Shared {
     }
 
     /// Whether a build may be offered a named key now: always, unless the
-    /// sandbox, asked again, no longer keeps builds from the agents.
+    /// gate has closed, the sandbox, asked again, no longer keeping builds
+    /// from the agents or not answering.
     pub async fn named_keys_held(&self) -> bool {
         match &self.named_keys_gate {
             None => true,
