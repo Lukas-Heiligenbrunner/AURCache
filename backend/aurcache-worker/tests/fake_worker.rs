@@ -19,6 +19,8 @@
 //! chroot build + source download are covered by the tier-3 e2e
 //! (`scripts/test-e2e.sh`).
 
+mod common;
+
 use std::io::Write;
 use std::time::{Duration, Instant};
 
@@ -30,11 +32,12 @@ use aurcache_db::files;
 use aurcache_db::helpers::worker_store;
 use aurcache_utils::repository::Repository;
 use aurcache_utils::settings;
-use aurcache_worker_core::client::{WorkerClient, fetch_and_pin_ca};
+use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::config::CoreConfig;
 use aurcache_worker_core::enroll::ensure_enrolled;
 use aurcache_worker_core::identity::Identity;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use common::{STUCK, seed_build, start_listener};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 /// Craft a minimal but structurally valid `*.pkg.tar.zst`: a zstd-compressed
 /// tar containing a single `.PKGINFO` with the fields `repo_add` requires
@@ -61,36 +64,6 @@ fn make_pkg(name: &str, ver: &str) -> (String, Vec<u8>) {
 
     (format!("{name}-{ver}-x86_64.pkg.tar.zst"), bytes)
 }
-
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
-async fn seed_build(db: &DatabaseConnection, id: i32, platform: &str, start: i64) {
-    // Nonexistent local git path -> the server's best-effort `.SRCINFO` fetch
-    // during `claim` fails instantly (offline, empty pgp_keys) rather than
-    // hitting the AUR.
-    let source =
-        r#"{"type":"git","url":"/nonexistent-aurcache-fake-worker","ref":"HEAD","subfolder":""}"#;
-    db.execute_unprepared(&format!(
-        "INSERT INTO packages (id, name, build_flags, source_data, platforms) \
-         VALUES ({id}, 'p{id}', '', '{source}', '{platform}')"
-    ))
-    .await
-    .unwrap();
-    db.execute_unprepared(&format!(
-        "INSERT INTO builds (id, pkg_id, status, start_time, platform, version) \
-         VALUES ({id}, {id}, 3, {start}, '{platform}', '1.0')"
-    ))
-    .await
-    .unwrap();
-}
-
-/// How long a wait below goes on before it is taken for a hang. Not how long
-/// anything should take: publishing syncs the repository to disk, and on a
-/// busy machine that alone can take tens of seconds.
-const STUCK: Duration = Duration::from_secs(180);
 
 /// The build's status once its publication has finished.
 ///
@@ -125,36 +98,13 @@ async fn build_status(db: &DatabaseConnection, id: i32) -> BuildState {
 #[tokio::test]
 async fn fake_worker_protocol_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
-    let ca_dir = tmp.path().join("ca");
-    let worker_data = tmp.path().join("worker");
     std::env::set_current_dir(tmp.path()).unwrap();
-
-    let port = free_port();
-    let token = "s3cr3t-enroll-token";
-
-    // SAFETY: single-threaded setup phase before any worker/server threads read
-    // these; each `tests/*.rs` integration test is its own process so there is
-    // no cross-test env contention.
-    unsafe {
-        std::env::set_var("AURCACHE_WORKER_PORT", port.to_string());
-        std::env::set_var("AURCACHE_TLS_SANS", "localhost");
-        std::env::set_var("AURCACHE_ENROLLMENT_TOKEN", token);
-        std::env::remove_var("AURCACHE_ENROLLMENT_DIR");
-        std::env::remove_var("AURCACHE_PREAPPROVED_WORKERS");
-        // Worker config:
-        std::env::set_var("AURCACHE_URL", format!("https://localhost:{port}"));
-        std::env::set_var("WORKER_DATA_DIR", worker_data.display().to_string());
-        std::env::set_var("WORKER_ARCHES", "x86_64");
-        std::env::set_var("WORKER_NAME", "fake-worker");
-    }
 
     // In-memory DB with the full schema, seeded with two enqueued x86_64 builds.
     let db = aurcache_db::testing::memory_db().await;
     seed_build(&db, 1, "x86_64", 1000).await;
     seed_build(&db, 2, "x86_64", 2000).await;
 
-    // Boot the real worker protocol listener (HTTPS + optional mTLS).
-    let ca = aurcache_ca::Ca::load_or_create(&ca_dir).unwrap();
     let repo_root = tmp.path().join("repo");
     let repo = std::sync::Arc::new(
         Repository::new(&repo_root)
@@ -162,26 +112,7 @@ async fn fake_worker_protocol_roundtrip() {
             .unwrap(),
     );
     repo.init().unwrap();
-    let _server = aurcache_api::init::init_worker_api(
-        db.clone(),
-        ca,
-        std::sync::Arc::new(aurcache_utils::snapshot::SnapshotStore::new()),
-        std::sync::Arc::clone(&repo),
-        aurcache_activitylog::activity_utils::ActivityLog::discarding(),
-        // Read as the server reads them, so AURCACHE_WORKER_PORT above applies.
-        aurcache_api::listen::ListenAddresses::from_env().unwrap(),
-    );
-
-    // Wait for the TLS listener to accept and serve the CA.
-    let base = format!("https://localhost:{port}");
-    let deadline = Instant::now() + STUCK;
-    while fetch_and_pin_ca(&base, None).await.is_err() {
-        assert!(
-            Instant::now() < deadline,
-            "worker protocol listener did not come up on :{port}"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    start_listener(tmp.path(), &db, std::sync::Arc::clone(&repo), "fake-worker").await;
 
     // Enroll a synthetic worker with the production client + enrollment flow.
     // The shared enrollment token makes the server auto-approve it.
