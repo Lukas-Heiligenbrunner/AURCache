@@ -2,14 +2,30 @@
 sidebar_position: 4
 ---
 
-# Upgrading from 0.5
+# Upgrading
+
+What changes between releases, and what to do about it. Upgrading across
+several releases is each of their sections in turn, oldest first.
+
+## From 0.6 {#from-0-6}
+
+- **A sandbox policy the build user cannot read refuses every build.** On
+  0.6.0 a `/etc/aurcache/sandbox-protected` that exists but cannot be read by
+  the build user (`0600 root`, say), or that is reached through a symlink to
+  nothing, was taken for no policy: builds ran with the paths it lists
+  readable. Such a worker now fails every build with `cannot read the
+  protected-path list`. Before upgrading a worker, make the file readable by
+  everyone (`chmod 644 /etc/aurcache/sandbox-protected`), and fix or remove a
+  link to it that leads nowhere. See [the sandbox](../setup/native.md#aurcache-build-the-patched-makechrootpkg).
+
+## From 0.5 {#from-0-5}
 
 An instance set up from the 0.5 docs upgrades by changing the image line and
 nothing else: the `aurcache` image is now the [hybrid
 image](../workers/hybrid.md), the server and a worker that builds the way 0.5
-did. This page is what to do before, and what to expect after.
+did. This section is what to do before, and what to expect after.
 
-## Before
+### Before
 
 **Back up.** The upgrade converts the database once and cannot be undone: 0.5
 refuses to start on what it leaves. Going back means restoring a copy.
@@ -43,7 +59,7 @@ docker compose up -d
 Moving the data to a newer PostgreSQL is a separate step, with `pg_upgrade` or
 a dump and restore.
 
-## On the first start
+### On the first start
 
 The log says what it does; nothing needs an answer.
 
@@ -73,7 +89,7 @@ The log says what it does; nothing needs an answer.
   `BUILD_ON_NEW_VERSION=false` and `AUTO_UPDATE_SCHEDULE=@never` to keep 0.5's
   behaviour.
 
-## Settings
+### Settings
 
 - **CPU and memory limits, and the number of concurrent builds**, set in the
   0.5 settings page, become the embedded worker's own settings, on its page under
@@ -88,7 +104,7 @@ The log says what it does; nothing needs an answer.
 - **`DB_PWD`** is the password itself. If you percent-encoded it for 0.5 so that
   it differed from `POSTGRES_PASSWORD`, set the plain password.
 
-## Clients and the repository
+### Clients and the repository
 
 pacman clients need no change: the repository's URL, name and layout are the
 same. The repository directory now also holds `.build_logs` and `.ca`, which the
@@ -96,13 +112,13 @@ server never serves. If you serve `./aurcache/repo` with a web server of your
 own, or copy it to a mirror, exclude dot directories: `.ca` holds the CA's
 private key.
 
-## Other architectures
+### Other architectures
 
 Packages for `aarch64` and `armv7h` build as they did, through the host's
 qemu/binfmt handlers; see [the Docker
 worker](../workers/docker.md#other-architectures).
 
-## Afterwards
+### Afterwards
 
 The hybrid image is for keeping an existing setup running. When convenient,
 move to a server and a separate worker; see [Migrating](../workers/hybrid.md#migrating).
