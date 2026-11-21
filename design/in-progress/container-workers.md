@@ -407,8 +407,8 @@ same shape, that is the moment to give it the agent's.
 
 For each job the worker now:
 
-1. makes `<BUILD_ARTIFACT_DIR_LOCAL>/<build_id>/`, mode 0755 (it no longer
-   has to be writable by a stranger's uid), with `in/spec.json`,
+1. makes `<BUILD_ARTIFACT_DIR_LOCAL>/<worker>_<build_id>/`, mode 0755 (it no
+   longer has to be writable by a stranger's uid), with `in/spec.json`,
    `in/source.tar.gz` and a copy of the agent in `bin/`;
 2. creates the container:
 
