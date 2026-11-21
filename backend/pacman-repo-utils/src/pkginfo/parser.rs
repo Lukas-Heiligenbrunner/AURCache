@@ -1,12 +1,17 @@
 use anyhow::bail;
 use base64::Engine;
 use base64::engine::general_purpose;
+use std::fs;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
-use std::{fs, io};
 
 /// Upper bound on a detached signature, mirroring `repo-add`'s own check.
 const MAX_SIGNATURE_BYTES: usize = 16384;
+
+/// Upper bound on a `.PKGINFO`. A real one is a few KiB; this one comes from
+/// an archive whoever built the package controls, and a compressed one can
+/// expand to anything.
+const MAX_PKGINFO_BYTES: u64 = 1 << 20;
 
 #[derive(Default)]
 pub struct Pkginfo {
@@ -37,9 +42,15 @@ impl Pkginfo {
         Self::default()
     }
 
+    /// Parse a `.PKGINFO`, refusing one larger than [`MAX_PKGINFO_BYTES`]
+    /// rather than reading it all.
     pub fn parse(&mut self, file: impl Read) -> anyhow::Result<()> {
-        let reader = io::BufReader::new(file);
-        for line in reader.lines() {
+        let mut content = Vec::new();
+        file.take(MAX_PKGINFO_BYTES + 1).read_to_end(&mut content)?;
+        if content.len() as u64 > MAX_PKGINFO_BYTES {
+            bail!("its .PKGINFO is larger than {MAX_PKGINFO_BYTES} bytes");
+        }
+        for line in content.lines() {
             self.parse_line(&line?)?;
         }
         Ok(())
@@ -142,6 +153,15 @@ mod tests {
         assert_eq!(pkginfo.arch, "x86_64");
         assert_eq!(pkginfo.builddate, "2021-01-01");
         assert_eq!(pkginfo.packager, "test");
+    }
+
+    #[test]
+    fn an_oversized_pkginfo_is_refused() {
+        let line = format!(
+            "pkgdesc = {}\n",
+            "x".repeat(usize::try_from(MAX_PKGINFO_BYTES).unwrap())
+        );
+        assert!(Pkginfo::new().parse(line.as_bytes()).is_err());
     }
 
     #[test]

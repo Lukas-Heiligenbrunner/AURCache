@@ -63,14 +63,16 @@ fn write_entry(f: &mut Formatter<'_>, header: &str, value: &str) -> std::fmt::Re
     write!(f, "%{}%\n{value}\n\n", header.to_uppercase())
 }
 
-/// Write a multi-value `%HEADER%` section. An empty list, or a list holding
-/// nothing but one empty string, writes nothing at all.
+/// Write a multi-value `%HEADER%` section, a line per value. Empty values are
+/// left out: pacman reads a blank line as the end of the section, and the
+/// line after it as the start of another. A list of none writes nothing.
 fn write_entries(f: &mut Formatter<'_>, header: &str, values: &[String]) -> std::fmt::Result {
-    match values {
-        [] => Ok(()),
-        [value] if value.is_empty() => Ok(()),
-        _ => write_entry(f, header, &values.join("\n")),
-    }
+    let values: Vec<&str> = values
+        .iter()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .collect();
+    write_entry(f, header, &values.join("\n"))
 }
 
 impl From<Pkginfo> for Desc {
@@ -208,6 +210,21 @@ test
 
 ";
         assert_eq!(desc.to_string(), expected);
+    }
+
+    /// An empty value cannot end a section early, and so cannot start one.
+    #[test]
+    fn an_empty_value_writes_no_blank_line() {
+        let desc = Desc::from(Pkginfo {
+            pkgname: "demo".to_string(),
+            licenses: vec![String::new(), "MIT".to_string(), String::new()],
+            depends: vec![String::new()],
+            ..Pkginfo::default()
+        });
+        assert_eq!(
+            desc.to_string(),
+            "%NAME%\ndemo\n\n%ISIZE%\n0\n\n%LICENSE%\nMIT\n\n"
+        );
     }
 
     #[test]
