@@ -650,3 +650,21 @@ async fn a_repository_that_does_not_resolve_refuses_the_build_and_leaves_the_oth
     let _ = rules.close().await;
     drop(lan);
 }
+
+/// Workers sharing a network namespace each keep a table of their own: one
+/// starting leaves the other's in place.
+#[tokio::test]
+#[ignore = "restructures the caller's cgroup and adds nftables tables; run in a privileged container"]
+async fn a_worker_starting_leaves_anothers_table_alone() {
+    let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
+    let first = Table::for_worker("f125");
+    let second = Table::for_worker("5ec0d");
+    let install = |table: &Table| enforced(table.clone(), &hierarchy);
+    let _first = install(&first);
+    let _second = install(&second);
+    assert!(nft_lists(&["table", "inet", first.name()]));
+    assert!(nft_lists(&["table", "inet", second.name()]));
+    // A restart makes its own table afresh, and only its own.
+    let _first = install(&first);
+    assert!(nft_lists(&["table", "inet", second.name()]));
+}

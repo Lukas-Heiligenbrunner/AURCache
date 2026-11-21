@@ -608,11 +608,11 @@ mount a network filesystem; the others keep it, and their filter denies
 mounts too. That rules both out. [What runs as root](#what-runs-as-root) says
 what is left of this on an emulated worker, where qemu refuses the filter.
 
-Run one worker per network namespace for now. Workers sharing one, as
-containers on the host's network or as units on one machine, each keep a
-table of their own, but mark their builds' packets to a local address by
-build id alone: two workers of different servers can run builds with the same
-id, and each would refuse the other's build its own listeners.
+Several workers can share a network namespace, as containers on the host's
+network or as units on one machine: each makes and removes only its own
+table, and marks its builds apart from the others'. With
+`WORKER_BUILD_FIREWALL=0` a worker removes its table too, so no earlier run's
+rules hold its builds.
 
 A build whose rules cannot be put in place does not run. A worker that cannot
 put the policy in place at all takes no builds: one that cannot match builds

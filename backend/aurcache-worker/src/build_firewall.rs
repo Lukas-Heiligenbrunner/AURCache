@@ -69,7 +69,8 @@
 //! A listener of the build itself is told apart on the way in: a build's
 //! packet to a local address leaves with a mark naming the build, and the
 //! input hook accepts it only when the socket it reaches is in that same
-//! build's cgroup. A marked packet no build names is left alone.
+//! build's cgroup. A marked packet no build of a table names is left alone by
+//! that table: it is another worker's, whose table decides.
 //!
 //! Set `WORKER_BUILD_FIREWALL=0` to install none of this.
 
@@ -121,6 +122,8 @@ pub fn disabled() -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
     name: String,
+    /// What this worker mixes into its builds' marks; see [`Self::mark`].
+    salt: u32,
 }
 
 impl Table {
@@ -134,9 +137,12 @@ impl Table {
             .take(16)
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        Self {
-            name: format!("aurcache_worker_{id}"),
-        }
+        let name = format!("aurcache_worker_{id}");
+        // FNV-1a: a stable number of the name's, the same at every start.
+        let salt = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+        Self { name, salt }
     }
 
     #[must_use]
@@ -145,12 +151,14 @@ impl Table {
     }
 
     /// The mark a build's packets to a local address carry: the tag, and the
-    /// build's id below it.
+    /// build's id mixed with this worker's own number. Builds of different
+    /// servers can have the same id, and their workers can share a network
+    /// namespace; each table claims only the marks of its own builds.
     #[must_use]
     pub const fn mark(&self, build_id: i32) -> u32 {
         #[allow(clippy::cast_sign_loss)]
         let id = build_id as u32;
-        MARK_TAG | (id & !MARK_MASK)
+        MARK_TAG | ((id ^ self.salt) & !MARK_MASK)
     }
 }
 
@@ -878,6 +886,12 @@ impl BuildNetwork {
     #[must_use]
     pub fn install(table: Table, cgroups: Option<&Hierarchy>) -> Self {
         if disabled() {
+            // A table of an earlier run would still hold builds to its
+            // baseline, the repository refused with the rest.
+            let removal = format!("add table inet {table}\ndelete table inet {table}\n");
+            if let Err(e) = load(&removal) {
+                tracing::debug!("no build network table removed: {e:#}");
+            }
             tracing::warn!(
                 "{DISABLE_ENV} is off: builds can reach the server's API and worker \
                  protocol, and the worker's local network"
@@ -1509,18 +1523,27 @@ mod tests {
         assert!(allowed < repo, "{chain:#?}");
     }
 
-    /// A worker's builds are marked apart from each other.
+    /// A worker's builds are marked apart from each other, and from another
+    /// worker's builds with the same ids.
     #[test]
     fn the_mark_carries_the_build_under_the_tag() {
+        let other = Table::for_worker("0000ffff0000ffff");
         for build_id in [1, 42, 0x0123_4567] {
-            assert_eq!(table().mark(build_id) & MARK_MASK, MARK_TAG);
+            for table in [table(), other.clone()] {
+                assert_eq!(table.mark(build_id) & MARK_MASK, MARK_TAG);
+            }
+            assert_ne!(table().mark(build_id), other.mark(build_id));
             assert_ne!(table().mark(build_id), table().mark(build_id + 1));
         }
-        assert_eq!(table().mark(42), MARK_TAG | 42);
+        // The same worker marks the same build the same way at every start.
+        assert_eq!(
+            Table::for_worker("5e1f0a2b3c4d5e6f7a8b9c0d1e2f3a4b").mark(42),
+            table().mark(42)
+        );
     }
 
-    /// A marked packet that no build names is left alone: the input hook
-    /// only refuses what a build's own rules say is its.
+    /// A marked packet that no build of this table names goes on to the next
+    /// table: another worker's build's, which that worker's rules decide.
     #[test]
     fn the_input_hook_claims_only_its_own_builds_marks() {
         let script = baseline_script(&table(), &cgroup("builds"));

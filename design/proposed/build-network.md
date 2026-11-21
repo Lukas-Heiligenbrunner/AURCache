@@ -235,7 +235,11 @@ One table per worker, `inet aurcache_worker_<id>`, named after the first 16
 hex digits of its identity's fingerprint. Workers sharing a network namespace
 (containers on the host's network, several units on one machine) each make,
 fill and remove only their own: a fixed name would have each worker's startup
-delete the others' rules. The table holds:
+delete the others' rules. With `WORKER_BUILD_FIREWALL=0` a worker removes its
+own table, so no earlier run's rules are left to hold its builds. A table left
+under an earlier identity stays until the network namespace goes (a
+container's restart, the host's reboot), and holds nothing: its rules match
+the cgroups of that run's builds, which went with it. The table holds:
 
 - **Static, at startup**, on `builds/`: rules 1, 4 and 5, which need no DNS.
   This is the baseline every build gets, even before its own rules load.
@@ -316,13 +320,11 @@ On the way out, nothing says whose socket a local connection will reach. On
 the way in it does: in the input hook, `socket cgroupv2` looks up the socket the
 packet is for. So a build's packet to a local address is not refused at once;
 it leaves with a mark naming the build (`0x41` in the top byte, and the build
-id below it, set only on packets to
+id mixed with a number of the worker's below it, set only on packets to
 `fib daddr type local`), and the input hook accepts a marked packet only if
 the socket it reaches is in that build's cgroup, and refuses it otherwise.
 
-*(Follows, in a later PR of this chain: the build id
-is mixed with a number of the worker's.)* Each table claims only its own
-builds' marks, and lets any other marked
+Each table claims only its own builds' marks, and lets any other marked
 packet through: with several workers in one network namespace, every table's
 input hook sees every worker's builds' packets, and a table that refused the
 marks it did not know refused the other workers' builds their own listeners.
@@ -383,7 +385,14 @@ protocol on a routed address is refused on every port while the repository is
 elsewhere. Further tests check that a build cancelled while its rules load has
 them loaded and then removed (as `nft monitor` reports), and that a build
 whose repository does not resolve is refused while a running build stays
-refused the server's other ports.
+refused the server's other ports, and that two workers' tables coexist in one
+network namespace.
+
+Not tested against the kernel: that two workers matched by cgroup leave each
+other's builds' own listeners alone. It needs a second worker's `builds/`
+cgroup, and the test process can prepare only its own hierarchy. The rules
+that make it so are unit tested: each table's input hook claims only the marks
+of its own builds, mixed with its own number.
 
 The script runs them a second time in a container with the host's cgroup
 namespace (`--cgroupns=host`), as the compose files run the worker.
