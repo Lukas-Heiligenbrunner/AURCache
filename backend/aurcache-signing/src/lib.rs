@@ -147,21 +147,23 @@ fn is_inside(path: &Path, dir: &Path) -> bool {
 /// What a key is refused with when rPGP refuses its checksum: see
 /// [`parse_secret`].
 const REFUSED_CHECKSUM: &str = "rPGP, which the server reads keys with, refuses this key's \
-     checksum. Either it is one of the unprotected Ed25519 keys GnuPG exports that rPGP \
-     misreads, about one in 256 (https://github.com/rpgp/rpgp/issues/901), or the key file \
-     is damaged. Lock the key with a passphrase (`gpg --passwd <fingerprint>`), export it \
-     again and give the server that passphrase (AURCACHE_SIGNING_KEY_PASSPHRASE_FILE): rPGP \
-     reads a locked copy of the same key. If that copy is refused too, restore the key from \
-     a backup";
+     checksum. Either GnuPG wrote this unprotected key's secret in a form the OpenPGP \
+     standard does not allow, which rPGP refuses (https://github.com/rpgp/rpgp/issues/901), \
+     or the key file is damaged. Lock the key with a passphrase (`gpg --passwd \
+     <fingerprint>`), export it again and give the server that passphrase \
+     (AURCACHE_SIGNING_KEY_PASSPHRASE_FILE). If that copy is refused too, restore the key \
+     from a backup";
 
 /// A secret key, armored or binary.
 ///
-/// rPGP (0.21) checks an unprotected secret's checksum over its own encoding
-/// of the secret rather than over the bytes in the file, and GnuPG writes an
-/// Ed25519 secret whose first byte is zero with a bit count of 256, so the
-/// two sums differ and rPGP refuses a key GnuPG reads
-/// (<https://github.com/rpgp/rpgp/issues/901>). A damaged key file is refused
-/// the same way, so the refusal names both, and what to try for each.
+/// GnuPG writes about one unprotected Ed25519 secret in 256 -- one whose
+/// first byte is zero -- as an MPI that keeps that leading zero octet, which
+/// the OpenPGP standard (RFC 9580, and RFC 4880 before it) forbids; GnuPG
+/// follows its own LibrePGP draft. rPGP refuses such a secret as an invalid
+/// checksum; an rPGP contributor argues it should not accept one, and the
+/// issue is open (<https://github.com/rpgp/rpgp/issues/901>). A damaged key
+/// file is refused the same way, so the refusal names both, and what to try
+/// for each.
 fn parse_secret(bytes: &[u8]) -> anyhow::Result<SignedSecretKey> {
     let armored = std::str::from_utf8(bytes)
         .is_ok_and(|text| text.trim_start().starts_with("-----BEGIN PGP"));
@@ -1536,15 +1538,17 @@ mod tests {
     }
 
     /// About one unprotected Ed25519 secret GnuPG exports in 256 -- one
-    /// beginning with a zero byte -- is one rPGP refuses ("Invalid checksum"),
-    /// though GnuPG reads it. It is refused saying how to get a copy rPGP
-    /// reads, and that way, locked with a passphrase, it loads and signs.
+    /// beginning with a zero byte, written with that leading zero octet,
+    /// which the standard forbids -- is one rPGP refuses ("Invalid
+    /// checksum"), though GnuPG reads it. It is refused saying how to get a
+    /// copy rPGP reads, and that way, locked with a passphrase, it loads and
+    /// signs.
     #[test]
-    fn a_key_rpgp_misreads_is_refused_with_a_way_around() {
+    fn a_key_gnupg_wrote_off_the_standard_is_refused_with_a_way_around() {
         let tmp = tempfile::tempdir().unwrap();
-        let misread = include_bytes!("../testdata/gnupg-unprotected-leading-zero.asc");
-        let path = tmp.path().join("misread.asc");
-        std::fs::write(&path, misread).unwrap();
+        let off_standard = include_bytes!("../testdata/gnupg-unprotected-leading-zero.asc");
+        let path = tmp.path().join("off-standard.asc");
+        std::fs::write(&path, off_standard).unwrap();
         let error = format!("{:#}", InstanceKey::load(&path, None).unwrap_err());
         assert!(
             error.contains(REFUSED_CHECKSUM),
@@ -1602,10 +1606,10 @@ mod tests {
     }
 
     /// Run `test` with a throwaway GnuPG home in a temporary directory, or
-    /// skip it when GnuPG is not installed. A run that fails because a key
-    /// GnuPG made is one rPGP misreads ([`REFUSED_CHECKSUM`]) -- about one
-    /// unprotected secret in 256, which no test calling this is about -- is
-    /// run again, with new keys.
+    /// skip it when GnuPG is not installed. A run that fails because GnuPG
+    /// wrote a key off the standard, which rPGP refuses
+    /// ([`REFUSED_CHECKSUM`]) -- about one unprotected secret in 256, which no
+    /// test calling this is about -- is run again, with new keys.
     fn with_gnupg(test: impl Fn(&Path, &Gpg)) {
         for _ in 0..5 {
             let tmp = tempfile::tempdir().unwrap();
@@ -1627,9 +1631,9 @@ mod tests {
             if !said.contains(REFUSED_CHECKSUM) {
                 std::panic::resume_unwind(panic);
             }
-            eprintln!("GnuPG made a key rPGP misreads; running again with new keys");
+            eprintln!("GnuPG made a key rPGP refuses; running again with new keys");
         }
-        panic!("GnuPG made keys rPGP misreads five times running");
+        panic!("GnuPG made keys rPGP refuses five times running");
     }
 
     /// A throwaway GnuPG home, whose agent is stopped when it is dropped.

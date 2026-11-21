@@ -206,8 +206,10 @@ elsewhere with `AURCACHE_SIGNING_KEY_FILE`.
   the old expiry.
 - Some unprotected Ed25519 keys GnuPG exports — about one in 256 — are
   refused with a message saying the library the server reads keys with
-  refuses their checksum ([rPGP #901](https://github.com/rpgp/rpgp/issues/901)).
-  A damaged key file is refused with the same message. Lock the key with a
+  refuses their checksum: GnuPG wrote the secret in a form the OpenPGP
+  standard does not allow, which that library, rPGP, refuses
+  ([rPGP #901](https://github.com/rpgp/rpgp/issues/901)). A damaged key file
+  is refused with the same message. Lock the key with a
   passphrase (`gpg --passwd <fingerprint>`), export it again and give the
   server the passphrase (below): the locked copy is read. If it is refused
   too, the file is damaged: restore the key from a backup.
