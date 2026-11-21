@@ -78,7 +78,9 @@ pub enum CreateError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Admission {
     /// It would be created, as `pod`: what the API server would store,
-    /// without any field it does not know.
+    /// without any field it does not know. A dry run the server answered
+    /// without judging the pod, because the name it was asked about is
+    /// taken, has nothing against it either: `pod` is then the pod as asked.
     Admitted { pod: Box<Pod> },
     /// The cluster answered, and a pod created now would not be: admission
     /// said no, the namespace is not there, or the API server is failing or
@@ -87,9 +89,6 @@ pub enum Admission {
     /// The question reached no API server. A pod created now would not
     /// reach one either.
     Unreached { message: String },
-    /// An API server answered without judging the pod: the name it was
-    /// asked about is taken. Nothing is known against the cluster.
-    Unjudged { message: String },
 }
 
 /// The shortest grace a pod is deleted with. None at all is a force
