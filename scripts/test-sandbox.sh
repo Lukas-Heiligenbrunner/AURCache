@@ -32,12 +32,17 @@
 # CAP_SYS_ADMIN and runs outside any sandbox, which only the container's own
 # filter keeps from mounting.
 #
-# It also covers the worker's ssh-agent, which every build can reach by its
-# fixed path, being the build user's own: a build not offered the key must be
-# refused it -- while another build is using it -- and one offered it must not.
-# The agent's directory is a protected path, and the refusal is Landlock's
+# It also covers the worker's ssh-agents, one per key, which every build can
+# reach by their fixed paths, being the build user's own: a build not offered
+# a key must be refused its agent -- while another build is using it -- and a
+# build offered one key must reach its agent and not another key's. The
+# agents' directory is a protected path, and the refusal is Landlock's
 # `LANDLOCK_ACCESS_FS_RESOLVE_UNIX` (ABI 9, Linux 7.1); on an older kernel the
-# sandbox leaves sockets alone, and that leg is reported as skipped.
+# sandbox leaves sockets alone, and those checks are reported as skipped.
+# The worker holds named keys only where the sandbox, asked as the build user,
+# says it would refuse them: with the policy at 0600 root, which the build
+# user cannot read, it must answer `bad policy`, so the worker would hold no
+# named key.
 #
 # Last, with the protected-path list unreadable to the build user, the
 # sandbox must refuse the build outright rather than read it as no list.
@@ -115,9 +120,10 @@ mkdir -p /srv/canary && echo intact > /srv/canary/victim && touch /srv/canary/ho
 mkdir -p /var/lib/aurcache-worker/ssh
 echo SSH-KEY-MATERIAL > /var/lib/aurcache-worker/ssh/id_ed25519
 echo MTLS-KEY-MATERIAL > /var/lib/aurcache-worker/worker-key.pem
-# The worker's ssh-agent, as the worker starts it: the build user's own, at its
-# fixed path, holding a key.
-mkdir -p /var/lib/aurcache-worker/agent
+# The worker's ssh-agents, as the worker starts them: the build user's own,
+# one per key, each at its fixed path and holding its key -- the default, and
+# a named one only some packages may use.
+mkdir -p /var/lib/aurcache-worker/agent/{default,other}
 chown -R builder: /var/lib/aurcache-worker
 # A secret a deployment keeps under /run, protected by adding it to the
 # shipped list. The walk reaches /var on its way to the worker's directory,
@@ -126,10 +132,13 @@ mkdir -p /run/aurcache-secret && echo RUN-KEY-MATERIAL > /run/aurcache-secret/ke
 chown -R builder: /run/aurcache-secret
 grep -qx /run/aurcache-secret /etc/aurcache/sandbox-protected \
     || echo /run/aurcache-secret >> /etc/aurcache/sandbox-protected
-agent_sock=/var/lib/aurcache-worker/agent/agent.sock
-sudo -u builder ssh-agent -a "$agent_sock" >/dev/null
-sudo -u builder ssh-keygen -q -t ed25519 -N '' -f /tmp/agent-key
-sudo -u builder env SSH_AUTH_SOCK="$agent_sock" ssh-add -q /tmp/agent-key
+agent_sock=/var/lib/aurcache-worker/agent/default/agent.sock
+for name in default other; do
+    sock=/var/lib/aurcache-worker/agent/$name/agent.sock
+    sudo -u builder ssh-agent -a "$sock" >/dev/null
+    sudo -u builder ssh-keygen -q -t ed25519 -N '' -f "/tmp/agent-key-$name"
+    sudo -u builder env SSH_AUTH_SOCK="$sock" ssh-add -q "/tmp/agent-key-$name"
+done
 # Another build using the agent all the while, with its socket in its
 # environment -- where /proc shows it to every process of the build user.
 sudo -u builder env SSH_AUTH_SOCK="$agent_sock" \
@@ -289,8 +298,8 @@ fi
 
 cd /job/pkg
 if [[ $mode == offered ]]; then
-    # As the worker runs a build it offers the key: as root, naming the build
-    # user, with the agent's socket in the environment.
+    # As the worker runs a build it offers the default key: as root, naming
+    # the build user, with that agent's socket in the environment.
     env SRCDEST=/job/srcdest SSH_AUTH_SOCK="$agent_sock" "${confs[@]}" "${build[@]}" -U builder \
         -c -r /chroot -l job1 \
         -D /srv/ro-bind:/aurcache-ro -I /job/mountprobe/aurcache-mountprobe-1-1-any.pkg.tar.zst \
@@ -348,15 +357,24 @@ for e in raw mount userns-mount remount-ro userns-remount-ro mknod keyring; do
 done
 [[ -s /job/pkg/sudo ]] || tail -n 40 /tmp/build.log | sed 's/^/log: /'
 echo "agent=$([ -s /job/pkg/agent-reached ] && echo reached || echo blocked)"
+echo "other_agent=$([ -s /job/pkg/other-agent-reached ] && echo reached || echo blocked)"
 # Whether this kernel's Landlock can restrict UNIX sockets at all (ABI >= 9).
 abi=$(python3 -c 'import ctypes; print(ctypes.CDLL(None).syscall(444, None, 0, 1))')
 echo "landlock_abi=$abi"
+# What the worker asks before it holds named keys, as it asks it.
+capabilities() {
+    sudo -u builder aurcache-sandbox --capabilities --agent-dir /var/lib/aurcache-worker/agent |
+        paste -sd,
+}
+echo "capabilities=$(capabilities)"
 
 if [[ $mode == confined ]]; then
     # The policy where the build user cannot read it: the sandbox reads it as
     # that user, and must refuse the build before any of its code runs rather
-    # than take it for a policy that protects nothing.
+    # than take it for a policy that protects nothing. Asked as that user
+    # whether it keeps builds from the agents, it must answer `bad policy`.
     chmod 600 /etc/aurcache/sandbox-protected
+    echo "unreadable_capabilities=$(capabilities)"
     mkdir -p /job/pkg2 && cp /fixture/PKGBUILD /job/pkg2/PKGBUILD && chown -R builder: /job/pkg2
     cd /job/pkg2
     sudo -u builder env SRCDEST=/job/srcdest "${confs[@]}" "${build[@]}" -c -r /chroot -l job2 \
@@ -423,6 +441,7 @@ check "unconfined: -I's root may mount in a user namespace" allowed "$(get admin
 check "unconfined: root writes through the read-only bind" by-root,intact "$(get ro_bind "$unconfined")"
 check "unconfined: root may use the keyring" allowed "$(get install_keyring "$unconfined")"
 check "unconfined: reaches the ssh-agent"  reached "$(get agent    "$unconfined")"
+check "unconfined: reaches another key's agent" reached "$(get other_agent "$unconfined")"
 # With it, every write is denied and the build still succeeds.
 check "confined:   keyring untouched"       blocked "$(get gnupg   "$confined")"
 check "confined:   other srcdest intact"    legit   "$(get srcdest  "$confined")"
@@ -481,14 +500,34 @@ fi
 check "confined:   read-only bind untouched" intact "$(get ro_bind "$confined")"
 check "confined:   install: no keyring"      "Function not implemented" "$(get install_keyring "$confined")"
 check "confined:   build_root: no keyring"   "Operation not permitted" "$(get build_root_keyring "$confined")"
+# The sandbox says it restricts UNIX sockets, which the worker requires
+# before it holds named keys -- where the kernel can.
+if (( $(get landlock_abi "$confined") >= 9 )); then
+    check "sandbox:    reports resolve-unix"    resolve-unix "$(get capabilities "$confined")"
+else
+    check "sandbox:    reports the kernel cannot" "no-resolve-unix: kernel" \
+        "$(get capabilities "$confined" | cut -d' ' -f1-2)"
+fi
+# With the policy unreadable to the build user, whatever the kernel, the
+# sandbox answers that every build is refused, so the worker would hold no
+# named key.
+check "unreadable: sandbox says bad policy" "no-resolve-unix: bad policy" \
+    "$(get unreadable_capabilities "$confined" | cut -d' ' -f1-3)"
+
 # Offered the agent, the build reaches it and builds.
 check "offered:    reaches the ssh-agent"   reached "$(get agent    "$offered")"
 check "offered:    build still succeeds"    0       "$(get build_exit "$offered")"
-# Not offered it, the build is refused it -- where the kernel can say no.
+# Not offered a key, the build is refused its agent, and offered one, it is
+# refused every other -- where the kernel can say no.
 if (( $(get landlock_abi "$confined") >= 9 )); then
     check "confined:   ssh-agent refused"       blocked "$(get agent    "$confined")"
+    check "confined:   another key's agent refused" blocked "$(get other_agent "$confined")"
+    check "offered:    another key's agent refused" blocked "$(get other_agent "$offered")"
 else
-    echo "    skip confined:   ssh-agent refused (Landlock ABI $(get landlock_abi "$confined") < 9)"
+    for what in "confined:   ssh-agent refused" "confined:   another key's agent refused" \
+        "offered:    another key's agent refused"; do
+        echo "    skip $what (Landlock ABI $(get landlock_abi "$confined") < 9)"
+    done
 fi
 # With the policy unreadable to the build user: the build is refused before
 # any of its code runs.

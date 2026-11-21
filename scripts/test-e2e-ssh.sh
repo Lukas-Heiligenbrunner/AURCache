@@ -14,18 +14,17 @@ set -euo pipefail
 # server that authorises it — so this runs in CI wherever Docker does, with no
 # secret committed or configured.
 #
-# The server names the worker's `default` key for every build
-# (`BUILD_SSH_KEY=default` in the overlay). Five phases, in order:
+# Every build is offered the worker's `default` key unless its package's
+# `build_ssh_key` names another. Five phases, in order:
 #   1. unauthorised — the worker falls back to its own generated key, which the
 #      server does not authorise. The build MUST fail. Without this the whole
 #      test could pass for the wrong reason (sources cached, fetch skipped, an
 #      agent key picked up).
-#   2. authorised — the worker is pointed at the key the server accepts, and
-#      `WORKER_GIT_SSH_PACKAGES` lists the fixture. The build must succeed AND
-#      the payload's marker must appear in the installed package twice,
-#      proving both fetches really happened: the `source=` one on the worker,
-#      and the `prepare()` clone inside the chroot, through the agent's socket
-#      bound in there.
+#   2. authorised — the worker's default key is the one the server accepts.
+#      The build must succeed AND the payload's marker must appear in the
+#      installed package twice, proving both fetches really happened: the
+#      `source=` one on the worker, and the `prepare()` clone inside the
+#      chroot, through the agent's socket bound in there.
 #   3. pinned host — the same key, with `WORKER_SSH_KNOWN_HOSTS` naming the
 #      server's host key. The build must succeed, both fetches checking the
 #      server against the staged copy: on the worker, and inside the chroot,
@@ -34,13 +33,25 @@ set -euo pipefail
 #      build MUST fail, refused at host-key verification: the host-side fetch
 #      checks the server against the configured list instead of trusting it
 #      on first use.
-#   5. not listed — the same key, but `WORKER_GIT_SSH_PACKAGES` names another
-#      package. The build MUST fail, and its log must say why.
+#   5. a named key — the default key is generated, so unauthorised, and the
+#      accepted one is held as `gitssh` in `WORKER_GIT_SSH_KEYS`. Built on
+#      the default, the fixture MUST fail: it is not offered the `gitssh`
+#      key. (That it cannot reach that agent by its path outside the chroot
+#      either is `test-sandbox.sh`'s to show.) Its package then names a key
+#      the worker lacks, and the build MUST fail with its log saying so.
+#      Named `gitssh`, it must succeed.
 #
-# On a kernel whose Landlock cannot restrict UNIX sockets, a worker with
-# `WORKER_GIT_SSH_PACKAGES` set holds no key at all. Phase 2 then MUST fail,
-# and is run again without the list to prove the fetch; phase 5 fails for want
-# of a key, and its log says that instead.
+# The worker is given the accepted key as a file of its own user's, mode
+# 0600, which a build cannot read: the setup the docs ask for. Before phase 5,
+# a stack whose named key is the same key at mode 0644 MUST not start, the
+# worker refusing to with a line naming the file, and warning that a build
+# can read its default key's file, at 0644 too.
+#
+# Where the sandbox, asked as the build user, says it would not restrict UNIX
+# sockets (an older kernel's Landlock, a policy that user cannot read, or an
+# older aurcache-sandbox), the worker holds no named key, which it says at
+# startup: the build naming `gitssh` then MUST fail, saying that key is not
+# here.
 #
 #   ./scripts/test-e2e-ssh.sh [timeout]
 
@@ -74,7 +85,7 @@ trap cleanup EXIT
 # Bring the stack up and drive one build to a terminal state, leaving what it
 # came to in `phase_result`: `success`, `failed`, or why it came to neither.
 run_phase() {
-    local phase="$1" key="$2" known_hosts="${3-}" ssh_packages="${4-}" output
+    local phase="$1" key="$2" known_hosts="${3-}" named_keys="${4-}" output
     log "=== Phase: $phase ==="
     dc down -v --remove-orphans >/dev/null 2>&1 || true
     fresh_worker_data >/dev/null
@@ -87,11 +98,10 @@ run_phase() {
     else
         unset WORKER_SSH_KNOWN_HOSTS
     fi
-    # Unset unless a phase names packages: set but empty lists none.
-    if [ -n "$ssh_packages" ]; then
-        export WORKER_GIT_SSH_PACKAGES="$ssh_packages"
+    if [ -n "$named_keys" ]; then
+        export WORKER_GIT_SSH_KEYS="$named_keys"
     else
-        unset WORKER_GIT_SSH_PACKAGES
+        unset WORKER_GIT_SSH_KEYS
     fi
     dc up -d --build >/dev/null
 
@@ -99,11 +109,16 @@ run_phase() {
     wait_for_worker || { dump_logs_on_failure; exit 1; }
 
     log "    adding the fixture package"
-    # The exit status is the outcome. A failure is told apart from a timeout or
-    # a stalled queue by what `--wait` says, since phase 1 wants exactly a
-    # failed build and nothing else.
-    if output=$(pkg_add "git://gitssh/pkg.git" --ref master \
-        --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
+    settle pkg_add "git://gitssh/pkg.git" --ref master
+}
+
+# Run a build-triggering CLI command under `--wait` and leave what the build
+# came to in `phase_result`. The exit status is the outcome. A failure is told
+# apart from a timeout or a stalled queue by what `--wait` says, since several
+# phases want exactly a failed build and nothing else.
+settle() {
+    local output
+    if output=$("$@" --wait --wait-timeout "$BUILD_TIMEOUT" 2>&1); then
         phase_result=success
     elif [[ $output == *"build failed:"* ]]; then
         phase_result=failed
@@ -114,6 +129,24 @@ run_phase() {
     CURRENT_BUILD_REF=$(latest_build_ref "$FIXTURE")
 }
 
+# Set the fixture's `build_ssh_key` to `$1` and build it again.
+rebuild_naming() {
+    log "    the fixture's build_ssh_key is now $1"
+    aurcache_cli raw PATCH "/package/$FIXTURE/settings/build_ssh_key" \
+        --body "{\"value\": \"$1\"}" >/dev/null
+    settle aurcache_cli builds retry "$CURRENT_BUILD_REF"
+}
+
+# Fail the run unless the log of the last build has `$1` in it.
+expect_in_log() {
+    if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "$1"; then
+        log "ERROR: the build log of $CURRENT_BUILD_REF does not say why it had no key"
+        log "       (expected: $1)"
+        dump_logs_on_failure
+        exit 1
+    fi
+}
+
 E2E_TOOLS+=(ssh-keygen)
 preflight
 announce_log
@@ -121,11 +154,6 @@ build_cli
 
 log "=== Generating a throwaway keypair ==="
 ssh-keygen -q -t ed25519 -N '' -C aurcache-ssh-test -f "$KEYDIR/id_ed25519"
-# The worker container runs as an unprivileged user whose uid need not match
-# the host's, and `mktemp -d` gives 0700 / ssh-keygen gives 0600 — both
-# unreadable there. Widen them: this key exists only for the duration of the
-# run, and the worker reads it into its ssh-agent at startup, which applies no
-# permission check -- the same as a root-owned Docker secret needs.
 # The git server's host key, made here so a `known_hosts` can name it before
 # the server starts; and one naming another host only.
 ssh-keygen -q -t ed25519 -N '' -C gitssh -f "$KEYDIR/host_ed25519"
@@ -133,9 +161,19 @@ printf 'gitssh %s\n' "$(cut -d' ' -f1,2 "$KEYDIR/host_ed25519.pub")" >"$KEYDIR/k
 ssh-keygen -q -t ed25519 -N '' -C elsewhere -f "$KEYDIR/other_host_ed25519"
 printf 'elsewhere.invalid %s\n' "$(cut -d' ' -f1,2 "$KEYDIR/other_host_ed25519.pub")" \
     >"$KEYDIR/known_hosts.other"
+# `mktemp -d` gives 0700 and ssh-keygen 0600, which the containers' users,
+# whose uids need not match the host's, cannot read. What the git server reads
+# is widened. The worker's key is a copy of the accepted one owned by the
+# worker's user in its image, mode 0600: a build cannot read it, and the worker
+# refuses to start with a named key a build could read. `id_ed25519` itself is
+# left at 0644, for the phase that checks that refusal.
 chmod 755 "$KEYDIR"
 chmod 644 "$KEYDIR/id_ed25519" "$KEYDIR/id_ed25519.pub" "$KEYDIR/known_hosts" \
     "$KEYDIR/known_hosts.other" "$KEYDIR/host_ed25519.pub" "$KEYDIR/host_ed25519"
+readonly WORKER_KEY=/keys/worker_ed25519
+dc run --rm --build --no-deps --user root --entrypoint sh -v "$KEYDIR:/keydir" builder -c \
+    'install -o aurcache -g aurcache -m 0600 /keydir/id_ed25519 /keydir/worker_ed25519' \
+    >/dev/null
 
 # ---- Phase 1: the fixture must genuinely require the credential ------------
 run_phase "unauthorised (expect failure)" ""
@@ -148,19 +186,7 @@ fi
 log "    build failed as required"
 
 # ---- Phase 2: with the authorised key it must build ------------------------
-host_gate=enforced
-run_phase "authorised and listed (expect success)" "/keys/id_ed25519" "" "$FIXTURE"
-if dc logs builder 2>&1 | grep -q "is set, but builds could not be kept from the SSH agent"; then
-    # This machine cannot keep the list, so the worker must hold no key.
-    host_gate=unenforced
-    if [ "$phase_result" != "failed" ]; then
-        log "ERROR: build was '$phase_result' on a worker that says it holds no key"
-        dump_logs_on_failure
-        exit 1
-    fi
-    log "    WORKER_GIT_SSH_PACKAGES cannot be kept here: no key held, build failed as required"
-    run_phase "authorised, no WORKER_GIT_SSH_PACKAGES (expect success)" "/keys/id_ed25519"
-fi
+run_phase "authorised (expect success)" "$WORKER_KEY"
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the authorised key"
     dump_logs_on_failure
@@ -174,21 +200,6 @@ log "    build succeeded"
 if dc logs builder 2>&1 | grep -q "Build SSH key:"; then
     log "ERROR: the worker generated its own key; WORKER_GIT_SSH_KEY did not"
     log "       reach the container, so this phase proves nothing."
-    exit 1
-fi
-
-# The image's sandbox must refuse the agent to builds outside their chroot
-# that were not offered it, which takes this kernel's Landlock and the shipped
-# policy. On a kernel without the right the worker says so instead, and this
-# only reports it: the in-chroot gate is what phase 5 checks.
-if dc logs builder 2>&1 | grep -q "refused its agent outside their chroot as well"; then
-    log "    host-side gate enforced (Landlock)"
-elif dc logs builder 2>&1 | grep -q "Landlock cannot restrict UNIX sockets"; then
-    log "    host-side gate not enforced on this kernel (in-chroot only)"
-else
-    log "ERROR: the worker did not say whether builds are kept from its agent"
-    log "       outside their chroot; the shipped sandbox policy may not name it."
-    dump_logs_on_failure
     exit 1
 fi
 
@@ -209,7 +220,7 @@ if [ "$found" != "$SSH_TEST_MARKER"$'\n'"$SSH_TEST_MARKER" ]; then
 fi
 
 # ---- Phase 3: a configured known_hosts naming the server must build --------
-run_phase "known_hosts names the server (expect success)" "/keys/id_ed25519" "/keys/known_hosts"
+run_phase "known_hosts names the server (expect success)" "$WORKER_KEY" "/keys/known_hosts"
 if [ "$phase_result" != "success" ]; then
     log "ERROR: build was '$phase_result' with the server's host key in WORKER_SSH_KNOWN_HOSTS"
     dump_logs_on_failure
@@ -218,7 +229,7 @@ fi
 log "    build succeeded against the pinned host key"
 
 # ---- Phase 4: a host the configured known_hosts does not name is refused ----
-run_phase "known_hosts names another host (expect failure)" "/keys/id_ed25519" "/keys/known_hosts.other"
+run_phase "known_hosts names another host (expect failure)" "$WORKER_KEY" "/keys/known_hosts.other"
 if [ "$phase_result" != "failed" ]; then
     log "ERROR: build was '$phase_result' against a host WORKER_SSH_KNOWN_HOSTS does not name"
     dump_logs_on_failure
@@ -231,25 +242,85 @@ if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "Hos
 fi
 log "    build refused the unknown host at host-key verification"
 
-# ---- Phase 5: a package the worker does not list gets no key ---------------
-run_phase "not in WORKER_GIT_SSH_PACKAGES (expect failure)" "/keys/id_ed25519" "" "some-other-package"
+# ---- A key file a build could read: refused if named, warned of if default --
+log "=== Phase: key files a build could read (expect the worker to refuse to start) ==="
+dc down -v --remove-orphans >/dev/null 2>&1 || true
+fresh_worker_data >/dev/null
+export WORKER_GIT_SSH_KEY=/keys/id_ed25519 WORKER_GIT_SSH_KEYS=gitssh:/keys/id_ed25519
+unset WORKER_SSH_KNOWN_HOSTS
+dc up -d --build >/dev/null
+refused='refusing to start: a build could read the file of a key WORKER_GIT_SSH_KEYS names'
+for _ in $(seq 1 60); do
+    dc logs builder 2>&1 | grep -qF "$refused" && break
+    sleep 2
+done
+builder_log=$(dc logs builder 2>&1)
+for expected in "$refused" 'SSH key "gitssh": /keys/id_ed25519 belongs to uid' \
+    "A build can read the default SSH key's file itself"; do
+    if ! grep -qF "$expected" <<<"$builder_log"; then
+        log "ERROR: the worker's log does not say: $expected"
+        dump_logs_on_failure
+        exit 1
+    fi
+done
+if grep -qF "Worker fingerprint:" <<<"$builder_log"; then
+    log "ERROR: the worker went on to enroll with a named key a build could read"
+    dump_logs_on_failure
+    exit 1
+fi
+log "    the worker refused to start, naming the key file, and warned of the default"
+
+# ---- Phase 5: a named key goes to the package that names it, and only it ---
+run_phase "named key, built on the default (expect failure)" "" "" "gitssh:$WORKER_KEY"
 if [ "$phase_result" != "failed" ]; then
-    log "ERROR: build was '$phase_result' for a package WORKER_GIT_SSH_PACKAGES does not list"
+    log "ERROR: build was '$phase_result' on the default key, with the authorised key"
+    log "       held only as gitssh"
     dump_logs_on_failure
     exit 1
 fi
-if [ "$host_gate" = enforced ]; then
-    expected="no SSH key offered: $FIXTURE is not in this worker's WORKER_GIT_SSH_PACKAGES"
+log "    build on the default key failed: it was not offered the gitssh key"
+log "    (that it cannot reach that agent by its path is test-sandbox.sh's to show)"
+
+# Named keys need the sandbox to keep builds from the agents of the keys they
+# are not offered, outside their chroot; where it cannot, the worker holds none.
+if dc logs builder 2>&1 | grep -q "outside their chroot as well (Landlock)"; then
+    named_held=yes
+    log "    named keys held: the sandbox keeps builds from the other agents (Landlock)"
+elif dc logs builder 2>&1 | grep -q "WORKER_GIT_SSH_KEYS names SSH keys, but builds could not be kept"; then
+    named_held=no
+    log "    named keys not held here; the build naming gitssh must fail"
 else
-    expected="this worker holds no SSH key named \"default\""
-fi
-if ! aurcache_cli builds output "$CURRENT_BUILD_REF" 2>/dev/null | grep -qF "$expected"; then
-    log "ERROR: the build log of $CURRENT_BUILD_REF does not say why it had no key"
-    log "       (expected: $expected)"
+    log "ERROR: the worker did not say whether it holds its named keys"
     dump_logs_on_failure
     exit 1
 fi
-log "    build failed without the key, and its log says why"
+
+rebuild_naming missing
+if [ "$phase_result" != "failed" ]; then
+    log "ERROR: build was '$phase_result' naming a key the worker does not hold"
+    dump_logs_on_failure
+    exit 1
+fi
+expect_in_log 'this worker holds no SSH key named "missing"'
+log "    build naming a key the worker lacks failed, and its log says why"
+
+rebuild_naming gitssh
+if [ "$named_held" = yes ]; then
+    if [ "$phase_result" != "success" ]; then
+        log "ERROR: build was '$phase_result' naming the authorised key, gitssh"
+        dump_logs_on_failure
+        exit 1
+    fi
+    log "    build naming gitssh succeeded"
+else
+    if [ "$phase_result" != "failed" ]; then
+        log "ERROR: build was '$phase_result' naming gitssh on a worker that holds no named key"
+        dump_logs_on_failure
+        exit 1
+    fi
+    expect_in_log 'this worker holds no SSH key named "gitssh"'
+    log "    build naming gitssh failed, as the worker holds no named key here"
+fi
 
 log "=== SSH credential test complete ==="
 log "    markers: ${found//$'\n'/, }"
