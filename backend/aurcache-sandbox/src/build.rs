@@ -163,7 +163,9 @@ fn run(request: &Request) -> Result<Infallible, Failure> {
 ///
 /// The *parent* must exist, though. A typo there -- `/vr/lib/...` for
 /// `/var/lib/...` -- would leave the real directory granted wholesale,
-/// producing a policy that reads as protection and is not.
+/// producing a policy that reads as protection and is not. It is checked
+/// where the path really is ([`protected_paths`]), so a dangling link into a
+/// missing directory is refused the same way.
 fn check_parents(protected: &[PathBuf]) -> Result<(), String> {
     for path in protected {
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -211,28 +213,20 @@ fn resolve_writable_dirs(
 /// A missing file means "protect nothing", which is the correct default for a
 /// worker with no secrets on disk. Blank lines and `#` comments are ignored.
 ///
-/// Each listed path that exists is protected at its real path too. The read
-/// walk keeps a path unreadable as it is written, so a secret behind a
-/// symlink -- a Kubernetes secret is `key -> ..data/key` -- or under a linked
-/// directory would otherwise stay readable where it really is.
+/// Each listed path is protected where it really is, whether or not it exists
+/// yet ([`crate::with_real_paths`]).
 fn protected_paths(file: &Path) -> Vec<PathBuf> {
     let Ok(contents) = std::fs::read_to_string(file) else {
         return Vec::new();
     };
-    let listed: Vec<PathBuf> = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(PathBuf::from)
-        .collect();
-    let mut real: Vec<PathBuf> = listed
-        .iter()
-        .filter_map(|path| std::fs::canonicalize(path).ok())
-        .filter(|real| !listed.contains(real))
-        .collect();
-    real.sort();
-    real.dedup();
-    listed.into_iter().chain(real).collect()
+    crate::with_real_paths(
+        contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 /// Apply the Landlock policy to this process (inherited by the exec'd child).
@@ -411,7 +405,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A listed path behind a symlink is protected where it really is too.
+    /// A listed path behind a symlink is protected where it really is.
     #[test]
     fn a_listed_symlink_is_protected_at_its_real_path() {
         let dir =
@@ -426,10 +420,95 @@ mod tests {
         std::fs::write(&file, format!("{}\n", dir.join("secret/key").display())).unwrap();
 
         let protected = protected_paths(&file);
-        assert_eq!(protected[0], dir.join("secret/key"));
-        assert!(
-            protected.contains(&std::fs::canonicalize(stamped.join("key")).unwrap()),
-            "{protected:?}"
+        assert_eq!(
+            protected,
+            vec![std::fs::canonicalize(stamped.join("key")).unwrap()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed path not written yet, under a linked directory, is protected
+    /// where it will really be: the walk would otherwise grant it there once
+    /// it is created.
+    #[test]
+    fn a_missing_path_under_a_linked_directory_is_protected_at_its_real_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+        let file = dir.join("list");
+        std::fs::write(&file, format!("{}\n", dir.join("alias/identity").display())).unwrap();
+
+        let protected = protected_paths(&file);
+        assert!(check_parents(&protected).is_ok(), "{protected:?}");
+        assert_eq!(
+            protected,
+            vec![
+                std::fs::canonicalize(dir.join("real"))
+                    .unwrap()
+                    .join("identity"),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A listed path that is a dangling link is protected where its target
+    /// will be, not only at the link: the walk would grant the target's
+    /// directory, and the target with it once written. A link into a missing
+    /// directory is refused like a missing parent.
+    #[test]
+    fn a_dangling_symlink_is_protected_where_its_target_will_be() {
+        let dir = std::env::temp_dir().join(format!(
+            "aurcache-sandbox-test-dangling-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("w")).unwrap();
+        std::fs::create_dir_all(dir.join("store")).unwrap();
+        std::os::unix::fs::symlink("../store/worker-key.pem", dir.join("w/worker-key.pem"))
+            .unwrap();
+        std::os::unix::fs::symlink("../gone/ssh", dir.join("w/ssh")).unwrap();
+        let file = dir.join("list");
+        std::fs::write(
+            &file,
+            format!("{}\n", dir.join("w/worker-key.pem").display()),
+        )
+        .unwrap();
+
+        let protected = protected_paths(&file);
+        assert!(check_parents(&protected).is_ok(), "{protected:?}");
+        assert_eq!(
+            protected,
+            vec![
+                std::fs::canonicalize(dir.join("store"))
+                    .unwrap()
+                    .join("worker-key.pem"),
+            ]
+        );
+
+        std::fs::write(
+            &file,
+            format!("{}\n", dir.join("w/ssh/id_ed25519").display()),
+        )
+        .unwrap();
+        assert!(check_parents(&protected_paths(&file)).is_err());
+
+        // A `..` after a missing part: `gone/..` is `w` once `gone` exists.
+        std::fs::create_dir_all(dir.join("w/store")).unwrap();
+        std::os::unix::fs::symlink("gone/../store/key", dir.join("w/k")).unwrap();
+        std::fs::write(&file, format!("{}\n", dir.join("w/k").display())).unwrap();
+        let protected = protected_paths(&file);
+        assert!(check_parents(&protected).is_ok(), "{protected:?}");
+        assert_eq!(
+            protected,
+            vec![
+                std::fs::canonicalize(dir.join("w/store"))
+                    .unwrap()
+                    .join("key"),
+            ]
         );
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -234,10 +234,7 @@ fn layer_landlock(network: bool) -> Result<(), String> {
 /// but `/dev/null`, TCP is denied unless allowed, and nothing outside the
 /// sandbox can be signalled. All of it or a refusal.
 fn restrict_with_landlock(dir: &Path, private: &[PathBuf], network: bool) -> Result<(), String> {
-    let private: Vec<PathBuf> = private
-        .iter()
-        .map(|path| shallowest_missing(path, Path::exists))
-        .collect();
+    let private = unreadable(private);
 
     // v3 is where `truncate` can be denied -- below it the parse, running as
     // the server's own uid, could empty the database by path -- and v6 where
@@ -283,6 +280,19 @@ fn restrict_with_landlock(dir: &Path, private: &[PathBuf], network: bool) -> Res
         RulesetStatus::FullyEnforced => Ok(()),
         other => Err(format!("Landlock not fully enforced ({other:?})")),
     }
+}
+
+/// What to keep unreadable so that every `--private` path is: each where it
+/// really is ([`crate::with_real_paths`]), from its first missing part, as
+/// `--private T/alias/secret` with `alias -> real` would otherwise leave
+/// `T/real` granted whole. Resolving first follows a dangling link to where
+/// its target will be, rather than stopping at the link, which `exists`
+/// reports missing.
+fn unreadable(private: &[PathBuf]) -> Vec<PathBuf> {
+    crate::with_real_paths(private.to_vec())
+        .iter()
+        .map(|path| shallowest_missing(path, Path::exists))
+        .collect()
 }
 
 /// What to keep unreadable so that `path` is, whether or not it exists yet.
@@ -536,6 +546,47 @@ mod tests {
             shallowest_missing(Path::new("/app/data/ca"), all),
             PathBuf::from("/app/data/ca")
         );
+    }
+
+    /// A private path under a linked directory is kept unreadable where it
+    /// really is, existing or not.
+    #[test]
+    fn a_private_path_under_a_linked_directory_is_kept_unreadable_where_it_is() {
+        let dir =
+            std::env::temp_dir().join(format!("aurcache-sandbox-linked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/secret"), "secret").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("alias")).unwrap();
+        let real = std::fs::canonicalize(dir.join("real")).unwrap();
+
+        assert_eq!(
+            unreadable(&[dir.join("alias/secret"), dir.join("alias/later/ca")]),
+            vec![real.join("secret"), real.join("later")]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A private path behind a dangling link is kept unreadable where the
+    /// link's target will be, not only at the link, whether the link is the
+    /// path or one of its parents.
+    #[test]
+    fn a_private_path_behind_a_dangling_link_is_kept_unreadable_where_it_will_be() {
+        let dir =
+            std::env::temp_dir().join(format!("aurcache-sandbox-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("store")).unwrap();
+        std::fs::create_dir_all(dir.join("w")).unwrap();
+        std::os::unix::fs::symlink("../store/key", dir.join("w/key")).unwrap();
+        std::os::unix::fs::symlink("store/data", dir.join("data")).unwrap();
+        std::os::unix::fs::symlink("gone/../../store/up", dir.join("w/up")).unwrap();
+        let store = std::fs::canonicalize(dir.join("store")).unwrap();
+
+        assert_eq!(
+            unreadable(&[dir.join("w/key"), dir.join("data/ca"), dir.join("w/up")]),
+            vec![store.join("key"), store.join("data"), store.join("up")]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
