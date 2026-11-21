@@ -13,7 +13,7 @@ upgrade without editing their compose file. New setups use `aurcache-server` +
 
 If you already run AURCache as a single container, pulling the new `aurcache`
 image keeps it building with no changes — read [Upgrading from
-0.5](../overview/upgrading.md#from-0-5) first, for what to back up and what the first
+0.5](../overview/upgrading.md) first, for what to back up and what the first
 start does. On startup it launches the server, then
 an embedded worker that enrolls over loopback with a secret generated inside the
 container.
