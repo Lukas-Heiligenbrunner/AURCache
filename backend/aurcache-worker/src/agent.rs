@@ -321,12 +321,24 @@ fn chown_group(path: &Path, gid: u32) -> Result<()> {
     Ok(())
 }
 
-/// The file `aurcache-sandbox` reads the paths a build may not read from.
-pub const SANDBOX_POLICY: &str = "/etc/aurcache/sandbox-protected";
+/// The sandbox builds run under outside their chroot, as `makechrootpkg`
+/// names it.
+const SANDBOX: &str = "aurcache-sandbox";
 
-/// The first Landlock ABI that can restrict connecting to pathname UNIX
-/// sockets (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, Linux 7.1).
-const RESOLVE_UNIX_ABI: libc::c_long = 9;
+// What the worker has to agree with `aurcache-sandbox` on to ask it. The
+// sandbox is a program of its own, exec'd rather than linked, so these are
+// copies of its definitions, which a test below holds to them.
+
+/// The argument that makes the sandbox say what it would enforce, and run
+/// nothing.
+const CAPABILITIES_ARG: &str = "--capabilities";
+/// The argument naming the agents' directory to that question.
+const AGENT_DIR_ARG: &str = "--agent-dir";
+/// The answer of a sandbox that would refuse a build every socket beneath
+/// that directory but the one it is offered.
+const RESOLVE_UNIX: &str = "resolve-unix";
+/// The answer of one that would not, followed by `: ` and why not.
+const NO_RESOLVE_UNIX: &str = "no-resolve-unix";
 
 /// Whether a build is kept from the agents of the keys it is not offered, on
 /// this machine.
@@ -334,90 +346,266 @@ const RESOLVE_UNIX_ABI: libc::c_long = 9;
 /// Inside its chroot it always is: only the directory of the agent it is
 /// offered is mounted there. Outside it -- the PKGBUILD code `makechrootpkg`
 /// runs on the worker -- it is the sandbox that refuses every other socket,
-/// which takes a kernel that can and a policy that names the agents'
+/// and only the sandbox can say whether it would: that takes a kernel that
+/// can, and a policy the build user can read that protects the agents'
 /// directory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostSideGate {
     /// Refused outside the chroot as well.
     Enforced,
-    /// This kernel's Landlock cannot restrict UNIX sockets.
-    KernelCannot,
-    /// The sandbox's policy does not protect the agent's directory.
-    PolicyMissesAgent,
+    /// The sandbox says a build would not be refused them; `why` is its
+    /// reason.
+    SandboxDeclines { why: String },
+    /// The sandbox gave no answer to go by; `why` is what came of asking.
+    Unanswered { why: String },
 }
 
-/// The [`HostSideGate`] this machine gives the agent under `data_dir`.
-#[must_use]
-pub fn host_side_gate(data_dir: &Path) -> HostSideGate {
-    if landlock_abi() < RESOLVE_UNIX_ABI {
-        return HostSideGate::KernelCannot;
+/// What the sandbox answers `query` ([`sandbox_capabilities`]), as a
+/// [`HostSideGate`].
+pub async fn host_side_gate(query: Command) -> HostSideGate {
+    let via_sudo = Path::new(query.as_std().get_program()).file_name() == Some("sudo".as_ref());
+    let out = match query_output(query).await {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let what = if via_sudo { "sudo" } else { SANDBOX };
+            return HostSideGate::Unanswered {
+                why: format!("{what} is not installed, or not on this worker's PATH"),
+            };
+        }
+        Err(e) => {
+            return HostSideGate::Unanswered {
+                why: format!("{SANDBOX} {CAPABILITIES_ARG} could not run: {e}"),
+            };
+        }
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = stderr.trim();
+    if !out.status.success() {
+        return HostSideGate::Unanswered {
+            why: refusal(out.status, stderr, via_sudo),
+        };
     }
-    let policy = std::fs::read_to_string(SANDBOX_POLICY).unwrap_or_default();
-    if !protects(&policy, &dir(data_dir)) {
-        return HostSideGate::PolicyMissesAgent;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.lines().any(|line| line.trim() == RESOLVE_UNIX) {
+        return HostSideGate::Enforced;
     }
-    HostSideGate::Enforced
-}
-
-/// The kernel's Landlock ABI version, or a negative number without Landlock.
-fn landlock_abi() -> libc::c_long {
-    // SAFETY: `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`
-    // reads nothing and creates nothing; it only answers the version.
-    unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<libc::c_void>(),
-            0usize,
-            1u32,
-        )
-    }
-}
-
-/// Whether the sandbox `policy` keeps builds out of `dir`: a listed path is
-/// `dir` or one of its parents.
-fn protects(policy: &str, dir: &Path) -> bool {
-    policy
+    let declined = format!("{NO_RESOLVE_UNIX}: ");
+    if let Some(why) = stdout
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .any(|line| dir.starts_with(line))
+        .find_map(|line| line.trim().strip_prefix(&declined))
+    {
+        return HostSideGate::SandboxDeclines {
+            why: why.to_string(),
+        };
+    }
+    HostSideGate::Unanswered {
+        why: format!(
+            "{SANDBOX} {CAPABILITIES_ARG} answered neither {RESOLVE_UNIX} nor {NO_RESOLVE_UNIX} \
+             (it printed {:?})",
+            stdout.trim()
+        ),
+    }
+}
+
+/// Run the question, with nothing on its stdin.
+async fn query_output(mut query: Command) -> std::io::Result<std::process::Output> {
+    query
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+}
+
+/// Why the question failed with `status`, by what that status means.
+///
+/// The sandbox answers with success whatever its answer; it fails only on a
+/// usage error, which is how one that predates the question refuses it. Run
+/// through `sudo`, a failure of sudo's own -- the sandbox not on its `PATH`,
+/// or no rule letting the worker run it as the build user -- is status 1,
+/// which the sandbox never exits with here; its message says which.
+fn refusal(status: std::process::ExitStatus, stderr: &str, via_sudo: bool) -> String {
+    match status.code() {
+        Some(2) => format!(
+            "{SANDBOX} refused {CAPABILITIES_ARG} as a usage error, as one that predates the \
+             question does (update the aurcache-sandbox package): {stderr}"
+        ),
+        Some(127) => format!("{SANDBOX} was not found: {stderr}"),
+        Some(1) if via_sudo && stderr.contains("command not found") => format!(
+            "{SANDBOX} is not on sudo's PATH (install the aurcache-sandbox package): {stderr}"
+        ),
+        Some(1) if via_sudo => format!(
+            "sudo would not run {SANDBOX} as the build user (the worker may run commands as \
+             that user without a password, as makechrootpkg does): {stderr}"
+        ),
+        _ => format!("{SANDBOX} {CAPABILITIES_ARG} failed ({status}): {stderr}"),
+    }
+}
+
+/// The command asking the `aurcache-sandbox` that confines `build_user`'s
+/// builds whether it would keep them from the agents under `data_dir`.
+///
+/// Run as that user, the way `makechrootpkg` runs it, so the sandbox judges
+/// the policy with that user's rights rather than the worker's. It is found
+/// on the `PATH` that user gets: sudo's, as `makechrootpkg`'s is, when the
+/// worker is someone else, and the worker's own when it already is the
+/// build user, which need not find the same copy.
+#[must_use]
+pub fn sandbox_capabilities(build_user: &str, data_dir: &Path) -> Command {
+    let agents = dir(data_dir).display().to_string();
+    as_user(
+        build_user,
+        &[SANDBOX, CAPABILITIES_ARG, AGENT_DIR_ARG, &agents],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A listed directory protects what is beneath it, never its siblings, and
-    /// comments and blank lines list nothing.
+    /// The policy the packages ship lists the agents' directory of a worker
+    /// in its default data directory, which is what the sandbox is asked
+    /// about.
     #[test]
-    fn the_policy_protects_a_listed_path_and_its_contents() {
-        let policy = "# the agent\n\n/var/lib/aurcache-worker/agent\n/etc/secret\n";
-        assert!(protects(
-            policy,
-            Path::new("/var/lib/aurcache-worker/agent")
-        ));
-        assert!(protects(
-            "/var/lib/aurcache-worker\n",
-            Path::new("/var/lib/aurcache-worker/agent")
-        ));
-        assert!(!protects(policy, Path::new("/var/lib/aurcache-worker")));
-        assert!(!protects(policy, Path::new("/srv/worker/agent")));
-        assert!(!protects(
-            "# /var/lib/aurcache-worker/agent\n",
-            Path::new("/var/lib/aurcache-worker/agent")
-        ));
-        assert!(!protects("", Path::new("/var/lib/aurcache-worker/agent")));
+    fn the_shipped_policy_lists_the_default_agents_directory() {
+        let policy = include_str!("../../../packaging/sandbox-protected");
+        let agents = dir(Path::new("/var/lib/aurcache-worker"));
+        assert!(
+            policy.lines().any(|line| Path::new(line.trim()) == agents),
+            "packaging/sandbox-protected must list {}",
+            agents.display()
+        );
     }
 
-    /// The policy the packages ship protects the agent of a worker in its
-    /// default data directory, which is what the startup check reads.
+    /// The worker's copies of what it asks the sandbox are the sandbox's own
+    /// definitions, so the two cannot drift apart unnoticed.
     #[test]
-    fn the_shipped_policy_protects_the_default_agent() {
-        let policy = include_str!("../../../packaging/sandbox-protected");
-        assert!(protects(
-            policy,
-            &dir(Path::new("/var/lib/aurcache-worker"))
-        ));
+    fn the_question_is_the_one_the_sandbox_answers() {
+        let sandbox = include_str!("../../aurcache-sandbox/src/main.rs");
+        for (name, value) in [
+            ("CAPABILITIES_ARG", CAPABILITIES_ARG),
+            ("AGENT_DIR_ARG", AGENT_DIR_ARG),
+            ("RESOLVE_UNIX", RESOLVE_UNIX),
+            ("NO_RESOLVE_UNIX", NO_RESOLVE_UNIX),
+        ] {
+            let definition = format!("const {name}: &str = {value:?};");
+            assert!(
+                sandbox.contains(&definition),
+                "aurcache-sandbox does not define `{definition}`"
+            );
+        }
+    }
+
+    /// The gate `script` gives, run as the sandbox would be.
+    async fn gate(script: &str) -> HostSideGate {
+        let mut query = Command::new("sh");
+        query.args(["-c", script]);
+        host_side_gate(query).await
+    }
+
+    /// The reason of a gate that is not [`HostSideGate::Enforced`].
+    fn why(gate: HostSideGate) -> String {
+        match gate {
+            HostSideGate::SandboxDeclines { why } | HostSideGate::Unanswered { why } => why,
+            HostSideGate::Enforced => panic!("enforced"),
+        }
+    }
+
+    /// Only a sandbox that answers the capability keeps builds from the
+    /// agents; one that declines says why, which is the reason the worker
+    /// logs.
+    #[tokio::test]
+    async fn only_a_sandbox_answering_resolve_unix_enforces() {
+        assert_eq!(gate("echo resolve-unix").await, HostSideGate::Enforced);
+        assert_eq!(
+            gate("printf 'other\\nresolve-unix\\n'").await,
+            HostSideGate::Enforced
+        );
+        assert_eq!(
+            gate("echo 'no-resolve-unix: policy unreadable (Permission denied)'").await,
+            HostSideGate::SandboxDeclines {
+                why: "policy unreadable (Permission denied)".into()
+            }
+        );
+        for lacking in ["true", "echo resolve-unix-maybe", "echo other"] {
+            let gate = gate(lacking).await;
+            assert!(
+                matches!(&gate, HostSideGate::Unanswered { why } if why.contains("answered neither")),
+                "{lacking}: {gate:?}"
+            );
+        }
+    }
+
+    /// A question that fails says why by how it failed: a sandbox that
+    /// predates it, a sandbox or sudo that is not installed, and sudo that
+    /// will not run it as the build user.
+    #[tokio::test]
+    async fn a_failed_question_says_how_it_failed() {
+        let old = why(gate(
+            "echo 'aurcache-sandbox: expected `--allow-build-env`' >&2; \
+             echo 'usage: aurcache-sandbox --allow-build-env -- PROGRAM [ARGS]...' >&2; exit 2",
+        )
+        .await);
+        assert!(old.contains("usage error"), "{old}");
+        assert!(old.contains("expected `--allow-build-env`"), "{old}");
+        assert!(!old.contains("sudo"), "{old}");
+
+        let missing = why(host_side_gate(Command::new("/nonexistent/aurcache-sandbox")).await);
+        assert!(
+            missing.contains("aurcache-sandbox is not installed"),
+            "{missing}"
+        );
+        let missing = why(gate("echo 'aurcache-sandbox: not found' >&2; exit 127").await);
+        assert!(missing.contains("was not found"), "{missing}");
+
+        let other = why(gate("echo boom >&2; exit 1").await);
+        assert!(
+            other.contains("failed") && other.contains("boom"),
+            "{other}"
+        );
+        assert!(!other.contains("sudo"), "{other}");
+
+        // As through sudo: a shell by sudo's name, failing the way sudo does.
+        let bin = tempfile::tempdir().unwrap();
+        let sudo = bin.path().join("sudo");
+        std::os::unix::fs::symlink("/bin/sh", &sudo).unwrap();
+        let run_sudo = |stderr: &str| {
+            let mut query = Command::new(&sudo);
+            query.args(["-c", &format!("echo '{stderr}' >&2; exit 1")]);
+            host_side_gate(query)
+        };
+        let refused = why(run_sudo("sudo: a password is required").await);
+        assert!(refused.contains("sudo would not run"), "{refused}");
+        assert!(refused.contains("a password is required"), "{refused}");
+        let unfound = why(run_sudo("sudo: aurcache-sandbox: command not found").await);
+        assert!(unfound.contains("not on sudo's PATH"), "{unfound}");
+
+        let no_sudo = why(host_side_gate(Command::new(bin.path().join("missing/sudo"))).await);
+        assert!(no_sudo.contains("sudo is not installed"), "{no_sudo}");
+    }
+
+    /// The question goes to the sandbox builds find, as the build user, and
+    /// names the agents' directory under the worker's data directory.
+    #[test]
+    fn the_sandbox_is_asked_as_the_build_user() {
+        let cmd = sandbox_capabilities("someone-else", Path::new("/srv/worker"));
+        let argv: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(cmd.as_std().get_program(), "sudo");
+        assert_eq!(
+            argv,
+            [
+                "-n",
+                "-u",
+                "someone-else",
+                SANDBOX,
+                CAPABILITIES_ARG,
+                AGENT_DIR_ARG,
+                "/srv/worker/agent"
+            ]
+        );
     }
 
     /// The bind mount is the key's directory, not the socket: the socket's

@@ -103,20 +103,16 @@ async fn announce_build_credential(cfg: &Config) {
     }
 }
 
-/// Why builds cannot be kept from the agent outside their chroot on this
+/// Why builds cannot be kept from the agents outside their chroot on this
 /// machine, as a clause for the startup log; `None` when they can.
-fn gate_gap(data_dir: &Path, gate: agent::HostSideGate) -> Option<String> {
+fn gate_gap(gate: agent::HostSideGate) -> Option<String> {
     match gate {
         agent::HostSideGate::Enforced => None,
-        agent::HostSideGate::KernelCannot => Some(
-            "this kernel's Landlock cannot restrict UNIX sockets (that takes Landlock ABI 9, \
-             Linux 7.1 or later)"
-                .to_string(),
-        ),
-        agent::HostSideGate::PolicyMissesAgent => Some(format!(
-            "{} does not list the agents' directory, {} (add it to that file)",
-            agent::SANDBOX_POLICY,
-            agent::dir(data_dir).display()
+        agent::HostSideGate::SandboxDeclines { why } => Some(format!(
+            "aurcache-sandbox, asked as the build user, says it would not: {why}"
+        )),
+        agent::HostSideGate::Unanswered { why } => Some(format!(
+            "aurcache-sandbox could not be asked whether it would, as the build user: {why}"
         )),
     }
 }
@@ -125,10 +121,11 @@ fn gate_gap(data_dir: &Path, gate: agent::HostSideGate) -> Option<String> {
 ///
 /// The default key's always, when there is one: every build may have it
 /// anyway. The named ones only where builds are kept from them outside their
-/// chroot as well, which takes the sandbox, and so a kernel and a policy that
-/// can: where either cannot, a build could reach every agent by its path, and
-/// a key only some packages may use would be within reach of all of them. The
-/// worker then holds none of them, and says why.
+/// chroot as well, which only the sandbox can say, as the build user: it
+/// takes a kernel that can, and a policy that user can read that protects the
+/// agents' directory. Where it does not say so, a build could reach every
+/// agent by its path, and a key only some packages may use would be within
+/// reach of all of them. The worker then holds none of them, and says why.
 ///
 /// Held for the worker's lifetime: dropping one kills its agent, so no stray
 /// agent outlives the worker holding a credential.
@@ -139,8 +136,8 @@ async fn start_agents(core: &CoreConfig, cfg: &Config) -> Vec<agent::BuildAgent>
     if cfg.named_ssh_keys.is_empty() {
         return agents;
     }
-    let gate = agent::host_side_gate(&core.data_dir);
-    match gate_gap(&core.data_dir, gate) {
+    let sandbox = agent::sandbox_capabilities(&cfg.build_user, &core.data_dir);
+    match gate_gap(agent::host_side_gate(sandbox).await) {
         None => {
             for key in &cfg.named_ssh_keys {
                 agents.extend(start_agent(core, cfg, &key.name, &key.path).await);
