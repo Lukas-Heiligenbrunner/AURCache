@@ -120,8 +120,8 @@ they cover, rather than running all of them as a matter of course:
   local storage: root in the container cannot write to a root-squashed NFS.
 
 CI runs the lint and unit tests for both workspaces, `test-frontend.sh`,
-`test-kernel.sh` and `test-sandbox.sh` on every push; `test-e2e.sh` runs
-nightly instead, and only when something landed that day. It cannot cover a
+`test-kernel.sh`, `test-sandbox.sh` and `test-signed-repo.sh` on every push;
+`test-e2e.sh` runs nightly instead, and only when something landed that day. It cannot cover a
 pool on a block device or zvol, or an image on ZFS; the runner has neither.
 Add the `run-e2e` label to a pull request to run the e2e suite there on demand.
 

@@ -234,6 +234,21 @@ jobs:
       - name: Sandbox test
         run: ./scripts/test-sandbox.sh
 
+  # What pacman itself makes of what the server signs: an untrusted key is
+  # refused, a trusted one installs with `SigLevel = Required`, and a database
+  # or package that is not the one signed is refused. In an Arch container,
+  # Docker only.
+  signedRepoTest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Update local toolchain
+        run: rustup update
+
+      - name: Signed repository test
+        run: ./scripts/test-signed-repo.sh
+
   # No e2e job here: the full suite builds images and hits the real AUR and
   # Arch mirrors, so it runs nightly (see e2e-nightly.yml) instead of on every
   # push -- and only when something landed since the last run.

@@ -633,7 +633,7 @@ pacman makes of the server's output without workers.
 - **A staged rollout**: a mode that creates and publishes the key without
   signing yet, so clients can trust it before signatures appear and nobody
   sees the refusal described under [Turning it on](#turning-it-on).
-- **Signing in `test-e2e.sh`**, and `test-signed-repo.sh` in CI.
+- **Signing in `test-e2e.sh`**.
 - **Per-worker keys**, certified by the instance key, once there is a
   keyring package.
 
