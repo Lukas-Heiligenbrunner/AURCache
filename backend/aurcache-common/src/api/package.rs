@@ -303,7 +303,8 @@ pub enum PackageSource {
     Upload(UploadPackage),
 }
 
-// todo upload package
+/// A package built elsewhere and published from its uploads: there is no
+/// source here to build, update or edit.
 #[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadPackage {}
@@ -322,6 +323,8 @@ pub struct UploadedBuild {
     /// first attempt hit a recoverable failure and the server is still at
     /// it; `Failed` when publishing refused it, which its log explains.
     pub status: crate::build_state::BuildState,
+    /// Whether this upload created the package.
+    pub created: bool,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone, Debug, PartialEq, Eq)]

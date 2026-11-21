@@ -32,23 +32,43 @@ pub struct PackageEntry {
     pub meta: PackageMeta,
 }
 
-/// What a package's `.PKGINFO` says it is, of the fields that decide where
-/// it belongs.
+/// What a package's `.PKGINFO` says it is: the fields that decide where it
+/// belongs, and the ones a page describing it shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageMeta {
     pub pkgname: String,
+    /// `None` when the `.PKGINFO` names none, which makepkg always does.
+    pub pkgbase: Option<String>,
     /// `[epoch:]pkgver-pkgrel`, the way a filename spells it.
     pub version: String,
     /// `None` when the `.PKGINFO` names none.
     pub arch: Option<String>,
+    pub description: Option<String>,
+    pub url: Option<String>,
+    pub licenses: Vec<String>,
+    pub provides: Vec<String>,
 }
 
 impl From<&Pkginfo> for PackageMeta {
     fn from(pkginfo: &Pkginfo) -> Self {
+        let present = |value: &str| Some(value.to_string()).filter(|v| !v.is_empty());
+        // A `license = ` line with nothing after it is no licence.
+        let listed = |values: &[String]| {
+            values
+                .iter()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .collect()
+        };
         Self {
             pkgname: pkginfo.pkgname.clone(),
+            pkgbase: present(&pkginfo.pkgbase),
             version: pkginfo.pkgver.clone(),
-            arch: Some(pkginfo.arch.clone()).filter(|arch| !arch.is_empty()),
+            arch: present(&pkginfo.arch),
+            description: present(&pkginfo.pkgdesc),
+            url: present(&pkginfo.url),
+            licenses: listed(&pkginfo.licenses),
+            provides: listed(&pkginfo.provides),
         }
     }
 }
@@ -739,12 +759,13 @@ mod tests {
     }
 
     /// The `.PKGINFO` fields come back as written, and absent optional ones
-    /// as absent rather than empty.
+    /// -- an empty list value among them -- as absent rather than empty.
     #[test]
     fn package_meta_is_read_as_written() {
         let bytes = archive(&[file(
             ".PKGINFO",
-            b"pkgname = demo-docs\npkgbase = demo\npkgver = 1:1.0-2\narch = any\n",
+            b"pkgname = demo-docs\npkgbase = demo\npkgver = 1:1.0-2\narch = any\n\
+              provides = demo-doc=1.0\nlicense = MIT\nlicense = \nprovides = \n",
         )]);
         let tmp = tempfile::tempdir().unwrap();
         let path = write(&tmp, "demo-docs-1:1.0-2-any.pkg.tar.zst", &bytes);
@@ -754,8 +775,13 @@ mod tests {
             meta,
             PackageMeta {
                 pkgname: "demo-docs".to_string(),
+                pkgbase: Some("demo".to_string()),
                 version: "1:1.0-2".to_string(),
                 arch: Some("any".to_string()),
+                description: None,
+                url: None,
+                licenses: vec!["MIT".to_string()],
+                provides: vec!["demo-doc=1.0".to_string()],
             }
         );
         assert_eq!(describe_package(&path).unwrap().meta, meta);
@@ -764,7 +790,9 @@ mod tests {
             "demo-1.0-1-x86_64.pkg.tar.zst",
             &archive(&[file(".PKGINFO", PKGINFO)]),
         );
-        assert_eq!(read_package_meta(&bare).unwrap().arch, None);
+        let meta = read_package_meta(&bare).unwrap();
+        assert_eq!(meta.pkgbase, None);
+        assert_eq!(meta.arch, None);
     }
 
     /// The streamed checksums are the checksums of the whole file, across

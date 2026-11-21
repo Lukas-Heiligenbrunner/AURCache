@@ -157,8 +157,13 @@ mod tests {
             files: "%FILES%\nusr/bin/x".to_string(),
             meta: crate::PackageMeta {
                 pkgname: dir_name.to_string(),
+                pkgbase: None,
                 version: String::new(),
                 arch: None,
+                description: None,
+                url: None,
+                licenses: Vec::new(),
+                provides: Vec::new(),
             },
         }
     }

@@ -365,7 +365,10 @@ fn SourceCard(pkg: ExtendedPackage) -> Element {
                         }
                     },
                     PackageSource::Upload(_) => rsx! {
-                        Field { label: "Origin", span { "Uploaded archive" } }
+                        Field { label: "Origin", span { "Uploaded" } }
+                        p { class: "text-sm opacity-70",
+                            "Built elsewhere; nothing here builds it. Upload its next version from the header."
+                        }
                     },
                 }
 

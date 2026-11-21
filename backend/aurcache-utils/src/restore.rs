@@ -34,6 +34,7 @@ use aurcache_common::api::dump::{
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
+use aurcache_common::source::SourceData;
 use aurcache_db::packages;
 use aurcache_db::prelude::Packages;
 use flate2::read::GzDecoder;
@@ -234,6 +235,14 @@ pub async fn preview(
             outcome: match (existing, options.on_existing) {
                 (None, _) => RestoreOutcome::Imported,
                 (Some(_), ExistingPackagePolicy::Skip) => RestoreOutcome::Skipped,
+                (Some(row), ExistingPackagePolicy::Overwrite)
+                    if !options.clear
+                        && becomes_uploaded(&row.source_data, &dump.packages[pkgbase]) =>
+                {
+                    RestoreOutcome::Failed {
+                        error: BECOMES_UPLOADED.to_string(),
+                    }
+                }
                 (Some(_), ExistingPackagePolicy::Overwrite) => RestoreOutcome::Overwritten,
                 (Some(row), ExistingPackagePolicy::MergePatches) => {
                     match patch_decision(row.patch.as_deref(), dump_patch.map(String::as_str)) {
@@ -248,6 +257,18 @@ pub async fn preview(
         });
     }
     Ok(entries)
+}
+
+/// Said the same way wherever it is reported, so a dry run and a refused
+/// import give the operator the same sentence.
+const BECOMES_UPLOADED: &str = "this instance builds this package, and the dump has it \
+     uploaded; overwriting would leave its queued builds and dependencies to a package \
+     nothing builds: remove it first, or import with --on-existing skip";
+
+/// Whether overwriting a package that has `current` as its source with the
+/// dump's `package` would turn one built here into one only ever uploaded.
+fn becomes_uploaded(current: &SourceData, package: &DumpPackage) -> bool {
+    current.is_buildable() && !package.source_data.is_buildable()
 }
 
 /// Said the same way wherever it is reported, so a dry run and a refused import
@@ -276,8 +297,8 @@ fn patch_decision(existing: Option<&str>, from_dump: Option<&str>) -> PatchDecis
     }
 }
 
-async fn package_row(
-    db: &DatabaseConnection,
+async fn package_row<C: sea_orm::ConnectionTrait>(
+    db: &C,
     pkgbase: &str,
 ) -> anyhow::Result<Option<packages::Model>> {
     Ok(Packages::find()
@@ -576,6 +597,21 @@ async fn write_rows_txn(
     if options.clear {
         clear_existing(txn).await?;
     }
+    // Read in the transaction that writes, so a package changed meanwhile
+    // cannot slip past it; every one at once, as for a patch conflict.
+    if options.on_existing == ExistingPackagePolicy::Overwrite {
+        let mut kinds = Vec::new();
+        for (pkgbase, package) in &dump.packages {
+            if let Some(row) = package_row(txn, pkgbase).await?
+                && becomes_uploaded(&row.source_data, package)
+            {
+                kinds.push(pkgbase.clone());
+            }
+        }
+        if !kinds.is_empty() {
+            anyhow::bail!("{BECOMES_UPLOADED}: {}", kinds.join(", "));
+        }
+    }
 
     for (pkgbase, package) in &dump.packages {
         let existing = Packages::find()
@@ -810,7 +846,13 @@ async fn insert_row<C: sea_orm::ConnectionTrait>(
         ..Default::default()
     };
     apply_config(&mut active, package, patch);
-    Ok(active.insert(db).await?.id)
+    let id = active.insert(db).await?.id;
+    // An uploaded package is never queued, so its status is derived from its
+    // builds -- none -- rather than left as the queued one written above.
+    if !package.source_data.is_buildable() {
+        aurcache_db::helpers::builds::refresh_package_status(db, id).await?;
+    }
+    Ok(id)
 }
 
 /// Settings, keyed back from pkgbase onto row ids.
@@ -870,6 +912,11 @@ async fn fill_source_facts(
     let Some(row) = package_row(db, pkgbase).await? else {
         return Ok(());
     };
+    // An uploaded package has no source to read; its uploads record what it
+    // builds.
+    if !row.source_data.is_buildable() {
+        return Ok(());
+    }
     let SourceFacts { sourceinfo, deps } = pkg_deps(
         store,
         &row.source_data,

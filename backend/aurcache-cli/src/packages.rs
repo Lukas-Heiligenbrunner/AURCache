@@ -359,7 +359,11 @@ fn print_uploaded(uploaded: &UploadedBuild) {
         platform,
         version,
         status,
+        created,
     } = uploaded;
+    if *created {
+        println!("created {pkgbase} as an uploaded package");
+    }
     println!(
         "{pkgbase}/{number}: {version} for {platform}, {}",
         status.label()

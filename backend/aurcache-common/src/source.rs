@@ -32,8 +32,10 @@ pub enum SourceData {
         #[serde(flatten)]
         spec: GitSourceSpec,
     },
+    /// Built elsewhere and uploaded: there is nothing here to build it from,
+    /// so nothing queues a build of it (see [`SourceData::is_buildable`]).
     #[serde(rename = "upload")]
-    Upload { archive: Vec<u8> },
+    Upload {},
 }
 
 /// Whether a package someone typed is a git remote rather than an AUR name.
@@ -81,10 +83,7 @@ pub fn source_label(source: &SourceData) -> String {
             }
             label
         }
-        // Never built from here — the upload it belongs to was never
-        // implemented server-side — but the variant exists, so it gets a
-        // label rather than a panic.
-        SourceData::Upload { .. } => "uploaded archive".to_string(),
+        SourceData::Upload { .. } => "uploaded".to_string(),
     }
 }
 
@@ -107,6 +106,17 @@ impl FromStr for SourceData {
 }
 
 impl SourceData {
+    /// Whether a build of a package with this source can be queued: there is
+    /// something to build it from. An uploaded package is only ever published
+    /// from its uploads.
+    #[must_use]
+    pub const fn is_buildable(&self) -> bool {
+        match self {
+            Self::Aur { .. } | Self::Git { .. } => true,
+            Self::Upload { .. } => false,
+        }
+    }
+
     /// Unique cache key for this source.
     ///
     /// The git fields are length-prefixed, not plain-joined: they are URLs
@@ -186,5 +196,22 @@ mod tests {
             },
         };
         assert_ne!(left.cache_key(), right.cache_key());
+    }
+
+    /// The stored form of an uploaded source reads back, and so does one
+    /// that also carries an `archive` field, which is ignored.
+    #[test]
+    fn an_upload_source_round_trips() {
+        let upload = SourceData::Upload {};
+        assert_eq!(upload.to_string(), r#"{"type":"upload"}"#);
+        assert_eq!(
+            r#"{"type":"upload"}"#.parse::<SourceData>().unwrap(),
+            upload
+        );
+        assert_eq!(
+            r#"{"type":"upload","archive":[]}"#.parse::<SourceData>().unwrap(),
+            upload
+        );
+        assert!(!upload.is_buildable());
     }
 }

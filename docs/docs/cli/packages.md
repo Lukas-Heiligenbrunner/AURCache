@@ -40,27 +40,45 @@ aurcli pkg upload gcc13 gcc13-*.pkg.tar.zst gcc13-*.pkg.tar.zst.sig
 aurcli pkg upload fonts fonts-1.0-1-any.pkg.tar.zst --platform aarch64
 ```
 
-The package must already be here, as an AUR or git package. The files are one
-build of it: its package files (split packages included) and, optionally, a
-detached `.sig` for each. They become a build of it, published like one a
-worker built: the previous version leaves the repository, and builds waiting on
-this package are released. Every file must be among the packages its source
-builds, as a worker's would, its version `[epoch:]pkgver-pkgrel` as makepkg
-writes it, and its `.PKGINFO` must agree with its filename. All of them must be
-one version, for one platform the package is built for (`arch = any` packages
-go with the rest, or to `--platform` when there is nothing else). A `.sig` must
-be a binary detached signature, not an ASCII-armored one. One file refused
-refuses the upload, and the error says which and why; `aurcli` checks the file
-names before it sends anything. makepkg's `-debug` packages are left out, as
-for a build here: the repository does not carry them.
+The files are one build of the named package: its package files (split
+packages included) and, optionally, a detached `.sig` for each. They become a
+build of it, published like one a worker built: the previous version leaves
+the repository, and builds waiting on this package are released. For an AUR or
+git package, every file must be among the packages its source builds, as a
+worker's would; for an uploaded (or new) package, every file's `.PKGINFO`
+must name it as its `pkgbase`, and every package name follow the AUR's rule
+(lowercase letters, digits and `@._+-`, not starting with `-` or `.`). Every
+version is `[epoch:]pkgver-pkgrel` as makepkg writes it, and every `.PKGINFO`
+must agree with its filename. All of them must be one version, for one
+platform the package is built for (`arch = any` packages go with the rest, or
+to `--platform` when there is nothing else). A `.sig` must be a binary
+detached signature, not an ASCII-armored one. One file refused refuses the
+upload, and the error says which and why; `aurcli` checks the file names
+before it sends anything. makepkg's `-debug` packages are left out, as for a
+build here: the repository does not carry them.
 
 An upload is a whole build of the package: split packages it leaves out leave
 the repository on that platform, and its version replaces the one there even
 when it is older.
 
-Its next upstream version is built as usual; if that build fails, the uploaded
-version stays in the repository. A build of the package already queued or
-running on that platform has to finish, or be cancelled, first.
+A package that does not exist yet is created as an *uploaded* package: nothing
+here ever builds it, and its next version comes from its next upload. It is
+created before its first upload is published, and stays if publishing fails:
+an empty package with one failed build, until it is uploaded again or removed
+(`aurcli pkg rm`). An
+upload to an AUR or git package is a build of it; its next upstream version is
+built as usual, and if that build fails, the uploaded version stays in the
+repository. A build of the package already queued or running on that platform
+has to finish, or be cancelled, first.
+
+A package name is published by one package at a time, on each platform: an
+upload carrying a name another package already publishes there is refused,
+and so is any build that would publish one, whichever kind of package it is
+-- the build fails, and its log names the package that has it. A name a
+package only builds, and has not published yet, belongs to whichever package
+publishes it first. Packages that already shared a name before this rule each
+keep publishing it (see
+[Upgrading](../overview/upgrading.md#one-package-per-package-name)).
 
 The package page has the same upload, for files small enough to read into the
 browser; `aurcli` streams them, so it has no such limit beyond the package's

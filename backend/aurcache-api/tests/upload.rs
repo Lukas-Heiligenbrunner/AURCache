@@ -107,21 +107,76 @@ async fn an_upload_publishes_a_build_of_the_package() {
 }
 
 #[tokio::test]
+async fn a_first_upload_creates_an_uploaded_package() {
+    quiet_logs();
+    let api = test_api("test", std::convert::identity).await;
+    let body = multipart(&[(
+        "demo-1.0-1-x86_64.pkg.tar.zst".to_string(),
+        package_file("demo", "demo", "1.0-1", "x86_64"),
+    )]);
+
+    let response = api
+        .client
+        .post("/api/package/demo/upload")
+        .header(form_data())
+        .body(body)
+        .dispatch()
+        .await;
+    assert_eq!(response.status(), Status::Ok);
+    let uploaded: UploadedBuild = response.into_json().await.unwrap();
+    assert!(uploaded.created);
+    assert_eq!(uploaded.status, BuildState::Successful);
+    assert_eq!(uploaded.number, 1);
+
+    let package: ExtendedPackage = api
+        .client
+        .get("/api/package/demo")
+        .dispatch()
+        .await
+        .into_json()
+        .await
+        .unwrap();
+    assert!(matches!(package.package_source, PackageSource::Upload(_)));
+    assert_eq!(package.built_version.as_deref(), Some("1.0-1"));
+    assert_eq!(package.files.len(), 1);
+
+    // Nothing here builds it.
+    let update = api
+        .client
+        .post("/api/package/demo/update")
+        .header(ContentType::JSON)
+        .body(r#"{"force":true}"#)
+        .dispatch()
+        .await;
+    assert_eq!(update.status(), Status::BadRequest);
+
+    // Nor has it a source to show.
+    let source = api
+        .client
+        .get("/api/package/demo/source/files")
+        .dispatch()
+        .await;
+    assert_eq!(source.status(), Status::BadRequest);
+}
+
+#[tokio::test]
 async fn a_refused_upload_says_why() {
     quiet_logs();
     let api = test_api("test", std::convert::identity).await;
 
-    let no_package = api
+    let wrong_base = api
         .client
         .post("/api/package/absent/upload")
         .header(form_data())
         .body(multipart(&[(
-            "absent-1.0-1-x86_64.pkg.tar.zst".to_string(),
-            package_file("absent", "absent", "1.0-1", "x86_64"),
+            "other-1.0-1-x86_64.pkg.tar.zst".to_string(),
+            package_file("other", "other", "1.0-1", "x86_64"),
         )]))
         .dispatch()
         .await;
-    assert_eq!(no_package.status(), Status::NotFound);
+    assert_eq!(wrong_base.status(), Status::BadRequest);
+    let reason = wrong_base.into_string().await.unwrap();
+    assert!(reason.contains("not of 'absent'"), "{reason}");
     let missing = api.client.get("/api/package/absent").dispatch().await;
     assert_eq!(missing.status(), Status::NotFound, "nothing was created");
 
@@ -235,8 +290,8 @@ async fn a_refusal_reaches_a_client_still_sending() {
     let stray_first = upload("sending", vec![stray, large.clone()]).await;
     assert!(stray_first.contains("neither a package"), "{stray_first}");
 
-    let absent = upload("absent", vec![large]).await;
-    assert!(absent.contains("no package 'absent'"), "{absent}");
+    let misnamed = upload("Misnamed", vec![large]).await;
+    assert!(misnamed.contains("not a package name"), "{misnamed}");
 }
 
 /// A client that waits for `100 Continue` before sending the body is told to
@@ -258,7 +313,7 @@ async fn a_client_waiting_to_continue_reads_the_refusal() {
     let body = vec![b'-'; 16 << 20];
     let mut stream = tokio::net::TcpStream::connect(&address).await.unwrap();
     let head = format!(
-        "POST /api/package/absent/upload HTTP/1.1\r\nHost: {address}\r\n\
+        "POST /api/package/Misnamed/upload HTTP/1.1\r\nHost: {address}\r\n\
          Content-Type: multipart/form-data; boundary={BOUNDARY}\r\n\
          Content-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
         body.len()
@@ -291,5 +346,5 @@ async fn a_client_waiting_to_continue_reads_the_refusal() {
         .expect("the server answers")
         .unwrap();
     let answer = String::from_utf8_lossy(&rest);
-    assert!(answer.contains("HTTP/1.1 404"), "{answer}");
+    assert!(answer.contains("HTTP/1.1 400"), "{answer}");
 }
