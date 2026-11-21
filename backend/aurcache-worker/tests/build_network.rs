@@ -6,14 +6,16 @@
 //! privileged container, with `nftables`, `python` and `systemd-nspawn`
 //! installed.
 //!
-//! The server (its worker protocol, its API and its repository) and another
-//! host on the local network are listeners of this process on loopback
-//! addresses, which the policy treats as it treats any local destination. A host on the worker's link, with addresses that no
+//! The server (its worker protocol, its API, its repository, and a git server
+//! beside it on the same host) and another host on the local network are
+//! listeners of this process on loopback addresses, which the policy treats as
+//! it treats any local destination. A host on the worker's link, with addresses that no
 //! fixed range calls local, is a listener in a network namespace of its own.
 //! The build is root inside `systemd-nspawn`, kept in the build's cgroup the
 //! way the worker keeps a build's container there (`--keep-unit`): what
 //! pacman, and code its dependencies leave for root, run as.
 
+use aurcache_common::host_port::HostPort;
 use aurcache_worker::build_firewall::{BuildNetwork, Inputs, Table};
 use aurcache_worker::cgroup::{BuildCgroup, BuildLimits, Hierarchy};
 use aurcache_worker_core::repo::{Endpoint, RepoSection};
@@ -281,6 +283,7 @@ impl PacmanConf {
     fn inputs(&self) -> Inputs {
         Inputs {
             repo: Some(self.section.clone()),
+            allow: Vec::new(),
             server: None,
             pacman_conf: self.path.clone(),
             mirrorlist: None,
@@ -350,11 +353,13 @@ fn nft_lists(what: &[&str]) -> bool {
 #[tokio::test]
 #[ignore = "restructures the caller's cgroup, adds nftables tables and a network namespace; run in a privileged container"]
 async fn root_in_a_builds_container_is_held_by_its_cgroup() {
-    // The server's worker protocol, API and repository, and a service
-    // elsewhere on this host that nothing allows.
+    // The server's worker protocol, API and repository; a git server on the
+    // server's host that the worker allows; and a service elsewhere on this
+    // host that nothing allows.
     let protocol = listen("127.0.0.1:0");
     let api = listen("127.0.0.1:0");
     let repo = listen("127.0.0.1:0");
+    let git = listen("127.0.0.1:0");
     let nas = listen("127.0.0.2:0");
     let hierarchy = Hierarchy::prepare().expect("preparing the cgroup hierarchy");
     let network = enforced(Table::for_worker("c9a0"), &hierarchy);
@@ -369,7 +374,17 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         .for_build(4242, &BuildLimits::default())
         .expect("creating the build cgroup");
     let rules = network
-        .open(4242, Some(&cgroup), conf.inputs())
+        .open(
+            4242,
+            Some(&cgroup),
+            Inputs {
+                allow: vec![HostPort {
+                    host: "127.0.0.1".to_string(),
+                    port: git.port(),
+                }],
+                ..conf.inputs()
+            },
+        )
         .await
         .expect("loading the build's rules")
         .expect("rules, with the policy enforced");
@@ -378,6 +393,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         api.target("server-api"),
         protocol.target("worker-protocol"),
         repo.target("repository"),
+        git.target("allowed-git"),
         nas.target("local-network"),
         on_lan.public_v4.target("lan-public-v4"),
         on_lan.global_v6.target("lan-global-v6"),
@@ -402,6 +418,10 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         },
         Want {
             check: "repository",
+            got: "open",
+        },
+        Want {
+            check: "allowed-git",
             got: "open",
         },
         Want {
@@ -469,7 +489,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
             listener.addr
         );
     }
-    for listener in [&repo, &on_lan.beyond_v4, &on_lan.beyond_v6] {
+    for listener in [&repo, &git, &on_lan.beyond_v4, &on_lan.beyond_v6] {
         assert!(!reported(listener), "{refused:#?}");
     }
 
@@ -478,6 +498,7 @@ async fn root_in_a_builds_container_is_held_by_its_cgroup() {
         &protocol,
         &api,
         &repo,
+        &git,
         &nas,
         &on_lan.public_v4,
         &on_lan.global_v6,

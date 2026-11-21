@@ -48,6 +48,10 @@ pub struct Config {
     /// identity and build credentials are protected from PKGBUILD code by file
     /// ownership, which only separates them if the two users differ.
     pub build_user: String,
+    /// Local destinations every build on this worker may reach
+    /// (`WORKER_BUILD_ALLOW`), besides what its `pacman.conf` names; see
+    /// [`crate::build_firewall`]. The machine's alone, like the build user.
+    pub build_allow: Vec<aurcache_common::host_port::HostPort>,
     /// This executor's declared settings, read from the worker's resolution
     /// of them.
     pub tunables: Tunables,
@@ -125,6 +129,9 @@ impl Config {
             chroot_dir: chroot_dir.clone(),
             cache_dir: pool_mountpoint(pool.clone(), &chroot_dir).join(CACHE_SUBVOLUME),
             build_user: env_opt("WORKER_BUILD_USER").unwrap_or_else(|| "builder".to_string()),
+            build_allow: env_opt("WORKER_BUILD_ALLOW")
+                .map(|raw| build_allow(&raw))
+                .unwrap_or_default(),
             pool_backing: pool_backing(
                 pool.clone(),
                 env_opt("WORKER_DISK_RESERVE").is_some_and(|v| truthy(&v)),
@@ -174,6 +181,15 @@ impl Config {
             crate::settings::chroot_settings(),
         ))
     }
+}
+
+/// Parse `WORKER_BUILD_ALLOW`, saying which entries are left out.
+fn build_allow(raw: &str) -> Vec<aurcache_common::host_port::HostPort> {
+    let list = aurcache_common::host_port::HostPort::parse_list(raw);
+    for invalid in &list.invalid {
+        tracing::warn!("WORKER_BUILD_ALLOW: ignoring {invalid}");
+    }
+    list.entries
 }
 
 impl Tunables {
