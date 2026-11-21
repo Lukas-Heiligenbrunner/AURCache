@@ -8,7 +8,7 @@ use crate::screens::settings::Section;
 use crate::widgets::Modal;
 use aurcache_client::{
     ExistingPackagePolicy, RestoreEntry, RestoreOptions, RestoreOutcome, SecretChange,
-    SecretsPolicy,
+    SecretReport, SecretsPolicy,
 };
 use dioxus::html::{FileData, HasFileData};
 use dioxus::prelude::*;
@@ -144,6 +144,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
     let mut preview = use_signal(Vec::<RestoreEntry>::new);
+    let mut secret_preview = use_signal(Vec::<SecretReport>::new);
     // Where a started restore goes once the dialog closes.
     let jobs = crate::progress::use_jobs();
 
@@ -151,6 +152,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
         file_name.set(String::new());
         bytes.set(bytes::Bytes::new());
         preview.set(Vec::new());
+        secret_preview.set(Vec::new());
         error.set(None);
         hovering.set(false);
         busy.set(false);
@@ -185,6 +187,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 // previewed; showing the old result against the new name would
                 // be worse than showing nothing.
                 preview.set(Vec::new());
+                secret_preview.set(Vec::new());
                 error.set(None);
                 file_name.set(name);
                 bytes.set(content);
@@ -222,6 +225,7 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
             Ok(accepted) => {
                 if dry_run {
                     preview.set(accepted.preview);
+                    secret_preview.set(accepted.secrets);
                 } else if let Some(job_id) = accepted.job_id {
                     // Handed to the progress card and the dialog closes, rather
                     // than holding the page until every package is imported. A
@@ -306,8 +310,8 @@ fn RestoreDialog(open: Signal<bool>) -> Element {
                 if let Some(message) = error() {
                     div { class: "alert alert-error text-sm", span { "{message}" } }
                 }
-                if !preview().is_empty() {
-                    RestoreReport { entries: preview(), blocked: blocked() }
+                if !preview().is_empty() || !secret_preview().is_empty() {
+                    RestoreReport { entries: preview(), secrets: secret_preview(), blocked: blocked() }
                 }
             }
             div { class: "modal-action",
@@ -404,9 +408,10 @@ fn RestoreOptionsForm(
     }
 }
 
-/// What an import did, or would do.
+/// What an import would do, to each package and to each of the server's
+/// secrets.
 #[component]
-fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
+fn RestoreReport(entries: Vec<RestoreEntry>, secrets: Vec<SecretReport>, blocked: bool) -> Element {
     rsx! {
         div {
             if blocked {
@@ -419,17 +424,30 @@ fn RestoreReport(entries: Vec<RestoreEntry>, blocked: bool) -> Element {
                     // Indexed as well as named: nothing stops two entries
                     // sharing a package and an outcome, and duplicate keys
                     // make the framework reuse the wrong row.
-                    li { key: "{index}-{entry.subject()}-{entry.outcome.label()}",
+                    li { key: "{index}-{entry.pkgbase}-{entry.outcome.label()}",
                         div { class: "flex flex-col items-start gap-0.5",
                             div { class: "flex items-baseline gap-2",
                                 span { class: "badge badge-xs {outcome_class(&entry.outcome)}",
                                     {entry.outcome.label()}
                                 }
-                                span { class: subject_class(&entry.outcome), "{entry.subject()}" }
+                                span { class: "font-mono text-sm break-all", "{entry.pkgbase}" }
                             }
-                            if let Some(detail) = entry.detail() {
-                                span { class: "text-xs opacity-70 text-left", "{detail}" }
+                            if let RestoreOutcome::Failed { error } = &entry.outcome {
+                                span { class: "text-xs opacity-70 text-left", "{error}" }
                             }
+                        }
+                    }
+                }
+                for report in secrets {
+                    li { key: "secret-{report.secret.label()}",
+                        div { class: "flex flex-col items-start gap-0.5",
+                            div { class: "flex items-baseline gap-2",
+                                span { class: "badge badge-xs {change_class(report.change)}",
+                                    {report.change.label()}
+                                }
+                                span { class: "text-sm font-semibold", "{report.secret.label()}" }
+                            }
+                            span { class: "text-xs opacity-70 text-left", "{report.detail}" }
                         }
                     }
                 }
@@ -444,22 +462,14 @@ fn outcome_class(outcome: &RestoreOutcome) -> &'static str {
         RestoreOutcome::Overwritten => "badge-warning",
         RestoreOutcome::Skipped => "badge-ghost",
         RestoreOutcome::Failed { .. } => "badge-error",
-        RestoreOutcome::Secret { change, .. } => match change {
-            SecretChange::Kept => "badge-ghost",
-            SecretChange::Restored => "badge-success",
-            // Each changes what workers or clients have to trust.
-            SecretChange::Replaced | SecretChange::Generated | SecretChange::Removed => {
-                "badge-warning"
-            }
-        },
     }
 }
 
-/// A package is named in monospace, as it is spelled; a secret is a thing
-/// the report describes, in words.
-fn subject_class(outcome: &RestoreOutcome) -> &'static str {
-    match outcome {
-        RestoreOutcome::Secret { .. } => "text-sm font-semibold",
-        _ => "font-mono text-sm break-all",
+fn change_class(change: SecretChange) -> &'static str {
+    match change {
+        SecretChange::Kept => "badge-ghost",
+        SecretChange::Restored => "badge-success",
+        // Each changes what workers or clients have to trust.
+        SecretChange::Replaced | SecretChange::Generated | SecretChange::Removed => "badge-warning",
     }
 }

@@ -20,6 +20,18 @@ fn test_repo() -> aurcache_utils::repository::Repository {
     aurcache_utils::repository::Repository::new(tempfile::tempdir().unwrap().keep())
 }
 
+/// What the restore route plans for `dump`'s secrets, as `config` has them,
+/// before it starts the restore.
+async fn planned(
+    config: aurcache_utils::restore::SecretsConfig,
+    dump: &aurcache_utils::restore::LoadedDump,
+    options: &aurcache_common::api::dump::RestoreOptions,
+) -> aurcache_utils::restore::SecretsPlan {
+    aurcache_utils::restore::plan_secrets(dump, options, config)
+        .await
+        .unwrap()
+}
+
 /// What a restore into the CA directory `ca` is planned for on a server that
 /// does not sign, as an unset environment configures it.
 fn unsigned_secrets(ca: &std::path::Path) -> aurcache_utils::restore::SecretsConfig {
@@ -395,16 +407,9 @@ async fn a_preview_reports_without_applying() {
     package(&target, "already-here", true, None).await;
 
     let loaded = load_dump(&bytes).unwrap();
-    let ca = tempfile::tempdir().unwrap();
-    let entries = preview(
-        &target,
-        &Repository::new(ca.path()),
-        &loaded,
-        &RestoreOptions::default(),
-        unsigned_secrets(ca.path()),
-    )
-    .await
-    .unwrap();
+    let entries = preview(&target, &loaded, &RestoreOptions::default())
+        .await
+        .unwrap();
 
     let by_name: HashMap<&str, &RestoreOutcome> = entries
         .iter()
@@ -431,14 +436,12 @@ async fn overwrite_is_reported_as_overwrite() {
     let loaded = load_dump(&bytes).unwrap();
     let entries = preview(
         &target,
-        &Repository::new(tempfile::tempdir().unwrap().keep()),
         &loaded,
         &RestoreOptions {
             dry_run: true,
             on_existing: ExistingPackagePolicy::Overwrite,
             ..RestoreOptions::default()
         },
-        unsigned_secrets(tempfile::tempdir().unwrap().path()),
     )
     .await
     .unwrap();
@@ -673,7 +676,12 @@ async fn a_package_whose_source_fails_is_reported_as_failed() {
             )),
             activity: ActivityLog::discarding(),
         },
-        unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+        planned(
+            unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+            &loaded,
+            &RestoreOptions::default(),
+        )
+        .await,
         loaded,
         RestoreOptions::default(),
         progress_tx,
@@ -778,7 +786,12 @@ async fn a_restored_package_is_queued_to_build() {
             repo: Arc::new(test_repo()),
             activity: ActivityLog::discarding(),
         },
-        unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+        planned(
+            unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+            &load_dump(&bytes).unwrap(),
+            &RestoreOptions::default(),
+        )
+        .await,
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
         progress_tx,
@@ -1198,7 +1211,12 @@ async fn restoring_does_not_touch_the_ca_unless_asked() {
             )),
             activity: ActivityLog::discarding(),
         },
-        unsigned_secrets(target_ca.path()),
+        planned(
+            unsigned_secrets(target_ca.path()),
+            &load_dump(&bytes).unwrap(),
+            &RestoreOptions::default(),
+        )
+        .await,
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
         progress_tx,
@@ -1272,7 +1290,15 @@ async fn copying_secrets_replaces_the_ca_and_protects_the_key() {
             )),
             activity: ActivityLog::discarding(),
         },
-        unsigned_secrets(target_ca.path()),
+        planned(
+            unsigned_secrets(target_ca.path()),
+            &load_dump(&bytes).unwrap(),
+            &RestoreOptions {
+                secrets: aurcache_common::api::dump::SecretsPolicy::Copy,
+                ..RestoreOptions::default()
+            },
+        )
+        .await,
         load_dump(&bytes).unwrap(),
         RestoreOptions {
             secrets: aurcache_common::api::dump::SecretsPolicy::Copy,
@@ -1446,14 +1472,12 @@ async fn a_preview_names_the_conflicting_packages() {
     let loaded = load_dump(&bytes).unwrap();
     let entries = preview(
         &target,
-        &Repository::new(tempfile::tempdir().unwrap().keep()),
         &loaded,
         &RestoreOptions {
             dry_run: true,
             on_existing: ExistingPackagePolicy::MergePatches,
             ..RestoreOptions::default()
         },
-        unsigned_secrets(tempfile::tempdir().unwrap().path()),
     )
     .await
     .unwrap();
@@ -1551,7 +1575,12 @@ async fn a_dependency_only_package_survives_the_restore() {
             repo: Arc::new(test_repo()),
             activity: ActivityLog::discarding(),
         },
-        unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+        planned(
+            unsigned_secrets(&tempfile::tempdir().unwrap().keep()),
+            &load_dump(&bytes).unwrap(),
+            &RestoreOptions::default(),
+        )
+        .await,
         load_dump(&bytes).unwrap(),
         RestoreOptions::default(),
         progress_tx,
@@ -1586,11 +1615,13 @@ async fn a_dependency_only_package_survives_the_restore() {
 
 mod signing_key {
     use super::*;
-    use aurcache_common::api::dump::{RestoreEntry, Secret, SecretChange, SecretsPolicy};
+    use aurcache_common::api::dump::{
+        RestoreEntry, Secret, SecretChange, SecretReport, SecretsPolicy,
+    };
     use aurcache_signing::{InstanceKey, KEY_FILE, KeyLocation};
     use aurcache_utils::restore::{
-        CaOutcome, KeyOutcome, SecretsConfig, SignsWith, apply, apply_secrets, load_dump,
-        plan_secrets, preview,
+        CaOutcome, KeyOutcome, LoadedDump, SecretsConfig, SignsWith, apply, apply_secrets,
+        load_dump, plan_secrets, preview, secret_reports,
     };
     use aurcache_utils::signing::{Backfill, backfill};
     use pacman_mirrors::platforms::Platform;
@@ -1680,6 +1711,50 @@ mod signing_key {
         write_archive(&build_dump(&source, "test", None).await.unwrap()).unwrap()
     }
 
+    /// What the restore route answers and its job reports: what it said it
+    /// does to the secrets, and its entries -- a refused plan's one failure,
+    /// as the route's refusal says it, when it was refused.
+    #[derive(Debug)]
+    struct Report {
+        entries: Vec<RestoreEntry>,
+        secrets: Vec<SecretReport>,
+    }
+
+    impl Report {
+        fn refused(error: &anyhow::Error, verb: &str) -> Self {
+            Self {
+                entries: vec![RestoreEntry {
+                    pkgbase: String::new(),
+                    outcome: RestoreOutcome::Failed {
+                        error: format!("nothing {verb} imported: {error:#}"),
+                    },
+                }],
+                secrets: Vec::new(),
+            }
+        }
+    }
+
+    /// What a dry run of `dump` with `options` answers, its secrets as
+    /// `config` has them: as the route answers it.
+    async fn dry_run(
+        db: &DatabaseConnection,
+        repo: &Repository,
+        dump: &LoadedDump,
+        options: &RestoreOptions,
+        config: SecretsConfig,
+    ) -> anyhow::Result<Report> {
+        let plan = match plan_secrets(dump, options, config).await {
+            Ok(plan) => plan,
+            Err(e) => return Ok(Report::refused(&e, "would be")),
+        };
+        let secrets = secret_reports(&plan.expected(repo).await);
+        drop(plan);
+        Ok(Report {
+            entries: preview(db, dump, options).await?,
+            secrets,
+        })
+    }
+
     /// Restore `bytes` with `options`, and what the restore reported.
     async fn restore(
         db: &DatabaseConnection,
@@ -1687,7 +1762,7 @@ mod signing_key {
         repo: Arc<Repository>,
         bytes: &[u8],
         options: RestoreOptions,
-    ) -> Vec<RestoreEntry> {
+    ) -> Report {
         let config = SecretsConfig {
             signs: repo.key().is_some(),
             ..own(ca)
@@ -1703,7 +1778,13 @@ mod signing_key {
         repo: Arc<Repository>,
         bytes: &[u8],
         options: RestoreOptions,
-    ) -> Vec<RestoreEntry> {
+    ) -> Report {
+        let dump = load_dump(bytes).unwrap();
+        let plan = match plan_secrets(&dump, &options, config).await {
+            Ok(plan) => plan,
+            Err(e) => return Report::refused(&e, "was"),
+        };
+        let secrets = secret_reports(&plan.expected(&repo).await);
         let store = Arc::new(aurcache_utils::snapshot::SnapshotStore::with_checkout_root(
             tempfile::tempdir().unwrap().keep(),
         ));
@@ -1717,8 +1798,8 @@ mod signing_key {
                 repo,
                 activity: ActivityLog::discarding(),
             },
-            config,
-            load_dump(bytes).unwrap(),
+            plan,
+            dump,
             options,
             progress_tx,
         )
@@ -1727,7 +1808,7 @@ mod signing_key {
         while let Ok(entry) = progress_rx.try_recv() {
             entries.push(entry);
         }
-        entries
+        Report { entries, secrets }
     }
 
     /// What a restore's report says became of one secret.
@@ -1737,25 +1818,28 @@ mod signing_key {
         detail: &'a str,
     }
 
-    /// The line `entries` give `secret`, which every restore that got past
-    /// planning reports.
-    fn secret_line(entries: &[RestoreEntry], secret: Secret) -> SecretLine<'_> {
-        let lines: Vec<SecretLine<'_>> = entries
+    /// What `report` says becomes of `secret`, which every restore that got
+    /// past planning says.
+    fn secret_line(report: &Report, secret: Secret) -> SecretLine<'_> {
+        let lines: Vec<SecretLine<'_>> = report
+            .secrets
             .iter()
-            .filter_map(|entry| match &entry.outcome {
-                RestoreOutcome::Secret {
-                    secret: which,
-                    change,
-                    detail,
-                } if *which == secret => Some(SecretLine {
-                    change: *change,
-                    detail,
-                }),
-                _ => None,
+            .filter(|line| line.secret == secret)
+            .map(|line| SecretLine {
+                change: line.change,
+                detail: &line.detail,
             })
             .collect();
-        assert_eq!(lines.len(), 1, "{entries:?}");
+        assert_eq!(lines.len(), 1, "{report:?}");
         lines.into_iter().next().unwrap()
+    }
+
+    /// That `report` says nothing of `secret`, which the restore left alone.
+    fn assert_untouched(report: &Report, secret: Secret) {
+        assert!(
+            report.secrets.iter().all(|line| line.secret != secret),
+            "{report:?}"
+        );
     }
 
     /// That the file at `path` is readable by its owner only.
@@ -1768,8 +1852,9 @@ mod signing_key {
         }
     }
 
-    fn failures(entries: &[RestoreEntry]) -> Vec<&str> {
-        entries
+    fn failures(report: &Report) -> Vec<&str> {
+        report
+            .entries
             .iter()
             .filter_map(|entry| match &entry.outcome {
                 RestoreOutcome::Failed { error } => Some(error.as_str()),
@@ -1874,7 +1959,7 @@ mod signing_key {
         // A dry run says what becomes of both secrets, and where the key it
         // replaces would go -- and writes nothing.
         let files = listing(target_ca.path());
-        let previewed = preview(
+        let previewed = dry_run(
             &target,
             &repo,
             &load_dump(&bytes).unwrap(),
@@ -1974,7 +2059,7 @@ mod signing_key {
             .path()
             .join(format!("{KEY_FILE}.replaced-{before}"));
         assert_private(&kept);
-        assert_eq!(secret_line(&entries, Secret::Ca).change, SecretChange::Kept);
+        assert_untouched(&entries, Secret::Ca);
         let line = secret_line(&entries, Secret::SigningKey);
         assert_eq!(line.change, SecretChange::Generated);
         assert!(
@@ -2093,12 +2178,12 @@ mod signing_key {
         let fingerprint = repo.key().unwrap().fingerprint().to_string();
         let files = listing(target_ca.path());
 
-        let refusal = |entries: &[RestoreEntry]| {
+        let refusal = |entries: &Report| {
             failures(entries).iter().any(|error| {
                 error.contains("nothing") && error.contains("AURCACHE_SIGNING_KEY_PASSPHRASE_FILE")
             })
         };
-        let previewed = preview(
+        let previewed = dry_run(
             &target,
             &repo,
             &load_dump(&bytes).unwrap(),
@@ -2735,7 +2820,7 @@ mod signing_key {
         )
         .await;
         assert!(
-            entries.iter().any(
+            entries.entries.iter().any(
                 |entry| entry.pkgbase == "offline" && entry.outcome == RestoreOutcome::Imported
             ),
             "{entries:?}"
@@ -2746,10 +2831,7 @@ mod signing_key {
                 "{failure}"
             );
         }
-        assert_eq!(
-            secret_line(&entries, Secret::SigningKey).change,
-            SecretChange::Kept
-        );
+        assert_untouched(&entries, Secret::SigningKey);
 
         let SourceDump {
             bytes,

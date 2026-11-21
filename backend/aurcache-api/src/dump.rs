@@ -149,9 +149,12 @@ pub struct RestoreQuery {
 
 /// Restore a dump, returning before it has finished.
 ///
-/// The whole archive is validated first, so a dump that would be refused is
-/// refused before anything is written. A dry run answers with what it *would*
-/// do and no job id, because there is nothing to watch.
+/// The whole archive is validated first, and what becomes of the secrets
+/// decided, so a dump that would be refused is refused before anything is
+/// written -- a dry run included. The answer says what becomes of each secret
+/// should every rename succeed (`secrets`); a dry run also says what it
+/// *would* do to each package, and has no job id, because there is nothing
+/// to watch.
 ///
 /// Otherwise the rows are written in one transaction and the slow half -- one
 /// source read per package, then the dependency graph -- runs detached, with
@@ -161,7 +164,7 @@ pub struct RestoreQuery {
     params(RestoreQuery),
     responses(
             (status = 202, description = "Restore started, or for a dry run what it would do", body = RestoreAccepted),
-            (status = 400, description = "Not a dump this server can read, or an unknown policy"),
+            (status = 400, description = "Not a dump this server can read, an unknown policy, or secrets that cannot all be put in place"),
             (status = 409, description = "Another restore is still running"),
             (status = 413, description = "Larger than any dump this server reads"),
     )
@@ -202,37 +205,55 @@ pub async fn restore(
         aurcache_utils::restore::load_dump(&bytes.value).map_err(|e| err(Status::BadRequest, e))?;
     let total = i32::try_from(loaded.packages.len()).unwrap_or(i32::MAX);
 
-    if options.dry_run {
-        let preview = aurcache_utils::restore::preview(
-            &services.db,
-            &services.repo,
-            &loaded,
-            &options,
-            SecretsConfig::from_env(&ca_dir.0, &services.repo),
+    // Taken before the secrets are planned: two restores would each plan
+    // from what the other is changing.
+    let running = if options.dry_run {
+        None
+    } else {
+        Some(Restoring::begin().ok_or_else(|| {
+            err(
+                Status::Conflict,
+                "a restore is already running; wait for it to finish",
+            )
+        })?)
+    };
+    // Everything the secrets need, checked before anything is written: a
+    // restore that could not finish is refused whole.
+    let plan = aurcache_utils::restore::plan_secrets(
+        &loaded,
+        &options,
+        SecretsConfig::from_env(&ca_dir.0, &services.repo),
+    )
+    .await
+    .map_err(|e| {
+        let verb = if options.dry_run { "would be" } else { "was" };
+        err(
+            Status::BadRequest,
+            format!("nothing {verb} imported: {e:#}"),
         )
-        .await?;
+    })?;
+    let secrets = aurcache_utils::restore::secret_reports(&plan.expected(&services.repo).await);
+
+    if options.dry_run {
+        // What the plan staged goes when it is dropped.
+        drop(plan);
+        let preview = aurcache_utils::restore::preview(&services.db, &loaded, &options).await?;
         return Ok(status::Accepted(Json(RestoreAccepted {
             job_id: None,
             total,
             preview,
+            secrets,
         })));
     }
 
-    let running = Restoring::begin().ok_or_else(|| {
-        err(
-            Status::Conflict,
-            "a restore is already running; wait for it to finish",
-        )
-    })?;
     let services_task = services.inner().clone();
-    let config = SecretsConfig::from_env(&ca_dir.0, &services.repo);
     let job_id = operation::start(
         services,
         operations::KIND_RESTORE,
         total,
         move |progress| async move {
             let _running = running;
-            aurcache_utils::restore::apply(&services_task, config, loaded, options, progress).await;
+            aurcache_utils::restore::apply(&services_task, plan, loaded, options, progress).await;
         },
         RestoreRecorder {
             activity: services.activity.clone(),
@@ -247,6 +268,7 @@ pub async fn restore(
         job_id: Some(job_id),
         total,
         preview: Vec::new(),
+        secrets,
     })))
 }
 
@@ -290,17 +312,11 @@ struct RestoreRecorder {
 
 impl Recorder<RestoreEntry> for RestoreRecorder {
     fn record(&mut self, entry: &RestoreEntry) -> Counts {
-        match entry.outcome {
-            // Not a package: what became of a secret is in the entry and in
-            // the log, and counts as neither.
-            RestoreOutcome::Secret { .. } => {}
-            RestoreOutcome::Failed { .. } => {
-                self.succeeded.remove(&entry.pkgbase);
-                self.failed.insert(entry.pkgbase.clone());
-            }
-            _ => {
-                self.succeeded.insert(entry.pkgbase.clone());
-            }
+        if let RestoreOutcome::Failed { .. } = entry.outcome {
+            self.succeeded.remove(&entry.pkgbase);
+            self.failed.insert(entry.pkgbase.clone());
+        } else {
+            self.succeeded.insert(entry.pkgbase.clone());
         }
         Counts {
             completed: i32::try_from(self.succeeded.len()).unwrap_or(i32::MAX),
@@ -343,37 +359,7 @@ pub async fn restore_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::{RestoreRecorder, Restoring, dump_file_name};
-    use crate::utils::operation::{Counts, Recorder};
-    use aurcache_activitylog::activity_utils::ActivityLog;
-    use aurcache_common::api::dump::{RestoreEntry, RestoreOutcome, Secret, SecretChange};
-    use std::collections::HashSet;
-
-    /// What becomes of a secret is reported beside the packages, and counts
-    /// as neither a package restored nor one that failed.
-    #[test]
-    fn a_secret_line_is_not_counted_as_a_package() {
-        let mut recorder = RestoreRecorder {
-            activity: ActivityLog::discarding(),
-            username: None,
-            succeeded: HashSet::new(),
-            failed: HashSet::new(),
-        };
-        recorder.record(&RestoreEntry {
-            pkgbase: "hello".to_string(),
-            outcome: RestoreOutcome::Imported,
-        });
-        let Counts { completed, failed } = recorder.record(&RestoreEntry {
-            pkgbase: String::new(),
-            outcome: RestoreOutcome::Secret {
-                secret: Secret::SigningKey,
-                change: SecretChange::Replaced,
-                detail: "the dump's".to_string(),
-            },
-        });
-        assert_eq!(completed, 1);
-        assert_eq!(failed, 0);
-    }
+    use super::{Restoring, dump_file_name};
 
     /// One restore at a time: a second is refused until the first ends.
     #[test]

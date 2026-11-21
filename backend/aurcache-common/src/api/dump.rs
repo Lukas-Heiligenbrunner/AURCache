@@ -315,14 +315,6 @@ pub enum RestoreOutcome {
     PatchAdopted,
     /// Rejected. The rest of the import still applied.
     Failed { error: String },
-    /// Not a package: what the import does, or did, to one of this server's
-    /// secrets, in a word (`change`) and in a sentence (`detail`). Its entry's
-    /// `pkgbase` is empty.
-    Secret {
-        secret: Secret,
-        change: SecretChange,
-        detail: String,
-    },
 }
 
 impl RestoreOutcome {
@@ -335,13 +327,12 @@ impl RestoreOutcome {
             Self::Overwritten => "overwritten",
             Self::PatchAdopted => "patched",
             Self::Failed { .. } => "failed",
-            Self::Secret { change, .. } => change.label(),
         }
     }
 }
 
-/// One of this server's secrets, which an import reports on beside its
-/// packages.
+/// One of this server's secrets, which an import says what it does to
+/// beside its packages ([`SecretReport`]).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -394,38 +385,26 @@ impl SecretChange {
     }
 }
 
-/// One line of an import's report: about a package, about one of the
-/// server's secrets ([`RestoreOutcome::Secret`]), or -- `pkgbase` empty and
-/// failed -- about the dump as a whole.
+/// What an import does to one of this server's secrets, should every rename
+/// succeed: in a word (`change`) and in a sentence (`detail`). A rename that
+/// fails after the packages are in is a failed [`RestoreEntry`] of the
+/// import, against the dump as a whole.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SecretReport {
+    pub secret: Secret,
+    pub change: SecretChange,
+    pub detail: String,
+}
+
+/// One line of an import's report: about a package, or -- `pkgbase` empty
+/// and failed -- about the dump as a whole.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RestoreEntry {
     pub pkgbase: String,
     #[serde(flatten)]
     pub outcome: RestoreOutcome,
-}
-
-impl RestoreEntry {
-    /// What the line is about, as a report shows it: the package, the
-    /// secret, or nothing for the dump as a whole.
-    #[must_use]
-    pub fn subject(&self) -> &str {
-        match &self.outcome {
-            RestoreOutcome::Secret { secret, .. } => secret.label(),
-            _ => &self.pkgbase,
-        }
-    }
-
-    /// The sentence beside the word, when the line has one: why it failed,
-    /// or what became of a secret.
-    #[must_use]
-    pub fn detail(&self) -> Option<&str> {
-        match &self.outcome {
-            RestoreOutcome::Failed { error } => Some(error),
-            RestoreOutcome::Secret { detail, .. } => Some(detail),
-            _ => None,
-        }
-    }
 }
 
 /// An import's state and the entries after the offset asked for.
@@ -443,13 +422,19 @@ pub struct RestoreAccepted {
     /// Populated only for a dry run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preview: Vec<RestoreEntry>,
+    /// What the import does to each of this server's secrets, should every
+    /// rename succeed -- for a dry run and a restore alike; empty when it
+    /// takes none. Apart from `preview`, whose entries are packages, so that
+    /// a client that knows nothing of secrets reads the answer as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretReport>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DumpSecrets, DumpToken, ExistingPackagePolicy, RestoreEntry, RestoreOutcome, Secret,
-        SecretChange, SecretsPolicy,
+        DumpSecrets, DumpToken, ExistingPackagePolicy, RestoreAccepted, RestoreEntry,
+        RestoreOutcome, Secret, SecretChange, SecretReport, SecretsPolicy,
     };
 
     /// Printing a dump's secrets says what it holds, never the keys or
@@ -477,26 +462,116 @@ mod tests {
         assert!(printed.contains("signing_key: true"), "{printed}");
     }
 
-    /// A secret's line goes over the wire as the others do, flattened, and
-    /// is reported as the secret rather than as a package.
+    /// A secret's report goes over the wire as named fields, apart from the
+    /// packages.
     #[test]
-    fn a_secret_line_round_trips_and_names_the_secret() {
-        let entry = RestoreEntry {
-            pkgbase: String::new(),
-            outcome: RestoreOutcome::Secret {
-                secret: Secret::SigningKey,
-                change: SecretChange::Replaced,
-                detail: "the dump's".to_string(),
-            },
+    fn a_secret_report_round_trips() {
+        let report = SecretReport {
+            secret: Secret::SigningKey,
+            change: SecretChange::Replaced,
+            detail: "the dump's".to_string(),
         };
-        let json = serde_json::to_value(&entry).unwrap();
-        assert_eq!(json["outcome"], "secret");
+        let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["secret"], "signing_key");
         assert_eq!(json["change"], "replaced");
-        assert_eq!(serde_json::from_value::<RestoreEntry>(json).unwrap(), entry);
-        assert_eq!(entry.subject(), "signing key");
-        assert_eq!(entry.outcome.label(), "replaced");
-        assert_eq!(entry.detail(), Some("the dump's"));
+        assert_eq!(
+            serde_json::from_value::<SecretReport>(json).unwrap(),
+            report
+        );
+        assert_eq!(report.change.label(), "replaced");
+        assert_eq!(report.secret.label(), "signing key");
+    }
+
+    /// What a 0.6.0 client decodes: its `RestoreAccepted`, `RestoreEntry` and
+    /// `RestoreOutcome`, as they were released. An answer carrying secrets,
+    /// a dry run's and a restore's, and a restore's entries -- packages, and
+    /// a secret that failed, against the dump as a whole -- all read with
+    /// them, the secrets left out.
+    mod released {
+        use serde::Deserialize;
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        #[serde(rename_all = "snake_case", tag = "outcome")]
+        pub enum RestoreOutcome {
+            Imported,
+            Skipped,
+            Overwritten,
+            PatchAdopted,
+            Failed { error: String },
+        }
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        pub struct RestoreEntry {
+            pub pkgbase: String,
+            #[serde(flatten)]
+            pub outcome: RestoreOutcome,
+        }
+
+        #[derive(Deserialize, Debug, PartialEq, Eq)]
+        pub struct RestoreAccepted {
+            pub job_id: Option<i32>,
+            pub total: i32,
+            #[serde(default)]
+            pub preview: Vec<RestoreEntry>,
+        }
+    }
+
+    #[test]
+    fn a_released_client_reads_what_a_restore_answers() {
+        let secrets = vec![SecretReport {
+            secret: Secret::Ca,
+            change: SecretChange::Replaced,
+            detail: "the dump's".to_string(),
+        }];
+        let dry_run = RestoreAccepted {
+            job_id: None,
+            total: 1,
+            preview: vec![RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Imported,
+            }],
+            secrets: secrets.clone(),
+        };
+        let read: released::RestoreAccepted =
+            serde_json::from_str(&serde_json::to_string(&dry_run).unwrap()).unwrap();
+        assert_eq!(read.total, 1);
+        assert_eq!(
+            read.preview,
+            [released::RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: released::RestoreOutcome::Imported,
+            }]
+        );
+
+        let started = RestoreAccepted {
+            job_id: Some(7),
+            total: 1,
+            preview: Vec::new(),
+            secrets,
+        };
+        let read: released::RestoreAccepted =
+            serde_json::from_str(&serde_json::to_string(&started).unwrap()).unwrap();
+        assert_eq!(read.job_id, Some(7));
+        assert!(read.preview.is_empty());
+
+        for entry in [
+            RestoreEntry {
+                pkgbase: "hello".to_string(),
+                outcome: RestoreOutcome::Overwritten,
+            },
+            RestoreEntry {
+                pkgbase: String::new(),
+                outcome: RestoreOutcome::Failed {
+                    error: "the packages were imported, but the dump's CA could not be put \
+                            in place"
+                        .to_string(),
+                },
+            },
+        ] {
+            let read: released::RestoreEntry =
+                serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+            assert_eq!(read.pkgbase, entry.pkgbase);
+        }
     }
 
     /// Every policy parses back from the spelling it is sent as.

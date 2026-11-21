@@ -515,6 +515,14 @@ events! {
         kept: Option<String>,
     },
 
+    /// A restore put a secret's file in place, but its directory could not be
+    /// synced after: every reader sees the new file, but a crash soon after
+    /// may bring the old one back.
+    RestoreSecretUnsynced => ("restore.secret_unsynced", "Backups", "Restored secret not synced") {
+        file: String,
+        error: String,
+    },
+
     /// A restore did not change what the server signs with: the key
     /// `AURCACHE_SIGNING_KEY_FILE` supplies, `supplied` (`None` when its
     /// file cannot be read), is the one it signs with if `signs`, and would
@@ -837,6 +845,7 @@ impl Event {
             | Self::RestoreSigningKeyInstalled { .. }
             | Self::RestoreSigningKeyUnused { .. }
             | Self::RestoreSigningKeyReset { .. }
+            | Self::RestoreSecretUnsynced { .. }
             | Self::WorkersUntrusted { .. }
             | Self::MirrorRankFailed { .. }
             | Self::OfficialReposRefreshFailed { .. }
@@ -1287,6 +1296,10 @@ impl Event {
                  AURCACHE_SIGN is on{}",
                 kept_note(kept.as_deref())
             ))],
+            Self::RestoreSecretUnsynced { file, error } => vec![text(format!(
+                "a restore put {file} in place, but its directory could not be synced \
+                 ({error}): a crash soon after may undo it"
+            ))],
             Self::RestoreSigningKeyUnused {
                 restored,
                 supplied,
@@ -1628,6 +1641,10 @@ mod tests {
                     "data/ca/signing-key.asc.replaced-F9D34ACE12A456EA1702C4D637A35C207FF0D2A6"
                         .to_string(),
                 ),
+            },
+            Event::RestoreSecretUnsynced {
+                file: "data/ca/signing-key.asc".to_string(),
+                error: error(),
             },
             Event::RestoreSigningKeyUnused {
                 restored: "0B05DA40BC50A034F03B4975B4624944991A5056".to_string(),

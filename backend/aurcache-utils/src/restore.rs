@@ -33,7 +33,7 @@ use aurcache_common::api::dump::{
     CA_CERT_FILE, CA_KEY_FILE, DUMP_SCHEMA_VERSION, DumpManifest, DumpPackage, DumpPackages,
     DumpSecrets, DumpSettings, DumpToken, DumpWorker, ExistingPackagePolicy, MANIFEST_FILE,
     PACKAGES_FILE, PATCH_DIR, RestoreEntry, RestoreOptions, RestoreOutcome, SETTINGS_FILE,
-    SIGNING_KEY_FILE, Secret, SecretChange, SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
+    SIGNING_KEY_FILE, Secret, SecretChange, SecretReport, SecretsPolicy, TOKENS_FILE, WORKERS_FILE,
 };
 use aurcache_common::build_state::BuildState;
 use aurcache_common::settings::{Scope, Setting};
@@ -236,38 +236,18 @@ fn parse<T: serde::de::DeserializeOwned>(
     serde_json::from_str(content).map_err(|e| anyhow::anyhow!("{name} is not valid: {e}"))
 }
 
-/// What a dump would do to each package, and to this server's secrets,
-/// without doing it.
+/// What a dump would do to each package, without doing it.
 ///
 /// A dry run answers the only question worth asking before an import: which of
-/// my packages does this touch, and what becomes of the worker CA and the
-/// signing key -- and, before that, whether its secrets would have it refused
-/// ([`plan_secrets`]). It reads, so it can be wrong about a race, but nothing
-/// it reports has happened.
+/// my packages does this touch. What it would do to the server's secrets is
+/// the plan's to say ([`plan_secrets`], [`SecretsPlan::expected`]). It reads,
+/// so it can be wrong about a race, but nothing it reports has happened.
 pub async fn preview(
     db: &DatabaseConnection,
-    repo: &Repository,
     dump: &LoadedDump,
     options: &RestoreOptions,
-    config: SecretsConfig,
 ) -> anyhow::Result<Vec<RestoreEntry>> {
     let mut entries = Vec::new();
-    // Said up front, as the restore itself would refuse. What the plan
-    // staged goes again when it is dropped.
-    let plan = match plan_secrets(dump, options, config).await {
-        Ok(plan) => plan,
-        Err(e) => {
-            // Nothing else would happen, so nothing else is listed.
-            return Ok(vec![RestoreEntry {
-                pkgbase: String::new(),
-                outcome: RestoreOutcome::Failed {
-                    error: format!("nothing would be imported: {e:#}"),
-                },
-            }]);
-        }
-    };
-    let secrets = secret_entries(&plan.expected(repo).await);
-    drop(plan);
     for pkgbase in dump.packages.keys() {
         let existing = package_row(db, pkgbase).await?;
         let dump_patch = dump.patches.get(pkgbase);
@@ -289,7 +269,6 @@ pub async fn preview(
             },
         });
     }
-    entries.extend(secrets);
     Ok(entries)
 }
 
@@ -360,9 +339,13 @@ async fn package_row(
 /// package names, so a dependency naming one of those will not find it; the
 /// entry says so, because it is the difference between a restore that worked
 /// and one that looks like it did.
+///
+/// `plan` is what [`plan_secrets`] made of the dump's secrets before the
+/// restore was accepted: refusing it is the caller's, since a restore that
+/// could not finish is refused whole, before anything is written.
 pub async fn apply(
     services: &Services,
-    config: SecretsConfig,
+    plan: SecretsPlan,
     dump: LoadedDump,
     options: RestoreOptions,
     progress: Sender<RestoreEntry>,
@@ -370,15 +353,6 @@ pub async fn apply(
     let Services {
         store, db, repo, ..
     } = services;
-    // Everything the secrets need, checked before anything is written: a
-    // restore that could not finish is refused whole.
-    let plan = match plan_secrets(&dump, &options, config).await {
-        Ok(plan) => plan,
-        Err(e) => {
-            report_failure(&progress, "", format!("nothing was imported: {e:#}")).await;
-            return;
-        }
-    };
     // PASS 1: rows. One transaction, because a half-applied dump is neither
     // what the instance was nor what the dump describes.
     let applied = match write_rows(db, repo, &dump, &options).await {
@@ -423,7 +397,6 @@ pub async fn apply(
                 ),
             )
             .await;
-            send_all(&progress, secret_entries(&SecretsApplied::untouched())).await;
             return;
         }
     }
@@ -434,7 +407,7 @@ pub async fn apply(
     // must not happen while the import might still fail.
     let secrets = apply_secrets(plan, repo).await;
     record_secrets(&services.activity, &secrets);
-    send_all(&progress, secret_entries(&secrets)).await;
+    send_all(&progress, secret_failures(&secrets)).await;
 
     // PASS 2: sources. Every imported package's `provides` and split package
     // names, so that pass 3 can recognise them. Until this is done for *all* of
@@ -944,17 +917,6 @@ pub struct SecretsApplied {
     pub signing_key: KeyOutcome,
 }
 
-impl SecretsApplied {
-    /// Both left as they are: what a restore that applies no secret did.
-    #[must_use]
-    pub const fn untouched() -> Self {
-        Self {
-            ca: CaOutcome::Kept,
-            signing_key: KeyOutcome::Kept,
-        }
-    }
-}
-
 /// What a restore did to the worker CA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaOutcome {
@@ -1452,56 +1414,61 @@ fn record_secrets(activity: &ActivityLog, applied: &SecretsApplied) {
             tracing::error!("a restore could not change the signing key: {error}");
         }
     }
+    // In place, but a crash soon after may undo it: said in the log alone,
+    // as the restore's report says what it does, not how durably.
+    if let CaOutcome::Replaced {
+        unsynced: Some(error),
+    } = &applied.ca
+    {
+        activity.emit(Event::RestoreSecretUnsynced {
+            file: "the worker CA".to_string(),
+            error: error.clone(),
+        });
+    }
+    if let KeyOutcome::Installed { file, .. } | KeyOutcome::Reset { file, .. } =
+        &applied.signing_key
+        && let Some(error) = &file.unsynced
+    {
+        activity.emit(Event::RestoreSecretUnsynced {
+            file: file.path.display().to_string(),
+            error: error.clone(),
+        });
+    }
 }
 
-/// The lines a restore's report gives the secrets: what became of each, or
-/// would, and what could not be done, against the restore as a whole --
-/// the rows committed before.
-fn secret_entries(applied: &SecretsApplied) -> Vec<RestoreEntry> {
-    let line = |secret: Secret, change: SecretChange, detail: String| RestoreEntry {
-        pkgbase: String::new(),
-        outcome: RestoreOutcome::Secret {
+/// What a restore says it does to each secret it touches, should every
+/// rename succeed: what the answer to it carries, from
+/// [`SecretsPlan::expected`]. A secret it leaves alone has no line, so a
+/// restore that takes none says nothing about secrets; one that could not be
+/// put in place has none either, but a failed entry ([`secret_failures`]).
+#[must_use]
+pub fn secret_reports(applied: &SecretsApplied) -> Vec<SecretReport> {
+    let line = |secret: Secret, change: SecretChange, detail: String| {
+        Some(SecretReport {
             secret,
             change,
             detail,
-        },
-    };
-    let failure = |error: String| RestoreEntry {
-        pkgbase: String::new(),
-        outcome: RestoreOutcome::Failed { error },
+        })
     };
     let ca = match &applied.ca {
-        CaOutcome::Kept => line(
-            Secret::Ca,
-            SecretChange::Kept,
-            "left as it is: workers keep their certificates".to_string(),
-        ),
+        CaOutcome::Kept => None,
         CaOutcome::Same => line(
             Secret::Ca,
             SecretChange::Kept,
             "the dump's, which is this server's already: workers keep their certificates"
                 .to_string(),
         ),
-        CaOutcome::Replaced { unsynced } => line(
+        CaOutcome::Replaced { .. } => line(
             Secret::Ca,
             SecretChange::Replaced,
-            format!(
-                "the dump's, in place of this server's, which is not kept: every worker \
-                 enrolled under it has to enroll again{}",
-                unsynced_note(unsynced.as_deref())
-            ),
+            "the dump's, in place of this server's, which is not kept: every worker \
+             enrolled under it has to enroll again"
+                .to_string(),
         ),
-        CaOutcome::Failed { error } => failure(format!(
-            "the packages were imported, but the dump's CA could not be put in place, \
-             and the previous one stays: {error}"
-        )),
+        CaOutcome::Failed { .. } => None,
     };
     let key = match &applied.signing_key {
-        KeyOutcome::Kept => line(
-            Secret::SigningKey,
-            SecretChange::Kept,
-            "left as it is".to_string(),
-        ),
+        KeyOutcome::Kept => None,
         KeyOutcome::NotWritten {
             restored,
             supplied,
@@ -1547,10 +1514,9 @@ fn secret_entries(applied: &SecretsApplied) -> Vec<RestoreEntry> {
                 Secret::SigningKey,
                 change,
                 format!(
-                    "the dump's key {restored} in {}{}; {signs}{}",
+                    "the dump's key {restored} in {}{}; {signs}",
                     file.path.display(),
                     previous_note(&file.previous),
-                    unsynced_note(file.unsynced.as_deref())
                 ),
             )
         }
@@ -1563,10 +1529,9 @@ fn secret_entries(applied: &SecretsApplied) -> Vec<RestoreEntry> {
             SecretChange::Generated,
             format!(
                 "a new key, {generated}, in {}{}, as a fresh install generates; the server \
-                 signs with it at once, and clients have to trust it{}",
+                 signs with it at once, and clients have to trust it",
                 file.path.display(),
                 previous_note(&file.previous),
-                unsynced_note(file.unsynced.as_deref())
             ),
         ),
         KeyOutcome::Reset {
@@ -1577,16 +1542,40 @@ fn secret_entries(applied: &SecretsApplied) -> Vec<RestoreEntry> {
             Secret::SigningKey,
             SecretChange::Removed,
             format!(
-                "{} removed, as a fresh install has none{}; {}{}",
+                "{} removed, as a fresh install has none{}; {}",
                 file.path.display(),
                 previous_note(&file.previous),
                 supplied_note(supplied.as_deref(), supplied.is_some()),
-                unsynced_note(file.unsynced.as_deref())
             ),
         ),
-        KeyOutcome::Failed { error } => failure(format!("the packages were imported, but {error}")),
+        KeyOutcome::Failed { .. } => None,
     };
-    vec![ca, key]
+    [ca, key].into_iter().flatten().collect()
+}
+
+/// The entries a restore adds for what it could not do to the secrets once
+/// the rows had committed, against the restore as a whole: each secret
+/// that failed is as it was.
+fn secret_failures(applied: &SecretsApplied) -> Vec<RestoreEntry> {
+    let ca = match &applied.ca {
+        CaOutcome::Failed { error } => Some(format!(
+            "the packages were imported, but the dump's CA could not be put in place, \
+             and the previous one stays: {error}"
+        )),
+        _ => None,
+    };
+    let key = match &applied.signing_key {
+        KeyOutcome::Failed { error } => Some(format!("the packages were imported, but {error}")),
+        _ => None,
+    };
+    [ca, key]
+        .into_iter()
+        .flatten()
+        .map(|error| RestoreEntry {
+            pkgbase: String::new(),
+            outcome: RestoreOutcome::Failed { error },
+        })
+        .collect()
 }
 
 /// Where the key a restore replaced or removed is kept, for its report
@@ -1624,17 +1613,6 @@ fn supplied_note(supplied: Option<&str>, signs: bool) -> String {
              AURCACHE_SIGNING_KEY_FILE supplies"
         )
     }
-}
-
-/// What a report line adds for a change whose directory could not be
-/// synced.
-fn unsynced_note(unsynced: Option<&str>) -> String {
-    unsynced.map_or_else(String::new, |error| {
-        format!(
-            " -- in place, but its directory could not be synced ({error}), so a crash \
-             soon after may undo it"
-        )
-    })
 }
 
 /// What pass 1 did.

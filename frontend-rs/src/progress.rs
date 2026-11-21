@@ -449,9 +449,6 @@ async fn poll_restore(jobs: Signal<Vec<Job>>, id: u64, operation: i32) {
                 job.failed.push(Failed::of(entry.pkgbase, error));
                 return false;
             }
-            // Not a package: the card counts packages, and what became of
-            // the secrets is in the dry run's report and in the Logs.
-            RestoreOutcome::Secret { .. } => return false,
         };
         // "skipped" changed nothing, but the others did; a spare re-fetch for
         // a skip is cheaper than telling them apart here.
