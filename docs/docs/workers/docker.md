@@ -21,6 +21,21 @@ image with the engine's resource limits, streams the container's output into
 the build log, and uploads the packages the build leaves in the directory. The
 container and the directory are removed afterwards, however the build ended.
 
+When the worker is told to stop (`SIGTERM` or `SIGINT`), it claims nothing
+more, stops the builds it holds, removes their containers and directories and
+reports each to the server as interrupted, so that a new build of the package
+is queued at once. It gives that 30 seconds. `docker stop` kills after 10
+unless told otherwise, so run the worker's container with `--stop-timeout 30`
+(`stop_grace_period: 30s` in a compose file); `systemctl stop` waits 90 by
+default. A build that is not reported in time is ended by the server once it
+stops hearing of it, as for a worker that died, and queued again then.
+
+The [hybrid image](./hybrid.md) is not stopped that way: its entrypoint sends
+`SIGTERM` to the server, the worker and, in DinD mode, the Podman its builds
+run in, all at once. The server and Podman go away under the worker, so a
+build there is usually not reported, and is queued again once the server is
+back and has stopped hearing of it.
+
 A build's container is named `aurcache_build_<worker>_<build>`, and its
 directory under `BUILD_ARTIFACT_DIR` is `<worker>_<build>`, where `<worker>`
 is the start of the worker's fingerprint. So two AURCache instances can share
