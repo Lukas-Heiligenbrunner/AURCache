@@ -222,10 +222,27 @@ impl Staged {
     /// error but [`Installed::Unsynced`].
     pub fn install(self) -> std::io::Result<Installed> {
         fs::rename(&self.temporary, &self.target)?;
-        Ok(match sync_dir(parent_of(&self.target)) {
-            Ok(()) => Installed::Synced,
-            Err(error) => Installed::Unsynced { error },
-        })
+        Ok(synced(parent_of(&self.target)))
+    }
+
+    /// Put it at its target only if nothing is there, by a hard link and
+    /// the removal of its own name: never over anything, a file that
+    /// appeared since it was staged included, which is refused
+    /// ([`std::io::ErrorKind::AlreadyExists`]) and left as it is. Synced as
+    /// [`Self::install`] syncs.
+    pub fn install_new(self) -> std::io::Result<Installed> {
+        fs::hard_link(&self.temporary, &self.target)?;
+        // Only the staged name goes; dropping it would remove it as well.
+        fs::remove_file(&self.temporary)?;
+        Ok(synced(parent_of(&self.target)))
+    }
+}
+
+/// What syncing `dir` after a rename in it came to.
+fn synced(dir: &Path) -> Installed {
+    match sync_dir(dir) {
+        Ok(()) => Installed::Synced,
+        Err(error) => Installed::Unsynced { error },
     }
 }
 
@@ -299,23 +316,48 @@ fn stage(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<Staged> {
 }
 
 /// The name a secret's file is kept under once something replaces or removes
-/// it: `<file>.replaced-<fingerprint>` beside it, named for the key it held
-/// so that whoever looks for that key finds it by the fingerprint they know.
-#[must_use]
-pub fn replaced_name(path: &Path, fingerprint: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".replaced-{fingerprint}"));
-    path.with_file_name(name)
+/// it: `<file>.replaced-<tag>` beside it. `tag` names what it held -- a key's
+/// fingerprint, so that whoever looks for that key finds it by the
+/// fingerprint they know, or `digest::content_tag` for a file that
+/// is not a key. A tag that is empty or could name another directory, and a
+/// `path` with no file name, are refused ([`std::io::ErrorKind::InvalidInput`]).
+pub fn replaced_name(path: &Path, tag: &str) -> std::io::Result<PathBuf> {
+    let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, why);
+    if tag.is_empty() || tag.contains(['/', '\\', '\0']) {
+        return Err(invalid(format!(
+            "{tag:?} cannot name a copy of {}",
+            path.display()
+        )));
+    }
+    let Some(name) = path.file_name() else {
+        return Err(invalid(format!("{} names no file", path.display())));
+    };
+    let mut name = name.to_os_string();
+    name.push(format!(".replaced-{tag}"));
+    Ok(path.with_file_name(name))
 }
 
-/// A copy of a secret's file, to keep beside it before it is replaced or
-/// removed ([`stage_replaced`]).
+/// Who may read a copy [`stage_replaced`] keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readers {
+    /// Its owner only, as a secret's copy: staged owner-only, and a copy
+    /// already there that others can read is refused rather than taken for
+    /// it.
+    Owner,
+    /// Everyone, as a public file's copy -- `known_hosts` -- is: staged
+    /// readable by all, and one already there taken whoever can read it.
+    Everyone,
+}
+
+/// A copy of a file, to keep beside it before it is replaced
+/// ([`stage_replaced`]).
 #[derive(Debug)]
 pub enum KeptCopy {
-    /// Written and synced under a name of its own, owner-only, and renamed
-    /// to the name it is kept under by [`Self::install`].
+    /// Written and synced under a name of its own, and put under the name it
+    /// is kept under by [`Self::install`].
     Staged(Staged),
-    /// A file of that name holds the same already, so nothing is written.
+    /// A regular file of that name, this process's user's and writable by it
+    /// alone, holds the same already, so nothing is written.
     Present(PathBuf),
 }
 
@@ -329,37 +371,59 @@ impl KeptCopy {
         }
     }
 
-    /// Put the copy where it is kept, as [`Staged::install`] does; a copy
-    /// already present is left as it is.
+    /// Put the copy where it is kept, never over anything there
+    /// ([`Staged::install_new`]); a copy already present is left as it is.
     pub fn install(self) -> std::io::Result<Installed> {
         match self {
-            Self::Staged(staged) => staged.install(),
+            Self::Staged(staged) => staged.install_new(),
             Self::Present(_) => Ok(Installed::Synced),
         }
     }
 }
 
 /// Stage `contents` -- what the file at `path` holds, which is about to be
-/// replaced or removed -- to be kept as [`replaced_name`]: or, when a file of
-/// that name holds something else, under that name followed by `.2`, `.3`,
-/// and so on, so that nothing kept earlier is ever overwritten. A file of
-/// one of those names that holds `contents` already is the copy.
+/// replaced -- to be kept as [`replaced_name`] for `tag`, readable by
+/// `readers`: or, when something else is at that name, under that name
+/// followed by `.2`, `.3`, and so on, so that nothing kept earlier is ever
+/// overwritten, at install either ([`KeptCopy::install`]).
+///
+/// What is at one of those names is opened without following a link and
+/// read from what was opened. Anything that is not a regular file -- a
+/// symlink, a directory -- counts as something else, and so does a file
+/// another user owns, others than its owner can write, or this process
+/// cannot read: none of those is a copy this process can stand behind. A
+/// file there that holds `contents` already is the copy -- unless `readers`
+/// is [`Readers::Owner`] and others can read it, which is refused, since it
+/// would not be the owner-only copy this promises.
 pub fn stage_replaced(
     path: &Path,
-    fingerprint: &str,
+    tag: &str,
     contents: &[u8],
+    readers: Readers,
 ) -> std::io::Result<KeptCopy> {
-    let first = replaced_name(path, fingerprint);
+    let first = replaced_name(path, tag)?;
     let mut candidate = first.clone();
     let mut number = 1;
     loop {
-        match fs::read(&candidate) {
-            Ok(kept) if kept == contents => return Ok(KeptCopy::Present(candidate)),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return stage_private(&candidate, contents).map(KeptCopy::Staged);
+        match read_held(&candidate)? {
+            Held::Nothing => {
+                let mode = match readers {
+                    Readers::Owner => 0o600,
+                    Readers::Everyone => 0o644,
+                };
+                return stage(&candidate, contents, mode).map(KeptCopy::Staged);
             }
-            Err(error) => return Err(error),
+            Held::Own { bytes, shared } if bytes == contents => {
+                if shared && readers == Readers::Owner {
+                    return Err(std::io::Error::other(format!(
+                        "{} holds this copy already, but others than its owner can read \
+                         it; make it owner-only (chmod 600) or remove it",
+                        candidate.display()
+                    )));
+                }
+                return Ok(KeptCopy::Present(candidate));
+            }
+            Held::Own { .. } | Held::Other => {}
         }
         number += 1;
         let mut name = first.as_os_str().to_os_string();
@@ -368,43 +432,108 @@ pub fn stage_replaced(
     }
 }
 
-/// What [`probe_writable`] names its file with, so that [`remove_staged`]
-/// knows one a stopped process left.
-const PROBE_PREFIX: &str = ".restore-probe-";
+/// What is at a name [`stage_replaced`] considers.
+enum Held {
+    /// Nothing: the name is free.
+    Nothing,
+    /// A regular file this process's user owns and alone can write, holding
+    /// `bytes`; `shared` when others can read it.
+    Own { bytes: Vec<u8>, shared: bool },
+    /// Anything else: not a copy to take, and not to be overwritten.
+    Other,
+}
 
-/// Check that `dir` can be written to -- a dot-named file of a name of its
-/// own created and removed in it -- before a change writes anything there,
-/// so that a read-only mount refuses the change rather than leaving it half
-/// done. Two probes at once each have their own name.
-pub fn probe_writable(dir: &Path) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    loop {
-        let probe = dir.join(format!(
-            "{PROBE_PREFIX}{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&probe)
-        {
-            Ok(file) => {
-                drop(file);
-                return fs::remove_file(&probe);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+/// What is at `path`, opened without following a link -- and, where a FIFO
+/// could be swapped in, without blocking -- and read from what was opened,
+/// so that what is judged is what is read.
+fn read_held(path: &Path) -> std::io::Result<Held> {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => return Ok(Held::Other),
+        _ => {}
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Held::Nothing),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Ok(Held::Other);
         }
+        // A symlink, which `O_NOFOLLOW` refuses to open.
+        #[cfg(unix)]
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(Held::Other),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || !is_own(&metadata) {
+        return Ok(Held::Other);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Held::Own {
+        bytes,
+        shared: is_shared(&metadata),
+    })
+}
+
+/// Whether the file `metadata` describes is this process's user's, and
+/// writable by no one else.
+fn is_own(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let user = unsafe { libc::geteuid() };
+        metadata.uid() == user && metadata.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
     }
 }
 
-/// Remove what [`stage_private`] and [`probe_writable`] left in `dir` and
-/// nothing installed: a process that stopped between staging and installing,
-/// or in the middle of a probe, leaves its files behind, and nothing else
-/// ever names them. For a directory only this server writes, before it
-/// writes anything there; returns how many went.
+/// Whether anyone but its owner may read the file `metadata` describes.
+fn is_shared(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o044 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+/// Remove the file at `path`, if there is one, and sync its directory: what
+/// [`Staged::install`] is to a file put in place, for one taken away. A
+/// failed sync is not an error but [`Installed::Unsynced`]: the file is gone
+/// for every reader either way.
+pub fn remove_synced(path: &Path) -> std::io::Result<Installed> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(match sync_dir(parent_of(path)) {
+        Ok(()) => Installed::Synced,
+        Err(error) => Installed::Unsynced { error },
+    })
+}
+
+/// Remove what [`stage_private`] left in `dir` and nothing installed: a
+/// process that stopped between staging and installing leaves its files
+/// behind, and nothing else ever names them. For a directory only this
+/// server writes, before it writes anything there; returns how many went.
 pub fn remove_staged(dir: &Path) -> std::io::Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -414,9 +543,7 @@ pub fn remove_staged(dir: &Path) -> std::io::Result<usize> {
     let mut removed = 0;
     for entry in entries {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if (name.starts_with(".private-") || name.starts_with(PROBE_PREFIX))
+        if entry.file_name().to_string_lossy().starts_with(".private-")
             && entry.file_type()?.is_file()
         {
             fs::remove_file(entry.path())?;
@@ -424,6 +551,40 @@ pub fn remove_staged(dir: &Path) -> std::io::Result<usize> {
         }
     }
     Ok(removed)
+}
+
+/// Whether `a` and `b` name the same file, the one that is not there yet
+/// included: a file mounted or linked at another path is the same file. Two
+/// files that exist are the same when they are one inode -- which a bind
+/// mount is, under another path; otherwise their paths, resolved, are
+/// compared.
+#[must_use]
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
+            return (a.dev(), a.ino()) == (b.dev(), b.ino());
+        }
+    }
+    canonical(a) == canonical(b)
+}
+
+/// `path` with its links and `..` resolved, as far as what exists allows.
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path)
+        .or_else(|_| match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => {
+                let parent = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+                fs::canonicalize(parent).map(|parent| parent.join(name))
+            }
+            _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        })
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn parent_of(path: &Path) -> &Path {
@@ -461,24 +622,25 @@ pub fn check_replaceable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether something is mounted at `path`, which exists: on another
-/// filesystem than its directory, or listed as a mount point in
-/// `/proc/self/mountinfo` -- a bind mount from the same filesystem keeps its
-/// device, so only the kernel's table tells it.
+/// Whether something is mounted at `path`, which exists: listed as a mount
+/// point in `/proc/self/mountinfo`, which alone tells -- a bind mount from
+/// the same filesystem keeps its device, and a file in an overlay can show
+/// its lower layer's device under a directory showing the overlay's. Only
+/// where that table cannot be read is a device other than its directory's
+/// taken for a mount.
 fn is_mount_point(path: &Path) -> std::io::Result<bool> {
+    if let Ok(table) = fs::read_to_string("/proc/self/mountinfo") {
+        let canonical = fs::canonicalize(path)?;
+        return Ok(mount_points(&table).any(|point| point == canonical));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         let parent = fs::metadata(parent_of(path))?;
-        if fs::symlink_metadata(path)?.dev() != parent.dev() {
-            return Ok(true);
-        }
+        Ok(fs::symlink_metadata(path)?.dev() != parent.dev())
     }
-    let Ok(table) = fs::read_to_string("/proc/self/mountinfo") else {
-        return Ok(false);
-    };
-    let canonical = fs::canonicalize(path)?;
-    Ok(mount_points(&table).any(|point| point == canonical))
+    #[cfg(not(unix))]
+    Ok(false)
 }
 
 /// The mount points `/proc/self/mountinfo` lists, its octal escapes undone.
@@ -564,9 +726,8 @@ mod tests {
         let target = tmp.path().join("secret");
         fs::write(&target, "kept").unwrap();
         std::mem::forget(stage_private(&target, b"left").unwrap());
-        fs::write(tmp.path().join(format!("{PROBE_PREFIX}1-0")), "").unwrap();
         fs::write(tmp.path().join(".other"), "kept").unwrap();
-        assert_eq!(remove_staged(tmp.path()).unwrap(), 2);
+        assert_eq!(remove_staged(tmp.path()).unwrap(), 1);
         let mut names: Vec<_> = fs::read_dir(tmp.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -576,14 +737,16 @@ mod tests {
         assert_eq!(remove_staged(&tmp.path().join("missing")).unwrap(), 0);
     }
 
-    /// A probe leaves nothing behind, and a directory that cannot be written
-    /// to refuses it.
+    /// A file removed is gone, its directory synced; one that is not there
+    /// is removed already.
     #[test]
-    fn a_probe_leaves_nothing_and_needs_a_writable_directory() {
+    fn a_file_is_removed_and_its_directory_synced() {
         let tmp = tempfile::tempdir().unwrap();
-        probe_writable(tmp.path()).unwrap();
-        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
-        assert!(probe_writable(&tmp.path().join("missing")).is_err());
+        let path = tmp.path().join("secret");
+        fs::write(&path, "x").unwrap();
+        assert!(matches!(remove_synced(&path).unwrap(), Installed::Synced));
+        assert!(!path.exists());
+        assert!(matches!(remove_synced(&path).unwrap(), Installed::Synced));
     }
 
     /// A replaced file is kept under its fingerprint, owner-only; another
@@ -593,16 +756,13 @@ mod tests {
     fn a_kept_copy_never_overwrites_another() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("signing-key.asc");
-        assert_eq!(
-            replaced_name(&path, "ABCD"),
-            tmp.path().join("signing-key.asc.replaced-ABCD")
-        );
+        let kept = tmp.path().join("signing-key.asc.replaced-ABCD");
+        assert_eq!(replaced_name(&path, "ABCD").unwrap(), kept);
 
-        let first = stage_replaced(&path, "ABCD", b"one").unwrap();
-        assert_eq!(first.path(), replaced_name(&path, "ABCD"));
+        let first = stage_replaced(&path, "ABCD", b"one", Readers::Owner).unwrap();
+        assert_eq!(first.path(), kept);
         assert!(!first.path().exists(), "staged, not yet kept");
         assert!(matches!(first.install().unwrap(), Installed::Synced));
-        let kept = replaced_name(&path, "ABCD");
         assert_eq!(fs::read(&kept).unwrap(), b"one");
         #[cfg(unix)]
         {
@@ -611,15 +771,118 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
 
-        let again = stage_replaced(&path, "ABCD", b"one").unwrap();
+        let again = stage_replaced(&path, "ABCD", b"one", Readers::Owner).unwrap();
         assert!(matches!(&again, KeptCopy::Present(at) if *at == kept));
 
-        let second = stage_replaced(&path, "ABCD", b"two").unwrap();
+        let second = stage_replaced(&path, "ABCD", b"two", Readers::Owner).unwrap();
         let second_path = tmp.path().join("signing-key.asc.replaced-ABCD.2");
         assert_eq!(second.path(), second_path);
         assert!(matches!(second.install().unwrap(), Installed::Synced));
         assert_eq!(fs::read(&kept).unwrap(), b"one");
         assert_eq!(fs::read(&second_path).unwrap(), b"two");
+    }
+
+    /// What is at a kept copy's name and is not a regular file -- a symlink,
+    /// even to a file holding the very same bytes, or a directory -- is never
+    /// followed nor taken for the copy: the copy goes under the next name.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_copy_never_follows_a_link_or_enters_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("signing-key.asc");
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::write(&elsewhere, b"one").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, replaced_name(&path, "ABCD").unwrap()).unwrap();
+        fs::create_dir(tmp.path().join("signing-key.asc.replaced-ABCD.2")).unwrap();
+
+        let copy = stage_replaced(&path, "ABCD", b"one", Readers::Owner).unwrap();
+        assert!(matches!(copy, KeptCopy::Staged(_)));
+        assert_eq!(
+            copy.path(),
+            tmp.path().join("signing-key.asc.replaced-ABCD.3")
+        );
+    }
+
+    /// A copy already there that others than its owner can read is refused
+    /// rather than taken for the owner-only copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_copy_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("signing-key.asc");
+        let kept = replaced_name(&path, "ABCD").unwrap();
+        fs::write(&kept, b"one").unwrap();
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = stage_replaced(&path, "ABCD", b"one", Readers::Owner).unwrap_err();
+        assert!(error.to_string().contains("owner-only"), "{error}");
+    }
+
+    /// A copy of a public file may be readable by all, and is staged so; one
+    /// others can write is not taken for the copy, which goes under the next
+    /// name.
+    #[cfg(unix)]
+    #[test]
+    fn a_public_copy_may_be_read_by_all_but_not_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("known_hosts");
+        let kept = replaced_name(&path, "sha256-0123456789abcdef").unwrap();
+        fs::write(&kept, b"one").unwrap();
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o644)).unwrap();
+        let copy =
+            stage_replaced(&path, "sha256-0123456789abcdef", b"one", Readers::Everyone).unwrap();
+        assert!(matches!(&copy, KeptCopy::Present(at) if *at == kept));
+
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o666)).unwrap();
+        let copy =
+            stage_replaced(&path, "sha256-0123456789abcdef", b"one", Readers::Everyone).unwrap();
+        let next = tmp
+            .path()
+            .join("known_hosts.replaced-sha256-0123456789abcdef.2");
+        assert_eq!(copy.path(), next);
+        assert!(matches!(copy.install().unwrap(), Installed::Synced));
+        let mode = fs::metadata(&next).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    /// A copy is never installed over a file that appeared at its name
+    /// after it was staged: that file is left as it is, and the staged copy
+    /// goes.
+    #[test]
+    fn a_kept_copy_is_not_installed_over_a_newcomer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("signing-key.asc");
+        let copy = stage_replaced(&path, "ABCD", b"one", Readers::Owner).unwrap();
+        fs::write(copy.path(), b"newcomer").unwrap();
+        let kept = copy.path().to_path_buf();
+        let error = copy.install().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&kept).unwrap(), b"newcomer");
+        assert_eq!(remove_staged(tmp.path()).unwrap(), 0, "nothing left staged");
+    }
+
+    /// A tag that is empty, or could name another directory, and a path with
+    /// no file name, name no copy.
+    #[test]
+    fn a_tag_that_could_escape_is_refused() {
+        let path = Path::new("/data/ca/signing-key.asc");
+        for tag in ["", "a/b", "a\\b", "a\0b", "../x"] {
+            let error = replaced_name(path, tag).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{tag:?}");
+            assert!(
+                stage_replaced(path, tag, b"x", Readers::Owner).is_err(),
+                "{tag:?}"
+            );
+        }
+        assert_eq!(
+            replaced_name(Path::new("/"), "ABCD").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            replaced_name(path, "sha256-0123456789abcdef").unwrap(),
+            Path::new("/data/ca/signing-key.asc.replaced-sha256-0123456789abcdef")
+        );
     }
 
     /// A regular file or none can be replaced; a directory or a symlink
@@ -640,31 +903,79 @@ mod tests {
         }
     }
 
+    /// Set when [`mounts_are_told_by_the_kernels_table`] runs again inside
+    /// a user and mount namespace of its own.
+    #[cfg(target_os = "linux")]
+    const IN_NAMESPACE: &str = "AURCACHE_FS_TEST_IN_NAMESPACE";
+
     /// A file bind-mounted over another -- a Docker secret where the server
-    /// keeps its own file -- cannot be replaced. Needs a mount namespace
-    /// (`unshare -rm cargo test ...`); skipped elsewhere.
-    #[cfg(unix)]
+    /// keeps its own file -- cannot be replaced; a file in an overlay whose
+    /// layers are on other filesystems than the overlay -- its device is not
+    /// its directory's -- can be. Run again under `unshare -rm`, which gives
+    /// it the mounts it needs, where unprivileged user namespaces are
+    /// allowed; skipped elsewhere.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_file_mounted_in_place_is_not_replaceable() {
+    fn mounts_are_told_by_the_kernels_table() {
+        use std::process::{Command, Stdio};
+        if std::env::var_os(IN_NAMESPACE).is_none() {
+            let usable = Command::new("unshare")
+                .args(["-rm", "true"])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+            if !usable {
+                eprintln!("skipped: no unprivileged user namespaces here");
+                return;
+            }
+            let status = Command::new("unshare")
+                .arg("-rm")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", "fs::tests::mounts_are_told_by_the_kernels_table"])
+                .env(IN_NAMESPACE, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "the test failed in its namespace");
+            return;
+        }
+        let mount = |args: &[&str]| {
+            let status = Command::new("mount").args(args).status().unwrap();
+            assert!(status.success(), "mount {args:?}");
+        };
         let tmp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let dir = tmp.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            dir.to_str().unwrap().to_string()
+        };
+
         let secret = tmp.path().join("secret");
         let target = tmp.path().join("target");
         fs::write(&secret, "mounted").unwrap();
         fs::write(&target, "own").unwrap();
-        let mounted = std::process::Command::new("mount")
-            .arg("--bind")
-            .arg(&secret)
-            .arg(&target)
-            .stderr(std::process::Stdio::null())
-            .status();
-        if !mounted.is_ok_and(|status| status.success()) {
-            eprintln!("skipped: cannot bind-mount here");
-            return;
-        }
-        let refused = check_replaceable(&target);
-        let _ = std::process::Command::new("umount").arg(&target).status();
-        let error = refused.unwrap_err().to_string();
+        mount(&["--bind", secret.to_str().unwrap(), target.to_str().unwrap()]);
+        let error = check_replaceable(&target).unwrap_err().to_string();
         assert!(error.contains("is mounted where it is"), "{error}");
+
+        let (lower, layers, merged) = (dir("lower"), dir("layers"), dir("merged"));
+        mount(&["-t", "tmpfs", "lower", &lower]);
+        mount(&["-t", "tmpfs", "layers", &layers]);
+        let (upper, work) = (format!("{layers}/upper"), format!("{layers}/work"));
+        fs::create_dir(&upper).unwrap();
+        fs::create_dir(&work).unwrap();
+        fs::write(Path::new(&lower).join("signing-key.asc"), "key").unwrap();
+        let options = format!("lowerdir={lower},upperdir={upper},workdir={work}");
+        mount(&["-t", "overlay", "overlay", "-o", &options, &merged]);
+        let file = Path::new(&merged).join("signing-key.asc");
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                fs::metadata(&file).unwrap().dev(),
+                fs::metadata(&merged).unwrap().dev(),
+                "the overlay shows the file's own device, as this test needs"
+            );
+        }
+        check_replaceable(&file).unwrap();
     }
 
     #[test]

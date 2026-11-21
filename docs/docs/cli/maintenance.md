@@ -103,7 +103,7 @@ directory (`.2`, `.3` and so on after it when that name holds another file
 already). The restore's report says where it went. Clients still have to
 trust the key the server signs with after; the kept one is there to go back
 to, or to sign with elsewhere. A file that does not read as a key is kept as
-`signing-key.asc.replaced-unreadable`. The worker CA a restore replaces is not
+`signing-key.asc.replaced-sha256-<16 hex digits of its SHA-256>`. The worker CA a restore replaces is not
 kept.
 
 Values set on workers from AURCache are included in a backup with the worker

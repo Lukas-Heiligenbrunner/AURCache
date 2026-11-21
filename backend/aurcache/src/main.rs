@@ -85,10 +85,9 @@ async fn main() {
     // Load (or create on first run) the internal CA used to authenticate remote
     // build workers over mutual TLS. Persisted under the data directory.
     let ca_dir = aurcache_common::fs::ca_dir();
-    // A restore probes the CA directory, and stages the CA, the signing key
-    // and a copy of the key it replaces beside them, before it commits; one
-    // stopped in between leaves its files there, which nothing else would
-    // ever remove.
+    // A restore stages the CA, the signing key and a copy of the key it
+    // replaces beside them before it commits; one stopped in between leaves
+    // its files there, which nothing else would ever remove.
     match aurcache_common::fs::remove_staged(&ca_dir) {
         Ok(0) => {}
         Ok(removed) => tracing::info!(

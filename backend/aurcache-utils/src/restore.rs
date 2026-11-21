@@ -52,7 +52,9 @@ use crate::snapshot::SnapshotStore;
 use aurcache_activitylog::activity_utils::ActivityLog;
 use aurcache_activitylog::events::{Event, RestoreStep};
 use aurcache_ca::StagedCa;
-use aurcache_common::fs::{Installed, KeptCopy, Staged, check_replaceable, stage_private};
+use aurcache_common::fs::{
+    Installed, KeptCopy, Readers, Staged, check_replaceable, same_file, stage_private,
+};
 use aurcache_signing::{InstanceKey, KeyLocation};
 
 /// A dump that has been read and checked, ready to apply. Its `Debug` prints
@@ -602,45 +604,32 @@ enum KeyPlan {
     Supplied { restored: String },
 }
 
-/// What a restore does with the dump's key: decided before anything about
-/// the key is checked, so that a plan that writes nothing probes nothing.
-enum KeyAction {
-    Keep,
-    Supplied,
-    Install,
-    Store,
-    Generate,
-    Remove,
+/// What the server's own key file holds before a plan writes or removes it:
+/// a key nothing else may have a copy of, so it is kept beside it rather than
+/// lost.
+struct Previous {
+    /// What it will be reported as once kept.
+    expected: PreviousKey,
+    /// A copy staged to be kept as `<file>.replaced-<tag>`
+    /// ([`aurcache_common::fs::stage_replaced`]), when there is anything to
+    /// keep.
+    copy: Option<KeptCopy>,
 }
-
-/// What a plan does with what the server's own key file holds before the
-/// file is written or removed: a key nothing else may have a copy of, so it
-/// is kept beside it rather than lost.
-enum Previous {
-    /// There is no file.
-    Absent,
-    /// It holds what is to be written, byte for byte: nothing is lost.
-    Same,
-    /// It holds something else -- a key with this `fingerprint`, or `None`
-    /// for what does not read as one -- whose `copy` is staged to be kept
-    /// as `<file>.replaced-<fingerprint>` ([`aurcache_common::fs::stage_replaced`]).
-    Keep {
-        fingerprint: Option<String>,
-        copy: KeptCopy,
-    },
-}
-
-/// What a kept copy of a file that does not read as a key is named for.
-const UNREADABLE: &str = "unreadable";
 
 impl Previous {
     /// What the server's own key file `own` holds, for a plan that writes
     /// `written` there -- `None` for one that removes it, or writes a new
-    /// key -- with what it holds staged to be kept.
+    /// key -- with what it holds staged to be kept: named for its key's
+    /// fingerprint, or for its contents when it does not read as a key.
     fn of(own: &Path, written: Option<&[u8]>) -> anyhow::Result<Self> {
         let held = match std::fs::read(own) {
             Ok(held) => held,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    expected: PreviousKey::Absent,
+                    copy: None,
+                });
+            }
             Err(error) => {
                 return Err(anyhow::Error::new(error).context(format!(
                     "reading the signing key {} to keep it",
@@ -649,56 +638,41 @@ impl Previous {
             }
         };
         if written == Some(held.as_slice()) {
-            return Ok(Self::Same);
+            return Ok(Self {
+                expected: PreviousKey::Same,
+                copy: None,
+            });
         }
         let fingerprint = aurcache_signing::inspect(&held)
             .ok()
             .map(|facts| facts.fingerprint);
-        let copy = aurcache_common::fs::stage_replaced(
-            own,
-            fingerprint.as_deref().unwrap_or(UNREADABLE),
-            &held,
-        )
-        .with_context(|| {
+        let tag = fingerprint
+            .clone()
+            .unwrap_or_else(|| aurcache_common::digest::content_tag(&held));
+        let copy = aurcache_common::fs::stage_replaced(own, &tag, &held, Readers::Owner)
+            .with_context(|| {
             format!(
                 "writing a copy of the signing key {} to keep",
                 own.display()
             )
         })?;
-        Ok(Self::Keep { fingerprint, copy })
-    }
-
-    /// What it will be reported as once kept.
-    fn expected(&self) -> PreviousKey {
-        match self {
-            Self::Absent => PreviousKey::Absent,
-            Self::Same => PreviousKey::Same,
-            Self::Keep { fingerprint, copy } => PreviousKey::Kept {
-                fingerprint: fingerprint.clone(),
+        Ok(Self {
+            expected: PreviousKey::Kept {
+                fingerprint,
                 kept: copy.path().to_path_buf(),
             },
-        }
+            copy: Some(copy),
+        })
     }
 
     /// Put the copy where it is kept: before the file is replaced or
     /// removed.
-    fn keep(self) -> std::io::Result<KeptPrevious> {
-        let expected = self.expected();
-        let installed = match self {
-            Self::Absent | Self::Same => Installed::Synced,
-            Self::Keep { copy, .. } => copy.install()?,
-        };
-        Ok(KeptPrevious {
-            previous: expected,
-            installed,
-        })
+    fn keep(self) -> std::io::Result<Installed> {
+        match self.copy {
+            Some(copy) => copy.install(),
+            None => Ok(Installed::Synced),
+        }
     }
-}
-
-/// What keeping the previous key came to.
-struct KeptPrevious {
-    previous: PreviousKey,
-    installed: Installed,
 }
 
 /// Where this server keeps its secrets, and how it uses its signing key:
@@ -783,22 +757,6 @@ fn plan(
     let own_is_supplied = matches!(&location, KeyLocation::Supplied(path) if same_file(path, &own));
     // Whether a key in the server's own file is the one it signs with.
     let own_signs = signs && matches!(location, KeyLocation::Own(_));
-    let carried = secrets
-        .as_ref()
-        .and_then(|secrets| secrets.signing_key.as_deref());
-    let action = match carried {
-        Some(_) if own_is_supplied => KeyAction::Supplied,
-        Some(_) if own_signs => KeyAction::Install,
-        Some(_) => KeyAction::Store,
-        None if clear && !own_is_supplied && own_signs => KeyAction::Generate,
-        None if clear && !own_is_supplied && own.exists() => KeyAction::Remove,
-        None => KeyAction::Keep,
-    };
-    // A probe only where something is written: the CA, or the key file.
-    if secrets.is_some() || !matches!(action, KeyAction::Keep | KeyAction::Supplied) {
-        aurcache_common::fs::probe_writable(&ca_dir)
-            .with_context(|| format!("{} cannot be written to", ca_dir.display()))?;
-    }
     let ca = secrets
         .as_ref()
         .map(|secrets| {
@@ -812,54 +770,55 @@ fn plan(
         .transpose()?;
     // Read only for a key that is written: a restore that writes none goes
     // through whatever has become of the file.
-    let passphrase = match action {
-        KeyAction::Install | KeyAction::Store | KeyAction::Generate => passphrase_file
+    let passphrase = || {
+        passphrase_file
             .as_deref()
             .map(aurcache_signing::read_passphrase)
-            .transpose()?,
-        KeyAction::Keep | KeyAction::Supplied | KeyAction::Remove => None,
+            .transpose()
     };
-    let passphrase = passphrase.as_deref();
-    let signing_key = match (action, carried) {
-        (KeyAction::Supplied, Some(text)) => KeyPlan::Supplied {
+    let carried = secrets
+        .as_ref()
+        .and_then(|secrets| secrets.signing_key.as_deref());
+    let signing_key = match carried {
+        Some(text) if own_is_supplied => KeyPlan::Supplied {
             restored: fingerprint(text)?,
         },
-        (KeyAction::Install, Some(text)) => {
+        Some(text) if own_signs => {
             replaceable_key(&own)?;
-            let ToSign { text, key } = to_sign(text, passphrase)?;
+            let ToSign { text, key } = to_sign(text, passphrase()?.as_deref())?;
             KeyPlan::Install {
                 previous: Previous::of(&own, Some(text.as_bytes()))?,
                 staged: stage_key(&own, text.as_bytes())?,
                 key: Box::new(key),
             }
         }
-        (KeyAction::Store, Some(text)) => {
+        Some(text) => {
             replaceable_key(&own)?;
             let restored = fingerprint(text)?;
-            let text = to_keep(text, &restored, passphrase)?;
+            let text = to_keep(text, &restored, passphrase()?.as_deref())?;
             KeyPlan::Store {
                 previous: Previous::of(&own, Some(text.as_bytes()))?,
                 staged: stage_key(&own, text.as_bytes())?,
                 restored,
             }
         }
-        (KeyAction::Generate, _) => {
+        None if clear && !own_is_supplied && own_signs => {
             replaceable_key(&own)?;
-            let key = InstanceKey::generate(passphrase)?;
+            let key = InstanceKey::generate(passphrase()?.as_deref())?;
             KeyPlan::Generate {
                 previous: Previous::of(&own, None)?,
                 staged: key.stage(&own)?,
                 key: Box::new(key),
             }
         }
-        (KeyAction::Remove, _) => {
+        None if clear && !own_is_supplied && own.exists() => {
             replaceable_key(&own)?;
             KeyPlan::Remove {
                 previous: Previous::of(&own, None)?,
                 path: own,
             }
         }
-        _ => KeyPlan::Keep,
+        None => KeyPlan::Keep,
     };
     Ok(SecretsPlan {
         ca,
@@ -959,39 +918,6 @@ fn to_keep(text: &str, restored: &str, passphrase: Option<&str>) -> anyhow::Resu
         )
     })?;
     Ok(text.to_string())
-}
-
-/// Whether `a` and `b` name the same file, the one that is not there yet
-/// included: a supplied key mounted or linked where the server keeps its own
-/// is the supplied key. Two files that exist are the same when they are one
-/// inode -- which a bind mount is, under another path; otherwise their
-/// paths, resolved, are compared.
-fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            return (a.dev(), a.ino()) == (b.dev(), b.ino());
-        }
-    }
-    canonical(a) == canonical(b)
-}
-
-/// `path` with its links and `..` resolved, as far as what exists allows.
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path)
-        .or_else(|_| match (path.parent(), path.file_name()) {
-            (Some(parent), Some(name)) => {
-                let parent = if parent.as_os_str().is_empty() {
-                    Path::new(".")
-                } else {
-                    parent
-                };
-                std::fs::canonicalize(parent).map(|parent| parent.join(name))
-            }
-            _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-        })
-        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// What putting a dump's secrets in place did, secret by secret: what a
@@ -1183,7 +1109,7 @@ impl SecretsPlan {
         };
         let file = |path: &Path, previous: &Previous| KeyFile {
             path: path.to_path_buf(),
-            previous: previous.expected(),
+            previous: previous.expected.clone(),
             unsynced: None,
         };
         let signing_key = match &self.signing_key {
@@ -1371,6 +1297,7 @@ async fn apply_key(plan: KeyPlan, location: KeyLocation, repo: &Repository) -> K
 /// Keep what the server's own key file holds, then rename `staged` over it.
 fn persist_key(previous: Previous, staged: Staged) -> anyhow::Result<KeyFile> {
     let path = staged.target().to_path_buf();
+    let previous_key = previous.expected.clone();
     let kept = previous
         .keep()
         .with_context(|| format!("keeping the signing key {}", path.display()))?;
@@ -1381,27 +1308,23 @@ fn persist_key(previous: Previous, staged: Staged) -> anyhow::Result<KeyFile> {
         .with_context(|| format!("replacing {}", path.display()))?;
     Ok(KeyFile {
         path,
-        previous: kept.previous,
-        unsynced: unsynced(installed),
+        previous: previous_key,
+        unsynced: unsynced(installed).or_else(|| unsynced(kept)),
     })
 }
 
 /// Keep what the server's own key file at `path` holds, then remove it.
 fn remove_key(previous: Previous, path: PathBuf) -> anyhow::Result<KeyFile> {
+    let previous_key = previous.expected.clone();
     let kept = previous
         .keep()
         .with_context(|| format!("keeping the signing key {}", path.display()))?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("removing {}", path.display())));
-        }
-    }
+    let removed = aurcache_common::fs::remove_synced(&path)
+        .with_context(|| format!("removing {}", path.display()))?;
     Ok(KeyFile {
         path,
-        previous: kept.previous,
-        unsynced: unsynced(kept.installed),
+        previous: previous_key,
+        unsynced: unsynced(removed).or_else(|| unsynced(kept)),
     })
 }
 

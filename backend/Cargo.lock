@@ -793,6 +793,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "jiff 1.0.0",
+ "libc",
  "sea-orm",
  "serde",
  "serde_json",
