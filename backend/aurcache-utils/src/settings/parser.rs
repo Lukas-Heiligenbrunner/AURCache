@@ -1,3 +1,4 @@
+use aurcache_common::host_port::{HostPort, HostPortList};
 use std::str::FromStr;
 
 pub trait ParseSetting: Sized + Clone {
@@ -34,6 +35,19 @@ impl ParseSetting for ByteSize {
     }
 }
 
+/// A list of `host:port` destinations, written comma separated: the entries
+/// that parse, and apart from them the ones that do not.
+///
+/// Never fails. An entry that does not parse costs only itself, rather than
+/// every other host builds were to reach. The API refuses such a value before
+/// it is stored (`Setting::validate`), and the server warns about the
+/// environment's at startup.
+impl ParseSetting for HostPortList {
+    fn parse_setting(s: &str) -> Result<Self, String> {
+        Ok(HostPort::parse_list(s))
+    }
+}
+
 impl ParseSetting for String {
     fn parse_setting(s: &str) -> Result<Self, String> {
         Ok(s.to_string())
@@ -65,6 +79,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{ParseSetting, Seconds};
+    use aurcache_common::host_port::{HostPort, HostPortList};
 
     /// A duration setting reads what the worker's do: units, or plain seconds
     /// as it always took.
@@ -95,5 +110,21 @@ mod tests {
     fn an_unrecognised_boolean_is_an_error() {
         assert!(bool::parse_setting("ture").is_err());
         assert!(bool::parse_setting("enabled").is_err());
+    }
+
+    /// One entry that is not `host:port` leaves the others in place.
+    #[test]
+    fn a_host_list_keeps_the_entries_that_parse() {
+        let list =
+            HostPortList::parse_setting("distcc.lan:3632, gitlab.lan, [fd00::5]:22").unwrap();
+        assert_eq!(
+            list.entries,
+            [
+                HostPort::parse("distcc.lan:3632").unwrap(),
+                HostPort::parse("[fd00::5]:22").unwrap(),
+            ]
+        );
+        assert_eq!(list.invalid.len(), 1);
+        assert_eq!(list.invalid[0].entry, "gitlab.lan");
     }
 }

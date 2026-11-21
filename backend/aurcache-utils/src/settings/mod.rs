@@ -4,13 +4,19 @@
 //! package, then the setting's environment variable, then the value set for the
 //! server, then the built-in default. [`key`] names each setting with the type
 //! it is read as, so a setting is read as the same type everywhere.
+//!
+//! `build_hosts` is the exception: a package's list is added to the server's
+//! rather than replacing it, so it has no [`key`] for [`get`] to read it by.
+//! [`build_hosts`] reads it, for a build and for the settings pages alike.
 
 mod parser;
 
 pub use parser::{ByteSize, ParseSetting, Seconds};
 
+use aurcache_common::host_port::{HostPort, HostPortList, InvalidEntry};
 use aurcache_common::settings::{
-    ApplicationSettings, Scope, Setting, SettingSource, SettingsEntry, SettingsMeta,
+    ApplicationSettings, BuildHostsEntry, Scope, Setting, SettingSource, SettingsEntry,
+    SettingsMeta,
 };
 use aurcache_db::settings;
 use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
@@ -79,6 +85,70 @@ pub async fn get<T: ParseSetting>(
     Ok(resolve(&stored, key))
 }
 
+/// `build_hosts` for a package or the server, as one read saw it.
+///
+/// A package's list is added to the server's rather than replacing it, so a
+/// package that needs one more host does not repeat every host the server
+/// allows. What a build gets is [`BuildHosts::union`].
+pub struct BuildHosts {
+    /// The package's own list; `None` for the server, and for a package
+    /// without one.
+    pub package: Option<Vec<HostPort>>,
+    /// The server's: `Env -> Global -> Default`.
+    pub server: SettingsEntry<Vec<HostPort>>,
+    /// Entries of either list that are not `host:port`, which are left out:
+    /// the API refuses one before storing it, but nothing checks the
+    /// environment.
+    pub invalid: Vec<InvalidEntry>,
+}
+
+impl BuildHosts {
+    /// What a build gets: the package's hosts, then the server's that are not
+    /// among them.
+    #[must_use]
+    pub fn union(&self) -> Vec<HostPort> {
+        let mut hosts = self.package.clone().unwrap_or_default();
+        for host in &self.server.value {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
+        hosts
+    }
+}
+
+/// `build_hosts` for `pkg_id` (`None` for the whole server).
+pub async fn build_hosts(
+    db: &DatabaseConnection,
+    pkg_id: Option<i32>,
+) -> Result<BuildHosts, sea_orm::DbErr> {
+    let stored = Stored::one(db, Setting::BuildHosts, pkg_id).await?;
+    Ok(build_hosts_of(&stored))
+}
+
+/// `build_hosts` from what `stored` holds.
+fn build_hosts_of(stored: &Stored) -> BuildHosts {
+    let key: Key<HostPortList> = Key::of(Setting::BuildHosts);
+    // By precedence, the package's list answers whenever it has one; the
+    // server's is what answers without the package.
+    let own = resolve(stored, key);
+    let package = (own.source == SettingSource::Package).then_some(own.value);
+    let server = resolve(&stored.server_wide(), key);
+    let invalid = package
+        .iter()
+        .chain([&server.value])
+        .flat_map(|list| list.invalid.iter().cloned())
+        .collect();
+    BuildHosts {
+        package: package.map(|list| list.entries),
+        server: SettingsEntry {
+            value: server.value.entries,
+            source: server.source,
+        },
+        invalid,
+    }
+}
+
 /// Whether the environment answers for `setting` whatever is stored.
 fn env_decides(setting: Setting, pkg_id: Option<i32>) -> bool {
     let meta = setting.meta();
@@ -110,6 +180,15 @@ impl Stored {
     /// What is stored for every setting, for the server and for `pkg_id`.
     async fn every(db: &DatabaseConnection, pkg_id: Option<i32>) -> Result<Self, sea_orm::DbErr> {
         Self::load(db, None, pkg_id).await
+    }
+
+    /// What is stored for the server alone.
+    fn server_wide(&self) -> Self {
+        Self {
+            pkg_id: None,
+            package: HashMap::new(),
+            global: self.global.clone(),
+        }
     }
 
     /// Nothing stored, as when the database need not be asked.
@@ -246,7 +325,28 @@ pub async fn all(
         build_on_new_version: resolve(&stored, key::BUILD_ON_NEW_VERSION),
         persistent_builddir: resolve(&stored, key::PERSISTENT_BUILDDIR),
         parse_network: resolve(&stored, key::PARSE_NETWORK),
+        build_hosts: build_hosts_entry(&build_hosts_of(&stored)),
     })
+}
+
+/// `build_hosts` as the settings pages show it: each list as it is typed.
+fn build_hosts_entry(hosts: &BuildHosts) -> BuildHostsEntry {
+    BuildHostsEntry {
+        package: hosts.package.as_deref().map(written),
+        server: SettingsEntry {
+            value: written(&hosts.server.value),
+            source: hosts.server.source,
+        },
+    }
+}
+
+/// Hosts as they are typed: `host:port` separated by commas.
+fn written(hosts: &[HostPort]) -> String {
+    hosts
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A value to store for a setting, or `None` to remove the one stored.
@@ -340,7 +440,7 @@ pub async fn write<C: sea_orm::ConnectionTrait>(
 #[cfg(test)]
 mod tests {
     use super::{Change, get, key, write};
-    use aurcache_common::settings::{Setting, SettingSource};
+    use aurcache_common::settings::{BuildHostsEntry, Setting, SettingSource, SettingsEntry};
     use aurcache_db::migration::Migrator;
     use sea_orm::{Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
@@ -383,6 +483,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(entry.source, SettingSource::Default);
+    }
+
+    /// The names of `hosts`, as typed.
+    fn names(hosts: &[aurcache_common::host_port::HostPort]) -> Vec<String> {
+        hosts.iter().map(ToString::to_string).collect()
+    }
+
+    /// A package's build hosts are added to the server's, not put in their
+    /// place. A build gets both, the page shows each list, and the setting
+    /// read on its own answers as written, like any other.
+    #[tokio::test]
+    async fn build_hosts_are_the_package_and_the_server_together() {
+        let db = db().await;
+        let none = super::build_hosts(&db, Some(1)).await.unwrap();
+        assert!(none.union().is_empty());
+
+        write(
+            &db,
+            [
+                Change {
+                    setting: Setting::BuildHosts,
+                    pkg_id: None,
+                    value: Some("distcc.lan:3632, flexo.lan:7878".to_string()),
+                },
+                Change {
+                    setting: Setting::BuildHosts,
+                    pkg_id: Some(1),
+                    value: Some("gitlab.lan:22, distcc.lan:3632".to_string()),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        let own = super::build_hosts(&db, Some(1)).await.unwrap();
+        assert_eq!(
+            names(&own.union()),
+            ["gitlab.lan:22", "distcc.lan:3632", "flexo.lan:7878"]
+        );
+        let other = super::build_hosts(&db, Some(2)).await.unwrap();
+        assert_eq!(names(&other.union()), ["distcc.lan:3632", "flexo.lan:7878"]);
+
+        let inherited = SettingsEntry {
+            value: "distcc.lan:3632, flexo.lan:7878".to_string(),
+            source: SettingSource::Global,
+        };
+        assert_eq!(
+            super::all(&db, Some(1)).await.unwrap().build_hosts,
+            BuildHostsEntry {
+                package: Some("gitlab.lan:22, distcc.lan:3632".to_string()),
+                server: inherited.clone(),
+            }
+        );
+        for pkg_id in [Some(2), None] {
+            assert_eq!(
+                super::all(&db, pkg_id).await.unwrap().build_hosts,
+                BuildHostsEntry {
+                    package: None,
+                    server: inherited.clone(),
+                }
+            );
+        }
+
+        // What PATCH stores is what the setting on its own reads back, so
+        // writing back what was read changes nothing.
+        let one = super::raw(&db, Setting::BuildHosts, Some(1)).await.unwrap();
+        assert_eq!(one.value, "gitlab.lan:22, distcc.lan:3632");
+        assert_eq!(one.source, SettingSource::Package);
+    }
+
+    /// An entry that is not `host:port` -- as one in `BUILD_HOSTS` can be,
+    /// which nothing checks before it is read -- leaves out only itself, and
+    /// is named for the startup warning.
+    #[tokio::test]
+    async fn a_bad_build_host_leaves_the_others_in_place() {
+        let db = db().await;
+        write(
+            &db,
+            [Change {
+                setting: Setting::BuildHosts,
+                pkg_id: None,
+                value: Some("distcc.lan:3632, gitlab.lan, flexo.lan:7878".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        let hosts = super::build_hosts(&db, None).await.unwrap();
+        assert_eq!(names(&hosts.union()), ["distcc.lan:3632", "flexo.lan:7878"]);
+        let invalid: Vec<String> = hosts.invalid.iter().map(ToString::to_string).collect();
+        assert_eq!(invalid, [r#""gitlab.lan": no port: write it as host:port"#]);
     }
 
     /// One a package may override is read for it.

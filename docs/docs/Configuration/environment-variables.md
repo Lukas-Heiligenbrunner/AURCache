@@ -25,6 +25,10 @@ lowest priority:
 The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 `(inherited from env)`, or no badge when this scope owns the value.
 
+`BUILD_HOSTS` is the exception: a package's list is **added to** the
+server-wide one (environment, else global, else none) rather than replacing
+it, so a build gets both.
+
 ## Database Configuration
 | Variable               | Type                  | Description                                                         | Default                   |
 |------------------------|-----------------------|---------------------------------------------------------------------|---------------------------|
@@ -51,6 +55,7 @@ The UI badges reflect the source: `(default)`, `(inherited)` (= global),
 | RETIRED_PACKAGE_GRACE  | Duration      | How long a package file stays downloadable after a newer build or a removal takes it out of the repository database (`1d`, `12h`, or seconds), so clients that synced just before can still fetch it | `1d` |
 | ACTIVITY_RETENTION     | Duration      | How long an entry stays in the **Logs** page (`90d`, `4w`, or seconds). `0` keeps everything | `90d` |
 | PARSE_NETWORK          | Boolean       | Let a PKGBUILD reach the network while the server parses it; also a setting, global | false |
+| BUILD_HOSTS            | List          | Local destinations builds may reach, as `host:port` separated by commas (`distcc.lan:3632,[fd00::5]:22`). Also a setting, global or per package, where a package's list is added to this one rather than replacing it. An entry that is not `host:port` is left out, with a warning at startup; see [What builds can reach on the network](../workers/split-chroot.md#what-builds-can-reach-on-the-network) | none |
 | SECRET_KEY             | String        | \>32Byte Random String for singing cookies                            | Random  |
 | AURCACHE_REPO_NAME     | String        | Pacman section and database filename prefix; see [Repository name](#repository-name) | `repo` |
 | AURCACHE_PUBLIC_URL    | String        | Base URL workers use for the pacman repo, baked into build configs. Example: `http://aurcache:8081`. One that names no port means `AURCACHE_REPO_PORT` | `http://localhost:<AURCACHE_REPO_PORT>` |

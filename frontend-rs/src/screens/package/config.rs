@@ -40,17 +40,23 @@ pub(super) fn BuildConfigCard(pkg: ExtendedPackage, on_changed: EventHandler<()>
                     on_changed,
                 }
                 PersistBuildDirField { key: "persist-{pkg.name}", pkgbase: pkg.name.clone(), entry }
-                PackageLimitField {
+                PackageSettingField {
                     key: "artifact-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::ArtifactSize,
+                    setting: PackageSetting::ArtifactSize,
                 }
-                PackageLimitField {
+                PackageSettingField {
                     key: "timeout-{pkg.name}",
                     pkgbase: pkg.name.clone(),
                     entry,
-                    limit: PackageLimit::JobTimeout,
+                    setting: PackageSetting::JobTimeout,
+                }
+                PackageSettingField {
+                    key: "hosts-{pkg.name}",
+                    pkgbase: pkg.name.clone(),
+                    entry,
+                    setting: PackageSetting::BuildHosts,
                 }
                 // Editing the sources is what creates or clears the package's
                 // patch, so the button says whether there is one rather than a
@@ -186,19 +192,22 @@ fn PersistBuildDirField(
 }
 
 /// A server setting this package may set for itself: the largest file its
-/// builds may upload, or how long one may run.
+/// builds may upload, how long one may run, or the local hosts it may reach.
 ///
-/// Both resolve per package (see `Setting::MaxArtifactSize`), so one outsized
-/// or slow package can be allowed more without raising the limit for all.
-/// Shown as it is written (`20G`, `3h`), with where the value comes from;
-/// typing a new one offers Save, and a package override offers Reset.
+/// The limits resolve per package (see `Setting::MaxArtifactSize`), so one
+/// outsized or slow package can be allowed more without raising the limit for
+/// all; each is shown with where its value comes from. The hosts are added to
+/// the server's (see `Setting::BuildHosts`), so the field holds this package's
+/// own, and the server's it inherits are listed under it.
+/// Shown as it is written (`20G`, `3h`); typing a new value offers Save, and a
+/// value of the package's own offers Reset.
 #[component]
-fn PackageLimitField(
+fn PackageSettingField(
     pkgbase: String,
     mut entry: Resource<Result<aurcache_client::ApplicationSettings, String>>,
-    limit: PackageLimit,
+    setting: PackageSetting,
 ) -> Element {
-    let setting = limit.setting();
+    let key = setting.key();
     use crate::setting_editor::{
         MutationOutcome, SettingEdit, SettingScope, use_editor_draft, use_setting_mutations,
     };
@@ -209,7 +218,7 @@ fn PackageLimitField(
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|settings| limit.shown(settings).value);
+        .map(|settings| setting.shown(settings).value);
     let mut draft = use_editor_draft(loaded);
     let scope = SettingScope::Package(pkgbase);
     let save_scope = scope.clone();
@@ -217,11 +226,14 @@ fn PackageLimitField(
         let scope = save_scope.clone();
         async move {
             let value = draft().text().trim().to_owned();
-            if controller
-                .apply(&scope, SettingEdit::set(setting, value).editing(draft))
-                .await
-                == MutationOutcome::Applied
-            {
+            // Emptied, the field means the package has no value of its own:
+            // what Reset does, rather than an empty one stored in its place.
+            let edit = if value.is_empty() {
+                SettingEdit::reset(key)
+            } else {
+                SettingEdit::set(key, value)
+            };
+            if controller.apply(&scope, edit.editing(draft)).await == MutationOutcome::Applied {
                 entry.restart();
             }
         }
@@ -230,7 +242,7 @@ fn PackageLimitField(
         let scope = scope.clone();
         async move {
             if controller
-                .apply(&scope, SettingEdit::reset(setting).editing(draft))
+                .apply(&scope, SettingEdit::reset(key).editing(draft))
                 .await
                 == MutationOutcome::Applied
             {
@@ -240,8 +252,10 @@ fn PackageLimitField(
     };
 
     rsx! {
-        div { class: "flex gap-2 py-1 text-sm items-center",
-            span { class: "opacity-60 w-32 shrink-0", "{limit.label()}" }
+        // Aligned on the first line, the field's, rather than centred against
+        // whatever is listed under it.
+        div { class: "flex gap-2 py-1 text-sm items-start",
+            span { class: "opacity-60 w-32 shrink-0 leading-6", "{setting.label()}" }
             div { class: "min-w-0 flex-1",
                 match &*entry.read_unchecked() {
                     None => rsx! { span { class: "loading loading-spinner loading-xs" } },
@@ -249,34 +263,37 @@ fn PackageLimitField(
                         span { class: "text-xs text-error", "Could not load the setting: {e}" }
                     },
                     Some(Ok(settings)) => {
-                        let SettingsEntry { value: current, source } = limit.shown(settings);
+                        let SettingsEntry { value: current, source } = setting.shown(settings);
+                        let inherited = setting.inherited(settings);
                         // No lock for an environment variable: a package's own
-                        // value outranks it (Package -> Env -> Global -> Default),
-                        // so an override here still applies.
+                        // value applies whatever it says. A limit of the
+                        // package's outranks it (Package -> Env -> Global ->
+                        // Default), and the package's hosts are added to it.
                         let changed = draft().text().trim() != current;
                         rsx! {
-                            div { class: "flex items-center gap-2 flex-wrap",
+                            // Wrapping, so a narrow screen puts the buttons
+                            // under the field rather than past the edge.
+                            div { class: "flex flex-wrap items-center gap-2",
                                 input {
                                     r#type: "text",
-                                    class: "input input-bordered input-xs w-24 font-mono",
-                                    placeholder: limit.placeholder(),
+                                    class: "input input-bordered input-xs {setting.input_width()} font-mono",
+                                    placeholder: setting.placeholder(),
                                     disabled: busy(),
                                     value: draft().text(),
                                     oninput: move |e| draft.with_mut(|draft| draft.edit(e.value())),
                                 }
-                                span {
-                                    class: "badge badge-ghost badge-sm",
-                                    title: "Where this value comes from",
-                                    match source {
-                                        SettingSource::Package => "this package",
-                                        SettingSource::Global => "global",
-                                        SettingSource::Env => "environment",
-                                        SettingSource::Default => "default",
+                                // What is inherited says where it comes from
+                                // itself, under the field.
+                                if inherited.is_none() {
+                                    span {
+                                        class: "badge badge-ghost badge-sm shrink-0",
+                                        title: "Where this value comes from",
+                                        "{source_label(source)}"
                                     }
                                 }
                                 if changed {
                                     button {
-                                        class: "btn btn-primary btn-xs",
+                                        class: "btn btn-primary btn-xs shrink-0",
                                         disabled: busy(),
                                         onclick: save,
                                         "Save"
@@ -284,12 +301,18 @@ fn PackageLimitField(
                                 }
                                 if source == SettingSource::Package && !busy() {
                                     button {
-                                        class: "btn btn-ghost btn-xs",
-                                        title: "Discard this package's limit and use the global one again",
+                                        class: "btn btn-ghost btn-xs shrink-0",
+                                        title: setting.reset_title(),
                                         onclick: reset,
                                         "Reset"
                                     }
                                 }
+                            }
+                            if let Some(inherited) = inherited {
+                                InheritedHosts { hosts: inherited }
+                            }
+                            if let Some(note) = setting.note() {
+                                p { class: "text-xs opacity-60", "{note}" }
                             }
                             if let Some(message) = error() {
                                 p { class: "text-xs text-error", "{message}" }
@@ -302,18 +325,54 @@ fn PackageLimitField(
     }
 }
 
-/// The limits a package may set for itself, each shown by [`PackageLimitField`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackageLimit {
-    ArtifactSize,
-    JobTimeout,
+/// The server's build hosts, which a package's own are added to.
+#[component]
+fn InheritedHosts(hosts: SettingsEntry<String>) -> Element {
+    rsx! {
+        // Running text, so a long list breaks after its commas rather than
+        // inside a host.
+        p { class: "text-xs mt-1 break-words",
+            span { class: "opacity-60", "Inherited: " }
+            if hosts.value.is_empty() {
+                span { class: "opacity-60", "none" }
+            } else {
+                span { class: "font-mono", "{hosts.value}" }
+                " "
+                span {
+                    class: "badge badge-ghost badge-xs align-middle",
+                    title: "Where the inherited hosts come from",
+                    "{source_label(hosts.source)}"
+                }
+            }
+        }
+    }
 }
 
-impl PackageLimit {
-    const fn setting(self) -> Setting {
+/// Where a value comes from, as its badge says it.
+const fn source_label(source: SettingSource) -> &'static str {
+    match source {
+        SettingSource::Package => "this package",
+        SettingSource::Global => "global",
+        SettingSource::Env => "environment",
+        SettingSource::Default => "default",
+    }
+}
+
+/// The settings a package may set for itself, each shown by [`PackageSettingField`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageSetting {
+    ArtifactSize,
+    JobTimeout,
+    BuildHosts,
+}
+
+impl PackageSetting {
+    /// The server setting it is stored as.
+    const fn key(self) -> Setting {
         match self {
             Self::ArtifactSize => Setting::MaxArtifactSize,
             Self::JobTimeout => Setting::JobTimeout,
+            Self::BuildHosts => Setting::BuildHosts,
         }
     }
 
@@ -321,6 +380,38 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "Max artifact size",
             Self::JobTimeout => "Job timeout",
+            Self::BuildHosts => "Build hosts",
+        }
+    }
+
+    /// A list takes the whole row, its buttons going under it; a size or a
+    /// duration needs little.
+    const fn input_width(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => "w-24",
+            Self::BuildHosts => "w-full",
+        }
+    }
+
+    const fn reset_title(self) -> &'static str {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => {
+                "Discard this package's limit and use the global one again"
+            }
+            Self::BuildHosts => {
+                "Discard this package's own hosts; its builds keep the inherited ones"
+            }
+        }
+    }
+
+    /// What the field holds, where that is not obvious.
+    const fn note(self) -> Option<&'static str> {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => None,
+            Self::BuildHosts => Some(
+                "Local host:port destinations this package's builds may reach, \
+                 separated by commas, besides the inherited ones.",
+            ),
         }
     }
 
@@ -328,10 +419,11 @@ impl PackageLimit {
         match self {
             Self::ArtifactSize => "20G",
             Self::JobTimeout => "1h",
+            Self::BuildHosts => "gitlab.lan:22",
         }
     }
 
-    /// The value as it is written, and where it comes from.
+    /// The value the field holds, as it is written, and where it comes from.
     fn shown(self, settings: &aurcache_client::ApplicationSettings) -> SettingsEntry<String> {
         match self {
             Self::ArtifactSize => SettingsEntry {
@@ -344,6 +436,30 @@ impl PackageLimit {
                 )),
                 source: settings.job_timeout.source,
             },
+            // The package's own list, if it has one.
+            Self::BuildHosts => match &settings.build_hosts.package {
+                Some(hosts) => SettingsEntry {
+                    value: hosts.clone(),
+                    source: SettingSource::Package,
+                },
+                None => SettingsEntry {
+                    value: String::new(),
+                    source: SettingSource::Default,
+                },
+            },
+        }
+    }
+
+    /// What the package gets besides the field's value: the server's hosts,
+    /// for a list added to them. `None` for a limit, whose value replaces the
+    /// server's.
+    fn inherited(
+        self,
+        settings: &aurcache_client::ApplicationSettings,
+    ) -> Option<SettingsEntry<String>> {
+        match self {
+            Self::ArtifactSize | Self::JobTimeout => None,
+            Self::BuildHosts => Some(settings.build_hosts.server.clone()),
         }
     }
 }

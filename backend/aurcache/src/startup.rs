@@ -235,6 +235,34 @@ pub async fn resume_publishing(
     }
 }
 
+/// Say, once, which of the server's build hosts builds do not get.
+///
+/// The API refuses an entry that is not `host:port` before storing it, but
+/// `BUILD_HOSTS` is read as it is: such an entry is left out, and the others
+/// apply.
+pub async fn warn_about_invalid_build_hosts(db: &DatabaseConnection) {
+    use aurcache_common::settings::{Setting, SettingSource};
+
+    let hosts = match aurcache_utils::settings::build_hosts(db, None).await {
+        Ok(hosts) => hosts,
+        Err(e) => return warn!("could not read the build hosts: {e}"),
+    };
+    if hosts.invalid.is_empty() {
+        return;
+    }
+    let meta = Setting::BuildHosts.meta();
+    let name = match (hosts.server.source, meta.env_name) {
+        (SettingSource::Env, Some(env)) => env,
+        _ => meta.key,
+    };
+    let entries: Vec<String> = hosts.invalid.iter().map(ToString::to_string).collect();
+    warn!(
+        "{name} has entries that are not host:port, which builds do not get: {}. \
+         Its other entries apply.",
+        entries.join("; ")
+    );
+}
+
 /// See [`operations::close_orphaned`]; this only reports what it did.
 pub async fn close_orphaned_operations(db: &DatabaseConnection) {
     match operations::close_orphaned(db).await {

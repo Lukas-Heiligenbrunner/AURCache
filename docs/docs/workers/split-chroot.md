@@ -550,8 +550,8 @@ connection a build makes, in this order:
 1. DNS to the resolvers in the worker's `/etc/resolv.conf` is allowed.
 2. **The allowlist is allowed**, exact `host:port` pairs: the hosts the
    build's `pacman.conf` names in its `Server =` lines (AURCache's
-   repository, a LAN mirror, the mirrorlist AURCache sends), and
-   `WORKER_BUILD_ALLOW`.
+   repository, a LAN mirror, the mirrorlist AURCache sends), the
+   `build_hosts` setting on the server, and `WORKER_BUILD_ALLOW`.
 3. **Local destinations are refused**:
    - loopback, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
      `169.254.0.0/16`, `100.64.0.0/10`, `198.18.0.0/15`, `240.0.0.0/4`,
@@ -593,7 +593,7 @@ refused and why:
 
 ```text
 [worker] the build network policy refused connections to:
-[worker]   192.168.1.20:3632/tcp: a local address; the worker's WORKER_BUILD_ALLOW can allow it (host:port)
+[worker]   192.168.1.20:3632/tcp: a local address; build_hosts on the server, or the worker's WORKER_BUILD_ALLOW, can allow it (host:port)
 ```
 
 Names are resolved, and the worker's links read from its addresses and
@@ -674,6 +674,24 @@ worker-protocol port, until the machine reboots. It refuses nothing the policy
 allows; `iptables -S OUTPUT` (and `ip6tables -S OUTPUT`) show it, and
 `iptables -D` with the same arguments removes it.
 
+Hosts every worker's builds need go in the server's **`build_hosts`**
+setting: on the settings page, or `BUILD_HOSTS` in the server's environment.
+A package can list hosts of its own on its page, and they are added to the
+server's rather than replacing them, so a package that needs one more host
+lists only that one. Entries are `host:port`, separated by commas, with an
+IPv6 address in brackets (`[fd00::5]:3632`). They reach the worker with each
+build, and are resolved there when the build starts.
+
+Over the API, `GET /api/package/<pkgbase>/settings/build_hosts` answers like any
+other setting: the package's own list when it has one, and otherwise the
+server's, with its source (`Env` or `Global`). Writing back what a package
+without a list of its own answered stores the server's hosts as that
+package's list, and it no longer follows the server's; read the source first,
+or write only the package's own hosts.
+
+Hosts only one worker's builds need -- a worker on another network with its
+own distcc helpers -- go in that worker's `WORKER_BUILD_ALLOW` instead.
+
 | Variable | Type | Description | Default |
 |---|---|---|---|
 | `WORKER_BUILD_ALLOW` | List | Local destinations every build on this worker may reach, TCP and UDP, as `host:port` separated by commas (an IPv6 address in brackets: `[fd00::5]:3632`; a link-local one with a zone, `[fe80::1%eth0]:22`, is refused) | none |
@@ -733,7 +751,7 @@ build actually connects to. Otherwise, `WORKER_BUILD_FIREWALL=0` turns the
 policy off.
 
 A [distcc](https://www.distcc.org/) helper, a git server or a cache a build
-needs on your network goes in `WORKER_BUILD_ALLOW`. A distccd that builds
+needs on your network goes in `build_hosts`. A distccd that builds
 reach runs any build's compilers, so make its helpers dedicated machines, with
 `--allow` set to the workers.
 

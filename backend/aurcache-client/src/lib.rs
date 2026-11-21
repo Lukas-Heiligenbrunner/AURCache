@@ -49,7 +49,7 @@ pub use aurcache_common::api::worker::{
     ApprovalStatus, WorkerConfigUpdate, WorkerConfigView, WorkerJoinInfo, WorkerSummary as Worker,
 };
 pub use aurcache_common::settings::{
-    ApplicationSettings, Setting, SettingSource, SettingsEntry, SettingsMeta,
+    ApplicationSettings, BuildHostsEntry, Setting, SettingSource, SettingsEntry, SettingsMeta,
 };
 pub use aurcache_common::source::{GitSourceSpec, SourceData, looks_like_git_url, source_label};
 use reqwest::Response;

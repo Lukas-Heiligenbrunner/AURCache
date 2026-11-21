@@ -830,6 +830,7 @@ async fn execute_build_process(
                 server: client.server(),
                 pacman_conf: ctx.pacman.build.clone(),
                 mirrorlist: claimed.mirrorlist.clone(),
+                build_hosts: claimed.job.build_hosts.clone().unwrap_or_default(),
             },
         )
         .await

@@ -236,6 +236,12 @@ INSERT INTO settings (key, value, pkg_id) VALUES
 INSERT INTO settings (key, value, pkg_id) VALUES
   ('makepkg_conf', '# neofetch-only makepkg.conf', (SELECT id FROM packages WHERE name = 'neofetch'));
 
+-- Build hosts for the server and one of `hello`'s own, which are added to the
+-- server's: the package page shows both lists.
+INSERT INTO settings (key, value, pkg_id) VALUES
+  ('build_hosts', 'distcc.lan:3632, flexo.lan:7878', -1),
+  ('build_hosts', 'gitlab.lan:22', (SELECT id FROM packages WHERE name = 'hello'));
+
 -- Builds spread back over the year, purely so the dashboard graph has a curve.
 -- It groups by month over the last twelve, and every build seeded above landed
 -- in the last few days — one point is a dot, not a line.
