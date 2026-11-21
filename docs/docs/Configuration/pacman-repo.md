@@ -138,8 +138,8 @@ and are not affected.
 
 Packages published before signing was turned on — or signed by another key —
 are signed in the background after the server starts, a batch at a time,
-without holding up publishing. Until that has finished, `GET /api/repo/info`
-and `GET /api/repo/signing` say so (`backfilling`): a client requiring
+without holding up publishing. Until that has finished, `GET /api/repo/signing`
+says so (`backfilling`): a client requiring
 signatures would refuse the packages not yet signed. Whatever cannot be
 signed yet is retried later and reported in the **Logs** page. Some packages
 the repository lists cannot be signed at all, and are reported there at every
