@@ -207,6 +207,12 @@ spec:
             # is accepted.
             # - name: WORKER_KUBE_POD_TEMPLATE
             #   value: /etc/aurcache/pod-template.json
+          # Packages pass through without being held; each running build's
+          # source archive is held once, until its pod has it, and twice for
+          # a moment as its download completes. The limit covers the
+          # worker's own 15 MiB or so plus WORKER_CONCURRENCY + 1 times the
+          # largest source, and twice WORKER_CONCURRENCY times at worst, when
+          # every build's download completes at once.
           resources:
             requests:
               cpu: 50m

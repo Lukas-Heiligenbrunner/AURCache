@@ -17,6 +17,7 @@ use anyhow::{Result, bail};
 use aurcache_build_agent::report::{Artifact, BuildReport, Ended, Handback};
 use aurcache_build_agent::spec::INTERFACE;
 use aurcache_common::worker::{JobDescriptor, JobVcsSource, MirrorlistOffer};
+use aurcache_worker_container::input::Packed;
 use aurcache_worker_core::executor::ClaimedJob;
 use aurcache_worker_core::protocol::{PackagesRefused, Timeout, TimeoutSource};
 use aurcache_worker_kube::cluster::{Admission, Cluster, CreateError, Exec, ExecEnd, Stdin};
@@ -1122,8 +1123,20 @@ pub struct Rig {
     pub ssh: Option<std::path::PathBuf>,
 }
 
-/// The job as a test hands it in: any bytes, since no agent reads them.
+/// The job as `receive` reads it in a test: any bytes, since no agent reads
+/// them.
 pub const INPUT: &[u8] = b"the job, as a tar";
+
+/// [`INPUT`] as the dispatcher holds it, in three pieces that are written
+/// one after the other.
+#[must_use]
+pub fn input() -> Packed {
+    Packed {
+        head: b"the job, ".to_vec(),
+        source: b"as a".to_vec(),
+        tail: b" tar".to_vec(),
+    }
+}
 
 impl Rig {
     pub fn new(script: Script) -> Self {
@@ -1150,7 +1163,7 @@ impl Rig {
         let (log, mut lines) = tokio::sync::mpsc::channel(16);
         let build = Build {
             claimed,
-            input: INPUT.to_vec(),
+            input: input(),
             log,
             uploads: &self.sink,
             ssh: self.ssh.clone(),

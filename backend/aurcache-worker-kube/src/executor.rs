@@ -21,13 +21,14 @@ use aurcache_common::artifact::is_artifact;
 use aurcache_common::worker::{
     BuildOutcome, CompleteReport, JobDescriptor, JobVcsSource, MirrorlistOffer,
 };
+use aurcache_worker_container::input::{self, Packed};
 use aurcache_worker_container::outcome::{
     self as container_outcome, Ending, MemoryLimit, complete,
 };
+use aurcache_worker_container::spec;
 use aurcache_worker_container::spec::SpecOptions;
 use aurcache_worker_container::ssh::link::Served;
 use aurcache_worker_container::ssh::{Credential, CredentialFiles};
-use aurcache_worker_container::{input, spec};
 use aurcache_worker_core::build_log::BuildLog;
 use aurcache_worker_core::client::WorkerClient;
 use aurcache_worker_core::executor::{ClaimedJob, Executor};
@@ -101,9 +102,10 @@ struct Waiting {
 /// What one build is made from, beside the configuration.
 pub struct Build<'a, U> {
     pub claimed: &'a ClaimedJob,
-    /// The job as `receive` reads it: [`input::pack`]'s tar. Taken out when
-    /// the build starts, and dropped once the pod has it.
-    pub input: Vec<u8>,
+    /// The job as `receive` reads it: [`input::pack`]'s tar, whose middle
+    /// is the source as it was downloaded. Taken out when the build starts,
+    /// and dropped once the pod has it.
+    pub input: Packed,
     /// Where the build log goes, a chunk of text at a time.
     pub log: mpsc::Sender<String>,
     pub uploads: &'a U,
@@ -337,7 +339,7 @@ impl<C: Cluster> KubeExecutor<C> {
         pod: &Pod,
         name: &str,
         build: &Build<'_, U>,
-        input: Vec<u8>,
+        input: Packed,
         watch: &StopWatch,
     ) -> Result<CompleteReport> {
         // A build stopped before it has a pod gets none.
@@ -395,7 +397,7 @@ impl<C: Cluster> KubeExecutor<C> {
         cfg: &Config,
         agent: &Agent<'_, C>,
         build: &Build<'_, U>,
-        input: Vec<u8>,
+        input: Packed,
         lines: &Mutex<Lines>,
         watch: &StopWatch,
     ) -> Result<Reached> {
@@ -787,10 +789,9 @@ impl<C: Cluster> Executor for KubeExecutor<C> {
             .as_ref()
             .map(|credential| credential.agent.socket().to_path_buf());
         let spec = spec::for_job(&claimed, client.repo(), options(&cfg, ssh));
-        let input = input::pack(&spec, &source)?;
-        // Packed: one copy of the source is enough to hold until the pod
-        // takes it.
-        drop(source);
+        // The source is moved into the input, not copied: it is held once,
+        // until the pod has it.
+        let input = input::pack(&spec, source)?;
         let log = BuildLog::open(Arc::clone(&client), build_id);
         let build = Build {
             claimed: &claimed,
