@@ -218,8 +218,11 @@ too), armored, written owner-only through `fs::write_private`, created by
 on. The database is what gets exported, backed up elsewhere and inspected, so
 it is the wrong home for the key. Where the hybrid image keeps its CA in the
 repository (`repo/.ca`), the key is there too, and as unreachable as the CA
-key: the server's file server and the compose files' nginx both refuse dot
-paths.
+key through the server's file server and the compose files' nginx, which
+both refuse dot paths -- but not through whatever else serves, mirrors or
+syncs that directory. So the server warns at start when the key's path is
+inside `REPO_ROOT`, and the docs say to move the CA directory onto a volume
+of its own or supply the key from elsewhere.
 
 `AURCACHE_SIGNING_KEY_FILE` points at a key the operator supplies (a Docker
 secret, a separate mount); the server only reads it, and refuses to start
